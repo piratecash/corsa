@@ -15,10 +15,13 @@ graph TB
         PH["peerHealth<br/>.BytesSent / .BytesReceived"]
         LT["liveTrafficLocked()<br/>(active connections)"]
         NSF["networkStatsFrame()<br/>aggregates per-peer + live"]
+        TTF["trafficTotalsFrame()<br/>totals only, no per-peer"]
         MC -->|"accumulate on close"| PH
         MC -->|"live read"| LT
         PH --> NSF
         LT --> NSF
+        PH --> TTF
+        LT --> TTF
     end
 
     subgraph Metrics["metrics.Collector"]
@@ -34,8 +37,8 @@ graph TB
         CMD_GP["get_peers"]
     end
 
-    TICK -->|"every 1s"| NSF
-    NSF -->|"total_sent, total_received"| TH
+    TICK -->|"every 1s"| TTF
+    TTF -->|"total_sent, total_received"| TH
     SNAP -->|"Snapshot()"| TH
     CMD -->|"calls"| SNAP
     CMD_NS -->|"atomic snapshot load"| NSF
@@ -51,7 +54,7 @@ graph TB
 2. When a connection closes, its final byte counts are accumulated into the peer's `peerHealth.BytesSent` / `peerHealth.BytesReceived`
 3. While connections are active, `liveTrafficLocked()` reads current counters directly from `MeteredConn` instances
 4. The hot local RPCs (`fetch_network_stats`, `fetch_peer_health`, `get_peers`, plus `fetchRouteTable`/`fetchRouteSummary`/`fetchRouteLookup`) each return a pre-built snapshot via a single `atomic.Pointer` load — `networkStatsSnapshot`, `peerHealthSnapshot`, `peersExchangeSnapshot`, `cmSlotsSnapshot`, and `routingSnapshot` respectively. `cmSlotsSnapshot` caches `ConnectionManager.Slots()` so `peerHealthFrames` and `buildPeerExchangeResponse` never call `Slots()` on the RPC path — `Slots()` takes `cm.mu.RLock`, and Go's writer-preferring `sync.RWMutex` would otherwise serialise these RPC readers behind any queued CM-writer just like `s.mu` used to. `routingSnapshot` caches `routing.Table.Snapshot()` for the same reason against `routing.Table.t.mu.RLock`: at scale the deep copy is expensive and a writer storm on the routing table (announce loop convergence, mass disconnect, hop_ack burst) would otherwise stall every routing-observability RPC and the file router's transit-forwarding callback (`HandleInbound`). The locally-originated file paths (`SendFileCommand`, `ExplainRoute`) and `isPeerReachable` deliberately bypass this cache and read the routing table per-destination via `routing.Table.Lookup(peer)` — they need immediate visibility of a route accepted moments before the call (cached-snapshot lag would surface as "isPeerReachable says yes, SendFile fails" for the ~500 ms republish window). Snapshots are primed **synchronously** by `primeHotReadSnapshots()` in `Run()` before the TCP listener opens, then refreshed every 500 ms by `hotReadsRefreshLoop` — the only path that takes `s.mu.RLock` (first three snapshots), `cm.mu.RLock` (fourth) or `routing.Table.t.mu.RLock` (fifth, gated by a dirty flag so an idle table skips the rebuild entirely) to read `health` / `peers` / `persistedMeta` / live counters / slot state / routing entries. The RPC handlers themselves never touch `s.mu`, `cm.mu` or `routing.Table.t.mu` and **do not fall back to a synchronous rebuild** on a snapshot miss — the previous fallback re-coupled the hot path to the very locks the snapshot infrastructure was meant to bypass. With the prime step in place, every hot-path handler observes a non-nil snapshot on its first load.
-5. The `metrics.Collector` calls `fetch_network_stats` every second and records the totals into a ring buffer (`TrafficHistory`)
+5. The `metrics.Collector` calls `fetch_traffic_totals` every second and records the totals into a ring buffer (`TrafficHistory`). This is a deliberately lightweight local frame: it sums only the cumulative sent/received `int64` totals (persisted `peerHealth` + live counters via `sumLiveTrafficLocked`, which walks inbound connections through the capability-free `forEachInboundConnIDLocked` iterator) and returns them in a `network_stats`-shaped reply with the per-peer fields left empty. Critically it does **not** stamp `networkStatsAccessNanos`, so the collector's once-a-second poll no longer pins the full `networkStatsSnapshot` rebuild-gate awake. The heavier `fetch_network_stats` (full per-peer breakdown, `knownPeers`/`connectedPeers`, sorted `peerTraffic`) is still served from the `atomic.Pointer` snapshot for the desktop UI, whose reader access re-arms the rebuild-gate only while a UI is actually polling — a headless node lets the gate idle out after `networkStatsRebuildIdleAfter`.
 6. RPC clients call `fetch_traffic_history` to get the full 1-hour rolling window
 
 Snapshot staleness is bounded by `networkStatsSnapshotInterval` (500 ms) for `networkStatsSnapshot`, `peerHealthSnapshot`, `peersExchangeSnapshot` and `cmSlotsSnapshot` — every state change a writer touches is reflected within one refresh tick. `routingSnapshot` follows the same 500 ms bound for structural changes (route accepted, withdrawn, replaced; direct peer added/removed; flap burst arming hold-down; flap-state cleanup after a writer touched the table) but a wider bound for time-derived fields (`IsExpired`/`ttl_seconds` against `snap.TakenAt`, `FlapEntry.InHoldDown` flipping `true→false` on hold-down expiry): those advance on the wall clock without a writer event, so the dirty-flag publisher cannot observe them directly. `TickTTL` (every 10 s) converts those wall-clock transitions into writer events, which gives a worst-case lag of `TickTTL` interval + one refresh ≈ 10.5 s. See `docs/routing.md` "Snapshot freshness" for the full contract. Even if a writer holds `s.mu.Lock`, `cm.mu.Lock` or `routing.Table.t.mu.Lock` for many seconds, the RPCs keep serving the last successfully-built snapshot instead of blocking — clients prefer bounded-stale data over a frozen UI. The five rebuilds run in independent per-snapshot goroutines inside `hotReadsRefreshLoop`, each on its own 500 ms ticker. The fan-out isolates slow rebuilds (notably `peersExchangeSnapshot`, which re-acquires `s.mu.RLock` via `peerProvider.Candidates()` callbacks; `cmSlotsSnapshot`, which takes `cm.mu.RLock`; and `routingSnapshot`, which takes `routing.Table.t.mu.RLock` only when the dirty flag fires) so they do not delay the other snapshots' refreshes or widen their staleness windows.
@@ -117,10 +120,13 @@ graph TB
         PH["peerHealth<br/>.BytesSent / .BytesReceived"]
         LT["liveTrafficLocked()<br/>(активные соединения)"]
         NSF["networkStatsFrame()<br/>агрегация по пирам + live"]
+        TTF["trafficTotalsFrame()<br/>только итоги, без разбивки по пирам"]
         MC -->|"аккумуляция при закрытии"| PH
         MC -->|"live чтение"| LT
         PH --> NSF
         LT --> NSF
+        PH --> TTF
+        LT --> TTF
     end
 
     subgraph Metrics["metrics.Collector"]
@@ -136,8 +142,8 @@ graph TB
         CMD_GP["get_peers"]
     end
 
-    TICK -->|"каждую 1 сек"| NSF
-    NSF -->|"total_sent, total_received"| TH
+    TICK -->|"каждую 1 сек"| TTF
+    TTF -->|"total_sent, total_received"| TH
     SNAP -->|"Snapshot()"| TH
     CMD -->|"вызывает"| SNAP
     CMD_NS -->|"atomic snapshot load"| NSF
@@ -153,7 +159,7 @@ graph TB
 2. При закрытии соединения финальные счётчики аккумулируются в `peerHealth.BytesSent` / `peerHealth.BytesReceived`
 3. Пока соединения активны, `liveTrafficLocked()` читает текущие счётчики напрямую из экземпляров `MeteredConn`
 4. Hot local RPC (`fetch_network_stats`, `fetch_peer_health`, `get_peers`, плюс `fetchRouteTable`/`fetchRouteSummary`/`fetchRouteLookup`) отдают заранее подготовленный snapshot одним `atomic.Pointer`-load'ом — `networkStatsSnapshot`, `peerHealthSnapshot`, `peersExchangeSnapshot`, `cmSlotsSnapshot` и `routingSnapshot` соответственно. `cmSlotsSnapshot` кэширует `ConnectionManager.Slots()`, чтобы `peerHealthFrames` и `buildPeerExchangeResponse` не звали `Slots()` на RPC-пути — `Slots()` берёт `cm.mu.RLock`, и writer-preferring `sync.RWMutex` в Go иначе сериализовал бы этих RPC-читателей за любым queued CM-writer'ом ровно той же формы, что `s.mu` раньше. `routingSnapshot` кэширует `routing.Table.Snapshot()` по той же причине против `routing.Table.t.mu.RLock`: на масштабе глубокая копия дорогая, и writer-шторм на таблице маршрутизации (конвергенция announce-цикла, массовый disconnect, всплеск hop_ack) иначе стопорил бы каждый routing-observability RPC и transit-forward callback file router'а (`HandleInbound`). Locally-originated пути файл-роутера (`SendFileCommand`, `ExplainRoute`) и `isPeerReachable` сознательно обходят этот кэш и читают таблицу per-destination через `routing.Table.Lookup(peer)` — им нужна немедленная видимость маршрута, принятого за моменты до вызова (cached-snapshot лаг проявился бы как «isPeerReachable говорит да, SendFile падает» в окне republish'а ~500 мс). Snapshot'ы **синхронно** инициализируются в `Run()` вызовом `primeHotReadSnapshots()` ДО открытия TCP-listener'а, и далее пересобираются каждые 500 мс в `hotReadsRefreshLoop` — это единственный путь, который берёт `s.mu.RLock` (первые три snapshot'а), `cm.mu.RLock` (четвёртый) или `routing.Table.t.mu.RLock` (пятый, гейтится через dirty-флаг, поэтому idle-таблица пропускает rebuild целиком) для чтения `health` / `peers` / `persistedMeta` / live-счётчиков / slot state / routing entries. Сами RPC-handler'ы не касаются ни `s.mu`, ни `cm.mu`, ни `routing.Table.t.mu`, и **не делают синхронный rebuild на miss** — прежний fallback как раз возвращал hot-path обратно на те самые локи, от которых snapshot-инфраструктура должна была его отвязать. С prime-шагом каждый handler на первом же load'е видит непустой snapshot.
-5. `metrics.Collector` вызывает `fetch_network_stats` каждую секунду и записывает итоги в кольцевой буфер (`TrafficHistory`)
+5. `metrics.Collector` вызывает `fetch_traffic_totals` каждую секунду и записывает итоги в кольцевой буфер (`TrafficHistory`). Это сознательно лёгкий локальный фрейм: он суммирует только кумулятивные итоги sent/received (`int64`) — persisted `peerHealth` + live-счётчики через `sumLiveTrafficLocked`, который обходит входящие соединения лёгким итератором `forEachInboundConnIDLocked` (без `core.Capabilities()`/`cloneCaps`) — и возвращает их в ответе формы `network_stats` с пустыми per-peer полями. Важно: он **не** штампует `networkStatsAccessNanos`, поэтому ежесекундный опрос коллектора больше не держит rebuild-gate полного `networkStatsSnapshot` вечно бодрствующим. Более тяжёлый `fetch_network_stats` (полная разбивка по пирам, `knownPeers`/`connectedPeers`, отсортированный `peerTraffic`) по-прежнему отдаётся из `atomic.Pointer`-snapshot для desktop UI, и его reader-access перевзводит gate только пока UI реально опрашивает — headless-нода даёт gate'у заснуть через `networkStatsRebuildIdleAfter`.
 6. RPC-клиенты вызывают `fetch_traffic_history` для получения полного часового окна
 
 Максимальная устаревшесть `networkStatsSnapshot`, `peerHealthSnapshot`, `peersExchangeSnapshot` и `cmSlotsSnapshot` ограничена `networkStatsSnapshotInterval` (500 мс) — любое изменение состояния, которое touch'ит writer, отражается в течение одного refresh-тика. `routingSnapshot` следует той же границе 500 мс для структурных изменений (маршрут принят, отозван, заменён; добавлен/удалён direct peer; flap-burst, армирующий hold-down; flap-state cleanup после writer-touch'а), но имеет более широкую границу для time-производных полей (`IsExpired`/`ttl_seconds` относительно `snap.TakenAt`, `FlapEntry.InHoldDown` flipping `true→false` на истечении hold-down): они двигаются по wall-clock без writer-события, поэтому dirty-флаг publisher их напрямую не видит. `TickTTL` (каждые 10 с) конвертирует эти wall-clock переходы в writer-события, что даёт worst-case lag `TickTTL` interval + один refresh ≈ 10,5 с. Полный контракт — в `docs/routing.md` «Свежесть снапшота». Даже если writer держит `s.mu.Lock`, `cm.mu.Lock` или `routing.Table.t.mu.Lock` много секунд, RPC продолжает отдавать последний успешно построенный snapshot вместо того, чтобы блокироваться — клиент предпочитает bounded-stale данные замёрзшему UI. Пять rebuild'ов выполняются в независимых под-горутинах внутри `hotReadsRefreshLoop`, по одной на snapshot, каждая со своим 500 мс тикером. Fan-out изолирует медленные rebuild'ы (особенно `peersExchangeSnapshot`, который повторно берёт `s.mu.RLock` через callback'и `peerProvider.Candidates()`; `cmSlotsSnapshot`, который берёт `cm.mu.RLock`; и `routingSnapshot`, который берёт `routing.Table.t.mu.RLock` только при срабатывании dirty-флага), так что они не задерживают refresh остальных snapshot'ов и не расширяют их окна staleness.

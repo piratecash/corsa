@@ -396,11 +396,16 @@ type Service struct {
 	// decoupled from every writer holding s.peerMu.
 	//
 	// Each Load returns nil until the first refresh of that snapshot
-	// completes; the networkStatsFrame handler falls back to a synchronous
-	// rebuild in that window.  peer_health and peers_exchange handlers
-	// accept a nil snapshot and return an empty slice — same semantics the
-	// caller saw during a 0-peer startup window.  See
-	// network_stats_snapshot.go / peer_health_snapshot.go /
+	// completes; the networkStatsFrame handler treats a nil snapshot as an
+	// empty-but-valid network_stats frame (toFrame handles nil) and does NOT
+	// fall back to a synchronous rebuild — such a fallback would re-acquire
+	// s.peerMu.RLock on the RPC goroutine and break the lock-free contract the
+	// snapshot infrastructure enforces.  peer_health and peers_exchange
+	// handlers likewise accept a nil snapshot and return an empty slice — same
+	// semantics the caller saw during a 0-peer startup window.  In production
+	// primeHotReadSnapshots() publishes the initial snapshot before the
+	// listener opens, so handlers observe a non-nil snapshot on their first
+	// load.  See network_stats_snapshot.go / peer_health_snapshot.go /
 	// peers_exchange_snapshot.go for the per-path contract.
 	networkStatsSnap networkStatsSnapPtr
 	// networkStatsAccessNanos mirrors peerHealthAccessNanos for the
@@ -3002,6 +3007,13 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.peerHealthFrame()
 	case "fetch_network_stats":
 		return s.networkStatsFrame()
+	case "fetch_traffic_totals":
+		// Lightweight totals for the metrics collector's per-second traffic
+		// sampling — no per-peer / map / slice allocations (only the returned
+		// frame value escapes). Deliberately does NOT arm the
+		// network_stats rebuild-gate (see trafficTotalsFrame). Local-only —
+		// not exposed on the wire/HTTP command tables.
+		return s.trafficTotalsFrame()
 	case "fetch_aggregate_status":
 		return s.aggregateStatusFrame()
 	case "fetch_resource_usage":

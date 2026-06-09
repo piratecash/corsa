@@ -50,7 +50,7 @@ func NewCollector(source TrafficSource) *Collector {
 // source error), Seed leaves the baseline at zero, which is correct for the
 // "started together" case.
 func (c *Collector) Seed() {
-	reply := c.source.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+	reply := c.source.HandleLocalFrame(protocol.Frame{Type: "fetch_traffic_totals"})
 	if reply.NetworkStats == nil {
 		return
 	}
@@ -81,7 +81,12 @@ func (c *Collector) Run(ctx context.Context) {
 }
 
 func (c *Collector) collectTrafficSample() {
-	reply := c.source.HandleLocalFrame(protocol.Frame{Type: "fetch_network_stats"})
+	// fetch_traffic_totals is the lightweight, map/slice-free totals path: it
+	// returns the same TotalBytesSent/Received the collector needs WITHOUT
+	// triggering the full per-peer network_stats rebuild or arming its
+	// rebuild-gate. Using fetch_network_stats here was what kept that rebuild
+	// running every 500ms forever, even on a headless node.
+	reply := c.source.HandleLocalFrame(protocol.Frame{Type: "fetch_traffic_totals"})
 	if reply.NetworkStats == nil {
 		return
 	}

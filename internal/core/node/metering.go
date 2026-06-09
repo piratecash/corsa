@@ -142,6 +142,50 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 	return result
 }
 
+// sumLiveTrafficLocked returns the grand total of live byte counters across all
+// active MeteredConn instances, without materialising the per-address map that
+// liveTrafficLocked allocates. Address resolution and per-address aggregation
+// only affect how counters are GROUPED; they do not change the grand total, so
+// summing the raw counters yields exactly the same totals
+// rebuildNetworkStatsSnapshot derives from liveTrafficLocked. Used by the
+// map/slice-free trafficTotalsFrame fast path. Caller MUST hold s.peerMu at
+// least for read.
+//
+// The inbound walk uses forEachInboundConnIDLocked, NOT forEachInboundConnLocked:
+// the latter builds a full connInfo via snapshotEntryLocked, which calls
+// core.Capabilities() → cloneCaps and would re-introduce a per-connection
+// allocation on this once-a-second collector path. The lightweight iterator
+// exposes exactly the id / address this sum needs (the trust check and metered
+// lookup are keyed by id), applying the identical inbound-direction filter, so
+// the total is unchanged while the capability copy is avoided entirely.
+func (s *Service) sumLiveTrafficLocked() (sent, received int64) {
+	for _, session := range s.sessions {
+		if session.metered == nil {
+			continue
+		}
+		sent += session.metered.BytesWritten()
+		received += session.metered.BytesRead()
+	}
+
+	s.forEachInboundConnIDLocked(func(id domain.ConnID, address domain.PeerAddress, _ bool) bool {
+		metered := s.meteredForIDLocked(id)
+		if metered == nil {
+			return true
+		}
+		if !s.isConnTrafficTrustedByIDLocked(id) {
+			return true
+		}
+		if address == "" {
+			return true
+		}
+		sent += metered.BytesWritten()
+		received += metered.BytesRead()
+		return true
+	})
+
+	return sent, received
+}
+
 // networkStatsFrame returns the cached network_stats snapshot.
 //
 // The frame is rebuilt in the background by hotReadsRefreshLoop while a recent
@@ -170,6 +214,44 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 			Msg("network_stats_frame_end")
 	}
 	return frame
+}
+
+// trafficTotalsFrame answers the cumulative byte totals (sent / received /
+// total) with NO per-peer breakdown, NO knownPeers/connectedPeers, and — most
+// importantly — WITHOUT marking networkStatsAccessNanos.
+//
+// The metrics collector polls traffic totals once a second for the desktop
+// traffic chart's running deltas. Previously it called fetch_network_stats,
+// which (a) ran the full O(peers) rebuild with its knownSet + peerAddrs +
+// peerTraffic allocations and sort, and (b) stamped the reader-access clock,
+// pinning the background rebuild-gate permanently awake even on a headless node
+// with no UI attached. That single poll was the reason rebuildNetworkStatsSnapshot
+// never slept — the dominant alloc_space line item over long runs.
+//
+// This path computes only the two int64 totals under a short RLock with zero
+// map/slice allocation (see sumLiveTrafficLocked), and deliberately does not
+// touch networkStatsAccessNanos, so the full snapshot's rebuild-gate is free to
+// idle out whenever no genuine fetch_network_stats reader (the UI) is active.
+//
+// The reply reuses the network_stats frame shape so the collector reads
+// TotalBytesSent / TotalBytesReceived unchanged; the per-peer fields stay zero.
+func (s *Service) trafficTotalsFrame() protocol.Frame {
+	s.peerMu.RLock()
+	sent, received := s.sumLiveTrafficLocked()
+	for _, h := range s.health {
+		sent += h.BytesSent
+		received += h.BytesReceived
+	}
+	s.peerMu.RUnlock()
+
+	return protocol.Frame{
+		Type: "network_stats",
+		NetworkStats: &protocol.NetworkStatsFrame{
+			TotalBytesSent:     sent,
+			TotalBytesReceived: received,
+			TotalTraffic:       sent + received,
+		},
+	}
 }
 
 // emitTrafficDeltas publishes a single PeerTrafficBatch event containing

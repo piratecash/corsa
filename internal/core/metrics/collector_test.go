@@ -15,17 +15,23 @@ func newMutableMockTrafficSource(t *testing.T, sent, recv *int64) *metricsmocks.
 	t.Helper()
 	m := metricsmocks.NewMockTrafficSource(t)
 	m.EXPECT().HandleLocalFrame(mock.Anything).RunAndReturn(func(frame protocol.Frame) protocol.Frame {
-		if frame.Type == "fetch_network_stats" {
-			return protocol.Frame{
-				Type: "network_stats",
-				NetworkStats: &protocol.NetworkStatsFrame{
-					TotalBytesSent:     *sent,
-					TotalBytesReceived: *recv,
-					TotalTraffic:       *sent + *recv,
-				},
-			}
+		// STRICT CONTRACT: the collector must poll only the lightweight totals
+		// path. fetch_network_stats is the heavy full-rebuild path whose
+		// per-poll allocation churn this decoupling removed; if the collector
+		// ever regresses to it, fail loudly here rather than passing silently
+		// and letting the leak return.
+		if frame.Type != "fetch_traffic_totals" {
+			t.Errorf("collector sent %q; it must use fetch_traffic_totals (lightweight totals path)", frame.Type)
+			return protocol.Frame{Type: "error", Error: "unexpected frame type"}
 		}
-		return protocol.Frame{Type: "error", Error: "unknown"}
+		return protocol.Frame{
+			Type: "network_stats",
+			NetworkStats: &protocol.NetworkStatsFrame{
+				TotalBytesSent:     *sent,
+				TotalBytesReceived: *recv,
+				TotalTraffic:       *sent + *recv,
+			},
+		}
 	}).Maybe()
 	return m
 }
@@ -35,6 +41,12 @@ func newNilStatsSource(t *testing.T) *metricsmocks.MockTrafficSource {
 	t.Helper()
 	m := metricsmocks.NewMockTrafficSource(t)
 	m.EXPECT().HandleLocalFrame(mock.Anything).RunAndReturn(func(frame protocol.Frame) protocol.Frame {
+		// Same strict contract as newMutableMockTrafficSource: only the
+		// lightweight totals path is allowed; here it simply yields nil
+		// NetworkStats to exercise the collector's tolerant handling.
+		if frame.Type != "fetch_traffic_totals" {
+			t.Errorf("collector sent %q; it must use fetch_traffic_totals (lightweight totals path)", frame.Type)
+		}
 		return protocol.Frame{Type: "network_stats"}
 	}).Maybe()
 	return m
