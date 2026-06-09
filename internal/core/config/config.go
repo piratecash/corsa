@@ -250,7 +250,7 @@ const (
 	// correctly.
 	ClientVersionMajor = 1
 	ClientVersionMinor = 0
-	ClientVersionBuild = 56
+	ClientVersionBuild = 57
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
@@ -267,8 +267,8 @@ const (
 	// subscribe_inbox command itself stays wired for backward compatibility and
 	// for client-role (non-node) subscribers; it will be removed only once
 	// MinimumProtocolVersion reaches 20.
-	ProtocolVersion        = 20
-	MinimumProtocolVersion = 16
+	ProtocolVersion        = 21
+	MinimumProtocolVersion = 17
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
 )
