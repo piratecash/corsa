@@ -305,6 +305,49 @@ func TestCandidates_PersistedManualPrivateFiltered(t *testing.T) {
 	}
 }
 
+// TestCandidates_PersistedManualPrivateFilteredIPv6 is the IPv6 arm of the
+// "addpeer <local> resurrects after restart" guard. The feature allows adding
+// LAN peers by hand for ANY loopback / private range — not only IPv4 192.168/16
+// — so an IPv6 ULA (fd00::/8) or IPv6 loopback (::1) persisted with Source=manual
+// must likewise NOT become an auto-dial candidate after restart. ForbiddenFn is
+// left at its permissive default here on purpose: the exclusion must come from
+// the persisted-private guard itself (shouldSkipPersistedPrivatePeer), not from
+// ForbiddenFn wiring, so the restore/candidate contract holds even if a host
+// forgets to wire the dial filter.
+func TestCandidates_PersistedManualPrivateFilteredIPv6(t *testing.T) {
+	cfg := testProviderConfig()
+	cfg.AllowPrivateCandidates = false
+	cfg.ForbiddenFn = func(net.IP) bool { return false } // prove the guard, not ForbiddenFn
+	pp := NewPeerProvider(cfg)
+
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("[fd00::8]:64646"), // IPv6 unique-local (ULA)
+		Source:  domain.PeerSourceManual,
+		AddedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("[::1]:64646"), // IPv6 loopback
+		Source:  domain.PeerSourceManual,
+		AddedAt: time.Date(2025, 1, 1, 0, 1, 0, 0, time.UTC),
+		Network: domain.NetGroupLocal,
+	})
+	pp.Restore(domain.RestoreEntry{
+		Address: mustAddr("[2606:4700:4700::1111]:64646"), // public IPv6
+		Source:  domain.PeerSourceManual,
+		AddedAt: time.Date(2025, 1, 1, 0, 2, 0, 0, time.UTC),
+		Network: domain.NetGroupIPv6,
+	})
+
+	candidates := pp.Candidates()
+	if len(candidates) != 1 {
+		t.Fatalf("expected only the public IPv6 manual peer to survive, got %d: %+v", len(candidates), candidates)
+	}
+	if candidates[0].Address != mustAddr("[2606:4700:4700::1111]:64646") {
+		t.Fatalf("unexpected candidate %v", candidates[0].Address)
+	}
+}
+
 func TestCandidates_BannedIPFiltered(t *testing.T) {
 	cfg := testProviderConfig()
 	now := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
@@ -1493,9 +1536,15 @@ func TestShouldSkipPrivateAutoDialPeer(t *testing.T) {
 		{"192.168.x manual", "192.168.1.1", domain.PeerSourceManual, true},
 		{"172.24.x announce", "172.24.0.1", domain.PeerSourceAnnounce, true},
 		{"172.24.x manual", "172.24.0.1", domain.PeerSourceManual, true},
+		// IPv6: ULA (fd00::/8) and loopback (::1) are LAN-local too and must
+		// be filtered identically to their IPv4 counterparts.
+		{"ipv6 ula manual", "fd00::8", domain.PeerSourceManual, true},
+		{"ipv6 ula persisted", "fd00::8", domain.PeerSourcePersisted, true},
+		{"ipv6 loopback manual", "::1", domain.PeerSourceManual, true},
 		{"public announce", "198.51.100.1", domain.PeerSourceAnnounce, false},
 		{"public persisted", "198.51.100.1", domain.PeerSourcePersisted, false},
 		{"public manual", "198.51.100.1", domain.PeerSourceManual, false},
+		{"public ipv6 manual", "2606:4700:4700::1111", domain.PeerSourceManual, false},
 	}
 
 	for _, tc := range tests {

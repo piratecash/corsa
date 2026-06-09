@@ -324,7 +324,12 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 		Version: peerStateVersion,
 		Peers: []peerEntry{
 			{
-				Address:             "10.0.0.99:64646",
+				// Public (TEST-NET-3, RFC 5737) address: this test exercises
+				// metadata survival across flush, not private peering. A
+				// private/LAN fixture would now be intentionally dropped from
+				// peers.json by the manual-local-peer persistence rule, so use
+				// a routable address that is legitimately persisted.
+				Address:             "203.0.113.99:64646",
 				NodeType:            "full",
 				LastConnectedAt:     &connTime,
 				LastDisconnectedAt:  &discTime,
@@ -373,7 +378,7 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 
 	var found *peerEntry
 	for i := range reloaded.Peers {
-		if reloaded.Peers[i].Address == "10.0.0.99:64646" {
+		if reloaded.Peers[i].Address == "203.0.113.99:64646" {
 			found = &reloaded.Peers[i]
 			break
 		}
@@ -383,7 +388,7 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 		for i, p := range reloaded.Peers {
 			addrs[i] = string(p.Address)
 		}
-		t.Fatalf("peer 10.0.0.99:64646 not found in flushed state; got: %v", addrs)
+		t.Fatalf("peer 203.0.113.99:64646 not found in flushed state; got: %v", addrs)
 	}
 
 	if found.Score != 42 {

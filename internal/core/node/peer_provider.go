@@ -894,8 +894,9 @@ func (pp *PeerProvider) buildDialAddresses(kp *knownPeer) []domain.PeerAddress {
 	return pp.BuildDialAddresses(kp.Address)
 }
 
-// shouldSkipPersistedPrivatePeer returns true for loopback / RFC1918 IPv4
-// addresses regardless of Source. Private addresses are never valid CM
+// shouldSkipPersistedPrivatePeer returns true for loopback / private LAN
+// addresses (IPv4 RFC1918 AND IPv6 ULA fd00::/8, plus loopback of either
+// family) regardless of Source. Private addresses are never valid CM
 // auto-dial candidates: the operator's `addpeer` command is a runtime-only
 // dial intent (the immediate connect flows through
 // ConnectionManager.EmitSlot(ManualPeerRequested), which bypasses
@@ -906,11 +907,16 @@ func (pp *PeerProvider) buildDialAddresses(kp *knownPeer) []domain.PeerAddress {
 // and would also let inbound learning from a localhost peer (which records
 // Source=Announce, not Manual) accumulate stale candidates that the guard
 // is supposed to suppress. Public addresses are unaffected.
+//
+// The predicate matches isManualLocalDialIP — the exact set addPeerFrame
+// admits as a manual LAN peer — so the "addable by hand, never re-selected
+// from peers.dat" contract holds identically for IPv4 and IPv6 and does not
+// depend solely on ForbiddenFn being wired (defence in depth).
 func shouldSkipPersistedPrivatePeer(kp *knownPeer) bool {
 	if kp == nil {
 		return false
 	}
-	return isLoopbackOrPrivateIPv4(net.ParseIP(kp.IP))
+	return isManualLocalDialIP(net.ParseIP(kp.IP))
 }
 
 // BuildDialAddresses generates the ordered dial address list for an

@@ -5680,15 +5680,92 @@ func TestAddPeerFrameForbiddenIPError(t *testing.T) {
 	// Restore strict filtering — this test verifies forbidden IPs are rejected.
 	svc.cfg.AllowPrivatePeers = false
 
-	// 192.168.x.x is in isForbiddenAdvertisedIP → shouldSkipDialAddress
+	// Link-local (169.254/16) is structurally undialable: it is forbidden by
+	// shouldSkipDialAddress and is NOT a manually-addable LAN address, so it
+	// must still be rejected even though loopback / RFC1918 LAN targets are
+	// now allowed by hand (see TestAddPeerFrameAllowsLocalPrivatePeer).
 	reply := svc.addPeerFrame(protocol.Frame{
-		Peers: []string{"192.168.1.20:64646"},
+		Peers: []string{"169.254.1.20:64646"},
 	})
 	if reply.Type != "error" {
 		t.Fatalf("expected error for forbidden IP, got %#v", reply)
 	}
 	if !strings.Contains(reply.Error, "forbidden") {
 		t.Fatalf("expected 'forbidden' in error message, got %q", reply.Error)
+	}
+}
+
+func TestAddPeerFrameAllowsLocalPrivatePeer(t *testing.T) {
+	t.Parallel()
+
+	// Every loopback / RFC1918 / IPv6-ULA target must be addable by hand —
+	// the feature is "add local addresses", not "add 192.168/16". These are
+	// the ranges net.IP.IsLoopback()/IsPrivate() recognise, which is exactly
+	// what isManualLocalDialIP allows.
+	locals := []string{
+		"10.0.0.8:64646",     // RFC1918 10/8
+		"172.16.0.8:64646",   // RFC1918 172.16/12 (low edge)
+		"172.31.255.8:64646", // RFC1918 172.16/12 (high edge)
+		"192.168.0.8:64646",  // RFC1918 192.168/16
+		"127.0.0.1:64646",    // IPv4 loopback
+		"[fd00::8]:64646",    // IPv6 unique-local (ULA)
+	}
+
+	peersPath := filepath.Join(t.TempDir(), "peers.json")
+	address := freeAddress(t)
+	svc, stop := startTestNode(t, config.Node{
+		ListenAddress:  address,
+		PeersStatePath: peersPath,
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
+	})
+	defer stop()
+
+	// Strict mode: private LAN peers are NOT auto-dialed, yet the operator
+	// may still add one by hand as a runtime-only dial intent.
+	svc.cfg.AllowPrivatePeers = false
+
+	for _, local := range locals {
+		local := local
+		t.Run(local, func(t *testing.T) {
+			reply := svc.addPeerFrame(protocol.Frame{Peers: []string{local}})
+			if reply.Type != "ok" {
+				t.Fatalf("expected ok for manual local peer %s, got %#v", local, reply)
+			}
+
+			// It must become a live dial target in memory.
+			svc.peerMu.RLock()
+			inMemory := false
+			for _, p := range svc.peers {
+				if p.Address == domain.PeerAddress(local) {
+					inMemory = true
+				}
+			}
+			svc.peerMu.RUnlock()
+			if !inMemory {
+				t.Fatalf("expected manual local peer %s in memory", local)
+			}
+
+			// It must be hidden from peer exchange so neighbours never learn it.
+			if !shouldHidePeerExchangeAddress(domain.PeerAddress(local)) {
+				t.Fatalf("expected local address %s to be hidden from peer exchange", local)
+			}
+		})
+	}
+
+	// None of the manual local peers may be written to peers.json — no
+	// survive-restart, no re-selection as a candidate from disk.
+	svc.flushPeerState()
+	state, err := loadPeerState(peersPath)
+	if err != nil {
+		t.Fatalf("loadPeerState: %v", err)
+	}
+	for _, p := range state.Peers {
+		for _, local := range locals {
+			if p.Address == domain.PeerAddress(local) {
+				t.Fatalf("manual local peer %s must not be persisted to peers.json, got %+v", local, state.Peers)
+			}
+		}
 	}
 }
 

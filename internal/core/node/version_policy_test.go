@@ -3190,7 +3190,12 @@ func TestVersionDiagnostics_BuildAndRestoreRoundTrip(t *testing.T) {
 	localProto := domain.ProtocolVersion(config.ProtocolVersion)
 	higherMin := localProto + 1
 
-	addr := domain.PeerAddress("10.0.0.1:1234")
+	// Public (TEST-NET-3, RFC 5737) address: this test exercises version
+	// diagnostics serialization through buildPeerEntriesLocked, not private
+	// peering. A private/LAN fixture would now be dropped by the
+	// manual-local-peer persistence rule (AllowPrivatePeers defaults false on
+	// a bare Service), so use a routable address that is serialized.
+	addr := domain.PeerAddress("203.0.113.1:1234")
 
 	svc := &Service{
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
@@ -3310,7 +3315,12 @@ func TestClientVersion_SurvivesRestartViaLockout(t *testing.T) {
 	localProto := domain.ProtocolVersion(config.ProtocolVersion)
 	higherMin := localProto + 1
 
-	addr := domain.PeerAddress("10.0.0.1:1234")
+	// Public (TEST-NET-3, RFC 5737) address: this test exercises client-version
+	// survival through buildPeerEntriesLocked, not private peering. A
+	// private/LAN fixture would now be dropped by the manual-local-peer
+	// persistence rule (AllowPrivatePeers defaults false on a bare Service), so
+	// use a routable address that is serialized.
+	addr := domain.PeerAddress("203.0.113.1:1234")
 
 	svc := &Service{
 		persistedMeta: map[domain.PeerAddress]*peerEntry{

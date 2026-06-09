@@ -632,6 +632,20 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 		if peer.Address == "" {
 			continue
 		}
+		// Never persist loopback / private LAN peers unless the node is
+		// explicitly configured for private peering. A manual
+		// `addpeer 192.168.x` is a runtime-only dial intent (immediate
+		// EmitSlot(ManualPeerRequested)); it must not survive a restart in
+		// peers.json nor be re-selected as a candidate from disk. This
+		// mirrors the candidate-side filter (shouldSkipPersistedPrivatePeer),
+		// keeping the persisted set and the dial-candidate set consistent.
+		if !s.cfg.AllowPrivatePeers {
+			if host, _, ok := splitHostPort(string(peer.Address)); ok {
+				if isManualLocalDialIP(net.ParseIP(host)) {
+					continue
+				}
+			}
+		}
 		var entry peerEntry
 		if pm := s.persistedMeta[peer.Address]; pm != nil {
 			// Preserve stable metadata from the persisted snapshot.
@@ -1506,7 +1520,26 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 		return protocol.Frame{Type: "error", Error: "cannot add self as peer"}
 	}
 	if s.shouldSkipDialAddress(peerAddress) {
-		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in a forbidden IP range", address)}
+		// A forbidden address is normally rejected, but the operator may
+		// deliberately want to reach a peer on the local network (e.g.
+		// `addpeer 192.168.0.8`). Allow loopback / RFC1918 / ULA LAN
+		// targets through as a RUNTIME-ONLY dial intent: the immediate
+		// connect flows via EmitSlot(ManualPeerRequested) below, which
+		// bypasses Candidates() filtering. These addresses are still
+		// excluded from announce (classifyAddress==local guard in the
+		// auth path), from peer exchange / candidate selection
+		// (shouldSkipPersistedPrivatePeer + shouldHidePeerExchangeAddress),
+		// and from peers.json persistence (buildPeerEntriesLocked) — so a
+		// private LAN address is never leaked to neighbours or re-selected
+		// from disk. Structurally undialable forbidden addresses
+		// (link-local, unspecified, multicast) and non-IP hosts remain
+		// rejected. When the node already runs in private-peer mode the
+		// address is not forbidden and never reaches this branch.
+		host, _, _ := splitHostPort(address)
+		if !isManualLocalDialIP(net.ParseIP(host)) {
+			return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in a forbidden IP range", address)}
+		}
+		log.Info().Str("address", address).Msg("add_peer_local_allowed")
 	}
 	if !s.canReach(peerAddress) {
 		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(peerAddress))}
@@ -4728,6 +4761,23 @@ func joinHostPort(host, port string) string {
 	return net.JoinHostPort(host, port)
 }
 
+// isManualLocalDialIP reports whether ip is a local-network address that an
+// operator may legitimately target with a manual `addpeer` even though the
+// automatic dial filters treat it as forbidden. Loopback and private/ULA LAN
+// ranges qualify; link-local, unspecified and multicast addresses are
+// structurally undialable and never qualify. A nil ip (non-IP host such as a
+// hostname or overlay address) does not qualify — manual local peering is an
+// IP-literal LAN convenience only.
+func isManualLocalDialIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
+}
+
 func (s *Service) isForbiddenDialIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -5421,20 +5471,18 @@ func (s *Service) buildPeerExchangeResponse(callerGroups map[domain.NetGroup]str
 	return addresses
 }
 
+// shouldHidePeerExchangeAddress reports whether an address must never be
+// surfaced in a get_peers response. It uses the shared non-routable predicate
+// (loopback, RFC1918, CGNAT, link-local, IPv6 ULA) rather than an IPv4-only
+// check: a manually added LAN peer (addPeerFrame) may be an IPv6 loopback/ULA
+// target (::1, fd00::/8), and those must be hidden from peer exchange just as
+// IPv4 private addresses are. Aligning with isNonRoutableIP keeps the
+// peer-exchange filter consistent with the announce/advertise/dial filters so
+// no non-routable address can leak to neighbours through any one path.
 func shouldHidePeerExchangeAddress(address domain.PeerAddress) bool {
 	host, _, ok := splitHostPort(string(address))
 	if !ok {
 		return false
 	}
-	return isLoopbackOrPrivateIPv4(net.ParseIP(host))
-}
-
-func isLoopbackOrPrivateIPv4(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	if ipv4 := ip.To4(); ipv4 != nil {
-		return ipv4[0] == 127 || ip.IsPrivate()
-	}
-	return false
+	return isNonRoutableIP(net.ParseIP(host))
 }
