@@ -485,3 +485,58 @@ func TestWithdrawalGrace_ConcurrentScheduleCancelSafe(t *testing.T) {
 
 	svc.cancelAllPendingWithdrawalsForShutdown()
 }
+
+// TestWithdrawalGrace_ReconnectClearsBlackHoleCooldown pins the
+// node-level integration of Table.ClearDirectPairCooldown: a peer
+// that goes down, accumulates BlackHoleThreshold hop-ack failures
+// during the grace window (the route is still in the table and
+// still selectable, so relay attempts keep timing out against the
+// dead session), and reconnects INSIDE the window must be
+// immediately selectable again. Before the fix the grace branch of
+// onPeerSessionEstablished returned without touching reputation
+// state, leaving the still-present direct route hidden from
+// Lookup / fetchRouteLookup for up to BlackHoleCooldown — the
+// "peer online, route count=0" field bug.
+func TestWithdrawalGrace_ReconnectClearsBlackHoleCooldown(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestServiceWithRouting(t, idNodeA)
+	svc.pendingWithdrawals = make(map[domain.PeerIdentity]*pendingWithdrawal)
+	// Long grace so the deferred withdrawal cannot fire mid-test.
+	svc.routeWithdrawalGracePeriodTest = time.Hour
+	caps := []domain.Capability{domain.CapMeshRelayV1}
+
+	// Session up → direct route present and selectable.
+	svc.onPeerSessionEstablished(idPeerB, caps)
+	if got := svc.routingTable.Lookup(idPeerB); len(got) != 1 {
+		t.Fatalf("precondition: direct route missing after establish; Lookup=%d", len(got))
+	}
+
+	// Session down → deferred withdrawal armed, route stays in table.
+	svc.onPeerSessionClosed(idPeerB, caps)
+	if !peerInPendingMap(svc, idPeerB) {
+		t.Fatal("withdrawal grace timer should be armed after close")
+	}
+
+	// Relay traffic toward the dead peer keeps timing out and arms
+	// the black-hole cooldown for the (peer, peer) direct pair.
+	for i := 0; i < routing.BlackHoleThreshold; i++ {
+		svc.routingTable.MarkHopFailure(idPeerB, idPeerB)
+	}
+	if got := svc.routingTable.Lookup(idPeerB); len(got) != 0 {
+		t.Fatalf("precondition: cooldown must hide the direct route; Lookup=%d", len(got))
+	}
+
+	// Reconnect inside the window: withdrawal cancelled AND cooldown
+	// lifted — the route must be selectable immediately, not after
+	// BlackHoleCooldown.
+	svc.onPeerSessionEstablished(idPeerB, caps)
+	if peerInPendingMap(svc, idPeerB) {
+		t.Fatal("pending withdrawal should have been cancelled by the reconnect")
+	}
+	if got := svc.routingTable.Lookup(idPeerB); len(got) != 1 {
+		t.Fatalf("direct route must be selectable right after grace reconnect; Lookup=%d", len(got))
+	}
+
+	svc.cancelAllPendingWithdrawalsForShutdown()
+}

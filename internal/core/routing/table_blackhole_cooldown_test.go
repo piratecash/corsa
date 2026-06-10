@@ -293,6 +293,105 @@ func TestBlackHole_TickHealthClearsExpiredCooldownForDirectPair(t *testing.T) {
 	}
 }
 
+// TestBlackHole_AddDirectPeerClearsCooldownOnReconnect — session
+// re-establishment is positive liveness evidence on par with an
+// organic late hop-ack, so AddDirectPeer (the reconnect path that
+// re-admits / reactivates the direct claim) must lift an armed
+// cooldown for the (peer, peer) pair. Without the clear, a peer
+// whose downtime accumulated 5+ hop-ack failures stays hidden
+// from Lookup / fetchRouteLookup for up to BlackHoleCooldown
+// AFTER the new handshake completes — the "peer online, route
+// count=0" field bug this clear exists to fix.
+func TestBlackHole_AddDirectPeerClearsCooldownOnReconnect(t *testing.T) {
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+
+	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	for i := 0; i < BlackHoleThreshold; i++ {
+		tbl.MarkHopFailure("id-direct", "id-direct")
+	}
+	if got := tbl.Lookup("id-direct"); len(got) != 0 {
+		t.Fatalf("precondition: Direct pair cooldown not applied; Lookup returned %d", len(got))
+	}
+
+	// Reconnect: storage-idempotent re-add, but the cooldown must lift.
+	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+		t.Fatalf("AddDirectPeer (reconnect): %v", err)
+	}
+
+	got := tbl.Lookup("id-direct")
+	if len(got) != 1 {
+		t.Fatalf("post-reconnect Lookup returned %d entries, want 1 (cooldown must be cleared by AddDirectPeer)", len(got))
+	}
+	var found bool
+	for _, st := range tbl.HealthSnapshot() {
+		if st.Identity != "id-direct" || st.Uplink != "id-direct" {
+			continue
+		}
+		found = true
+		if !st.CooldownUntil.IsZero() {
+			t.Fatalf("CooldownUntil = %v after reconnect, want zero", st.CooldownUntil)
+		}
+		if st.ConsecutiveFailures != 0 {
+			t.Fatalf("ConsecutiveFailures = %d after reconnect, want 0", st.ConsecutiveFailures)
+		}
+		// Shaping grace must engage exactly as on the organic-recovery
+		// and expiry-sweep clears.
+		if st.LastCooldownClearedAt.IsZero() {
+			t.Fatal("LastCooldownClearedAt not stamped on session-establish clear")
+		}
+		// Honest history: the EMA and attempt counters are NOT reset.
+		if st.HopAckAttempts != uint64(BlackHoleThreshold) {
+			t.Fatalf("HopAckAttempts = %d, want %d (reputation history must survive the clear)", st.HopAckAttempts, BlackHoleThreshold)
+		}
+	}
+	if !found {
+		t.Fatal("health entry for (id-direct, id-direct) missing from snapshot")
+	}
+}
+
+// TestBlackHole_ClearDirectPairCooldown — the standalone clear used
+// by the withdrawal-grace reconnect branch (tryCancelPendingWithdrawal
+// == true), where AddDirectPeer is intentionally skipped because the
+// direct route never left the table. Same semantics as the inline
+// AddDirectPeer clear: armed cooldown lifts, untracked / already-clean
+// pairs and empty identities are no-ops returning false.
+func TestBlackHole_ClearDirectPairCooldown(t *testing.T) {
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+
+	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	for i := 0; i < BlackHoleThreshold; i++ {
+		tbl.MarkHopFailure("id-direct", "id-direct")
+	}
+	if got := tbl.Lookup("id-direct"); len(got) != 0 {
+		t.Fatalf("precondition: Direct pair cooldown not applied; Lookup returned %d", len(got))
+	}
+
+	if !tbl.ClearDirectPairCooldown("id-direct") {
+		t.Fatal("ClearDirectPairCooldown returned false on an armed cooldown, want true")
+	}
+	got := tbl.Lookup("id-direct")
+	if len(got) != 1 {
+		t.Fatalf("post-clear Lookup returned %d entries, want 1", len(got))
+	}
+
+	// Idempotency / guard branches.
+	if tbl.ClearDirectPairCooldown("id-direct") {
+		t.Fatal("second ClearDirectPairCooldown returned true, want false (nothing left to clear)")
+	}
+	if tbl.ClearDirectPairCooldown("") {
+		t.Fatal("ClearDirectPairCooldown(\"\") returned true, want false")
+	}
+	if tbl.ClearDirectPairCooldown("id-untracked") {
+		t.Fatal("ClearDirectPairCooldown on untracked pair returned true, want false")
+	}
+}
+
 // mutableClock helper is shared with table_dirty_test.go — see the
 // declaration there. The method `nowFunc` matches WithClock's
 // expected signature.

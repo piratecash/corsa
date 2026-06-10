@@ -446,6 +446,23 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 		t.dirty.Store(true)
 	}
 
+	// Black-hole cooldown clear on session establishment. The health
+	// reset above deliberately preserves reputation fields, but an
+	// armed CooldownUntil for the (peer, peer) direct pair would keep
+	// the just-confirmed route hidden from Lookup / fetchRouteLookup
+	// (the PR 12.4 filter has NO Direct exemption) for up to
+	// BlackHoleCooldown after the reconnect. The completed handshake
+	// is positive liveness evidence on par with an organic late
+	// hop-ack (applyHopAckSuccess), so the arm is lifted here. See
+	// applySessionEstablishedLocked for the full contract; the
+	// grace-window reconnect path that skips AddDirectPeer entirely
+	// gets the same clear via Table.ClearDirectPairCooldown.
+	if state := t.health.getLocked(peerIdentity, peerIdentity); state != nil {
+		if state.applySessionEstablishedLocked(now) {
+			t.dirty.Store(true)
+		}
+	}
+
 	return AddDirectPeerResult{Entry: entry, Penalized: penalized}, nil
 }
 

@@ -129,6 +129,23 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	// docs/refactoring/route-withdrawal-grace-period.md for the
 	// design rationale.
 	if s.tryCancelPendingWithdrawal(peerIdentity) {
+		// The route never left the table, but hop-ack failures
+		// accumulated against the dead session during the grace
+		// window may have armed the black-hole cooldown for the
+		// (peer, peer) pair — which would keep the still-present
+		// direct route hidden from Lookup / fetchRouteLookup for
+		// up to BlackHoleCooldown ("peer online, route count=0").
+		// The confirmed new session is positive liveness evidence
+		// on par with an organic late hop-ack, so lift the arm.
+		// The non-grace reconnect path gets the same clear inside
+		// AddDirectPeer below.
+		// Nil guard mirrors executeDeferredWithdrawal: bare test
+		// fixtures may run without a routing table.
+		if s.routingTable != nil && s.routingTable.ClearDirectPairCooldown(peerIdentity) {
+			log.Info().
+				Str("peer", string(peerIdentity)).
+				Msg("routing_direct_pair_cooldown_cleared_on_grace_reconnect")
+		}
 		return
 	}
 

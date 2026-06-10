@@ -586,6 +586,47 @@ func (s *RouteHealthState) applyCooldownExpiryLocked(now time.Time) {
 	s.LastCooldownClearedAt = now
 }
 
+// applySessionEstablishedLocked clears the black-hole braking state
+// (ConsecutiveFailures counter and an armed CooldownUntil) when a
+// direct session to the uplink has just been (re-)established and
+// the peer's identity confirmed by the transport handshake.
+//
+// Rationale: hop-ack failures accumulated while the peer was down
+// (typically inside the withdrawal grace window, when the direct
+// route is still in the table and relay attempts keep timing out)
+// arm the black-hole cooldown for the (peer, peer) pair. The
+// cooldown is empirical "cannot deliver" evidence — but a freshly
+// completed handshake is strictly newer evidence of the opposite,
+// equivalent in strength to the organic late hop-ack that
+// applyHopAckSuccess treats as an immediate cooldown lift. Without
+// this clear, the reconnected direct peer stays hidden from
+// Lookup / fetchRouteLookup for up to BlackHoleCooldown even though
+// the session is alive ("peer online, route count=0").
+//
+// What is deliberately NOT touched: ReliabilityScore / HopAckAttempts
+// / HopAckSuccesses stay as-is — the EMA is honest history and the
+// session handshake is not a hop-ack outcome; and Health-state-machine
+// fields are owned by AddDirectPeer's existing reset. LastCooldownClearedAt
+// is stamped only when an armed cooldown was actually lifted, so the
+// PR 12.6 partial-traffic shaping grace engages exactly as it does on
+// the organic-recovery and expiry-sweep paths.
+//
+// Returns true when any field changed (caller marks the snapshot
+// dirty). Callers must hold the owning routing.Table's t.mu in W mode.
+func (s *RouteHealthState) applySessionEstablishedLocked(now time.Time) bool {
+	changed := false
+	if s.ConsecutiveFailures != 0 {
+		s.ConsecutiveFailures = 0
+		changed = true
+	}
+	if !s.CooldownUntil.IsZero() {
+		s.CooldownUntil = time.Time{}
+		s.LastCooldownClearedAt = now
+		changed = true
+	}
+	return changed
+}
+
 // isShapingCandidate reports whether the (Identity, Uplink) pair
 // should still be considered for multi-path traffic shaping by
 // the Phase 3 PR 12.6 LookupForRelay rotation. Two conditions

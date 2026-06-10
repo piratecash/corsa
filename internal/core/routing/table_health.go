@@ -403,6 +403,50 @@ func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
 	t.dirty.Store(true)
 }
 
+// ClearDirectPairCooldown lifts an armed black-hole cooldown (and the
+// ConsecutiveFailures streak feeding it) for the (peer, peer) direct
+// pair after a session to the peer has been (re-)established and its
+// identity confirmed by the handshake.
+//
+// Production caller: node.Service.onPeerSessionEstablished on the
+// withdrawal-grace reconnect branch (tryCancelPendingWithdrawal ==
+// true), where AddDirectPeer is intentionally NOT called because the
+// direct route never left the table. That is exactly the scenario in
+// which the cooldown gets armed in the first place: during the grace
+// window the route stays selectable, relay attempts toward the dead
+// peer keep timing out, and the 5th consecutive hop-ack failure arms
+// CooldownUntil. Reconnecting inside the window cancels the deferred
+// withdrawal but — without this method — would leave the cooldown
+// hiding the still-present direct route from Lookup /
+// fetchRouteLookup for up to BlackHoleCooldown ("peer online, route
+// count=0"). The AddDirectPeer path performs the equivalent clear
+// inline; see the matching block in table_mutation.go.
+//
+// Semantics mirror the organic-recovery clear in applyHopAckSuccess:
+// reliability EMA and attempt counters are untouched,
+// LastCooldownClearedAt is stamped only when an armed cooldown was
+// actually lifted (keeping the PR 12.6 partial-traffic shaping grace
+// engaged). No-op when the pair is untracked or has nothing to clear.
+//
+// Returns true when state changed (snapshot republish was scheduled).
+// Safe to call from any goroutine; acquires t.mu in W mode.
+func (t *Table) ClearDirectPairCooldown(peerIdentity PeerIdentity) bool {
+	if peerIdentity == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state := t.health.getLocked(peerIdentity, peerIdentity)
+	if state == nil {
+		return false
+	}
+	if !state.applySessionEstablishedLocked(t.clock()) {
+		return false
+	}
+	t.dirty.Store(true)
+	return true
+}
+
 // HealthSnapshot returns a deep copy of every tracked
 // RouteHealthState. Backs the fetchRouteHealth RPC handler in
 // internal/core/rpc/routing_commands.go (PR 11.5) — the handler
