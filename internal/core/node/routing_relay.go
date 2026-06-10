@@ -707,7 +707,7 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.P
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		s.goBackground(func() { s.sendGossipFrameToPeer(address, frame, msgID, recipient) })
+		s.dispatchGossipSend(func() { s.sendGossipFrameToPeer(address, frame, msgID, recipient) })
 	}
 }
 
@@ -991,7 +991,12 @@ func (s *Service) gossipNotice(ttl time.Duration, ciphertext string) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		s.goBackground(func() { s.sendNoticeToPeer(address, ttl, ciphertext) })
+		// Dedicated notice lane: push_notice fan-out has no retry cycle
+		// behind it (unlike DM gossip, which retryRelayDeliveries
+		// re-covers), so it must not share a lossy queue with DM
+		// storms. Its own lane only sheds under a notice flood — abuse
+		// traffic by definition (inbound notices re-gossip here).
+		s.dispatchGossipNoticeSend(func() { s.sendNoticeToPeer(address, ttl, ciphertext) })
 	}
 }
 

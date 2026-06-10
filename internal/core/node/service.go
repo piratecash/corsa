@@ -308,6 +308,42 @@ type Service struct {
 	reachableGroups                map[domain.NetGroup]struct{}                 // network groups this node can reach (computed at startup)
 	messageStore                   MessageStore                                 // optional: persistence handler registered by desktop layer
 	router                         Router                                       // routing strategy for outbound message delivery
+
+	// gossipJobs feeds the bounded gossip-dispatch worker pool that
+	// replaces the historical goroutine-per-target gossip fan-out (see
+	// gossip_dispatch.go). nil until Run calls startGossipDispatch;
+	// dispatchGossipSend falls back to goBackground while the pool is
+	// down so unit tests and partially-wired Services keep the old
+	// per-send-goroutine semantics.
+	gossipJobs chan func()
+	// gossipNoticeJobs is the dedicated lane for push_notice fan-out:
+	// notices have no retry path, so they must not share the lossy
+	// DM/receipt queue — a DM storm could otherwise silently shed
+	// them. See gossip_dispatch.go.
+	gossipNoticeJobs chan func()
+	// gossipPoolMu excludes job enqueues (RLock) from the shutdown
+	// supervisor's flag-flip + queue-drain critical section (Lock), so
+	// no closure can be parked in gossipJobs after the drain. NOT in
+	// the peerMu/ipStateMu lock hierarchy — leaf lock, nothing else is
+	// acquired under it.
+	gossipPoolMu sync.RWMutex
+	// gossipPoolUp flips once startGossipDispatch has the workers
+	// running; read lock-free on every dispatch.
+	gossipPoolUp atomic.Bool
+	// gossipPoolShutdown flips when the pool's ctx is cancelled: late
+	// dispatchers drop their job instead of enqueueing it or falling
+	// back to a fresh goroutine. Distinct from gossipPoolUp so the
+	// "never started" (tests → goBackground fallback) and "started,
+	// now tearing down" (→ drop) states cannot be confused.
+	gossipPoolShutdown atomic.Bool
+	// gossipSendsDropped counts DM/receipt fan-out jobs shed because
+	// the dispatch queue was saturated (fire-and-forget; re-covered by
+	// the relay retry cycle). Observability only.
+	gossipSendsDropped atomic.Uint64
+	// gossipNoticesDropped counts push_notice fan-out jobs shed because
+	// the dedicated notice lane overflowed — only plausible under a
+	// notice flood. Logged at Warn (notices have no retry path).
+	gossipNoticesDropped atomic.Uint64
 	relayStates                    *relayStateStore                             // hop-by-hop relay forwarding state (Iteration 1)
 	relayLimiter                   *relayRateLimiter                            // per-peer token bucket for relay fan-out
 	announceLimiter                *announceRateLimiter                         // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
@@ -1699,6 +1735,12 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.primeBootstrapOnRun {
 		s.primeStartupBootstrapPeers()
 	}
+
+	// Bounded gossip-dispatch pool (gossip_dispatch.go): must be up
+	// before bootstrapLoop's first retryRelayDeliveries tick enqueues
+	// its fan-out, otherwise those sends take the per-goroutine
+	// fallback path.
+	s.startGossipDispatch(ctx)
 
 	bootstrapDone := make(chan struct{})
 	go func() {
@@ -5385,11 +5427,13 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// It ensures store-and-forward (transit DMs held IN MEMORY on relay
 		// nodes for offline recipients — bounded by the per-peer ring and
 		// NOT durable across restart), push delivery to connected clients,
-		// and backlog drain. Never skip or filter gossip. Tracked:
-		// executeGossipTargets → sendGossipFrameToPeer → queuePeerFrame; the
-		// trailing queuePersist.MarkDirty is now a no-op (the persister is
-		// dormant — no disk write is scheduled).
-		s.goBackground(func() { s.executeGossipTargets(envelope, decision.GossipTargets) })
+		// and backlog drain. Never skip or filter gossip. Runs inline:
+		// executeGossipTargets only enqueues jobs on the bounded gossip
+		// dispatch pool (gossip_dispatch.go) — the actual sends
+		// (sendGossipFrameToPeer → queuePeerFrame) happen on the pool
+		// workers; the trailing queuePersist.MarkDirty is now a no-op
+		// (the persister is dormant — no disk write is scheduled).
+		s.executeGossipTargets(envelope, decision.GossipTargets)
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
 		// next-hop for this recipient, send relay_message directly to that

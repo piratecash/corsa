@@ -1505,7 +1505,7 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		s.goBackground(func() { s.sendReceiptToPeer(address, receipt) })
+		s.dispatchGossipSend(func() { s.sendReceiptToPeer(address, receipt) })
 	}
 }
 
@@ -1550,7 +1550,13 @@ func (s *Service) retryRelayDeliveries() {
 			}
 			e.Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Int("attempts", attempts).Strs("gossip_targets", targets).Msg("relay_retry_message")
 		}
-		s.goBackground(func() { s.executeGossipTargets(msg, decision.GossipTargets) })
+		// Inline: executeGossipTargets only enqueues jobs on the bounded
+		// gossip-dispatch pool now. The per-message goroutine that used
+		// to live here was the retry loop's storm amplifier — N backlog
+		// messages × fan-out targets in fresh goroutines every 2s tick
+		// permanently ratcheted the runtime's goroutine free-list and
+		// stack high-water mark (see gossip_dispatch.go header).
+		s.executeGossipTargets(msg, decision.GossipTargets)
 		// Table-directed relay (Phase 1.2): mirror the logic in
 		// storeIncomingMessage — use the routing table when a next-hop
 		// is known, fall back to blind gossip relay otherwise.
@@ -1563,7 +1569,9 @@ func (s *Service) retryRelayDeliveries() {
 	for _, receipt := range s.retryableRelayReceipts(now) {
 		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
 		if !s.handleRelayReceipt(receipt) {
-			s.goBackground(func() { s.gossipReceipt(receipt) })
+			// Inline for the same reason as executeGossipTargets above:
+			// the body is now a cheap enqueue loop on the dispatch pool.
+			s.gossipReceipt(receipt)
 		}
 	}
 }
