@@ -933,6 +933,23 @@ type incomingMessage struct {
 	CreatedAt  time.Time
 	TTLSeconds int
 	Body       string
+
+	// Hops is the raw wire hop budget (frame Hops field). 0 = absent:
+	// either a legacy peer that predates the field or a local send —
+	// storeIncomingMessage assigns defaultMessageHopBudget as if this
+	// node originated the message. See transit_retention.go.
+	Hops int
+
+	// Via is the ingress peer address for messages that arrived over
+	// the network (push_message / relay_message); empty for local
+	// sends and imports. Used for ingress suppression in gossip
+	// fan-out and recorded on the stored Envelope.
+	Via domain.PeerAddress
+
+	// ViaIdentity is the authenticated identity of the ingress peer,
+	// when known — see protocol.Envelope.ViaIdentity for why address
+	// comparison alone cannot cover inbound-only next-hops.
+	ViaIdentity domain.PeerIdentity
 }
 
 func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
@@ -1099,7 +1116,25 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// build their own dedup with an injected clock via
 	// newRotatingBloomDedup directly.
 	seen := newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
+	restoredAt := time.Now().UTC()
 	for _, msg := range queueState.RelayMessages {
+		// Normalize restored envelopes for the hop-budget / in-flight
+		// contracts (transit_retention.go). ONLY true legacy entries —
+		// Hops==0 AND StoredAt zero, i.e. persisted before both fields
+		// existed — re-arm the default budget ("as if we originated
+		// it"); an entry persisted with a non-zero StoredAt and
+		// Hops==0 is genuinely EXHAUSTED and must stay that way, or a
+		// restore would hand it a fresh propagation allowance. The
+		// Hops check runs first, while StoredAt still distinguishes
+		// the two cases; StoredAt then restarts the in-flight window
+		// at process start so restored transit gets one forwarding
+		// cycle before the sweep reaps it.
+		if msg.Hops <= 0 && msg.StoredAt.IsZero() {
+			msg.Hops = defaultMessageHopBudget
+		}
+		if msg.StoredAt.IsZero() {
+			msg.StoredAt = restoredAt
+		}
 		topics[msg.Topic] = append(topics[msg.Topic], msg)
 		if msg.ID != "" {
 			seen.Add(string(msg.ID))
@@ -5264,15 +5299,29 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	}
 	s.seen.Add(string(msg.ID))
 
+	// Hop budget at admission (transit_retention.go): a frame without
+	// the Hops field — legacy peer or local send — is treated as if
+	// THIS node originated it (full default budget). Network arrivals
+	// spend one hop: the stored value is what WE may stamp on outbound
+	// gossip; < 1 means store/deliver only, never re-gossip.
+	hopBudget := effectiveHopBudget(msg.Hops)
+	if msg.Via != "" {
+		hopBudget--
+	}
+
 	envelope := protocol.Envelope{
-		ID:         msg.ID,
-		Topic:      msg.Topic,
-		Sender:     msg.Sender,
-		Recipient:  msg.Recipient,
-		Flag:       msg.Flag,
-		TTLSeconds: msg.TTLSeconds,
-		Payload:    []byte(msg.Body),
-		CreatedAt:  msg.CreatedAt,
+		ID:          msg.ID,
+		Topic:       msg.Topic,
+		Sender:      msg.Sender,
+		Recipient:   msg.Recipient,
+		Flag:        msg.Flag,
+		TTLSeconds:  msg.TTLSeconds,
+		Payload:     []byte(msg.Body),
+		CreatedAt:   msg.CreatedAt,
+		Hops:        hopBudget,
+		Via:         string(msg.Via),
+		ViaIdentity: string(msg.ViaIdentity),
+		StoredAt:    time.Now().UTC(),
 	}
 
 	// Only messages that belong to this node (sender or recipient) get
@@ -5334,19 +5383,46 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// path send frames on the wire on the fly without depending on
 	// s.topics as a backing store.
 	beforeCount := len(s.topics[msg.Topic])
+	// evictedIDs collects messages displaced by the transit caps; their
+	// relayRetry entries are dropped AFTER gossipMu is released (the
+	// canonical deliveryMu → gossipMu order forbids nesting here).
+	var evictedIDs []protocol.MessageID
 	if storeResult != StoreDuplicate && msg.Topic != protocol.TopicControlDM {
+		// Single admission pass over the backlog (transit_retention.go):
+		// exact-ID dedup plus transit accounting. The rotating bloom
+		// (s.seen) forgets IDs after 5–10 min while the backlog lives
+		// beyond the bloom window (transit for transitInFlightWindow,
+		// local messages indefinitely), so late re-injections (pending-
+		// ring drains, reconnect backlog replays) would otherwise be
+		// re-admitted as duplicate envelopes — previously only spotted
+		// by the duplicate *diagnostics* below, never prevented.
+		scan := scanTopicForAdmission(s.topics[msg.Topic], msg.ID, msg.Recipient, s.isTransitEnvelope)
+		if scan.duplicate {
+			count := len(s.topics[msg.Topic])
+			s.gossipMu.Unlock()
+			log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_exact_dedup").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
+			log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_backlog_dedup")
+			return false, count, ""
+		}
+		// Transit retention (layer 1): enforce the per-recipient FIFO
+		// cap and the global byte budget before appending.
+		if s.isTransitEnvelope(envelope) {
+			s.topics[msg.Topic], evictedIDs = evictTransitOverflowLocked(
+				s.topics[msg.Topic], scan, msg.Recipient, len(envelope.Payload), s.isTransitEnvelope)
+		}
 		s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
 	}
 	count := len(s.topics[msg.Topic])
-	// Collect existing IDs for duplicate diagnostics.
-	var existingIDs []string
-	if count > 1 {
-		for _, e := range s.topics[msg.Topic] {
-			existingIDs = append(existingIDs, string(e.ID))
-		}
-	}
 	s.gossipMu.Unlock()
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
+
+	// Orphan prevention: retryableRelayMessages iterates the TOPIC
+	// snapshot, so relayRetry entries of evicted envelopes would never
+	// be visited (and never lazily deleted) again.
+	s.dropRelayRetryEntries(evictedIDs)
+	if len(evictedIDs) > 0 {
+		log.Debug().Str("node", s.identity.Address).Int("evicted", len(evictedIDs)).Str("recipient", msg.Recipient).Msg("transit_backlog_cap_eviction")
+	}
 
 	// Only notify the desktop UI for messages this node participates in.
 	// Transit relay traffic must not wake up the UI.
@@ -5394,7 +5470,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	}
 
 	_, callerFile, callerLine, _ := runtime.Caller(1)
-	log.Info().Str("node", s.identity.Address).Str("topic", msg.Topic).Str("id", string(msg.ID)).Str("from", msg.Sender).Str("to", msg.Recipient).Str("flag", string(msg.Flag)).Int("before_count", beforeCount).Int("topic_count", count).Bool("is_local", isLocal).Str("caller", fmt.Sprintf("%s:%d", callerFile, callerLine)).Strs("topic_ids", existingIDs).Msg("stored message")
+	log.Info().Str("node", s.identity.Address).Str("topic", msg.Topic).Str("id", string(msg.ID)).Str("from", msg.Sender).Str("to", msg.Recipient).Str("flag", string(msg.Flag)).Int("before_count", beforeCount).Int("topic_count", count).Bool("is_local", isLocal).Int("hops_budget", envelope.Hops).Str("caller", fmt.Sprintf("%s:%d", callerFile, callerLine)).Msg("stored message")
 
 	// Push and gossip are independent delivery mechanisms:
 	//
@@ -5423,17 +5499,21 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	if s.shouldRouteStoredMessage(msg) {
 		s.trackRelayMessage(envelope)
 
-		// Gossip is the baseline delivery mechanism — always runs.
-		// It ensures store-and-forward (transit DMs held IN MEMORY on relay
-		// nodes for offline recipients — bounded by the per-peer ring and
-		// NOT durable across restart), push delivery to connected clients,
-		// and backlog drain. Never skip or filter gossip. Runs inline:
-		// executeGossipTargets only enqueues jobs on the bounded gossip
-		// dispatch pool (gossip_dispatch.go) — the actual sends
-		// (sendGossipFrameToPeer → queuePeerFrame) happen on the pool
-		// workers; the trailing queuePersist.MarkDirty is now a no-op
-		// (the persister is dormant — no disk write is scheduled).
-		s.executeGossipTargets(envelope, decision.GossipTargets)
+		// Gossip is the baseline delivery mechanism. It ensures
+		// store-and-forward (transit DMs held IN MEMORY on relay nodes
+		// for offline recipients — bounded by the transit retention
+		// caps and NOT durable across restart), push delivery to
+		// connected clients, and backlog drain. Two propagation gates
+		// apply (transit_retention.go): the hop budget (no re-gossip
+		// once the decremented budget hits 0 — bounds blind-delivery
+		// radius like bitchat's hop TTL) and ingress suppression (the
+		// link the message arrived on is excluded — it already has
+		// it). Runs inline: executeGossipTargets only enqueues jobs on
+		// the bounded gossip dispatch pool (gossip_dispatch.go); the
+		// trailing queuePersist.MarkDirty is now a no-op (the
+		// persister is dormant — no disk write is scheduled).
+		gossipTargets := s.filterGossipTargetsForEnvelope(envelope, decision.GossipTargets)
+		s.executeGossipTargets(envelope, gossipTargets)
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
 		// next-hop for this recipient, send relay_message directly to that
@@ -5445,8 +5525,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 				s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
 			} else {
 				// No table route — fall back to blind gossip relay to
-				// capable full nodes (pre-Phase 1.2 behavior).
-				s.tryRelayToCapableFullNodes(envelope, decision.GossipTargets)
+				// capable full nodes (pre-Phase 1.2 behavior). Same
+				// hop/ingress gates as the gossip fan-out above: this
+				// path is blind propagation too.
+				s.tryRelayToCapableFullNodes(envelope, gossipTargets)
 			}
 		}
 	}
@@ -6530,6 +6612,7 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 		Flag:       frame.Item.Flag,
 		CreatedAt:  frame.Item.CreatedAt,
 		TTLSeconds: frame.Item.TTLSeconds,
+		Hops:       frame.Item.Hops,
 		Body:       frame.Item.Body,
 	})
 	if err != nil {
@@ -6538,6 +6621,10 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 
 	peerAddr := s.inboundPeerAddress(connID)
 	peerIdentity := s.inboundPeerIdentity(connID)
+	// Ingress link for hop accounting + echo suppression
+	// (transit_retention.go).
+	msg.Via = peerAddr
+	msg.ViaIdentity = peerIdentity
 
 	// Non-DM sender verification: reject messages whose sender is not a
 	// known identity. DM messages — both data DM ("dm") and control DM
@@ -7029,7 +7116,19 @@ func (s *Service) cleanupExpiredMessagesForce() {
 				expiresAt := message.CreatedAt.Add(time.Duration(message.TTLSeconds) * time.Second)
 				if !expiresAt.After(now) {
 					expired = append(expired, expiredEntry{topic, string(message.ID)})
+					continue
 				}
+			}
+			// Forwarding-only transit (transit_retention.go): a
+			// transit envelope (neither party is this node) is the
+			// in-flight buffer of its forwarding operation, dropped
+			// unconditionally once transitInFlightWindow closes —
+			// relays do NOT store user messages. Before this gate,
+			// ordinary DMs (TTLSeconds=0, no auto-delete flag) to
+			// never-returning recipients were IMMORTAL — the third
+			// leak of the June 2026 hunt.
+			if s.isTransitEnvelope(message) && transitExpired(message, now) {
+				expired = append(expired, expiredEntry{topic, string(message.ID)})
 			}
 		}
 	}
@@ -7072,6 +7171,11 @@ func (s *Service) cleanupExpiredMessagesForce() {
 			}
 			filtered = append(filtered, msg)
 		}
+		// Release dropped Envelopes left in the shared backing array —
+		// without this the removed payloads stay GC-reachable until
+		// future appends overwrite the tail, which can be never on a
+		// quiet topic. Defeats the whole point of the retention sweep.
+		clear(messages[len(filtered):])
 		if len(filtered) == 0 {
 			delete(s.topics, topic)
 		} else {
@@ -7080,6 +7184,17 @@ func (s *Service) cleanupExpiredMessagesForce() {
 	}
 	s.gossipMu.Unlock()
 	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_released").Msg("gossipMu_writer")
+
+	// Orphan prevention (transit_retention.go): retryableRelayMessages
+	// iterates the TOPIC snapshot, so the relayRetry entry of a removed
+	// envelope is never visited again and its lazy TTL delete never
+	// fires. Sequential lock use (gossipMu released above, deliveryMu
+	// inside) keeps the canonical deliveryMu → gossipMu order intact.
+	removedIDs := make([]protocol.MessageID, 0, len(expired))
+	for _, e := range expired {
+		removedIDs = append(removedIDs, protocol.MessageID(e.id))
+	}
+	s.dropRelayRetryEntries(removedIDs)
 }
 
 func (s *Service) validateMessageTiming(msg incomingMessage) error {
@@ -7144,6 +7259,7 @@ func incomingMessageFromFrame(frame protocol.Frame) (incomingMessage, error) {
 		Flag:       protocol.MessageFlag(strings.TrimSpace(frame.Flag)),
 		CreatedAt:  timestamp.UTC(),
 		TTLSeconds: frame.TTLSeconds,
+		Hops:       frame.Hops,
 		Body:       strings.TrimSpace(frame.Body),
 	}
 
@@ -7162,6 +7278,16 @@ func incomingMessageFromFrame(frame protocol.Frame) (incomingMessage, error) {
 }
 
 func messageFrame(msg protocol.Envelope) protocol.MessageFrame {
+	// Deliberately NO Hops here: messageFrame serves FINAL-delivery
+	// surfaces — fetch_messages / fetch_inbox responses and subscriber
+	// push — where the receiver is the endpoint (the recipient pulls
+	// its own mail; subscribers do not relay). Stamping a budget here
+	// would change the long-standing local/query API contract (clients
+	// expect hops absent), and propagation budgets belong exclusively
+	// to the mesh fan-out builder, gossipPushFrame. An endpoint that
+	// DOES later re-inject a fetched message into the mesh goes
+	// through admission, where the absent field correctly reads as
+	// "originated here".
 	return protocol.MessageFrame{
 		ID:         string(msg.ID),
 		Sender:     msg.Sender,

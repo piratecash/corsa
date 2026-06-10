@@ -963,6 +963,19 @@ func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSe
 		log.Warn().Err(err).Str("id", frame.ID).Msg("relay_deliver_parse_error")
 		return false
 	}
+	// Ingress link (previous relay hop) for hop accounting + echo
+	// suppression (transit_retention.go). The identity lookup covers
+	// inbound-only previous hops whose route key ("inbound:<raw>")
+	// address comparison cannot match.
+	msg.Via = senderAddress
+	msg.ViaIdentity = s.viaIdentityForAddress(senderAddress)
+	// Gossip hop budget for a relay_message is derived UNCONDITIONALLY
+	// from the relay chain's own HopCount/MaxHops — the top-level
+	// `hops` field is deliberately NOT copied above and has no way
+	// into the computation (see relayChainGossipBudget for the
+	// injection-defense rationale and the MaxHops normalization
+	// contract).
+	msg.Hops = relayChainGossipBudget(frame.HopCount, frame.MaxHops)
 	stored, _, errCode := s.storeIncomingMessage(msg, false)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey && senderAddress != "" {
 		log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_start")
@@ -1169,7 +1182,15 @@ func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.Pee
 	targets := s.routingTargetsForRecipient(string(frame.Recipient))
 	var forwardedTo domain.PeerAddress
 	for _, address := range targets {
-		if address == "" || s.isSelfAddress(address) || address == excludeAddress {
+		if address == "" || s.isSelfAddress(address) {
+			continue
+		}
+		// Canonical comparison (transit_retention.go): the previous
+		// hop may appear in the target list under a fallback-port
+		// dial alias — raw equality would echo the relay_message
+		// straight back to it. Same ingress-suppression contract as
+		// the push_message gossip filter and the table-directed path.
+		if excludeAddress != "" && s.sameCanonicalAddress(address, excludeAddress) {
 			continue
 		}
 		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
@@ -1556,14 +1577,19 @@ func (s *Service) retryRelayDeliveries() {
 		// messages × fan-out targets in fresh goroutines every 2s tick
 		// permanently ratcheted the runtime's goroutine free-list and
 		// stack high-water mark (see gossip_dispatch.go header).
-		s.executeGossipTargets(msg, decision.GossipTargets)
+		// Retries obey the same propagation gates as first admission
+		// (hop budget + ingress suppression, transit_retention.go): a
+		// retry is a re-emission of the SAME hop, not a new one, so
+		// the stored Hops value is reused, not decremented again.
+		gossipTargets := s.filterGossipTargetsForEnvelope(msg, decision.GossipTargets)
+		s.executeGossipTargets(msg, gossipTargets)
 		// Table-directed relay (Phase 1.2): mirror the logic in
 		// storeIncomingMessage — use the routing table when a next-hop
 		// is known, fall back to blind gossip relay otherwise.
 		if decision.RelayNextHop != nil {
 			s.sendTableDirectedRelay(s.runCtx, msg, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
 		} else {
-			s.tryRelayToCapableFullNodes(msg, decision.GossipTargets)
+			s.tryRelayToCapableFullNodes(msg, gossipTargets)
 		}
 	}
 	for _, receipt := range s.retryableRelayReceipts(now) {
@@ -1818,15 +1844,20 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
 	s.gossipMu.Lock()
-	before := len(s.topics["dm"])
-	filtered := s.topics["dm"][:0]
-	for _, msg := range s.topics["dm"] {
+	messages := s.topics["dm"]
+	before := len(messages)
+	filtered := messages[:0]
+	for _, msg := range messages {
 		if msg.ID == messageID && msg.Recipient == recipient {
 			delete(s.relayRetry, relayMessageKey(msg.ID))
 			continue
 		}
 		filtered = append(filtered, msg)
 	}
+	// Release the delivered Envelope left in the shared backing array
+	// so its payload is not pinned until a future append overwrites
+	// the tail (same hygiene as the retention sweep).
+	clear(messages[len(filtered):])
 	if len(filtered) == 0 {
 		delete(s.topics, "dm")
 	} else {

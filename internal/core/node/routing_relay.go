@@ -562,24 +562,48 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 	}
 
 	if address == "" {
-		// Session gone — gossip fallback.
+		// Session gone — gossip fallback. Same propagation gates as
+		// every other blind path (transit_retention.go): hop budget
+		// and ingress suppression apply, or an exhausted/echoing
+		// message sneaks out through this side door.
 		log.Debug().
 			Str("recipient", msg.Recipient).
 			Str("next_hop", string(nextHopIdentity)).
 			Msg("table_relay_no_session_fallback_gossip")
-		targets := s.routingTargetsForMessage(msg)
+		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
+		s.tryRelayToCapableFullNodes(msg, targets)
+		return
+	}
+
+	// Ingress suppression for the DIRECTED path: when the routing table
+	// says "recipient via B" and the message arrived FROM B, sending a
+	// relay_message back to B is a guaranteed no-op round trip — B has
+	// already seen the message (its dedup rejects the store) and made
+	// its own delivery decision. isIngressNextHop checks the
+	// authenticated identity first (inbound-only routes are keyed
+	// "inbound:<raw>" and defeat address canonicalization), then falls
+	// back to the canonical-address comparison. Fall back to
+	// (Via-filtered) gossip instead of echoing; covers both the
+	// admission call and every 2s retry.
+	if s.isIngressNextHop(msg, nextHopIdentity, address) {
+		log.Debug().
+			Str("recipient", msg.Recipient).
+			Str("next_hop", string(nextHopIdentity)).
+			Str("address", string(address)).
+			Msg("table_relay_ingress_suppressed_fallback_gossip")
+		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
 		s.tryRelayToCapableFullNodes(msg, targets)
 		return
 	}
 
 	if !s.sendRelayToAddress(ctx, address, msg, routeOrigin) {
-		// Send failed — gossip fallback.
+		// Send failed — gossip fallback (same gates as above).
 		log.Debug().
 			Str("recipient", msg.Recipient).
 			Str("next_hop", string(nextHopIdentity)).
 			Str("address", string(address)).
 			Msg("table_relay_send_failed_fallback_gossip")
-		targets := s.routingTargetsForMessage(msg)
+		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
 		s.tryRelayToCapableFullNodes(msg, targets)
 		return
 	}
@@ -693,6 +717,11 @@ func (s *Service) resolveRouteNextHopAddress(peerIdentity domain.PeerIdentity, h
 // recomputed here.
 func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.PeerAddress) {
 	defer crashlog.DeferRecover()
+	if len(targets) == 0 {
+		// Hop budget exhausted / all targets ingress-suppressed
+		// (filterGossipTargetsForEnvelope) — nothing to build.
+		return
+	}
 	// Build the push_message frame ONCE and share it (read-only) across every
 	// gossip target instead of rebuilding it — and re-copying the ciphertext
 	// into a fresh MessageFrame — per target. Gossip fan-out recreating the
@@ -715,6 +744,12 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.P
 // returned frame is safe to share read-only across the per-target send
 // goroutines (its *MessageFrame is never mutated downstream).
 func gossipPushFrame(msg protocol.Envelope) protocol.Frame {
+	// Hop budget on the wire: wireHops (transit_retention.go) resolves
+	// the budget THIS node may stamp — decremented at admission for
+	// transit, full default for local sends and legacy pre-field
+	// envelopes, floored at 1 because 0 is never emitted (an absent
+	// omitempty field means "assign the FULL default as if originated
+	// here" on the receiver, which would re-arm an exhausted budget).
 	return protocol.Frame{
 		Type:  "push_message",
 		Topic: msg.Topic,
@@ -725,6 +760,7 @@ func gossipPushFrame(msg protocol.Envelope) protocol.Frame {
 			Flag:       string(msg.Flag),
 			CreatedAt:  msg.CreatedAt.UTC().Format(time.RFC3339),
 			TTLSeconds: msg.TTLSeconds,
+			Hops:       wireHops(msg),
 			Body:       string(msg.Payload),
 		},
 	}
@@ -966,8 +1002,10 @@ func (s *Service) sendGossipFrameToPeer(address domain.PeerAddress, frame protoc
 	// has connected to us (inbound) but we have no outbound session (CM slot
 	// full). push_message is fire-and-forget so it is safe to interleave on
 	// the inbound conn without disrupting request/reply traffic.
-	resolved := s.resolveHealthAddress(address)
+	// resolveHealthAddress reads dialOrigin (peer-domain state mutated
+	// during session setup/teardown) — it belongs INSIDE the RLock.
 	s.peerMu.RLock()
+	resolved := s.resolveHealthAddress(address)
 	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
 	s.peerMu.RUnlock()
 	if haveInbound {
@@ -1012,8 +1050,10 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	}
 
 	// Try authenticated inbound connection before expensive TCP dial.
-	resolved := s.resolveHealthAddress(address)
+	// resolveHealthAddress reads dialOrigin (peer-domain state) — it
+	// belongs INSIDE the RLock.
 	s.peerMu.RLock()
+	resolved := s.resolveHealthAddress(address)
 	inboundID, haveInbound := s.inboundConnIDForAddressLocked(resolved)
 	s.peerMu.RUnlock()
 	if haveInbound {

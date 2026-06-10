@@ -63,6 +63,22 @@ type Frame struct {
 	CreatedAt       string                `json:"created_at,omitempty"`
 	DeliveredAt     string                `json:"delivered_at,omitempty"`
 	TTLSeconds      int                   `json:"ttl_seconds,omitempty"`
+	// Hops is the remaining hop budget for blind-gossip propagation
+	// of DM traffic. Read on send_message (an origin MAY stamp a
+	// budget; absent means the node assigns the default). NOT read on
+	// relay_message: the relay chain's budget lives exclusively in
+	// HopCount/MaxHops, and deliverRelayedMessage deliberately
+	// IGNORES a top-level `hops` there — honouring it would let a
+	// peer re-arm gossip propagation on a chain that is already at
+	// hop_count≈max_hops. Semantics mirror BLE-mesh hop TTLs: a relay
+	// forwards with Hops-1 and never re-gossips a message whose
+	// remaining budget would drop below 1. omitempty keeps the field
+	// absent both for legacy senders and for non-message frames; a
+	// missing/zero value at the receiver means "legacy peer or
+	// originator did not stamp a budget" and the receiver assigns
+	// defaultMessageHopBudget AS IF IT ORIGINATED the message — the
+	// value 0 is therefore never emitted on the wire.
+	Hops            int                   `json:"hops,omitempty"`
 	Body            string                `json:"body,omitempty"`
 	Ciphertext      string                `json:"ciphertext,omitempty"`
 	ExpiresAt       int64                 `json:"expires_at,omitempty"`
@@ -121,7 +137,18 @@ type MessageFrame struct {
 	Flag       string `json:"flag"`
 	CreatedAt  string `json:"created_at"`
 	TTLSeconds int    `json:"ttl_seconds"`
-	Body       string `json:"body"`
+	// Hops carries the remaining mesh-propagation budget — see
+	// Frame.Hops for the full contract (absent/0 = legacy peer,
+	// receiver assigns the default budget as if it originated the
+	// message; never emitted as 0). ONLY the mesh fan-out builder
+	// (gossipPushFrame → push_message) stamps it. Final-delivery
+	// surfaces — fetch_messages / fetch_inbox responses and
+	// subscriber push, built by messageFrame — deliberately OMIT it:
+	// the receiver there is the endpoint, and clients of the
+	// local/query API expect the field absent. Do not "fix" that
+	// asymmetry — it is the API contract.
+	Hops int    `json:"hops,omitempty"`
+	Body string `json:"body"`
 }
 
 type ReceiptFrame struct {

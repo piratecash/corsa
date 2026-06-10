@@ -2507,10 +2507,17 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			Flag:       frame.Item.Flag,
 			CreatedAt:  frame.Item.CreatedAt,
 			TTLSeconds: frame.Item.TTLSeconds,
+			Hops:       frame.Item.Hops,
 			Body:       frame.Item.Body,
 		})
 		if err != nil {
 			return
+		}
+		// Ingress link for hop accounting + echo suppression
+		// (transit_retention.go).
+		if session != nil {
+			msg.Via = session.address
+			msg.ViaIdentity = session.peerIdentity
 		}
 
 		// Non-DM sender verification: reject messages whose sender is not

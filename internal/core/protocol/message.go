@@ -28,6 +28,40 @@ type Envelope struct {
 	TTLSeconds int
 	Payload    []byte
 	CreatedAt  time.Time
+
+	// The fields below are NODE-LOCAL bookkeeping — Envelope is an
+	// in-memory struct (no json tags); the wire shape is MessageFrame.
+	// They exist for the transit-retention and hop-budget layers.
+
+	// Hops is the remaining propagation budget THIS node may stamp on
+	// outbound gossip for the message (already decremented at
+	// admission for transit; full default budget for locally
+	// originated messages). Hops < 1 means the message must not be
+	// re-gossiped — store/deliver only.
+	Hops int
+
+	// Via is the transport address of the peer the message arrived
+	// from (ingress link). Gossip fan-out excludes it so a message is
+	// never echoed straight back where it came from. Empty for
+	// locally originated messages.
+	Via string
+
+	// ViaIdentity is the authenticated identity (Ed25519 fingerprint)
+	// of the ingress peer, when known. Address comparison alone cannot
+	// suppress an inbound-only next-hop: the routing table keys those
+	// sessions as "inbound:<raw remote addr>" while Via carries the
+	// sanitized overlay address, and dialOrigin canonicalization does
+	// not bridge the two forms. Identity comparison does. Empty for
+	// local sends and for ingress links whose identity is not (yet)
+	// established.
+	ViaIdentity string
+
+	// StoredAt is the LOCAL admission time, used by the transit
+	// in-flight sweep (transitInFlightWindow anchors here, NOT at the
+	// sender-controlled CreatedAt — a hostile sender could otherwise
+	// post-date messages to dodge eviction). Zero only in legacy
+	// test fixtures; the sweep falls back to CreatedAt then.
+	StoredAt time.Time
 }
 
 type DeliveryReceipt struct {
