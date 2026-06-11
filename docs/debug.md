@@ -66,6 +66,20 @@ Traffic recording is started and stopped via console/RPC diagnostic commands (se
 
 Capture files are written to `<data_dir>/debug/traffic-captures/` with one `.jsonl` file per live `conn_id`.
 
+#### Recording from startup
+
+Recording all peer traffic can also be enabled from process start — no RPC round-trip needed — via environment variables (default **off**):
+
+```bash
+# Equivalent to issuing recordAllPeerTraffic right after startup:
+CORSA_RECORD_ALL_TRAFFIC=1 ./corsa-node
+
+# Optional format override (compact|pretty, default compact):
+CORSA_RECORD_ALL_TRAFFIC=1 CORSA_RECORD_TRAFFIC_FORMAT=pretty ./corsa-node
+```
+
+This installs the standing `scope=all` rule before any peer connects, so every connection (including the very first handshakes) is captured. Stop it at runtime with `stopPeerTrafficRecording scope=all`. An invalid `CORSA_RECORD_TRAFFIC_FORMAT` is logged and ignored — the node still starts, just without recording. Leave both unset in production except during an active investigation: capture files grow with traffic volume.
+
 #### Capture Architecture
 
 ```mermaid
@@ -271,6 +285,20 @@ CORSA_LOG_LEVEL=trace ./corsa
 - `stopPeerTrafficRecording scope=all` — остановка всех записей
 
 Файлы записи пишутся в `<data_dir>/debug/traffic-captures/` с отдельным `.jsonl` файлом на каждый live `conn_id`.
+
+#### Запись со старта приложения
+
+Запись всего peer-трафика можно включить прямо со старта процесса — без RPC-вызова — через переменные окружения (по умолчанию **выключено**):
+
+```bash
+# Эквивалент команды recordAllPeerTraffic сразу после старта:
+CORSA_RECORD_ALL_TRAFFIC=1 ./corsa-node
+
+# Опциональный формат (compact|pretty, по умолчанию compact):
+CORSA_RECORD_ALL_TRAFFIC=1 CORSA_RECORD_TRAFFIC_FORMAT=pretty ./corsa-node
+```
+
+Правило `scope=all` устанавливается до подключения первого пира, поэтому захватывается каждое соединение, включая самые первые handshake'и. Остановить запись в рантайме: `stopPeerTrafficRecording scope=all`. Невалидный `CORSA_RECORD_TRAFFIC_FORMAT` логируется и игнорируется — нода стартует, просто без записи. В продакшене обе переменные оставляйте незаданными, кроме активного расследования: файлы записи растут вместе с объёмом трафика.
 
 #### Архитектура записи
 

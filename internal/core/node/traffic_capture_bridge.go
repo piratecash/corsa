@@ -11,6 +11,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/capture"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+
+	"github.com/rs/zerolog/log"
 )
 
 // ---------------------------------------------------------------------------
@@ -88,12 +90,46 @@ func (s *Service) initCaptureManager() {
 		BaseDir:      baseDir,
 		Clock:        time.Now,
 		ConnResolver: &serviceCaptureResolver{svc: s},
+		// Sessions the manager tears down on its own (auto-start setup
+		// failures, runtime writer failures) must still surface as Stopped
+		// on the bus, or NodeStatusMonitor keeps showing a recording that
+		// silently died. Stop*/StopAll teardown is published separately by
+		// publishCaptureStopped; duplicates are idempotent for subscribers.
+		OnSessionEvicted: s.publishCaptureSessionEvicted,
 	})
 }
 
 // CaptureManager returns the capture manager (nil before Run).
 func (s *Service) CaptureManager() *capture.Manager {
 	return s.captureManager
+}
+
+// startConfiguredCapture starts recording all peer traffic at startup when
+// cfg.RecordAllTraffic is set (env: CORSA_RECORD_ALL_TRAFFIC, default off).
+// Called from Service.Run right after initCaptureManager. It goes through
+// StartCaptureAll — the same path as the recordAllPeerTraffic RPC command —
+// so the standing scope=all rule is installed (capturing every connection
+// established later) and ebus Started events are published identically.
+// A bad CORSA_RECORD_TRAFFIC_FORMAT is logged and ignored rather than
+// failing startup: a diagnostic feature must not take the node down.
+func (s *Service) startConfiguredCapture() {
+	if !s.cfg.RecordAllTraffic {
+		return
+	}
+	if _, err := s.StartCaptureAll(s.cfg.RecordTrafficFormat); err != nil {
+		log.Error().
+			Err(err).
+			Str("format", s.cfg.RecordTrafficFormat).
+			Msg("capture: startup traffic recording failed (CORSA_RECORD_ALL_TRAFFIC)")
+		return
+	}
+	// Log the effective format, not the raw env value: the default empty
+	// string parses to compact and would otherwise show up as format="".
+	// StartCaptureAll succeeded, so the parse cannot fail here.
+	format, _ := domain.ParseCaptureFormat(s.cfg.RecordTrafficFormat)
+	log.Info().
+		Str("format", format.String()).
+		Msg("capture: startup traffic recording enabled (CORSA_RECORD_ALL_TRAFFIC)")
 }
 
 // notifyCaptureNewConn tells the capture manager about a new connection
@@ -123,15 +159,76 @@ func (s *Service) notifyCaptureNewConn(connID domain.ConnID) {
 		RemoteIP: remoteIP,
 		PeerDir:  peerDir,
 	})
+
+	// Standing rules (recordAllPeerTraffic / recordPeerTrafficByIP, including
+	// the CORSA_RECORD_ALL_TRAFFIC startup rule) auto-start sessions inside
+	// OnNewConnection. That path bypasses StartCapture* and would otherwise
+	// never reach publishCaptureStarted, breaking the topics.go contract that
+	// every session start emits TopicCaptureSessionStarted — NodeStatusMonitor
+	// relies on it for CaptureSessions / the recording UI state.
+	// OnNewConnection registers the (pending) session synchronously, so a
+	// successful auto-start is observable here; if no rule matched there is
+	// no session and nothing is published.
+	s.publishAutoStartedCapture(connID)
+}
+
+// publishAutoStartedCapture emits TopicCaptureSessionStarted for a session
+// that a standing rule auto-started for connID inside OnNewConnection.
+// No-op when no session exists (no rule matched) or no bus is wired.
+func (s *Service) publishAutoStartedCapture(connID domain.ConnID) {
+	if s.eventBus == nil || s.captureManager == nil {
+		return
+	}
+	snap, ok := s.captureManager.SessionSnapshotByID(connID)
+	if !ok {
+		return
+	}
+	s.publishOneCaptureStarted(capture.StartEntry{
+		ConnID:   snap.ConnID,
+		RemoteIP: snap.RemoteIP,
+		PeerDir:  snap.PeerDirection,
+		Format:   snap.Format,
+		FilePath: snap.FilePath,
+	})
 }
 
 // notifyCaptureConnClosed tells the capture manager that a connection is
-// being torn down.
+// being torn down, and publishes the paired Stopped event when a capture
+// session existed for it. Auto-started sessions (standing rules) have no
+// Stop* RPC call to publish their teardown, so without this the status
+// monitor would keep showing an active recording after the peer disconnects.
+// The existed-check races an explicit Stop* only in the duplicate direction
+// (both publish Stopped), which is idempotent for subscribers.
 func (s *Service) notifyCaptureConnClosed(connID domain.ConnID) {
 	if s.captureManager == nil {
 		return
 	}
+	snap, hadSession := s.captureManager.SessionSnapshotByID(connID)
 	s.captureManager.OnConnectionClosed(connID)
+	if hadSession {
+		s.publishCaptureSessionEvicted(snap, nil)
+	}
+}
+
+// publishCaptureSessionEvicted emits TopicCaptureSessionStopped for a session
+// torn down outside the Stop* RPC paths: connection close, auto-start setup
+// failure, or runtime writer failure (wired as capture.ManagerOpts.
+// OnSessionEvicted). The snapshot's terminal diagnostics flow into the
+// payload per the CaptureSessionStopped contract; cause covers setup
+// failures where the session never recorded its own error.
+func (s *Service) publishCaptureSessionEvicted(snap capture.SessionSnapshot, cause error) {
+	if s.eventBus == nil {
+		return
+	}
+	errMsg := snap.Error
+	if errMsg == "" && cause != nil {
+		errMsg = cause.Error()
+	}
+	s.eventBus.Publish(ebus.TopicCaptureSessionStopped, ebus.CaptureSessionStopped{
+		ConnID:        snap.ConnID,
+		Error:         errMsg,
+		DroppedEvents: snap.DroppedEvents,
+	})
 }
 
 // ---------------------------------------------------------------------------

@@ -60,6 +60,21 @@ type ManagerOpts struct {
 	// Factory creates a Writer for the given path.
 	// If nil, DefaultWriterFactory is used.
 	Factory WriterFactory
+
+	// OnSessionEvicted, when non-nil, is called for every session the
+	// Manager tears down OUTSIDE an explicit Stop command: auto-start setup
+	// failures (mkdir/open/attach in OnNewConnection's deferred goroutine)
+	// and runtime writer failures (evictFailedSession). Stop*/StopAll
+	// callers learn about teardown from their own results and are NOT
+	// reported here. The snapshot carries the session's terminal
+	// diagnostics (Error from the writer, DroppedEvents); cause is the
+	// setup error for mkdir/open failures, where the session itself never
+	// recorded one, and nil otherwise. The node bridge uses this to publish
+	// TopicCaptureSessionStopped so status consumers never show a recording
+	// that silently died. May be invoked from writer/setup goroutines and
+	// must not block; duplicate notifications for a conn_id are possible
+	// (subscribers treat stopped as idempotent).
+	OnSessionEvicted func(snap SessionSnapshot, cause error)
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +99,9 @@ type Manager struct {
 	// rules is the set of standing capture instructions (by_ip, all).
 	// by_conn_id does not produce rules — it is a one-shot action.
 	rules map[string]*rule
+
+	// onEvicted mirrors ManagerOpts.OnSessionEvicted (nil when unset).
+	onEvicted func(snap SessionSnapshot, cause error)
 }
 
 // NewManager creates a capture Manager bound to the given context.
@@ -96,14 +114,25 @@ func NewManager(ctx context.Context, opts ManagerOpts) *Manager {
 		factory = DefaultWriterFactory
 	}
 	return &Manager{
-		ctx:      derived,
-		cancel:   cancel,
-		clock:    opts.Clock,
-		baseDir:  opts.BaseDir,
-		resolver: opts.ConnResolver,
-		factory:  factory,
-		sessions: make(map[domain.ConnID]*session),
-		rules:    make(map[string]*rule),
+		ctx:       derived,
+		cancel:    cancel,
+		clock:     opts.Clock,
+		baseDir:   opts.BaseDir,
+		resolver:  opts.ConnResolver,
+		factory:   factory,
+		sessions:  make(map[domain.ConnID]*session),
+		rules:     make(map[string]*rule),
+		onEvicted: opts.OnSessionEvicted,
+	}
+}
+
+// notifyEvicted invokes the OnSessionEvicted hook when configured, passing
+// the session's terminal snapshot (diagnostics survive eviction this way —
+// after removal from m.sessions they are unrecoverable). Must be called
+// without m.mu held — the hook may call back into snapshot getters.
+func (m *Manager) notifyEvicted(s *session, cause error) {
+	if m.onEvicted != nil {
+		m.onEvicted(s.snapshot(), cause)
 	}
 }
 
@@ -404,25 +433,43 @@ func (m *Manager) OnNewConnection(info ConnInfo) {
 	// Phase 2: defer heavy I/O (mkdir + file create) to a goroutine.
 	// Once the writer is ready, attachWriter transitions to active and
 	// starts the writer goroutine which drains any buffered events.
+	// Eviction is published only when removeSessionIfOwner reports that WE
+	// removed OUR session. If it returns false the conn_id entry was already
+	// replaced (stop→start re-created the session while this goroutine was
+	// stuck in mkdir/open) or already removed (stop/conn-close, which report
+	// teardown themselves) — publishing Stopped then would mark the LIVE
+	// replacement session inactive, since status consumers key by ConnID.
 	go func() {
 		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 			log.Error().Err(err).Str("dir", sessionDir).Msg("capture: mkdir failed for auto-start")
-			m.removeSessionIfOwner(info.ConnID, s)
+			removed := m.removeSessionIfOwner(info.ConnID, s)
 			s.initiateStop()
+			if removed {
+				m.notifyEvicted(s, err)
+			}
 			return
 		}
 
 		w, err := m.factory(filePath)
 		if err != nil {
 			log.Error().Err(err).Str("path", filePath).Msg("capture: open writer failed for auto-start")
-			m.removeSessionIfOwner(info.ConnID, s)
+			removed := m.removeSessionIfOwner(info.ConnID, s)
 			s.initiateStop()
+			if removed {
+				m.notifyEvicted(s, err)
+			}
 			return
 		}
 
 		if !s.attachWriter(w, m.ctx.Done()) {
-			// Session was stopped before writer was ready (connection closed).
-			m.removeSessionIfOwner(info.ConnID, s)
+			// Session was stopped before writer was ready (connection closed
+			// or explicit stop). Those paths report teardown themselves, but
+			// notify when we still owned the map entry — stopped is
+			// idempotent for subscribers and this closes any window where
+			// the started event already went out.
+			if m.removeSessionIfOwner(info.ConnID, s) {
+				m.notifyEvicted(s, nil)
+			}
 			return
 		}
 
@@ -530,18 +577,24 @@ func (m *Manager) HasActiveCaptures() bool {
 // removeSessionIfOwner atomically removes connID from m.sessions only if the
 // current map entry still points to the given session. This prevents a stale
 // async cleanup goroutine from wiping out a replacement session that was
-// installed after the original was stopped.
-func (m *Manager) removeSessionIfOwner(connID domain.ConnID, owner *session) {
+// installed after the original was stopped. Returns true when the entry was
+// removed by THIS call — callers must publish eviction only in that case, or
+// a stale Stopped event would mark the replacement session inactive (status
+// consumers key sessions by ConnID).
+func (m *Manager) removeSessionIfOwner(connID domain.ConnID, owner *session) bool {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.sessions[connID] == owner {
 		delete(m.sessions, connID)
+		return true
 	}
-	m.mu.Unlock()
+	return false
 }
 
 // evictFailedSession removes a session that has entered sessionFailed.
 // Called by the session's onFailed callback from the writer goroutine.
 func (m *Manager) evictFailedSession(connID domain.ConnID) {
+	evicted := false
 	m.mu.Lock()
 	s, ok := m.sessions[connID]
 	if ok {
@@ -550,9 +603,17 @@ func (m *Manager) evictFailedSession(connID domain.ConnID) {
 		s.mu.Unlock()
 		if failed {
 			delete(m.sessions, connID)
+			evicted = true
 		}
 	}
 	m.mu.Unlock()
+
+	if evicted {
+		// The snapshot carries the writer's lastError and DroppedEvents —
+		// taken via notifyEvicted after removal, while the session struct
+		// is still alive. No separate cause: the session recorded its own.
+		m.notifyEvicted(s, nil)
+	}
 }
 
 // -----------------------------------------------------------------------

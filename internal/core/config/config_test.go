@@ -97,6 +97,44 @@ func TestEnableMeshRoutingV3FromEnv(t *testing.T) {
 	}
 }
 
+// TestRecordAllTrafficFromEnv pins the startup traffic recording knob:
+// default OFF (unset/empty/unrecognised), only explicit truthy values
+// enable it. Mirrors the opt-in contract documented on Node.RecordAllTraffic.
+func TestRecordAllTrafficFromEnv(t *testing.T) {
+	// Default-off: unset, empty, and unrecognised all stay disabled.
+	for _, v := range []string{"", "  ", "0", "false", "no", "off", "wat"} {
+		t.Setenv("CORSA_RECORD_ALL_TRAFFIC", v)
+		if recordAllTrafficFromEnv() {
+			t.Fatalf("CORSA_RECORD_ALL_TRAFFIC=%q: want default false", v)
+		}
+	}
+
+	// Explicit opt-in.
+	for _, v := range []string{"1", "true", "yes", "on", "ON", " True "} {
+		t.Setenv("CORSA_RECORD_ALL_TRAFFIC", v)
+		if !recordAllTrafficFromEnv() {
+			t.Fatalf("CORSA_RECORD_ALL_TRAFFIC=%q: want true (opt-in)", v)
+		}
+	}
+}
+
+// TestRecordTrafficFormatFromEnv pins that the format knob flows through
+// Default() verbatim (validation happens later in Service.Run via
+// domain.ParseCaptureFormat, same as the RPC command).
+func TestRecordTrafficFormatFromEnv(t *testing.T) {
+	t.Setenv("CORSA_RECORD_TRAFFIC_FORMAT", "pretty")
+	cfg := Default()
+	if cfg.Node.RecordTrafficFormat != "pretty" {
+		t.Fatalf("RecordTrafficFormat = %q, want %q", cfg.Node.RecordTrafficFormat, "pretty")
+	}
+
+	t.Setenv("CORSA_RECORD_TRAFFIC_FORMAT", "")
+	cfg = Default()
+	if cfg.Node.RecordTrafficFormat != "" {
+		t.Fatalf("RecordTrafficFormat = %q, want empty default", cfg.Node.RecordTrafficFormat)
+	}
+}
+
 // TestPendingRingSizeFromEnv pins the per-peer pending ring size knob:
 // unset/empty/non-numeric/<=0 → 0 ("use built-in default"); a positive
 // integer is taken as-is.

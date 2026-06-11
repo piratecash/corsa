@@ -294,20 +294,20 @@ type Service struct {
 	// the invariant is pinned by TestConnRegistry_InvalidationIsAtomic and
 	// TestConnRegistry_RegisterSyncsSecondaryIndex in
 	// conn_registry_lifecycle_test.go.
-	connIDByNetConn                map[net.Conn]netcore.ConnID
-	connIDCounter                  uint64 // monotonic counter for connection IDs (protected by mu)
-	bans                           map[string]banEntry
-	listener                       net.Listener
-	lastSync                       time.Time
-	peersStatePath                 string
-	lastPeerSave                   time.Time
-	lastPeerEvict                  time.Time
-	dialOrigin                     map[domain.PeerAddress]domain.PeerAddress    // dial address → primary peer address (for fallback port tracking)
-	persistedMeta                  map[domain.PeerAddress]*peerEntry            // stable metadata from peers.json, keyed by address
-	observedAddrs                  map[domain.PeerIdentity]string               // peer identity (fingerprint) → observed IP they reported for us
-	reachableGroups                map[domain.NetGroup]struct{}                 // network groups this node can reach (computed at startup)
-	messageStore                   MessageStore                                 // optional: persistence handler registered by desktop layer
-	router                         Router                                       // routing strategy for outbound message delivery
+	connIDByNetConn map[net.Conn]netcore.ConnID
+	connIDCounter   uint64 // monotonic counter for connection IDs (protected by mu)
+	bans            map[string]banEntry
+	listener        net.Listener
+	lastSync        time.Time
+	peersStatePath  string
+	lastPeerSave    time.Time
+	lastPeerEvict   time.Time
+	dialOrigin      map[domain.PeerAddress]domain.PeerAddress // dial address → primary peer address (for fallback port tracking)
+	persistedMeta   map[domain.PeerAddress]*peerEntry         // stable metadata from peers.json, keyed by address
+	observedAddrs   map[domain.PeerIdentity]string            // peer identity (fingerprint) → observed IP they reported for us
+	reachableGroups map[domain.NetGroup]struct{}              // network groups this node can reach (computed at startup)
+	messageStore    MessageStore                              // optional: persistence handler registered by desktop layer
+	router          Router                                    // routing strategy for outbound message delivery
 
 	// gossipJobs feeds the bounded gossip-dispatch worker pool that
 	// replaces the historical goroutine-per-target gossip fan-out (see
@@ -343,7 +343,7 @@ type Service struct {
 	// gossipNoticesDropped counts push_notice fan-out jobs shed because
 	// the dedicated notice lane overflowed — only plausible under a
 	// notice flood. Logged at Warn (notices have no retry path).
-	gossipNoticesDropped atomic.Uint64
+	gossipNoticesDropped           atomic.Uint64
 	relayStates                    *relayStateStore                             // hop-by-hop relay forwarding state (Iteration 1)
 	relayLimiter                   *relayRateLimiter                            // per-peer token bucket for relay fan-out
 	announceLimiter                *announceRateLimiter                         // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
@@ -1683,6 +1683,8 @@ func (s *Service) Run(ctx context.Context) error {
 	// Traffic capture manager — diagnostic feature (plan §4.5).
 	s.initCaptureManager()
 	defer s.captureManager.Close()
+	// Startup traffic recording (env: CORSA_RECORD_ALL_TRAFFIC, default off).
+	s.startConfiguredCapture()
 
 	// Relay-state TTL-evict hook. Historically this persisted the updated
 	// state to disk; queue-state disk persistence has been removed, so

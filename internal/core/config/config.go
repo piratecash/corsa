@@ -222,6 +222,22 @@ type Node struct {
 	// surface exposes process internals and must never face the network).
 	// Leave unset in production except during an active investigation.
 	PprofAddr string
+
+	// RecordAllTraffic starts recording all peer traffic at node startup
+	// (env: CORSA_RECORD_ALL_TRAFFIC, default FALSE = off). Equivalent to
+	// issuing the recordAllPeerTraffic RPC command right after the capture
+	// manager is initialised: it installs the standing scope=all rule, so
+	// every connection established afterwards is captured automatically.
+	// Diagnostic feature — capture files grow with traffic volume, so
+	// leave it off in production except during an active investigation.
+	RecordAllTraffic bool
+
+	// RecordTrafficFormat selects the capture file format used by the
+	// startup recording rule (env: CORSA_RECORD_TRAFFIC_FORMAT,
+	// "compact"|"pretty", default "compact"). Only consulted when
+	// RecordAllTraffic is true. An unrecognised value is logged and
+	// ignored at startup (Service.Run) — the node starts, recording off.
+	RecordTrafficFormat string
 }
 
 type RPC struct {
@@ -340,6 +356,8 @@ func Default() Config {
 			OverloadGoroutineThreshold: overloadGoroutineThreshold,
 			EnableMeshRoutingV3:        enableMeshRoutingV3,
 			PprofAddr:                  envOrDefault("CORSA_PPROF_ADDR", ""),
+			RecordAllTraffic:           recordAllTrafficFromEnv(),
+			RecordTrafficFormat:        envOrDefault("CORSA_RECORD_TRAFFIC_FORMAT", ""),
 		},
 		RPC: RPC{
 			Host:     envOrDefault("CORSA_RPC_HOST", "127.0.0.1"),
@@ -788,6 +806,20 @@ func enableMeshRoutingV3FromEnv() bool {
 	default:
 		// Unset, empty, truthy, or unrecognised → enabled (the new default).
 		return true
+	}
+}
+
+// recordAllTrafficFromEnv reads CORSA_RECORD_ALL_TRAFFIC. Default FALSE:
+// startup traffic recording is opt-in (it is a diagnostic feature whose
+// capture files grow with traffic volume). Only explicit truthy values
+// enable it; unset, empty, or unrecognised → disabled.
+func recordAllTrafficFromEnv() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_RECORD_ALL_TRAFFIC")))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
