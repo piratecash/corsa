@@ -148,7 +148,7 @@ type ConsoleWindow struct {
 	trafficSamplesOut []float32 // per-second sent bytes/s (newest last)
 	trafficTotalSent  int64     // cumulative sent (for totals display)
 	trafficTotalRecv  int64     // cumulative received (for totals display)
-	trafficLoaded     bool      // true after initial history load
+	trafficLastTS     string    // RFC3339 timestamp of the newest applied collector sample (incremental-fetch cursor; "" = none yet)
 	trafficTicker     *time.Ticker
 	mu                sync.RWMutex
 	consoleEntries    []consoleEntry
@@ -296,7 +296,7 @@ func (c *ConsoleWindow) layout(gtx layout.Context) layout.Dimensions {
 	return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(c.layoutTabs),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 			layout.Flexed(1, c.layoutActiveTab),
 		)
 	})
@@ -524,7 +524,8 @@ func (c *ConsoleWindow) layoutInfoTab(gtx layout.Context, status service.NodeSta
 func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
-		return layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// 8dp panel padding matching the main window cards (window.go card).
+		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.donate_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
@@ -565,7 +566,8 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeSt
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
-		return layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// 8dp panel padding matching the main window cards (window.go card).
+		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.peers_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
@@ -1511,7 +1513,8 @@ func (c *ConsoleWindow) card(gtx layout.Context, titleText string, rows []string
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 
-		inset := layout.UniformInset(unit.Dp(18))
+		// 8dp panel padding matching the main window cards (window.go card).
+		inset := layout.UniformInset(unit.Dp(8))
 		return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			children := make([]layout.FlexChild, 0, len(rows)+len(extras)+2)
 			if strings.TrimSpace(titleText) != "" {
@@ -2451,6 +2454,47 @@ var (
 	trafficOutSolid   = color.NRGBA{R: 86, G: 156, B: 231, A: 255} // blue solid (legend/badges)
 )
 
+// trafficSamplePoint mirrors protocol.TrafficSampleFrame for the fields the
+// traffic tab consumes. Timestamps are RFC3339 UTC strings produced by a
+// single writer (metrics.TrafficHistory.Record) in a fixed-width "...Z"
+// form, so lexicographic comparison is chronological.
+type trafficSamplePoint struct {
+	Timestamp     string `json:"timestamp"`
+	BytesSentPS   int64  `json:"bytes_sent_ps"`
+	BytesRecvPS   int64  `json:"bytes_recv_ps"`
+	TotalSent     int64  `json:"total_sent"`
+	TotalReceived int64  `json:"total_received"`
+}
+
+// fetchTrafficSamples executes fetchTrafficHistory and decodes the samples.
+// When since is non-empty it is passed as the incremental cursor so the
+// collector returns only samples strictly newer than that timestamp.
+// ok=false means RPC failure, unmarshal failure, or missing frame — an empty
+// sample slice with ok=true is a valid response (collector just restarted or
+// nothing newer than the cursor).
+func (c *ConsoleWindow) fetchTrafficSamples(ctx context.Context, since string) (samples []trafficSamplePoint, ok bool) {
+	if c.parent.cmdTable == nil {
+		return nil, false
+	}
+	req := rpc.CommandRequest{Name: "fetchTrafficHistory", Ctx: ctx}
+	if since != "" {
+		req.Args = map[string]interface{}{"since": since}
+	}
+	resp := c.parent.cmdTable.Execute(req)
+	if resp.Error != nil {
+		return nil, false
+	}
+	var frame struct {
+		TrafficHistory *struct {
+			Samples []trafficSamplePoint `json:"samples"`
+		} `json:"traffic_history"`
+	}
+	if err := json.Unmarshal(resp.Data, &frame); err != nil || frame.TrafficHistory == nil {
+		return nil, false
+	}
+	return frame.TrafficHistory.Samples, true
+}
+
 // loadTrafficHistory fetches the full history from the metrics collector
 // and populates the local sample slices. Called when the tab opens and on
 // every ticker restart so reopening shows accurate data.
@@ -2461,31 +2505,11 @@ var (
 // collector, context cancellation). On failure the cached graph state is
 // cleared to prevent rendering stale data from a previous session.
 func (c *ConsoleWindow) loadTrafficHistory(ctx context.Context) bool {
-	if c.parent.cmdTable == nil {
+	samples, ok := c.fetchTrafficSamples(ctx, "")
+	if !ok {
 		c.resetTrafficState()
 		return false
 	}
-	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetchTrafficHistory", Ctx: ctx})
-	if resp.Error != nil {
-		c.resetTrafficState()
-		return false
-	}
-	var frame struct {
-		TrafficHistory *struct {
-			Samples []struct {
-				BytesSentPS   int64 `json:"bytes_sent_ps"`
-				BytesRecvPS   int64 `json:"bytes_recv_ps"`
-				TotalSent     int64 `json:"total_sent"`
-				TotalReceived int64 `json:"total_received"`
-			} `json:"samples"`
-		} `json:"traffic_history"`
-	}
-	if err := json.Unmarshal(resp.Data, &frame); err != nil || frame.TrafficHistory == nil {
-		c.resetTrafficState()
-		return false
-	}
-
-	samples := frame.TrafficHistory.Samples
 
 	c.mu.Lock()
 	c.trafficSamplesIn = make([]float32, 0, len(samples))
@@ -2498,14 +2522,14 @@ func (c *ConsoleWindow) loadTrafficHistory(ctx context.Context) bool {
 		last := samples[len(samples)-1]
 		c.trafficTotalSent = last.TotalSent
 		c.trafficTotalRecv = last.TotalReceived
-		c.trafficLoaded = true
+		c.trafficLastTS = last.Timestamp
 	} else {
-		// Empty history (e.g. collector just restarted). Do NOT set trafficLoaded
-		// so the next sampleTraffic call records the current counters as baseline
-		// instead of computing a bogus delta against stale values.
+		// Empty history (e.g. collector just restarted). An empty cursor
+		// means the next appendNewTrafficSamples tick picks up everything
+		// the collector has recorded since.
 		c.trafficTotalSent = 0
 		c.trafficTotalRecv = 0
-		c.trafficLoaded = false
+		c.trafficLastTS = ""
 	}
 	c.mu.Unlock()
 	return true
@@ -2519,7 +2543,7 @@ func (c *ConsoleWindow) resetTrafficState() {
 	c.trafficSamplesOut = nil
 	c.trafficTotalSent = 0
 	c.trafficTotalRecv = 0
-	c.trafficLoaded = false
+	c.trafficLastTS = ""
 	c.mu.Unlock()
 }
 
@@ -2531,8 +2555,8 @@ func (c *ConsoleWindow) resetTrafficState() {
 // background goroutine to avoid blocking the Gio event loop.
 //
 // The ticker is created only after the initial history load finishes so
-// that sampleTraffic() ticks cannot race with and be overwritten by a
-// slow loadTrafficHistory() response. A stopped sentinel ticker is
+// that appendNewTrafficSamples() ticks cannot race with and be overwritten by
+// a slow loadTrafficHistory() response. A stopped sentinel ticker is
 // stored during the load phase to prevent concurrent clicks from
 // spawning a second goroutine. The history load has a 30-second timeout;
 // on timeout or failure the sentinel is cleared so the user can retry.
@@ -2575,7 +2599,7 @@ func (c *ConsoleWindow) startTrafficTicker() {
 		// If the RPC failed or timed out, clear the sentinel so the
 		// user can retry by clicking the Traffic tab again.
 		// Note: loadOK is true even when the collector returned an empty
-		// history (trafficLoaded stays false in that case) — empty history
+		// history (the cursor stays empty in that case) — empty history
 		// is a valid response after a collector restart, not a failure.
 		if !loadOK {
 			c.mu.Lock()
@@ -2584,17 +2608,10 @@ func (c *ConsoleWindow) startTrafficTicker() {
 			return
 		}
 
-		// Seed baseline synchronously when history is empty so the first
-		// ticker-driven sample produces a real delta instead of being
-		// consumed just to record the baseline. See docstring on
-		// seedTrafficBaselineIfNeeded for full rationale.
-		c.seedTrafficBaselineIfNeeded()
-
-		// History is loaded — now start the real 1-second ticker.
-		// No sampleTraffic() call could have run before this point other
-		// than the optional baseline seed above, which is idempotent: it
-		// records current counters and flips trafficLoaded to true so the
-		// next tick computes a real delta.
+		// History is loaded — now start the real 1-second ticker. Each
+		// tick appends only collector samples newer than the cursor set
+		// by the load above, so no tick can race the load into producing
+		// duplicate or bogus points.
 		ticker := time.NewTicker(1 * time.Second)
 		c.mu.Lock()
 		c.trafficTicker = ticker
@@ -2613,47 +2630,58 @@ func (c *ConsoleWindow) startTrafficTicker() {
 					c.mu.Unlock()
 					return
 				}
-				c.sampleTraffic()
+				c.appendNewTrafficSamples()
 				c.invalidateWindow()
 			}
 		}
 	}()
 }
 
-func (c *ConsoleWindow) sampleTraffic() {
-	if c.parent.cmdTable == nil {
-		return
-	}
-	resp := c.parent.cmdTable.Execute(rpc.CommandRequest{Name: "fetchNetworkStats"})
-	if resp.Error != nil {
-		return
-	}
-	var frame struct {
-		NetworkStats *struct {
-			TotalBytesSent     int64 `json:"total_bytes_sent"`
-			TotalBytesReceived int64 `json:"total_bytes_received"`
-		} `json:"network_stats"`
-	}
-	if err := json.Unmarshal(resp.Data, &frame); err != nil || frame.NetworkStats == nil {
-		return
-	}
+// appendNewTrafficSamples pulls the tail of the collector's history (samples
+// strictly newer than trafficLastTS) and appends it to the local graph state.
+// Called once a second by the traffic ticker.
+//
+// The collector is the single source of truth for per-second deltas. The
+// previous implementation computed deltas client-side from fetchNetworkStats,
+// whose reply is a CACHED snapshot rebuilt at most every 500ms and only while
+// a reader was active in the last 5s (see networkStatsRebuildIdleAfter). Any
+// freeze→jump of that snapshot (gate re-arming after the tab was inactive, or
+// the rebuild stalling on peerMu under a writer storm) packed several seconds
+// of traffic into one "per-second" delta — a phantom spike that vanished on
+// tab reopen because the refetched collector history never contained it.
+// Pulling the collector's own samples makes the live view and the reloaded
+// history identical by construction.
+//
+// If a tick is late (UI stall, system sleep), the collector kept sampling, so
+// the next pull simply appends several correct 1-second bars instead of one
+// inflated one.
+func (c *ConsoleWindow) appendNewTrafficSamples() {
+	c.mu.RLock()
+	since := c.trafficLastTS
+	c.mu.RUnlock()
 
-	sent := frame.NetworkStats.TotalBytesSent
-	recv := frame.NetworkStats.TotalBytesReceived
+	samples, ok := c.fetchTrafficSamples(context.Background(), since)
+	if !ok || len(samples) == 0 {
+		return
+	}
 
 	c.mu.Lock()
-	if c.trafficLoaded {
-		deltaSent := sent - c.trafficTotalSent
-		deltaRecv := recv - c.trafficTotalRecv
-		if deltaSent < 0 {
-			deltaSent = 0
+	applied := false
+	for _, s := range samples {
+		// Cursor guard: skip anything not strictly newer than the last
+		// applied sample. Defense-in-depth for a server that ignores the
+		// "since" arg; also makes duplicate delivery harmless.
+		if s.Timestamp <= c.trafficLastTS {
+			continue
 		}
-		if deltaRecv < 0 {
-			deltaRecv = 0
-		}
-		c.trafficSamplesOut = append(c.trafficSamplesOut, float32(deltaSent))
-		c.trafficSamplesIn = append(c.trafficSamplesIn, float32(deltaRecv))
-
+		c.trafficSamplesIn = append(c.trafficSamplesIn, float32(s.BytesRecvPS))
+		c.trafficSamplesOut = append(c.trafficSamplesOut, float32(s.BytesSentPS))
+		c.trafficLastTS = s.Timestamp
+		c.trafficTotalSent = s.TotalSent
+		c.trafficTotalRecv = s.TotalReceived
+		applied = true
+	}
+	if applied {
 		// Trim to trafficMaxSamples to prevent unbounded growth.
 		if len(c.trafficSamplesIn) > trafficMaxSamples {
 			c.trafficSamplesIn = c.trafficSamplesIn[len(c.trafficSamplesIn)-trafficMaxSamples:]
@@ -2662,43 +2690,14 @@ func (c *ConsoleWindow) sampleTraffic() {
 			c.trafficSamplesOut = c.trafficSamplesOut[len(c.trafficSamplesOut)-trafficMaxSamples:]
 		}
 	}
-	c.trafficTotalSent = sent
-	c.trafficTotalRecv = recv
-	c.trafficLoaded = true
 	c.mu.Unlock()
-}
-
-// seedTrafficBaselineIfNeeded captures the current cumulative counters as the
-// delta baseline when no history was returned by the collector.
-//
-// loadTrafficHistory leaves trafficLoaded==false when the collector reports an
-// empty samples slice (e.g. right after a restart) so that the first
-// sampleTraffic call does not compute a bogus delta against stale zero totals.
-// Without this helper the first 1s ticker tick is consumed just to seed that
-// baseline (sampleTraffic guards delta computation behind trafficLoaded), so
-// the user sees totals populate instantly from fetchNetworkStats but graph
-// bars remain empty for one extra tick. Seeding here shifts the baseline-only
-// sample off the visible timeline, letting the first ticker-driven tick at
-// t+1s produce a real delta.
-//
-// Called from the history-load goroutine in startTrafficTicker before the
-// real 1s ticker is created; safe to call when trafficLoaded is already true
-// (no-op in that case).
-func (c *ConsoleWindow) seedTrafficBaselineIfNeeded() {
-	c.mu.RLock()
-	needBaseline := !c.trafficLoaded
-	c.mu.RUnlock()
-	if !needBaseline {
-		return
-	}
-	c.sampleTraffic()
-	c.invalidateWindow()
 }
 
 func (c *ConsoleWindow) layoutTrafficTab(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
-		return layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// 8dp panel padding matching the main window cards (window.go card).
+		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				// Title
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {

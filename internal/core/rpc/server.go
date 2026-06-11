@@ -239,8 +239,10 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	rpc.Post("/network/stats", s.legacyHandler("fetchNetworkStats"))
 	rpc.Post("/network/add_peer", s.legacyArgHandler("addPeer"))
 
-	// Metrics
-	rpc.Post("/metrics/traffic_history", s.legacyHandler("fetchTrafficHistory"))
+	// Metrics — arg handler so the optional incremental cursor
+	// ({"since":"<RFC3339>"}) reaches the command; an empty body still
+	// returns the full history.
+	rpc.Post("/metrics/traffic_history", s.legacyArgHandler("fetchTrafficHistory"))
 
 	// Identity
 	rpc.Post("/identity/identities", s.legacyHandler("fetchIdentities"))

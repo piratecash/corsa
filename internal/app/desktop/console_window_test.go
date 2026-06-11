@@ -517,47 +517,47 @@ func TestActivePeerHealth_EmptyInput(t *testing.T) {
 	}
 }
 
-// trafficStatsTable returns a CommandTable wired with mocks suitable for
-// exercising loadTrafficHistory + sampleTraffic flows. sentTotal and recvTotal
-// control the cumulative byte counters reported by fetchNetworkStats; emptyHistory
-// controls whether fetchTrafficHistory returns an empty-but-well-formed frame
-// (mimicking a collector restart) or a single-sample frame.
-func trafficStatsTable(sentTotal, recvTotal int64, emptyHistory bool) *rpc.CommandTable {
-	tt := rpc.NewCommandTable()
+// trafficSample builds one fetchTrafficHistory sample for the mock table.
+func trafficSample(ts string, sentPS, recvPS, totalSent, totalRecv int64) map[string]any {
+	return map[string]any{
+		"timestamp":      ts,
+		"bytes_sent_ps":  sentPS,
+		"bytes_recv_ps":  recvPS,
+		"total_sent":     totalSent,
+		"total_received": totalRecv,
+	}
+}
 
-	tt.Register(
-		rpc.CommandInfo{Name: "fetchNetworkStats", Description: "Network stats", Category: "metrics"},
-		func(req rpc.CommandRequest) rpc.CommandResponse {
-			data, _ := json.Marshal(map[string]any{
-				"network_stats": map[string]any{
-					"total_bytes_sent":     sentTotal,
-					"total_bytes_received": recvTotal,
-				},
-			})
-			return rpc.CommandResponse{Data: data}
-		},
-	)
+// trafficHistoryTable returns a CommandTable whose fetchTrafficHistory serves
+// the given chronological samples. When honorSince is true the handler
+// filters to samples strictly newer than the "since" arg, mirroring the
+// production handler in RegisterMetricsCommands; when false it returns the
+// full slice regardless, exercising the client-side cursor guard. If gotSince
+// is non-nil, the last received "since" arg is stored there.
+func trafficHistoryTable(samples []map[string]any, honorSince bool, gotSince *string) *rpc.CommandTable {
+	tt := rpc.NewCommandTable()
 
 	tt.Register(
 		rpc.CommandInfo{Name: "fetchTrafficHistory", Description: "Traffic history", Category: "metrics"},
 		func(req rpc.CommandRequest) rpc.CommandResponse {
-			if emptyHistory {
-				data, _ := json.Marshal(map[string]any{
-					"traffic_history": map[string]any{"samples": []any{}},
-				})
-				return rpc.CommandResponse{Data: data}
+			since, _ := req.Args["since"].(string)
+			if gotSince != nil {
+				*gotSince = since
+			}
+			out := samples
+			if honorSince && since != "" {
+				out = nil
+				for _, s := range samples {
+					if ts, _ := s["timestamp"].(string); ts > since {
+						out = append(out, s)
+					}
+				}
+			}
+			if out == nil {
+				out = []map[string]any{}
 			}
 			data, _ := json.Marshal(map[string]any{
-				"traffic_history": map[string]any{
-					"samples": []map[string]any{
-						{
-							"bytes_sent_ps":  int64(10),
-							"bytes_recv_ps":  int64(20),
-							"total_sent":     sentTotal,
-							"total_received": recvTotal,
-						},
-					},
-				},
+				"traffic_history": map[string]any{"samples": out},
 			})
 			return rpc.CommandResponse{Data: data}
 		},
@@ -566,8 +566,8 @@ func trafficStatsTable(sentTotal, recvTotal int64, emptyHistory bool) *rpc.Comma
 	return tt
 }
 
-func TestLoadTrafficHistoryEmptyLeavesUnloaded(t *testing.T) {
-	cw := newTestConsoleWindow(trafficStatsTable(5000, 3000, true))
+func TestLoadTrafficHistoryEmptyLeavesEmptyCursor(t *testing.T) {
+	cw := newTestConsoleWindow(trafficHistoryTable(nil, true, nil))
 
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false for valid empty frame")
@@ -576,8 +576,8 @@ func TestLoadTrafficHistoryEmptyLeavesUnloaded(t *testing.T) {
 	cw.mu.RLock()
 	defer cw.mu.RUnlock()
 
-	if cw.trafficLoaded {
-		t.Error("trafficLoaded should stay false after empty history — baseline not captured yet")
+	if cw.trafficLastTS != "" {
+		t.Errorf("cursor should stay empty after empty history, got %q", cw.trafficLastTS)
 	}
 	if cw.trafficTotalSent != 0 || cw.trafficTotalRecv != 0 {
 		t.Errorf("totals should be zero for empty history, got sent=%d recv=%d",
@@ -589,8 +589,11 @@ func TestLoadTrafficHistoryEmptyLeavesUnloaded(t *testing.T) {
 	}
 }
 
-func TestLoadTrafficHistoryNonEmptyPopulatesAndMarksLoaded(t *testing.T) {
-	cw := newTestConsoleWindow(trafficStatsTable(5000, 3000, false))
+func TestLoadTrafficHistoryNonEmptyPopulatesStateAndCursor(t *testing.T) {
+	cw := newTestConsoleWindow(trafficHistoryTable([]map[string]any{
+		trafficSample("2026-06-11T10:00:00Z", 10, 20, 4000, 2500),
+		trafficSample("2026-06-11T10:00:01Z", 30, 40, 5000, 3000),
+	}, true, nil))
 
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
@@ -599,174 +602,170 @@ func TestLoadTrafficHistoryNonEmptyPopulatesAndMarksLoaded(t *testing.T) {
 	cw.mu.RLock()
 	defer cw.mu.RUnlock()
 
-	if !cw.trafficLoaded {
-		t.Error("trafficLoaded should be true after non-empty history")
+	if cw.trafficLastTS != "2026-06-11T10:00:01Z" {
+		t.Errorf("cursor should be last sample timestamp, got %q", cw.trafficLastTS)
 	}
 	if cw.trafficTotalSent != 5000 || cw.trafficTotalRecv != 3000 {
 		t.Errorf("totals mismatch: sent=%d recv=%d", cw.trafficTotalSent, cw.trafficTotalRecv)
 	}
-	if len(cw.trafficSamplesIn) != 1 || len(cw.trafficSamplesOut) != 1 {
-		t.Fatalf("expected 1 sample each, got in=%d out=%d",
+	if len(cw.trafficSamplesIn) != 2 || len(cw.trafficSamplesOut) != 2 {
+		t.Fatalf("expected 2 samples each, got in=%d out=%d",
 			len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
 	}
-	if cw.trafficSamplesIn[0] != 20 || cw.trafficSamplesOut[0] != 10 {
-		t.Errorf("sample mismatch: in=%v out=%v", cw.trafficSamplesIn[0], cw.trafficSamplesOut[0])
+	if cw.trafficSamplesIn[1] != 40 || cw.trafficSamplesOut[1] != 30 {
+		t.Errorf("sample mismatch: in=%v out=%v", cw.trafficSamplesIn[1], cw.trafficSamplesOut[1])
 	}
 }
 
-// TestSampleTrafficSeedsBaselineWhenNotLoaded verifies that the first
-// sampleTraffic call after an empty history load records the current counters
-// as baseline and flips trafficLoaded to true, without appending any sample.
-// This is the precondition for the baseline-seed fix in startTrafficTicker:
-// the seeded baseline lets the first ticker-driven tick produce a real delta
-// rather than being wasted on baseline capture.
-func TestSampleTrafficSeedsBaselineWhenNotLoaded(t *testing.T) {
-	cw := newTestConsoleWindow(trafficStatsTable(7777, 4444, true))
-
-	// Simulate the state after a successful empty-history load.
+// TestAppendNewTrafficSamplesAppendsTail verifies the ticker path: after the
+// initial history load, a tick must request only samples newer than the
+// cursor and append exactly those, advancing the cursor and totals. This is
+// the regression test for the phantom-spike bug: live points now come from
+// the collector's own per-second samples, never from client-side deltas
+// against the cached network_stats snapshot.
+func TestAppendNewTrafficSamplesAppendsTail(t *testing.T) {
+	history := []map[string]any{
+		trafficSample("2026-06-11T10:00:00Z", 10, 20, 1000, 500),
+		trafficSample("2026-06-11T10:00:01Z", 15, 25, 1015, 525),
+	}
+	var gotSince string
+	cw := newTestConsoleWindow(trafficHistoryTable(history, true, &gotSince))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
 	}
 
-	cw.sampleTraffic()
+	// Collector recorded two more samples since the load.
+	history = append(history,
+		trafficSample("2026-06-11T10:00:02Z", 100, 200, 1115, 725),
+		trafficSample("2026-06-11T10:00:03Z", 5, 8, 1120, 733),
+	)
+	cw.parent.cmdTable = trafficHistoryTable(history, true, &gotSince)
+
+	cw.appendNewTrafficSamples()
+
+	if gotSince != "2026-06-11T10:00:01Z" {
+		t.Errorf("expected since=cursor of last loaded sample, got %q", gotSince)
+	}
 
 	cw.mu.RLock()
 	defer cw.mu.RUnlock()
 
-	if !cw.trafficLoaded {
-		t.Error("trafficLoaded should flip to true after baseline seed")
-	}
-	if cw.trafficTotalSent != 7777 || cw.trafficTotalRecv != 4444 {
-		t.Errorf("baseline totals mismatch: sent=%d recv=%d",
-			cw.trafficTotalSent, cw.trafficTotalRecv)
-	}
-	if len(cw.trafficSamplesIn) != 0 || len(cw.trafficSamplesOut) != 0 {
-		t.Errorf("baseline seed must NOT append a sample, got in=%d out=%d",
+	if len(cw.trafficSamplesIn) != 4 || len(cw.trafficSamplesOut) != 4 {
+		t.Fatalf("expected 4 samples each, got in=%d out=%d",
 			len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
 	}
-}
-
-// TestSampleTrafficAppendsDeltaAfterBaseline verifies that once the baseline
-// is captured, the next sampleTraffic call appends a real delta sample. This
-// exercises the path the first ticker tick takes after the baseline seed.
-func TestSampleTrafficAppendsDeltaAfterBaseline(t *testing.T) {
-	// First call seeds baseline at 1000/500.
-	tableBaseline := trafficStatsTable(1000, 500, true)
-	cw := newTestConsoleWindow(tableBaseline)
-	if ok := cw.loadTrafficHistory(context.Background()); !ok {
-		t.Fatalf("loadTrafficHistory returned false")
+	if cw.trafficSamplesIn[2] != 200 || cw.trafficSamplesOut[2] != 100 {
+		t.Errorf("appended sample mismatch: in=%v out=%v",
+			cw.trafficSamplesIn[2], cw.trafficSamplesOut[2])
 	}
-	cw.sampleTraffic()
-
-	// Swap in a table with advanced counters to simulate a later tick.
-	cw.parent.cmdTable = trafficStatsTable(1100, 520, true)
-	cw.sampleTraffic()
-
-	cw.mu.RLock()
-	defer cw.mu.RUnlock()
-
-	if cw.trafficTotalSent != 1100 || cw.trafficTotalRecv != 520 {
-		t.Errorf("cumulative totals not updated: sent=%d recv=%d",
-			cw.trafficTotalSent, cw.trafficTotalRecv)
+	if cw.trafficLastTS != "2026-06-11T10:00:03Z" {
+		t.Errorf("cursor not advanced, got %q", cw.trafficLastTS)
 	}
-	if len(cw.trafficSamplesOut) != 1 || cw.trafficSamplesOut[0] != 100 {
-		t.Errorf("expected single sent delta=100, got %v", cw.trafficSamplesOut)
-	}
-	if len(cw.trafficSamplesIn) != 1 || cw.trafficSamplesIn[0] != 20 {
-		t.Errorf("expected single recv delta=20, got %v", cw.trafficSamplesIn)
+	if cw.trafficTotalSent != 1120 || cw.trafficTotalRecv != 733 {
+		t.Errorf("totals mismatch: sent=%d recv=%d", cw.trafficTotalSent, cw.trafficTotalRecv)
 	}
 }
 
-// TestSeedTrafficBaselineIfNeededSeedsAfterEmptyHistory mirrors the
-// startTrafficTicker orchestration: after loadTrafficHistory returns with an
-// empty frame (trafficLoaded==false), the helper must populate the baseline
-// totals from fetchNetworkStats and flip trafficLoaded so the next tick
-// produces a real delta sample. This is the regression path for the
-// traffic-chart "bars appear one tick late" bug.
-func TestSeedTrafficBaselineIfNeededSeedsAfterEmptyHistory(t *testing.T) {
-	cw := newTestConsoleWindow(trafficStatsTable(9999, 8888, true))
+// TestAppendNewTrafficSamplesSkipsDuplicatesWhenServerIgnoresSince exercises
+// the client-side cursor guard: even if the server returns the FULL history
+// (ignoring the since arg), only samples strictly newer than the cursor may
+// be appended — duplicate delivery must be harmless.
+func TestAppendNewTrafficSamplesSkipsDuplicatesWhenServerIgnoresSince(t *testing.T) {
+	history := []map[string]any{
+		trafficSample("2026-06-11T10:00:00Z", 10, 20, 1000, 500),
+		trafficSample("2026-06-11T10:00:01Z", 15, 25, 1015, 525),
+	}
+	cw := newTestConsoleWindow(trafficHistoryTable(history, false, nil))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
 	}
 
-	cw.mu.RLock()
-	if cw.trafficLoaded {
-		cw.mu.RUnlock()
-		t.Fatal("precondition failed: empty history must leave trafficLoaded=false")
-	}
-	cw.mu.RUnlock()
+	history = append(history, trafficSample("2026-06-11T10:00:02Z", 30, 60, 1045, 585))
+	cw.parent.cmdTable = trafficHistoryTable(history, false, nil)
 
-	cw.seedTrafficBaselineIfNeeded()
+	cw.appendNewTrafficSamples()
+	// A second tick with no newer samples must be a no-op.
+	cw.appendNewTrafficSamples()
 
 	cw.mu.RLock()
 	defer cw.mu.RUnlock()
 
-	if !cw.trafficLoaded {
-		t.Error("trafficLoaded should be true after baseline seed")
-	}
-	if cw.trafficTotalSent != 9999 || cw.trafficTotalRecv != 8888 {
-		t.Errorf("baseline totals mismatch: sent=%d recv=%d",
-			cw.trafficTotalSent, cw.trafficTotalRecv)
-	}
-	if len(cw.trafficSamplesIn) != 0 || len(cw.trafficSamplesOut) != 0 {
-		t.Errorf("baseline seed must NOT append a sample, got in=%d out=%d",
+	if len(cw.trafficSamplesIn) != 3 || len(cw.trafficSamplesOut) != 3 {
+		t.Fatalf("expected 3 samples each (no duplicates), got in=%d out=%d",
 			len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
 	}
+	if cw.trafficSamplesIn[2] != 60 || cw.trafficSamplesOut[2] != 30 {
+		t.Errorf("appended sample mismatch: in=%v out=%v",
+			cw.trafficSamplesIn[2], cw.trafficSamplesOut[2])
+	}
+	if cw.trafficLastTS != "2026-06-11T10:00:02Z" {
+		t.Errorf("cursor mismatch: %q", cw.trafficLastTS)
+	}
 }
 
-// TestSeedTrafficBaselineIfNeededNoOpWhenLoaded verifies the helper is a
-// no-op when history already populated the baseline, so calling it after a
-// non-empty loadTrafficHistory does not double-sample or disturb the cached
-// samples.
-func TestSeedTrafficBaselineIfNeededNoOpWhenLoaded(t *testing.T) {
-	cw := newTestConsoleWindow(trafficStatsTable(5000, 3000, false))
+// TestAppendNewTrafficSamplesAfterEmptyHistory verifies the collector-restart
+// path: an empty initial load leaves an empty cursor, and the next tick picks
+// up everything the collector recorded since — no baseline seeding required.
+func TestAppendNewTrafficSamplesAfterEmptyHistory(t *testing.T) {
+	cw := newTestConsoleWindow(trafficHistoryTable(nil, true, nil))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
 	}
 
-	beforeIn := len(cw.trafficSamplesIn)
-	beforeOut := len(cw.trafficSamplesOut)
-	beforeSent := cw.trafficTotalSent
-	beforeRecv := cw.trafficTotalRecv
+	cw.parent.cmdTable = trafficHistoryTable([]map[string]any{
+		trafficSample("2026-06-11T10:00:05Z", 11, 22, 11, 22),
+	}, true, nil)
 
-	cw.seedTrafficBaselineIfNeeded()
+	cw.appendNewTrafficSamples()
 
 	cw.mu.RLock()
 	defer cw.mu.RUnlock()
 
-	if len(cw.trafficSamplesIn) != beforeIn || len(cw.trafficSamplesOut) != beforeOut {
-		t.Errorf("sample count changed on no-op path: in %d→%d, out %d→%d",
-			beforeIn, len(cw.trafficSamplesIn), beforeOut, len(cw.trafficSamplesOut))
+	if len(cw.trafficSamplesIn) != 1 || cw.trafficSamplesIn[0] != 22 {
+		t.Errorf("expected single recv sample=22, got %v", cw.trafficSamplesIn)
 	}
-	if cw.trafficTotalSent != beforeSent || cw.trafficTotalRecv != beforeRecv {
-		t.Errorf("totals changed on no-op path: sent %d→%d, recv %d→%d",
-			beforeSent, cw.trafficTotalSent, beforeRecv, cw.trafficTotalRecv)
+	if len(cw.trafficSamplesOut) != 1 || cw.trafficSamplesOut[0] != 11 {
+		t.Errorf("expected single sent sample=11, got %v", cw.trafficSamplesOut)
+	}
+	if cw.trafficLastTS != "2026-06-11T10:00:05Z" {
+		t.Errorf("cursor mismatch: %q", cw.trafficLastTS)
+	}
+	if cw.trafficTotalSent != 11 || cw.trafficTotalRecv != 22 {
+		t.Errorf("totals mismatch: sent=%d recv=%d", cw.trafficTotalSent, cw.trafficTotalRecv)
 	}
 }
 
-// TestSampleTrafficClampsNegativeDeltaToZero verifies that if the collector
-// reports a smaller cumulative value than the cached baseline (e.g. after a
-// restart without a tab reload), the delta is clamped to zero rather than
-// producing a negative sample that would render as a downward bar.
-func TestSampleTrafficClampsNegativeDeltaToZero(t *testing.T) {
-	cw := newTestConsoleWindow(trafficStatsTable(1000, 500, true))
+// TestAppendNewTrafficSamplesTrimsToMax verifies the FIFO cap: appended
+// samples may not grow the local slices beyond trafficMaxSamples.
+func TestAppendNewTrafficSamplesTrimsToMax(t *testing.T) {
+	cw := newTestConsoleWindow(trafficHistoryTable([]map[string]any{
+		trafficSample("2026-06-11T10:00:00Z", 1, 2, 1, 2),
+	}, true, nil))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
 	}
-	cw.sampleTraffic() // baseline at 1000/500
 
-	// Counters regressed (lower than baseline).
-	cw.parent.cmdTable = trafficStatsTable(200, 100, true)
-	cw.sampleTraffic()
+	// Inflate local state to the cap, then append one more sample.
+	cw.mu.Lock()
+	cw.trafficSamplesIn = make([]float32, trafficMaxSamples)
+	cw.trafficSamplesOut = make([]float32, trafficMaxSamples)
+	cw.mu.Unlock()
+
+	cw.parent.cmdTable = trafficHistoryTable([]map[string]any{
+		trafficSample("2026-06-11T10:00:01Z", 3, 4, 4, 6),
+	}, true, nil)
+	cw.appendNewTrafficSamples()
 
 	cw.mu.RLock()
 	defer cw.mu.RUnlock()
 
-	if len(cw.trafficSamplesOut) != 1 || cw.trafficSamplesOut[0] != 0 {
-		t.Errorf("expected clamped sent delta=0, got %v", cw.trafficSamplesOut)
+	if len(cw.trafficSamplesIn) != trafficMaxSamples || len(cw.trafficSamplesOut) != trafficMaxSamples {
+		t.Fatalf("expected trim to %d, got in=%d out=%d",
+			trafficMaxSamples, len(cw.trafficSamplesIn), len(cw.trafficSamplesOut))
 	}
-	if len(cw.trafficSamplesIn) != 1 || cw.trafficSamplesIn[0] != 0 {
-		t.Errorf("expected clamped recv delta=0, got %v", cw.trafficSamplesIn)
+	if cw.trafficSamplesIn[trafficMaxSamples-1] != 4 || cw.trafficSamplesOut[trafficMaxSamples-1] != 3 {
+		t.Errorf("newest sample must survive the trim: in=%v out=%v",
+			cw.trafficSamplesIn[trafficMaxSamples-1], cw.trafficSamplesOut[trafficMaxSamples-1])
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -736,7 +737,12 @@ func RegisterMeshCommands(t *CommandTable, node NodeProvider) {
 // the command is registered as unavailable — hidden from help/autocomplete
 // and returning 503 on execution, consistent with other mode-gated commands.
 func RegisterMetricsCommands(t *CommandTable, m MetricsProvider) {
-	trafficHistoryInfo := CommandInfo{Name: "fetchTrafficHistory", Description: "Get rolling traffic history (1 sample/sec, 1 hour window)", Category: "metrics"}
+	trafficHistoryInfo := CommandInfo{
+		Name:        "fetchTrafficHistory",
+		Description: "Get rolling traffic history (1 sample/sec, 1 hour window)",
+		Category:    "metrics",
+		Usage:       "fetchTrafficHistory [since=<RFC3339>] — with since, returns only samples strictly newer than the given timestamp",
+	}
 
 	if m == nil {
 		t.RegisterUnavailable(trafficHistoryInfo)
@@ -749,6 +755,43 @@ func RegisterMetricsCommands(t *CommandTable, m MetricsProvider) {
 				return r
 			}
 			reply := m.TrafficSnapshot()
+
+			// Optional incremental cursor: with "since", return only samples
+			// strictly newer than the given timestamp. The desktop traffic
+			// chart polls this once a second to append fresh collector
+			// samples instead of computing its own deltas from the cached
+			// (and potentially stale) network_stats snapshot — see
+			// ConsoleWindow.appendNewTrafficSamples.
+			//
+			// The cursor is parsed as RFC3339 and compared as time.Time, so
+			// any valid RFC3339 form works — including offset variants like
+			// "+00:00" that denote the same instant as the collector's
+			// canonical "...Z" output but would break a lexicographic
+			// comparison.
+			if since, ok := req.Args["since"].(string); ok && since != "" {
+				sinceT, err := time.Parse(time.RFC3339, since)
+				if err != nil {
+					return validationError(fmt.Errorf("invalid since (want RFC3339): %w", err))
+				}
+				if reply.TrafficHistory != nil {
+					// Work on a shallow copy of the history frame so providers
+					// that return a shared frame are not mutated by filtering.
+					th := *reply.TrafficHistory
+					all := th.Samples
+					// Samples are chronological; binary-search the first one
+					// strictly after the cursor. Sample timestamps are written
+					// by a single producer (TrafficHistory.Record) in RFC3339;
+					// an unparseable timestamp is treated as not-newer and
+					// stays excluded rather than failing the whole reply.
+					lo := sort.Search(len(all), func(i int) bool {
+						ts, err := time.Parse(time.RFC3339, all[i].Timestamp)
+						return err == nil && ts.After(sinceT)
+					})
+					th.Samples = all[lo:]
+					th.Count = len(all) - lo
+					reply.TrafficHistory = &th
+				}
+			}
 			return frameResponse(reply)
 		},
 	)

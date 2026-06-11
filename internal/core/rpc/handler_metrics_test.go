@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/config"
@@ -51,6 +52,147 @@ func TestMetricsTrafficHistory(t *testing.T) {
 	}
 	if len(samplesResult) != 2 {
 		t.Fatalf("expected 2 samples, got %d", len(samplesResult))
+	}
+}
+
+// TestMetricsTrafficHistoryLegacyRouteSince verifies the legacy HTTP route
+// forwards the JSON body as command args: {"since": ...} must filter samples
+// exactly like the CommandTable path, and a malformed since must surface the
+// validation error instead of being silently ignored.
+func TestMetricsTrafficHistoryLegacyRouteSince(t *testing.T) {
+	samples := []protocol.TrafficSampleFrame{
+		{Timestamp: "2026-03-27T10:00:00Z", BytesSentPS: 100, BytesRecvPS: 200, TotalSent: 100, TotalReceived: 200},
+		{Timestamp: "2026-03-27T10:00:01Z", BytesSentPS: 150, BytesRecvPS: 250, TotalSent: 250, TotalReceived: 450},
+	}
+	metrics := newMockMetricsProvider(t, protocol.Frame{
+		Type: "traffic_history",
+		TrafficHistory: &protocol.TrafficHistoryFrame{
+			IntervalSeconds: 1,
+			Capacity:        3600,
+			Count:           2,
+			Samples:         samples,
+		},
+	})
+	server := setupTestServerWithMetrics(t, newDefaultNodeProvider(t), metrics)
+
+	code, result := postJSON(t, server, "/rpc/v1/metrics/traffic_history",
+		map[string]interface{}{"since": "2026-03-27T10:00:00Z"})
+
+	expectStatusCode(t, code, 200)
+	history, ok := result["traffic_history"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected traffic_history to be object, got %T", result["traffic_history"])
+	}
+	samplesResult, ok := history["samples"].([]interface{})
+	if !ok {
+		t.Fatalf("expected samples to be array, got %T", history["samples"])
+	}
+	if len(samplesResult) != 1 {
+		t.Fatalf("expected 1 sample newer than cursor, got %d", len(samplesResult))
+	}
+	first, ok := samplesResult[0].(map[string]interface{})
+	if !ok || first["timestamp"] != "2026-03-27T10:00:01Z" {
+		t.Fatalf("expected the 10:00:01Z sample, got %+v", samplesResult[0])
+	}
+
+	// Malformed since → validation error from the command, not a silent
+	// full-history reply.
+	code, result = postJSON(t, server, "/rpc/v1/metrics/traffic_history",
+		map[string]interface{}{"since": "yesterday"})
+	expectStatusCode(t, code, 400)
+	expectFieldExists(t, result, "error")
+}
+
+// TestMetricsTrafficHistorySinceFiltersSamples verifies the incremental
+// cursor: with args.since set, only samples strictly newer than the given
+// RFC3339 timestamp are returned, and the provider's shared frame is not
+// mutated (a follow-up call without since still sees the full history).
+func TestMetricsTrafficHistorySinceFiltersSamples(t *testing.T) {
+	samples := []protocol.TrafficSampleFrame{
+		{Timestamp: "2026-03-27T10:00:00Z", BytesSentPS: 100, BytesRecvPS: 200, TotalSent: 100, TotalReceived: 200},
+		{Timestamp: "2026-03-27T10:00:01Z", BytesSentPS: 150, BytesRecvPS: 250, TotalSent: 250, TotalReceived: 450},
+		{Timestamp: "2026-03-27T10:00:02Z", BytesSentPS: 10, BytesRecvPS: 20, TotalSent: 260, TotalReceived: 470},
+	}
+	metrics := newMockMetricsProvider(t, protocol.Frame{
+		Type: "traffic_history",
+		TrafficHistory: &protocol.TrafficHistoryFrame{
+			IntervalSeconds: 1,
+			Capacity:        3600,
+			Count:           3,
+			Samples:         samples,
+		},
+	})
+	table := buildTestTable(newDefaultNodeProvider(t), nil, nil, metrics)
+
+	decode := func(t *testing.T, data []byte) []protocol.TrafficSampleFrame {
+		t.Helper()
+		var frame protocol.Frame
+		if err := json.Unmarshal(data, &frame); err != nil || frame.TrafficHistory == nil {
+			t.Fatalf("decode traffic_history: err=%v frame=%+v", err, frame)
+		}
+		if frame.TrafficHistory.Count != len(frame.TrafficHistory.Samples) {
+			t.Errorf("count=%d does not match samples=%d",
+				frame.TrafficHistory.Count, len(frame.TrafficHistory.Samples))
+		}
+		return frame.TrafficHistory.Samples
+	}
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "fetchTrafficHistory",
+		Args: map[string]interface{}{"since": "2026-03-27T10:00:00Z"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("execute with since: %v", resp.Error)
+	}
+	got := decode(t, resp.Data)
+	if len(got) != 2 || got[0].Timestamp != "2026-03-27T10:00:01Z" {
+		t.Fatalf("expected 2 samples newer than cursor, got %+v", got)
+	}
+
+	// since == newest timestamp → empty tail.
+	resp = table.Execute(rpc.CommandRequest{
+		Name: "fetchTrafficHistory",
+		Args: map[string]interface{}{"since": "2026-03-27T10:00:02Z"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("execute with newest since: %v", resp.Error)
+	}
+	if got := decode(t, resp.Data); len(got) != 0 {
+		t.Fatalf("expected empty tail, got %+v", got)
+	}
+
+	// Offset form denoting the same instant as the first sample's "...Z"
+	// timestamp must filter identically — the comparison is by parsed
+	// time.Time, not by string.
+	resp = table.Execute(rpc.CommandRequest{
+		Name: "fetchTrafficHistory",
+		Args: map[string]interface{}{"since": "2026-03-27T11:00:00+01:00"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("execute with offset since: %v", resp.Error)
+	}
+	got = decode(t, resp.Data)
+	if len(got) != 2 || got[0].Timestamp != "2026-03-27T10:00:01Z" {
+		t.Fatalf("offset since must exclude the equal instant, got %+v", got)
+	}
+
+	// Unparseable since → validation error.
+	resp = table.Execute(rpc.CommandRequest{
+		Name: "fetchTrafficHistory",
+		Args: map[string]interface{}{"since": "yesterday"},
+	})
+	if resp.ErrorKind != rpc.ErrValidation {
+		t.Fatalf("expected ErrValidation for bad since, got kind=%v err=%v", resp.ErrorKind, resp.Error)
+	}
+
+	// No since → full history; also proves the filtered calls above did not
+	// mutate the provider's shared frame.
+	resp = table.Execute(rpc.CommandRequest{Name: "fetchTrafficHistory"})
+	if resp.Error != nil {
+		t.Fatalf("execute without since: %v", resp.Error)
+	}
+	if got := decode(t, resp.Data); len(got) != 3 {
+		t.Fatalf("expected full history of 3 samples, got %+v", got)
 	}
 }
 

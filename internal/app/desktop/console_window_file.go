@@ -99,7 +99,8 @@ func (c *ConsoleWindow) layoutFileTab(gtx layout.Context) layout.Dimensions {
 	bg := color.NRGBA{R: 21, G: 26, B: 34, A: 255}
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fill(gtx, bg)
-		return layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// 8dp panel padding matching the main window cards (window.go card).
+		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.file_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
