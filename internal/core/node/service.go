@@ -66,8 +66,21 @@ type MessageStore interface {
 }
 
 type Service struct {
-	identity   *identity.Identity
-	selfBoxSig string // cached ed25519 signature binding identity.BoxPublicKey to identity.Address
+	identity *identity.Identity
+	// selfBoxKey / selfBoxSig are the box key (base64) and its identity-
+	// binding signature this node sends in hello/welcome frames. They are
+	// ALWAYS populated — including under cfg.DisableDirectMessages —
+	// because deployed peers gate session-auth challenge issuance on all
+	// four identity fields (connauth.HasIdentityFields); omitting the box
+	// key would route this node's hello into the unauthenticated branch
+	// and break every outbound authenticated session. The relay-only DM
+	// opt-out therefore suppresses the key only on the CONTACT plane
+	// (trust-store self row → s.boxKeys → fetch_contacts, see NewService);
+	// direct peers still learn the key from the handshake, and DMs
+	// encrypted with such a cached key are dropped by the inbound gate in
+	// storeIncomingMessage.
+	selfBoxKey string
+	selfBoxSig string
 	cfg        config.Node
 	// externalListenCached memoises externalListenAddress(). cfg is immutable
 	// after construction, but isSelfAddress (and thus externalListenAddress) is
@@ -997,12 +1010,30 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		})
 	}
 
+	selfBoxKey := identity.BoxPublicKeyBase64(id.BoxPublicKey)
+	selfBoxSig := identity.SignBoxKeyBinding(id)
 	selfContact := trustedContact{
-		Address:      id.Address,
-		PubKey:       identity.PublicKeyBase64(id.PublicKey),
-		BoxKey:       identity.BoxPublicKeyBase64(id.BoxPublicKey),
-		BoxSignature: identity.SignBoxKeyBinding(id),
-		Source:       "self",
+		Address: id.Address,
+		PubKey:  identity.PublicKeyBase64(id.PublicKey),
+		Source:  "self",
+	}
+	// The box key enters the CONTACT plane (trust-store self row →
+	// s.boxKeys → fetch_contacts) only when this node accepts DMs
+	// addressed to itself: a relay-only node (headless without
+	// CORSA_ACCEPT_DM) never redistributes its own key, and
+	// loadTrustStore refreshes the persisted self row from this value,
+	// so flipping the policy purges a previously persisted key.
+	//
+	// The HANDSHAKE plane is deliberately NOT gated: hello/welcome carry
+	// selfBoxKey/selfBoxSig unconditionally because deployed peers issue
+	// the session-auth challenge only when all four identity fields are
+	// present (connauth.HasIdentityFields) — a keyless hello would break
+	// outbound authenticated sessions. Direct peers therefore still
+	// cache the key; DMs composed with it are dropped by the inbound
+	// gate in storeIncomingMessage.
+	if !cfg.DisableDirectMessages {
+		selfContact.BoxKey = selfBoxKey
+		selfContact.BoxSignature = selfBoxSig
 	}
 	trust, err := loadTrustStore(cfg.TrustStorePath, selfContact)
 	if err != nil {
@@ -1102,7 +1133,8 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		startedAt:               time.Now().UTC(),
 		cfg:                     cfg,
 		eventBus:                eventBus,
-		selfBoxSig:              selfContact.BoxSignature,
+		selfBoxKey:              selfBoxKey,
+		selfBoxSig:              selfBoxSig,
 		trust:                   trust,
 		peers:                   peers,
 		peersStatePath:          peersStatePath,
@@ -3477,7 +3509,7 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		Services:               s.Services(),
 		Address:                s.identity.Address,
 		PubKey:                 identity.PublicKeyBase64(s.identity.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
+		BoxKey:                 s.selfBoxKey,
 		BoxSig:                 s.selfBoxSig,
 		ObservedAddress:        observedAddr,
 		Challenge:              challenge,
@@ -4868,6 +4900,27 @@ func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (
 }
 
 func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bool) (bool, int, string) {
+	// Relay-only DM opt-out enforcement (cfg.DisableDirectMessages).
+	// Runs FIRST — before timestamp validation and signature
+	// verification — so spam addressed to a node that opted out of DMs
+	// costs no crypto work, no lock traffic,
+	// and no memory: the message never enters s.topics/s.seen/s.known
+	// and no delivery receipt is emitted (the sender must not believe
+	// anyone will read it). The (false, 0, "") return deliberately
+	// mirrors the duplicate outcome: shouldAckOnStoreResult acks the
+	// previous hop (push path) and deliverRelayedMessage reports
+	// success for the hop-ack (relay path), so upstream hop-level
+	// retries stop instead of looping — the same reconnect-storm
+	// amplifier dedup protects against. The sender's own end-to-end
+	// retry simply expires by TTL. Clients whose node never obtained
+	// this node's box key cannot even compose the DM (the key is not
+	// redistributed via fetch_contacts — see Service.selfBoxKey); those
+	// that cached it from a direct handshake land here and are dropped.
+	if s.dropsInboundDM(msg) {
+		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("sender", msg.Sender).Msg("inbound_dm_dropped_no_dm_inbox")
+		return false, 0, ""
+	}
+
 	if validateTimestamp {
 		if err := s.validateMessageTiming(msg); err != nil {
 			return false, 0, protocol.ErrCodeMessageTimestampOutOfRange
@@ -5253,6 +5306,33 @@ func (s *Service) owesDeliveryReceipt(msg incomingMessage) bool {
 		msg.Recipient != "*" &&
 		msg.Recipient == s.identity.Address &&
 		msg.Sender != s.identity.Address
+}
+
+// dropsInboundDM reports whether msg must be rejected because this node
+// opted out of receiving direct messages (cfg.DisableDirectMessages, the
+// headless relay-only default). The gate covers exactly the DM-class
+// messages whose FINAL RECIPIENT is this node and whose author is someone
+// else:
+//
+//   - data DMs (topic "dm") — nobody reads them here, storing them would
+//     grow s.topics unboundedly (local messages are exempt from transit
+//     retention caps) and emitting a delivered receipt would lie to the
+//     sender;
+//   - control DMs (TopicControlDM) — they mutate chat state this node
+//     does not keep.
+//
+// Everything else stays untouched: broadcasts and global topics
+// (recipient "*"/empty), transit DMs this node merely relays between two
+// other parties, and this node's own outgoing messages echoed back
+// (sender == self).
+func (s *Service) dropsInboundDM(msg incomingMessage) bool {
+	if !s.cfg.DisableDirectMessages {
+		return false
+	}
+	if !protocol.IsDMTopic(msg.Topic) {
+		return false
+	}
+	return msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address
 }
 
 // isLocalMessage returns true if this node is a party to the message
@@ -6124,7 +6204,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		Networks:      reachableGroupNames(s.reachableGroups),
 		Address:       s.identity.Address,
 		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
-		BoxKey:        identity.BoxPublicKeyBase64(s.identity.BoxPublicKey),
+		BoxKey:        s.selfBoxKey,
 		BoxSig:        s.selfBoxSig,
 		Capabilities:  localCapabilityStrings(s.cfg.EnableMeshRoutingV3),
 	})
@@ -6264,8 +6344,27 @@ func (s *Service) addKnownIdentity(identity domain.PeerIdentity) {
 	}
 }
 
+// suppressesSelfBoxKey reports whether box-key material for address must
+// be kept out of the contact plane (knowledge maps / trust store). True
+// only for THIS node's own identity under the relay-only DM opt-out
+// (cfg.DisableDirectMessages): the handshake still hands the key to
+// direct peers — session auth requires all four identity fields — so a
+// neighbor can echo our genuine, validly-signed key back through
+// fetch_contacts sync or import_contacts. Without this guard the echo
+// re-enters s.boxKeys / the trust store and contactsFrame redistributes
+// the key network-wide, silently defeating the contact-plane opt-out
+// established at NewService. Every network-sourced key import funnels
+// through addKnownBoxKey/addKnownBoxSig/trustContact, which all consult
+// this predicate.
+func (s *Service) suppressesSelfBoxKey(address string) bool {
+	return s.cfg.DisableDirectMessages && address == s.identity.Address
+}
+
 func (s *Service) addKnownBoxKey(address, boxKey string) {
 	if address == "" || boxKey == "" {
+		return
+	}
+	if s.suppressesSelfBoxKey(address) {
 		return
 	}
 
@@ -6298,6 +6397,9 @@ func (s *Service) addKnownBoxSig(address, boxSig string) {
 	if address == "" || boxSig == "" {
 		return
 	}
+	if s.suppressesSelfBoxKey(address) {
+		return
+	}
 
 	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
@@ -6328,6 +6430,13 @@ func (s *Service) emitLocalChange(event protocol.LocalChangeEvent) {
 
 func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 	if address == "" || pubKey == "" || boxKey == "" || boxSig == "" {
+		return
+	}
+	// Relay-only contact-plane opt-out: a re-imported SELF contact would
+	// persist our box key back into the trust store (and would otherwise
+	// trip a spurious errTrustConflict against the keyless self row
+	// seeded at startup). See suppressesSelfBoxKey.
+	if s.suppressesSelfBoxKey(address) {
 		return
 	}
 

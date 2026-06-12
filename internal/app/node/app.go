@@ -23,6 +23,17 @@ type App struct {
 
 func New() *App {
 	cfg := config.Default()
+	// Headless override: the shared config zero value keeps DMs enabled
+	// for the desktop client, but a console node has no user reading
+	// messages — DM acceptance is opt-in via CORSA_ACCEPT_DM. See the
+	// Node.DisableDirectMessages doc-comment for the full behaviour matrix.
+	//
+	// Deliberately env-only, no CLI flag (operator decision, confirmed
+	// repeatedly in review): corsa-node's argv contract is "unknown
+	// process-manager arguments are ignored" (cmd/corsa-node scans argv
+	// solely for --version), and every other runtime knob on this binary
+	// is already CORSA_*-env-driven.
+	cfg.Node.DisableDirectMessages = !config.AcceptDirectMessagesFromEnv()
 	id, err := identity.LoadOrCreate(cfg.Node.IdentityPath)
 	if err != nil {
 		panic(err)

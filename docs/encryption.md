@@ -27,6 +27,19 @@ Fingerprint address derivation:
 
 Direct messages are encrypted on the desktop before reaching the local node.
 
+Encryption requires the recipient's `X25519` box key. A relay-only node
+(headless `corsa-node` started without `CORSA_ACCEPT_DM=1`) does not
+redistribute its box key through the contact plane (`fetch_contacts`),
+so a sender whose node never handshaked with it directly usually cannot
+compose the DM — the send fails client-side with "recipient box key is
+unknown". The key does still travel in `hello`/`welcome` (session auth
+requires all four identity fields), so peers that connected directly may
+hold a cached copy; DMs encrypted with such a key are silently dropped
+by the node's inbound gate. The box-key binding is signed by the
+recipient's identity key, so a third party cannot publish a forged key
+on the node's behalf. See `docs/protocol/messaging.md` "DM Opt-Out
+(Relay-Only Nodes)".
+
 Visible to relays:
 
 - sender address
@@ -187,6 +200,19 @@ flowchart LR
 ### Direct messages
 
 Direct messages шифруются на desktop-клиенте до того, как попадут в локальную ноду.
+
+Для шифрования нужен `X25519` box-ключ получателя. Relay-only нода
+(headless `corsa-node`, запущенный без `CORSA_ACCEPT_DM=1`) не раздаёт
+свой box-ключ через contact-плоскость (`fetch_contacts`), поэтому
+отправитель, чья нода не делала с ней прямой handshake, обычно не может
+составить DM — отправка падает на стороне клиента с ошибкой «recipient
+box key is unknown». В `hello`/`welcome` ключ всё же передаётся (session
+auth требует все четыре identity-поля), так что напрямую подключавшиеся
+пиры могут иметь закэшированную копию; DM, зашифрованные таким ключом,
+нода молча дропает входным гейтом. Привязка box-ключа подписана
+identity-ключом получателя, так что третья сторона не может опубликовать
+поддельный ключ от имени ноды. См. `docs/protocol/messaging.md`, раздел
+«Отказ от приёма DM (relay-only ноды)».
 
 Что relay-узлы видят:
 

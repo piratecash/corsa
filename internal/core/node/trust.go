@@ -64,8 +64,17 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	if self.Address != "" {
 		now := time.Now().UTC()
 		if existing, ok := store.contacts[self.Address]; ok {
-			existing.LastSeenAt = now
-			store.contacts[self.Address] = existing
+			// The caller-supplied self contact is canonical for OUR OWN
+			// key material — it is derived from the identity file plus the
+			// runtime DM-acceptance policy (a relay-only node passes an
+			// empty BoxKey/BoxSignature so the box key is not republished
+			// via fetch_contacts). Refreshing the row instead of keeping
+			// the persisted one prevents a stale box key from surviving a
+			// policy flip across restarts. FirstSeenAt is preserved as
+			// history.
+			self.FirstSeenAt = existing.FirstSeenAt
+			self.LastSeenAt = now
+			store.contacts[self.Address] = self
 		} else {
 			self.FirstSeenAt = now
 			self.LastSeenAt = now

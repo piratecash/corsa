@@ -216,6 +216,39 @@ type Node struct {
 	// docs/cluster-mesh/phase-4-compact-wire-signed.md §7.
 	EnableMeshRoutingV3 bool
 
+	// DisableDirectMessages opts this node out of direct messages
+	// (topics "dm" / "dm-control") addressed to its own identity.
+	//
+	// The zero value (false = DMs accepted) is today's behaviour, so the
+	// desktop client and every existing config.Node construction —
+	// including struct-literal test fixtures — are untouched; same
+	// zero-value convention as AllowPrivatePeers. Only the headless
+	// binary (cmd/corsa-node via internal/app/node) sets it, from
+	// CORSA_ACCEPT_DM (see AcceptDirectMessagesFromEnv): a console node
+	// has no user reading messages, so an inbound DM addressed to it is
+	// unread spam that would otherwise accumulate in memory forever and
+	// trigger false "delivered" receipts to the sender.
+	//
+	// When true the node:
+	//   - keeps its own box key out of the contact plane (trust-store
+	//     self row and fetch_contacts), so the key is never
+	//     redistributed and clients whose node has not handshaked with
+	//     this node directly cannot encrypt a DM to it. The handshake
+	//     plane (hello/welcome) still carries the key — deployed peers
+	//     require all four identity fields to issue the session-auth
+	//     challenge (connauth.HasIdentityFields), so direct peers do
+	//     cache it;
+	//   - drops inbound DM-class messages addressed to itself before any
+	//     crypto work, acking the previous hop like a duplicate so
+	//     hop-level retries stop (see Service.storeIncomingMessage) —
+	//     this is the authoritative protection, covering DMs composed
+	//     with a handshake-cached key;
+	//   - omits "messages" from ServiceList.
+	//
+	// Relay/transit of OTHER parties' DMs is unaffected — the node stays
+	// a full relay.
+	DisableDirectMessages bool
+
 	// PprofAddr enables Go's net/http/pprof profiling server on the
 	// given address when non-empty (env: CORSA_PPROF_ADDR). Default
 	// empty = OFF: no listener, no debug surface, zero overhead. Intended
@@ -393,7 +426,14 @@ func (n Node) NormalizedType() NodeType {
 }
 
 func (n Node) ServiceList() []string {
-	services := []string{"identity", "contacts", "messages", "gazeta"}
+	services := []string{"identity", "contacts"}
+	// "messages" advertises a live DM inbox. A node that drops inbound
+	// DMs (headless relay without CORSA_ACCEPT_DM) must not claim it —
+	// peers surface the list in their console UI.
+	if !n.DisableDirectMessages {
+		services = append(services, "messages")
+	}
+	services = append(services, "gazeta")
 	if n.NormalizedType() == NodeTypeFull {
 		services = append(services, "relay")
 	}
@@ -808,6 +848,25 @@ func enableMeshRoutingV3FromEnv() bool {
 	default:
 		// Unset, empty, truthy, or unrecognised → enabled (the new default).
 		return true
+	}
+}
+
+// AcceptDirectMessagesFromEnv reads CORSA_ACCEPT_DM and returns whether a
+// HEADLESS node should accept direct messages addressed to its own
+// identity. Default FALSE: a console node has no user behind it, so DM
+// acceptance is opt-in ("1", "true", "yes", "on" after trimming, any
+// case). Exported because the decision of WHICH default applies belongs
+// to the binary: internal/app/node (headless) derives
+// Node.DisableDirectMessages from this, while the desktop app keeps the
+// zero value (DMs accepted) — a GUI client always has a user who wants
+// to chat.
+func AcceptDirectMessagesFromEnv() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ACCEPT_DM")))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

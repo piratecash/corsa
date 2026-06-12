@@ -97,6 +97,75 @@ func TestEnableMeshRoutingV3FromEnv(t *testing.T) {
 	}
 }
 
+// TestAcceptDirectMessagesFromEnv pins the headless DM-acceptance knob:
+// default OFF (unset/empty/unrecognised) — a console node has no user
+// reading messages — only explicit truthy values enable acceptance.
+func TestAcceptDirectMessagesFromEnv(t *testing.T) {
+	// Default-off: unset, empty, and unrecognised all stay disabled.
+	for _, v := range []string{"", "  ", "0", "false", "no", "off", "wat"} {
+		t.Setenv("CORSA_ACCEPT_DM", v)
+		if AcceptDirectMessagesFromEnv() {
+			t.Fatalf("CORSA_ACCEPT_DM=%q: want default false", v)
+		}
+	}
+
+	// Explicit opt-in.
+	for _, v := range []string{"1", "true", "yes", "on", "ON", " True "} {
+		t.Setenv("CORSA_ACCEPT_DM", v)
+		if !AcceptDirectMessagesFromEnv() {
+			t.Fatalf("CORSA_ACCEPT_DM=%q: want true (opt-in)", v)
+		}
+	}
+}
+
+// TestDefaultAcceptsDirectMessages pins that the SHARED default keeps
+// today's behaviour: the DisableDirectMessages zero value means DMs are
+// accepted, so the desktop client and existing Service constructions
+// (including struct-literal fixtures) are untouched. The headless binary
+// opts out explicitly via AcceptDirectMessagesFromEnv — that override is
+// pinned in internal/app/node, not here.
+func TestDefaultAcceptsDirectMessages(t *testing.T) {
+	cfg := Default()
+	if cfg.Node.DisableDirectMessages {
+		t.Fatal("Default(): want DisableDirectMessages=false (desktop/back-compat default)")
+	}
+}
+
+// TestServiceListMessagesGate pins that "messages" is advertised only by
+// nodes that actually accept DMs; peers display the list in console UIs,
+// so a drop-everything relay must not claim a live inbox.
+func TestServiceListMessagesGate(t *testing.T) {
+	accepting := Node{Type: NodeTypeFull}
+	want := []string{"identity", "contacts", "messages", "gazeta", "relay"}
+	if got := accepting.ServiceList(); !slicesEqual(got, want) {
+		t.Fatalf("accepting full node: got %v, want %v", got, want)
+	}
+
+	relayOnly := Node{Type: NodeTypeFull, DisableDirectMessages: true}
+	want = []string{"identity", "contacts", "gazeta", "relay"}
+	if got := relayOnly.ServiceList(); !slicesEqual(got, want) {
+		t.Fatalf("relay-only full node: got %v, want %v", got, want)
+	}
+
+	client := Node{Type: NodeTypeClient}
+	want = []string{"identity", "contacts", "messages", "gazeta"}
+	if got := client.ServiceList(); !slicesEqual(got, want) {
+		t.Fatalf("accepting client node: got %v, want %v", got, want)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestRecordAllTrafficFromEnv pins the startup traffic recording knob:
 // default OFF (unset/empty/unrecognised), only explicit truthy values
 // enable it. Mirrors the opt-in contract documented on Node.RecordAllTraffic.

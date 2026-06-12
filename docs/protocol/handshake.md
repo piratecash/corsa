@@ -63,12 +63,12 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `node_type` | string | optional | `"full"` (relays mesh traffic) or `"client"` (no relay). Only for `client="node"` |
 | `client_version` | string | optional | Version string (e.g., `"0.1.0"` or `"1.2.3"`) for logging and diagnostics. Single source of truth — no separate "wire" form |
 | `client_build` | integer | optional | Monotonic build number for version tracking. Incremented on each release |
-| `services` | array | optional | Capability list: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
+| `services` | array | optional | Capability list: `["identity", "contacts", "messages", "gazeta", "relay", ...]`. `"messages"` is advertised only by nodes that accept direct messages addressed to their own identity; a relay-only node (headless `corsa-node` without `CORSA_ACCEPT_DM=1`) omits it |
 | `networks` | array | optional | Reachable networks: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Validated against the peer's overlay address as observed by the receiver (`pc.Address()` — built from the verified TCP IP plus `advertise_port`) since `hello.listen` no longer carries an authoritative host under v12 |
 | `capabilities` | array | optional | Extended capability tokens for feature negotiation (e.g., `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "mesh_routing_v3", "file_transfer_v1"]` — `mesh_routing_v3` is advertised by default). Both peers advertise capabilities during handshake; the session uses the intersection. Nodes without this field are treated as having an empty capability set. See [Capability Negotiation](#capability-negotiation) |
 | `address` | string | optional | Peer fingerprint (identity public key hash in hex). Required for mutual authentication on v2+ |
 | `pubkey` | string | optional | Ed25519 public key in base64. Used for message signature verification |
-| `boxkey` | string | optional | X25519 public key in base64. Used for message encryption |
+| `boxkey` | string | optional | X25519 public key in base64. Used for message encryption. Node-to-node hellos always include it even on a relay-only node (headless `corsa-node` without `CORSA_ACCEPT_DM=1`): responders issue the session-auth challenge only when all four identity fields (`address`, `pubkey`, `boxkey`, `boxsig`) are present. A relay-only node limits the key to this handshake plane — it never redistributes it via `fetch_contacts` — and drops any DM addressed to itself (see `docs/protocol/messaging.md` "DM Opt-Out") |
 | `boxsig` | string | optional | Ed25519 signature (base64url) of boxkey binding. Signature payload: `corsa-boxkey-v1|<address>|<boxkey-base64>` |
 
 ### welcome (responder → initiator)
@@ -116,7 +116,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `capabilities` | array | Responder's extended capability tokens. The session uses the intersection of initiator and responder capabilities. See [Capability Negotiation](#capability-negotiation) |
 | `address` | string | Responder's fingerprint |
 | `pubkey` | string | Responder's Ed25519 public key |
-| `boxkey` | string | Responder's X25519 public key |
+| `boxkey` | string | Responder's X25519 public key. Always included, same as in `hello` — required for the four-field identity check on session auth; a relay-only responder still sends it but never redistributes it via `fetch_contacts` |
 | `boxsig` | string | Signature of responder's boxkey binding |
 | `observed_address` | string | Initiator's IP address (no port) as seen by responder. Used by the dialer's `recordObservedAddress` as **NAT-detection telemetry only**: votes per peer identity feed a single "NAT detected" warning when the consensus IP disagrees with the local bind host (`cfg.ListenAddress`). It is NOT consumed for peer discovery, address learning, or any authoritative self-advertise decision under the v12 cleanup baseline |
 
@@ -563,12 +563,12 @@ stateDiagram-v2
 | `node_type` | string | опционально | `"full"` (релирует трафик) или `"client"` (без relay). Только для `client="node"` |
 | `client_version` | string | опционально | Строка версии (например, `"0.1.0"` или `"1.2.3"`) для логирования и диагностики. Единственный источник истины — отдельной "wire"-формы нет |
 | `client_build` | integer | опционально | Монотонный номер сборки для отслеживания версий. Увеличивается при каждом релизе |
-| `services` | array | опционально | Список возможностей: `["identity", "contacts", "messages", "gazeta", "relay", ...]` |
+| `services` | array | опционально | Список возможностей: `["identity", "contacts", "messages", "gazeta", "relay", ...]`. `"messages"` анонсируется только нодами, принимающими личные сообщения на свою identity; relay-only нода (headless `corsa-node` без `CORSA_ACCEPT_DM=1`) его опускает |
 | `networks` | array | опционально | Доступные сети: `["ipv4", "ipv6", "torv3", "torv2", "i2p", "cjdns", "local"]`. Валидируется против overlay-адреса пира, как его видит receiver (`pc.Address()` — собран из верифицированного TCP IP плюс `advertise_port`); под v12 `hello.listen` уже не несёт авторитетного host'а |
 | `capabilities` | array | опционально | Расширенные capability-токены для согласования функций (например, `["mesh_relay_v1", "mesh_routing_v1", "mesh_routing_v2", "mesh_routing_v3", "file_transfer_v1"]` — `mesh_routing_v3` анонсируется по умолчанию). Оба пира объявляют capabilities при handshake; сессия использует пересечение. Ноды без этого поля считаются с пустым набором. См. [Согласование capabilities](#согласование-capabilities) |
 | `address` | string | опционально | Fingerprint пира (хеш публичного ключа identity в hex). Требуется для взаимной аутентификации на v2+ |
 | `pubkey` | string | опционально | Ed25519 публичный ключ в base64. Используется для проверки подписей сообщений |
-| `boxkey` | string | опционально | X25519 публичный ключ в base64. Используется для шифрования сообщений |
+| `boxkey` | string | опционально | X25519 публичный ключ в base64. Используется для шифрования сообщений. Node-to-node hello всегда включает его, даже на relay-only ноде (headless `corsa-node` без `CORSA_ACCEPT_DM=1`): ответчик выдаёт session-auth challenge только при наличии всех четырёх identity-полей (`address`, `pubkey`, `boxkey`, `boxsig`). Relay-only нода ограничивает ключ handshake-плоскостью — никогда не раздаёт его через `fetch_contacts` — и дропает любой DM, адресованный ей самой (см. `docs/protocol/messaging.md`, «Отказ от приёма DM») |
 | `boxsig` | string | опционально | Ed25519 подпись (base64url) связи boxkey. Полезная нагрузка подписи: `corsa-boxkey-v1|<address>|<boxkey-base64>` |
 
 ### welcome (ответчик → инициатор)
@@ -616,7 +616,7 @@ stateDiagram-v2
 | `capabilities` | array | Расширенные capability-токены ответчика. Сессия использует пересечение capabilities инициатора и ответчика. См. [Согласование capabilities](#согласование-capabilities) |
 | `address` | string | Fingerprint ответчика |
 | `pubkey` | string | Ed25519 публичный ключ ответчика |
-| `boxkey` | string | X25519 публичный ключ ответчика |
+| `boxkey` | string | X25519 публичный ключ ответчика. Всегда включён, как и в `hello` — нужен для четырёхполевой identity-проверки при session auth; relay-only ответчик его шлёт, но никогда не раздаёт через `fetch_contacts` |
 | `boxsig` | string | Подпись связи boxkey ответчика |
 | `observed_address` | string | IP-адрес инициатора (без порта) как видит ответчик. Используется дайлером в `recordObservedAddress` **только как NAT-detection telemetry**: голоса per peer identity порождают единственное предупреждение «NAT detected», когда консенсусный IP расходится с host-частью локального `cfg.ListenAddress`. Под v12-baseline поле НЕ потребляется ни для peer discovery, ни для address learning, ни для каких-либо authoritative self-advertise решений |
 

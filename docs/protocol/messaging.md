@@ -298,6 +298,49 @@ Retrieve messages that are queued for delivery (not yet sent or delivery failed)
 
 ---
 
+## DM Opt-Out (Relay-Only Nodes)
+
+A headless `corsa-node` accepts direct messages addressed to its own
+identity only when started with `CORSA_ACCEPT_DM=1` (`"1"`/`"true"`/
+`"yes"`/`"on"`); the default is opt-out — a console node has no user
+reading messages, so accepting them would only accumulate unread spam in
+memory and emit misleading `delivered` receipts. The desktop client
+always accepts. The opt-out has two halves:
+
+**Advertisement (prevention, best-effort).** The node keeps its box key
+out of the contact plane: `fetch_contacts` serves no box key for the
+node's own identity, and a previously persisted self box key is purged
+from the trust store on the next start after the policy flip. Clients
+cannot encrypt a DM without the recipient's box key, so a sender whose
+node never obtained it fails client-side with "recipient box key is
+unknown". This is best-effort only: `hello`/`welcome` still carry
+`boxkey`/`boxsig` — responders issue the session-auth challenge only
+when all four identity fields are present, so omitting the key would
+break outbound authenticated sessions — which means direct peers do
+cache the key and may have redistributed it before the flip. Such DMs
+are handled by the enforcement gate below. The node also omits
+`"messages"` from its `services` list.
+
+**Enforcement (inbound gate).** Any DM-class message (`dm` or
+`dm-control`) whose final recipient is the node itself and whose sender
+is someone else is dropped before signature verification or any lock
+traffic. The drop deliberately mirrors duplicate semantics so hop-level
+retries stop instead of looping: on the relay path the previous hop
+receives a successful hop-ack for both classes; on the push path a
+dropped data DM (`dm`) is answered with `ack_delete`, while `dm-control`
+gets no `ack_delete` there — by design control DMs never occupy
+node-level backlog on any node (their retry lives at the application
+layer, see `docs/dm-commands.md`), so there is no per-hop push resource
+to release. No delivery receipt is emitted — the sender's end-to-end
+retry expires by `ttl_seconds`, which is the honest outcome: nobody will
+ever read the message.
+
+Relay and transit are unaffected: the node keeps relaying DMs between
+other parties, and broadcast/global topics are stored and gossiped as
+usual.
+
+---
+
 ## Message Flags
 
 Deletion policies are enforced server-side:
@@ -646,6 +689,49 @@ sequenceDiagram
 - Ожидающее сообщение в ответе → показать статус доставки
 - Нет ожидающей записи + нет подтверждения доставки → "отправлено"
 - Получено подтверждение → "доставлено" или "прочитано"
+
+---
+
+## Отказ от приёма DM (relay-only ноды)
+
+Headless `corsa-node` принимает личные сообщения, адресованные его
+собственной identity, только при запуске с `CORSA_ACCEPT_DM=1`
+(`"1"`/`"true"`/`"yes"`/`"on"`); по умолчанию приём выключен — за
+консольной нодой нет пользователя, читающего сообщения, поэтому их приём
+лишь копил бы непрочитанный спам в памяти и отправлял вводящие в
+заблуждение receipts `delivered`. Desktop-клиент принимает всегда.
+Отказ состоит из двух половин:
+
+**Анонс (предотвращение, best-effort).** Нода держит свой box-ключ вне
+contact-плоскости: `fetch_contacts` не отдаёт box-ключ для собственной
+identity, а ранее сохранённый self box-ключ вычищается из trust store
+при следующем старте после смены политики. Без box-ключа получателя
+зашифровать DM нельзя, поэтому отправитель, чья нода ключ не добыла,
+падает на стороне клиента с «recipient box key is unknown». Это лишь
+best-effort: `hello`/`welcome` по-прежнему несут `boxkey`/`boxsig` —
+ответчик выдаёт session-auth challenge только при всех четырёх
+identity-полях, и опускание ключа сломало бы исходящие
+authenticated-сессии — поэтому прямые соседи ключ кэшируют и могли
+раздать его до смены политики. Такие DM обрабатывает гейт ниже. Нода
+также опускает `"messages"` в списке `services`.
+
+**Принуждение (входной гейт).** Любое сообщение DM-класса (`dm` или
+`dm-control`), чей конечный получатель — сама нода, а отправитель —
+кто-то другой, отбрасывается до проверки подписи и любого захвата
+блокировок. Дроп намеренно повторяет семантику дубликата, поэтому
+hop-уровневые ретраи останавливаются, а не зацикливаются: на relay-пути
+предыдущий hop получает успешный hop-ack для обоих классов; на push-пути
+дропнутый data DM (`dm`) отвечается `ack_delete`, а `dm-control` там
+`ack_delete` не получает — control DM по дизайну не занимают node-level
+backlog ни на одной ноде (их ретрай живёт на уровне приложения, см.
+`docs/dm-commands.md`), так что освобождать per-hop push-ресурс нечего.
+Delivery receipt не отправляется — end-to-end ретрай отправителя
+истекает по `ttl_seconds`, и это честный исход: сообщение никто никогда
+не прочитает.
+
+Relay и транзит не затронуты: нода продолжает релеить DM между другими
+сторонами, а broadcast/глобальные темы сохраняются и госсипятся как
+обычно.
 
 ---
 
