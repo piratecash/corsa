@@ -7,11 +7,13 @@
 package crashlog
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/appdata"
@@ -23,13 +25,20 @@ const (
 	logFileName    = "corsa.log"
 	stderrFileName = "stderr.log"
 	crashPrefix    = "crash-"
-	maxLogSize     = 10 * 1024 * 1024 // 10 MB — rotate when exceeded
+	maxLogSize     = 10 * 1024 * 1024 // 10 MB — shrink when exceeded
+	shrinkKeepSize = 200 * 1024       // tail preserved on shrink so recent context survives restarts
 	keepCrashLogs  = 10               // keep last N crash files
+
+	// envLogFormat selects the corsa.log file format:
+	// "console" (default) — the same human-readable format as stdout;
+	// "json" — raw zerolog JSON for machine ingestion.
+	envLogFormat = "CORSA_LOG_FORMAT"
 )
 
 // Setup initialises structured logging via zerolog and installs a deferred
 // panic handler. It configures dual output: human-friendly console (stdout)
-// + JSON log file (.corsa/corsa.log).
+// + log file (.corsa/corsa.log). The file format follows CORSA_LOG_FORMAT:
+// human-readable console format by default, JSON when set to "json".
 //
 // It returns a cleanup function that should be deferred by the caller
 // (typically main). If the log directory cannot be created, Setup falls
@@ -67,7 +76,8 @@ func Setup() func() {
 	stderrFile := redirectStderr(dir)
 
 	logPath := filepath.Join(dir, logFileName)
-	rotateIfNeeded(logPath)
+	removeLegacyRotatedLogs(dir)
+	shrinkLogIfNeeded(logPath)
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -79,10 +89,11 @@ func Setup() func() {
 		return func() { recoverAndLog(dir) }
 	}
 
-	var out io.Writer = f
+	fileFormat := fileLogFormat()
+	out := fileWriter(f, fileFormat)
 	if stdoutAvailable {
 		cw := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05"}
-		out = io.MultiWriter(cw, f)
+		out = io.MultiWriter(cw, out)
 	}
 	log.Logger = zerolog.New(out).With().Timestamp().Caller().Logger()
 
@@ -118,7 +129,7 @@ func Setup() func() {
 	// the warn default dropped the banner entirely — TestSetupLogsStartupEvent
 	// read an empty corsa.log.)
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	log.Info().Str("path", logPath).Str("level", level.String()).Msg("logging initialised")
+	log.Info().Str("path", logPath).Str("level", level.String()).Str("format", string(fileFormat)).Msg("logging initialised")
 	if stderrFile != nil {
 		log.Info().Str("stderr_path", filepath.Join(dir, stderrFileName)).Msg("stderr redirected to file")
 	}
@@ -210,18 +221,102 @@ func logCrashAndRepanic(dir string, r any) {
 	panic(r)
 }
 
-func rotateIfNeeded(path string) {
+// logFormat is the corsa.log file output format selected via CORSA_LOG_FORMAT.
+type logFormat string
+
+const (
+	logFormatConsole logFormat = "console"
+	logFormatJSON    logFormat = "json"
+)
+
+// fileLogFormat reads CORSA_LOG_FORMAT. Anything other than "json"
+// (including unset) falls back to the human-readable console format.
+func fileLogFormat() logFormat {
+	if strings.EqualFold(os.Getenv(envLogFormat), string(logFormatJSON)) {
+		return logFormatJSON
+	}
+	return logFormatConsole
+}
+
+// fileWriter wraps the log file according to the selected format. The console
+// format carries a date in the timestamp (unlike the stdout writer) because a
+// persisted file spans days and "15:04:05" alone is ambiguous there.
+func fileWriter(f *os.File, format logFormat) io.Writer {
+	if format == logFormatJSON {
+		return f
+	}
+	return zerolog.ConsoleWriter{Out: f, TimeFormat: "2006-01-02 15:04:05", NoColor: true}
+}
+
+// removeLegacyRotatedLogs deletes corsa.log.<timestamp> and
+// stderr.log.<timestamp> copies produced by the old rename-based rotation.
+// Shrink-in-place replaced rotation, so the copies would otherwise sit on
+// disk forever. Idempotent; runs on every startup.
+func removeLegacyRotatedLogs(dir string) {
+	for _, base := range []string{logFileName, stderrFileName} {
+		entries, err := filepath.Glob(filepath.Join(dir, base+".*"))
+		if err != nil {
+			continue
+		}
+		for _, path := range entries {
+			if err := os.Remove(path); err != nil {
+				// Use fmt because zerolog is not initialised yet.
+				fmt.Fprintf(os.Stderr, "crashlog: remove legacy rotated log %s failed: %v\n", path, err)
+			}
+		}
+	}
+}
+
+// shrinkLogIfNeeded truncates corsa.log in place to its last shrinkKeepSize
+// bytes once it exceeds maxLogSize. No rotated copies are created: the recent
+// tail is enough restart context, and unbounded .log.<timestamp> copies were
+// a disk leak. Runs only at startup, before the file is opened for append.
+func shrinkLogIfNeeded(path string) {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() < maxLogSize {
 		return
 	}
 
-	ts := time.Now().UTC().Format("20060102-150405")
-	rotated := path + "." + ts
-	if err := os.Rename(path, rotated); err != nil {
-		// Use fmt here because zerolog may not be initialised yet.
-		fmt.Fprintf(os.Stderr, "crashlog: rotate failed: %v\n", err)
+	tail, err := readLogTail(path, shrinkKeepSize)
+	if err != nil {
+		// Use fmt because zerolog is not initialised yet.
+		fmt.Fprintf(os.Stderr, "crashlog: shrink read failed: %v\n", err)
+		return
 	}
+	if err := os.WriteFile(path, tail, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "crashlog: shrink write failed: %v\n", err)
+	}
+}
+
+// readLogTail returns the last keep bytes of the file, advanced to the next
+// line boundary so the shrunk log does not start with a partial record.
+func readLogTail(path string, keep int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	offset := info.Size() - keep
+	if offset <= 0 {
+		return io.ReadAll(f)
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		data = data[i+1:]
+	}
+	return data, nil
 }
 
 func cleanOldCrashLogs(dir string) {

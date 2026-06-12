@@ -53,6 +53,27 @@ All protocol interactions are logged with `protocol_trace` message and the follo
 
 Logs are written to `corsa.log` in the application data directory. Stderr is also captured to `stderr.log` for crash diagnostics.
 
+The file format is controlled by the `CORSA_LOG_FORMAT` environment variable:
+
+| Value     | Description                                                              |
+|-----------|--------------------------------------------------------------------------|
+| `console` | Default. Human-readable console-style format; unlike stdout (`15:04:05`), file timestamps include the date (`2006-01-02 15:04:05`) |
+| `json`    | Raw zerolog JSON records, for machine ingestion                          |
+
+Any other value (or unset) falls back to `console`.
+
+```bash
+# Default — human-readable corsa.log
+./corsa
+
+# JSON file output for log shippers / jq
+CORSA_LOG_FORMAT=json ./corsa
+```
+
+#### Log size limit
+
+`corsa.log` is capped at 10 MB. At startup, if the file exceeds the limit, it is shrunk in place to its last ~200 KB (aligned to a line boundary) so recent context survives the restart. No rotated copies are created. The same shrink applies to `stderr.log`. Legacy `corsa.log.<timestamp>` / `stderr.log.<timestamp>` copies produced by older versions are deleted automatically at startup.
+
 ### Peer Traffic Recording
 
 For targeted diagnostics of specific peer connections, CORSA provides a built-in traffic capture feature that records the raw wire payload (JSON-line protocol and non-JSON traffic) to disk. The capture is implemented natively through the application's existing `net.Conn` read/write paths — no external packet capture tools (`pcap`, `libpcap`) are needed.
@@ -272,6 +293,27 @@ CORSA_LOG_LEVEL=trace ./corsa
 ### Вывод логов
 
 Логи записываются в `corsa.log` в директории данных приложения. Stderr также перенаправляется в `stderr.log` для диагностики падений.
+
+Формат файла управляется переменной окружения `CORSA_LOG_FORMAT`:
+
+| Значение  | Описание                                                                       |
+|-----------|--------------------------------------------------------------------------------|
+| `console` | По умолчанию. Человекочитаемый console-формат; в отличие от stdout (`15:04:05`), timestamp в файле включает дату (`2006-01-02 15:04:05`) |
+| `json`    | Сырые JSON-записи zerolog, для машинной обработки                              |
+
+Любое другое значение (или незаданное) — fallback на `console`.
+
+```bash
+# По умолчанию — человекочитаемый corsa.log
+./corsa
+
+# JSON-вывод в файл для лог-шипперов / jq
+CORSA_LOG_FORMAT=json ./corsa
+```
+
+#### Ограничение размера лога
+
+`corsa.log` ограничен 10 МБ. На старте, если файл превышает лимит, он обрезается на месте до последних ~200 КБ (с выравниванием по границе строки), чтобы свежий контекст переживал рестарт. Ротированные копии не создаются. Та же обрезка применяется к `stderr.log`. Устаревшие копии `corsa.log.<timestamp>` / `stderr.log.<timestamp>` от старых версий автоматически удаляются при старте.
 
 ### Запись peer-трафика
 

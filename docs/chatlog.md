@@ -466,15 +466,19 @@ its connection open (e.g. a persistent session from another node).
 ### Structured logging (zerolog)
 
 The project uses [`rs/zerolog`](https://github.com/rs/zerolog) for structured
-logging. All log output is JSON (for machine parsing) + human-friendly console
-(for development). The `crashlog` package (`internal/core/crashlog`) provides
-the initialization point:
+logging. The `crashlog` package (`internal/core/crashlog`) provides the
+initialization point:
 
 1. **Dual output** — logs go to both stdout (via `zerolog.ConsoleWriter` with
-   coloured human-friendly format) and `.corsa/corsa.log` (JSON lines). The
-   log file is checked at startup and rotated if it exceeds 10 MB. Rotation
-   does not happen during a running process — a long-lived session may exceed
-   the threshold until the next restart.
+   coloured human-friendly format) and `.corsa/corsa.log`. The file uses a
+   human-readable console-style format by default (unlike stdout, file
+   timestamps include the date);
+   `CORSA_LOG_FORMAT=json` switches it to raw JSON lines for machine parsing.
+   At startup, if the file exceeds 10 MB it is shrunk in place to its last
+   ~200 KB (line-aligned) — no rotated copies are created; legacy
+   `corsa.log.<timestamp>` copies are deleted. The shrink does not happen
+   during a running process — a long-lived session may exceed the threshold
+   until the next restart. See [debug.md](debug.md) for details.
 2. **Startup logging** — application start time and log path are recorded on
    every launch, making it easy to correlate crashes with sessions.
 3. **Panic recovery** — when a panic occurs, the stack trace is written to
@@ -1224,15 +1228,19 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 ### Структурированное логирование (zerolog)
 
 Проект использует [`rs/zerolog`](https://github.com/rs/zerolog) для
-структурированного логирования. Весь вывод идёт одновременно в JSON
-(для машинного парсинга) и в человекочитаемую консоль (для разработки).
-Пакет `crashlog` (`internal/core/crashlog`) — точка инициализации:
+структурированного логирования. Пакет `crashlog` (`internal/core/crashlog`) —
+точка инициализации:
 
 1. **Двойной вывод** — логи идут в stdout (через `zerolog.ConsoleWriter`
-   с цветным человекочитаемым форматом) и в `.corsa/corsa.log` (JSON lines).
-   Лог-файл проверяется при старте и ротируется, если превышает 10 МБ.
-   Ротация во время работы процесса не выполняется — долгоживущая сессия
-   может превысить порог до следующего перезапуска.
+   с цветным человекочитаемым форматом) и в `.corsa/corsa.log`. Файл по
+   умолчанию использует человекочитаемый console-формат (в отличие от
+   stdout, timestamp в файле включает дату); `CORSA_LOG_FORMAT=json` переключает его на сырые JSON
+   lines для машинного парсинга. На старте, если файл превышает 10 МБ, он
+   обрезается на месте до последних ~200 КБ (по границе строки) —
+   ротированные копии не создаются; устаревшие копии `corsa.log.<timestamp>`
+   удаляются. Обрезка во время работы процесса не выполняется — долгоживущая
+   сессия может превысить порог до следующего перезапуска. Подробности —
+   в [debug.md](debug.md).
 2. **Логирование старта** — при запуске записывается время старта и путь к
    лог-файлу, что помогает привязать краши к сессиям.
 3. **Перехват паник** — при panic стек-трейс записывается в

@@ -17,7 +17,7 @@ import (
 func redirectStderr(dir string) *os.File {
 	path := filepath.Join(dir, stderrFileName)
 
-	rotateIfNeeded(path)
+	shrinkLogIfNeeded(path)
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

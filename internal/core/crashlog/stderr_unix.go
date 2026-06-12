@@ -16,8 +16,8 @@ import (
 func redirectStderr(dir string) *os.File {
 	path := filepath.Join(dir, stderrFileName)
 
-	// Rotate the stderr log if it gets too large (reuse the same threshold).
-	rotateIfNeeded(path)
+	// Shrink the stderr log if it gets too large (reuse the same threshold).
+	shrinkLogIfNeeded(path)
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {

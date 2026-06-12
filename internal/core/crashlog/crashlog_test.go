@@ -1,6 +1,7 @@
 package crashlog
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func TestSetupLogsStartupEvent(t *testing.T) {
 	cleanup := Setup()
 	defer cleanup()
 
-	// Read the log file and verify startup messages are present (zerolog JSON format).
+	// Read the log file and verify startup messages are present.
 	logPath := filepath.Join(dir, logFileName)
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -142,34 +143,152 @@ func TestSetupCreatesStderrLog(t *testing.T) {
 	}
 }
 
-func TestRotateIfNeeded(t *testing.T) {
+func TestShrinkLogIfNeededKeepsTail(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, logFileName)
 
-	// Create a file smaller than maxLogSize — should not rotate.
+	// File smaller than maxLogSize — untouched.
 	if err := os.WriteFile(logPath, []byte("small"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rotateIfNeeded(logPath)
-	if _, err := os.Stat(logPath); err != nil {
-		t.Fatal("file should still exist after no-op rotation")
+	shrinkLogIfNeeded(logPath)
+	data, err := os.ReadFile(logPath)
+	if err != nil || string(data) != "small" {
+		t.Fatalf("small file must not be shrunk, got %q err=%v", data, err)
 	}
 
-	// Create a file larger than maxLogSize — should rotate.
-	big := make([]byte, maxLogSize+1)
+	// File larger than maxLogSize — shrunk in place to the tail.
+	line := []byte("0123456789012345678901234567890123456789012345678901234567890\n")
+	big := bytes.Repeat(line, maxLogSize/len(line)+2)
+	lastLine := []byte("LAST LINE MARKER\n")
+	big = append(big, lastLine...)
 	if err := os.WriteFile(logPath, big, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rotateIfNeeded(logPath)
+	shrinkLogIfNeeded(logPath)
 
-	// Original file should be gone (renamed).
-	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
-		t.Fatal("original file should have been renamed")
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal("log file must still exist after shrink")
+	}
+	if info.Size() > shrinkKeepSize {
+		t.Fatalf("shrunk file size %d exceeds keep limit %d", info.Size(), shrinkKeepSize)
 	}
 
-	// Rotated file should exist.
+	data, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(data, lastLine) {
+		t.Fatal("shrunk log must preserve the most recent lines")
+	}
+	if !bytes.HasPrefix(data, line) {
+		t.Fatalf("shrunk log must start at a line boundary, got prefix %q", data[:16])
+	}
+
+	// No rotated copies are created.
 	matches, _ := filepath.Glob(logPath + ".*")
-	if len(matches) != 1 {
-		t.Fatalf("expected 1 rotated file, got %d", len(matches))
+	if len(matches) != 0 {
+		t.Fatalf("shrink must not create rotated copies, got %v", matches)
+	}
+}
+
+func TestRemoveLegacyRotatedLogs(t *testing.T) {
+	dir := t.TempDir()
+
+	legacy := []string{
+		logFileName + ".20250101-000000",
+		logFileName + ".20260101-000000",
+		stderrFileName + ".20260101-000000",
+	}
+	keep := []string{logFileName, stderrFileName, crashPrefix + "20260101-000000.log"}
+	for _, name := range append(append([]string{}, legacy...), keep...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeLegacyRotatedLogs(dir)
+
+	for _, name := range legacy {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("legacy rotated log %s must be removed", name)
+		}
+	}
+	for _, name := range keep {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("file %s must survive migration: %v", name, err)
+		}
+	}
+}
+
+func TestFileLogFormatDefaultsToConsole(t *testing.T) {
+	t.Setenv(envLogFormat, "")
+	if got := fileLogFormat(); got != logFormatConsole {
+		t.Fatalf("unset %s must default to console, got %q", envLogFormat, got)
+	}
+
+	t.Setenv(envLogFormat, "garbage")
+	if got := fileLogFormat(); got != logFormatConsole {
+		t.Fatalf("unknown %s must fall back to console, got %q", envLogFormat, got)
+	}
+
+	t.Setenv(envLogFormat, "JSON")
+	if got := fileLogFormat(); got != logFormatJSON {
+		t.Fatalf("%s=JSON must select json, got %q", envLogFormat, got)
+	}
+}
+
+func TestSetupWritesConsoleFormatByDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CORSA_CHATLOG_DIR", dir)
+	t.Setenv(envLogFormat, "")
+
+	cleanup := Setup()
+	defer cleanup()
+
+	data, err := os.ReadFile(filepath.Join(dir, logFileName))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if strings.Contains(string(data), `"message":"logging initialised"`) {
+		t.Fatal("default file format must be console, found JSON records")
+	}
+	if !strings.Contains(string(data), "logging initialised") {
+		t.Fatalf("log file missing startup banner, got:\n%s", data)
+	}
+}
+
+func TestSetupWritesJSONWhenRequested(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CORSA_CHATLOG_DIR", dir)
+	t.Setenv(envLogFormat, "json")
+
+	cleanup := Setup()
+	defer cleanup()
+
+	data, err := os.ReadFile(filepath.Join(dir, logFileName))
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(data), `"message":"logging initialised"`) {
+		t.Fatalf("%s=json must produce JSON records, got:\n%s", envLogFormat, data)
+	}
+}
+
+func TestSetupRemovesLegacyRotatedLogs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CORSA_CHATLOG_DIR", dir)
+
+	legacyPath := filepath.Join(dir, logFileName+".20250101-000000")
+	if err := os.WriteFile(legacyPath, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup := Setup()
+	defer cleanup()
+
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatal("Setup() must remove legacy corsa.log.* copies")
 	}
 }
