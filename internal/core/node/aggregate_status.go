@@ -28,8 +28,8 @@ const aggregateStatusHeartbeatInterval = 5 * time.Second
 // single source of truth.
 //
 // Caller MUST hold s.peerMu at least for read (peer domain owns s.health)
-// AND s.deliveryMu at least for read (delivery domain owns s.pending and
-// s.orphaned, both consumed here).  Canonical order is peerMu → deliveryMu.
+// AND s.deliveryMu at least for read (delivery domain owns s.pending,
+// consumed here).  Canonical order is peerMu → deliveryMu.
 // Writer-preferring RWMutex semantics make a self-nested RLock unsafe if
 // another writer queues between acquisitions, so this helper never calls
 // RLock itself — the caller's lock scope must already cover both domains.
@@ -58,13 +58,6 @@ func (s *Service) computeAggregateStatusLocked(now time.Time) domain.AggregateSt
 		if _, ok := healthAddrs[addr]; !ok {
 			pending += len(frames)
 		}
-	}
-
-	// Count orphaned frames — persisted backlog from legacy key migration
-	// that could not be matched to a current peer. These survive restarts
-	// and represent unsent data, so they belong in the pending total.
-	for _, frames := range s.orphaned {
-		pending += len(frames)
 	}
 
 	connected := usable + stalled
@@ -154,8 +147,7 @@ func (s *Service) refreshAggregateStatusLocked() {
 // Caller MUST hold:
 //   - s.peerMu at least for read (s.health is iterated to discover which
 //     addresses own pending frames)
-//   - s.deliveryMu at least for read (s.pending / s.orphaned live in the
-//     delivery domain)
+//   - s.deliveryMu at least for read (s.pending lives in the delivery domain)
 //   - s.statusMu.Lock (status domain — s.aggregateStatus.PendingMessages is
 //     written here)
 //
@@ -164,15 +156,12 @@ func (s *Service) refreshAggregatePendingLocked() {
 	// s.health is keyed by address (one entry per address), so the old
 	// health-then-non-health two-pass with a healthAddrs dedup map counted
 	// each pending address exactly once — which is identical to simply summing
-	// every pending queue plus every orphaned queue. This runs on every queue
-	// mutation (enqueue / flush / drain), so the previous per-call
-	// map[address]struct{} allocation (sized to len(s.health)) was a top
-	// allocation-churn source in profiling. Direct iteration is allocation-free.
+	// every pending queue. This runs on every queue mutation (enqueue / flush /
+	// drain), so the previous per-call map[address]struct{} allocation (sized
+	// to len(s.health)) was a top allocation-churn source in profiling. Direct
+	// iteration is allocation-free.
 	pending := 0
 	for _, frames := range s.pending {
-		pending += len(frames)
-	}
-	for _, frames := range s.orphaned {
 		pending += len(frames)
 	}
 	s.aggregateStatus.PendingMessages = pending

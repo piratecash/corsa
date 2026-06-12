@@ -176,7 +176,7 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 //
 // Unregistered frame types are REJECTED (400 Bad Request). Previously they
 // were forwarded to HandleLocalFrame, but this allowed HTTP clients to inject
-// network-level frames (relay_message, push_message, subscribe_inbox) that
+// network-level frames (relay_message, push_message) that
 // bypass P2P authentication. Only CommandTable-registered types have proper
 // validation and authorization checks for the RPC context.
 //
@@ -200,7 +200,7 @@ func (s *Server) handleFrame(c fiber.Ctx) error {
 		// Unregistered frame type — reject. Previously, unknown frame types
 		// were forwarded to HandleLocalFrame, which processes them as if
 		// they came from an authenticated P2P peer. This allowed HTTP
-		// clients to inject relay_message, push_message, subscribe_inbox
+		// clients to inject relay_message, push_message
 		// and other network-level frames, bypassing P2P authentication.
 		//
 		// Only CommandTable-registered frame types are safe for RPC dispatch

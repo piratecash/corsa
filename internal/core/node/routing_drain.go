@@ -38,9 +38,11 @@ import (
 // Only send_message is drained — other frame types are not route-recoverable:
 //   - relay_message, announce_peer: other peers' traffic, handled by relay
 //     retry loop and peer session flush respectively.
-//   - relay_delivery_receipt: delivered via relayStates hop chain
-//     (lookupReceiptForwardTo), not via the routing table. A new route to
-//     the receipt's Recipient does not create a delivery path for the receipt.
+//   - relay_delivery_receipt: delivered via the relayStates hop chain
+//     (relayHopForReceipt — the reverse ReceiptForwardTo hop for
+//     delivered/seen, the forward ForwardedTo hop for seen_ack), not via
+//     the routing table. A new route to the receipt's Recipient does not
+//     create a delivery path for the receipt.
 //     Receipts are retried through flushPendingPeerFrames (peer reconnect)
 //     and the relay retry loop, both of which already handle them correctly.
 //
@@ -512,7 +514,6 @@ returnFrames:
 	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_released").Int("pending_deltas", len(pendingDeltas)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "drainPendingForIdentities_return").Str("phase", "lock_released").Int("pending_deltas", len(pendingDeltas)).Msg("peer_mu_writer")
-	s.queuePersist.MarkDirty()
 	for _, d := range pendingDeltas {
 		s.emitPeerPendingChanged(d.Address, d.Count)
 	}

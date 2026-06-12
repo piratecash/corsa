@@ -116,19 +116,12 @@ func TestRelayChain4NodesDMDelivery(t *testing.T) {
 		t.Fatalf("expected message_stored from nodeA, got %s: %s", storeReply.Type, storeReply.Error)
 	}
 
-	// Wait for the DM to propagate to nodeC via relay/gossip chain.
-	// fetch_messages is a data-only command (Stage 7) — use HandleLocalFrame.
+	// Wait for the DM to propagate to nodeC via relay/gossip chain. On
+	// nodeC the DM is TRANSIT (neither party is nodeC), so the fetch
+	// surfaces exclude it by contract — probe the in-flight topic buffer
+	// directly.
 	waitForCondition(t, 15*time.Second, func() bool {
-		reply := nodeC.HandleLocalFrame(protocol.Frame{Type: "fetch_messages", Topic: "dm"})
-		if reply.Type != "messages" {
-			return false
-		}
-		for _, msg := range reply.Messages {
-			if msg.ID == "chain-dm-1" && msg.Recipient == recipientID.Address {
-				return true
-			}
-		}
-		return false
+		return topicHasMessage(nodeC, "dm", "chain-dm-1")
 	})
 }
 
@@ -468,8 +461,9 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Integration test: relay chain with live inbox route. Sender injects a DM
-// into NodeA. The recipient connects directly to NodeC with subscribe_inbox.
-// The DM should be pushed to the recipient via the live route.
+// into NodeA. The recipient connects directly to NodeC; the inbox route is
+// auto-registered at auth time (registerHelloRoute). The DM should be pushed
+// to the recipient via the live route.
 // ---------------------------------------------------------------------------
 
 func TestRelayChainWithLiveInboxRoute(t *testing.T) {
@@ -512,7 +506,8 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 		return len(nodeA.Peers()) >= 1 && len(nodeB.Peers()) >= 1
 	})
 
-	// Recipient connects to nodeB with authenticated session + subscribe_inbox.
+	// Recipient connects to nodeB with an authenticated session — the live
+	// inbox route is auto-registered at auth time.
 	recipConn, err := net.DialTimeout("tcp", nodeB.externalListenAddress(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial recipient: %v", err)
@@ -548,33 +543,8 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 		t.Fatalf("expected auth_ok, got %s: %s", authOK.Type, authOK.Error)
 	}
 
-	// subscribe_inbox
-	writeJSONFrame(t, recipConn, protocol.Frame{
-		Type:       "subscribe_inbox",
-		Topic:      "dm",
-		Recipient:  recipientID.Address,
-		Subscriber: "test-recip-sub",
-	})
-	subReply := readJSONTestFrame(t, recipReader)
-	if subReply.Type != "subscribed" {
-		t.Fatalf("expected subscribed, got %s: %s", subReply.Type, subReply.Error)
-	}
-
-	// Drain any reverse subscribe frame.
-	_ = recipConn.SetDeadline(time.Now().Add(2 * time.Second))
-	if reverseFrame, err := recipReader.ReadString('\n'); err == nil {
-		var rf protocol.Frame
-		rf, _ = protocol.ParseFrameLine(reverseFrame[:len(reverseFrame)-1])
-		if rf.Type == "subscribe_inbox" {
-			writeJSONFrame(t, recipConn, protocol.Frame{
-				Type:       "subscribed",
-				Topic:      rf.Topic,
-				Recipient:  rf.Recipient,
-				Subscriber: rf.Subscriber,
-			})
-		}
-	}
-	_ = recipConn.SetDeadline(time.Now().Add(15 * time.Second))
+	// The live inbox route was auto-registered at auth time
+	// (registerHelloRoute) — no explicit subscription round-trip exists.
 
 	// Encrypt DM and inject into nodeA.
 	ciphertext, err := directmsg.EncryptForParticipants(

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -142,6 +143,41 @@ func (g *ChatlogGateway) FetchConversations() (string, error) {
 		return "", fmt.Errorf("format conversations: %w", err)
 	}
 	return string(data), nil
+}
+
+// UndeliveredOutgoing returns the locally-sent DM entries still in the
+// "sent" delivery status — the durable source for the sender-side delivery
+// retry scheduler.
+func (g *ChatlogGateway) UndeliveredOutgoing() ([]chatlog.Entry, error) {
+	if g == nil || g.store == nil {
+		return nil, fmt.Errorf("chatlog not available")
+	}
+	return g.store.UndeliveredOutgoing(g.SelfAddress())
+}
+
+// UnconfirmedSeen returns the inbound DM entries marked "seen" whose seen
+// receipt the original sender has not confirmed yet (since bounds the scan).
+func (g *ChatlogGateway) UnconfirmedSeen(since time.Time) ([]chatlog.Entry, error) {
+	if g == nil || g.store == nil {
+		return nil, fmt.Errorf("chatlog not available")
+	}
+	return g.store.UnconfirmedSeen(g.SelfAddress(), since)
+}
+
+// MarkDeliveryFailed durably journals an abandoned delivery retry.
+func (g *ChatlogGateway) MarkDeliveryFailed(messageID string) error {
+	if g == nil || g.store == nil {
+		return fmt.Errorf("chatlog not available")
+	}
+	return g.store.MarkDeliveryFailed(messageID)
+}
+
+// MarkSeenConfirmed durably journals an arrived seen_ack.
+func (g *ChatlogGateway) MarkSeenConfirmed(messageID string) error {
+	if g == nil || g.store == nil {
+		return fmt.Errorf("chatlog not available")
+	}
+	return g.store.MarkSeenConfirmed(messageID)
 }
 
 // ReadCtx returns the raw chatlog entries for a conversation using the

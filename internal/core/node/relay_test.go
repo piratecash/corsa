@@ -240,64 +240,6 @@ func TestRelayStateStoreTTLCleanup(t *testing.T) {
 	}
 }
 
-func TestRelayStateStoreSnapshotAndRestore(t *testing.T) {
-	rs := newRelayStateStore()
-
-	rs.store(&relayForwardState{
-		MessageID:        "msg-1",
-		PreviousHop:      "peer-a",
-		ReceiptForwardTo: "peer-a",
-		ForwardedTo:      "peer-b",
-		HopCount:         3,
-		RemainingTTL:     100,
-	})
-	rs.store(&relayForwardState{
-		MessageID:        "msg-2",
-		PreviousHop:      "peer-c",
-		ReceiptForwardTo: "peer-c",
-		ForwardedTo:      "peer-d",
-		HopCount:         1,
-		RemainingTTL:     50,
-	})
-
-	snap := rs.snapshot()
-	if len(snap) != 2 {
-		t.Fatalf("expected 2 states in snapshot, got %d", len(snap))
-	}
-
-	// Restore into a new store
-	rs2 := newRelayStateStore()
-	rs2.restore(snap)
-
-	if rs2.count() != 2 {
-		t.Fatalf("expected 2 states after restore, got %d", rs2.count())
-	}
-	if !rs2.hasSeen("msg-1") {
-		t.Fatal("msg-1 should be seen after restore")
-	}
-	if !rs2.hasSeen("msg-2") {
-		t.Fatal("msg-2 should be seen after restore")
-	}
-}
-
-func TestRelayStateStoreRestoreSkipsExpired(t *testing.T) {
-	rs := newRelayStateStore()
-
-	states := []relayForwardState{
-		{MessageID: "msg-alive", RemainingTTL: 50},
-		{MessageID: "msg-expired", RemainingTTL: 0},
-		{MessageID: "msg-negative", RemainingTTL: -1},
-	}
-	rs.restore(states)
-
-	if rs.count() != 1 {
-		t.Fatalf("expected 1 state (expired should be skipped), got %d", rs.count())
-	}
-	if !rs.hasSeen("msg-alive") {
-		t.Fatal("msg-alive should survive restore")
-	}
-}
-
 // --- relayForwardState struct tests ---
 
 func TestRelayForwardStateFields(t *testing.T) {
@@ -539,7 +481,6 @@ func TestIsFireAndForgetFrame(t *testing.T) {
 		{"send_message", false},
 		{"publish_notice", false},
 		{"ping", false},
-		{"subscribe_inbox", false},
 		{"", false},
 	}
 
@@ -625,7 +566,6 @@ func newTestService(t *testing.T, nodeType config.NodeType) *Service {
 	svc := NewService(config.Node{
 		ListenAddress:     "127.0.0.1:64646",
 		TrustStorePath:    filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:    filepath.Join(tempDir, "queue.json"),
 		Type:              nodeType,
 		AllowPrivatePeers: true,
 	}, id, nil)
@@ -1107,112 +1047,6 @@ func TestRejectedRelayStoredBranchReturnsEmptyStatus(t *testing.T) {
 	}
 }
 
-// TestRelayState_DormantPersisterManualFlushStillWrites is a low-level test of
-// the DORMANT queue-state persister, NOT a runtime durability guarantee.
-//
-// At runtime the persister's Run goroutine is no longer started and
-// MarkDirty is a no-op, so relay forward state is in-memory only and does NOT
-// survive a restart (see docs/protocol/relay.md INV-8). This test bypasses
-// that by calling FlushSync() directly — the synchronous escape hatch on the
-// still-constructed persister — to confirm the retained mechanism can still
-// snapshot relay forward state to disk on demand. It exists to keep the
-// dormant mechanism exercised until it is removed; it must NOT be read as
-// proof that relay paths survive a restart in production.
-func TestRelayState_DormantPersisterManualFlushStillWrites(t *testing.T) {
-	t.Parallel()
-	svc := newTestService(t, config.NodeTypeFull)
-
-	sender := registerSenderKey(t, svc)
-	body := sealDMBody(t, sender, svc.Address(), identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey))
-
-	frame := protocol.Frame{
-		Type:        "relay_message",
-		ID:          "persist-test-1",
-		Address:     sender.Address,
-		Recipient:   svc.Address(),
-		Topic:       "dm",
-		Body:        body,
-		Flag:        string(protocol.MessageFlagImmutable),
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
-		HopCount:    1,
-		MaxHops:     10,
-		PreviousHop: "10.0.0.9:64646",
-	}
-
-	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.9:64646"), nil, frame)
-	if status != "delivered" {
-		t.Fatalf("expected \"delivered\", got %q", status)
-	}
-
-	// handleRelayMessage mutation sites call MarkDirty from fire-and-forget
-	// goroutines. MarkDirty no longer has a background consumer (the Run loop
-	// is not started), but it still sets the persister's dirty flag — which
-	// FlushSync's finalFlush requires (it returns early when not dirty).
-	// WaitBackground drains those goroutines so the dirty flag is set, then
-	// FlushSync — the manual escape hatch on the dormant persister — forces an
-	// on-demand snapshot to disk inline (the only way the file is written now).
-	// loadQueueState below then observes that snapshot.
-	svc.WaitBackground()
-	svc.queuePersist.FlushSync()
-
-	// Read the persisted queue state and verify relay forward states are there.
-	queuePath := svc.cfg.EffectiveQueueStatePath()
-	state, err := loadQueueState(queuePath)
-	if err != nil {
-		t.Fatalf("loadQueueState: %v", err)
-	}
-
-	found := false
-	for _, rs := range state.RelayForwardStates {
-		if rs.MessageID == "persist-test-1" {
-			if rs.ReceiptForwardTo != "10.0.0.9:64646" {
-				t.Fatalf("persisted ReceiptForwardTo = %q, want 10.0.0.9:64646", rs.ReceiptForwardTo)
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("dormant persister FlushSync did not snapshot relay forward state to the queue-state file")
-	}
-}
-
-// TestDecrementTTLsAndReportReturnValue verifies that decrementTTLsAndReport
-// returns true only when entries are actually removed.
-func TestDecrementTTLsAndReportReturnValue(t *testing.T) {
-	t.Parallel()
-	rs := newRelayStateStore()
-
-	rs.store(&relayForwardState{
-		MessageID:    "ttl-report-1",
-		RemainingTTL: 3,
-	})
-
-	// Tick 1: TTL goes from 3 to 2 — no removal.
-	if rs.decrementTTLsAndReport() {
-		t.Fatal("decrementTTLsAndReport should return false when no entries removed")
-	}
-
-	// Tick 2: TTL goes from 2 to 1 — no removal.
-	if rs.decrementTTLsAndReport() {
-		t.Fatal("decrementTTLsAndReport should return false when no entries removed")
-	}
-
-	// Tick 3: TTL goes from 1 to 0 — entry removed.
-	if !rs.decrementTTLsAndReport() {
-		t.Fatal("decrementTTLsAndReport should return true when entries are removed")
-	}
-
-	if rs.count() != 0 {
-		t.Fatalf("expected 0 entries after TTL expiry, got %d", rs.count())
-	}
-
-	// Tick 4: empty store — no removal.
-	if rs.decrementTTLsAndReport() {
-		t.Fatal("decrementTTLsAndReport should return false on empty store")
-	}
-}
-
 // TestTryReserveAtomicDedupe verifies that tryReserve provides atomic
 // check-and-claim semantics: the first call for a given messageID succeeds,
 // subsequent calls return false. This closes the race window between
@@ -1494,7 +1328,6 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:     "127.0.0.1:0",
 		TrustStorePath:    filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:    filepath.Join(tempDir, "queue.json"),
 		AllowPrivatePeers: true,
 	}, id, nil)
 	t.Cleanup(svc.WaitBackground)

@@ -18,7 +18,6 @@ func TestRuntimeExecuteHelp(t *testing.T) {
 	cfg.Node.ChatLogDir = t.TempDir()
 	cfg.Node.IdentityPath = filepath.Join(cfg.Node.ChatLogDir, "identity.json")
 	cfg.Node.TrustStorePath = filepath.Join(cfg.Node.ChatLogDir, "trust.json")
-	cfg.Node.QueueStatePath = filepath.Join(cfg.Node.ChatLogDir, "queue.json")
 	cfg.Node.PeersStatePath = filepath.Join(cfg.Node.ChatLogDir, "peers.json")
 
 	// SDK no longer auto-generates identity — create one for the test.

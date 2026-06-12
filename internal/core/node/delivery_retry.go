@@ -1,0 +1,433 @@
+package node
+
+// ---------------------------------------------------------------------------
+// Sender-side end-to-end delivery retry.
+//
+// Relays are forwarding-only (transit_retention.go): nothing in the mesh
+// stores user messages durably for an offline recipient. The party that owns
+// delivery is therefore the SENDER, and this scheduler is its retry engine:
+//
+//   - awaitingDelivered — every locally-sent DM stays here until the
+//     recipient's delivered/seen receipt arrives. On each due tick the
+//     envelope is re-sent with the SAME MessageID: the receiver dedupes
+//     silently (no beep, no unread) and re-sends the delivered receipt
+//     (see the duplicate paths in storeIncomingMessage).
+//   - awaitingSeenAck — every locally-sent "seen" receipt stays here until
+//     the original message sender confirms it with a "seen_ack" receipt
+//     (ReceiptStatusSeenAck, additive in ProtocolVersion 23). The original
+//     sender answers seen and seen-duplicates with seen_ack symmetrically
+//     to the message/delivered pair.
+//
+// Both maps are delivery-domain state under s.deliveryMu (docs/locking.md).
+// The tick runs from bootstrapLoop: due entries are snapshotted (and their
+// schedule bumped) under the mutex, the actual sends happen after release —
+// network I/O under a domain mutex is forbidden.
+//
+// Retry intervals are exponential: 30s → 1m → 2m → 5m → 11m (capped). The
+// early intervals only help when a direct route to the recipient exists —
+// a re-emission through transit peers is absorbed by their dedup layers
+// (relay exact-dedup TTL 3 min, bloom rotation window 5-10 min). From the
+// 5th attempt on the interval exceeds every dedup window, so blind/relayed
+// retries start getting through. Routing per attempt mirrors the primary
+// send: live subscriber push, then table-directed relay, then blind gossip
+// ("the route may be missing only on OUR side" — absence of a route does
+// not prove the recipient is offline).
+//
+// Durability: the desktop layer registers a chatlog-backed DeliveryOutbox;
+// RegisterDeliveryOutbox reseeds awaitingDelivered from the still-'sent'
+// rows, and — when the outbox also implements SeenAckJournal — reseeds
+// awaitingSeenAck from the seen rows that lack a journaled seen_ack, so
+// both retry sets survive a sender restart. Relay-only nodes (no outbox)
+// run memory-only.
+// ---------------------------------------------------------------------------
+
+import (
+	"time"
+
+	"github.com/rs/zerolog/log"
+
+	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/protocol"
+)
+
+// DeliveryOutbox is the narrow read-only view of the durable message store
+// used to reseed the sender-side delivery retry scheduler after a restart.
+// Implemented by the desktop chatlog adapter; nil on relay-only nodes.
+type DeliveryOutbox interface {
+	// UndeliveredOutgoing returns the sealed envelopes of locally-sent DMs
+	// whose delivery status is still "sent".
+	UndeliveredOutgoing() ([]protocol.Envelope, error)
+}
+
+// DeliveryFailureJournal is the optional durable journal for messages the
+// retry engine gave up on (TTL expiry / attempts cap). A journaled id is
+// excluded from UndeliveredOutgoing, so RegisterDeliveryOutbox does not
+// reseed it after a restart — the attempts cap stays durable. Implemented
+// by the desktop chatlog adapter.
+type DeliveryFailureJournal interface {
+	// MarkDeliveryFailed durably records that automatic retries for the
+	// message have been abandoned.
+	MarkDeliveryFailed(id protocol.MessageID) error
+}
+
+// SeenAckJournal is the optional durable journal for outgoing seen
+// receipts: which of the locally-seen inbound DMs still lack the original
+// sender's seen_ack. Implemented by the desktop chatlog adapter (an outbox
+// that also implements this interface gets the seen retry reseeded after a
+// restart and confirmations persisted on arrival).
+type SeenAckJournal interface {
+	// UnconfirmedSeen returns the outgoing seen receipts that have not been
+	// confirmed with a seen_ack yet.
+	UnconfirmedSeen() ([]protocol.DeliveryReceipt, error)
+	// MarkSeenConfirmed durably records that the seen receipt for the
+	// message was confirmed by the original sender.
+	MarkSeenConfirmed(id protocol.MessageID) error
+}
+
+// deliveryRetrySchedule are the exponential retry intervals; the last value
+// repeats. See the package comment for why the tail exceeds the transit
+// dedup windows.
+var deliveryRetrySchedule = []time.Duration{
+	30 * time.Second,
+	1 * time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	11 * time.Minute,
+}
+
+// defaultDeliveryRetryMaxAttempts bounds how long a sender keeps retrying a
+// single message/receipt: 20 attempts ≈ 3.5 hours on the capped schedule.
+// Overridable via config.Node.DeliveryRetryMaxAttempts
+// (CORSA_DELIVERY_RETRY_MAX_ATTEMPTS).
+const defaultDeliveryRetryMaxAttempts = 20
+
+// deliveryRetryBackoff returns the wait before the attempt with the given
+// zero-based number.
+func deliveryRetryBackoff(attempt int) time.Duration {
+	if attempt >= len(deliveryRetrySchedule) {
+		return deliveryRetrySchedule[len(deliveryRetrySchedule)-1]
+	}
+	return deliveryRetrySchedule[attempt]
+}
+
+// deliveryRetryEntry tracks one locally-sent DM awaiting its delivered/seen
+// receipt. Owned by s.deliveryMu.
+type deliveryRetryEntry struct {
+	Envelope      protocol.Envelope
+	Attempts      int
+	NextAttemptAt time.Time
+}
+
+// seenAckRetryEntry tracks one locally-sent seen receipt awaiting the
+// original sender's seen_ack. Owned by s.deliveryMu.
+type seenAckRetryEntry struct {
+	Receipt       protocol.DeliveryReceipt
+	Attempts      int
+	NextAttemptAt time.Time
+}
+
+func (s *Service) deliveryRetryMaxAttempts() int {
+	if s.cfg.DeliveryRetryMaxAttempts > 0 {
+		return s.cfg.DeliveryRetryMaxAttempts
+	}
+	return defaultDeliveryRetryMaxAttempts
+}
+
+// registerAwaitingDeliveredLocked schedules the locally-sent envelope for
+// end-to-end retry until its delivered/seen receipt arrives. Caller MUST
+// hold s.deliveryMu.Lock. Idempotent per MessageID — a re-send of the same
+// id keeps the original schedule.
+func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, now time.Time) {
+	if _, exists := s.awaitingDelivered[envelope.ID]; exists {
+		return
+	}
+	s.awaitingDelivered[envelope.ID] = &deliveryRetryEntry{
+		Envelope:      envelope,
+		NextAttemptAt: now.Add(deliveryRetryBackoff(0)),
+	}
+}
+
+// registerAwaitingSeenAckLocked schedules the locally-sent seen receipt for
+// retry until the original sender's seen_ack arrives. Caller MUST hold
+// s.deliveryMu.Lock. Idempotent per MessageID.
+func (s *Service) registerAwaitingSeenAckLocked(receipt protocol.DeliveryReceipt, now time.Time) {
+	if _, exists := s.awaitingSeenAck[receipt.MessageID]; exists {
+		return
+	}
+	s.awaitingSeenAck[receipt.MessageID] = &seenAckRetryEntry{
+		Receipt:       receipt,
+		NextAttemptAt: now.Add(deliveryRetryBackoff(0)),
+	}
+}
+
+// RegisterDeliveryOutbox reseeds the delivery retry scheduler from the
+// durable outbox (chatlog rows still in "sent"). Called once by the desktop
+// layer right after RegisterMessageStore, before Run.
+func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
+	if outbox == nil {
+		return
+	}
+	now := time.Now().UTC()
+
+	envelopes, err := outbox.UndeliveredOutgoing()
+	if err != nil {
+		log.Error().Err(err).Msg("delivery_retry_outbox_reseed_failed")
+	} else if len(envelopes) > 0 {
+		s.deliveryMu.Lock()
+		for _, envelope := range envelopes {
+			s.registerAwaitingDeliveredLocked(envelope, now)
+		}
+		count := len(s.awaitingDelivered)
+		s.deliveryMu.Unlock()
+		log.Info().Int("reseeded", len(envelopes)).Int("awaiting_delivered", count).Msg("delivery_retry_outbox_reseeded")
+	}
+
+	// Durable arm of the seen retry: an outbox that also journals seen
+	// confirmations reseeds the unconfirmed seen receipts too, and gets the
+	// arriving seen_ack persisted back (storeDeliveryReceipt).
+	if failureJournal, ok := outbox.(DeliveryFailureJournal); ok {
+		s.deliveryFailureJournal = failureJournal
+	}
+
+	journal, ok := outbox.(SeenAckJournal)
+	if !ok {
+		return
+	}
+	s.seenAckJournal = journal
+	receipts, err := journal.UnconfirmedSeen()
+	if err != nil {
+		log.Error().Err(err).Msg("seen_ack_journal_reseed_failed")
+		return
+	}
+	if len(receipts) == 0 {
+		return
+	}
+	s.deliveryMu.Lock()
+	for _, receipt := range receipts {
+		s.registerAwaitingSeenAckLocked(receipt, now)
+	}
+	seenCount := len(s.awaitingSeenAck)
+	s.deliveryMu.Unlock()
+	log.Info().Int("reseeded", len(receipts)).Int("awaiting_seen_ack", seenCount).Msg("seen_ack_journal_reseeded")
+}
+
+// retryDueDeliveries re-sends every awaiting entry whose NextAttemptAt has
+// passed. Called from bootstrapLoop on its 2s tick; the schedule inside the
+// entries provides the real pacing. The due snapshot (and the schedule
+// bump) happens under s.deliveryMu; the sends run after release.
+func (s *Service) retryDueDeliveries(now time.Time) {
+	maxAttempts := s.deliveryRetryMaxAttempts()
+
+	var dueMessages []protocol.Envelope
+	var dueReceipts []protocol.DeliveryReceipt
+	type abandonedDelivery struct {
+		envelope protocol.Envelope
+		status   string
+		reason   string
+	}
+	var abandoned []abandonedDelivery
+
+	log.Trace().Str("site", "retryDueDeliveries").Str("phase", "lock_wait").Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "retryDueDeliveries").Str("phase", "lock_held").Msg("delivery_mu_writer")
+	for id, entry := range s.awaitingDelivered {
+		if entry.NextAttemptAt.After(now) {
+			continue
+		}
+		// TTL bounds the delivery lifetime (docs/protocol/messaging.md) —
+		// the retry engine honours it the same way the relay retry loop
+		// does, instead of re-emitting an envelope receivers would reject
+		// as expired.
+		if s.messageDeliveryExpired(entry.Envelope.CreatedAt, entry.Envelope.TTLSeconds) {
+			delete(s.awaitingDelivered, id)
+			abandoned = append(abandoned, abandonedDelivery{entry.Envelope, "expired", "message delivery expired"})
+			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).Msg("delivery_retry_expired_ttl")
+			continue
+		}
+		if entry.Attempts >= maxAttempts {
+			delete(s.awaitingDelivered, id)
+			abandoned = append(abandoned, abandonedDelivery{entry.Envelope, "failed", "delivery retries exhausted"})
+			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).Int("attempts", entry.Attempts).Msg("delivery_retry_exhausted")
+			continue
+		}
+		entry.Attempts++
+		entry.NextAttemptAt = now.Add(deliveryRetryBackoff(entry.Attempts))
+		dueMessages = append(dueMessages, entry.Envelope)
+	}
+	for id, entry := range s.awaitingSeenAck {
+		if entry.NextAttemptAt.After(now) {
+			continue
+		}
+		if entry.Attempts >= maxAttempts {
+			delete(s.awaitingSeenAck, id)
+			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Receipt.Recipient).Int("attempts", entry.Attempts).Msg("seen_ack_retry_exhausted")
+			continue
+		}
+		entry.Attempts++
+		entry.NextAttemptAt = now.Add(deliveryRetryBackoff(entry.Attempts))
+		dueReceipts = append(dueReceipts, entry.Receipt)
+	}
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "retryDueDeliveries").Str("phase", "lock_released").Msg("delivery_mu_writer")
+
+	for _, entry := range abandoned {
+		s.failDelivery(entry.envelope, entry.status, entry.reason)
+	}
+	for _, envelope := range dueMessages {
+		log.Info().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).Msg("delivery_retry_resend")
+		s.dispatchEnvelopeRetry(envelope)
+	}
+	for _, receipt := range dueReceipts {
+		log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("seen_receipt_retry_resend")
+		s.distributeReceipt(receipt)
+	}
+}
+
+// peerSupportsProtocol reports whether the peer behind the address
+// advertises a negotiated wire protocol version >= min. Checks the outbound
+// session first, then the inbound conn registry. Unknown peers (no live
+// session/conn) report false — for additive features the caller's retry
+// re-attempts once the peer is back with a known version.
+func (s *Service) peerSupportsProtocol(address domain.PeerAddress, min int) bool {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	if session := s.resolveSessionLocked(address); session != nil && session.version >= min {
+		return true
+	}
+	for _, entry := range s.conns {
+		if entry == nil || entry.core == nil {
+			continue
+		}
+		if entry.core.Address() == address && int(entry.core.ProtocolVersion()) >= min {
+			return true
+		}
+	}
+	return false
+}
+
+// connSupportsProtocol reports whether the connection advertises a
+// negotiated wire protocol version >= min.
+func (s *Service) connSupportsProtocol(connID domain.ConnID, min int) bool {
+	core := s.netCoreForID(connID)
+	return core != nil && int(core.ProtocolVersion()) >= min
+}
+
+// failDelivery finalises a locally-sent DM the retry engine gave up on
+// (TTL expiry or attempts cap): outbound goes terminal — the same
+// "expired"/"failed" statuses the pending-ring paths use, visible through
+// fetch_pending_messages — the pending rings drop every queued frame of the
+// message (the send_message AND any relay_message queued by the relay
+// fallback), relayRetry drops its entry, the aggregate pending count
+// refreshes, and the durable failure journal (written synchronously — it is
+// the durable boundary of the abandonment) keeps RegisterDeliveryOutbox
+// from reseeding the same chatlog row after a restart. A late-receipt
+// re-check under the locks makes the abandon decision lose against a
+// delivered/seen receipt that landed in the unlocked gap since the retry
+// tick. The chatlog row itself intentionally stays at "sent": sent→failed
+// is not a chatlog lifecycle transition, and "sent without delivered" is
+// the truthful terminal state the UI shows — only the automatic retries
+// stop.
+//
+// Canonical order peerMu → deliveryMu → statusMu (refreshAggregatePendingLocked
+// reads peer-domain health and writes status-domain state); side effects and
+// the synchronous journal write run after every mutex is released.
+func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string) {
+	frame := protocol.Frame{Type: "send_message", Topic: envelope.Topic, ID: string(envelope.ID), Recipient: envelope.Recipient}
+
+	log.Trace().Str("site", "failDelivery").Str("phase", "lock_wait").Str("msg_id", string(envelope.ID)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "failDelivery").Str("phase", "lock_held").Str("msg_id", string(envelope.ID)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "failDelivery").Str("phase", "lock_wait").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "failDelivery").Str("phase", "lock_held").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
+	// Late-receipt re-check: the abandon decision was taken under a
+	// previous deliveryMu window; a delivered/seen receipt may have landed
+	// in the unlocked gap (clearing awaitingDelivered and updating chatlog).
+	// Terminalizing or journaling on top of that would overwrite a
+	// confirmed delivery with failed/expired — skip entirely.
+	if s.hasReceiptForMessageLocked(envelope.Sender, envelope.ID) {
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "failDelivery").Str("phase", "lock_released_receipt_won").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "failDelivery").Str("phase", "lock_released_receipt_won").Str("msg_id", string(envelope.ID)).Msg("peer_mu_writer")
+		log.Debug().Str("message_id", string(envelope.ID)).Msg("delivery_retry_abandon_skipped: receipt arrived first")
+		return
+	}
+	s.markOutboundTerminalLocked(frame, status, reason)
+	pendingDeltas := s.clearPendingMessageLocked(envelope.ID)
+	delete(s.relayRetry, relayMessageKey(envelope.ID))
+	s.statusMu.Lock()
+	if len(pendingDeltas) > 0 {
+		s.refreshAggregatePendingLocked()
+	}
+	aggSnap := s.aggregateStatus
+	s.statusMu.Unlock()
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "failDelivery").Str("phase", "lock_released").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "failDelivery").Str("phase", "lock_released").Str("msg_id", string(envelope.ID)).Msg("peer_mu_writer")
+
+	for _, d := range pendingDeltas {
+		s.emitPeerPendingChanged(d.Address, d.Count)
+	}
+	if len(pendingDeltas) > 0 {
+		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
+	}
+
+	// The journal write is the durable boundary of the abandonment ("do not
+	// reseed after restart"), so it runs SYNCHRONOUSLY here — every domain
+	// mutex is already released, and failDelivery executes on the
+	// bootstrapLoop tick goroutine, not on a hot wire path. A background
+	// hop would race production shutdown: Run does not wait for
+	// backgroundWg, and the desktop/SDK runtime closes the chatlog right
+	// after Run returns, silently dropping the write and resurrecting the
+	// abandoned retry on the next start.
+	if s.deliveryFailureJournal != nil {
+		if err := s.deliveryFailureJournal.MarkDeliveryFailed(envelope.ID); err != nil {
+			log.Warn().Str("message_id", string(envelope.ID)).Err(err).Msg("delivery_failure_journal_write_failed")
+		}
+	}
+}
+
+// sendSeenAck answers a received "seen" receipt with the end-to-end
+// seen_ack confirmation (ReceiptStatusSeenAck) so the seen-sender's retry
+// loop stops. No local retry state is kept for the ack itself: every
+// (re)arrival of the seen receipt re-triggers it, mirroring the
+// duplicate-DM → delivered re-send contract.
+func (s *Service) sendSeenAck(seen protocol.DeliveryReceipt) {
+	defer crashlog.DeferRecover()
+	ack := protocol.DeliveryReceipt{
+		MessageID:   seen.MessageID,
+		Sender:      s.identity.Address,
+		Recipient:   seen.Sender,
+		Status:      protocol.ReceiptStatusSeenAck,
+		DeliveredAt: time.Now().UTC(),
+	}
+	log.Info().Str("message_id", string(ack.MessageID)).Str("recipient", ack.Recipient).Msg("seen_ack_send")
+	s.distributeReceipt(ack)
+}
+
+// dispatchEnvelopeRetry re-sends one locally-sent envelope, mirroring the
+// primary send paths of storeIncomingMessage: live subscriber push,
+// table-directed relay when a route exists, blind gossip otherwise. The
+// re-emission reuses the stored hop budget (a retry is the same hop, not a
+// new one) and is deduped by receivers via the duplicate paths that also
+// re-send the delivered receipt.
+func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope) {
+	decision := s.router.Route(envelope)
+
+	if len(decision.PushSubscribers) > 0 {
+		s.goBackground(func() { s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers) })
+	}
+
+	gossipTargets := s.filterGossipTargetsForEnvelope(envelope, decision.GossipTargets)
+	s.executeGossipTargets(envelope, gossipTargets)
+
+	if decision.RelayNextHop != nil {
+		s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+	} else {
+		s.tryRelayToCapableFullNodes(envelope, gossipTargets)
+	}
+}

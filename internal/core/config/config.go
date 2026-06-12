@@ -47,7 +47,6 @@ type Node struct {
 	BootstrapPeers   []string
 	IdentityPath     string
 	TrustStorePath   string
-	QueueStatePath   string
 	PeersStatePath   string
 	ChatLogDir       string // directory for chatlog/state files
 	DownloadDir      string // directory for downloaded files (defaults to "<DataDir>/downloads")
@@ -71,6 +70,11 @@ type Node struct {
 	// internal/core/node — so this knob only trades RAM for how far back a
 	// reconnecting peer can still receive missed frames within the uptime.
 	PendingRingSize int
+	// DeliveryRetryMaxAttempts caps how many times the sender-side delivery
+	// retry scheduler re-sends a single message (or seen receipt) that has
+	// not been confirmed end-to-end. 0 selects the node-package default.
+	// Env: CORSA_DELIVERY_RETRY_MAX_ATTEMPTS.
+	DeliveryRetryMaxAttempts int
 
 	// AllowPrivatePeers disables the private/loopback IP filter for peer
 	// addresses. Production nodes never set this — it exists solely for
@@ -274,17 +278,28 @@ const (
 	// is well above v12, so this build does not carry any v10..v13
 	// compatibility paths.
 	//
-	// v20: subscribe_inbox deprecation rollout. A v20 responder auto-registers
-	// the peer's inbox subscription AND replays the backlog at auth time (see
-	// handleAuthSession → registerHelloRoute), so the explicit
-	// subscribe_inbox/subscribed round-trip is redundant. A v20 initiator
-	// therefore SKIPS subscribe_inbox when the peer advertises version >= 20
-	// and still sends it to older peers (see peer_sessions.go). The
-	// subscribe_inbox command itself stays wired for backward compatibility and
-	// for client-role (non-node) subscribers; it will be removed only once
-	// MinimumProtocolVersion reaches 20.
-	ProtocolVersion        = 22
-	MinimumProtocolVersion = 18
+	// v20 raised the floor past the subscribe_inbox era: a v20+ responder
+	// auto-registers the peer's inbox subscription AND replays the backlog at
+	// auth time (see handleAuthSession → registerHelloRoute), so the explicit
+	// subscribe_inbox/subscribed round-trip became redundant. With the floor
+	// at 20 the legacy commands (subscribe_inbox, subscribed, request_inbox)
+	// and the pre-v20 initiator round-trip have been removed entirely.
+	// v23: ReceiptStatusSeenAck — the end-to-end acknowledgement the
+	// original message sender returns for a received "seen" receipt, riding
+	// the existing receipt frames (push_delivery_receipt /
+	// relay_delivery_receipt). Additive: pre-v23 binaries reject the unknown
+	// status at parse time and drop the frame; the seen-sender's bounded
+	// retry absorbs that until both ends are v23+.
+	ProtocolVersion        = 23
+	MinimumProtocolVersion = 20
+	// ProtocolVersionSeenAck is the version that introduced
+	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
+	// peer advertising >= this version (a pre-v23 binary only rejects the
+	// unknown status at parse time, so sending it is pure waste).
+	// TODO(seen-ack-gate-removal): delete this constant and the gates in
+	// internal/core/node (sendReceiptToPeer, pushReceiptToSubscribers) once
+	// MinimumProtocolVersion reaches ProtocolVersionSeenAck.
+	ProtocolVersionSeenAck = 23
 	DefaultOutgoingPeers   = 8
 	DefaultPeerPort        = "64646"
 )
@@ -304,7 +319,6 @@ func Default() Config {
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
 	identityPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress)))
 	trustStorePath := resolveStartupPath(envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress)))
-	queueStatePath := resolveStartupPath(envOrDefault("CORSA_QUEUE_STATE_PATH", defaultQueueStatePath(listenAddress)))
 	peersStatePath := resolveStartupPath(envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress)))
 	chatLogDir := resolveStartupPath(envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir()))
 	downloadDir := resolveStartupPath(envOrDefault("CORSA_DOWNLOAD_DIR", ""))
@@ -320,6 +334,7 @@ func Default() Config {
 	overloadGoroutineThreshold := overloadGoroutineThresholdFromEnv()
 	enableMeshRoutingV3 := enableMeshRoutingV3FromEnv()
 	pendingRingSize := pendingRingSizeFromEnv()
+	deliveryRetryMaxAttempts := deliveryRetryMaxAttemptsFromEnv()
 
 	return Config{
 		App: App{
@@ -335,7 +350,6 @@ func Default() Config {
 			BootstrapPeers:             bootstrapPeers,
 			IdentityPath:               identityPath,
 			TrustStorePath:             trustStorePath,
-			QueueStatePath:             queueStatePath,
 			PeersStatePath:             peersStatePath,
 			ChatLogDir:                 chatLogDir,
 			DownloadDir:                downloadDir,
@@ -348,6 +362,7 @@ func Default() Config {
 			MaxOutgoingPeers:           maxOutgoingPeers,
 			MaxIncomingPeers:           maxIncomingPeers,
 			PendingRingSize:            pendingRingSize,
+			DeliveryRetryMaxAttempts:   deliveryRetryMaxAttempts,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
 			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
 			SeqAdvanceWindow:           seqAdvanceWindow,
@@ -430,13 +445,6 @@ func (n Node) EffectiveMaxIncomingPeers() int {
 	return 0
 }
 
-func (n Node) EffectiveQueueStatePath() string {
-	if strings.TrimSpace(n.QueueStatePath) != "" {
-		return n.QueueStatePath
-	}
-	return defaultQueueStatePath(n.ListenAddress)
-}
-
 func (n Node) EffectivePeersStatePath() string {
 	if strings.TrimSpace(n.PeersStatePath) != "" {
 		return n.PeersStatePath
@@ -498,12 +506,6 @@ func defaultTrustStorePath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
 	return filepath.Join(defaultChatLogDir(), "trust-"+port+".json")
-}
-
-func defaultQueueStatePath(listenAddress string) string {
-	port := portSuffix(listenAddress)
-
-	return filepath.Join(defaultChatLogDir(), "queue-"+port+".json")
 }
 
 func defaultPeersStatePath(listenAddress string) string {
@@ -841,6 +843,21 @@ func maxIncomingPeersFromEnv() int {
 // the per-peer ring at exactly that many frames. See Node.PendingRingSize.
 func pendingRingSizeFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv("CORSA_PENDING_RING_SIZE"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+// deliveryRetryMaxAttemptsFromEnv reads CORSA_DELIVERY_RETRY_MAX_ATTEMPTS —
+// the cap on sender-side end-to-end delivery retries. Empty, non-numeric or
+// non-positive values select the node-package default.
+func deliveryRetryMaxAttemptsFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_DELIVERY_RETRY_MAX_ATTEMPTS"))
 	if raw == "" {
 		return 0
 	}

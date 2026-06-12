@@ -1,9 +1,7 @@
 package node
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -31,42 +29,49 @@ func drainPipe(t *testing.T) net.Conn {
 	return conn
 }
 
-// TestRespondToInboxRequestNilSession verifies that respondToInboxRequest
-// does not panic when called with a nil session.
-func TestRespondToInboxRequestNilSession(t *testing.T) {
-	svc := &Service{}
-	// Must not panic.
-	svc.respondToInboxRequest(nil)
-}
-
-// TestRespondToInboxRequestEmptyInbox verifies that respondToInboxRequest
-// produces no frames when there are no pending messages for the peer.
-func TestRespondToInboxRequestEmptyInbox(t *testing.T) {
-	svc := &Service{}
-	svc.initMaps()
-
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = serverConn.Close() }()
-	defer func() { _ = clientConn.Close() }()
-
-	session := &peerSession{
-		address: "peer-addr",
-		conn:    clientConn,
+// initMaps initialises the Service maps that tests constructing a bare
+// &Service{} (bypassing NewService) rely on. Kept in sync with the
+// production NewService defaults for the fields it covers.
+func (s *Service) initMaps() {
+	// Match the production NewService default: keep runCtx non-nil so that
+	// code paths deriving ctx from s.runCtx (sender-key recovery etc.)
+	// do not panic in tests that construct &Service{} directly.
+	if s.runCtx == nil {
+		s.runCtx = context.Background()
 	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		svc.respondToInboxRequest(session)
-	}()
-
-	// Close the writer side so the reader unblocks.
-	select {
-	case <-done:
-		// respondToInboxRequest finished without writing anything.
-	case <-time.After(2 * time.Second):
-		t.Fatal("respondToInboxRequest hung — expected it to return quickly for empty inbox")
-	}
+	s.topics = make(map[string][]protocol.Envelope)
+	s.seen = newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
+	s.seenReceipts = make(map[string]struct{})
+	s.known = make(map[string]struct{})
+	s.sessions = make(map[domain.PeerAddress]*peerSession)
+	s.subs = make(map[string]map[string]*subscriber)
+	s.receipts = make(map[string][]protocol.DeliveryReceipt)
+	s.notices = make(map[string]gazeta.Notice)
+	s.conns = make(map[netcore.ConnID]*connEntry)
+	s.connIDByNetConn = make(map[net.Conn]netcore.ConnID)
+	s.pending = make(map[domain.PeerAddress][]pendingFrame)
+	s.pendingKeys = make(map[pendingKey]struct{})
+	s.relayRetry = make(map[string]relayAttempt)
+	s.outbound = make(map[string]outboundDelivery)
+	s.awaitingDelivered = make(map[protocol.MessageID]*deliveryRetryEntry)
+	s.awaitingSeenAck = make(map[protocol.MessageID]*seenAckRetryEntry)
+	s.upstream = make(map[domain.PeerAddress]struct{})
+	s.health = make(map[domain.PeerAddress]*peerHealth)
+	s.peerTypes = make(map[domain.PeerAddress]domain.NodeType)
+	s.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
+	s.peerVersions = make(map[domain.PeerAddress]string)
+	s.peerBuilds = make(map[domain.PeerAddress]int)
+	s.pubKeys = make(map[string]string)
+	s.boxKeys = make(map[string]string)
+	s.boxSigs = make(map[string]string)
+	s.bans = make(map[string]banEntry)
+	s.events = make(map[chan protocol.LocalChangeEvent]struct{})
+	s.inboundHealthRefs = make(map[domain.PeerAddress]int)
+	s.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
+	s.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
+	s.observedAddrs = make(map[domain.PeerIdentity]string)
+	s.reachableGroups = make(map[domain.NetGroup]struct{})
+	s.relayStates = newRelayStateStore()
 }
 
 // TestHandleInboundPushMessageNilItem verifies that handleInboundPushMessage
@@ -100,192 +105,6 @@ func TestHandleInboundPushDeliveryReceiptNilReceipt(t *testing.T) {
 		Receipt: nil,
 	})
 }
-
-// TestRespondToInboxRequestPushesMessages is an integration-level test that
-// verifies messages stored for a peer are pushed over the session connection
-// when respondToInboxRequest is called. It requires a fully initialised
-// Service with identity and stored messages.
-func TestRespondToInboxRequestPushesMessages(t *testing.T) {
-	svc := &Service{}
-	svc.initMaps()
-
-	peerIdentity := "fcb566d960d139435d317a7e50127f293285b1eb"
-
-	// Manually insert a message addressed to the peer by identity fingerprint.
-	envelope := protocol.Envelope{
-		ID:        "msg-001",
-		Topic:     "dm",
-		Sender:    "some-sender",
-		Recipient: peerIdentity,
-		Payload:   []byte("encrypted-payload"),
-		CreatedAt: time.Now().UTC(),
-	}
-	// s.topics is guarded by s.gossipMu, not s.peerMu.
-	svc.gossipMu.Lock()
-	svc.topics["dm"] = append(svc.topics["dm"], envelope)
-	svc.gossipMu.Unlock()
-
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = serverConn.Close() }()
-	defer func() { _ = clientConn.Close() }()
-
-	// respondToInboxRequest's session-local reply path probes s.Network()
-	// first and falls back to session.netCore when the ConnID is absent
-	// from the backend/registry. This test deliberately skips backend
-	// registration to exercise the fallback, so attach a NetCore just
-	// like attachOutboundNetCore does in production — the managed writer
-	// loop is what drains the pipe on the fallback branch.
-	session := &peerSession{
-		address:      domain.PeerAddress(peerIdentity),
-		peerIdentity: domain.PeerIdentity(peerIdentity),
-		conn:         clientConn,
-		netCore:      netcore.New(netcore.ConnID(1), clientConn, netcore.Outbound, netcore.Options{}),
-	}
-
-	go svc.respondToInboxRequest(session)
-
-	reader := bufio.NewReader(serverConn)
-	_ = serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("expected push_message frame, got error: %v", err)
-	}
-
-	var pushed protocol.Frame
-	if err := json.Unmarshal([]byte(line), &pushed); err != nil {
-		t.Fatalf("failed to parse pushed frame: %v", err)
-	}
-	if pushed.Type != "push_message" {
-		t.Errorf("expected type push_message, got %s", pushed.Type)
-	}
-	if pushed.Recipient != peerIdentity {
-		t.Errorf("expected recipient %s, got %s", peerIdentity, pushed.Recipient)
-	}
-	if pushed.Item == nil {
-		t.Fatal("expected non-nil item in push_message")
-	}
-	if pushed.Item.ID != "msg-001" {
-		t.Errorf("expected message id msg-001, got %s", pushed.Item.ID)
-	}
-}
-
-// TestRespondToInboxRequestUsesIdentityNotTransportAddress verifies that
-// respondToInboxRequest fetches messages by peer identity fingerprint, not
-// by the transport/dial address.  This is the regression test for the P1 bug
-// where dial address != recipient identity caused empty inbox responses.
-func TestRespondToInboxRequestUsesIdentityNotTransportAddress(t *testing.T) {
-	svc := &Service{}
-	svc.initMaps()
-
-	transportAddr := "127.0.0.1:9090"
-	peerIdentity := "fcb566d960d139435d317a7e50127f293285b1eb"
-
-	// Store a message keyed by identity fingerprint (as real code does).
-	envelope := protocol.Envelope{
-		ID:        "msg-002",
-		Topic:     "dm",
-		Sender:    "another-sender",
-		Recipient: peerIdentity,
-		Payload:   []byte("encrypted-payload"),
-		CreatedAt: time.Now().UTC(),
-	}
-	// s.topics is guarded by s.gossipMu, not s.peerMu.
-	svc.gossipMu.Lock()
-	svc.topics["dm"] = append(svc.topics["dm"], envelope)
-	svc.gossipMu.Unlock()
-
-	serverConn, clientConn := net.Pipe()
-	defer func() { _ = serverConn.Close() }()
-	defer func() { _ = clientConn.Close() }()
-
-	// Transport address differs from identity — this is the normal case
-	// in production where the dial address is an IP:port and the identity
-	// is the Ed25519 fingerprint.
-	// Attach a NetCore so the session-local reply path has a working
-	// transport: this test does not register the ConnID with a backend,
-	// so the Network() probe misses and the path falls back to
-	// session.netCore.
-	session := &peerSession{
-		address:      domain.PeerAddress(transportAddr),
-		peerIdentity: domain.PeerIdentity(peerIdentity),
-		conn:         clientConn,
-		netCore:      netcore.New(netcore.ConnID(1), clientConn, netcore.Outbound, netcore.Options{}),
-	}
-
-	go svc.respondToInboxRequest(session)
-
-	reader := bufio.NewReader(serverConn)
-	_ = serverConn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("expected push_message frame when dial addr != identity, got error: %v", err)
-	}
-
-	var pushed protocol.Frame
-	if err := json.Unmarshal([]byte(line), &pushed); err != nil {
-		t.Fatalf("failed to parse pushed frame: %v", err)
-	}
-	if pushed.Type != "push_message" {
-		t.Errorf("expected type push_message, got %s", pushed.Type)
-	}
-	if pushed.Recipient != peerIdentity {
-		t.Errorf("expected recipient to be identity %s, got %s", peerIdentity, pushed.Recipient)
-	}
-	if pushed.Item == nil {
-		t.Fatal("expected non-nil item in push_message")
-	}
-	if pushed.Item.ID != "msg-002" {
-		t.Errorf("expected message id msg-002, got %s", pushed.Item.ID)
-	}
-}
-
-// initMaps initialises the Service maps required for the tests.  In
-// production the maps are set up by New(), but tests that create a bare
-// Service need this helper.
-func (s *Service) initMaps() {
-	// Match the production NewService default: keep runCtx non-nil so that
-	// code paths deriving ctx from s.runCtx (sender-key recovery etc.)
-	// do not panic in tests that construct &Service{} directly.
-	if s.runCtx == nil {
-		s.runCtx = context.Background()
-	}
-	s.topics = make(map[string][]protocol.Envelope)
-	s.seen = newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
-	s.seenReceipts = make(map[string]struct{})
-	s.known = make(map[string]struct{})
-	s.sessions = make(map[domain.PeerAddress]*peerSession)
-	s.subs = make(map[string]map[string]*subscriber)
-	s.receipts = make(map[string][]protocol.DeliveryReceipt)
-	s.notices = make(map[string]gazeta.Notice)
-	s.conns = make(map[netcore.ConnID]*connEntry)
-	s.connIDByNetConn = make(map[net.Conn]netcore.ConnID)
-	s.pending = make(map[domain.PeerAddress][]pendingFrame)
-	s.pendingKeys = make(map[pendingKey]struct{})
-	s.orphaned = make(map[domain.PeerAddress][]pendingFrame)
-	s.relayRetry = make(map[string]relayAttempt)
-	s.outbound = make(map[string]outboundDelivery)
-	s.upstream = make(map[domain.PeerAddress]struct{})
-	s.health = make(map[domain.PeerAddress]*peerHealth)
-	s.peerTypes = make(map[domain.PeerAddress]domain.NodeType)
-	s.peerIDs = make(map[domain.PeerAddress]domain.PeerIdentity)
-	s.peerVersions = make(map[domain.PeerAddress]string)
-	s.peerBuilds = make(map[domain.PeerAddress]int)
-	s.pubKeys = make(map[string]string)
-	s.boxKeys = make(map[string]string)
-	s.boxSigs = make(map[string]string)
-	s.bans = make(map[string]banEntry)
-	s.events = make(map[chan protocol.LocalChangeEvent]struct{})
-	s.inboundHealthRefs = make(map[domain.PeerAddress]int)
-	s.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
-	s.persistedMeta = make(map[domain.PeerAddress]*peerEntry)
-	s.observedAddrs = make(map[domain.PeerIdentity]string)
-	s.reachableGroups = make(map[domain.NetGroup]struct{})
-	s.relayStates = newRelayStateStore()
-}
-
-// ---------------------------------------------------------------------------
-// push_delivery_receipt identity binding tests
-// ---------------------------------------------------------------------------
 
 // TestPushDeliveryReceiptRejectsUnrelatedRecipient verifies that
 // handleInboundPushDeliveryReceipt drops a receipt whose Recipient does

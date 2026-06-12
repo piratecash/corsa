@@ -88,7 +88,7 @@ func TestCM_SetupFailureCooldown_ShortCircuitsRetry(t *testing.T) {
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr(bannedAddr),
 		Identity:       "id-banned",
-		Error:          errors.New("subscribe_inbox: EOF"),
+		Error:          errors.New("sync: EOF"),
 		WasHealthy:     false,
 		SlotGeneration: gen,
 	})
@@ -158,7 +158,7 @@ func TestCM_SetupFailureCooldown_NilCallbackKeepsLegacyRetry(t *testing.T) {
 		cm.EmitSlot(ActiveSessionLost{
 			Address:        mustAddr(peerAddr),
 			Identity:       "id-peer",
-			Error:          errors.New("subscribe_inbox: EOF"),
+			Error:          errors.New("sync: EOF"),
 			WasHealthy:     false,
 			SlotGeneration: gen,
 		})

@@ -2230,14 +2230,11 @@ func deriveTestAdvertisePort(cfg config.Node) config.Node {
 func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	t.Helper()
 
-	// Isolate peer and queue state so tests never load leftover files
-	// from a previous run that happened to bind the same port.
+	// Isolate peer state so tests never load leftover files from a
+	// previous run that happened to bind the same port.
 	tmpDir := t.TempDir()
 	if cfg.PeersStatePath == "" {
 		cfg.PeersStatePath = filepath.Join(tmpDir, "peers.json")
-	}
-	if cfg.QueueStatePath == "" {
-		cfg.QueueStatePath = filepath.Join(tmpDir, "queue.json")
 	}
 	// Allow private/loopback IPs as peer addresses in tests.
 	// Tests that explicitly verify forbidden-IP filtering should
@@ -2258,14 +2255,11 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Identity) (*Service, func()) {
 	t.Helper()
 
-	// Isolate peer and queue state so tests never load leftover files
-	// from a previous run that happened to bind the same port.
+	// Isolate peer state so tests never load leftover files from a
+	// previous run that happened to bind the same port.
 	tmpDir := t.TempDir()
 	if cfg.PeersStatePath == "" {
 		cfg.PeersStatePath = filepath.Join(tmpDir, "peers.json")
-	}
-	if cfg.QueueStatePath == "" {
-		cfg.QueueStatePath = filepath.Join(tmpDir, "queue.json")
 	}
 	cfg.AllowPrivatePeers = true
 	cfg = deriveTestAdvertisePort(cfg)
@@ -2316,9 +2310,9 @@ func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFu
 		case <-time.After(5 * time.Second):
 			t.Fatal("timed out waiting for node shutdown")
 		}
-		// Wait for fire-and-forget goroutines (MarkDirty emitters, trust
-		// store writes, etc.) to finish so TempDir cleanup does not race
-		// with async disk writes or with the persister's final flush.
+		// Wait for fire-and-forget goroutines (trust store writes,
+		// gossip fan-outs, etc.) to finish so TempDir cleanup does not
+		// race with async disk writes.
 		bgDone := make(chan struct{})
 		go func() {
 			svc.WaitBackground()
@@ -2552,8 +2546,10 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	}
 
 	waitForConditionMsg(t, 10*time.Second, "message did not propagate from sender to full node via gossip", func() bool {
-		fullReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: idRecipient.Address})
-		return fullReply.Type == "inbox" && len(fullReply.Messages) == 1 && fullReply.Messages[0].ID == "client-offline-dm-1"
+		// Internal probe: on the full node this DM is TRANSIT (neither
+		// party is the full node), so the fetch surfaces exclude it by
+		// contract — inspect the in-flight topic buffer directly.
+		return topicHasMessage(fullNode, "dm", "client-offline-dm-1")
 	})
 
 	// Verify sender has an active, healthy connection to the full node.
@@ -2578,8 +2574,9 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	defer stopRecipient()
 
 	// Wait for recipient to establish peer session with the full node
-	// before checking messages — this ensures initPeerSession (subscribe_inbox
-	// + sync) has completed and the single backlog delivery path has fired.
+	// before checking messages — this ensures session setup (auth-time
+	// auto-subscribe + sync) has completed and the single backlog delivery
+	// path has fired.
 	// The recipient boots last, so the full node is already busy servicing
 	// the sender's session when this handshake starts; 15 s absorbs the
 	// extra latency without papering over a real failure.
@@ -2677,10 +2674,11 @@ func TestRelayMessageDoesNotStallGossipDelivery(t *testing.T) {
 
 	// The message should arrive at the full node within 3 seconds via gossip.
 	// Before the fire-and-forget fix, relay_message stalled the session for
-	// 12 seconds, causing this check to time out at 3s.
+	// 12 seconds, causing this check to time out at 3s. On the full node the
+	// DM is TRANSIT (neither party is the full node), so the fetch surfaces
+	// exclude it by contract — probe the in-flight topic buffer directly.
 	waitForCondition(t, 3*time.Second, func() bool {
-		fullReply := fullNode.HandleLocalFrame(protocol.Frame{Type: "fetch_inbox", Topic: "dm", Recipient: idRecipient.Address})
-		return fullReply.Type == "inbox" && len(fullReply.Messages) == 1 && fullReply.Messages[0].ID == "relay-stall-test-1"
+		return topicHasMessage(fullNode, "dm", "relay-stall-test-1")
 	})
 }
 
@@ -2696,7 +2694,6 @@ func TestFetchInboxSkipsDeliveredDirectMessages(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:  "127.0.0.1:64646",
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
@@ -2748,7 +2745,6 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 	svc := NewService(config.Node{
 		ListenAddress:  "127.0.0.1:64646",
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
@@ -2869,89 +2865,6 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 	}
 }
 
-func TestQueueAndRelayRetryStatePersistAcrossServiceRestart(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate test identity: %v", err)
-	}
-
-	cfg := config.Node{
-		ListenAddress:  "127.0.0.1:64646",
-		Type:           domain.NodeTypeFull,
-		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
-	}
-
-	svc := NewService(cfg, id, nil)
-	frame := protocol.Frame{
-		Type:      "send_message",
-		Topic:     "dm",
-		ID:        "persist-msg-1",
-		Address:   id.Address,
-		Recipient: "recipient-1",
-		Flag:      "sender-delete",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Body:      "queued-body",
-	}
-	if ok := svc.queuePeerFrame("127.0.0.1:65001", frame); !ok {
-		t.Fatal("expected queued frame to be accepted")
-	}
-
-	envelope := protocol.Envelope{
-		ID:         protocol.MessageID("persist-msg-1"),
-		Topic:      "dm",
-		Sender:     id.Address,
-		Recipient:  "recipient-1",
-		Flag:       protocol.MessageFlag("sender-delete"),
-		CreatedAt:  time.Now().UTC(),
-		TTLSeconds: 0,
-		Payload:    []byte("ciphertext"),
-	}
-	svc.topics["dm"] = append(svc.topics["dm"], envelope)
-	svc.trackRelayMessage(envelope)
-	attempts := svc.noteRelayAttempt(relayMessageKey(envelope.ID), time.Now().UTC())
-	if attempts != 1 {
-		t.Fatalf("expected first relay attempt, got %d", attempts)
-	}
-
-	// This test deliberately bypasses Run() so the persister's background
-	// writer never starts.  Every mutation above has marked the persister
-	// dirty; without a synchronous flush here the restart branch below
-	// would read the empty on-disk file that NewService created.  See
-	// queue_state_persister.go — MarkDirty is fire-and-forget, FlushSync
-	// is the escape hatch for Run-less fixtures and graceful shutdown.
-	svc.queuePersist.MarkDirty()
-	svc.queuePersist.FlushSync()
-
-	reloaded := NewService(cfg, id, nil)
-	reloaded.peerMu.RLock()
-	defer reloaded.peerMu.RUnlock()
-
-	items := reloaded.pending[domain.PeerAddress("127.0.0.1:65001")]
-	if len(items) != 1 {
-		t.Fatalf("expected 1 pending item after restart, got %d", len(items))
-	}
-	if items[0].Frame.ID != "persist-msg-1" {
-		t.Fatalf("unexpected persisted pending frame: %#v", items[0].Frame)
-	}
-	state, ok := reloaded.relayRetry[relayMessageKey(envelope.ID)]
-	if !ok {
-		t.Fatal("expected relay retry state after restart")
-	}
-	if state.Attempts != 1 {
-		t.Fatalf("expected persisted attempts=1, got %#v", state)
-	}
-	if outbound, ok := reloaded.outbound["persist-msg-1"]; !ok || outbound.Status != "queued" {
-		t.Fatalf("expected persisted outbound queued state, got %#v", reloaded.outbound)
-	}
-	if len(reloaded.topics["dm"]) != 1 || reloaded.topics["dm"][0].ID != protocol.MessageID("persist-msg-1") {
-		t.Fatalf("expected persisted relay message payload, got %#v", reloaded.topics["dm"])
-	}
-}
-
 func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 	t.Parallel()
 
@@ -2960,11 +2873,8 @@ func TestPendingMessagesFrameIncludesLifecycleStatuses(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 
-	tempDir := t.TempDir()
-
 	svc := NewService(config.Node{
-		ListenAddress:  "127.0.0.1:64646",
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	queuedAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
@@ -3047,11 +2957,8 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 
-	tempDir := t.TempDir()
-
 	svc := NewService(config.Node{
-		ListenAddress:  "127.0.0.1:64646",
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	address := domain.PeerAddress("127.0.0.1:65001")
@@ -3104,7 +3011,6 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:  "127.0.0.1:64646",
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}, id, nil)
 
 	receipt := protocol.DeliveryReceipt{
@@ -3149,7 +3055,6 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:  "127.0.0.1:64646",
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
@@ -3325,6 +3230,22 @@ func readJSONTestFrame(t *testing.T, reader *bufio.Reader) protocol.Frame {
 		t.Fatalf("parse frame: %v", err)
 	}
 	return frame
+}
+
+// topicHasMessage reports whether the topic backlog holds the message,
+// regardless of locality. Tests probing TRANSIT propagation must use this
+// internal check: the fetch surfaces (fetch_messages / fetch_inbox / ...)
+// deliberately exclude transit envelopes — they are forwarding state, not a
+// mailbox.
+func topicHasMessage(svc *Service, topic string, id protocol.MessageID) bool {
+	svc.gossipMu.RLock()
+	defer svc.gossipMu.RUnlock()
+	for _, env := range svc.topics[topic] {
+		if env.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -4669,10 +4590,8 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 		t.Fatalf("Generate identity failed: %v", err)
 	}
 
-	tempDir := t.TempDir()
 	svc := NewService(config.Node{
-		ListenAddress:  "127.0.0.1:64646",
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
+		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
 	primaryAddr := domain.PeerAddress("10.0.0.1:64647")
@@ -4789,9 +4708,6 @@ func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
 	}
 }
 
-// TestQueueStateMigrationFallbackToPrimary verifies that pending frames
-// persisted under a fallback dial address (e.g. host:64646) are migrated
-// to the primary peer address (e.g. host:64647) on startup.
 // TestQueuePeerFrame_RingEvictsOldest pins the per-peer pending RING: once a
 // peer's queue reaches PendingRingSize, queuing a new frame evicts the OLDEST
 // (not rejects the new one), the per-peer count stays exactly at the cap, and
@@ -4809,7 +4725,6 @@ func TestQueuePeerFrame_RingEvictsOldest(t *testing.T) {
 		ListenAddress:   "127.0.0.1:64646",
 		Type:            domain.NodeTypeFull,
 		TrustStorePath:  filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:  filepath.Join(tempDir, "queue.json"),
 		PendingRingSize: 3,
 	}, id, nil)
 
@@ -4880,7 +4795,6 @@ func TestCapPendingRingLocked_EvictsOldestByQueuedAt(t *testing.T) {
 		ListenAddress:  "127.0.0.1:64646",
 		Type:           domain.NodeTypeFull,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}, id, nil)
 
 	addr := domain.PeerAddress("127.0.0.1:65010")
@@ -4950,7 +4864,6 @@ func TestCapPendingRingLocked_DoesNotDropForeignOutbound(t *testing.T) {
 		ListenAddress:  "127.0.0.1:64646",
 		Type:           domain.NodeTypeFull,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	}, id, nil)
 
 	addr := domain.PeerAddress("127.0.0.1:65011")
@@ -4996,306 +4909,6 @@ func frameIDs(items []pendingFrame) []string {
 	}
 	return out
 }
-
-func TestQueueStateMigrationFallbackToPrimary(t *testing.T) {
-	t.Parallel()
-
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("Generate identity failed: %v", err)
-	}
-
-	tempDir := t.TempDir()
-	queuePath := filepath.Join(tempDir, "queue.json")
-
-	// Write a queue state file with a pending frame under the fallback
-	// address 10.0.0.1:64646 (the default port variant).
-	fallbackAddr := "10.0.0.1:64646"
-	qs := queueStateFile{
-		Pending: map[string][]pendingFrame{
-			fallbackAddr: {
-				{
-					Frame: protocol.Frame{
-						Type:      "send_message",
-						Topic:     "dm",
-						ID:        "migrate-1",
-						Address:   id.Address,
-						Recipient: "recipient-1",
-						Body:      "ciphertext",
-					},
-					QueuedAt: time.Now().UTC(),
-				},
-			},
-		},
-		RelayRetry:    map[string]relayAttempt{},
-		OutboundState: map[string]outboundDelivery{},
-	}
-	data, err := json.Marshal(qs)
-	if err != nil {
-		t.Fatalf("marshal queue state: %v", err)
-	}
-	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
-		t.Fatalf("write queue state: %v", err)
-	}
-
-	// Create a service where the primary peer address uses a NON-default port.
-	primaryAddr := "10.0.0.1:64647"
-	svc := NewService(config.Node{
-		ListenAddress:  "127.0.0.1:64646",
-		BootstrapPeers: []string{primaryAddr},
-		QueueStatePath: queuePath,
-	}, id, nil)
-
-	svc.deliveryMu.RLock()
-	primaryPending := len(svc.pending[domain.PeerAddress(primaryAddr)])
-	fallbackPending := len(svc.pending[domain.PeerAddress(fallbackAddr)])
-	svc.deliveryMu.RUnlock()
-
-	if primaryPending != 1 {
-		t.Fatalf("expected 1 pending frame migrated to primary %s, got %d", primaryAddr, primaryPending)
-	}
-	if fallbackPending != 0 {
-		t.Fatalf("expected 0 pending frames under fallback %s after migration, got %d", fallbackAddr, fallbackPending)
-	}
-
-	// Verify pendingKeys were rebuilt with the primary address.
-	expectedKey := pendingFrameKey(domain.PeerAddress(primaryAddr), qs.Pending[fallbackAddr][0].Frame)
-	svc.deliveryMu.RLock()
-	_, hasKey := svc.pendingKeys[expectedKey]
-	svc.deliveryMu.RUnlock()
-	if !hasKey {
-		t.Fatalf("expected pending key %q to exist after migration", expectedKey)
-	}
-
-	// Old fallback-keyed entry should NOT exist.
-	oldKey := pendingFrameKey(domain.PeerAddress(fallbackAddr), qs.Pending[fallbackAddr][0].Frame)
-	svc.deliveryMu.RLock()
-	_, hasOldKey := svc.pendingKeys[oldKey]
-	orphanedCount := len(svc.orphaned)
-	svc.deliveryMu.RUnlock()
-	if hasOldKey {
-		t.Fatal("expected old fallback-keyed pending key to be absent after migration")
-	}
-
-	// Successful migration should not produce orphans.
-	if orphanedCount != 0 {
-		t.Fatalf("expected 0 orphaned entries after clean migration, got %d", orphanedCount)
-	}
-}
-
-// TestQueueStateMigrationOrphansAmbiguousHost verifies that when multiple
-// primary peers share the same host (different ports), pending frames under
-// a fallback address are moved to the orphaned map — preserving them on disk
-// for manual recovery instead of silently dropping user data.
-func TestQueueStateMigrationOrphansAmbiguousHost(t *testing.T) {
-	t.Parallel()
-
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("Generate identity failed: %v", err)
-	}
-
-	tempDir := t.TempDir()
-	queuePath := filepath.Join(tempDir, "queue.json")
-
-	// Pending frame under a fallback address whose host has TWO known primaries.
-	fallbackAddr := "10.0.0.1:64646"
-	qs := queueStateFile{
-		Pending: map[string][]pendingFrame{
-			fallbackAddr: {
-				{
-					Frame: protocol.Frame{
-						Type:      "send_message",
-						Topic:     "dm",
-						ID:        "ambiguous-1",
-						Address:   id.Address,
-						Recipient: "recipient-1",
-						Body:      "ciphertext",
-					},
-					QueuedAt: time.Now().UTC(),
-				},
-			},
-		},
-		RelayRetry:    map[string]relayAttempt{},
-		OutboundState: map[string]outboundDelivery{},
-	}
-	data, err := json.Marshal(qs)
-	if err != nil {
-		t.Fatalf("marshal queue state: %v", err)
-	}
-	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
-		t.Fatalf("write queue state: %v", err)
-	}
-
-	// Two primaries on the same host but different ports.
-	primaryA := "10.0.0.1:64647"
-	primaryB := "10.0.0.1:64648"
-	svc := NewService(config.Node{
-		ListenAddress:  "127.0.0.1:64646",
-		BootstrapPeers: []string{primaryA, primaryB},
-		QueueStatePath: queuePath,
-	}, id, nil)
-
-	svc.deliveryMu.RLock()
-	fallbackPending := len(svc.pending[domain.PeerAddress(fallbackAddr)])
-	aPending := len(svc.pending[domain.PeerAddress(primaryA)])
-	bPending := len(svc.pending[domain.PeerAddress(primaryB)])
-	orphanedCount := len(svc.orphaned[domain.PeerAddress(fallbackAddr)])
-	svc.deliveryMu.RUnlock()
-
-	// Frames must NOT be in the active pending map (runtime would never flush them).
-	if fallbackPending != 0 {
-		t.Fatalf("expected fallback %s removed from pending, got %d", fallbackAddr, fallbackPending)
-	}
-	if aPending != 0 {
-		t.Fatalf("expected 0 pending frames under %s, got %d", primaryA, aPending)
-	}
-	if bPending != 0 {
-		t.Fatalf("expected 0 pending frames under %s, got %d", primaryB, bPending)
-	}
-
-	// Frames must be preserved in orphaned for manual recovery.
-	if orphanedCount != 1 {
-		t.Fatalf("expected 1 orphaned frame under %s, got %d", fallbackAddr, orphanedCount)
-	}
-	if svc.orphaned[domain.PeerAddress(fallbackAddr)][0].Frame.ID != "ambiguous-1" {
-		t.Fatalf("unexpected orphaned frame ID: %s", svc.orphaned[domain.PeerAddress(fallbackAddr)][0].Frame.ID)
-	}
-}
-
-// TestQueueStateMigrationOrphansUnknownHost verifies that legacy pending
-// frames for an address whose host has no known primaries are orphaned
-// during v0→v1 migration (since the runtime would never flush them).
-func TestQueueStateMigrationOrphansUnknownHost(t *testing.T) {
-	t.Parallel()
-
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("Generate identity failed: %v", err)
-	}
-
-	tempDir := t.TempDir()
-	queuePath := filepath.Join(tempDir, "queue.json")
-
-	unknownAddr := "10.99.99.1:65001"
-	// Version 0 (legacy) — triggers migration.
-	qs := queueStateFile{
-		Pending: map[string][]pendingFrame{
-			unknownAddr: {
-				{
-					Frame: protocol.Frame{
-						Type:      "send_message",
-						Topic:     "dm",
-						ID:        "unknown-host-1",
-						Address:   id.Address,
-						Recipient: "recipient-1",
-						Body:      "ciphertext",
-					},
-					QueuedAt: time.Now().UTC(),
-				},
-			},
-		},
-		RelayRetry:    map[string]relayAttempt{},
-		OutboundState: map[string]outboundDelivery{},
-	}
-	data, err := json.Marshal(qs)
-	if err != nil {
-		t.Fatalf("marshal queue state: %v", err)
-	}
-	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
-		t.Fatalf("write queue state: %v", err)
-	}
-
-	// Bootstrap peer on a DIFFERENT host — 10.99.99.1 has zero candidates.
-	svc := NewService(config.Node{
-		ListenAddress:     "127.0.0.1:64646",
-		BootstrapPeers:    []string{"10.0.0.1:64647"},
-		QueueStatePath:    queuePath,
-		AllowPrivatePeers: true,
-	}, id, nil)
-
-	svc.deliveryMu.RLock()
-	pendingCount := len(svc.pending[domain.PeerAddress(unknownAddr)])
-	orphanedCount := len(svc.orphaned[domain.PeerAddress(unknownAddr)])
-	svc.deliveryMu.RUnlock()
-
-	// Unknown-host entries are orphaned during migration — the runtime
-	// only drains primary-keyed entries so they would be stranded.
-	if pendingCount != 0 {
-		t.Fatalf("expected 0 pending frames under %s, got %d", unknownAddr, pendingCount)
-	}
-	if orphanedCount != 1 {
-		t.Fatalf("expected 1 orphaned frame under %s, got %d", unknownAddr, orphanedCount)
-	}
-}
-
-// TestQueueStateMigrationSkippedForCurrentVersion verifies that pending
-// frames written by the current code version (v1) are NOT touched by
-// migration — they survive a normal persist/reload cycle intact.
-func TestQueueStateMigrationSkippedForCurrentVersion(t *testing.T) {
-	t.Parallel()
-
-	id, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("Generate identity failed: %v", err)
-	}
-
-	tempDir := t.TempDir()
-	queuePath := filepath.Join(tempDir, "queue.json")
-
-	runtimeAddr := "10.99.99.1:65001"
-	// Version 1 (current) — migration should be skipped entirely.
-	qs := queueStateFile{
-		Version: queueStateVersion,
-		Pending: map[string][]pendingFrame{
-			runtimeAddr: {
-				{
-					Frame: protocol.Frame{
-						Type:      "send_message",
-						Topic:     "dm",
-						ID:        "current-version-1",
-						Address:   id.Address,
-						Recipient: "recipient-1",
-						Body:      "ciphertext",
-					},
-					QueuedAt: time.Now().UTC(),
-				},
-			},
-		},
-		RelayRetry:    map[string]relayAttempt{},
-		OutboundState: map[string]outboundDelivery{},
-	}
-	data, err := json.Marshal(qs)
-	if err != nil {
-		t.Fatalf("marshal queue state: %v", err)
-	}
-	if err := os.WriteFile(queuePath, data, 0o644); err != nil {
-		t.Fatalf("write queue state: %v", err)
-	}
-
-	// No bootstrap peer matching this host — but migration is skipped.
-	svc := NewService(config.Node{
-		ListenAddress:     "127.0.0.1:64646",
-		BootstrapPeers:    []string{"10.0.0.1:64647"},
-		QueueStatePath:    queuePath,
-		AllowPrivatePeers: true,
-	}, id, nil)
-
-	svc.deliveryMu.RLock()
-	pendingCount := len(svc.pending[domain.PeerAddress(runtimeAddr)])
-	orphanedCount := len(svc.orphaned[domain.PeerAddress(runtimeAddr)])
-	svc.deliveryMu.RUnlock()
-
-	// Current-version entries stay in pending — no migration runs.
-	if pendingCount != 1 {
-		t.Fatalf("expected 1 pending frame under %s, got %d", runtimeAddr, pendingCount)
-	}
-	if orphanedCount != 0 {
-		t.Fatalf("expected 0 orphaned frames under %s, got %d", runtimeAddr, orphanedCount)
-	}
-}
-
-// --- Observed IP tests ---
 
 func TestRecordObservedAddressIgnoresEmpty(t *testing.T) {
 	t.Parallel()
@@ -6432,7 +6045,6 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		PeersStatePath: filepath.Join(tempDir, "peers.json"),
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 		Type:           domain.NodeTypeFull,
 	}, senderID, nil)
 
@@ -7622,7 +7234,8 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	_ = subConn.SetDeadline(time.Now().Add(15 * time.Second))
 	subReader := bufio.NewReader(subConn)
 
-	// handshake + auth (subscribe_inbox requires authenticated session)
+	// handshake + auth — the responder auto-registers the inbox route for
+	// the authenticated identity at auth time (registerHelloRoute).
 	writeJSONFrame(t, subConn, protocol.Frame{
 		Type:                   "hello",
 		Version:                config.ProtocolVersion,
@@ -7647,25 +7260,6 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	authOK := readJSONTestFrame(t, subReader)
 	if authOK.Type != "auth_ok" {
 		t.Fatalf("expected auth_ok, got %s: %s", authOK.Type, authOK.Error)
-	}
-
-	// subscribe
-	writeJSONFrame(t, subConn, protocol.Frame{
-		Type: "subscribe_inbox", Topic: "dm", Recipient: recipientAddr, Subscriber: "sub-1",
-	})
-	subReply := readJSONTestFrame(t, subReader)
-	if subReply.Type != "subscribed" {
-		t.Fatalf("expected subscribed, got %s: %s", subReply.Type, subReply.Error)
-	}
-
-	// Drain reverse subscribe_inbox that the node sends back to authenticated peers.
-	if reverseFrame := readJSONTestFrame(t, subReader); reverseFrame.Type == "subscribe_inbox" {
-		writeJSONFrame(t, subConn, protocol.Frame{
-			Type:       "subscribed",
-			Topic:      reverseFrame.Topic,
-			Recipient:  reverseFrame.Recipient,
-			Subscriber: reverseFrame.Subscriber,
-		})
 	}
 
 	// --- sender connection: authenticates then sends messages concurrently ---
@@ -8505,7 +8099,8 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 }
 
 // TestTransitDMLiveInboxRoute verifies that a relay node delivers a transit
-// DM immediately to a recipient that has a live inbox route (subscribe_inbox).
+// DM immediately to a recipient that has a live inbox route (auth-time
+// auto-registration via registerHelloRoute).
 // Push and gossip are independent: push provides instant local delivery while
 // gossip ensures mesh-wide propagation regardless of local subscriber state.
 func TestTransitDMLiveInboxRoute(t *testing.T) {
@@ -8608,28 +8203,8 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 		t.Fatalf("expected auth_ok, got %s: %s", authOK.Type, authOK.Error)
 	}
 
-	// subscribe_inbox — registers the live inbox route.
-	writeJSONFrame(t, recipConn, protocol.Frame{
-		Type:       "subscribe_inbox",
-		Topic:      "dm",
-		Recipient:  recipientAddr,
-		Subscriber: "test-recip-sub",
-	})
-	subReply := readJSONTestFrame(t, recipReader)
-	if subReply.Type != "subscribed" {
-		t.Fatalf("expected subscribed, got %s: %s", subReply.Type, subReply.Error)
-	}
-
-	// Drain the reverse subscribe_inbox that the relay sends back.
-	reverseFrame := readJSONTestFrame(t, recipReader)
-	if reverseFrame.Type == "subscribe_inbox" {
-		writeJSONFrame(t, recipConn, protocol.Frame{
-			Type:       "subscribed",
-			Topic:      reverseFrame.Topic,
-			Recipient:  reverseFrame.Recipient,
-			Subscriber: reverseFrame.Subscriber,
-		})
-	}
+	// The live inbox route was auto-registered at auth time
+	// (registerHelloRoute) — no explicit subscription round-trip exists.
 
 	// --- Sender authenticates on TCP and submits DM via push_message ---
 	// push_message is the P2P wire command for delivering messages between
@@ -8702,13 +8277,13 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 	}
 }
 
-// TestTransitDMBacklogAfterRouteDisappears verifies that if a live inbox
-// route disappears (subscriber disconnects) after the snapshot is taken but
-// before the push frame is written, the message is still available through
-// backlog on the next subscribe_inbox. Even though gossip also propagates
-// the message to the mesh, the local backlog provides a safety net for
-// recipients reconnecting to this same node.
-func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
+// TestTransitDMNotReplayedFromBacklog pins the forwarding-only transit
+// contract end-to-end: a transit DM (neither party is this relay) that
+// missed its live push window is NOT replayed from the relay's backlog when
+// the recipient reconnects. Transit envelopes are the in-flight buffer of
+// their own forwarding operation, not a mailbox — recovery is the SENDER's
+// end-to-end retry, not relay-side storage.
+func TestTransitDMNotReplayedFromBacklog(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
@@ -8799,18 +8374,8 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 	if f := readJSONTestFrame(t, recipReader1); f.Type != "auth_ok" {
 		t.Fatalf("expected auth_ok, got %s", f.Type)
 	}
-	writeJSONFrame(t, recipConn1, protocol.Frame{
-		Type: "subscribe_inbox", Topic: "dm", Recipient: recipientAddr, Subscriber: "recip-sub-1",
-	})
-	if f := readJSONTestFrame(t, recipReader1); f.Type != "subscribed" {
-		t.Fatalf("expected subscribed, got %s", f.Type)
-	}
-	// Drain reverse subscribe_inbox.
-	if f := readJSONTestFrame(t, recipReader1); f.Type == "subscribe_inbox" {
-		writeJSONFrame(t, recipConn1, protocol.Frame{
-			Type: "subscribed", Topic: f.Topic, Recipient: f.Recipient, Subscriber: f.Subscriber,
-		})
-	}
+	// The live inbox route was auto-registered at auth time
+	// (registerHelloRoute) — no explicit subscription round-trip exists.
 
 	// Disconnect: route is gone.
 	_ = recipConn1.Close()
@@ -8872,8 +8437,8 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 	// message internally. Give it a moment to complete the async store.
 	time.Sleep(100 * time.Millisecond)
 
-	// Step 3: new recipient connection subscribes — should get the message
-	// via backlog even though the push to the old connection failed.
+	// Step 3: the recipient reconnects. The auth-time backlog replay must
+	// NOT serve the transit message — the relay is not its mailbox.
 	recipConn2, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial recipient (2nd): %v", err)
@@ -8906,28 +8471,24 @@ func TestTransitDMBacklogAfterRouteDisappears(t *testing.T) {
 		t.Fatalf("expected auth_ok (2nd), got %s", f.Type)
 	}
 
-	// v20: the responder auto-registers this node's inbox and replays the
-	// backlog at auth (handleAuthSession), so a v20 peer no longer sends
-	// subscribe_inbox — the backlog push_message arrives right after auth_ok.
-	// We therefore do NOT expect a subscribed frame here; we just drain frames
-	// below and look for the backlog message (which may now precede anything
-	// else on the wire). See subscribeInboxAutoAtAuthVersion.
-
-	// Read all frames — expect the backlog message to arrive.
-	_ = recipConn2.SetDeadline(time.Now().Add(3 * time.Second))
-	foundBacklogMsg := false
-	for i := 0; i < 10; i++ {
-		f := readJSONTestFrame(t, recipReader2)
-		if f.Type == "" {
-			break
+	// The responder auto-registers this node's inbox at auth and replays
+	// the backlog — which, under the forwarding-only contract, must not
+	// contain the transit message. Drain frames until the read deadline
+	// (reaching it IS the success path: nothing was replayed) and fail if
+	// the transit message leaks through.
+	_ = recipConn2.SetDeadline(time.Now().Add(2 * time.Second))
+	for {
+		line, err := recipReader2.ReadString('\n')
+		if err != nil {
+			break // deadline or EOF — no backlog replay observed
+		}
+		f, err := protocol.ParseFrameLine(line[:len(line)-1])
+		if err != nil {
+			continue
 		}
 		if f.Type == "push_message" && f.Item != nil && f.Item.ID == "backlog-msg-1" {
-			foundBacklogMsg = true
-			break
+			t.Fatal("transit DM was replayed from the relay backlog — relays must not act as a mailbox")
 		}
-	}
-	if !foundBacklogMsg {
-		t.Error("message was NOT delivered via backlog after route disappeared — potential message loss")
 	}
 }
 
@@ -9036,7 +8597,6 @@ func TestMixedVersionLegacyPeerExchange(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:  addr,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 		Type:           domain.NodeTypeFull,
 	}, nodeID, nil)
 	svc.disableRateLimiting = true
@@ -9127,7 +8687,6 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:  addr,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 		Type:           domain.NodeTypeFull,
 	}, id, nil)
 
@@ -9915,7 +9474,6 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 	svc, stop := startTestNode(t, config.Node{
 		ListenAddress:  address,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 	})
 	defer stop()
 
@@ -9994,24 +9552,17 @@ func TestDeleteTrustedContactDropsPendingMessages(t *testing.T) {
 
 // TestDeleteTrustedContactClearsOutboundWithNoPending verifies that deleting a
 // contact clears its outbound delivery entries even when NO pending frames
-// exist for the recipient (the dropped==0 path). The clearing is in-memory;
-// the FlushSync + reload below is the dormant queue-state persister's manual
-// snapshot escape hatch used purely to OBSERVE the in-memory clear on disk —
-// it is NOT a runtime restart-survival guarantee (the persister Run loop no
-// longer starts and the file is deleted on startup; see docs/protocol/relay.md
-// INV-8). It confirms the delete path also wipes outbound bookkeeping, not
-// just pending frames.
+// exist for the recipient (the dropped==0 path). It confirms the delete path
+// also wipes outbound bookkeeping, not just pending frames.
 func TestDeleteTrustedContactClearsOutboundWithNoPending(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
 	address := freeAddress(t)
-	queuePath := filepath.Join(tempDir, "queue.json")
 
 	svc, stop := startTestNode(t, config.Node{
 		ListenAddress:  address,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: queuePath,
 	})
 	defer stop()
 
@@ -10037,34 +9588,22 @@ func TestDeleteTrustedContactClearsOutboundWithNoPending(t *testing.T) {
 	svc.outbound["ob-1"] = outboundDelivery{MessageID: "ob-1", Recipient: peerID.Address, Status: "delivered"}
 	svc.deliveryMu.Unlock()
 
-	// Snapshot the initial state to disk via the dormant persister's manual
-	// escape hatch. MarkDirty no longer has a background consumer (the Run
-	// loop is not started), but it still sets the persister's dirty flag —
-	// which FlushSync's finalFlush requires (it returns early when not dirty),
-	// so it is needed here to force the on-demand snapshot inline before the
-	// delete below runs.
-	svc.queuePersist.MarkDirty()
-	svc.queuePersist.FlushSync()
-
-	// Delete the contact — should persist even though dropped == 0.
+	// Delete the contact — outbound tracking must be cleared even though
+	// dropped == 0 (no pending frames for this recipient).
 	svc.HandleLocalFrame(protocol.Frame{
 		Type:    "delete_trusted_contact",
 		Address: peerID.Address,
 	})
 
-	// HandleLocalFrame only calls MarkDirty; drain fire-and-forget
-	// goroutines first, then flush so the on-disk file is current before
-	// we load it back.
+	// HandleLocalFrame schedules fire-and-forget goroutines; drain them so
+	// the in-memory state below is final.
 	svc.WaitBackground()
-	svc.queuePersist.FlushSync()
 
-	// Reload queue state from disk and verify the outbound entry is gone.
-	reloaded, err := loadQueueState(queuePath)
-	if err != nil {
-		t.Fatalf("reload queue state: %v", err)
-	}
-	if _, ok := reloaded.OutboundState["ob-1"]; ok {
-		t.Fatal("outbound entry ob-1 should have been removed from persisted queue state")
+	svc.deliveryMu.RLock()
+	_, ok := svc.outbound["ob-1"]
+	svc.deliveryMu.RUnlock()
+	if ok {
+		t.Fatal("outbound entry ob-1 should have been removed")
 	}
 }
 
@@ -10072,217 +9611,11 @@ func TestDeleteTrustedContactClearsOutboundWithNoPending(t *testing.T) {
 // Protocol-level security tests
 // ---------------------------------------------------------------------------
 
-// TestSubscribeInboxRejectsUnauthenticated verifies that subscribe_inbox
-// returns auth-required when the connection has not completed auth_session.
-func TestSubscribeInboxRejectsUnauthenticated(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	// hello only, no auth_session
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type: "hello", Version: config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "test-attacker", ClientVersion: config.CorsaVersion,
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" {
-		t.Fatalf("expected welcome, got %s", welcome.Type)
-	}
-
-	// attempt subscribe_inbox without authentication
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type: "subscribe_inbox", Topic: "dm", Recipient: "victim-identity", Subscriber: "attacker-sub",
-	})
-	reply := readJSONTestFrame(t, reader)
-	if reply.Type != "error" {
-		t.Fatalf("expected error, got %s", reply.Type)
-	}
-	if reply.Code != protocol.ErrCodeAuthRequired {
-		t.Errorf("expected code %s, got %s", protocol.ErrCodeAuthRequired, reply.Code)
-	}
-}
-
-// TestSubscribeInboxRejectsIdentityMismatch verifies that an authenticated
-// peer cannot subscribe to a different identity's inbox.
-func TestSubscribeInboxRejectsIdentityMismatch(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	nodeID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate node identity: %v", err)
-	}
-	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	}, nodeID)
-	defer stop()
-
-	// Create an attacker identity that will authenticate as itself
-	// but try to subscribe to someone else's inbox.
-	attackerID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate attacker identity: %v", err)
-	}
-	attackerBoxSig := identity.SignBoxKeyBinding(attackerID)
-
-	// Register attacker as a contact so auth succeeds.
-	svc.HandleLocalFrame(protocol.Frame{
-		Type: "import_contacts",
-		Contacts: []protocol.ContactFrame{{
-			Address: attackerID.Address,
-			PubKey:  identity.PublicKeyBase64(attackerID.PublicKey),
-			BoxKey:  identity.BoxPublicKeyBase64(attackerID.BoxPublicKey),
-			BoxSig:  attackerBoxSig,
-		}},
-	})
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	// hello + auth as attacker
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                attackerID.Address,
-		PubKey:                 identity.PublicKeyBase64(attackerID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(attackerID.BoxPublicKey),
-		BoxSig:                 attackerBoxSig,
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %s", welcome.Type)
-	}
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   attackerID.Address,
-		Signature: identity.SignPayload(attackerID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+attackerID.Address)),
-	})
-	authReply := readJSONTestFrame(t, reader)
-	if authReply.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %s: %s", authReply.Type, authReply.Error)
-	}
-
-	// Try to subscribe to a DIFFERENT identity's inbox (the node's identity).
-	victimAddr := svc.Address()
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type: "subscribe_inbox", Topic: "dm", Recipient: victimAddr, Subscriber: "attacker-sub",
-	})
-	reply := readJSONTestFrame(t, reader)
-	if reply.Type != "error" {
-		t.Fatalf("expected error for identity mismatch, got %s", reply.Type)
-	}
-	if reply.Code != protocol.ErrCodeAuthRequired {
-		t.Errorf("expected code %s, got %s", protocol.ErrCodeAuthRequired, reply.Code)
-	}
-}
-
-// TestSubscribeInboxAllowsOwnIdentity verifies that an authenticated peer
-// can subscribe to its own identity's inbox.
-func TestSubscribeInboxAllowsOwnIdentity(t *testing.T) {
-	t.Parallel()
-
-	address := freeAddress(t)
-	nodeID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate node identity: %v", err)
-	}
-	svc, stop := startTestNodeWithIdentity(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	}, nodeID)
-	defer stop()
-
-	// Create peer identity and register as contact.
-	peerID, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("generate peer identity: %v", err)
-	}
-	peerBoxSig := identity.SignBoxKeyBinding(peerID)
-
-	svc.HandleLocalFrame(protocol.Frame{
-		Type: "import_contacts",
-		Contacts: []protocol.ContactFrame{{
-			Address: peerID.Address,
-			PubKey:  identity.PublicKeyBase64(peerID.PublicKey),
-			BoxKey:  identity.BoxPublicKeyBase64(peerID.BoxPublicKey),
-			BoxSig:  peerBoxSig,
-		}},
-	})
-
-	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
-
-	// hello + auth as peer
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:                   "hello",
-		Version:                config.ProtocolVersion,
-		MinimumProtocolVersion: config.MinimumProtocolVersion,
-		Client:                 "node",
-		ClientVersion:          config.CorsaVersion,
-		Address:                peerID.Address,
-		PubKey:                 identity.PublicKeyBase64(peerID.PublicKey),
-		BoxKey:                 identity.BoxPublicKeyBase64(peerID.BoxPublicKey),
-		BoxSig:                 peerBoxSig,
-	})
-	welcome := readJSONTestFrame(t, reader)
-	if welcome.Type != "welcome" || welcome.Challenge == "" {
-		t.Fatalf("expected welcome with challenge, got %s", welcome.Type)
-	}
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "auth_session",
-		Address:   peerID.Address,
-		Signature: identity.SignPayload(peerID, []byte("corsa-session-auth-v1|"+welcome.Challenge+"|"+peerID.Address)),
-	})
-	authReply := readJSONTestFrame(t, reader)
-	if authReply.Type != "auth_ok" {
-		t.Fatalf("expected auth_ok, got %s: %s", authReply.Type, authReply.Error)
-	}
-
-	// Subscribe to OWN identity's inbox — must succeed.
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type: "subscribe_inbox", Topic: "dm", Recipient: peerID.Address, Subscriber: "peer-sub",
-	})
-	reply := readJSONTestFrame(t, reader)
-	if reply.Type != "subscribed" {
-		t.Fatalf("expected subscribed for own identity, got %s: %s", reply.Type, reply.Error)
-	}
-}
-
 // NOTE: TestFetchInboxRejectsIdentityMismatch was removed — fetch_inbox is a
 // data-only command not available on the TCP wire (covered by
-// TestDataCommandViaTCP_UnknownCommand_SnakeCase). The equivalent identity-
-// binding test for subscribe_inbox already exists as
-// TestSubscribeInboxRejectsIdentityMismatch above (line ~8506).
+// TestDataCommandViaTCP_UnknownCommand_SnakeCase). Inbox routes are bound to
+// the authenticated identity at auth time (registerHelloRoute), so there is
+// no subscription command left to identity-check.
 
 // TestWriteJSONFrameDropsOnUnregisteredConn pins the PR 3 fail-closed
 // contract for the fire-and-forget send path: when writeJSONFrame is invoked

@@ -110,9 +110,9 @@ type Service struct {
 	// deliveryMu → statusMu with statusMu INNERMOST.
 	//
 	// Cross-domain examples that additionally touch gossipMu take the
-	// canonical peerMu → deliveryMu → gossipMu order: retryableRelayMessages,
-	// deleteBacklogMessageForRecipient, queueStateSnapshotLocked hold
-	// deliveryMu OUTER and gossipMu INNER.
+	// canonical peerMu → deliveryMu → gossipMu order: retryableRelayMessages
+	// and deleteBacklogMessageForRecipient hold deliveryMu OUTER and
+	// gossipMu INNER.
 	//
 	// Reverse orders (deliveryMu first, then re-entering peerMu while still
 	// holding delivery state; or delivery callers taking gossipMu before
@@ -121,22 +121,37 @@ type Service struct {
 	// Fields owned by this mutex:
 	//   • pending       — recipient → queued envelopes awaiting delivery
 	//   • pendingKeys   — envelope-id dedup set for pending frames
-	//   • orphaned      — legacy fallback-keyed frames that could not be
-	//                     migrated to a recipient-keyed slot
 	//   • outbound      — envelope-id → last-known outbound delivery state
 	//                     (queued/retrying/terminal) for UI + sync-out
 	//   • relayRetry    — envelope-id → relay retry bookkeeping (attempts,
 	//                     next-try timestamp, peer set)
+	//   • awaitingDelivered — locally-sent DMs awaiting their end-to-end
+	//                     delivered/seen receipt (delivery_retry.go)
+	//   • awaitingSeenAck — locally-sent seen receipts awaiting the original
+	//                     sender's seen_ack (delivery_retry.go)
 	//   • seenReceipts  — transit-receipt dedup set (receipt id → nothing)
 	//   • receipts      — recipient → persisted DeliveryReceipt batches
 	//   • upstream      — peer address → upstream-subscription marker; set of
 	//                     peers that have subscribed to our outbox
 	deliveryMu  sync.RWMutex
-	pending     map[domain.PeerAddress][]pendingFrame
-	pendingKeys map[pendingKey]struct{}
-	orphaned    map[domain.PeerAddress][]pendingFrame // legacy fallback-keyed frames that could not be migrated
-	outbound    map[string]outboundDelivery
-	relayRetry  map[string]relayAttempt
+	pending           map[domain.PeerAddress][]pendingFrame
+	pendingKeys       map[pendingKey]struct{}
+	outbound          map[string]outboundDelivery
+	relayRetry        map[string]relayAttempt
+	awaitingDelivered map[protocol.MessageID]*deliveryRetryEntry
+	awaitingSeenAck   map[protocol.MessageID]*seenAckRetryEntry
+	// seenAckJournal / deliveryFailureJournal are the optional durable
+	// journals behind awaitingSeenAck and the retry-abandonment path
+	// (delivery_retry.go). Set once by RegisterDeliveryOutbox before Run —
+	// like messageStore they are immutable afterwards, so reads need no
+	// mutex. Their SQLite I/O never runs under a domain mutex; the
+	// failure-journal write is synchronous (it is the durable boundary —
+	// a background hop would race shutdown, which does not wait for
+	// backgroundWg before the chatlog closes), while MarkSeenConfirmed may
+	// run on the background pool (losing it only costs one redundant,
+	// idempotent seen re-send after restart).
+	seenAckJournal         SeenAckJournal
+	deliveryFailureJournal DeliveryFailureJournal
 	// relayRetryScratch is a reusable buffer for the topics["dm"] snapshot
 	// taken on each 2s relay-retry cycle (retryableRelayMessages). Copying the
 	// whole topics["dm"] slice into a fresh allocation every cycle was a steady
@@ -184,7 +199,7 @@ type Service struct {
 	boxSigs     map[string]string
 
 	// gossipMu guards the "mesh-propagation" domain: the per-topic message
-	// backlog, its dedup set, the subscribe_inbox fan-out, ephemeral notices,
+	// backlog, its dedup set, the subscriber fan-out, ephemeral notices,
 	// local-change event subscribers, and the throttle timestamp that gates
 	// cleanupExpiredMessages.  Separate from peerMu so fetch_messages /
 	// fetch_inbox / publish_notice readers no longer contend with peer-state
@@ -194,10 +209,9 @@ type Service struct {
 	//   peerMu → deliveryMu → knowledgeMu → gossipMu → ipStateMu → fileMu → statusMu
 	//   • peer-domain / delivery-domain callers that also need gossip
 	//     fields take peerMu / deliveryMu OUTER, gossipMu INNER.
-	//     retryableRelayMessages, deleteBacklogMessageForRecipient,
-	//     queueStateSnapshotLocked are the canonical examples — deliveryMu
-	//     covers relayRetry / receipts, gossipMu covers the topics["dm"]
-	//     snapshot.
+	//     retryableRelayMessages and deleteBacklogMessageForRecipient are
+	//     the canonical examples — deliveryMu covers relayRetry / receipts,
+	//     gossipMu covers the topics["dm"] snapshot.
 	//   • knowledge+gossip mixes take knowledgeMu OUTER then gossipMu
 	//     INNER — the canonical knowledgeMu → gossipMu order.
 	//     storeIncomingMessage expresses the two halves as sequential
@@ -219,7 +233,7 @@ type Service struct {
 	//                           window is [5, 10] minutes — see
 	//                           bloom_dedup.go for the full contract.
 	//   • subs                — recipient → subscriber map for push delivery
-	//                           via subscribe_inbox and hello node-routes
+	//                           via hello node-routes
 	//   • notices             — gazeta notice cache keyed by ciphertext id
 	//   • events              — local-change event subscriber channels
 	//   • lastExpiredCleanup  — throttle timestamp for cleanupExpiredMessages
@@ -600,7 +614,7 @@ type Service struct {
 	// statusMu is INNERMOST.  Every write to aggregateStatus /
 	// versionPolicy is derived from peer-domain state (s.health,
 	// s.peerBuilds, s.peerIDs, s.persistedMeta) and delivery-domain state
-	// (s.pending, s.orphaned), so the full stack peerMu → deliveryMu →
+	// (s.pending), so the full stack peerMu → deliveryMu →
 	// statusMu must be held for any recompute.  Pure readers
 	// (AggregateStatus, VersionPolicySnapshot, aggregateStatusFrame) take
 	// statusMu.RLock alone — no peer/delivery lock is needed because the
@@ -656,23 +670,9 @@ type Service struct {
 	// whether the snapshot content moves again. Zero until first publish.
 	// Protected by s.statusMu.
 	lastVersionPolicyPublishAt time.Time
-
-	// queuePersist is the DEPRECATED, now-DORMANT on-disk queue-state writer.
-	// queue-state disk persistence has been removed: the persister is still
-	// constructed in NewService (so its unit-tested mechanism and the ~20
-	// s.queuePersist.MarkDirty() mutation-site calls stay valid), but its
-	// background goroutine is NO LONGER STARTED in Run. With no consumer,
-	// MarkDirty only sets a flag and a non-blocking wake on a capacity-1
-	// channel — a complete no-op. Nothing is written to queue-<port>.json
-	// anymore (the file is deleted on startup); pending frames are bounded by
-	// an in-memory per-peer ring instead. Retained for a few releases before
-	// full removal — see the queue-persist deprecation notes in NewService /
-	// Run and docs/protocol/relay.md INV-8.
-	queuePersist *queueStatePersister
 }
 
-// subscriber describes an active subscribe_inbox registration or a hello-
-// derived node route. The owning connection is identified by connID so that
+// subscriber describes a hello-derived node route registration. The owning connection is identified by connID so that
 // subscriber state survives independently of net.Conn identity and can be
 // resolved through the ConnID-first registry (netCoreForID). The
 // net.Conn-first write path remains available via netCoreForID(connID).Conn()
@@ -1013,148 +1013,21 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		boxSigs[address] = contact.BoxSignature
 	}
 
-	queueStatePath := cfg.EffectiveQueueStatePath()
-	queueState, err := loadQueueState(queueStatePath)
-	if err != nil {
-		log.Error().Str("path", queueStatePath).Err(err).Msg("queue state load failed")
-		queueState = queueStateFile{
-			Pending:       map[string][]pendingFrame{},
-			RelayRetry:    map[string]relayAttempt{},
-			OutboundState: map[string]outboundDelivery{},
-		}
-	}
-	// DEPRECATED queue-state persistence — one-shot migration + removal.
-	// The runtime no longer writes queue-<port>.json: pending is now an
-	// in-memory per-peer ring (see queuePeerFrame) and the background
-	// persister is constructed but never started (see Run). We still LOADED
-	// the file once above so an in-flight queue survives this upgrade, then
-	// delete it here so it is never read or written again. The persister
-	// mechanism (queue_state_persister.go, saveQueueState) is intentionally
-	// retained-but-dormant for a few releases before full removal.
-	// TODO(queue-persist-removal): delete the persister mechanism, the
-	// queue-state file handling, and EffectiveQueueStatePath once shipped.
-	if queueStatePath != "" {
-		if rmErr := os.Remove(queueStatePath); rmErr == nil {
-			log.Warn().Str("path", queueStatePath).Msg("queue_state_file_removed_deprecated: queue persistence disabled; pending is now an in-memory ring")
-		} else if !os.IsNotExist(rmErr) {
-			log.Warn().Str("path", queueStatePath).Err(rmErr).Msg("queue_state_file_remove_failed")
-		}
-	}
-	// One-time migration: pending queue entries written by pre-v1 code may be
-	// keyed by fallback dial addresses instead of the canonical primary.  The
-	// runtime only drains primary-keyed entries, so legacy keys must be
-	// resolved now.  After the first save the version is bumped and this
-	// block is skipped on subsequent restarts.
-	if queueState.Version < queueStateVersion {
-		hostPrimaries := make(map[string][]string, len(seenAddrs))
-		for addr := range seenAddrs {
-			if h, _, ok := splitHostPort(string(addr)); ok {
-				hostPrimaries[h] = append(hostPrimaries[h], string(addr))
-			}
-		}
-		for address := range queueState.Pending {
-			if _, isPrimary := seenAddrs[domain.PeerAddress(address)]; isPrimary {
-				continue
-			}
-			h, _, ok := splitHostPort(address)
-			if !ok {
-				// Malformed address — orphan to avoid silent loss.
-				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
-				delete(queueState.Pending, address)
-				log.Warn().Str("address", address).Int("count", len(queueState.Orphaned[address])).Msg("orphaned pending frames for malformed address")
-				continue
-			}
-			candidates := hostPrimaries[h]
-			switch len(candidates) {
-			case 0:
-				// Unknown host — no known primary to migrate to.  The
-				// runtime will never flush this key.  Orphan it so the
-				// data is preserved on disk for manual recovery.
-				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
-				delete(queueState.Pending, address)
-				log.Warn().Str("address", address).Int("count", len(queueState.Orphaned[address])).Msg("orphaned pending frames for unknown host")
-			case 1:
-				primary := candidates[0]
-				if primary == address {
-					continue
-				}
-				// Single candidate — move frames to the canonical primary.
-				queueState.Pending[primary] = append(queueState.Pending[primary], queueState.Pending[address]...)
-				delete(queueState.Pending, address)
-			default:
-				// Multiple primaries on the same host — ambiguous.
-				// Orphan so data survives for manual recovery.
-				queueState.Orphaned[address] = append(queueState.Orphaned[address], queueState.Pending[address]...)
-				delete(queueState.Pending, address)
-				log.Warn().Str("address", address).Int("count", len(queueState.Orphaned[address])).Int("candidates", len(candidates)).Msg("orphaned pending frames for ambiguous address")
-			}
-		}
-		queueState.Version = queueStateVersion
-	}
-
-	// NOTE: the one-shot migration trim of restored pending queues to the ring
-	// size happens AFTER svc is constructed (see capPendingRingLocked call
-	// below) so it reuses the exact runtime eviction rule (oldest-by-QueuedAt)
-	// instead of a parallel tail-trim — a pre-upgrade file's append order is
-	// not guaranteed to equal frame age.
+	// Delivery state (pending rings, outbound tracking, relay retry, receipts)
+	// is in-memory only: nothing survives a restart, recovery is sender-side
+	// end-to-end retry (docs/protocol/relay.md INV-8).
 	pendingKeys := make(map[pendingKey]struct{})
-	for address, items := range queueState.Pending {
-		for _, item := range items {
-			if key := pendingFrameKey(domain.PeerAddress(address), item.Frame); key.IsValid() {
-				pendingKeys[key] = struct{}{}
-			}
-		}
-	}
 
 	topics := make(map[string][]protocol.Envelope)
-	// Phase 4 13.4: dedup set is now a rotating Bloom filter. Seed it
-	// from the persisted message IDs so a restart preserves the
-	// already-seen contract within the [rotation, 2*rotation] eviction
-	// window. The bloom is sized via package-level constants
-	// (bloomDedupBits / bloomDedupHashes / bloomDedupRotation); the
-	// nil clock argument selects the production wall clock — tests
-	// build their own dedup with an injected clock via
-	// newRotatingBloomDedup directly.
+	// Phase 4 13.4: dedup set is a rotating Bloom filter, sized via
+	// package-level constants (bloomDedupBits / bloomDedupHashes /
+	// bloomDedupRotation); the nil clock argument selects the production
+	// wall clock — tests build their own dedup with an injected clock via
+	// newRotatingBloomDedup directly. It starts empty: message state is
+	// in-memory only, so there is nothing to re-seed after a restart.
 	seen := newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
-	restoredAt := time.Now().UTC()
-	for _, msg := range queueState.RelayMessages {
-		// Normalize restored envelopes for the hop-budget / in-flight
-		// contracts (transit_retention.go). ONLY true legacy entries —
-		// Hops==0 AND StoredAt zero, i.e. persisted before both fields
-		// existed — re-arm the default budget ("as if we originated
-		// it"); an entry persisted with a non-zero StoredAt and
-		// Hops==0 is genuinely EXHAUSTED and must stay that way, or a
-		// restore would hand it a fresh propagation allowance. The
-		// Hops check runs first, while StoredAt still distinguishes
-		// the two cases; StoredAt then restarts the in-flight window
-		// at process start so restored transit gets one forwarding
-		// cycle before the sweep reaps it.
-		if msg.Hops <= 0 && msg.StoredAt.IsZero() {
-			msg.Hops = defaultMessageHopBudget
-		}
-		if msg.StoredAt.IsZero() {
-			msg.StoredAt = restoredAt
-		}
-		topics[msg.Topic] = append(topics[msg.Topic], msg)
-		if msg.ID != "" {
-			seen.Add(string(msg.ID))
-		}
-	}
-	if len(queueState.RelayMessages) > 0 {
-		ids := make([]string, len(queueState.RelayMessages))
-		for i, m := range queueState.RelayMessages {
-			ids[i] = string(m.ID)
-		}
-		log.Info().Str("path", queueStatePath).Int("count", len(queueState.RelayMessages)).Strs("ids", ids).Msg("restored relay messages from queue state")
-	}
 	receipts := make(map[string][]protocol.DeliveryReceipt)
 	seenReceipts := make(map[string]struct{})
-	for _, receipt := range queueState.RelayReceipts {
-		receipts[receipt.Recipient] = append(receipts[receipt.Recipient], receipt)
-		key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
-		seenReceipts[key] = struct{}{}
-	}
-	sanitizeRelayState(queueState.RelayRetry, queueState.RelayMessages, queueState.RelayReceipts)
 
 	// Seed health map from persisted peer metadata so that scores,
 	// failure counts and timestamps survive a restart+flush cycle
@@ -1203,21 +1076,8 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		}
 	}
 
-	// Migrate queueState maps from string-keyed to domain.PeerAddress-keyed.
-	// queueState.Pending and queueState.Orphaned are keyed by string addresses in JSON;
-	// convert to domain.PeerAddress for internal use.
 	pending := make(map[domain.PeerAddress][]pendingFrame)
-	for addr, frames := range queueState.Pending {
-		pending[domain.PeerAddress(addr)] = frames
-	}
-	orphaned := make(map[domain.PeerAddress][]pendingFrame)
-	for addr, frames := range queueState.Orphaned {
-		orphaned[domain.PeerAddress(addr)] = frames
-	}
 	relayRetry := make(map[string]relayAttempt)
-	for addr, attempt := range queueState.RelayRetry {
-		relayRetry[addr] = attempt
-	}
 
 	svc := &Service{
 		// Default lifecycle context: replaced by Run(ctx) with the real
@@ -1258,9 +1118,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		peerBuilds:              make(map[domain.PeerAddress]int),
 		pending:                 pending,
 		pendingKeys:             pendingKeys,
-		orphaned:                orphaned,
 		relayRetry:              relayRetry,
-		outbound:                queueState.OutboundState,
+		outbound:                make(map[string]outboundDelivery),
+		awaitingDelivered:       make(map[protocol.MessageID]*deliveryRetryEntry),
+		awaitingSeenAck:         make(map[protocol.MessageID]*seenAckRetryEntry),
 		upstream:                make(map[domain.PeerAddress]struct{}),
 		dialOrigin:              make(map[domain.PeerAddress]domain.PeerAddress),
 		observedAddrs:           make(map[domain.PeerIdentity]string),
@@ -1284,51 +1145,6 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		setupFailures:           make(map[domain.PeerAddress]*setupFailureEntry),
 		aggregateStatus:         domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                    make(chan struct{}),
-	}
-
-	// Queue-state persister: DEPRECATED and DORMANT. Disk persistence has been
-	// removed — this is constructed (so its mechanism and the MarkDirty call
-	// sites stay valid, and the deps below keep saveQueueState /
-	// queueStateSnapshotLocked referenced) but its Run goroutine is NOT started
-	// (see Run), so MarkDirty is a no-op and nothing reaches disk. The Save /
-	// Snapshot wiring below is retained-but-inert for a few releases before the
-	// whole mechanism is deleted (TODO(queue-persist-removal)).
-	svc.queuePersist = newQueueStatePersister(queueStatePersisterDeps{
-		Path:             queueStatePath,
-		DebounceInterval: defaultQueueStatePersistDebounce,
-		MinWriteInterval: defaultQueueStateMinWriteInterval,
-		Snapshot: func() queueStateFile {
-			// queueStateSnapshotLocked reads delivery-domain fields
-			// (pending, orphaned, relayRetry, receipts, outbound), so
-			// s.deliveryMu is the contract lock.  Canonical order is
-			// irrelevant here — no other Service mutex is taken in this
-			// scope.
-			svc.deliveryMu.RLock()
-			defer svc.deliveryMu.RUnlock()
-			return svc.queueStateSnapshotLocked()
-		},
-		Save: saveQueueState,
-		Wait: realQueueStatePersistWait,
-	})
-
-	// One-shot migration trim of the restored pending queues. The pre-upgrade
-	// queue file predates the in-memory per-peer ring and may hold more than
-	// the configured ring size per peer (a large legacy file, or the operator
-	// lowered CORSA_PENDING_RING_SIZE below the old disk cap). Reuse the runtime
-	// ring cap so the eviction rule is IDENTICAL to steady state — oldest by
-	// QueuedAt (NOT slice position; a pre-upgrade file's append order is not
-	// guaranteed to equal frame age), type-gated outbound cleanup, dedup-key
-	// reconciliation — instead of a parallel tail-trim that could drop newer
-	// frames and keep older ones. Single-threaded here (no readers/writers
-	// yet); the lock only satisfies capPendingRingLocked's contract. Removable
-	// with the rest of the queue-file migration.
-	{
-		ringSize := svc.pendingRingSize()
-		svc.deliveryMu.Lock()
-		for addr := range svc.pending {
-			svc.capPendingRingLocked(addr, ringSize)
-		}
-		svc.deliveryMu.Unlock()
 	}
 
 	// Initialize PeerProvider (Stage 3: connection management integration).
@@ -1593,7 +1409,6 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	svc.queryRateLimit = newQueryRateLimit(nil, 0, 0)
 
 	svc.relayStates = newRelayStateStore()
-	svc.relayStates.restore(queueState.RelayForwardStates)
 	svc.relayLimiter = newRelayRateLimiter()
 	svc.announceLimiter = newAnnounceRateLimiter()
 	svc.connLimiter = newConnRateLimiter()
@@ -1667,31 +1482,12 @@ func (s *Service) Run(ctx context.Context) error {
 	// against a half-torn-down Service during shutdown.
 	defer close(s.done)
 
-	// DEPRECATED queue-state persistence: the background writer is NO LONGER
-	// STARTED. queue-<port>.json is not written anymore — pending lives in an
-	// in-memory per-peer ring (see queuePeerFrame) and the file is deleted at
-	// startup (see NewService). The persister is still constructed (so the
-	// ~20 s.queuePersist.MarkDirty() mutation-site calls remain valid no-ops:
-	// MarkDirty only sets a flag + a non-blocking wake on a channel that now
-	// has no consumer) and its unit-tested mechanism is retained-but-dormant
-	// for a few releases. Removing the Run goroutine eliminates the periodic
-	// snapshot deep-copy + JSON marshal that profiling flagged as the top
-	// allocation-churn source.
-	// TODO(queue-persist-removal): delete the persister, MarkDirty calls, and
-	// saveQueueState once the deprecation window closes.
-
 	// Traffic capture manager — diagnostic feature (plan §4.5).
 	s.initCaptureManager()
 	defer s.captureManager.Close()
 	// Startup traffic recording (env: CORSA_RECORD_ALL_TRAFFIC, default off).
 	s.startConfiguredCapture()
 
-	// Relay-state TTL-evict hook. Historically this persisted the updated
-	// state to disk; queue-state disk persistence has been removed, so
-	// persistRelayState() → MarkDirty() is now a no-op and relay state is
-	// in-memory only. The hook is kept (vestigial) alongside the dormant
-	// persister for a few releases; it neither writes disk nor blocks.
-	s.relayStates.onEvict = func() { s.persistRelayState() }
 	// Phase 3 PR 12.2 — wire the hop-ack budget timeout callback so the
 	// routing.Table reputation primitive learns about (Recipient,
 	// ForwardedTo) pairs that never produced a hop_ack. The handler
@@ -1757,13 +1553,10 @@ func (s *Service) Run(ctx context.Context) error {
 		s.connManager.Run(ctx)
 		close(cmDone)
 	}()
-	// Ensure the CM event loop has fully drained before Run returns. (This
-	// used to also gate the persister's final flush so a last-chance MarkDirty
-	// during outbound teardown still reached disk — but queue-state disk
-	// persistence has been removed: the persister is never started, MarkDirty
-	// is a no-op, and nothing is flushed on shutdown. In-memory pending/relay
-	// state is intentionally NOT recovered across a restart; the sender retries
-	// end-to-end.) The drain is still needed for clean goroutine teardown.
+	// Ensure the CM event loop has fully drained before Run returns —
+	// needed for clean goroutine teardown. In-memory pending/relay state is
+	// intentionally NOT recovered across a restart; the sender retries
+	// end-to-end.
 	// This defer is a no-op in the listener-disabled branch because that
 	// branch already awaits cmDone synchronously before returning.
 	defer func() { <-cmDone }()
@@ -1921,10 +1714,7 @@ func (s *Service) WaitBackground() {
 // helper for every fire-and-forget goroutine that mutates shared
 // state or performs still-durable writes (e.g. trust-store / peers.json
 // writes), so the work cannot race with TempDir cleanup in tests or with
-// process exit in production. (The queuePeerFrame → queuePersist.MarkDirty
-// path no longer writes disk — queue state is in-memory only — but these
-// goroutines still mutate in-memory pending/relay state and other
-// persisted subsystems, so tracking them remains required.)
+// process exit in production.
 //
 // Add(1) is called on the caller's goroutine before the spawn so
 // WaitBackground cannot observe the zero counter between spawn
@@ -2451,7 +2241,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			return false
 		}
 		// Handshake-phase reply: auth_ok is the gate the dialler waits on
-		// before sending subscribe_inbox. Use the no-eviction path so a
+		// before the session becomes usable. Use the no-eviction path so a
 		// transient outbound burst (broadcast of our own announce_routes
 		// to the new peer kicked off by the auth_session handler) does
 		// not torpedo the connection right at the threshold of becoming
@@ -2506,10 +2296,10 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			// buffer would be wasted work the peer never reads.
 			return true
 		}
-		// v20 auto-subscribe backlog replay — strictly AFTER auth_ok has been
+		// Auto-subscribe backlog replay — strictly AFTER auth_ok has been
 		// enqueued into the writer (sendHandshakeReplyViaNetwork returned nil),
-		// so push_message/push_delivery_receipt frames are ordered behind auth_ok
-		// on the connection. Fire-and-forget like the subscribe_inbox path.
+		// so push_message/push_delivery_receipt frames are ordered behind
+		// auth_ok on the connection. Fire-and-forget.
 		if backlogSub != nil {
 			s.goBackground(func() { s.pushBacklogToSubscriber(backlogSub) })
 		}
@@ -2592,97 +2382,6 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			return false
 		}
 		_ = s.sendFrameViaNetwork(s.runCtx, connID, reply)
-		return true
-	case "subscribe_inbox":
-		// DEPRECATED (v20): node peers running >= subscribeInboxAutoAtAuthVersion
-		// no longer send this frame — handleAuthSession auto-registers the
-		// subscription and replays the backlog at auth (registerHelloRoute +
-		// pushBacklogToSubscriber). This handler stays wired for (a) older node
-		// peers still in the mesh and (b) client-role (non-node) subscribers,
-		// which the auth path does not cover. Remove this case, the send sites
-		// in peer_sessions.go, and subscribeInboxFrame once MinimumProtocolVersion
-		// reaches subscribeInboxAutoAtAuthVersion.
-		//
-		// Auth gate enforced above. Identity binding: the authenticated
-		// peer may only subscribe to
-		// its own identity. Without this check, an authenticated peer could
-		// subscribe to a different identity's inbox and receive their messages.
-		peerIdentity := s.inboundPeerIdentity(connID)
-		requestedRecipient := strings.TrimSpace(frame.Recipient)
-		if requestedRecipient != "" && requestedRecipient != string(peerIdentity) {
-			accepted = false
-			log.Warn().
-				Str("peer_identity", string(peerIdentity)).
-				Str("requested_recipient", requestedRecipient).
-				Msg("subscribe_inbox identity mismatch")
-			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "subscribe_inbox: recipient must match authenticated identity"})
-			s.addBanScore(connID, banIncrementInvalidSig)
-			return true
-		}
-		reply, sub := s.subscribeInboxFrame(connID, frame)
-		// Handshake-phase reply: the subscribed frame is the literal
-		// signal the dialler waits on inside initPeerSession before
-		// transitioning the slot to Active. The pre-fix bug was exactly
-		// here: sendFrameViaNetwork closed the conn on SendBufferFull,
-		// turning a transient overload into cm_session_setup_failed.
-		// sendHandshakeReplyViaNetwork blocks-with-timeout instead and
-		// never evicts. See network_consumer.go and the root-cause
-		// discussion in the cm_session_setup_failed analysis notes.
-		//
-		// Failure handling: subscribeInboxFrame has ALREADY registered
-		// the subscriber in s.subs and the cleanup path (handleConn
-		// defer) only triggers on connection close. With the no-eviction
-		// helper a wedged outbound buffer no longer tears down the
-		// connection, so when the ack itself does not reach the peer we
-		// must roll back the subscription manually — otherwise we would
-		// (a) push the backlog into a queue the dialler will never read,
-		// (b) emit a reverse subscribe_inbox the peer cannot consume,
-		// and (c) keep a phantom subscriber bucket alive until the
-		// connection eventually dies for other reasons.
-		ackErr := s.sendHandshakeReplyViaNetwork(s.runCtx, connID, reply)
-		if ackErr != nil {
-			log.Warn().Err(ackErr).
-				Uint64("conn_id", uint64(connID)).
-				Str("recipient", reply.Recipient).
-				Msg("subscribed reply failed — rolling back subscription, skipping backlog push + reverse subscribe")
-			if sub != nil {
-				s.gossipMu.Lock()
-				s.removeSubscriberConnIDLocked(sub.recipient, connID)
-				s.gossipMu.Unlock()
-			}
-			return true
-		}
-		if sub != nil {
-			s.goBackground(func() { s.pushBacklogToSubscriber(sub) })
-		}
-		// Reverse subscription: subscribe on the outbound peer so that this
-		// node receives both the stored backlog and live updates for its own
-		// identity.  subscribe_inbox is a superset of the old request_inbox
-		// (it pushes backlog AND registers a live subscriber), so a single
-		// frame in each direction is sufficient for full bidirectional sync.
-		// Sent here (not after auth_ok) so that short-lived connections like
-		// syncPeer — which never send subscribe_inbox — are not affected.
-		//
-		// Use the no-eviction handshake-reply helper: the reverse
-		// subscribe_inbox lands on the same outbound buffer as the
-		// subscribed ack above, and if that buffer is still saturated by
-		// the peer's announce_routes flush we must not close the
-		// connection. Closing here would torpedo the session right after
-		// we just spent effort keeping it alive through the ack path —
-		// exactly the cm_session_setup_failed cascade we are trying to
-		// break.
-		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, protocol.Frame{
-			Type:       "subscribe_inbox",
-			Topic:      "dm",
-			Recipient:  s.identity.Address,
-			Subscriber: s.identity.Address,
-		})
-		return true
-	case "subscribed":
-		// Response to our reverse subscribe_inbox sent to the outbound peer.
-		// The outbound side has registered us as a subscriber and will push
-		// backlog + live updates.  Nothing to do here — just acknowledge.
-		log.Info().Str("recipient", frame.Recipient).Str("subscriber", frame.Subscriber).Msg("reverse subscription confirmed by outbound peer")
 		return true
 	case "push_message":
 		s.handleInboundPushMessage(connID, frame)
@@ -3014,8 +2713,6 @@ var p2pWireCommands = map[string]bool{
 	"get_peers":              true,
 	"fetch_contacts":         true,
 	"ack_delete":             true,
-	"subscribe_inbox":        true,
-	"subscribed":             true,
 	"push_message":           true,
 	"push_delivery_receipt":  true,
 	"relay_delivery_receipt": true,
@@ -3619,8 +3316,8 @@ func (s *Service) writeJSONFrameByID(id domain.ConnID, frame protocol.Frame) err
 // enqueueSessionFrame is the session-scoped counterpart of enqueueFrameByID:
 // instead of re-resolving the transport via s.conns (netCoreFor), it uses
 // the NetCore that the peerSession already owns. Session-local reply paths
-// — pong on outbound sessions, push_message/push_delivery_receipt on
-// respondToInboxRequest, subscribe_inbox reply — must not fail closed with
+// — pong on outbound sessions, push_message/push_delivery_receipt pushes
+// to subscribers — must not fail closed with
 // unregistered_write just because the registry entry has been reaped or
 // never existed (tests); the authoritative writer is session.netCore.
 func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueueResult {
@@ -3868,22 +3565,16 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	helloSub := s.registerHelloRoute(id, verified.Hello)
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_after_register_route")
 
-	// subscribe_inbox deprecation (v20): the node-route subscriber installed by
-	// registerHelloRoute already makes us push this peer's inbox to it, so the
-	// only thing the explicit subscribe_inbox round-trip still did — replay the
-	// stored backlog — is moved to auth instead. Gated on the peer being v20+:
-	// older peers still SEND subscribe_inbox (its handler replays the backlog
-	// for them), and replaying here too would just duplicate-push frames the
-	// peer already dedups. Non-node / client-role subscribers get nil here and
-	// keep using subscribe_inbox unchanged.
+	// The node-route subscriber installed by registerHelloRoute makes us push
+	// this peer's inbox to it; the stored-backlog replay happens at auth too.
+	// The MinimumProtocolVersion floor guarantees every peer relies on this
+	// auth-time registration (the legacy subscribe_inbox round-trip has been
+	// removed from the protocol).
 	//
 	// We do NOT spawn the replay here: it is returned to the caller, which runs
 	// it strictly AFTER the auth_ok reply is enqueued, so backlog frames cannot
 	// race ahead of auth_ok on the writer (see the function doc).
-	var backlogSub *subscriber
-	if helloSub != nil && verified.Hello.Version >= subscribeInboxAutoAtAuthVersion {
-		backlogSub = helloSub
-	}
+	backlogSub := helloSub
 
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
@@ -4714,9 +4405,7 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 // dropPendingForRecipient removes all pending send_message frames addressed
 // to the given recipient across every peer queue. It also clears the
 // corresponding outbound delivery tracking entries and pending dedup keys.
-// All of this is in-memory only — the trailing MarkDirty is a no-op (queue
-// state is no longer persisted to disk; see the queue-persist deprecation in
-// NewService / Run).
+// All of this is in-memory only.
 //
 // Cross-domain: writes s.pending / s.pendingKeys / s.outbound
 // (delivery-domain, s.deliveryMu) and recomputes the aggregate-status
@@ -4783,7 +4472,6 @@ func (s *Service) dropPendingForRecipient(recipient string) {
 
 	if dropped > 0 || outboundDropped > 0 {
 		log.Info().Str("recipient", recipient).Int("pending_dropped", dropped).Int("outbound_dropped", outboundDropped).Msg("dropped_pending_for_deleted_contact")
-		s.queuePersist.MarkDirty()
 	}
 
 	for _, d := range affected {
@@ -4946,64 +4634,6 @@ func (s *Service) importContactsFrame(contacts []protocol.ContactFrame) protocol
 	}
 }
 
-// subscribeInboxAutoAtAuthVersion is the protocol version from which a
-// responder auto-registers the peer's inbox subscription and replays its
-// backlog at auth time (handleAuthSession), making the explicit
-// subscribe_inbox/subscribed round-trip redundant. A v20+ initiator skips
-// subscribe_inbox when the peer advertises >= this version and still sends it
-// to older peers. The command stays wired until MinimumProtocolVersion reaches
-// this value. See config.ProtocolVersion (v20) for the rollout note.
-const subscribeInboxAutoAtAuthVersion = 20
-
-// subscribeInboxFrame registers a live subscriber for the recipient carried
-// by the frame and returns the acknowledgement plus the created subscriber
-// so the caller can push the backlog. The remote address string used as a
-// fallback subscriber id is resolved via s.Network().RemoteAddr(connID),
-// which returns "" for an unregistered ConnID — equivalent to the previous
-// nil-NetCore guard.
-func (s *Service) subscribeInboxFrame(connID domain.ConnID, frame protocol.Frame) (protocol.Frame, *subscriber) {
-	topic := strings.TrimSpace(frame.Topic)
-	recipient := strings.TrimSpace(frame.Recipient)
-	if topic != "dm" || recipient == "" {
-		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSubscribeInbox}, nil
-	}
-
-	subID := strings.TrimSpace(frame.Subscriber)
-	if subID == "" {
-		subID = s.Network().RemoteAddr(connID)
-	}
-
-	log.Trace().Str("site", "subscribeInboxFrame").Str("phase", "lock_wait").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("gossipMu_writer")
-	s.gossipMu.Lock()
-	log.Trace().Str("site", "subscribeInboxFrame").Str("phase", "lock_held").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("gossipMu_writer")
-	if _, ok := s.subs[recipient]; !ok {
-		s.subs[recipient] = make(map[string]*subscriber)
-	}
-	s.removeSubscriberConnIDLocked(recipient, connID)
-	if _, ok := s.subs[recipient]; !ok {
-		s.subs[recipient] = make(map[string]*subscriber)
-	}
-	sub := &subscriber{
-		id:        subID,
-		recipient: recipient,
-		connID:    connID,
-	}
-	s.subs[recipient][subID] = sub
-	count := len(s.subs[recipient])
-	s.gossipMu.Unlock()
-	log.Trace().Str("site", "subscribeInboxFrame").Str("phase", "lock_released").Str("recipient", recipient).Uint64("conn_id", uint64(connID)).Msg("gossipMu_writer")
-	log.Info().Str("recipient", recipient).Str("subscriber", subID).Int("active", count).Msg("subscribe_inbox")
-
-	return protocol.Frame{
-		Type:       "subscribed",
-		Topic:      topic,
-		Recipient:  recipient,
-		Subscriber: subID,
-		Status:     "ok",
-		Count:      count,
-	}, sub
-}
-
 // registerHelloRoute installs a synthetic "node-route" subscriber that
 // forwards pushes for the node's own address back through the inbound
 // connection. The remote address string that seeds the subscriber id is
@@ -5013,8 +4643,7 @@ func (s *Service) subscribeInboxFrame(connID domain.ConnID, frame protocol.Frame
 // nil-NetCore guard.
 //
 // Returns the installed (or pre-existing) node-route subscriber so the caller
-// (handleAuthSession) can replay the inbox backlog to it at auth time — this is
-// what makes the explicit subscribe_inbox round-trip redundant from v20 on.
+// (handleAuthSession) can replay the inbox backlog to it at auth time.
 // Returns nil when no route is installed (non-node client, empty address, or
 // unregistered conn).
 func (s *Service) registerHelloRoute(connID domain.ConnID, frame protocol.Frame) *subscriber {
@@ -5176,6 +4805,14 @@ func (s *Service) importMessageFrame(frame protocol.Frame) protocol.Frame {
 }
 
 func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame {
+	// seen_ack is wire-only scheduler plumbing: the local
+	// send_delivery_receipt command accepts only the user-level statuses
+	// (delivered/seen). Injecting seen_ack via local RPC would fake the
+	// remote confirmation and silence the seen retry without the original
+	// sender ever acking.
+	if frame.Status == protocol.ReceiptStatusSeenAck {
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
+	}
 	receipt, err := receiptFromFrame(frame)
 	if err != nil {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
@@ -5294,10 +4931,41 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
 	if s.seen.Has(string(msg.ID)) {
 		count := len(s.topics[msg.Topic])
-		s.gossipMu.Unlock()
-		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_dedup").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
-		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_dedup")
-		return false, count, ""
+		// A duplicate of a DM addressed to us means the sender most likely
+		// never received the original delivered receipt and is retrying
+		// end-to-end — re-send the receipt or the retries never stop. The
+		// dedupe stays silent towards the UI (no message.new below).
+		//
+		// Bloom positives can be FALSE positives (rotating filter, see
+		// bloom_dedup.go), so the receipt is only re-sent when the envelope
+		// is genuinely present in the local backlog: confirming delivery of
+		// a message we never stored would convert a bloom FP from "lost,
+		// sender keeps retrying" into a silent false "delivered".
+		confirmedPresent := false
+		if s.owesDeliveryReceipt(msg) {
+			for i := range s.topics[msg.Topic] {
+				if s.topics[msg.Topic][i].ID == msg.ID {
+					confirmedPresent = true
+					break
+				}
+			}
+		}
+		// Recipient-local DM that is NOT visible in the runtime backlog
+		// (e.g. cleared by a same-identity subscriber's ack_delete) while a
+		// durable MessageStore is registered: fall through and let the
+		// chatlog primary key decide — StoreDuplicate re-sends the receipt
+		// below; StoreInserted means the bloom hit was a FALSE positive and
+		// the message is genuinely new (stored properly instead of lost).
+		fallThroughToStore := s.owesDeliveryReceipt(msg) && !confirmedPresent && s.messageStore != nil
+		if !fallThroughToStore {
+			s.gossipMu.Unlock()
+			log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_dedup").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
+			log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_dedup")
+			if confirmedPresent {
+				s.goBackground(func() { s.resendDeliveryReceipt(msg) })
+			}
+			return false, count, ""
+		}
 	}
 	s.seen.Add(string(msg.ID))
 
@@ -5376,10 +5044,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// retry/persistence story lives at the application layer
 	// (DMRouter.pendingDelete in slice B), not at the node level.
 	// Putting them in topics["dm-control"] would (a) be unread by any
-	// retry/snapshot path — retryableRelayMessages and
-	// queueStateSnapshotLocked both read only topics["dm"] — so the
+	// retry path — retryableRelayMessages reads only topics["dm"] — so the
 	// envelopes accumulate forever, and (b) blur the design boundary
-	// between data DMs (node-level store-and-forward) and control DMs
+	// between data DMs (node-level forwarding/retry) and control DMs
 	// (sender-driven application retry). Routing/push-fanout still
 	// works because executeGossipTargets and the table-directed relay
 	// path send frames on the wire on the fly without depending on
@@ -5404,6 +5071,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			s.gossipMu.Unlock()
 			log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_exact_dedup").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
 			log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_backlog_dedup")
+			// Same contract as the bloom-dedup exit above: a retried DM
+			// addressed to us still owes the sender a delivered receipt.
+			if s.owesDeliveryReceipt(msg) {
+				s.goBackground(func() { s.resendDeliveryReceipt(msg) })
+			}
 			return false, count, ""
 		}
 		// Transit retention (layer 1): enforce the per-recipient FIFO
@@ -5501,19 +5173,18 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	if s.shouldRouteStoredMessage(msg) {
 		s.trackRelayMessage(envelope)
 
-		// Gossip is the baseline delivery mechanism. It ensures
-		// store-and-forward (transit DMs held IN MEMORY on relay nodes
-		// for offline recipients — bounded by the transit retention
-		// caps and NOT durable across restart), push delivery to
-		// connected clients, and backlog drain. Two propagation gates
+		// Gossip is the baseline delivery mechanism. It spreads the
+		// envelope so relays can forward it (transit DMs are held IN
+		// MEMORY only as the in-flight buffer of the forwarding
+		// operation — bounded by the transit retention caps, never a
+		// mailbox), plus push delivery to connected clients and the
+		// sender-side backlog. Two propagation gates
 		// apply (transit_retention.go): the hop budget (no re-gossip
 		// once the decremented budget hits 0 — bounds blind-delivery
 		// radius like bitchat's hop TTL) and ingress suppression (the
 		// link the message arrived on is excluded — it already has
 		// it). Runs inline: executeGossipTargets only enqueues jobs on
-		// the bounded gossip dispatch pool (gossip_dispatch.go); the
-		// trailing queuePersist.MarkDirty is now a no-op (the
-		// persister is dormant — no disk write is scheduled).
+		// the bounded gossip dispatch pool (gossip_dispatch.go).
 		gossipTargets := s.filterGossipTargetsForEnvelope(envelope, decision.GossipTargets)
 		s.executeGossipTargets(envelope, gossipTargets)
 
@@ -5540,14 +5211,41 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// Receipt emission must not be gated by validateTimestamp — relayed
 	// DMs arrive via deliverRelayedMessage which passes validateTimestamp=false,
 	// but the recipient still needs to acknowledge delivery to the sender.
-	// Skip for duplicates — the receipt was already sent on the first store.
-	if isLocal && storeResult != StoreDuplicate && msg.Topic == "dm" && msg.Recipient != "*" {
-		if msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address {
+	// Sender-side e2e retry: our own outgoing DM stays scheduled until the
+	// recipient's delivered/seen receipt arrives (delivery_retry.go). No
+	// other domain mutex is held here, so taking deliveryMu is safe.
+	if msg.Topic == "dm" && msg.Sender == s.identity.Address &&
+		msg.Recipient != "" && msg.Recipient != "*" && msg.Recipient != s.identity.Address &&
+		storeResult != StoreDuplicate {
+		s.deliveryMu.Lock()
+		s.registerAwaitingDeliveredLocked(envelope, time.Now().UTC())
+		s.deliveryMu.Unlock()
+	}
+
+	// A chatlog duplicate (StoreDuplicate) is a sender retry whose original
+	// receipt most likely got lost — storeDeliveryReceipt would dedupe the
+	// whole emit into a no-op via seenReceipts, so the duplicate path goes
+	// through resendDeliveryReceipt, which redistributes without touching
+	// local receipt state.
+	if s.owesDeliveryReceipt(msg) {
+		if storeResult == StoreDuplicate {
+			s.goBackground(func() { s.resendDeliveryReceipt(msg) })
+		} else {
 			s.goBackground(func() { s.emitDeliveryReceipt(msg) })
 		}
 	}
 
 	return true, count, ""
+}
+
+// owesDeliveryReceipt reports whether msg is a data DM addressed to this
+// node from another identity — exactly the messages whose arrival (first or
+// retried) obliges this node to confirm delivery to the remote sender.
+func (s *Service) owesDeliveryReceipt(msg incomingMessage) bool {
+	return msg.Topic == "dm" &&
+		msg.Recipient != "*" &&
+		msg.Recipient == s.identity.Address &&
+		msg.Sender != s.identity.Address
 }
 
 // isLocalMessage returns true if this node is a party to the message
@@ -5614,10 +5312,54 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_dup").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_dup").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
+		// A duplicate "seen" addressed to us means the seen-sender most
+		// likely never received our seen_ack and is retrying — answer it
+		// again, mirroring the duplicate-DM → delivered re-send contract.
+		if receipt.Status == protocol.ReceiptStatusSeen && receipt.Recipient == s.identity.Address {
+			s.goBackground(func() { s.sendSeenAck(receipt) })
+		}
 		return false, count
 	}
+	// Sender binding for seen_ack addressed to us: the only identity whose
+	// ack counts is the one our seen receipt was addressed to — recorded in
+	// awaitingSeenAck. Anything else (wrong sender, or no retry pending) is
+	// dropped BEFORE the seenReceipts insert, so a spoofed ack can neither
+	// stop the retry nor occupy the dedupe key and shadow the genuine ack.
+	if receipt.Status == protocol.ReceiptStatusSeenAck && receipt.Recipient == s.identity.Address {
+		entry, awaiting := s.awaitingSeenAck[receipt.MessageID]
+		if !awaiting || entry.Receipt.Recipient != receipt.Sender {
+			count := len(s.receipts[receipt.Recipient])
+			s.deliveryMu.Unlock()
+			log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_ack_rejected").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_ack_rejected").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
+			log.Warn().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Bool("awaiting", awaiting).Msg("seen_ack rejected: sender does not match the awaited original sender")
+			return false, count
+		}
+	}
 	s.seenReceipts[key] = struct{}{}
-	s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
+	// seen_ack is scheduler plumbing, not a deliverable artefact: dedupe it
+	// via seenReceipts but never store it in s.receipts, so it cannot leak
+	// through fetch_delivery_receipts or the auth-time backlog replay
+	// (neither surface has a v23 gate).
+	if receipt.Status != protocol.ReceiptStatusSeenAck {
+		s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
+	}
+	now := time.Now().UTC()
+	switch {
+	case receipt.Recipient == s.identity.Address &&
+		(receipt.Status == protocol.ReceiptStatusDelivered || receipt.Status == protocol.ReceiptStatusSeen):
+		// End-to-end confirmation for a message WE sent — the delivery
+		// retry scheduler can stop re-sending it.
+		delete(s.awaitingDelivered, receipt.MessageID)
+	case receipt.Recipient == s.identity.Address && receipt.Status == protocol.ReceiptStatusSeenAck:
+		// The original sender confirmed our seen receipt — stop retrying it.
+		delete(s.awaitingSeenAck, receipt.MessageID)
+	case receipt.Sender == s.identity.Address && receipt.Status == protocol.ReceiptStatusSeen:
+		// Our own outgoing seen receipt — retry it until the original
+		// sender's seen_ack arrives (etap 3.3 contract).
+		s.registerAwaitingSeenAckLocked(receipt, now)
+	}
 	delete(s.outbound, string(receipt.MessageID))
 	msgAffected := s.clearPendingMessageLocked(receipt.MessageID)
 	rcptAffected := s.clearPendingReceiptLocked(receipt.MessageID, receipt.Recipient, receipt.Status)
@@ -5639,7 +5381,6 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
-	s.queuePersist.MarkDirty()
 
 	// Emit pending count deltas for all peers whose queues were modified.
 	for _, d := range pendingDeltas {
@@ -5651,10 +5392,16 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 
 	// Update delivery status via the registered MessageStore BEFORE emitting
 	// local change so the desktop UI can safely read the new status from
-	// SQLite when it reacts to the event. Same invariant as storeIncomingMessage.
+	// SQLite when it reacts to the event. Same invariant as
+	// storeIncomingMessage. seen_ack is scheduler-plumbing, not a message
+	// lifecycle state — chatlog knows only sent→delivered→seen, so it never
+	// reaches the store or the UI event below.
 	receiptStoreOK := true
-	if s.messageStore != nil {
+	if s.messageStore != nil && receipt.Status != protocol.ReceiptStatusSeenAck {
 		receiptStoreOK = s.messageStore.UpdateDeliveryStatus(receipt)
+	}
+	if receipt.Status == protocol.ReceiptStatusSeenAck {
+		receiptStoreOK = false
 	}
 
 	if receiptStoreOK {
@@ -5674,17 +5421,40 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	log.Info().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Time("delivered_at", receipt.DeliveredAt).Msg("stored delivery receipt")
 
 	if receipt.Recipient == s.identity.Address {
+		// First arrival of a "seen" addressed to us — confirm it to the
+		// seen-sender so their retry loop stops (etap 3.3).
+		if receipt.Status == protocol.ReceiptStatusSeen {
+			s.goBackground(func() { s.sendSeenAck(receipt) })
+		}
+		// Persist the confirmation so the seen retry does not resurrect
+		// after a restart (the journal is chatlog-backed; SQLite I/O runs
+		// outside every domain mutex on the background pool).
+		if receipt.Status == protocol.ReceiptStatusSeenAck && s.seenAckJournal != nil {
+			journal := s.seenAckJournal
+			id := receipt.MessageID
+			s.goBackground(func() {
+				if err := journal.MarkSeenConfirmed(id); err != nil {
+					log.Warn().Str("message_id", string(id)).Err(err).Msg("seen_ack_journal_write_failed")
+				}
+			})
+		}
+		return true, count
+	}
+
+	// Transit receipt bookkeeping: seen_ack is excluded — it is not stored
+	// in s.receipts, so retryableRelayReceipts could never revisit its
+	// relayRetry entry, and the sender-side scheduler already owns its
+	// end-to-end retry.
+	if receipt.Status == protocol.ReceiptStatusSeenAck {
+		s.distributeReceipt(receipt)
 		return true, count
 	}
 
 	s.trackRelayReceipt(receipt)
-	// Try relay receipt return path first. Only fall back to gossip if the
-	// relay chain could not forward (no state, or hop unavailable).
-	relayForwarded := s.handleRelayReceipt(receipt)
-	if !relayForwarded {
-		s.goBackground(func() { s.gossipReceipt(receipt) })
-	}
-	s.goBackground(func() { s.pushReceiptToSubscribers(receipt) })
+	// Relay receipt return path first, gossip fallback, plus live
+	// subscribers — shared with the duplicate re-send paths and the
+	// delivery retry scheduler.
+	s.distributeReceipt(receipt)
 
 	return true, count
 }
@@ -5823,8 +5593,13 @@ func mergePendingDeltas(a, b []ebus.PeerPendingDelta) []ebus.PeerPendingDelta {
 	return result
 }
 
-// clearPendingMessageLocked removes a specific send_message from the pending
-// queue (matched by messageID). Returns affected (address, newCount) pairs
+// clearPendingMessageLocked removes every queued frame that carries the
+// message (matched by messageID) from the pending queue: the sender-side
+// send_message AND any relay_message queued for the same id by the relay
+// fallback (sendRelayMessage → queuePeerFrame when the session is
+// unavailable). Both must go together — once the message is confirmed
+// delivered or abandoned, flushing a leftover relay_message later would
+// re-emit a finished delivery. Returns affected (address, newCount) pairs
 // so the caller can emit TopicPeerPendingChanged after releasing the lock.
 // Caller MUST hold s.deliveryMu.Lock (mutates s.pending / s.pendingKeys).
 func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) []ebus.PeerPendingDelta {
@@ -5836,7 +5611,7 @@ func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) []ebus
 		origLen := len(items)
 		remaining := items[:0]
 		for _, item := range items {
-			if item.Frame.Type == "send_message" && item.Frame.ID == string(messageID) {
+			if (item.Frame.Type == "send_message" || item.Frame.Type == "relay_message") && item.Frame.ID == string(messageID) {
 				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
 				continue
 			}
@@ -5893,6 +5668,26 @@ func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipi
 	return affected
 }
 
+// localTopicSnapshot returns a copy of s.topics[topic] with transit
+// envelopes excluded. Transit DMs (neither sender nor recipient is this
+// node) live in s.topics solely as the in-flight buffer of their own
+// forwarding operation (transit_retention.go) — they are NOT a mailbox and
+// must never leak through fetch/backlog surfaces. Non-DM topics are local
+// by contract (isTransitEnvelope returns false), so they pass unfiltered.
+func (s *Service) localTopicSnapshot(topic string) []protocol.Envelope {
+	s.gossipMu.RLock()
+	src := s.topics[topic]
+	out := make([]protocol.Envelope, 0, len(src))
+	for _, env := range src {
+		if s.isTransitEnvelope(env) {
+			continue
+		}
+		out = append(out, env)
+	}
+	s.gossipMu.RUnlock()
+	return out
+}
+
 func (s *Service) fetchMessagesFrame(topic string) protocol.Frame {
 	if strings.TrimSpace(topic) == "" {
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidFetchMessages}
@@ -5902,9 +5697,7 @@ func (s *Service) fetchMessagesFrame(topic string) protocol.Frame {
 	// throttled variant to avoid repeated scans during message bursts.
 	s.cleanupExpiredMessagesForce()
 
-	s.gossipMu.RLock()
-	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
-	s.gossipMu.RUnlock()
+	messages := s.localTopicSnapshot(topic)
 
 	items := make([]protocol.MessageFrame, 0, len(messages))
 	for _, msg := range messages {
@@ -5928,9 +5721,7 @@ func (s *Service) fetchMessageIDsFrame(topic string) protocol.Frame {
 	}
 	s.cleanupExpiredMessagesForce()
 
-	s.gossipMu.RLock()
-	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
-	s.gossipMu.RUnlock()
+	messages := s.localTopicSnapshot(topic)
 
 	ids := make([]string, 0, len(messages))
 	for _, msg := range messages {
@@ -5946,9 +5737,7 @@ func (s *Service) fetchMessageFrame(topic, messageID string) protocol.Frame {
 	}
 	s.cleanupExpiredMessagesForce()
 
-	s.gossipMu.RLock()
-	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
-	s.gossipMu.RUnlock()
+	messages := s.localTopicSnapshot(topic)
 
 	for _, msg := range messages {
 		if string(msg.ID) == messageID {
@@ -5966,9 +5755,11 @@ func (s *Service) fetchInboxFrame(topic, recipient string) protocol.Frame {
 	}
 	s.cleanupExpiredMessagesForce()
 
-	s.gossipMu.RLock()
-	messages := append([]protocol.Envelope(nil), s.topics[topic]...)
-	s.gossipMu.RUnlock()
+	// Locality filter: for a remote recipient this leaves only the DMs this
+	// node itself sent (sender-owned retry); transit envelopes addressed to
+	// them are forwarding state, not a mailbox, and must not be replayed by
+	// the auth-time backlog push built on this frame.
+	messages := s.localTopicSnapshot(topic)
 
 	items := make([]protocol.MessageFrame, 0, len(messages))
 	for _, msg := range messages {
@@ -6160,7 +5951,7 @@ func (s *Service) closeAllInboundConns() {
 // actual send targets are determined atomically against the gossip
 // fan-out table. If a subscriber's connection has broken by the time we
 // write, the message is still safe in s.topics and will be delivered
-// via backlog on the next subscribe_inbox.
+// via backlog replay on the peer's next authentication.
 func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscriber) {
 	defer crashlog.DeferRecover()
 	if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
@@ -6201,6 +5992,15 @@ func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
 	}
 
 	for _, sub := range subs {
+		// seen_ack is additive in ProtocolVersion 23 — a pre-v23 subscriber
+		// would only reject the unknown status at parse time, so skip it.
+		// TODO(seen-ack-gate-removal): delete this gate (and the matching
+		// one in sendReceiptToPeer) once MinimumProtocolVersion reaches
+		// config.ProtocolVersionSeenAck.
+		if receipt.Status == protocol.ReceiptStatusSeenAck && !s.connSupportsProtocol(sub.connID, config.ProtocolVersionSeenAck) {
+			log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("subscriber", sub.id).Msg("push_receipt_skipped_pre_v23_subscriber")
+			continue
+		}
 		s.goBackground(func() { s.writePushFrame(sub, frame) })
 	}
 }
@@ -6358,7 +6158,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress dom
 	// skip the learning pass so we do not re-ingest our own listen
 	// address as a peer candidate or our own box key as a contact.
 	// Call sites that also need to abort their broader pipeline
-	// (auth_session, subscribe_inbox) consult isSelfIdentity
+	// (auth_session) consult isSelfIdentity
 	// independently; this guard is a defence-in-depth boundary.
 	if s.isSelfIdentity(domain.PeerIdentity(frame.Address)) {
 		log.Warn().
@@ -6588,8 +6388,8 @@ func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerI
 // handleInboundPushMessage processes a push_message frame received on an
 // authenticated inbound TCP connection. Two delivery paths converge here:
 //
-//  1. Backlog push — remote peer responds to subscribe_inbox with stored
-//     messages for this node's identity.
+//  1. Backlog push — remote peer replays stored messages for this node's
+//     identity at auth time (registerHelloRoute backlog replay).
 //  2. Gossip push — remote peer forwards a message as part of epidemic
 //     dissemination (sender ≠ relay peer, same as Bitcoin's tx relay).
 //
@@ -6670,13 +6470,16 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 	}
 	if shouldAckOnStoreResult(stored, errCode) && msg.Topic == "dm" {
 		// Ack-delete on stored=true OR on the dedup branch (stored=false
-		// && errCode==""): both outcomes mean "we have this message, the
-		// sender can stop retrying". Without the dedup arm a duplicate
-		// push_message would never be acknowledged and the sender would
-		// loop the same id forever, which is one of the reconnect-storm
-		// amplifiers. errCode!="" leaves the peer to retry once it
-		// addresses the underlying failure (unknown_sender_key triggers
-		// a sync upstream; other codes surface in the warn log).
+		// && errCode==""): both outcomes mean "this hop has the message —
+		// release the per-hop push/backlog resource". This is backlog
+		// cleanup between hops, NOT the end-to-end delivery confirmation:
+		// the sender's retry stops only on the delivered/seen receipt.
+		// Without the dedup arm a duplicate push_message would never be
+		// acknowledged and the pushing hop would loop the same id forever,
+		// which is one of the reconnect-storm amplifiers. errCode!=""
+		// leaves the peer to re-attempt once it addresses the underlying
+		// failure (unknown_sender_key triggers a sync upstream; other
+		// codes surface in the warn log).
 		//
 		// Prefer the outbound session for ack_delete (single write queue,
 		// no interleaving risk). Fall back to the inbound conn when no
@@ -6698,8 +6501,8 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 
 // handleInboundPushDeliveryReceipt processes a push_delivery_receipt frame
 // received on an inbound connection. This happens when the remote peer
-// responds to our subscribe_inbox with delivery receipts destined for this
-// node's identity.
+// pushes delivery receipts destined for this node's identity (auth-time
+// backlog replay or live push).
 //
 // Identity binding: the receipt's Recipient (the DM sender who should receive
 // the delivery confirmation) must match either our own identity or an identity
@@ -6949,7 +6752,7 @@ func (s *Service) subscribersForRecipient(recipient string) []*subscriber {
 // hasSubscriber returns true if at least one active subscriber exists for
 // the given recipient identity. Used by push_delivery_receipt identity
 // binding to allow a full-node relay to accept receipts for identities it
-// serves (i.e., identities with active subscribe_inbox subscriptions).
+// serves (i.e., identities with active subscriber registrations).
 func (s *Service) hasSubscriber(recipient string) bool {
 	s.gossipMu.RLock()
 	defer s.gossipMu.RUnlock()
@@ -6962,7 +6765,7 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	// Resolve the owning connection through the ConnID registry. If the
 	// subscriber's connection has already been unregistered, drop the
 	// subscriber and bail out — the message is safe in s.topics and will be
-	// delivered through backlog on the next subscribe_inbox.
+	// delivered through backlog replay on the peer's next authentication.
 	core := s.netCoreForID(sub.connID)
 	if core == nil {
 		s.removeSubscriberByID(sub.recipient, sub.id)

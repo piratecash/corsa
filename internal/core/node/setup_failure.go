@@ -11,7 +11,7 @@ import (
 //
 // Background: when a peer is reachable on TCP and completes the welcome /
 // auth handshake but then evicts our session during application-level
-// setup (subscribe_inbox, fetch_contacts, get_peers), CM emits
+// setup (fetch_contacts, get_peers), CM emits
 // cm_session_setup_failed. Without a dedicated cooldown the CM
 // retry/replace loop puts the same address straight back into the dial
 // queue every 2-3s. Combined with a small candidate pool (~7 bootstrap

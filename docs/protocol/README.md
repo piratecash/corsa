@@ -27,7 +27,7 @@ Every frame carries a `type` field that determines the command. Commands are gro
 |---|---|---|
 | [Handshake](handshake.md) | `hello`, `welcome`, `auth_session`, `auth_ok`, `ping`, `pong` | Connection lifecycle, authentication, heartbeat |
 | [Messaging](messaging.md) | `send_message`, `import_message`, `fetch_messages`, `fetch_message`, `fetch_message_ids`, `fetch_inbox`, `fetch_pending_messages` | Store, retrieve, and track direct messages |
-| [Realtime delivery](realtime.md) | `subscribe_inbox`, `subscribed`, `push_message`, `push_delivery_receipt`, `ack_delete`, `request_inbox` | Live push subscriptions, backlog replay, acknowledgement |
+| [Realtime delivery](realtime.md) | `push_message`, `push_delivery_receipt`, `ack_delete` | Live push at auth-time subscription, backlog replay, acknowledgement |
 | [Delivery receipts](delivery.md) | `send_delivery_receipt`, `fetch_delivery_receipts` | Delivery and seen tracking |
 | [Contacts](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers` | Identity management and contact exchange |
 | [Peers](peers.md) | `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`, `fetch_traffic_history` | Peer discovery, health monitoring, network stats, traffic history |
@@ -53,12 +53,9 @@ Not every command is available on every connection type. Commands are split acro
 |---|---|---|---|
 | `get_peers` | yes | yes | yes (syncPeerSession) |
 | `fetch_contacts` | yes | yes | yes (syncContactsViaSession) |
-| `subscribe_inbox` | — | yes | yes |
-| `subscribed` | — | yes | — |
 | `push_message` | — | yes | yes |
 | `push_delivery_receipt` | — | yes | yes |
 | `ack_delete` | — | yes | — |
-| `request_inbox` | — | — | yes |
 | `announce_peer` | — | yes | yes |
 | `relay_message` | — | yes (capability-gated) | yes (capability-gated) |
 | `relay_hop_ack` | — | yes (capability-gated) | yes (capability-gated) |
@@ -103,7 +100,6 @@ Environment variables:
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated bootstrap list (overrides `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — path to identity key file
 - `CORSA_TRUST_STORE_PATH` — path to trust store
-- `CORSA_QUEUE_STATE_PATH` — **deprecated**: legacy queue-state file path (now only deleted on startup; queue-state disk persistence removed)
 - `CORSA_PEERS_PATH` — path to persisted peer list
 - `CORSA_PROXY` — SOCKS5 proxy for Tor/overlay networks
 - `CORSA_NODE_TYPE` — `full` (relay) or `client` (no relay)
@@ -160,7 +156,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 6. fetch topic traffic
 7. fetch and decrypt readable direct messages
 8. fetch Gazeta notices
-9. for `client` nodes, keep an upstream `subscribe_inbox` session for realtime DM routing
+9. for `client` nodes, keep an upstream authenticated session for realtime DM routing (the inbox route is auto-registered at auth)
 
 ---
 
@@ -191,7 +187,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 |---|---|---|
 | [Handshake](handshake.md) | `hello`, `welcome`, `auth_session`, `auth_ok`, `ping`, `pong` | Жизненный цикл соединения, аутентификация, heartbeat |
 | [Сообщения](messaging.md) | `send_message`, `import_message`, `fetch_messages`, `fetch_message`, `fetch_message_ids`, `fetch_inbox`, `fetch_pending_messages` | Хранение, получение и отслеживание DM |
-| [Realtime-доставка](realtime.md) | `subscribe_inbox`, `subscribed`, `push_message`, `push_delivery_receipt`, `ack_delete`, `request_inbox` | Live push-подписки, replay бэклога, подтверждения |
+| [Realtime-доставка](realtime.md) | `push_message`, `push_delivery_receipt`, `ack_delete` | Live push по auth-time подписке, replay бэклога, подтверждения |
 | [Delivery receipts](delivery.md) | `send_delivery_receipt`, `fetch_delivery_receipts` | Отслеживание доставки и просмотра |
 | [Контакты](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers` | Управление identity и обмен контактами |
 | [Пиры](peers.md) | `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`, `fetch_traffic_history` | Обнаружение пиров, мониторинг, статистика, история трафика |
@@ -217,12 +213,9 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 |---|---|---|---|
 | `get_peers` | да | да | да (syncPeerSession) |
 | `fetch_contacts` | да | да | да (syncContactsViaSession) |
-| `subscribe_inbox` | — | да | да |
-| `subscribed` | — | да | — |
 | `push_message` | — | да | да |
 | `push_delivery_receipt` | — | да | да |
 | `ack_delete` | — | да | — |
-| `request_inbox` | — | — | да |
 | `announce_peer` | — | да | да |
 | `relay_message` | — | да (capability-gated) | да (capability-gated) |
 | `relay_hop_ack` | — | да (capability-gated) | да (capability-gated) |
@@ -267,7 +260,6 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 - `CORSA_BOOTSTRAP_PEERS` — список через запятую (имеет приоритет над `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — путь к файлу identity key
 - `CORSA_TRUST_STORE_PATH` — путь к trust store
-- `CORSA_QUEUE_STATE_PATH` — **устарело**: путь legacy queue-state файла (теперь только удаляется при старте; дисковый персист queue-state убран)
 - `CORSA_PEERS_PATH` — путь к персистированному списку пиров
 - `CORSA_PROXY` — SOCKS5-прокси для Tor/overlay сетей
 - `CORSA_NODE_TYPE` — `full` (relay) или `client` (без relay)
@@ -324,4 +316,4 @@ Push и gossip — независимые механизмы, работающи
 6. получение topic traffic
 7. получение и локальная расшифровка direct messages
 8. получение notices из Gazeta
-9. для `client`-узлов удержание upstream `subscribe_inbox` сессии для realtime-маршрутизации `dm`
+9. для `client`-узлов удержание upstream аутентифицированной сессии для realtime-маршрутизации `dm` (inbox-маршрут авто-регистрируется на auth)

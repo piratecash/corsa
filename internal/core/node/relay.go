@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -147,8 +148,7 @@ type relayStateStore struct {
 	states   map[string]*relayForwardState // keyed by message ID
 	perPeer  map[domain.PeerAddress]int    // PreviousHop → count of active states
 	stopCh   chan struct{}
-	onEvict  func() // called after TTL ticker removes expired entries; set by Service for persistence
-	rejected int64  // counter for monitoring: entries rejected due to capacity
+	rejected int64 // counter for monitoring: entries rejected due to capacity
 
 	// Phase 3 PR 12.2 — hop-ack timeout callback. Fired by ttlTicker
 	// for each relayForwardState whose HopAckRemainingTicks elapses
@@ -185,8 +185,6 @@ func (rs *relayStateStore) stop() {
 
 // ttlTicker decrements RemainingTTL every second and removes expired entries.
 // Uses a local ticker — no wall-clock comparison between nodes.
-// When entries are evicted and an onEvict callback is set, it is called to
-// trigger durable persistence of the updated relay state.
 //
 // Phase 3 PR 12.2 — the same 1-second tick also drives hop-ack budget
 // expiry (tickHopAckBudgets). Both scans run under rs.mu in turn; the
@@ -201,9 +199,7 @@ func (rs *relayStateStore) ttlTicker() {
 	for {
 		select {
 		case <-ticker.C:
-			if rs.decrementTTLsAndReport() && rs.onEvict != nil {
-				rs.onEvict()
-			}
+			rs.decrementTTLs()
 			if rs.onHopAckTimeout != nil {
 				for _, state := range rs.tickHopAckBudgets() {
 					rs.onHopAckTimeout(state)
@@ -441,45 +437,6 @@ func (rs *relayStateStore) lookupAbandonedForwardedTo(messageID string) []domain
 	return state.AbandonedForwardedTo
 }
 
-// snapshot returns a copy of all relay forward states for persistence.
-func (rs *relayStateStore) snapshot() []relayForwardState {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	out := make([]relayForwardState, 0, len(rs.states))
-	for _, state := range rs.states {
-		out = append(out, *state)
-	}
-	return out
-}
-
-// restore loads relay forward states from persisted data. Rebuilds per-peer
-// counters from the loaded entries.
-//
-// Phase 3 PR 12.2 — restored entries get HopAckObserved=true so the
-// post-restart ticker NEVER fires onRelayHopAckTimeout for them. The
-// pre-restart relay round-trip may have been acked during downtime
-// and we have no way to correlate that ack to the persisted entry
-// (handleRelayHopAck needs the live message ID match in the store).
-// Marking them observed converts the worst case from "spurious
-// MarkHopFailure on an actually-delivered message" (false-positive
-// reputation hit) into "we lose this one hop-ack timeline signal"
-// (best-effort survival). The relay state itself stays available for
-// receipt-forwarding lookups via the normal TTL window.
-func (rs *relayStateStore) restore(states []relayForwardState) {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	for i := range states {
-		s := states[i]
-		if s.RemainingTTL > 0 {
-			s.HopAckObserved = true
-			rs.states[s.MessageID] = &s
-			if s.PreviousHop != "" {
-				rs.perPeer[s.PreviousHop]++
-			}
-		}
-	}
-}
-
 // count returns the number of active relay forward states.
 func (rs *relayStateStore) count() int {
 	rs.mu.Lock()
@@ -507,10 +464,9 @@ func (rs *relayStateStore) count() int {
 //     markHopAckObserved; the timeout-fire branch below flips it
 //     itself.
 //
-// Returns nil when nothing fired, mirroring decrementTTLsAndReport's
-// "report only if work happened" shape. The ticker in ttlTicker
-// iterates the return value and invokes onHopAckTimeout outside the
-// mutex; see ttlTicker's doc-comment for the lock-ordering rationale.
+// Returns nil when nothing fired. The ticker in ttlTicker iterates the
+// return value and invokes onHopAckTimeout outside the mutex; see
+// ttlTicker's doc-comment for the lock-ordering rationale.
 //
 // Lock contract: takes rs.mu in W mode for the scan and the
 // HopAckObserved flip; callbacks fire after this returns, without
@@ -617,42 +573,6 @@ func (rs *relayStateStore) retryAttemptCountFor(messageID string) (int, bool) {
 	return state.RetryAttempt, true
 }
 
-// removed returns true if any entries were removed during the last
-// decrementTTLs call. Used by the TTL ticker to trigger persistence
-// only when state actually changed.
-func (rs *relayStateStore) decrementTTLsAndReport() bool {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	removed := false
-	for id, state := range rs.states {
-		state.RemainingTTL--
-		if state.RemainingTTL <= 0 {
-			if state.PreviousHop != "" {
-				rs.perPeer[state.PreviousHop]--
-				if rs.perPeer[state.PreviousHop] <= 0 {
-					delete(rs.perPeer, state.PreviousHop)
-				}
-			}
-			delete(rs.states, id)
-			removed = true
-		}
-	}
-	return removed
-}
-
-// persistRelayState is now a NO-OP, retained as a vestige of the removed
-// queue-state disk persistence. It still calls s.queuePersist.MarkDirty(),
-// but the persister's Run goroutine is no longer started, so MarkDirty only
-// sets a flag with no consumer — nothing is snapshotted or written to disk.
-// Relay state (paths, retry, receipts) is in-memory only and does NOT survive
-// a restart; recovery is sender-side end-to-end retry (see
-// docs/protocol/relay.md INV-8). The call sites are kept (and this helper with
-// them) so the dormant mechanism can be re-enabled or cleanly deleted in a
-// few releases — see the queue-persist deprecation notes in node/service.go.
-func (s *Service) persistRelayState() {
-	s.queuePersist.MarkDirty()
-}
-
 // handleRelayMessage processes an incoming relay_message frame and returns the
 // semantic hop-ack status. The caller is responsible for delivering the ack to
 // the sender — this function does NOT send an ack itself, because the delivery
@@ -662,7 +582,7 @@ func (s *Service) persistRelayState() {
 // Return values:
 //   - "delivered" — this node is the final recipient, message accepted and stored locally
 //   - "forwarded" — message relayed to the next hop
-//   - "stored"    — no capable next hop, message stored locally for later delivery
+//   - "stored"    — no capable next hop, message buffered in-flight for forwarding retries
 //   - ""          — message was dropped (dedupe, max hops, client node, rejected by
 //     storeIncomingMessage); no ack needed
 //
@@ -733,7 +653,6 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 				Msg("relay_deliver_rejected_locally")
 			return ""
 		}
-		s.persistRelayState()
 		log.Info().
 			Str("id", messageID).
 			Str("from", originSender).
@@ -817,7 +736,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 
 	if forwardedTo == "" {
 		// Control DMs (TopicControlDM) intentionally have no node-level
-		// store-and-forward fallback — they are not persisted in
+		// in-flight buffering fallback — they are not persisted in
 		// chatlog, not appended to s.topics, and not tracked in
 		// relayRetry (see docs/dm-commands.md "Storage rules for
 		// control DMs"). Calling deliverRelayedMessage here would
@@ -865,7 +784,6 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 			HopCount:         newHopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
-		s.persistRelayState()
 		log.Info().
 			Str("id", messageID).
 			Str("recipient", recipient).
@@ -914,7 +832,6 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 		FrameLine:            forwardLine,
 	})
-	s.persistRelayState()
 
 	log.Info().
 		Str("id", messageID).
@@ -934,7 +851,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 // storeIncomingMessage rejects the DM with ErrCodeUnknownSenderKey, this
 // function syncs keys from the previous hop (which likely knows the
 // sender's keys, since it already processed the message) and retries —
-// matching the existing push_message / request_inbox behavior.
+// matching the existing push_message behavior.
 //
 // Returns true if the message was accepted (stored locally), false if it was
 // rejected (parse error, invalid signature, unknown key after sync, etc.).
@@ -1215,13 +1132,28 @@ func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.Pee
 // should NOT additionally gossip it). Returns false if no relay path was
 // found or the relay hop failed — the caller is responsible for gossip
 // fallback in that case.
+// relayHopForReceipt resolves the relay hop for a receipt. delivered/seen
+// travel BACK toward the original message sender — the reverse path stored
+// as ReceiptForwardTo (the hop the message arrived FROM). seen_ack travels
+// in the ORIGINAL message direction, toward the seen-sender — the message's
+// ForwardedTo hop; pushing it through the reverse path would bounce it back
+// to the original sender.
+func (s *Service) relayHopForReceipt(receipt protocol.DeliveryReceipt) domain.PeerAddress {
+	if receipt.Status == protocol.ReceiptStatusSeenAck {
+		return s.relayStates.lookupForwardedTo(string(receipt.MessageID))
+	}
+	return s.relayStates.lookupReceiptForwardTo(string(receipt.MessageID))
+}
+
 func (s *Service) handleRelayReceipt(receipt protocol.DeliveryReceipt) bool {
-	forwardTo := s.relayStates.lookupReceiptForwardTo(string(receipt.MessageID))
+	forwardTo := s.relayHopForReceipt(receipt)
 	if forwardTo == "" {
 		return false
 	}
 
-	// Forward the receipt one hop back toward the original sender.
+	// Forward the receipt one hop along its direction: delivered/seen go
+	// BACK toward the original sender, seen_ack goes FORWARD toward the
+	// seen-sender (see relayHopForReceipt).
 	if s.sessionHasCapability(forwardTo, domain.CapMeshRelayV1) {
 		if s.sendReceiptToPeer(forwardTo, receipt) {
 			log.Debug().
@@ -1417,7 +1349,6 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 		FrameLine:            originLine,
 	})
-	s.persistRelayState()
 	log.Debug().
 		Str("id", string(msg.ID)).
 		Str("recipient", msg.Recipient).
@@ -1509,7 +1440,6 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 			Msg("relay_state_store_failed_outbound")
 		return false
 	}
-	s.persistRelayState()
 	log.Debug().
 		Str("id", string(msg.ID)).
 		Str("recipient", msg.Recipient).
@@ -1532,6 +1462,18 @@ func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
 
 func (s *Service) sendReceiptToPeer(address domain.PeerAddress, receipt protocol.DeliveryReceipt) bool {
 	defer crashlog.DeferRecover()
+	// seen_ack is additive in ProtocolVersion 23: a pre-v23 peer only
+	// rejects the unknown status at parse time, so emitting it there is
+	// pure waste — skip peers that do not advertise support (the
+	// seen-sender's retry keeps the receipt alive until a v23 path
+	// appears).
+	// TODO(seen-ack-gate-removal): delete this gate (and the matching one
+	// in pushReceiptToSubscribers) once MinimumProtocolVersion reaches
+	// config.ProtocolVersionSeenAck.
+	if receipt.Status == protocol.ReceiptStatusSeenAck && !s.peerSupportsProtocol(address, config.ProtocolVersionSeenAck) {
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("peer", string(address)).Str("status", receipt.Status).Msg("route_receipt_skipped_pre_v23_peer")
+		return false
+	}
 	frame := protocol.Frame{
 		Type:        "relay_delivery_receipt",
 		ID:          string(receipt.MessageID),
@@ -1630,7 +1572,6 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	items := s.relayRetryScratch
 	s.gossipMu.RUnlock()
 	out := make([]protocol.Envelope, 0)
-	beforeLen := len(s.relayRetry)
 	for _, msg := range items {
 		key := relayMessageKey(msg.ID)
 		if msg.Recipient == "" || msg.Recipient == "*" || msg.Recipient == s.identity.Address {
@@ -1650,13 +1591,6 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 		}
 		out = append(out, msg)
 	}
-	afterLen := len(s.relayRetry)
-	if beforeLen != afterLen {
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "retryableRelayMessages").Str("phase", "lock_released_dirty").Msg("delivery_mu_writer")
-		s.queuePersist.MarkDirty()
-		return out
-	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "retryableRelayMessages").Str("phase", "lock_released").Msg("delivery_mu_writer")
 	return out
@@ -1668,7 +1602,6 @@ func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryRecei
 	log.Trace().Str("site", "retryableRelayReceipts").Str("phase", "lock_held").Msg("delivery_mu_writer")
 
 	out := make([]protocol.DeliveryReceipt, 0)
-	beforeLen := len(s.relayRetry)
 	for _, list := range s.receipts {
 		for _, receipt := range list {
 			key := relayReceiptKey(receipt)
@@ -1681,13 +1614,6 @@ func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryRecei
 			}
 			out = append(out, receipt)
 		}
-	}
-	afterLen := len(s.relayRetry)
-	if beforeLen != afterLen {
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "retryableRelayReceipts").Str("phase", "lock_released_dirty").Msg("delivery_mu_writer")
-		s.queuePersist.MarkDirty()
-		return out
 	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "retryableRelayReceipts").Str("phase", "lock_released").Msg("delivery_mu_writer")
@@ -1740,7 +1666,6 @@ func (s *Service) noteRelayAttempt(key string, now time.Time) int {
 	s.relayRetry[key] = state
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_released").Str("key", key).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 	return state.Attempts
 }
 
@@ -1752,10 +1677,10 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 	// see docs/dm-commands.md §"Acknowledgement and retry"; restart
 	// abandons in-flight retries, and JSON persistence is a tracked
 	// follow-up. Tracking control DMs here would create dead state
-	// either way — retryableRelayMessages and queueStateSnapshotLocked
-	// only consult topics["dm"], so a control envelope put into
-	// relayRetry would never get retried and would only burn the
-	// maxRelayRetryEntries quota until tombstone TTL.
+	// either way — retryableRelayMessages only consults topics["dm"],
+	// so a control envelope put into relayRetry would never get
+	// retried and would only burn the maxRelayRetryEntries quota until
+	// tombstone TTL.
 	if msg.Topic != "dm" || msg.Recipient == "" || msg.Recipient == "*" {
 		return
 	}
@@ -1775,7 +1700,6 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 		s.relayRetry[key] = state
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released_new").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
-		s.queuePersist.MarkDirty()
 		return
 	}
 	s.deliveryMu.Unlock()
@@ -1811,7 +1735,6 @@ func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
 	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 }
 
 func relayMessageKey(id protocol.MessageID) string {
@@ -1873,7 +1796,6 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 	log.Debug().Str("node", s.identity.Address).Str("recipient", recipient).Str("id", string(messageID)).Int("before", before).Int("after", len(filtered)).Int("removed", removed).Msg("deleteBacklogMessageForRecipient")
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_released").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 	return removed
 }
 
@@ -1909,84 +1831,7 @@ func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID p
 	}
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_released").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 	return removed
-}
-
-// queueStateSnapshotLocked builds a full queue-state snapshot for disk
-// persistence.  Precondition: caller holds s.deliveryMu.RLock — covers
-// pending, orphaned, relayRetry, receipts, outbound.  The gossip slice
-// (topics["dm"]) is snapshotted under a brief internal gossipMu.RLock in
-// canonical deliveryMu → gossipMu order.
-func (s *Service) queueStateSnapshotLocked() queueStateFile {
-	pending := make(map[string][]pendingFrame, len(s.pending))
-	for address, items := range s.pending {
-		if len(items) == 0 {
-			continue
-		}
-		frames := make([]pendingFrame, len(items))
-		copy(frames, items)
-		pending[string(address)] = frames
-	}
-
-	relayRetry := make(map[string]relayAttempt, len(s.relayRetry))
-	for key, item := range s.relayRetry {
-		relayRetry[key] = item
-	}
-	// topics["dm"] is a gossip-domain field — take gossipMu.RLock briefly
-	// (nested inside the caller's s.deliveryMu.RLock, matching canonical
-	// order).
-	s.gossipMu.RLock()
-	relayMessages := make([]protocol.Envelope, 0, len(s.topics["dm"]))
-	for _, msg := range s.topics["dm"] {
-		if _, ok := relayRetry[relayMessageKey(msg.ID)]; ok {
-			relayMessages = append(relayMessages, msg)
-		}
-	}
-	s.gossipMu.RUnlock()
-	relayReceipts := make([]protocol.DeliveryReceipt, 0)
-	for _, list := range s.receipts {
-		for _, receipt := range list {
-			if _, ok := relayRetry[relayReceiptKey(receipt)]; ok {
-				relayReceipts = append(relayReceipts, receipt)
-			}
-		}
-	}
-	outbound := make(map[string]outboundDelivery, len(s.outbound))
-	for key, item := range s.outbound {
-		outbound[key] = item
-	}
-
-	orphaned := make(map[string][]pendingFrame, len(s.orphaned))
-	for addr, items := range s.orphaned {
-		orphaned[string(addr)] = append([]pendingFrame(nil), items...)
-	}
-
-	return queueStateFile{
-		Version:            queueStateVersion,
-		Pending:            pending,
-		Orphaned:           orphaned,
-		RelayRetry:         relayRetry,
-		RelayMessages:      relayMessages,
-		RelayReceipts:      relayReceipts,
-		OutboundState:      outbound,
-		RelayForwardStates: s.relayStates.snapshot(),
-	}
-}
-
-func sanitizeRelayState(items map[string]relayAttempt, messages []protocol.Envelope, receipts []protocol.DeliveryReceipt) {
-	valid := make(map[string]struct{}, len(messages)+len(receipts))
-	for _, msg := range messages {
-		valid[relayMessageKey(msg.ID)] = struct{}{}
-	}
-	for _, receipt := range receipts {
-		valid[relayReceiptKey(receipt)] = struct{}{}
-	}
-	for key := range items {
-		if _, ok := valid[key]; !ok {
-			delete(items, key)
-		}
-	}
 }
 
 // noteOutboundQueuedLocked upserts an outbound entry for the frame into
@@ -2016,14 +1861,12 @@ func (s *Service) markOutboundRetrying(frame protocol.Frame, queuedAt time.Time,
 	s.markOutboundRetryingLocked(frame, queuedAt, retries, errText)
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "markOutboundRetrying").Str("phase", "lock_released").Str("msg_id", frame.ID).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 }
 
 // markOutboundRetryingLocked updates outbound state to "retrying" in memory.
-// Caller MUST hold s.deliveryMu.Lock. The -Locked variant does not call the
-// (now no-op) MarkDirty; drainPendingForIdentities collects these as deferred
-// actions and applies them with the pending-queue return as one atomic
-// in-memory update (queue-state is in-memory only — no disk persist).
+// Caller MUST hold s.deliveryMu.Lock. drainPendingForIdentities collects these
+// as deferred actions and applies them with the pending-queue return as one
+// atomic in-memory update.
 func (s *Service) markOutboundRetryingLocked(frame protocol.Frame, queuedAt time.Time, retries int, errText string) {
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
@@ -2053,14 +1896,12 @@ func (s *Service) markOutboundTerminal(frame protocol.Frame, status, errText str
 	s.markOutboundTerminalLocked(frame, status, errText)
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "markOutboundTerminal").Str("phase", "lock_released").Str("msg_id", frame.ID).Str("status", status).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 }
 
 // markOutboundTerminalLocked updates outbound state to a terminal status in
-// memory. Caller MUST hold s.deliveryMu.Lock. The -Locked variant does not
-// call the (now no-op) MarkDirty; drainPendingForIdentities collects these as
-// deferred actions and applies them with the pending-queue return as one
-// atomic in-memory update (queue-state is in-memory only — no disk persist).
+// memory. Caller MUST hold s.deliveryMu.Lock. drainPendingForIdentities
+// collects these as deferred actions and applies them with the pending-queue
+// return as one atomic in-memory update.
 func (s *Service) markOutboundTerminalLocked(frame protocol.Frame, status, errText string) {
 	if frame.Type != "send_message" || frame.ID == "" {
 		return
@@ -2095,14 +1936,12 @@ func (s *Service) clearOutboundQueued(messageID string) {
 	delete(s.outbound, messageID)
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "clearOutboundQueued").Str("phase", "lock_released").Str("msg_id", messageID).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 }
 
 // clearOutboundQueuedLocked removes outbound delivery state for a message in
-// memory. Caller MUST hold s.deliveryMu.Lock. The -Locked variant does not
-// call the (now no-op) MarkDirty; drainPendingForIdentities collects these as
-// deferred actions and applies them with the pending-queue return as one
-// atomic in-memory update (queue-state is in-memory only — no disk persist).
+// memory. Caller MUST hold s.deliveryMu.Lock. drainPendingForIdentities
+// collects these as deferred actions and applies them with the pending-queue
+// return as one atomic in-memory update.
 func (s *Service) clearOutboundQueuedLocked(messageID string) {
 	if strings.TrimSpace(messageID) == "" {
 		return
@@ -2132,19 +1971,50 @@ func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
 	delete(s.relayRetry, key)
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "clearRelayRetryForOutbound").Str("phase", "lock_released").Str("key", key).Str("msg_id", frame.ID).Msg("delivery_mu_writer")
-	s.queuePersist.MarkDirty()
 }
 
 func (s *Service) emitDeliveryReceipt(msg incomingMessage) {
 	defer crashlog.DeferRecover()
-	receipt := protocol.DeliveryReceipt{
+	s.storeDeliveryReceipt(deliveredReceiptFor(s.identity.Address, msg))
+}
+
+// resendDeliveryReceipt redistributes the delivered receipt for a DM that
+// arrived as a DUPLICATE. The first arrival already recorded the receipt
+// locally (seenReceipts / receipts), so storeDeliveryReceipt would dedupe a
+// second emit into a complete no-op — but a duplicate arrival means the
+// sender most likely never received the original receipt and is retrying
+// end-to-end. Push the receipt outward again without touching local
+// receipt state.
+func (s *Service) resendDeliveryReceipt(msg incomingMessage) {
+	defer crashlog.DeferRecover()
+	receipt := deliveredReceiptFor(s.identity.Address, msg)
+	log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Msg("resending delivered receipt for duplicate DM")
+	s.distributeReceipt(receipt)
+}
+
+// distributeReceipt pushes a receipt outward — the relay hop first
+// (direction per relayHopForReceipt: reverse for delivered/seen, forward
+// for seen_ack), gossip fallback, plus live subscribers — without touching
+// local receipt state. Mirrors the distribution block at the end of
+// storeDeliveryReceipt and is shared by the duplicate re-send paths and
+// the delivery retry scheduler.
+func (s *Service) distributeReceipt(receipt protocol.DeliveryReceipt) {
+	if !s.handleRelayReceipt(receipt) {
+		s.goBackground(func() { s.gossipReceipt(receipt) })
+	}
+	s.goBackground(func() { s.pushReceiptToSubscribers(receipt) })
+}
+
+// deliveredReceiptFor builds the delivered receipt this node owes the
+// remote sender of msg.
+func deliveredReceiptFor(localAddress string, msg incomingMessage) protocol.DeliveryReceipt {
+	return protocol.DeliveryReceipt{
 		MessageID:   msg.ID,
-		Sender:      s.identity.Address,
+		Sender:      localAddress,
 		Recipient:   msg.Sender,
 		Status:      protocol.ReceiptStatusDelivered,
 		DeliveredAt: time.Now().UTC(),
 	}
-	s.storeDeliveryReceipt(receipt)
 }
 
 func receiptFrame(receipt protocol.DeliveryReceipt) protocol.ReceiptFrame {
@@ -2161,7 +2031,7 @@ func receiptFromFrame(frame protocol.Frame) (protocol.DeliveryReceipt, error) {
 	if strings.TrimSpace(frame.ID) == "" || strings.TrimSpace(frame.Address) == "" || strings.TrimSpace(frame.Recipient) == "" || strings.TrimSpace(frame.Status) == "" || strings.TrimSpace(frame.DeliveredAt) == "" {
 		return protocol.DeliveryReceipt{}, fmt.Errorf("missing delivery receipt fields")
 	}
-	if frame.Status != protocol.ReceiptStatusDelivered && frame.Status != protocol.ReceiptStatusSeen {
+	if !protocol.IsValidReceiptStatus(frame.Status) {
 		return protocol.DeliveryReceipt{}, fmt.Errorf("invalid delivery receipt status")
 	}
 
@@ -2180,7 +2050,7 @@ func receiptFromFrame(frame protocol.Frame) (protocol.DeliveryReceipt, error) {
 }
 
 func receiptFromReceiptFrame(frame protocol.ReceiptFrame) (protocol.DeliveryReceipt, error) {
-	if frame.Status != protocol.ReceiptStatusDelivered && frame.Status != protocol.ReceiptStatusSeen {
+	if !protocol.IsValidReceiptStatus(frame.Status) {
 		return protocol.DeliveryReceipt{}, fmt.Errorf("invalid delivery receipt status")
 	}
 	deliveredAt, err := time.Parse(time.RFC3339, frame.DeliveredAt)

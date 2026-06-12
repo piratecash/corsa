@@ -750,7 +750,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 	//           immediately.
 	//
 	//   false — the session never became operational because post-handshake
-	//           setup (subscribe_inbox / syncPeerSession) failed. This is
+	//           setup (syncPeerSession) failed. This is
 	//           semantically a dial failure — the peer is reachable but
 	//           unable to complete the application protocol. Without
 	//           backoff, the CM would spin an infinite reconnect loop
@@ -949,7 +949,7 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 }
 
 // handleSessionInitReady promotes a slot from Initializing to Active after
-// the application-level setup (subscribe_inbox + syncPeerSession) succeeds.
+// the application-level setup (syncPeerSession) succeeds.
 // Until this event arrives, Slots() and buildPeerExchangeResponse() do not
 // expose the slot — preventing advertisement of peers that are not yet usable.
 func (cm *ConnectionManager) handleSessionInitReady(_ context.Context, ev SessionInitReady) {
@@ -1137,7 +1137,7 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 
 // beginInitSlotLocked transitions a slot to Initializing after a successful
 // TCP handshake. The slot is NOT yet Active — application-level setup
-// (subscribe_inbox, syncPeerSession) has not completed. Slots(), ActiveCount(),
+// (syncPeerSession) has not completed. Slots(), ActiveCount(),
 // and buildPeerExchangeResponse() only expose Active slots, so this peer is
 // invisible to peer exchange and diagnostics until SessionInitReady arrives.
 //

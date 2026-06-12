@@ -75,6 +75,13 @@ type DeliveryReceipt struct {
 const (
 	ReceiptStatusDelivered = "delivered"
 	ReceiptStatusSeen      = "seen"
+	// ReceiptStatusSeenAck is the end-to-end acknowledgement the ORIGINAL
+	// message sender returns for a received "seen" receipt, so the
+	// seen-sender can stop retrying it. Travels over the existing receipt
+	// transport (push_delivery_receipt / relay_delivery_receipt) — additive
+	// in ProtocolVersion 23; older binaries reject the unknown status at
+	// parse time and simply drop the frame, which the seen-retry absorbs.
+	ReceiptStatusSeenAck = "seen_ack"
 )
 
 func NewMessageID() (MessageID, error) {
@@ -103,4 +110,14 @@ func (f MessageFlag) Valid() bool {
 	default:
 		return false
 	}
+}
+
+// IsValidReceiptStatus reports whether the wire receipt status is one of
+// the protocol-defined values.
+func IsValidReceiptStatus(status string) bool {
+	switch status {
+	case ReceiptStatusDelivered, ReceiptStatusSeen, ReceiptStatusSeenAck:
+		return true
+	}
+	return false
 }

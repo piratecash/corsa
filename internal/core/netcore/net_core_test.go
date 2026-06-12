@@ -386,7 +386,7 @@ func TestNetCoreSendRawSyncBlockingDoesNotStarveOnFullQueue(t *testing.T) {
 	// Blocking sync path must NOT fail fast on a saturated queue.
 	syncResult := make(chan SendStatus, 1)
 	go func() {
-		line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "subscribe_inbox"})
+		line, err := protocol.MarshalFrameLine(protocol.Frame{Type: "get_peers"})
 		if err != nil {
 			syncResult <- SendMarshalError
 			return

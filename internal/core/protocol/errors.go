@@ -15,7 +15,6 @@ const (
 	ErrCodeInvalidFetchInbox          = "invalid-fetch-inbox"
 	ErrCodeInvalidSendDeliveryReceipt = "invalid-send-delivery-receipt"
 	ErrCodeInvalidFetchReceipts       = "invalid-fetch-delivery-receipts"
-	ErrCodeInvalidSubscribeInbox      = "invalid-subscribe-inbox"
 	ErrCodeInvalidPublishNotice       = "invalid-publish-notice"
 	ErrCodeUnknownSenderKey           = "unknown-sender-key"
 	ErrCodeUnknownMessageID           = "unknown-message-id"
@@ -67,7 +66,6 @@ var (
 	ErrInvalidFetchInbox          = errors.New(ErrCodeInvalidFetchInbox)
 	ErrInvalidSendDeliveryReceipt = errors.New(ErrCodeInvalidSendDeliveryReceipt)
 	ErrInvalidFetchReceipts       = errors.New(ErrCodeInvalidFetchReceipts)
-	ErrInvalidSubscribeInbox      = errors.New(ErrCodeInvalidSubscribeInbox)
 	ErrInvalidPublishNotice       = errors.New(ErrCodeInvalidPublishNotice)
 	ErrUnknownSenderKey           = errors.New(ErrCodeUnknownSenderKey)
 	ErrUnknownMessageID           = errors.New(ErrCodeUnknownMessageID)
@@ -123,8 +121,6 @@ func ErrorCode(err error) string {
 		return ErrCodeInvalidSendDeliveryReceipt
 	case errors.Is(err, ErrInvalidFetchReceipts):
 		return ErrCodeInvalidFetchReceipts
-	case errors.Is(err, ErrInvalidSubscribeInbox):
-		return ErrCodeInvalidSubscribeInbox
 	case errors.Is(err, ErrInvalidPublishNotice):
 		return ErrCodeInvalidPublishNotice
 	case errors.Is(err, ErrUnknownSenderKey):
@@ -190,8 +186,6 @@ func ErrorFromCode(code string) error {
 		return ErrInvalidSendDeliveryReceipt
 	case ErrCodeInvalidFetchReceipts:
 		return ErrInvalidFetchReceipts
-	case ErrCodeInvalidSubscribeInbox:
-		return ErrInvalidSubscribeInbox
 	case ErrCodeInvalidPublishNotice:
 		return ErrInvalidPublishNotice
 	case ErrCodeUnknownSenderKey:

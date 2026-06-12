@@ -66,7 +66,6 @@ on this transport-control frame type.
 | `invalid-fetch-inbox` | Missing topic or recipient in `fetch_inbox` request | 400 Bad Request | Either `topic` or `recipient` field missing or invalid |
 | `invalid-send-delivery-receipt` | Missing or invalid fields in `send_delivery_receipt` request | 400 Bad Request | Required fields missing, invalid fingerprints, invalid status values, or malformed timestamp |
 | `invalid-fetch-delivery-receipts` | Missing recipient in `fetch_delivery_receipts` request | 400 Bad Request | `recipient` field not provided or invalid |
-| `invalid-subscribe-inbox` | Missing fields in `subscribe_inbox` request | 400 Bad Request | Required `topic` or `recipient` field missing or invalid |
 | `invalid-publish-notice` | Missing ciphertext or ttl in `publish_notice` request | 400 Bad Request | Either `ciphertext` or `ttl_seconds` field missing; TTL may be out of acceptable range |
 | `unknown-sender-key` | Sender address not found in trusted contacts | 401 Unauthorized | Message sender's fingerprint is not in the local contact database; cannot verify signature |
 | `unknown-message-id` | Referenced message UUID does not exist | 404 Not Found | `fetch_message` references a message ID that doesn't exist locally |
@@ -99,7 +98,6 @@ These errors indicate the request itself is invalid:
 - `invalid-fetch-inbox`
 - `invalid-send-delivery-receipt`
 - `invalid-fetch-delivery-receipts`
-- `invalid-subscribe-inbox`
 - `invalid-publish-notice`
 - `invalid-ack-delete`
 - `message-timestamp-out-of-range`
@@ -339,7 +337,6 @@ transport-control фрейме только `peer-banned`.
 | `invalid-fetch-inbox` | Отсутствует тема или получатель в запросе `fetch_inbox` | 400 Bad Request | Либо поле `topic`, либо `recipient` отсутствует или неверно |
 | `invalid-send-delivery-receipt` | Отсутствуют или неверные поля в запросе `send_delivery_receipt` | 400 Bad Request | Обязательные поля отсутствуют, неверные отпечатки, неверные значения статуса или неправильная временная метка |
 | `invalid-fetch-delivery-receipts` | Отсутствует получатель в запросе `fetch_delivery_receipts` | 400 Bad Request | Поле `recipient` не предоставлено или неверно |
-| `invalid-subscribe-inbox` | Отсутствуют поля в запросе `subscribe_inbox` | 400 Bad Request | Обязательное поле `topic` или `recipient` отсутствует или неверно |
 | `invalid-publish-notice` | Отсутствует шифротекст или ttl в запросе `publish_notice` | 400 Bad Request | Либо поле `ciphertext`, либо `ttl_seconds` отсутствует; TTL может быть вне приемлемого диапазона |
 | `unknown-sender-key` | Адрес отправителя не найден в доверенных контактах | 401 Unauthorized | Отпечаток отправителя сообщения не находится в локальной базе данных контактов; не может проверить подпись |
 | `unknown-message-id` | Ссылаемый UUID сообщения не существует | 404 Not Found | `fetch_message` ссылается на идентификатор сообщения, который не существует локально |
@@ -372,7 +369,6 @@ transport-control фрейме только `peer-banned`.
 - `invalid-fetch-inbox`
 - `invalid-send-delivery-receipt`
 - `invalid-fetch-delivery-receipts`
-- `invalid-subscribe-inbox`
 - `invalid-publish-notice`
 - `invalid-ack-delete`
 - `message-timestamp-out-of-range`

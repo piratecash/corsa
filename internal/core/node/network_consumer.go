@@ -31,7 +31,7 @@ package node
 // they can distinguish a caller-side encode bug from a transport drop.
 //
 // sendSessionFrameViaNetwork is the session-scoped Network consumer:
-// it routes session-local reply paths (pong, subscribe_inbox reply,
+// it routes session-local reply paths (pong,
 // push_message, push_delivery_receipt) through s.Network() keyed by
 // session.connID, with a carve-out fallback to enqueueSessionFrame on
 // netcore.ErrUnknownConn. The fallback preserves delivery for the
@@ -280,8 +280,7 @@ func (s *Service) sendFrameViaNetworkSync(ctx context.Context, id domain.ConnID,
 const handshakeReplyTimeout = 2 * time.Second
 
 // sendHandshakeReplyViaNetwork is the no-eviction reply path for
-// session-setup control-plane frames (subscribed, peers, contacts,
-// auth_ok). Unlike sendFrameViaNetwork — which calls network.Close on
+// session-setup control-plane frames (auth_ok, peers, contacts). Unlike sendFrameViaNetwork — which calls network.Close on
 // ErrSendBufferFull as the slow-peer eviction signal — this helper
 // NEVER closes the connection. Buffer pressure during session setup is
 // almost always caused by the peer's own initial announce_routes flush

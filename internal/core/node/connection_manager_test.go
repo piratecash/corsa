@@ -1761,7 +1761,7 @@ func TestCM_InitFailure_SlotNeverBecomesActive(t *testing.T) {
 			cm.EmitSlot(ActiveSessionLost{
 				Address:        info.Address,
 				Identity:       info.Session.peerIdentity,
-				Error:          errors.New("subscribe_inbox: timeout"),
+				Error:          errors.New("sync: timeout"),
 				WasHealthy:     false,
 				SlotGeneration: info.SlotGeneration,
 			})

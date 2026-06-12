@@ -102,7 +102,6 @@ func newScopedTestService(t *testing.T) (*Service, func()) {
 	svc := NewService(config.Node{
 		ListenAddress:  addr,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
-		QueueStatePath: filepath.Join(tempDir, "queue.json"),
 		Type:           domain.NodeTypeFull,
 	}, id, nil)
 	svc.disableRateLimiting = true
@@ -337,29 +336,6 @@ func TestUnauthPeerCannotPushMessage(t *testing.T) {
 	resp := readJSONTestFrame(t, reader)
 	if resp.Type != "error" || resp.Code != protocol.ErrCodeAuthRequired {
 		t.Fatalf("SECURITY: unauthenticated push_message not rejected with auth-required: %#v", resp)
-	}
-}
-
-// TestUnauthPeerCannotSubscribeInbox verifies that an unauthenticated peer
-// cannot send subscribe_inbox on the data port.
-func TestUnauthPeerCannotSubscribeInbox(t *testing.T) {
-	t.Parallel()
-
-	svc, stop := newScopedTestService(t)
-	defer stop()
-
-	conn, reader := unauthenticatedConn(t, svc)
-	defer func() { _ = conn.Close() }()
-
-	writeJSONFrame(t, conn, protocol.Frame{
-		Type:      "subscribe_inbox",
-		Topic:     "dm",
-		Recipient: "victim-address",
-	})
-
-	resp := readJSONTestFrame(t, reader)
-	if resp.Type != "error" || resp.Code != protocol.ErrCodeAuthRequired {
-		t.Fatalf("SECURITY: unauthenticated subscribe_inbox not rejected: %#v", resp)
 	}
 }
 

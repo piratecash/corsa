@@ -329,6 +329,10 @@ func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Ident
 	c.wireSubServices()
 	if localNode != nil {
 		localNode.RegisterMessageStore(c.store)
+		// Durable arm of the sender-side delivery retry: reseed the
+		// scheduler from chatlog rows still in "sent" so delayed delivery
+		// survives a restart of this node.
+		localNode.RegisterDeliveryOutbox(c.store)
 	}
 	return c
 }

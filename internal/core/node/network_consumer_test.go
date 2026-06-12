@@ -57,7 +57,6 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -119,7 +118,7 @@ func TestDispatchInboundPing_WritesPongViaNetworkBackend(t *testing.T) {
 //     full-path ack after the (no-op) promotion loop.
 //
 // Other async reply sites (get_peers, fetch_contacts, ack_delete,
-// subscribe_inbox pair, auth_session success, relay_hop_ack, and
+// auth_session success, relay_hop_ack, and
 // welcomeFrame-with-challenge) depend on broader Service state
 // (connManager, contactStore, DeleteTracker, MeshRelayV1 capability)
 // that is out of scope for this POC-style test. Those sites are
@@ -197,7 +196,6 @@ func TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend(t *testing.T) 
 				ListenAddress:  "127.0.0.1:0",
 				Type:           config.NodeTypeFull,
 				TrustStorePath: t.TempDir() + "/trust.json",
-				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -337,8 +335,8 @@ func uint64Hash(s string) uint64 {
 //     frame type on an authenticated connection.
 //
 // Other sync reply sites (re-hello-reject, invalid-auth-signature,
-// auth_session-reply-on-fail, ack_delete-on-fail,
-// subscribe_inbox-identity-mismatch) depend on broader Service state
+// auth_session-reply-on-fail, ack_delete-on-fail) depend on broader
+// Service state
 // (connauth initiation map, ban tracking, auth handler internals,
 // DeleteTracker, inboundPeerIdentity) whose fixture-wall is out of
 // proportion with the value of a runtime POC. Those sites are protected
@@ -401,7 +399,6 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 				ListenAddress:  "127.0.0.1:0",
 				Type:           config.NodeTypeFull,
 				TrustStorePath: t.TempDir() + "/trust.json",
-				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -520,7 +517,6 @@ func TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend(t *testing.
 				ListenAddress:  "127.0.0.1:0",
 				Type:           config.NodeTypeFull,
 				TrustStorePath: t.TempDir() + "/trust.json",
-				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -661,7 +657,6 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 				ListenAddress:  "127.0.0.1:0",
 				Type:           config.NodeTypeFull,
 				TrustStorePath: t.TempDir() + "/trust.json",
-				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 
@@ -736,7 +731,6 @@ func TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -777,8 +771,8 @@ func TestHandleCommand_InvalidJSON_ReplyViaNetworkBackend(t *testing.T) {
 
 // TestSendSessionFrameViaNetwork_NetworkPathVisibleToBackend pins the
 // runtime contract of session-local reply paths (the pong on outbound +
-// inbound ping handlers, the subscribe_inbox reply, push_message and
-// push_delivery_receipt on respondToInboxRequest):
+// inbound ping handlers, push_message and push_delivery_receipt pushes
+// to subscribers):
 //
 //   - When the session's ConnID is registered with the injected
 //     netcore.Network, replies must route through that surface and become
@@ -829,7 +823,6 @@ func TestSendSessionFrameViaNetwork_NetworkPathVisibleToBackend(t *testing.T) {
 				ListenAddress:  "127.0.0.1:0",
 				Type:           config.NodeTypeFull,
 				TrustStorePath: t.TempDir() + "/trust.json",
-				QueueStatePath: t.TempDir() + "/queue.json",
 			}, testIdentityForNetworkConsumerTest(t), backend)
 			t.Cleanup(svc.WaitBackground)
 

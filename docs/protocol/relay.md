@@ -65,7 +65,7 @@ Hop-by-hop relay frame. Sent only to peers with `mesh_relay_v1` capability.
 6. **Can forward?** — Client nodes cannot relay. Drop if not a full node.
 7. **Direct peer?** — If recipient identity has active sessions, try each capable session until one accepts the frame. This handles reconnects and address changes where the same identity appears under multiple addresses.
 8. **Gossip fallback** — Forward to top-scored capable peers (excluding the sender).
-9. **No capable peers?** — If no relay target found, store the message locally via `deliverRelayedMessage` for later delivery via `pushBacklogToSubscriber` or `retryRelayDeliveries`. Send `relay_hop_ack` with status `"stored"`.
+9. **No capable peers?** — If no relay target found, admit the message via `deliverRelayedMessage` into the in-flight forwarding buffer so `retryRelayDeliveries` can re-attempt within the transit window. Send `relay_hop_ack` with status `"stored"`.
 10. **Store state** — Save `relayForwardState` with `previous_hop` and `forwarded_to`.
 11. **Ack** — Send `relay_hop_ack` with status `"forwarded"` back to previous hop.
 
@@ -196,7 +196,7 @@ State is cleaned up when `RemainingTTL` reaches 0 (default: 180 seconds). Uses n
 
 ### Delivery receipt return path
 
-When the final recipient generates a delivery receipt, each intermediate node looks up `ReceiptForwardTo` by message ID and sends the receipt one hop back. If the previous hop is unavailable or lacks capability, fallback to gossip receipt delivery.
+When the final recipient generates a `delivered`/`seen` receipt, each intermediate node looks up `ReceiptForwardTo` by message ID and sends the receipt one hop back toward the original sender. The direction is status-dependent: the `seen_ack` confirmation (v23) travels the OPPOSITE way — in the original message direction — so intermediate nodes forward it via the message's `ForwardedTo` hop instead (`relayHopForReceipt` resolves the hop per status). If the resolved hop is unavailable or lacks capability, fallback to gossip receipt delivery.
 
 ```mermaid
 sequenceDiagram
@@ -235,13 +235,13 @@ Mixed relay chain: if an intermediate node lacks `mesh_relay_v1`, the relaying n
 
 ### Iteration 1 invariants
 
-**INV-1: Relay must not break store-and-forward for offline recipients.** Relay is an optimization on top of gossip. If the relay path cannot deliver a DM (recipient offline, no capable next hop), the message must still be stored on the intermediate full node and delivered later when the recipient connects. A relay failure must never cause a message to be silently lost.
+**INV-1: Relays are forwarding-only — offline delivery is the sender's job.** Relay is an optimization on top of gossip. If neither path can deliver a DM right now (recipient offline), the intermediate full node holds the envelope only as the in-flight buffer of its own forwarding operation (`transitInFlightWindow`, see `transit_retention.go`) and retries via `retryRelayDeliveries` within that window. Transit envelopes are NOT a mailbox: they are never served through fetch/backlog surfaces and are swept when the window closes. Recovery beyond the window is the SENDER's end-to-end retry.
 
-**INV-2: Intermediate full node stores transit DMs received via `relay_message`.** When `handleRelayMessage` on a full node finds no capable next hop, it calls `deliverRelayedMessage(frame)` which runs `storeIncomingMessage(msg, false)`. This writes the message into `topics["dm"]` under the recipient's fingerprint. The message is then delivered via `pushBacklogToSubscriber` when the recipient connects, or retried via `retryRelayDeliveries`. The node responds with `relay_hop_ack` status `"stored"`.
+**INV-2: Intermediate full node buffers transit DMs in-flight only.** When `handleRelayMessage` on a full node finds no capable next hop, it calls `deliverRelayedMessage(frame)` which runs `storeIncomingMessage(msg, false)`. This admits the message into `topics["dm"]` as in-flight forwarding state (bounded by the transit caps) so `retryRelayDeliveries` can re-attempt sends while the window is open, and live push reaches a recipient with an active route. The node responds with `relay_hop_ack` status `"stored"` (meaning "buffered for forwarding retry", not "stored durably"). The envelope is never replayed from backlog to a reconnecting recipient — that surface is local-only.
 
-**INV-3: Gossip always runs unconditionally.** `storeIncomingMessage` always executes `executeGossipTargets` regardless of whether relay succeeds or fails. This means every DM has at least two independent delivery paths: gossip and relay. Gossip provides the baseline store-and-forward guarantee; relay provides faster multi-hop traversal.
+**INV-3: Gossip always runs unconditionally.** `storeIncomingMessage` always executes `executeGossipTargets` regardless of whether relay succeeds or fails. This means every DM has at least two independent delivery paths: gossip and relay. Gossip provides the baseline propagation path; relay provides faster multi-hop traversal. Neither path stores transit envelopes beyond the in-flight window — durable recovery is the sender's end-to-end retry.
 
-Formally: an intermediate relay node may forward immediately, but must still preserve backlog semantics for later recipient retrieval. If both relay and gossip store the same message, deduplication via `seen[messageID]` prevents double delivery.
+Formally: an intermediate relay node forwards immediately and keeps the envelope only for its own forwarding retries. If both relay and gossip carry the same message, deduplication via `seen[messageID]` prevents double delivery.
 
 **INV-4: Client nodes must not act as intermediate relay hops.** A client node may be a sender (origin) or a final recipient of a relay chain, but never an intermediate transit hop. When `handleRelayMessage` receives a `relay_message` not addressed to itself on a client node (`CanForward() == false`), the frame is silently dropped. This is a protocol safety invariant, not just an implementation detail — client nodes lack the connectivity and uptime to provide reliable forwarding.
 
@@ -251,19 +251,19 @@ Formally: an intermediate relay node may forward immediately, but must still pre
 
 **INV-7: Hop-ack status reflects actual delivery outcome.** `handleRelayMessage` returns `"delivered"` or `"stored"` only when `deliverRelayedMessage` succeeds (i.e. `storeIncomingMessage` accepts the message). If the payload is rejected (unknown sender key, invalid signature, parse error), `handleRelayMessage` returns `""` — no ack is sent. This prevents the previous hop from believing the message was delivered when it was actually discarded.
 
-**INV-8: Relay/queue state is in-memory only (DEPRECATED disk persistence removed).** Relay state, pending frames, dedupe records and delivery receipts live in RAM only and do **not** survive a process restart. `persistRelayState()` and the `relayStates.store()` mutation sites still exist but their `s.queuePersist.MarkDirty()` call is now a no-op: the background queue-state persister is constructed but never started, and `queue-<port>.json` is deleted on startup (a one-shot migration loads any pre-upgrade file once, then removes it). Pending frames are bounded by an in-memory per-peer ring (`CORSA_PENDING_RING_SIZE`, evict-oldest) rather than a disk-backed queue. The rationale: with network growth the persisted JSON file became the dominant allocation-churn / memory source, and the relay store-and-forward contract is only required for the node's UPTIME, not across restarts — a restarted relay re-learns paths and recipients re-request via gossip. The persister mechanism (`saveQueueState`, atomic temp-then-rename) is retained-but-dormant and scheduled for full removal in a few releases. **Operator-facing consequence:** undelivered DMs held on an intermediate relay are lost if that relay restarts; the sender remains responsible for end-to-end retry until acknowledged.
+**INV-8: Relay/queue state is in-memory only.** Relay state, pending frames, dedupe records and delivery receipts live in RAM only and do **not** survive a process restart. Pending frames are bounded by an in-memory per-peer ring (`CORSA_PENDING_RING_SIZE`, evict-oldest) rather than a disk-backed queue. The rationale: with network growth a persisted queue file becomes the dominant allocation-churn / memory source, and the relay's in-flight forwarding buffer is only required for the node's UPTIME, not across restarts — a restarted relay re-learns paths, and durable recovery is the sender's end-to-end retry. The legacy disk persistence has been deleted entirely; the runtime neither reads nor writes any queue-state file. **Operator-facing consequence:** undelivered DMs held on an intermediate relay are lost if that relay restarts; the sender remains responsible for end-to-end retry until acknowledged.
 
-**INV-8: Relay/queue state хранится только в памяти (дисковый персист DEPRECATED и убран).** Relay state, pending-фреймы, записи дедупликации и delivery receipts живут только в RAM и **не** переживают перезапуск процесса. `persistRelayState()` и сайты `relayStates.store()` остались, но их вызов `s.queuePersist.MarkDirty()` теперь no-op: фоновый queue-state персистер конструируется, но не запускается, а `queue-<port>.json` удаляется при старте (one-shot миграция один раз загружает файл от предыдущей версии, затем удаляет его). Pending-фреймы ограничены in-memory пер-пировым кольцом (`CORSA_PENDING_RING_SIZE`, evict-oldest), а не диск-backed очередью. Причина: с ростом сети персистируемый JSON-файл стал основным источником allocation-churn / памяти, а контракт store-and-forward нужен только на время UPTIME ноды, а не между рестартами — перезапущенный relay переучивает пути, а получатели перезапрашивают через gossip. Механизм персиста (`saveQueueState`, атомарный temp-then-rename) оставлен dormant и будет полностью удалён через несколько релизов. **Для оператора:** недоставленные DM, лежащие на промежуточном relay, теряются при его рестарте; отправитель отвечает за end-to-end retry до подтверждения.
+**INV-8: Relay/queue state хранится только в памяти.** Relay state, pending-фреймы, записи дедупликации и delivery receipts живут только в RAM и **не** переживают перезапуск процесса. Pending-фреймы ограничены in-memory пер-пировым кольцом (`CORSA_PENDING_RING_SIZE`, evict-oldest), а не диск-backed очередью. Причина: с ростом сети персистируемый файл очереди становится основным источником allocation-churn / памяти, а in-flight-буфер пересылки нужен только на время UPTIME ноды, а не между рестартами — перезапущенный relay переучивает пути, а долговременное восстановление — end-to-end retry отправителя. Legacy-персист полностью удалён; рантайм не читает и не пишет никакой файл состояния очереди. **Для оператора:** недоставленные DM, лежащие на промежуточном relay, теряются при его рестарте; отправитель отвечает за end-to-end retry до подтверждения.
 
 **INV-9: Relay frames require an authenticated session.** `relay_message` and `relay_hop_ack` on inbound TCP connections are gated by `isConnAuthenticated(conn)`. A peer that has not completed the `auth_session` handshake (challenge-response signature verification) cannot send relay frames, even if it advertises `mesh_relay_v1` in its hello. Without this gate, any unauthenticated client could inject hop-by-hop relay traffic or spoof `previous_hop` addresses by simply claiming the capability in an unauthenticated hello. Outbound peer sessions (`dispatchPeerSessionFrame`) are inherently authenticated by the session establishment process and do not need this additional check.
 
 **INV-10: Relay is a DM-only mechanism.** Only frames with `topic="dm"` are eligible for relay forwarding. `handleRelayMessage` drops non-DM relay frames at entry before any further processing. This prevents misuse of the relay path for broadcast or topic-based messages that have different delivery semantics.
 
-**INV-11: On the origin node, ReceiptForwardTo is empty.** The origin sender is the final destination for delivery receipts. `handleRelayReceipt` returns false when `ReceiptForwardTo` is empty, terminating receipt propagation. This prevents infinite receipt forwarding loops and signals to the origin that the receipt chain has reached its end.
+**INV-11: The relay hop resolves to empty at a receipt's destination.** For `delivered`/`seen` the origin sender is the final destination: its `ReceiptForwardTo` is empty, so `handleRelayReceipt` returns false and propagation stops. Symmetrically, `seen_ack` terminates at the final recipient's node, where no further `ForwardedTo` hop exists. An empty hop from `relayHopForReceipt` always means "the chain ends here", preventing infinite receipt forwarding loops.
 
 ### Gossip and relay coexistence
 
-Gossip (`send_message` + `executeGossipTargets`) is the baseline delivery mechanism. It always runs unconditionally and provides store-and-forward guarantees, push delivery to connected clients, backlog drain on reconnect, and relay retry for offline recipients.
+Gossip (`send_message` + `executeGossipTargets`) is the baseline delivery mechanism. It always runs unconditionally and provides mesh-wide propagation, push delivery to connected clients, and in-flight relay retries within the transit window. Offline delivery beyond the window is the sender's end-to-end retry.
 
 Relay (`relay_message` + `tryRelayToCapableFullNodes`) is an additional optimization that fires on top of gossip for DMs. It targets only full-node peers with `mesh_relay_v1` capability. Client nodes are never relay targets because they cannot forward (`CanForward=false`). Relay provides faster multi-hop traversal for recipients unreachable by direct gossip.
 
@@ -303,16 +303,16 @@ sequenceDiagram
     Note over FN: Message stored in<br/>topics["dm"] via gossip
 
     Note over RC: Recipient connects later
-    RC->>FN: subscribe_inbox
-    FN-->>RC: subscribed
+    RC->>FN: hello / auth_session
+    FN-->>RC: auth_ok (inbox route auto-registered)
     FN->>RC: push_message (backlog)
     Note over RC: Message delivered
 ```
 *Diagram — Fire-and-forget relay with gossip baseline delivery*
 
-### Store-and-forward on intermediate full node
+### In-flight buffering on intermediate full node
 
-When `handleRelayMessage` on an intermediate full node finds no capable next hop (e.g., the only connected peer is the sender client), the message is stored locally via `deliverRelayedMessage`. This preserves store-and-forward semantics: the message remains in `topics["dm"]` and will be delivered via `pushBacklogToSubscriber` when the recipient connects, or retried via `retryRelayDeliveries`.
+When `handleRelayMessage` on an intermediate full node finds no capable next hop (e.g., the only connected peer is the sender client), the message is admitted via `deliverRelayedMessage` into `topics["dm"]` as in-flight forwarding state. `retryRelayDeliveries` re-attempts delivery while the transit window is open; if the recipient connects within that window, the retry reaches it through the routing table / live push. The relay does NOT replay transit envelopes from backlog — past the window, recovery is the sender's end-to-end retry.
 
 ```mermaid
 sequenceDiagram
@@ -321,20 +321,16 @@ sequenceDiagram
     participant RC as Recipient Client (offline)
 
     SC->>FN: relay_message
-    Note over FN: handleRelayMessage:<br/>no capable next hop<br/>→ deliverRelayedMessage<br/>→ storeIncomingMessage<br/>→ topics["dm"]
+    Note over FN: handleRelayMessage:<br/>no capable next hop<br/>→ deliverRelayedMessage<br/>→ topics["dm"] (in-flight buffer)
     FN-->>SC: relay_hop_ack (stored)
 
-    SC->>FN: send_message (gossip)
-    Note over FN: storeIncomingMessage:<br/>deduped (already in seen)
-    FN-->>SC: message_stored
-
-    Note over RC: Later: recipient connects
-    RC->>FN: subscribe_inbox (dm, recipientAddr)
-    FN-->>RC: subscribed
-    FN->>RC: push_message (backlog drain)
-    Note over RC: DM delivered from<br/>full node backlog
+    Note over RC: Recipient connects within<br/>the transit window
+    RC->>FN: hello / auth_session
+    FN-->>RC: auth_ok (inbox route auto-registered)
+    FN->>RC: relay retry delivers via live route
+    Note over FN: Past the window the envelope is swept;<br/>recovery = sender end-to-end retry
 ```
-*Diagram — Store-and-forward when no capable relay peers available*
+*Diagram — In-flight forwarding buffer when no capable relay peers are available*
 
 ### Notification boundaries (Iteration 1)
 
@@ -470,7 +466,7 @@ All handshake and session timeouts are defined as named constants in `admission.
 6. **Может пересылать?** — Client-ноды не могут ретранслировать. Отбросить если не full node.
 7. **Прямой пир?** — Если identity получателя имеет активные сессии, перебрать каждую capable-сессию до первой успешной отправки. Это учитывает реконнекты и смену адресов, когда один identity имеет несколько адресов.
 8. **Gossip-фоллбэк** — Переслать топ-пирам с capability (исключая отправителя).
-9. **Нет доступных пиров?** — Если relay-цель не найдена, сохранить сообщение локально через `deliverRelayedMessage` для последующей доставки через `pushBacklogToSubscriber` или `retryRelayDeliveries`. Отправить `relay_hop_ack` со статусом `"stored"`.
+9. **Нет доступных пиров?** — Если relay-цель не найдена, принять сообщение через `deliverRelayedMessage` в in-flight-буфер пересылки, чтобы `retryRelayDeliveries` мог повторять отправку в пределах транзитного окна. Отправить `relay_hop_ack` со статусом `"stored"`.
 10. **Сохранить состояние** — Записать `relayForwardState` с `previous_hop` и `forwarded_to`.
 11. **Подтверждение** — Отправить `relay_hop_ack` со статусом `"forwarded"` обратно на предыдущий хоп.
 
@@ -599,7 +595,7 @@ type relayForwardState struct {
 
 ### Обратный путь delivery receipt
 
-При генерации delivery receipt конечным получателем каждый промежуточный узел ищет `ReceiptForwardTo` по ID сообщения и отправляет receipt на один хоп назад. При недоступности предыдущего хопа или отсутствии capability — фоллбэк на gossip-доставку receipt.
+При генерации `delivered`/`seen`-квитанции конечным получателем каждый промежуточный узел ищет `ReceiptForwardTo` по ID сообщения и отправляет квитанцию на один хоп назад к исходному отправителю. Направление зависит от статуса: подтверждение `seen_ack` (v23) идёт в ОБРАТНУЮ сторону — в направлении исходного сообщения — поэтому промежуточные узлы пересылают его по хопу `ForwardedTo` сообщения (`relayHopForReceipt` разрешает хоп по статусу). При недоступности разрешённого хопа или отсутствии capability — фоллбэк на gossip-доставку квитанции.
 
 ```mermaid
 sequenceDiagram
@@ -638,13 +634,13 @@ sequenceDiagram
 
 ### Инварианты Iteration 1
 
-**INV-1: Relay не должен нарушать store-and-forward для офлайн-получателей.** Relay — это оптимизация поверх gossip. Если relay-путь не может доставить DM (получатель офлайн, нет capable next hop), сообщение обязано быть сохранено на промежуточном full node и доставлено позже при подключении получателя. Сбой relay не должен приводить к молчаливой потере сообщения.
+**INV-1: Relay — только пересылка; offline-доставка — обязанность отправителя.** Relay — это оптимизация поверх gossip. Если ни один путь не может доставить DM прямо сейчас (получатель офлайн), промежуточный full node держит конверт только как in-flight-буфер собственной операции пересылки (`transitInFlightWindow`, см. `transit_retention.go`) и повторяет отправку через `retryRelayDeliveries` в пределах окна. Транзитные конверты — НЕ mailbox: они не отдаются через fetch/backlog-поверхности и выметаются по закрытии окна. Восстановление за пределами окна — end-to-end retry ОТПРАВИТЕЛЯ.
 
-**INV-2: Промежуточный full node хранит транзитные DM, полученные через `relay_message`.** Когда `handleRelayMessage` на full node не находит capable next hop, он вызывает `deliverRelayedMessage(frame)`, который выполняет `storeIncomingMessage(msg, false)`. Сообщение записывается в `topics["dm"]` под fingerprint получателя. Доставка происходит через `pushBacklogToSubscriber` при подключении получателя или через `retryRelayDeliveries`. Узел отвечает `relay_hop_ack` со статусом `"stored"`.
+**INV-2: Промежуточный full node буферизует транзитные DM только in-flight.** Когда `handleRelayMessage` на full node не находит capable next hop, он вызывает `deliverRelayedMessage(frame)`, который выполняет `storeIncomingMessage(msg, false)`. Сообщение принимается в `topics["dm"]` как in-flight-состояние пересылки (ограничено транзитными капами): `retryRelayDeliveries` повторяет отправку, пока окно открыто, а live push доходит до получателя с активным маршрутом. Узел отвечает `relay_hop_ack` со статусом `"stored"` (в смысле «забуферизовано для повторов пересылки», а не «сохранено надолго»). Конверт никогда не реплеится из backlog переподключившемуся получателю — эта поверхность только для локальных сообщений.
 
-**INV-3: Gossip всегда запускается безусловно.** `storeIncomingMessage` всегда выполняет `executeGossipTargets` независимо от успеха или неудачи relay. Каждый DM имеет минимум два независимых пути доставки: gossip и relay. Gossip обеспечивает базовую гарантию store-and-forward; relay обеспечивает быстрое многохоповое прохождение.
+**INV-3: Gossip всегда запускается безусловно.** `storeIncomingMessage` всегда выполняет `executeGossipTargets` независимо от успеха или неудачи relay. Каждый DM имеет минимум два независимых пути доставки: gossip и relay. Gossip обеспечивает базовый путь распространения; relay обеспечивает быстрое многохоповое прохождение. Ни один из путей не хранит транзитные конверты дольше in-flight-окна — долговременное восстановление лежит на end-to-end retry отправителя.
 
-Формально: промежуточный relay-узел может переслать сообщение немедленно, но обязан сохранить backlog-семантику для последующего получения адресатом. Если и relay, и gossip сохранили одно и то же сообщение, дедупликация через `seen[messageID]` предотвращает двойную доставку.
+Формально: промежуточный relay-узел пересылает немедленно и держит конверт только для собственных повторов пересылки. Если и relay, и gossip несут одно и то же сообщение, дедупликация через `seen[messageID]` предотвращает двойную доставку.
 
 **INV-4: Client-ноды не могут быть промежуточными relay-хопами.** Client-нода может быть отправителем (origin) или конечным получателем relay-цепочки, но никогда — промежуточным транзитным хопом. Когда `handleRelayMessage` получает `relay_message`, не адресованный себе, на client-ноде (`CanForward() == false`), фрейм молча отбрасывается. Это инвариант безопасности протокола, а не просто деталь реализации — client-ноды не имеют достаточной связности и аптайма для надёжной пересылки.
 
@@ -654,17 +650,17 @@ sequenceDiagram
 
 **INV-7: Статус hop-ack отражает фактический результат доставки.** `handleRelayMessage` возвращает `"delivered"` или `"stored"` только когда `deliverRelayedMessage` успешно завершается (т.е. `storeIncomingMessage` принимает сообщение). Если payload отклонён (неизвестный ключ отправителя, невалидная подпись, ошибка парсинга), `handleRelayMessage` возвращает `""` — ack не отправляется. Это предотвращает ситуацию, когда предыдущий хоп считает сообщение доставленным, хотя оно было отброшено.
 
-**INV-8: Relay/queue state хранится только в памяти (дисковый персист DEPRECATED и убран).** Relay state, pending-фреймы, записи дедупликации и delivery receipts живут только в RAM и **не** переживают рестарт процесса. `persistRelayState()` и сайты `relayStates.store()` остались, но их вызов `s.queuePersist.MarkDirty()` теперь no-op: фоновый queue-state персистер конструируется, но не запускается, а `queue-<port>.json` удаляется при старте (one-shot миграция один раз загружает файл от предыдущей версии, затем удаляет его). Pending-фреймы ограничены in-memory пер-пировым кольцом (`CORSA_PENDING_RING_SIZE`, evict-oldest), а не диск-backed очередью. Причина: с ростом сети персистируемый JSON-файл стал основным источником allocation-churn / памяти, а контракт store-and-forward нужен только на время UPTIME ноды, а не между рестартами — перезапущенный relay переучивает пути, а получатели перезапрашивают через gossip. Механизм персиста (`saveQueueState`, атомарный temp-then-rename) оставлен dormant и будет полностью удалён через несколько релизов. **Для оператора:** недоставленные DM, лежащие на промежуточном relay, теряются при его рестарте; отправитель отвечает за end-to-end retry до подтверждения.
+**INV-8: Relay/queue state хранится только в памяти.** Relay state, pending-фреймы, записи дедупликации и delivery receipts живут только в RAM и **не** переживают рестарт процесса. Pending-фреймы ограничены in-memory пер-пировым кольцом (`CORSA_PENDING_RING_SIZE`, evict-oldest), а не диск-backed очередью. Причина: с ростом сети персистируемый файл очереди становится основным источником allocation-churn / памяти, а in-flight-буфер пересылки нужен только на время UPTIME ноды, а не между рестартами — перезапущенный relay переучивает пути, а долговременное восстановление — end-to-end retry отправителя. Legacy-персист полностью удалён; рантайм не читает и не пишет никакой файл состояния очереди. **Для оператора:** недоставленные DM, лежащие на промежуточном relay, теряются при его рестарте; отправитель отвечает за end-to-end retry до подтверждения.
 
 **INV-9: Relay-фреймы требуют аутентифицированную сессию.** `relay_message` и `relay_hop_ack` на inbound TCP-соединениях гейтятся через `isConnAuthenticated(conn)`. Пир, не прошедший `auth_session` handshake (верификация подписи challenge-response), не может отправлять relay-фреймы, даже если заявил `mesh_relay_v1` в hello. Без этого гейта любой неаутентифицированный клиент мог инжектить hop-by-hop relay-трафик или подделывать `previous_hop` адреса, просто заявив capability в неаутентифицированном hello. Outbound peer sessions (`dispatchPeerSessionFrame`) аутентифицированы самим процессом установки сессии и не требуют этой дополнительной проверки.
 
 **INV-10: Relay — механизм только для DM.** Только фреймы с `topic="dm"` допускаются к relay-пересылке. `handleRelayMessage` отбрасывает не-DM relay фреймы на входе до любой дальнейшей обработки. Это исключает использование relay для broadcast или topic-сообщений с другой семантикой доставки.
 
-**INV-11: На узле-отправителе ReceiptForwardTo пустой.** Узел-отправитель является конечной точкой для receipt-ов доставки. `handleRelayReceipt` возвращает false при пустом `ReceiptForwardTo`, прекращая дальнейшую пересылку receipt. Это предотвращает бесконечную пересылку и сигнализирует отправителю, что цепочка receipt завершена.
+**INV-11: Relay-хоп квитанции разрешается в пустоту на её конечной точке.** Для `delivered`/`seen` конечная точка — узел исходного отправителя: его `ReceiptForwardTo` пуст, `handleRelayReceipt` возвращает false и пересылка останавливается. Симметрично, `seen_ack` завершается на узле конечного получателя, где нет дальнейшего хопа `ForwardedTo`. Пустой хоп из `relayHopForReceipt` всегда означает «цепочка закончилась здесь», предотвращая бесконечную пересылку квитанций.
 
 ### Сосуществование gossip и relay
 
-Gossip (`send_message` + `executeGossipTargets`) — базовый механизм доставки. Запускается безусловно и гарантирует store-and-forward для транзитных DM, push-доставку подключённым клиентам, drain backlog при переподключении и relay retry для офлайн-получателей.
+Gossip (`send_message` + `executeGossipTargets`) — базовый механизм доставки. Запускается безусловно и обеспечивает распространение по mesh, push-доставку подключённым клиентам и in-flight relay-повторы в пределах транзитного окна. Offline-доставка за пределами окна — end-to-end retry отправителя.
 
 Relay (`relay_message` + `tryRelayToCapableFullNodes`) — дополнительная оптимизация поверх gossip для DM. Нацелен только на full-node пиров с capability `mesh_relay_v1`. Client-ноды не являются relay-целями (не могут форвардить, `CanForward=false`). Relay обеспечивает более быстрое многохоповое прохождение к получателям, недостижимым прямым gossip.
 
@@ -704,16 +700,16 @@ sequenceDiagram
     Note over FN: Сообщение сохранено в<br/>topics["dm"] через gossip
 
     Note over RC: Получатель подключается позже
-    RC->>FN: subscribe_inbox
-    FN-->>RC: subscribed
+    RC->>FN: hello / auth_session
+    FN-->>RC: auth_ok (inbox-маршрут авто-регистрируется)
     FN->>RC: push_message (backlog)
     Note over RC: Сообщение доставлено
 ```
 *Диаграмма — Fire-and-forget relay с базовой gossip-доставкой*
 
-### Store-and-forward на промежуточном full node
+### In-flight-буферизация на промежуточном full node
 
-Когда `handleRelayMessage` на промежуточном full node не находит capable next hop (например, единственный подключённый пир — это отправитель-клиент), сообщение сохраняется локально через `deliverRelayedMessage`. Это сохраняет store-and-forward семантику: сообщение остаётся в `topics["dm"]` и будет доставлено через `pushBacklogToSubscriber` при подключении получателя, или повторно через `retryRelayDeliveries`.
+Когда `handleRelayMessage` на промежуточном full node не находит capable next hop (например, единственный подключённый пир — это отправитель-клиент), сообщение принимается через `deliverRelayedMessage` в `topics["dm"]` как in-flight-состояние пересылки. `retryRelayDeliveries` повторяет доставку, пока открыто транзитное окно; если получатель подключится в этом окне, повтор дойдёт до него через таблицу маршрутизации / live push. Relay НЕ реплеит транзитные конверты из backlog — за пределами окна восстановление лежит на end-to-end retry отправителя.
 
 ```mermaid
 sequenceDiagram
@@ -722,20 +718,16 @@ sequenceDiagram
     participant RC as Клиент-получатель (офлайн)
 
     SC->>FN: relay_message
-    Note over FN: handleRelayMessage:<br/>нет capable next hop<br/>→ deliverRelayedMessage<br/>→ storeIncomingMessage<br/>→ topics["dm"]
+    Note over FN: handleRelayMessage:<br/>нет capable next hop<br/>→ deliverRelayedMessage<br/>→ topics["dm"] (in-flight-буфер)
     FN-->>SC: relay_hop_ack (stored)
 
-    SC->>FN: send_message (gossip)
-    Note over FN: storeIncomingMessage:<br/>дедупликация (уже в seen)
-    FN-->>SC: message_stored
-
-    Note over RC: Позже: получатель подключается
-    RC->>FN: subscribe_inbox (dm, recipientAddr)
-    FN-->>RC: subscribed
-    FN->>RC: push_message (backlog drain)
-    Note over RC: DM доставлен из<br/>backlog full node
+    Note over RC: Получатель подключается<br/>в пределах транзитного окна
+    RC->>FN: hello / auth_session
+    FN-->>RC: auth_ok (inbox-маршрут авто-регистрируется)
+    FN->>RC: relay retry доставляет по live-маршруту
+    Note over FN: За пределами окна конверт выметается;<br/>восстановление = end-to-end retry отправителя
 ```
-*Диаграмма — Store-and-forward при отсутствии capable relay-пиров*
+*Диаграмма — In-flight-буфер пересылки при отсутствии capable relay-пиров*
 
 ### Границы нотификаций (Iteration 1)
 

@@ -27,7 +27,6 @@ func main() {
 	cfg.Node.ChatLogDir = ".corsa-bot"
 	cfg.Node.IdentityPath = filepath.Join(".corsa-bot", "identity-64648.json")
 	cfg.Node.TrustStorePath = filepath.Join(".corsa-bot", "trust-64648.json")
-	cfg.Node.QueueStatePath = filepath.Join(".corsa-bot", "queue-64648.json")
 	cfg.Node.PeersStatePath = filepath.Join(".corsa-bot", "peers-64648.json")
 
 	// SDK does not auto-generate identity — ensure the file exists for this example.

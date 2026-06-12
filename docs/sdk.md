@@ -190,7 +190,6 @@ func main() {
 	cfg.Node.ChatLogDir = ".corsa-bot"
 	cfg.Node.IdentityPath = ".corsa-bot/identity-64648.json"
 	cfg.Node.TrustStorePath = ".corsa-bot/trust-64648.json"
-	cfg.Node.QueueStatePath = ".corsa-bot/queue-64648.json"
 	cfg.Node.PeersStatePath = ".corsa-bot/peers-64648.json"
 
 	// SDK does not auto-generate identity — create file for first run.
@@ -397,7 +396,6 @@ func main() {
 	cfg.Node.ChatLogDir = ".corsa-bot"
 	cfg.Node.IdentityPath = ".corsa-bot/identity-64648.json"
 	cfg.Node.TrustStorePath = ".corsa-bot/trust-64648.json"
-	cfg.Node.QueueStatePath = ".corsa-bot/queue-64648.json"
 	cfg.Node.PeersStatePath = ".corsa-bot/peers-64648.json"
 
 	// SDK does not auto-generate identity — create file for first run.

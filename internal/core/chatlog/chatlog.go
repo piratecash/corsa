@@ -234,6 +234,14 @@ func initSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_messages_status
 		ON messages(recipient, delivery_status);
 
+	CREATE TABLE IF NOT EXISTS seen_ack (
+		id TEXT PRIMARY KEY
+	);
+
+	CREATE TABLE IF NOT EXISTS delivery_failed (
+		id TEXT PRIMARY KEY
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_messages_created
 		ON messages(created_at DESC);
 
@@ -363,6 +371,81 @@ func (s *Store) ReadCtx(ctx context.Context, topic string, peerAddress domain.Pe
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: read: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanEntries(rows)
+}
+
+// UnconfirmedSeen returns the inbound DM entries this identity has marked
+// "seen" whose seen receipt has not yet been confirmed by the original
+// sender (no row in the seen_ack journal). since bounds the scan to
+// recently-updated rows so a first run on a long history does not reseed
+// the whole archive. Durable source for the seen half of the sender-side
+// retry scheduler (node.SeenAckJournal).
+func (s *Store) UnconfirmedSeen(self domain.PeerIdentity, since time.Time) ([]Entry, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+
+	rows, err := s.db.Query(
+		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
+		 FROM messages
+		 WHERE topic = 'dm' AND recipient = ? AND delivery_status = ?
+		   AND updated_at >= ?
+		   AND id NOT IN (SELECT id FROM seen_ack)
+		 ORDER BY updated_at ASC`,
+		string(self), StatusSeen, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: unconfirmed seen: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	return scanEntries(rows)
+}
+
+// MarkDeliveryFailed durably records that automatic retries for the
+// locally-sent message were abandoned (TTL expiry / attempts cap), so
+// UndeliveredOutgoing stops reseeding it. Idempotent.
+func (s *Store) MarkDeliveryFailed(messageID string) error {
+	if s.db == nil {
+		return fmt.Errorf("chatlog: database not available")
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO delivery_failed (id) VALUES (?)`, messageID); err != nil {
+		return fmt.Errorf("chatlog: mark delivery failed %s: %w", messageID, err)
+	}
+	return nil
+}
+
+// MarkSeenConfirmed durably records that the original sender confirmed the
+// seen receipt for the message (seen_ack arrived). Idempotent.
+func (s *Store) MarkSeenConfirmed(messageID string) error {
+	if s.db == nil {
+		return fmt.Errorf("chatlog: database not available")
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO seen_ack (id) VALUES (?)`, messageID); err != nil {
+		return fmt.Errorf("chatlog: mark seen confirmed %s: %w", messageID, err)
+	}
+	return nil
+}
+
+// UndeliveredOutgoing returns the DM entries this identity SENT that are
+// still in the "sent" delivery status — the durable source for the
+// sender-side end-to-end delivery retry scheduler (node.DeliveryOutbox).
+func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity) ([]Entry, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+
+	rows, err := s.db.Query(
+		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
+		 FROM messages
+		 WHERE topic = 'dm' AND sender = ? AND delivery_status = ?
+		   AND id NOT IN (SELECT id FROM delivery_failed)
+		 ORDER BY created_at ASC`,
+		string(self), StatusSent)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: undelivered outgoing: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 

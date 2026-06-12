@@ -166,20 +166,11 @@ graph TB
 
 The transport-layer protections above stop resource exhaustion and abuse at the wire level. The following protections operate at the protocol (application) level, preventing identity spoofing and data leakage through the P2P command set.
 
-### 10. subscribe_inbox Authentication & Identity Binding
+### 10. Inbox Route Authentication & Identity Binding
 
 **File**: `internal/core/node/service.go`
 
-The `subscribe_inbox` command registers a live push route for a recipient's inbox. Without protection, any TCP client that completes the hello/welcome handshake (but NOT `auth_session`) could subscribe to an arbitrary recipient's inbox and receive all their DMs — encrypted bodies plus metadata (sender address, timestamps, message IDs).
-
-Two checks are enforced:
-
-| Check | Behavior |
-|-------|----------|
-| Authentication gate | Unauthenticated connections receive `auth-required` error |
-| Identity binding | Authenticated peers may only subscribe to their own identity; mismatches receive `auth-required` error + ban points |
-
-The identity binding uses `inboundPeerIdentity(conn)` which returns the Ed25519 fingerprint from the hello frame's Address field, verified by `auth_session` signature.
+The inbox push route is registered exclusively at authentication time (`registerHelloRoute` inside `auth_session` handling) and is bound to the authenticated Ed25519 identity from the hello frame, verified by the `auth_session` signature. There is no subscription command on the wire (the legacy `subscribe_inbox` was removed at `MinimumProtocolVersion = 20`), so a peer structurally cannot request a route for another identity's inbox: the only inbox a connection can ever receive is the one whose private key signed the session challenge.
 
 ### 11. fetch_inbox Identity Binding
 
@@ -193,7 +184,7 @@ Unauthenticated connections (e.g., local RPC via HandleLocalFrame) are not restr
 
 **File**: `internal/core/rpc/server.go`
 
-The `/rpc/v1/frame` HTTP endpoint accepts arbitrary frame types from local tools. Previously, unknown frame types were forwarded to `HandleLocalFrame`, which processes them as if they came from a trusted local source. This allowed HTTP clients (potentially remote if the RPC port was exposed) to inject network-level frames (`relay_message`, `push_message`, `subscribe_inbox`) bypassing P2P authentication entirely.
+The `/rpc/v1/frame` HTTP endpoint accepts arbitrary frame types from local tools. Previously, unknown frame types were forwarded to `HandleLocalFrame`, which processes them as if they came from a trusted local source. This allowed HTTP clients (potentially remote if the RPC port was exposed) to inject network-level frames (`relay_message`, `push_message`) bypassing P2P authentication entirely.
 
 Now, only frame types registered in `CommandTable` are accepted. Unknown types receive HTTP 400.
 
@@ -392,20 +383,11 @@ graph TB
 
 Защиты транспортного уровня, описанные выше, предотвращают исчерпание ресурсов и злоупотребления на уровне провода. Следующие защиты работают на уровне протокола (приложения), предотвращая подмену identity и утечку данных через набор P2P-команд.
 
-### 10. Аутентификация и привязка identity для subscribe_inbox
+### 10. Аутентификация и привязка identity для inbox-маршрута
 
 **Файл**: `internal/core/node/service.go`
 
-Команда `subscribe_inbox` регистрирует live push-маршрут для inbox получателя. Без защиты любой TCP-клиент, прошедший hello/welcome рукопожатие (но НЕ `auth_session`), мог подписаться на inbox произвольного получателя и получать все его DM — зашифрованные тела плюс метаданные (адрес отправителя, временные метки, ID сообщений).
-
-Применяются две проверки:
-
-| Проверка | Поведение |
-|----------|-----------|
-| Гейт аутентификации | Неаутентифицированные соединения получают ошибку `auth-required` |
-| Привязка identity | Аутентифицированные пиры могут подписаться только на свой собственный identity; несовпадение получает ошибку `auth-required` + баллы бана |
-
-Привязка identity использует `inboundPeerIdentity(conn)`, возвращающий Ed25519-отпечаток из поля Address фрейма hello, верифицированный подписью `auth_session`.
+Push-маршрут inbox регистрируется исключительно в момент аутентификации (`registerHelloRoute` внутри обработки `auth_session`) и привязан к аутентифицированной Ed25519-identity из hello-фрейма, верифицированной подписью `auth_session`. Команды подписки на проводе нет (легаси `subscribe_inbox` удалена при `MinimumProtocolVersion = 20`), поэтому пир структурно не может запросить маршрут на чужой inbox: соединение может получать только тот inbox, чей приватный ключ подписал session challenge.
 
 ### 11. Привязка identity для fetch_inbox
 
@@ -419,7 +401,7 @@ graph TB
 
 **Файл**: `internal/core/rpc/server.go`
 
-HTTP-эндпоинт `/rpc/v1/frame` принимает произвольные типы фреймов от локальных инструментов. Ранее неизвестные типы пересылались в `HandleLocalFrame`, обрабатывавший их как пришедшие из доверенного локального источника. Это позволяло HTTP-клиентам (потенциально удалённым, если RPC-порт был открыт) инжектировать сетевые фреймы (`relay_message`, `push_message`, `subscribe_inbox`), полностью обходя P2P-аутентификацию.
+HTTP-эндпоинт `/rpc/v1/frame` принимает произвольные типы фреймов от локальных инструментов. Ранее неизвестные типы пересылались в `HandleLocalFrame`, обрабатывавший их как пришедшие из доверенного локального источника. Это позволяло HTTP-клиентам (потенциально удалённым, если RPC-порт был открыт) инжектировать сетевые фреймы (`relay_message`, `push_message`), полностью обходя P2P-аутентификацию.
 
 Теперь принимаются только типы фреймов, зарегистрированные в `CommandTable`. Неизвестные типы получают HTTP 400.
 

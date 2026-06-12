@@ -104,7 +104,7 @@ const maxRelayStatesPerPeer = 500
 
 // maxRelayRetryEntries caps the total number of entries in the relay retry
 // map. Each entry is a small (relayAttempt, ~48 bytes) timing record.
-// 5 000 entries keeps the queue-{port}.json file under reasonable size.
+// 5 000 entries bounds the in-memory map at a few hundred KB.
 const maxRelayRetryEntries = 5_000
 
 // maxPendingFramesPerPeer is the DEFAULT per-peer pending ring capacity —

@@ -400,7 +400,6 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 	svc := NewService(config.Node{
 		ListenAddress:     "127.0.0.1:64646",
 		TrustStorePath:    filepath.Join(tempDir, "trust.json"),
-		QueueStatePath:    filepath.Join(tempDir, "queue.json"),
 		Type:              config.NodeTypeFull,
 		AllowPrivatePeers: true,
 	}, id, nil)

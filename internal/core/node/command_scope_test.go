@@ -63,10 +63,6 @@ var requiredP2PWireCommands = map[string]bool{
 	"get_peers":      true,
 	"fetch_contacts": true,
 
-	// Inbox subscription lifecycle
-	"subscribe_inbox": true,
-	"subscribed":      true,
-
 	// Realtime message delivery
 	"push_message":           true,
 	"push_delivery_receipt":  true,

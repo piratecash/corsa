@@ -89,6 +89,10 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			// residue. See ban_purge.go.
 			s.purgeExpiredBanState()
 			s.retryRelayDeliveries()
+			// Sender-side end-to-end retry (delivery_retry.go): the 2s
+			// tick is the resolution; the per-entry exponential schedule
+			// provides the actual pacing.
+			s.retryDueDeliveries(time.Now().UTC())
 			s.relayLimiter.cleanup(5 * time.Minute)
 			if s.announceLimiter != nil {
 				// Phase 4 13.7: drop per-peer announce buckets for
@@ -2159,7 +2163,7 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 		s.markPeerWrite(session.address, frame)
 	}
 	// Outbound control-plane: block on full queue rather than fast-fail,
-	// so relay traffic backlog cannot starve handshake / subscribe_inbox /
+	// so relay traffic backlog cannot starve handshake /
 	// heartbeat writes. Inbound error paths keep the fast-fail sendRawSync
 	// contract via enqueueFrameSync.
 	if st := session.netCore.SendRawSyncBlocking(payload); st != netcore.SendOK {
@@ -2233,14 +2237,6 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				continue
 			}
 			if incoming.Type == "announce_peer" {
-				s.dispatchPeerSessionFrame(session.address, session, incoming)
-				continue
-			}
-			if incoming.Type == "request_inbox" {
-				s.dispatchPeerSessionFrame(session.address, session, incoming)
-				continue
-			}
-			if incoming.Type == "subscribe_inbox" {
 				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
@@ -2661,9 +2657,6 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// loop long enough to miss heartbeat pong replies and cause
 		// the remote side to disconnect on pong-stall timeout; a
 		// fire-and-forget hop keeps that per-peer write off the read loop.
-		// (The trailing queuePeerFrame → MarkDirty is now a no-op — queue
-		// state is in-memory only, no disk write — so it is the s.peerMu
-		// contention, not any disk path, that the fire-and-forget hop avoids.)
 		// Track via backgroundWg so WaitBackground() blocks until the
 		// gossip fan-out completes — prevents TempDir cleanup races
 		// in tests.
@@ -2676,30 +2669,6 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			Msg("relay_delivery_receipt gossip fallback: no relay path or send failed (session)")
 	case "push_notice":
 		s.handleInboundPushNotice(frame)
-	case "request_inbox":
-		// DEPRECATED (v20): legacy pull-backlog command, superseded long ago by
-		// subscribe_inbox and no longer SENT by any current code path (no
-		// Type:"request_inbox" is constructed anywhere). Kept only to answer
-		// pre-historic peers. Remove together with subscribe_inbox once
-		// MinimumProtocolVersion reaches subscribeInboxAutoAtAuthVersion.
-		s.respondToInboxRequest(session)
-	case "subscribe_inbox":
-		// DEPRECATED (v20): kept for older node peers and client-role
-		// subscribers; v20+ node peers rely on auto-subscribe + backlog replay
-		// at auth (handleAuthSession). Remove once MinimumProtocolVersion
-		// reaches subscribeInboxAutoAtAuthVersion.
-		if session != nil {
-			reply, sub := s.subscribeInboxFrame(session.connID, frame)
-			// Session-local reply: route through the injected Network
-			// surface so test backends observe the subscribe_inbox reply,
-			// with the session.netCore fallback (via enqueueSessionFrame)
-			// preserving the carve-out for live sessions whose s.conns
-			// entry is reaped or never populated (tests).
-			_ = s.sendSessionFrameViaNetwork(s.runCtx, session, reply)
-			if sub != nil {
-				s.goBackground(func() { s.pushBacklogToSubscriber(sub) })
-			}
-		}
 	case "announce_peer":
 		nodeType := frame.NodeType
 		// node_type is validated for protocol compatibility only. announce_peer
@@ -2965,68 +2934,23 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	}
 }
 
-// respondToInboxRequest is called by the outbound session when the remote
-// inbound side sends a request_inbox frame after authentication.  Messages
-// and receipts are stored by identity fingerprint (peerIdentity), not by
-// transport/dial address.  The function pushes any locally stored messages
-// and delivery receipts for the peer back over the outbound connection.
-func (s *Service) respondToInboxRequest(session *peerSession) {
-	if session == nil {
-		return
-	}
-	peerID := string(session.peerIdentity)
-	if peerID == "" {
-		peerID = string(session.address)
-	}
-
-	inbox := s.fetchInboxFrame("dm", peerID)
-	for _, item := range inbox.Messages {
-		if createdAt, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil && s.messageDeliveryExpired(createdAt.UTC(), item.TTLSeconds) {
-			continue
-		}
-		msgFrame := item
-		// Session-local push: route through the injected Network surface;
-		// helper falls back to session.netCore via enqueueSessionFrame on
-		// ErrUnknownConn so live sessions with absent registry entries
-		// (tests) keep delivering without a spurious unregistered_write.
-		_ = s.sendSessionFrameViaNetwork(s.runCtx, session, protocol.Frame{
-			Type:      "push_message",
-			Topic:     "dm",
-			Recipient: peerID,
-			Item:      &msgFrame,
-		})
-	}
-
-	receipts := s.fetchDeliveryReceiptsFrame(peerID)
-	for _, item := range receipts.Receipts {
-		receiptFrame := item
-		// Session-local push: route through the injected Network surface
-		// (see sendSessionFrameViaNetwork doc for the carve-out fallback).
-		_ = s.sendSessionFrameViaNetwork(s.runCtx, session, protocol.Frame{
-			Type:      "push_delivery_receipt",
-			Recipient: peerID,
-			Receipt:   &receiptFrame,
-		})
-	}
-	log.Info().Str("peer", string(session.address)).Str("identity", peerID).Int("messages", len(inbox.Messages)).Int("receipts", len(receipts.Receipts)).Msg("responded to request_inbox")
-}
-
 // shouldAckOnStoreResult returns true when storeIncomingMessage's
-// outcome should trigger an ack_delete back to the sender. The two
-// "ack-worthy" outcomes are:
+// outcome should trigger an ack_delete back to the sender. ack_delete is
+// a BACKLOG-CLEANUP signal — "this hop has the message, release the
+// per-hop push/backlog resource" — NOT an end-to-end delivery
+// confirmation: sender-side retry stops only on the delivered/seen
+// receipt. The two ack-worthy outcomes are:
 //
-//   - stored=true: the message was newly stored, so the sender can
-//     stop retrying.
+//   - stored=true: the message was newly stored on this hop.
 //   - stored=false && errCode=="": the message was a duplicate
-//     (already in the dedup index), so we have it and the sender can
-//     also stop retrying.
+//     (already in the dedup index), so this hop has it.
 //
 // stored=false && errCode!="" is a real failure (unknown sender key,
-// timestamp out of range, etc.) — the sender must retry once it has
-// addressed the underlying cause. Returning false on that path leaves
-// the dedup-and-retry policy intact while keeping the duplicate path
-// from looping forever, which is one of the reconnect-storm
-// amplifiers tracked in CLAUDE.md.
+// timestamp out of range, etc.) — the previous hop should re-attempt
+// once it has addressed the underlying cause. Returning false on that
+// path leaves the dedup-and-re-push policy intact while keeping the
+// duplicate path from looping forever, which is one of the
+// reconnect-storm amplifiers tracked in CLAUDE.md.
 func shouldAckOnStoreResult(stored bool, errCode string) bool {
 	return stored || errCode == ""
 }
@@ -3507,7 +3431,7 @@ func resetPeerHealthForRecoveryLocked(h *peerHealth) {
 //
 // Caller MUST hold s.peerMu.Lock.  This function internally acquires
 // s.deliveryMu.RLock for the full body — both the pending log line and
-// publishAggregateStatusChangedLocked need to read s.pending / s.orphaned.
+// publishAggregateStatusChangedLocked need to read s.pending.
 // It also nests s.statusMu.Lock around publishAggregateStatusChangedLocked
 // because s.aggregateStatus / s.lastPublishedAggregateStatus /
 // s.lastAggregateStatusPublishAt live in the status domain.
@@ -4062,7 +3986,6 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_dup").Str("address", string(address)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released_dup").Str("address", string(address)).Msg("peer_mu_writer")
-		s.queuePersist.MarkDirty()
 		return true
 	}
 
@@ -4070,9 +3993,8 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	// OLDEST queued frame for this peer instead of rejecting the new one, so
 	// a reconnecting peer always receives the most RECENT pendingRingSize
 	// frames and RAM stays bounded at ~pendingRingSize × connected-peers
-	// regardless of churn. This replaced the old reject-when-full behaviour
-	// when queue-state disk persistence was removed — the ring IS the bound
-	// now (nothing spills to queue-<port>.json anymore). The shared helper
+	// regardless of churn. The ring IS the bound — nothing spills to disk.
+	// The shared helper
 	// capPendingRingLocked enforces the same bound on EVERY write-back path
 	// (here, flushPendingPeerFrames re-queue, drainPendingForIdentities
 	// merge); here we pre-trim to ringSize-1 so the append below lands exactly
@@ -4107,7 +4029,6 @@ func (s *Service) queuePeerFrame(address domain.PeerAddress, frame protocol.Fram
 	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "queuePeerFrame").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(primary, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 	return true
@@ -4223,8 +4144,8 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 		}
 	}
 	if len(remaining) == 0 {
-		// refreshAggregatePendingLocked reads s.pending / s.orphaned
-		// (deliveryMu) and writes s.aggregateStatus (statusMu, INNERMOST).
+		// refreshAggregatePendingLocked reads s.pending (deliveryMu)
+		// and writes s.aggregateStatus (statusMu, INNERMOST).
 		// Canonical order: peerMu → deliveryMu → statusMu.
 		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 		s.peerMu.Lock()
@@ -4237,7 +4158,6 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 		s.deliveryMu.RUnlock()
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "flushPendingPeerFrames_drain_empty").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-		s.queuePersist.MarkDirty()
 		s.emitPeerPendingChanged(primary, 0)
 		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 		return
@@ -4269,7 +4189,6 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "flushPendingPeerFrames_requeue").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(primary, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 }
@@ -4354,7 +4273,6 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released").Str("address", string(address)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "flushPendingFireAndForget").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
-	s.queuePersist.MarkDirty()
 	s.emitPeerPendingChanged(address, pendingCount)
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 

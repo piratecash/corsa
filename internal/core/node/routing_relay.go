@@ -692,7 +692,6 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 				Msg("relay_state_store_failed_inbound")
 			return false
 		}
-		s.persistRelayState()
 		return true
 	}
 	return s.sendRelayMessageWithOrigin(address, msg, routeOrigin)

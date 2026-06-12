@@ -57,7 +57,6 @@ type NodeConfig struct {
 	PrivateKey       string
 	IdentityPath     string
 	TrustStorePath   string
-	QueueStatePath   string
 	PeersStatePath   string
 	ChatLogDir       string
 	DownloadDir      string
@@ -102,7 +101,6 @@ func DefaultConfig() Config {
 			BootstrapPeers: []string{net.JoinHostPort("65.108.204.190", coreconfig.DefaultPeerPort)},
 			IdentityPath:   filepath.Join(".corsa", "identity-"+portSuffix(listenAddress)+".json"),
 			TrustStorePath: filepath.Join(".corsa", "trust-"+portSuffix(listenAddress)+".json"),
-			QueueStatePath: filepath.Join(".corsa", "queue-"+portSuffix(listenAddress)+".json"),
 			PeersStatePath: filepath.Join(".corsa", "peers-"+portSuffix(listenAddress)+".json"),
 			ChatLogDir:     ".corsa",
 			Type:           NodeTypeFull,
@@ -173,9 +171,6 @@ func normalizeConfig(cfg Config) Config {
 	if strings.TrimSpace(cfg.Node.TrustStorePath) == "" {
 		cfg.Node.TrustStorePath = filepath.Join(".corsa", "trust-"+port+".json")
 	}
-	if strings.TrimSpace(cfg.Node.QueueStatePath) == "" {
-		cfg.Node.QueueStatePath = filepath.Join(".corsa", "queue-"+port+".json")
-	}
 	if strings.TrimSpace(cfg.Node.PeersStatePath) == "" {
 		cfg.Node.PeersStatePath = filepath.Join(".corsa", "peers-"+port+".json")
 	}
@@ -245,7 +240,6 @@ func (c Config) internal() coreconfig.Config {
 			BootstrapPeers:   append([]string(nil), cfg.Node.BootstrapPeers...),
 			IdentityPath:     cfg.Node.IdentityPath,
 			TrustStorePath:   cfg.Node.TrustStorePath,
-			QueueStatePath:   cfg.Node.QueueStatePath,
 			PeersStatePath:   cfg.Node.PeersStatePath,
 			ChatLogDir:       cfg.Node.ChatLogDir,
 			DownloadDir:      cfg.Node.DownloadDir,

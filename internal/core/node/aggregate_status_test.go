@@ -226,29 +226,6 @@ func TestComputeAggregateStatusLocked_PendingWithoutHealthEntry(t *testing.T) {
 	}
 }
 
-func TestComputeAggregateStatusLocked_OrphanedIncludedInPending(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now().UTC()
-	svc := newTestServiceWithHealth([]*peerHealth{
-		{Address: "10.0.0.1:1000", Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now},
-	})
-	svc.pending[domain.PeerAddress("10.0.0.1:1000")] = make([]pendingFrame, 2)
-
-	// Orphaned frames — persisted legacy backlog that could not be migrated.
-	svc.orphaned = map[domain.PeerAddress][]pendingFrame{
-		"legacy-peer-a": make([]pendingFrame, 3),
-		"legacy-peer-b": make([]pendingFrame, 5),
-	}
-
-	snap := svc.computeAggregateStatusLocked(now)
-
-	// 2 pending + 3 orphaned(a) + 5 orphaned(b) = 10
-	if snap.PendingMessages != 10 {
-		t.Fatalf("expected 10 pending messages (2 pending + 8 orphaned), got %d", snap.PendingMessages)
-	}
-}
-
 func TestRefreshAggregateStatusLocked_TransitionsCorrectly(t *testing.T) {
 	t.Parallel()
 

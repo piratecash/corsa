@@ -10,7 +10,7 @@ Individual command groups:
 
 - [Handshake](protocol/handshake.md) — `hello`, `welcome`, `auth_session`, `auth_ok`, `ping`, `pong`
 - [Messaging](protocol/messaging.md) — `send_message`, `import_message`, `fetch_messages`, `fetch_message`, `fetch_message_ids`, `fetch_inbox`, `fetch_pending_messages`
-- [Realtime delivery](protocol/realtime.md) — `subscribe_inbox`, `subscribed`, `push_message`, `push_delivery_receipt`, `ack_delete`, `request_inbox`
+- [Realtime delivery](protocol/realtime.md) — `push_message`, `push_delivery_receipt`, `ack_delete`
 - [Delivery receipts](protocol/delivery.md) — `send_delivery_receipt`, `fetch_delivery_receipts`
 - [Contacts](protocol/contacts.md) — `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers`
 - [Peers](protocol/peers.md) — `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`
@@ -29,7 +29,7 @@ Individual command groups:
 
 - [Handshake](protocol/handshake.md) — `hello`, `welcome`, `auth_session`, `auth_ok`, `ping`, `pong`
 - [Сообщения](protocol/messaging.md) — `send_message`, `import_message`, `fetch_messages`, `fetch_message`, `fetch_message_ids`, `fetch_inbox`, `fetch_pending_messages`
-- [Realtime-доставка](protocol/realtime.md) — `subscribe_inbox`, `subscribed`, `push_message`, `push_delivery_receipt`, `ack_delete`, `request_inbox`
+- [Realtime-доставка](protocol/realtime.md) — `push_message`, `push_delivery_receipt`, `ack_delete`
 - [Delivery receipts](protocol/delivery.md) — `send_delivery_receipt`, `fetch_delivery_receipts`
 - [Контакты](protocol/contacts.md) — `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers`
 - [Пиры](protocol/peers.md) — `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`

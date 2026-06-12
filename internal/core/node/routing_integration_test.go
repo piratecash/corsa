@@ -722,20 +722,6 @@ func newTestServiceWithRouting(t *testing.T, localIdentity string) *Service {
 		newNoopMockPeerSender(t),
 		func() []routing.AnnounceTarget { return nil },
 	)
-	// Queue-state persister: MarkDirty / FlushSync are nil-safe so tests
-	// that leave svc.queuePersist unset do not crash, but wiring a
-	// no-op persister here keeps the helper closer to NewService's
-	// defaults — tests derived from this fixture can exercise paths that
-	// observe persister identity (e.g. asserting two call sites share
-	// one persister) without extra setup.  Run is never started here,
-	// so no disk I/O happens.  Tests that want to observe persistence
-	// behaviour override svc.queuePersist themselves (see
-	// persist_regression_test.go).
-	svc.queuePersist = newQueueStatePersister(queueStatePersisterDeps{
-		Snapshot: func() queueStateFile { return queueStateFile{} },
-		Save:     func(string, queueStateFile) error { return nil },
-		Wait:     realQueueStatePersistWait,
-	})
 	// Phase 3 PR 12.3 review fix: the multi-path failover terminal
 	// branches now reach relayViaGossip (gossip fallback on retry
 	// exhaustion / no alternative), which dereferences
@@ -2445,9 +2431,10 @@ func newTestServiceWithPendingDrain(t *testing.T, localIdentity string) *Service
 	svc.pendingKeys = make(map[pendingKey]struct{})
 	svc.outbound = make(map[string]outboundDelivery)
 	svc.relayRetry = make(map[string]relayAttempt)
+	svc.awaitingDelivered = make(map[protocol.MessageID]*deliveryRetryEntry)
+	svc.awaitingSeenAck = make(map[protocol.MessageID]*seenAckRetryEntry)
 	svc.topics = make(map[string][]protocol.Envelope)
 	svc.receipts = make(map[string][]protocol.DeliveryReceipt)
-	svc.orphaned = make(map[domain.PeerAddress][]pendingFrame)
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
 	svc.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
 	svc.relayStates = newRelayStateStore()
@@ -3389,9 +3376,10 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		pendingKeys:           make(map[pendingKey]struct{}),
 		outbound:              make(map[string]outboundDelivery),
 		relayRetry:            make(map[string]relayAttempt),
+		awaitingDelivered:     make(map[protocol.MessageID]*deliveryRetryEntry),
+		awaitingSeenAck:       make(map[protocol.MessageID]*seenAckRetryEntry),
 		topics:                make(map[string][]protocol.Envelope),
 		receipts:              make(map[string][]protocol.DeliveryReceipt),
-		orphaned:              make(map[domain.PeerAddress][]pendingFrame),
 		health:                make(map[domain.PeerAddress]*peerHealth),
 		dialOrigin:            make(map[domain.PeerAddress]domain.PeerAddress),
 		relayStates:           newRelayStateStore(),

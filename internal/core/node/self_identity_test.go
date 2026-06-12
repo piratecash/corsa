@@ -42,7 +42,6 @@ func TestInboundHello_SelfIdentity_EmitsPeerBannedNotice(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -128,7 +127,6 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -224,7 +222,6 @@ func TestOnCMDialFailed_SelfIdentityError_AppliesCooldown(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -295,7 +292,6 @@ func TestOnCMDialFailed_WireSentinelSelfIdentity_AppliesCooldown(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -357,7 +353,6 @@ func TestIsSelfIdentity_EdgeCases(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -469,7 +464,6 @@ func TestTryApplySelfIdentityCooldown_StructuredError_Hit(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -521,7 +515,6 @@ func TestTryApplySelfIdentityCooldown_WireSentinel_Hit(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -564,7 +557,6 @@ func TestTryApplySelfIdentityCooldown_UnrelatedError_Miss(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -599,7 +591,6 @@ func TestTryApplySelfIdentityCooldown_NilError_Miss(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -771,7 +762,6 @@ func TestApplySelfIdentityCooldown_NoAccumulation_WithinBanWindow(t *testing.T) 
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -850,7 +840,6 @@ func TestApplySelfIdentityCooldown_ReAppliesAfterBanExpired(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 

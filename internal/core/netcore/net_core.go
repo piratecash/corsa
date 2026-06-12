@@ -448,7 +448,7 @@ func (pc *NetCore) SendRawSyncCtx(ctx context.Context, data []byte) (result Send
 
 // SendRawSyncBlocking enqueues pre-serialized bytes and waits for write
 // completion, BLOCKING on enqueue until a slot is available. Used by
-// outbound control-plane writes (handshake, heartbeat, subscribe_inbox,
+// outbound control-plane writes (handshake, heartbeat,
 // request-reply) that must not be starved by fire-and-forget relay traffic
 // already queued on sendCh. The entire operation (enqueue + flush) is
 // bounded by syncFlushTimeout so a stuck writer cannot hang the caller

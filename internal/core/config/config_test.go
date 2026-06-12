@@ -378,7 +378,6 @@ func TestDefaultAnchorsPathsToStartupDirectory(t *testing.T) {
 	}()
 
 	t.Setenv("CORSA_PEERS_PATH", "")
-	t.Setenv("CORSA_QUEUE_STATE_PATH", "")
 	t.Setenv("CORSA_TRUST_STORE_PATH", "")
 	t.Setenv("CORSA_IDENTITY_PATH", "")
 	t.Setenv("CORSA_CHATLOG_DIR", "")
@@ -401,9 +400,6 @@ func TestDefaultAnchorsPathsToStartupDirectory(t *testing.T) {
 	}
 	if got, want := cfg.Node.PeersStatePath, filepath.Join(dataDir, "peers-64646.json"); got != want {
 		t.Fatalf("PeersStatePath = %q, want %q", got, want)
-	}
-	if got, want := cfg.Node.QueueStatePath, filepath.Join(dataDir, "queue-64646.json"); got != want {
-		t.Fatalf("QueueStatePath = %q, want %q", got, want)
 	}
 	if got, want := cfg.Node.IdentityPath, filepath.Join(dataDir, "identity-64646.json"); got != want {
 		t.Fatalf("IdentityPath = %q, want %q", got, want)

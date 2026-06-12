@@ -310,23 +310,10 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	log.Trace().Str("site", "openPeerSession_register").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	s.markPeerConnected(address, peerDirectionOutbound)
 
-	// subscribe_inbox deprecation (v20): a v20+ responder auto-subscribes our
-	// inbox and replays the backlog at auth (see handleAuthSession), so the
-	// explicit subscribe_inbox round-trip is redundant — skip it and rely on
-	// the auth-time registration. Older peers still need it: their auth path
-	// installs the push route but does NOT replay the backlog, so we keep
-	// sending subscribe_inbox to peers below the threshold.
-	if session.version < subscribeInboxAutoAtAuthVersion {
-		if _, err := s.peerSessionRequest(session, protocol.Frame{
-			Type:       "subscribe_inbox",
-			Topic:      "dm",
-			Recipient:  s.identity.Address,
-			Subscriber: s.identity.Address,
-		}, "subscribed", false); err != nil {
-			return true, err
-		}
-		log.Info().Str("peer", string(address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
-	}
+	// Inbox subscription is established by the responder at auth time
+	// (handleAuthSession → registerHelloRoute + backlog replay) — the
+	// MinimumProtocolVersion floor guarantees every peer supports it, so no
+	// explicit subscription round-trip happens here.
 	_ = conn.SetDeadline(time.Time{})
 
 	if err := s.syncPeerSession(session, requestPeers, peerExchangePathSessionOutbound); err != nil {
@@ -689,7 +676,7 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 // openPeerSessionForCM opens a TCP connection, performs the protocol
 // handshake (hello/welcome) and authentication, then returns the
 // transport-ready session WITHOUT registering it in Service maps or
-// running any application-level exchanges (subscribe_inbox, sync).
+// running any application-level exchanges (sync).
 //
 // All side-effects — session registration, metadata writes, subscribe,
 // sync, routing — are deferred to onCMSessionEstablished which runs
@@ -814,7 +801,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 // transitions to Active — i.e., AFTER the generation check passes.
 //
 // The callback runs in the CM event loop, so it MUST NOT perform any
-// blocking I/O. All socket-level work (subscribe_inbox, syncPeerSession,
+// blocking I/O. All socket-level work (syncPeerSession,
 // servePeerSession) is launched in a dedicated goroutine.
 //
 // openPeerSessionForCM intentionally performs ONLY TCP handshake + auth
@@ -1110,8 +1097,10 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 }
 
 // initPeerSession performs the application-level setup for an already
-// authenticated session: subscribes to the peer's inbox relay and runs
-// the initial sync (conditionally get_peers, then fetch_contacts).
+// authenticated session: runs the initial sync (conditionally get_peers,
+// then fetch_contacts). Inbox subscription needs no setup here — the
+// responder auto-registers it and replays the backlog at auth time
+// (handleAuthSession → registerHelloRoute).
 // Whether get_peers is sent depends on the aggregate network status at
 // the moment of entry — see shouldRequestPeers() for the policy.
 // This is the blocking I/O phase that must NOT run in the CM event
@@ -1120,32 +1109,16 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 // On success the session is ready for the servePeerSession read loop.
 // On error the caller is responsible for session cleanup and CM notification.
 func (s *Service) initPeerSession(session *peerSession) error {
-	// Evaluate peer exchange policy before subscribe_inbox so that any
-	// network I/O done during subscribe cannot shift the aggregate status
-	// between the decision point and its use. In the CM path the session
-	// is not yet registered in s.health, so the snapshot naturally excludes
-	// the peer being set up — matching the legacy path (openPeerSession).
+	// Evaluate peer exchange policy before any session-setup I/O so that it
+	// cannot shift the aggregate status between the decision point and its
+	// use. In the CM path the session is not yet registered in s.health, so
+	// the snapshot naturally excludes the peer being set up — matching the
+	// legacy path (openPeerSession).
 	requestPeers := s.shouldRequestPeers()
 	if !requestPeers {
 		s.logPeerExchangeSkipped(peerExchangePathSessionCM, session.address, peerExchangeSkipByAggregateHealthy)
 	}
 
-	// subscribe_inbox deprecation (v20): skip the explicit round-trip for v20+
-	// peers — their auth path auto-subscribes us and replays the backlog (see
-	// handleAuthSession). Older peers still need it (their auth installs the
-	// push route but does not replay the backlog), so keep sending below the
-	// threshold. See subscribeInboxAutoAtAuthVersion.
-	if session.version < subscribeInboxAutoAtAuthVersion {
-		if _, err := s.peerSessionRequest(session, protocol.Frame{
-			Type:       "subscribe_inbox",
-			Topic:      "dm",
-			Recipient:  s.identity.Address,
-			Subscriber: s.identity.Address,
-		}, "subscribed", false); err != nil {
-			return fmt.Errorf("subscribe_inbox: %w", err)
-		}
-		log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Msg("upstream subscription established")
-	}
 	_ = session.conn.SetDeadline(time.Time{})
 
 	if err := s.syncPeerSession(session, requestPeers, peerExchangePathSessionCM); err != nil {

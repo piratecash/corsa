@@ -360,17 +360,6 @@ Outgoing connection candidates are selected using score-based ordering instead o
 - dial candidates with equal scores are sorted by insertion order (stable sort), preserving bootstrap-first priority
 - **host deduplication**: if any active connection (outbound or inbound) already exists to a given host IP, all dial candidates with the same host are skipped; this maximises fault tolerance by spreading connections across distinct hosts rather than accumulating multiple connections to the same IP
 
-## Queue state migration
-
-The queue-state file carries a `"version"` field (current: `1`).  When loading a file with `version < 1` (or no version field — legacy files written before canonicalisation), a one-time migration runs.  For each non-primary key in `"pending"`:
-
-1. if the host maps to exactly one known primary — frames are moved to that primary key
-2. if the host has no known primaries (unknown host) or maps to more than one primary (ambiguous) — the entry cannot be resolved automatically; it is moved to the `"orphaned"` section and a warning is logged
-
-After migration the version is set to `1` and subsequent restarts skip the migration entirely.  This means entries written by the current code (already keyed by primary address) are never touched.
-
-Orphaned frames are persisted across restarts in `"orphaned"`.  They are not loaded into the runtime pending queue, but remain on disk for manual recovery (e.g. editing the JSON to move them to the correct primary key).
-
 ## Stale peer eviction
 
 In-memory peer lists are periodically pruned to remove stale entries.  Every 10 minutes the node scans all known peers and removes those that meet **both** criteria:
@@ -825,17 +814,6 @@ graph TB
 - очередь исходящих pending-фреймов также привязана к основному адресу пира, поэтому фреймы, поставленные в очередь через fallback-вариант, корректно отправляются при переподключении через любой вариант
 - кандидаты для подключения с одинаковым score сортируются по порядку добавления (стабильная сортировка), сохраняя приоритет bootstrap-пиров
 - **дедупликация по хосту**: если к данному IP-хосту уже есть активное соединение (исходящее или входящее), все кандидаты с тем же хостом пропускаются; это максимизирует отказоустойчивость за счёт распределения соединений по разным хостам, а не накопления нескольких соединений к одному IP
-
-## Миграция queue state
-
-Файл queue-state содержит поле `"version"` (текущая: `1`). При загрузке файла с `version < 1` (или без поля version — legacy-файлы, записанные до каноникализации) выполняется одноразовая миграция. Для каждого не-primary ключа в `"pending"`:
-
-1. если host однозначно маппится на один known primary — фреймы переносятся на этот primary-ключ
-2. если у host нет known primary (неизвестный хост) или host маппится на несколько primary (неоднозначный) — запись не может быть автоматически разрешена; она перемещается в секцию `"orphaned"` и логируется warning
-
-После миграции version устанавливается в `1`, и последующие рестарты пропускают миграцию полностью. Это означает, что записи, сделанные текущей версией кода (уже ключеванные по primary-адресу), никогда не затрагиваются.
-
-Orphaned фреймы сохраняются между рестартами в `"orphaned"`. Они не загружаются в runtime pending-очередь, но остаются на диске для ручного восстановления (например, редактированием JSON и переносом на правильный primary-ключ).
 
 ## Вытеснение устаревших пиров
 

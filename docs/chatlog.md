@@ -33,12 +33,10 @@ flowchart TB
 
     subgraph DISK["Disk (.corsa/)"]
         DB["chatlog-<identity_short>-<port>.db\n(SQLite, WAL mode)"]
-        QUEUE["queue-64646.json\n(relay state + retry)"]
     end
 
     TOPICS -->|"MessageStore.StoreMessage()\nonly if isLocalMessage()"| CHATLOG
     CHATLOG -->|"chatLog.Append()"| DB
-    TOPICS -->|"trackRelayMessage()\ntransit DMs only"| QUEUE
     DB -->|"chatLog.Read()\n(on demand)"| CACHE
     DB -->|"ReadLastEntryPerPeer()\n(on startup)"| PEERS
     TOPICS -->|"fetch_dm_headers\n(every 5s, no body)"| HEADERS
@@ -63,11 +61,9 @@ flowchart LR
         D1["Chatlog (SQLite)\nsealed envelopes\nsingle DB per identity+port"]
         D2["Incoming DMs:\nstored as-is"]
         D3["Outgoing DMs:\nsealed envelope with\nsender-readable part"]
-        D4["queue-port.json\ntransit relay state\n+ retry metadata"]
     end
 
     MEM -->|"MessageStore.StoreMessage()\nlocal messages only"| D1
-    MEM -->|"trackRelayMessage()\ntransit DMs only"| D4
     D1 -->|"read on demand\n(DesktopClient reads directly)"| MEM
 ```
 
@@ -81,7 +77,6 @@ sequenceDiagram
     participant NODE as Local node
     participant SVC as DesktopClient<br/>(MessageStore)
     participant LOG as Chatlog (SQLite)
-    participant QUEUE as queue-port.json
     participant UI as Desktop UI
 
     NET->>NODE: relay DM (encrypted envelope)
@@ -110,7 +105,6 @@ sequenceDiagram
         Note over NODE: NOT written to chatlog<br/>(MessageStore not called)
         NODE->>NODE: trackRelayMessage()
         NODE->>NODE: gossip to other peers
-        NODE->>QUEUE: persist relay state on save
     end
 ```
 
@@ -626,10 +620,8 @@ not called. The message is stored only in-memory (`s.topics[dm]`) for
 gossip/relay purposes, so the local chat history only contains conversations
 this node actually participates in. Transit relay state (`relayRetry`,
 forward states, receipts) is likewise **in-memory only** — it is NOT written
-to disk and does **not** survive a restart. (Historically it was persisted to
-`queue-<port>.json`; that disk persistence has been removed — see
-`docs/protocol/relay.md` INV-8. A restarted relay re-learns paths and the
-sender retries end-to-end.)
+to disk and does **not** survive a restart (see `docs/protocol/relay.md`
+INV-8). A restarted relay re-learns paths and the sender retries end-to-end.
 
 ### Receipt write flow
 
@@ -638,7 +630,6 @@ storeDeliveryReceipt()
   ├── dedup check (seenReceipts)
   ├── store in-memory receipt (s.receipts[recipient])
   ├── clear pending/outbound/relay state
-  ├── persistQueueState()
   ├── messageStore.UpdateDeliveryStatus(receipt)    ← DB FIRST
   │     └── DesktopClient: chatLog.UpdateStatus()
   │           └── UPDATE messages SET delivery_status=?, updated_at=?
@@ -757,9 +748,8 @@ The desktop client minimizes memory usage by following these principles:
    the previous conversation data via `ConversationCache.Load()`.
 6. **Transit messages excluded from chatlog** — DMs relayed through a full node
    (where neither party is local) are only stored in-memory for gossip; they are
-   never persisted to disk (the former `queue-<port>.json` persistence has been
-   removed — transit relay state is in-memory only and does not survive a
-   restart; see `docs/protocol/relay.md` INV-8).
+   never persisted to disk — transit relay state is in-memory only and does not
+   survive a restart (see `docs/protocol/relay.md` INV-8).
 7. **Transit DMs filtered from `fetch_dm_headers`** — the poll loop returns only
    headers where the local node is sender or recipient; `seenMessageIDs` map
    records only local headers to avoid unbounded memory growth from transit traffic.
@@ -799,12 +789,10 @@ flowchart TB
 
     subgraph DISK["Диск (.corsa/)"]
         DB["chatlog-<identity_short>-<port>.db\n(SQLite, WAL режим)"]
-        QUEUE["queue-64646.json\n(состояние relay + retry)"]
     end
 
     TOPICS -->|"MessageStore.StoreMessage()\nтолько если isLocalMessage()"| CHATLOG
     CHATLOG -->|"chatLog.Append()"| DB
-    TOPICS -->|"trackRelayMessage()\nтолько транзитные DM"| QUEUE
     DB -->|"chatLog.Read()\n(по запросу)"| CACHE
     DB -->|"ReadLastEntryPerPeer()\n(при запуске)"| PEERS
     TOPICS -->|"fetch_dm_headers\n(каждые 5с, без тела)"| HEADERS
@@ -829,11 +817,9 @@ flowchart LR
         D1["Chatlog (SQLite)\nsealed envelopes\nодна БД на identity+port"]
         D2["Входящие ЛС:\nхранятся как есть"]
         D3["Исходящие ЛС:\nsealed envelope с\nsender-readable частью"]
-        D4["queue-port.json\nсостояние relay транзита\n+ метаданные retry"]
     end
 
     MEM -->|"MessageStore.StoreMessage()\nтолько локальные сообщения"| D1
-    MEM -->|"trackRelayMessage()\nтолько транзитные DM"| D4
     D1 -->|"чтение по запросу\n(DesktopClient читает напрямую)"| MEM
 ```
 
@@ -847,7 +833,6 @@ sequenceDiagram
     participant NODE as Локальная нода
     participant SVC as DesktopClient<br/>(MessageStore)
     participant LOG as Chatlog (SQLite)
-    participant QUEUE as queue-port.json
     participant UI as Desktop UI
 
     NET->>NODE: relay DM (зашифрованный конверт)
@@ -876,7 +861,6 @@ sequenceDiagram
         Note over NODE: НЕ записывается в chatlog<br/>(MessageStore не вызывается)
         NODE->>NODE: trackRelayMessage()
         NODE->>NODE: gossip другим peers
-        NODE->>QUEUE: сохранение состояния relay
     end
 ```
 
@@ -1393,9 +1377,8 @@ storeIncomingMessage()
 gossip/relay, поэтому локальная история чата содержит только те диалоги, в
 которых эта нода реально участвует. Транзитное relay-состояние (`relayRetry`,
 forward states, receipts) тоже **только в памяти** — на диск не пишется и
-**не** переживает рестарт. (Раньше персистилось в `queue-<port>.json`; этот
-дисковый персист убран — см. `docs/protocol/relay.md` INV-8. Перезапущенный
-relay переучивает пути, а отправитель ретраит end-to-end.)
+**не** переживает рестарт (см. `docs/protocol/relay.md` INV-8). Перезапущенный
+relay переучивает пути, а отправитель ретраит end-to-end.
 
 ### Flow записи receipt
 
@@ -1404,7 +1387,6 @@ storeDeliveryReceipt()
   ├── проверка дедупликации (seenReceipts)
   ├── запись receipt в память (s.receipts[recipient])
   ├── очистка pending/outbound/relay state
-  ├── persistQueueState()
   ├── messageStore.UpdateDeliveryStatus(receipt)    ← СНАЧАЛА БД
   │     └── DesktopClient: chatLog.UpdateStatus()
   │           └── UPDATE messages SET delivery_status=?, updated_at=?
@@ -1497,8 +1479,8 @@ Desktop-клиент минимизирует использование пам�
    предыдущие данные диалога через `ConversationCache.Load()`.
 6. **Транзитные сообщения исключены из chatlog** — ЛС, пересылаемые через полную ноду
    (где ни одна из сторон не является локальной), хранятся только в памяти для gossip;
-   на диск они не пишутся (прежний персист в `queue-<port>.json` убран — транзитное
-   relay-состояние только в памяти и не переживает рестарт; см. `docs/protocol/relay.md` INV-8).
+   на диск они не пишутся — транзитное relay-состояние только в памяти и не
+   переживает рестарт (см. `docs/protocol/relay.md` INV-8).
 7. **Транзитные DM отфильтрованы из `fetch_dm_headers`** — цикл опроса возвращает только
    заголовки, где локальная нода является отправителем или получателем; карта `seenMessageIDs`
    записывает только локальные заголовки, чтобы избежать неограниченного роста памяти от

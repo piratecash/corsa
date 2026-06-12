@@ -46,14 +46,13 @@ func TestSendHandshakeReply_HappyPath(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
 	connID := netcore.ConnID(7001)
 	backend.Register(connID, netcore.Inbound, "10.0.0.42:64646")
 
-	reply := protocol.Frame{Type: "subscribed", Topic: "dm", Recipient: "x", Subscriber: "x"}
+	reply := protocol.Frame{Type: "auth_ok", Topic: "dm", Recipient: "x", Subscriber: "x"}
 	err := svc.sendHandshakeReplyViaNetwork(context.Background(), connID, reply)
 	if err != nil {
 		t.Fatalf("sendHandshakeReplyViaNetwork(empty buffer): unexpected error %v", err)
@@ -65,11 +64,11 @@ func TestSendHandshakeReply_HappyPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse outbound frame: %v", err)
 		}
-		if got.Type != "subscribed" {
-			t.Fatalf("got type %q, want subscribed", got.Type)
+		if got.Type != "auth_ok" {
+			t.Fatalf("got type %q, want auth_ok", got.Type)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("subscribed reply did not arrive on backend.Outbound")
+		t.Fatal("auth_ok reply did not arrive on backend.Outbound")
 	}
 }
 
@@ -88,7 +87,6 @@ func TestSendHandshakeReply_BufferFullWaitsAndDelivers(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -148,7 +146,6 @@ func TestSendHandshakeReply_BufferFullTimesOutNoClose(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
@@ -166,7 +163,7 @@ func TestSendHandshakeReply_BufferFullTimesOutNoClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 
-	reply := protocol.Frame{Type: "subscribed"}
+	reply := protocol.Frame{Type: "auth_ok"}
 	err := svc.sendHandshakeReplyViaNetwork(ctx, connID, reply)
 	if err == nil {
 		t.Fatal("expected error from wedged outbound buffer, got nil")
@@ -195,13 +192,12 @@ func TestSendHandshakeReply_UnknownConnReportsButDoesNotPanic(t *testing.T) {
 		ListenAddress:  "127.0.0.1:0",
 		Type:           config.NodeTypeFull,
 		TrustStorePath: t.TempDir() + "/trust.json",
-		QueueStatePath: t.TempDir() + "/queue.json",
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
 	connID := netcore.ConnID(7099) // never registered
 
-	reply := protocol.Frame{Type: "subscribed"}
+	reply := protocol.Frame{Type: "auth_ok"}
 	err := svc.sendHandshakeReplyViaNetwork(context.Background(), connID, reply)
 	if err == nil {
 		t.Fatal("expected error on unknown ConnID, got nil")

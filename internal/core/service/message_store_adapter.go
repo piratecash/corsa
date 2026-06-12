@@ -85,3 +85,82 @@ func (a *MessageStoreAdapter) UpdateDeliveryStatus(receipt protocol.DeliveryRece
 	}
 	return true
 }
+
+// UndeliveredOutgoing implements node.DeliveryOutbox: it returns the sealed
+// envelopes of locally-sent DMs whose delivery status is still "sent", so
+// the node can reseed its end-to-end retry scheduler after a restart.
+func (a *MessageStoreAdapter) UndeliveredOutgoing() ([]protocol.Envelope, error) {
+	if a == nil || a.chatlog == nil {
+		return nil, nil
+	}
+	entries, err := a.chatlog.UndeliveredOutgoing()
+	if err != nil {
+		return nil, err
+	}
+	envelopes := make([]protocol.Envelope, 0, len(entries))
+	for _, entry := range entries {
+		createdAt, err := time.Parse(time.RFC3339Nano, entry.CreatedAt)
+		if err != nil {
+			if createdAt, err = time.Parse(time.RFC3339, entry.CreatedAt); err != nil {
+				log.Warn().Str("id", entry.ID).Str("created_at", entry.CreatedAt).Msg("undelivered outgoing entry has unparseable created_at — skipped")
+				continue
+			}
+		}
+		envelopes = append(envelopes, protocol.Envelope{
+			ID:         protocol.MessageID(entry.ID),
+			Topic:      "dm",
+			Sender:     entry.Sender,
+			Recipient:  entry.Recipient,
+			Flag:       protocol.MessageFlag(entry.Flag),
+			TTLSeconds: entry.TTLSeconds,
+			Payload:    []byte(entry.Body),
+			CreatedAt:  createdAt.UTC(),
+		})
+	}
+	return envelopes, nil
+}
+
+// seenReseedHorizon bounds how far back UnconfirmedSeen scans on startup.
+// Without it the first run after the seen_ack journal was introduced would
+// reseed the entire seen history; a week comfortably covers any realistic
+// retry window (the scheduler caps a single receipt at ~3.5h of attempts).
+const seenReseedHorizon = 7 * 24 * time.Hour
+
+// UnconfirmedSeen implements node.SeenAckJournal: the seen receipts this
+// identity sent that the original senders have not confirmed with seen_ack.
+func (a *MessageStoreAdapter) UnconfirmedSeen() ([]protocol.DeliveryReceipt, error) {
+	if a == nil || a.chatlog == nil {
+		return nil, nil
+	}
+	entries, err := a.chatlog.UnconfirmedSeen(time.Now().UTC().Add(-seenReseedHorizon))
+	if err != nil {
+		return nil, err
+	}
+	receipts := make([]protocol.DeliveryReceipt, 0, len(entries))
+	for _, entry := range entries {
+		receipts = append(receipts, protocol.DeliveryReceipt{
+			MessageID:   protocol.MessageID(entry.ID),
+			Sender:      a.id.Address,
+			Recipient:   entry.Sender,
+			Status:      protocol.ReceiptStatusSeen,
+			DeliveredAt: time.Now().UTC(),
+		})
+	}
+	return receipts, nil
+}
+
+// MarkDeliveryFailed implements node.DeliveryFailureJournal.
+func (a *MessageStoreAdapter) MarkDeliveryFailed(id protocol.MessageID) error {
+	if a == nil || a.chatlog == nil {
+		return nil
+	}
+	return a.chatlog.MarkDeliveryFailed(string(id))
+}
+
+// MarkSeenConfirmed implements node.SeenAckJournal.
+func (a *MessageStoreAdapter) MarkSeenConfirmed(id protocol.MessageID) error {
+	if a == nil || a.chatlog == nil {
+		return nil
+	}
+	return a.chatlog.MarkSeenConfirmed(string(id))
+}

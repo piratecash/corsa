@@ -923,7 +923,6 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 	cfg := config.Node{
 		ListenAddress:  ":0",
 		TrustStorePath: filepath.Join(dir, "trust.json"),
-		QueueStatePath: filepath.Join(dir, "queue.json"),
 		PeersStatePath: filepath.Join(dir, "peers.json"),
 	}
 

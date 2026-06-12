@@ -659,7 +659,7 @@ func TestFrameEndpointDispatchesThroughCommandTable(t *testing.T) {
 // TestFrameEndpointRejectsUnknownType verifies that unregistered frame types
 // are rejected instead of being forwarded to HandleLocalFrame. Previously,
 // unknown types were forwarded, which allowed HTTP clients to inject network-
-// level frames (relay_message, push_message, subscribe_inbox) bypassing P2P
+// level frames (relay_message, push_message) bypassing P2P
 // authentication. Now only CommandTable-registered types are accepted.
 func TestFrameEndpointRejectsUnknownType(t *testing.T) {
 	node := newNodeProviderWithHandler(t, func(frame protocol.Frame) protocol.Frame {
