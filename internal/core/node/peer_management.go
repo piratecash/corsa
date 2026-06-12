@@ -2127,13 +2127,23 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		case session.inboxCh <- frame:
 		default:
 			select {
-			case session.errCh <- fmt.Errorf("peer session inbox overflow for %s", session.address):
+			case session.errCh <- fmt.Errorf("%w for %s", errPeerSessionInboxOverflow, session.address):
 			default:
 			}
 			return
 		}
 	}
 }
+
+// errPeerSessionInboxOverflow marks a session teardown initiated by the
+// LOCAL node: the per-session inbox channel saturated while the serve
+// loop was busy (typically blocked inside a synchronous
+// peerSessionRequest against a slow socket). It is a local
+// slow-consumer eviction, not evidence of peer instability —
+// sessionCloseCauseFromError matches against this sentinel via
+// errors.Is to keep such teardowns out of the peer's disconnect_storm
+// quarantine accounting.
+var errPeerSessionInboxOverflow = errors.New("peer session inbox overflow")
 
 func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
 	// All outbound writes route through the managed single-writer path on

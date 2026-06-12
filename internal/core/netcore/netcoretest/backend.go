@@ -45,9 +45,9 @@ import (
 
 // defaultOutboundBuffer is the per-connection queue depth for Outbound
 // frames. It mirrors the production writer-queue depth (netcore's
-// sendChBuffer = 128) so the Backend returns ErrSendBufferFull at the
+// sendChBuffer = 512) so the Backend returns ErrSendBufferFull at the
 // same saturation point as the real writer goroutine would.
-const defaultOutboundBuffer = 128
+const defaultOutboundBuffer = 512
 
 // ErrBackendClosed is returned to callers of Register after the Backend
 // has been shut down via Shutdown(). It is distinct from the Network-layer

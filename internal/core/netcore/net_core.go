@@ -151,11 +151,16 @@ const (
 )
 
 // sendChBuffer is the per-connection write queue depth. When the queue
-// is full the peer is considered "too slow" and evicted (SendBufferFull).
-// 128 frames ≈ 4–8 KB of typical JSON protocol traffic — large enough
-// to absorb short bursts without dropping, small enough to detect
-// genuinely unresponsive peers promptly.
-const sendChBuffer = 128
+// is full, Send returns SendBufferFull and the CALLER decides what that
+// means: the fire-and-forget session path drops the frame (best-effort
+// contract, session survives), the blocking control-plane path waits.
+// 512 frames absorbs a connect-time burst (pending-backlog flush +
+// full table sync chunks + gossip fanout) against a peer that drains
+// slowly; the previous 128 overflowed within seconds under that burst,
+// and at the time overflow cost a whole session teardown. Genuinely
+// dead sockets are detected by the per-write deadline in writerLoop
+// (writeDeadlineFor), not by queue depth.
+const sendChBuffer = 512
 
 // Options carries the peer state to populate at construction time.
 // All fields are optional — omitted fields stay at zero value. Using a
@@ -276,10 +281,13 @@ func (pc *NetCore) writerLoop() {
 }
 
 // SendStatus describes why a send operation succeeded or failed.
-// Callers use this to choose the correct recovery action: buffer-full and
-// timeout warrant closing the connection (slow peer eviction), while
-// writerDone and channelClosed mean the connection is already dying and
-// an extra Close() would interfere with orderly teardown.
+// Callers use this to choose the correct recovery action: buffer-full
+// is a backpressure signal whose handling is the caller's policy
+// (best-effort fire-and-forget paths drop the frame and keep the
+// session; control-plane paths may wait or escalate), timeout warrants
+// closing the connection, while writerDone and channelClosed mean the
+// connection is already dying and an extra Close() would interfere
+// with orderly teardown.
 //
 // Zero value is an invalid sentinel — an uninitialised SendStatus
 // cannot be confused with success.

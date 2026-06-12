@@ -133,7 +133,7 @@ type Service struct {
 	//   • receipts      — recipient → persisted DeliveryReceipt batches
 	//   • upstream      — peer address → upstream-subscription marker; set of
 	//                     peers that have subscribed to our outbox
-	deliveryMu  sync.RWMutex
+	deliveryMu        sync.RWMutex
 	pending           map[domain.PeerAddress][]pendingFrame
 	pendingKeys       map[pendingKey]struct{}
 	outbound          map[string]outboundDelivery
@@ -720,6 +720,13 @@ type peerSession struct {
 	// openPeerSessionForCM and the CM failure path.
 	closeOnce sync.Once
 	closeErr  error
+
+	// ffDropsSinceWarn / ffLastDropWarnAt back the rate-limited
+	// fire_and_forget_buffer_full warn (see logFireAndForgetDrop).
+	// Only the servePeerSession goroutine reads or writes them, so
+	// they need no lock.
+	ffDropsSinceWarn int
+	ffLastDropWarnAt time.Time
 }
 
 // peerWelcomeMeta holds welcome-frame data deferred until CM activation.

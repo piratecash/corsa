@@ -171,7 +171,7 @@ func TestNetCoreSendReturnsFalseWhenQueueFull(t *testing.T) {
 		}
 	}
 
-	// Channel is now full (128 buffered + writer blocked on 1st). Next must fail.
+	// Channel is now full (sendChBuffer buffered + writer blocked on 1st). Next must fail.
 	if pc.Send(frame) == SendOK {
 		t.Fatal("Send returned SendOK when channel should be full")
 	}

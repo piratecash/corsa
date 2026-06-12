@@ -561,9 +561,15 @@ func computeQuarantineDuration(strikes int) time.Duration {
 }
 
 // maybeArmRouteQuarantineOnCloseLocked is the convenience entry
-// point called from onPeerSessionClosed: it records the disconnect,
-// checks the rate, and arms quarantine if exceeded. Caller must
-// hold s.peerMu (the existing close-path already does).
+// point called from onPeerSessionClosedWithCause: it records the
+// disconnect, checks the rate, and arms quarantine if exceeded.
+// Caller must hold s.peerMu (the existing close-path already does).
+//
+// The caller invokes this ONLY for peer-initiated teardowns
+// (sessionClosePeerInitiated): local evictions (inbox overflow, CM
+// slot replacement) are excluded upstream because they are not
+// evidence of peer instability — see sessionCloseCause in
+// routing_session.go.
 func (s *Service) maybeArmRouteQuarantineOnCloseLocked(peer domain.PeerIdentity, now time.Time) {
 	s.recordPeerDisconnectLocked(peer, now)
 	if s.disconnectRateExceedsLocked(peer, now) {

@@ -6,19 +6,27 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// logFastInvalidation emits the warn-level observability log
-// promised in RouteCapStats.FastInvalidations' doc-comment and in
-// docs/routing.md "RIB compaction" → "fast invalidation": Identity,
-// Uplink, observed hops, accepted-vs-rejected outcome. The log
-// fires on EVERY P3 decision (accepted invalidation AND rejected
-// stale-SeqNo / cross-Origin-replay sample), but the
-// FastInvalidations counter bumps ONLY on accepted invalidations
-// — the counter measures successful tombstone admissions, not
-// total bad-hops traffic. So for an operator-side dashboard:
+// logFastInvalidation emits the observability log promised in
+// RouteCapStats.FastInvalidations' doc-comment and in docs/routing.md
+// "RIB compaction" → "fast invalidation": Identity, Uplink, observed
+// hops, accepted-vs-rejected outcome. The log fires on EVERY P3
+// decision (accepted invalidation AND rejected stale-SeqNo /
+// cross-Origin-replay sample), but the FastInvalidations counter bumps
+// ONLY on accepted invalidations — the counter measures successful
+// tombstone admissions, not total bad-hops traffic.
 //
-//   - `accepted=true` log lines are paired 1:1 with FastInvalidations
-//     bumps (use either as the engage signal).
-//   - `accepted=false` log lines have NO counter equivalent — the
+// Level split: `accepted=true` is steady-state mesh convergence churn —
+// during a route storm it fires many times per minute on every node,
+// and per-event warn logging (JSON encode + runtime.Caller + log I/O)
+// was itself a measurable CPU cost, so the accepted path logs at
+// debug. `accepted=false` stays at warn: rejected samples (stale /
+// cross-Origin replay) are the anomaly an operator must see.
+// Dashboard guidance:
+//
+//   - FastInvalidations counter bumps are paired 1:1 with
+//     `accepted=true` debug lines — at the default (warn) log level
+//     the counter is the engage signal, not the log.
+//   - `accepted=false` warn lines have NO counter equivalent — the
 //     rejection_reason field is the only operator-visible record
 //     of stale / cross-Origin samples reaching the P3 branch. If
 //     dashboards need a counter for these, that's deferred work
@@ -26,7 +34,7 @@ import (
 //     the "successful guard fired" metric, not "bad samples seen").
 //
 // `accepted=false` carries the `reason` ("cross_origin_stale_replay"
-// или "stale_seqno") for diagnostic granularity; the accepted path
+// or "stale_seqno") for diagnostic granularity; the accepted path
 // keeps reason="" because the operator only needs the outcome to
 // be visible.
 //
@@ -35,7 +43,11 @@ import (
 // pipeline; the symmetric SeqNo-flap-cap engage log lives in
 // flap.go::recordSeqAdvanceLocked where the decision is made.
 func logFastInvalidation(entry RouteEntry, accepted bool, reason string) {
-	event := log.Warn().
+	event := log.Debug()
+	if !accepted {
+		event = log.Warn()
+	}
+	event = event.
 		Str("identity", string(entry.Identity)).
 		Str("uplink", string(entry.NextHop)).
 		Str("origin", string(entry.Origin)).

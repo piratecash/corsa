@@ -200,10 +200,40 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	s.announceLoop.TriggerUpdate()
 }
 
+// sessionCloseCause distinguishes WHO initiated a session teardown,
+// for the disconnect_storm quarantine accounting in
+// onPeerSessionClosedWithCause.
+//
+// The distinction exists because the quarantine counts disconnects as
+// evidence of PEER instability. A teardown the local node chose itself
+// (inbox-overflow slow-consumer eviction, ConnectionManager slot
+// replacement) says nothing about the peer's stability; counting it
+// used to let a busy local node quarantine — and transit-tombstone —
+// perfectly healthy neighbours, amplifying route churn across the mesh.
+type sessionCloseCause int
+
+const (
+	// sessionClosePeerInitiated covers remote-side failures: EOF,
+	// connection reset, read/write timeouts, protocol errors. These
+	// are genuine peer-instability evidence and feed the
+	// disconnect_storm sliding window.
+	sessionClosePeerInitiated sessionCloseCause = iota
+	// sessionCloseLocalEviction covers teardowns the local node
+	// initiated deliberately (inbox-overflow slow-consumer eviction,
+	// CM slot replacement/shutdown). Excluded from disconnect_storm
+	// accounting; all other close-path effects (route withdrawal,
+	// transit invalidation, counters) run unchanged.
+	sessionCloseLocalEviction
+)
+
 // onPeerSessionClosed is called when a session for a peer identity closes.
 // caps must describe the same capability set that was passed to
 // onPeerSessionEstablished for this session so that the relay-capable
 // session counter stays balanced.
+//
+// The close is attributed to the peer (sessionClosePeerInitiated) —
+// cleanup paths that know the teardown was a local decision must call
+// onPeerSessionClosedWithCause directly.
 //
 // Multi-session awareness: RemoveDirectPeer is called on the relay-session
 // 1→0 transition (last relay-capable session for this identity). Total
@@ -213,6 +243,14 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 // (returned as wire-ready AnnounceEntry items) and transit routes
 // learned through this peer are silently invalidated locally.
 func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
+	s.onPeerSessionClosedWithCause(peerIdentity, caps, sessionClosePeerInitiated)
+}
+
+// onPeerSessionClosedWithCause is onPeerSessionClosed with an explicit
+// teardown attribution. cause only gates the disconnect_storm
+// quarantine accounting; every other close-path effect is identical
+// for both causes.
+func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity, caps []domain.Capability, cause sessionCloseCause) {
 	if peerIdentity == "" {
 		return
 	}
@@ -250,7 +288,12 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 	// disconnect timestamp and arm quarantine if the rate exceeds
 	// the threshold. The quarantine map and history are guarded by
 	// the same peerMu we already hold.  See routing_route_quarantine.go.
-	if lastRelay {
+	//
+	// Local evictions are excluded: a teardown the local node chose
+	// itself is not evidence of peer instability, and counting it
+	// let a backpressured local node quarantine healthy neighbours
+	// (see sessionCloseCause).
+	if lastRelay && cause == sessionClosePeerInitiated {
 		s.maybeArmRouteQuarantineOnCloseLocked(peerIdentity, time.Now())
 	}
 	s.peerMu.Unlock()

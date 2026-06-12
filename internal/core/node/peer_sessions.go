@@ -100,6 +100,44 @@ func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3
 	session.netCore.SetProtocolVersion(domain.ProtocolVersion(welcome.Version))
 }
 
+// peerSessionSendBuffer / peerSessionInboxBuffer size the per-session
+// frame channels created by openPeerSession / openPeerSessionForCM.
+//
+// sendCh overflow degrades gracefully — enqueuePeerFrame fast-fails and
+// the frame lands in the pending ring for a later retry — so it stays
+// small. inboxCh overflow is fatal for the session (slow-consumer
+// eviction in readPeerSession), and the serve loop legitimately stops
+// draining inboxCh for up to peerRequestTimeout while a synchronous
+// peerSessionRequest waits on a slow socket — 256 gives the reader
+// that much headroom under gossip/announce bursts, where the previous
+// 64 overflowed and tore down otherwise healthy sessions.
+const (
+	peerSessionSendBuffer  = 64
+	peerSessionInboxBuffer = 256
+)
+
+// sessionCloseCauseFromError classifies a session teardown error for
+// the disconnect_storm quarantine accounting (see sessionCloseCause in
+// routing_session.go). Local evictions are:
+//
+//   - errors wrapping errPeerSessionInboxOverflow — slow-consumer
+//     eviction chosen by the local node;
+//   - nil — a clean local shutdown. The ONLY nil-returning exits of
+//     servePeerSession are local context cancellation (the ctx.Done
+//     case, and the writerDone case re-checked against ctx.Err), and
+//     the runPeerSession cleanup never runs with a nil error at all.
+//     Without the nil→local mapping a node shutdown whose session
+//     goroutine won the cleanup race against onCMSessionTeardown
+//     recorded a disconnect_storm event against every connected peer.
+//
+// Everything else is peer-initiated.
+func sessionCloseCauseFromError(err error) sessionCloseCause {
+	if err == nil || errors.Is(err, errPeerSessionInboxOverflow) {
+		return sessionCloseLocalEviction
+	}
+	return sessionClosePeerInitiated
+}
+
 func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress) {
 	defer crashlog.DeferRecover()
 	for {
@@ -137,7 +175,7 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			// s.sessions and no other goroutine mutates session.capabilities
 			// after applyWelcomeMetadata.
 			if closedSession != nil && closedSession.peerIdentity != "" {
-				s.onPeerSessionClosed(closedSession.peerIdentity, closedSession.capabilities)
+				s.onPeerSessionClosedWithCause(closedSession.peerIdentity, closedSession.capabilities, sessionCloseCauseFromError(err))
 			}
 			// Self-identity short-circuit — must run BEFORE the generic
 			// markPeerDisconnected penalty. openPeerSession surfaces the
@@ -228,8 +266,8 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		connID:       cid,
 		conn:         conn,
 		metered:      conn,
-		sendCh:       make(chan protocol.Frame, 64),
-		inboxCh:      make(chan protocol.Frame, 64),
+		sendCh:       make(chan protocol.Frame, peerSessionSendBuffer),
+		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
 		errCh:        make(chan error, 1),
 	}
 	s.attachOutboundNetCore(session)
@@ -414,21 +452,41 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			if isFireAndForgetFrame(outbound.Type) {
 				// Fire-and-forget frames (relay_message, relay_hop_ack) are
 				// enqueued on the managed writer without waiting for a reply.
-				// Buffer-full means the peer is not draining fast enough —
-				// evict it (slow-peer semantics) so upstream retry logic can
-				// pick a different route.
+				// Buffer-full drops the frame and keeps the session — see
+				// the SendBufferFull case below for the contract.
 				if session.netCore == nil {
 					return fmt.Errorf("fire_and_forget: outbound session missing NetCore")
 				}
-				s.markPeerWrite(session.address, outbound)
 				switch st := session.netCore.Send(outbound); st {
 				case netcore.SendOK:
-					// enqueued
+					// Enqueued. Account the write only now: a frame
+					// rejected by the queue never reaches the wire, so
+					// tracing it as accepted=true and bumping
+					// LastUsefulSendAt before Send would keep a
+					// backpressured peer looking healthy and falsify
+					// protocol_trace under sustained drops.
+					s.markPeerWrite(session.address, outbound)
 				case netcore.SendBufferFull:
-					writeErr := fmt.Errorf("fire_and_forget: send buffer full")
-					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Msg("fire_and_forget_buffer_full")
-					s.markPeerDisconnected(session.address, writeErr)
-					return writeErr
+					// Best-effort frame on a saturated write queue: drop
+					// the frame, keep the session. The previous slow-peer
+					// eviction (markPeerDisconnected + teardown) converted
+					// transient backpressure into a reconnect storm: every
+					// teardown discarded the whole write queue, forced a
+					// redial, a connect-time full table sync and a baseline
+					// resync — far more wire traffic than the one dropped
+					// frame — and the self-inflicted disconnects fed the
+					// disconnect_storm quarantine of an innocent peer.
+					// Fire-and-forget frames are best-effort by contract:
+					// gossip/relay payloads retry end-to-end through the
+					// delivery subsystem, announce-plane frames self-heal
+					// via the forced periodic full sync and route TTL. A
+					// genuinely dead socket is still detected by the
+					// heartbeat ping and by the writer-goroutine exit
+					// (writerDoneCh above). Relay retry state is
+					// deliberately NOT cleared so the relay-retry
+					// subsystem can pick a different route.
+					session.logFireAndForgetDrop(outbound.Type)
+					continue
 				case netcore.SendChanClosed, netcore.SendWriterDone:
 					writeErr := fmt.Errorf("fire_and_forget: connection closing (%s)", st.String())
 					s.markPeerDisconnected(session.address, writeErr)
@@ -467,6 +525,33 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 			s.flushPendingPeerFrames(session.address)
 		}
 	}
+}
+
+// fireAndForgetDropWarnInterval rate-limits the per-session
+// fire_and_forget_buffer_full warn. During sustained backpressure the
+// drop site fires for nearly every gossip frame, and per-event warn
+// logging (JSON encode + runtime.Caller) was itself a measurable
+// CPU/IO cost during storms. One line per interval carrying the
+// aggregated drop count preserves the operator signal.
+const fireAndForgetDropWarnInterval = 30 * time.Second
+
+// logFireAndForgetDrop records a best-effort frame drop on a saturated
+// write queue and emits the rate-limited fire_and_forget_buffer_full
+// warn. Only the servePeerSession goroutine touches the drop counters,
+// so no lock is required.
+func (session *peerSession) logFireAndForgetDrop(frameType string) {
+	session.ffDropsSinceWarn++
+	now := time.Now()
+	if !session.ffLastDropWarnAt.IsZero() && now.Sub(session.ffLastDropWarnAt) < fireAndForgetDropWarnInterval {
+		return
+	}
+	log.Warn().
+		Str("peer", string(session.address)).
+		Str("type", frameType).
+		Int("dropped", session.ffDropsSinceWarn).
+		Msg("fire_and_forget_buffer_full")
+	session.ffLastDropWarnAt = now
+	session.ffDropsSinceWarn = 0
 }
 
 func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol.Frame) error {
@@ -721,8 +806,8 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		connID:       cid,
 		conn:         conn,
 		metered:      conn,
-		sendCh:       make(chan protocol.Frame, 64),
-		inboxCh:      make(chan protocol.Frame, 64),
+		sendCh:       make(chan protocol.Frame, peerSessionSendBuffer),
+		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
 		errCh:        make(chan error, 1),
 	}
 	s.attachOutboundNetCore(session)
@@ -791,7 +876,8 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	// From here on, the CM event loop owns session lifetime.
 	// NOTE: session is NOT registered in s.sessions and no subscribe/sync
 	// has run. readPeerSession goroutine buffers incoming frames in
-	// inboxCh (capacity 64) until onCMSessionEstablished drains them.
+	// inboxCh (capacity peerSessionInboxBuffer) until
+	// onCMSessionEstablished drains them.
 	close(abort)
 
 	return session, nil
@@ -1010,7 +1096,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		// Routing table: deregister direct peer only if this goroutine
 		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
 		if ownedCleanup && session.peerIdentity != "" {
-			s.onPeerSessionClosed(session.peerIdentity, session.capabilities)
+			s.onPeerSessionClosedWithCause(session.peerIdentity, session.capabilities, sessionCloseCauseFromError(err))
 		}
 
 		// Accumulate traffic metrics from the metered connection.
@@ -1091,8 +1177,16 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// Pointer-compare ensures we don't accidentally delete or deregister
 	// a replacement session that was registered for the same address
 	// between deactivateSlotLocked and this callback.
+	//
+	// Cause is local eviction: CM deactivates a slot on replace or
+	// shutdown — a local decision, not peer instability. When the
+	// session died on its own, the servePeerSession goroutine cleanup
+	// owns the entry (it always runs before the ActiveSessionLost →
+	// deactivateSlot path emits this callback) and attributes the
+	// close from the actual session error, so this branch never
+	// shadows a genuine peer-side flap.
 	if ownedCleanup && info.Identity != "" {
-		s.onPeerSessionClosed(info.Identity, info.Capabilities)
+		s.onPeerSessionClosedWithCause(info.Identity, info.Capabilities, sessionCloseLocalEviction)
 	}
 }
 
