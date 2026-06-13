@@ -9633,14 +9633,17 @@ func TestDeleteTrustedContactClearsOutboundWithNoPending(t *testing.T) {
 
 	// Delete the contact — outbound tracking must be cleared even though
 	// dropped == 0 (no pending frames for this recipient).
+	//
+	// HandleLocalFrame is synchronous: delete_trusted_contact →
+	// deleteTrustedContactFrame → dropPendingForRecipient clears s.outbound
+	// under deliveryMu before it returns, so the assertion below sees the
+	// final state immediately. (Do NOT call WaitBackground here — on a
+	// fully-started node it waits for the long-lived gossip-worker pool,
+	// which only exits at shutdown, so it would hang until stop().)
 	svc.HandleLocalFrame(protocol.Frame{
 		Type:    "delete_trusted_contact",
 		Address: peerID.Address,
 	})
-
-	// HandleLocalFrame schedules fire-and-forget goroutines; drain them so
-	// the in-memory state below is final.
-	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
 	_, ok := svc.outbound["ob-1"]

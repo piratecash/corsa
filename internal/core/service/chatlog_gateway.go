@@ -148,11 +148,11 @@ func (g *ChatlogGateway) FetchConversations() (string, error) {
 // UndeliveredOutgoing returns the locally-sent DM entries still in the
 // "sent" delivery status — the durable source for the sender-side delivery
 // retry scheduler.
-func (g *ChatlogGateway) UndeliveredOutgoing() ([]chatlog.Entry, error) {
+func (g *ChatlogGateway) UndeliveredOutgoing(since time.Time) ([]chatlog.Entry, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.UndeliveredOutgoing(g.SelfAddress())
+	return g.store.UndeliveredOutgoing(g.SelfAddress(), since)
 }
 
 // UnconfirmedSeen returns the inbound DM entries marked "seen" whose seen

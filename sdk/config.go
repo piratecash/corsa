@@ -67,6 +67,12 @@ type NodeConfig struct {
 	MaxClockDrift    time.Duration
 	MaxOutgoingPeers int
 	MaxIncomingPeers int
+	// HoldDMUntilReachable gates sender-owned DM emission on recipient
+	// reachability (no blind gossip to unreachable recipients). nil means
+	// "use the default", which is ENABLED — matching the operator default
+	// and CORSA_HOLD_DM_UNTIL_REACHABLE. Set to a pointer to false to restore
+	// the legacy blind-gossip baseline for an embedded/SDK runtime.
+	HoldDMUntilReachable *bool
 }
 
 // RPCConfig configures the optional HTTP RPC server.
@@ -251,6 +257,9 @@ func (c Config) internal() coreconfig.Config {
 			MaxClockDrift:    cfg.Node.MaxClockDrift,
 			MaxOutgoingPeers: cfg.Node.MaxOutgoingPeers,
 			MaxIncomingPeers: cfg.Node.MaxIncomingPeers,
+			// Default ON (the storm cure) unless the embedder explicitly
+			// opts out via a non-nil pointer to false.
+			HoldDMUntilReachable: cfg.Node.HoldDMUntilReachable == nil || *cfg.Node.HoldDMUntilReachable,
 		},
 		RPC: coreconfig.RPC{
 			Host:     cfg.RPC.Host,

@@ -432,7 +432,12 @@ func (s *Store) MarkSeenConfirmed(messageID string) error {
 // UndeliveredOutgoing returns the DM entries this identity SENT that are
 // still in the "sent" delivery status — the durable source for the
 // sender-side end-to-end delivery retry scheduler (node.DeliveryOutbox).
-func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity) ([]Entry, error) {
+// since bounds the scan to recently-created rows so a restart does not
+// reseed (and re-inject into the mesh) ancient undelivered DMs whose
+// recipient never returned: the scheduler caps a single message at ~3.5h of
+// attempts, so anything older than the horizon is already abandoned in
+// practice. Symmetric with UnconfirmedSeen's `since`.
+func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity, since time.Time) ([]Entry, error) {
 	if s.db == nil {
 		return nil, nil
 	}
@@ -441,9 +446,10 @@ func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity) ([]Entry, error) {
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages
 		 WHERE topic = 'dm' AND sender = ? AND delivery_status = ?
+		   AND created_at >= ?
 		   AND id NOT IN (SELECT id FROM delivery_failed)
 		 ORDER BY created_at ASC`,
-		string(self), StatusSent)
+		string(self), StatusSent, since.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: undelivered outgoing: %w", err)
 	}

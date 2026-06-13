@@ -75,3 +75,39 @@ func TestNodeConfigAdvertisePortMapping(t *testing.T) {
 func peerPortPtr(p domain.PeerPort) *domain.PeerPort {
 	return &p
 }
+
+// TestNodeConfigHoldDMUntilReachableMapping pins the SDK boundary for the
+// reachability gate: the public *bool field maps into the internal bool with
+// "nil means the default, which is ENABLED". Without this test the SDK path
+// could silently regress to the bool zero value (false = legacy blind gossip),
+// the exact bug this case was created to prevent — an embedded/SDK runtime
+// running legacy behaviour despite the operator default being ON.
+func TestNodeConfigHoldDMUntilReachableMapping(t *testing.T) {
+	t.Parallel()
+
+	tr := true
+	fa := false
+
+	cases := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{name: "nil_defaults_to_enabled", in: nil, want: true},
+		{name: "explicit_true_stays_enabled", in: &tr, want: true},
+		{name: "explicit_false_is_kill_switch", in: &fa, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := DefaultConfig()
+			cfg.Node.HoldDMUntilReachable = tc.in
+
+			if got := cfg.internal().Node.HoldDMUntilReachable; got != tc.want {
+				t.Fatalf("HoldDMUntilReachable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

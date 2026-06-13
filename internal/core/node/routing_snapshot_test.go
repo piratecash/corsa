@@ -89,7 +89,10 @@ func TestRebuildRoutingSnapshotSkipsCleanRebuilds(t *testing.T) {
 	}
 
 	// Second rebuild without any table mutation in between — pointer
-	// must be unchanged.
+	// must be unchanged. Clear the coalescing throttle so the rebuild
+	// actually reaches the dirty-flag gate (otherwise the min-interval
+	// would short-circuit it first and the test would not exercise the gate).
+	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	second := svc.routingSnap.Load()
 	if second != first {
@@ -123,6 +126,9 @@ func TestRebuildRoutingSnapshotSeesRecentMutation(t *testing.T) {
 		t.Fatal("UpdateRoute did not mark the table dirty; writer→publisher edge broken")
 	}
 
+	// Clear the coalescing throttle so this rebuild is not deferred by the
+	// min-interval (it fired moments ago for the first publish).
+	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	second := svc.routingSnap.Load()
 	if second == first {
@@ -130,6 +136,44 @@ func TestRebuildRoutingSnapshotSeesRecentMutation(t *testing.T) {
 	}
 	if svc.loadRoutingSnapshot().TotalEntries != 1 {
 		t.Fatalf("expected TotalEntries=1 after UpdateRoute; got %d", svc.loadRoutingSnapshot().TotalEntries)
+	}
+}
+
+// TestRebuildRoutingSnapshotCoalescesWithinInterval pins the churn cure:
+// even when the table is dirty, a rebuild within routingSnapshotMinInterval of
+// the previous publish is coalesced (no deep copy), and the dirty bit is
+// preserved so the next eligible rebuild still sees the change.
+func TestRebuildRoutingSnapshotCoalescesWithinInterval(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.rebuildRoutingSnapshot() // cold publish, arms the throttle
+	first := svc.routingSnap.Load()
+	if first == nil {
+		t.Fatal("test setup: first rebuild did not publish")
+	}
+
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("UpdateRoute: %v", err)
+	}
+
+	// Within the interval: dirty, but coalesced — same pointer, dirty kept.
+	svc.rebuildRoutingSnapshot()
+	if svc.routingSnap.Load() != first {
+		t.Fatal("dirty rebuild within the min-interval must be coalesced (no new snapshot)")
+	}
+	if !svc.routingTable.IsDirty() {
+		t.Fatal("coalesced rebuild must preserve the dirty bit for the next eligible tick")
+	}
+
+	// Past the interval: the preserved dirty bit now produces a fresh publish.
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	if svc.routingSnap.Load() == first {
+		t.Fatal("rebuild past the min-interval must publish the pending change")
 	}
 }
 
@@ -180,7 +224,9 @@ func TestServiceRoutingSnapshotReturnsCachedNotFresh(t *testing.T) {
 			cached.TotalEntries)
 	}
 
-	// Explicit rebuild — now the cached pointer matches the table.
+	// Explicit rebuild — now the cached pointer matches the table. Clear the
+	// coalescing throttle so the rebuild is not deferred by the min-interval.
+	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	if got := svc.RoutingSnapshot().TotalEntries; got != 1 {
 		t.Fatalf("after rebuild, RoutingSnapshot.TotalEntries = %d; want 1", got)
@@ -213,6 +259,9 @@ func TestRebuildRoutingSnapshotRacePostConsume(t *testing.T) {
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	})
 	// Refresher consumes and rebuilds — second pointer with 1 entry.
+	// Clear the coalescing throttle so each rebuild in this race contract
+	// fires immediately rather than being deferred by the min-interval.
+	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	second := svc.routingSnap.Load()
 	if second == first || svc.loadRoutingSnapshot().TotalEntries != 1 {
@@ -229,6 +278,7 @@ func TestRebuildRoutingSnapshotRacePostConsume(t *testing.T) {
 	}
 
 	// Next refresh tick — must produce a third pointer reflecting both writers.
+	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	third := svc.routingSnap.Load()
 	if third == second {
@@ -327,8 +377,10 @@ func TestServiceRoutingSnapshotReflectsHoldDownExpiry(t *testing.T) {
 
 	// TickTTL must mark the table dirty so the next refresh
 	// republishes; rebuildRoutingSnapshot then sees a clean
-	// InHoldDown=false in the cached snapshot.
+	// InHoldDown=false in the cached snapshot. Clear the coalescing throttle
+	// so the rebuild is not deferred by the min-interval.
 	svc.routingTable.TickTTL()
+	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 
 	cached = svc.RoutingSnapshot()

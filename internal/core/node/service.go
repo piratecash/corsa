@@ -538,6 +538,14 @@ type Service struct {
 	// of the copy. Rebuilt by hotReadsRefreshLoop on the same ticker
 	// shape as the four snapshots above; see routing_snapshot.go.
 	routingSnap routingSnapPtr
+	// lastRoutingSnapAtNanos coalesces routingSnap rebuilds: under a steady
+	// route-announce stream the table is dirty on nearly every 500ms tick, so
+	// the dirty gate alone still rebuilt the full deep-copy snapshot 2x/s
+	// forever — a dominant churn source on otherwise-idle nodes. rebuildRoutingSnapshot
+	// rebuilds at most once per routingSnapshotMinInterval. atomic.Int64
+	// (UnixNano) because rebuildRoutingSnapshot runs both at startup priming
+	// and on the dedicated ticker goroutine.
+	lastRoutingSnapAtNanos atomic.Int64
 
 	// File transfer subsystem (Iteration 21).
 	//
@@ -3891,6 +3899,14 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", string(peerIdentity)).Msg("track_inbound_connect_before_on_peer_session")
 	s.onPeerSessionEstablished(peerIdentity, s.connCapabilitiesForID(id))
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_after_on_peer_session")
+	// The inbound peer's identity may now be directly reachable (a direct
+	// route was added above if it is relay-capable): re-arm any held
+	// sender-owned DM for it. Self-checked inside the kick, so a non-relay
+	// inbound peer (no usable route) is a no-op. The outbound path does the
+	// same in servePeerSession.
+	s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{
+		peerIdentity: {},
+	})
 
 	// Send full table sync to the inbound peer (Phase 1.2: full sync on
 	// connect, symmetric with the outbound path).
@@ -5239,7 +5255,33 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		s.goBackground(func() { s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers) })
 	}
 
-	if s.shouldRouteStoredMessage(msg) {
+	// An origin-authored message that ARRIVED from the network (Via != "")
+	// is an echo of our own DM coming back through the mesh. Re-propagating
+	// it would re-inject it with a FRESH hop budget and revive a message the
+	// sender-owned engine may already have abandoned — the months-long
+	// zombie-DM storm (traffic showed our own months-old DMs re-emitted by
+	// THIS path with hops reset to the default). Re-propagation of our own
+	// messages is owned EXCLUSIVELY by the sender-owned retry engine
+	// (delivery_retry.go), which is finite (TTL / attempts cap). The message
+	// is still stored for the local DM view above, and the inbound-push
+	// handler still ack-deletes the pushing hop (which actively helps the
+	// mesh copies die); we simply never re-gossip or relay it.
+	originEcho := msg.Via != "" && s.identity != nil && msg.Sender == s.identity.Address
+	// Reachability gate for our OWN first send (sender == self, local origin,
+	// Via == ""): emit only when the recipient is reachable — a directed
+	// route or a directly connected subscriber. An unreachable recipient is
+	// HELD (registered in awaitingDelivered below) instead of blind-gossiped
+	// into the void; the sender-owned retry engine delivers it when a route
+	// appears, bounded by TTL / attempts cap. This is the origin-send half of
+	// the INV-3 reachability gate (the retry half is dispatchEnvelopeRetry).
+	// TRANSIT forwarding (sender != self) is NOT gated — blind gossip is how
+	// relays propagate other people's messages (INV-3 unchanged for transit).
+	originFirstSend := msg.Via == "" && s.identity != nil && msg.Sender == s.identity.Address
+	originUnreachableHold := s.cfg.HoldDMUntilReachable && originFirstSend && decision.RelayNextHop == nil && len(decision.PushSubscribers) == 0
+	if originUnreachableHold {
+		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("origin_send_held_unreachable")
+	}
+	if s.shouldRouteStoredMessage(msg) && !originEcho && !originUnreachableHold {
 		s.trackRelayMessage(envelope)
 
 		// Gossip is the baseline delivery mechanism. It spreads the
@@ -5287,7 +5329,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		msg.Recipient != "" && msg.Recipient != "*" && msg.Recipient != s.identity.Address &&
 		storeResult != StoreDuplicate {
 		s.deliveryMu.Lock()
-		s.registerAwaitingDeliveredLocked(envelope, time.Now().UTC())
+		// held = the first send was withheld because the recipient was
+		// unreachable (reachability gate). Only held entries are woken by
+		// kickDeliveryRetriesForReachable when a route/connection appears.
+		s.registerAwaitingDeliveredLocked(envelope, time.Now().UTC(), originUnreachableHold)
 		s.deliveryMu.Unlock()
 	}
 

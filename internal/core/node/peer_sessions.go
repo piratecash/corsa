@@ -387,16 +387,19 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	// inboxCh is actively read (preventing overflow), drain any pending
 	// frames (push_message, etc.) that target this peer's identity.
 	if session.peerIdentity != "" {
+		peerID := session.peerIdentity
+		reachable := map[domain.PeerIdentity]struct{}{peerID: {}}
+		// The peer's identity just became directly reachable: re-arm any held
+		// sender-owned delivery retry for it (unconditional — held retries
+		// live in awaitingDelivered, not s.pending).
+		s.kickDeliveryRetriesForReachable(reachable)
 		// Pure-delivery probe: s.pending lives under deliveryMu.
 		s.deliveryMu.RLock()
 		hasPending := len(s.pending) > 0
 		s.deliveryMu.RUnlock()
 		if hasPending {
-			peerID := session.peerIdentity
 			s.goBackground(func() {
-				s.drainPendingForIdentities(map[domain.PeerIdentity]struct{}{
-					peerID: {},
-				})
+				s.drainPendingForIdentities(reachable)
 			})
 		}
 	}

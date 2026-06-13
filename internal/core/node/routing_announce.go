@@ -2560,6 +2560,13 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 	// This avoids unnecessary Lock contention on every announce_routes,
 	// which was causing inter-test timing regressions in full package runs.
 	if len(drainIdentities) > 0 {
+		// Held sender-owned DMs to these now-routable recipients are re-armed
+		// immediately (self-checked inside the kick), independent of pending —
+		// they live in awaitingDelivered, so the pending-empty fast path below
+		// must not skip them. This keeps the "route appeared → deliver now"
+		// promise for reachability-gated sends instead of waiting out the
+		// retry backoff.
+		s.kickDeliveryRetriesForReachable(drainIdentities)
 		s.deliveryMu.RLock()
 		hasPending := len(s.pending) > 0
 		s.deliveryMu.RUnlock()
@@ -2653,6 +2660,12 @@ func (s *Service) triggerDrainForExposed(exposed []routing.PeerIdentity) {
 	for _, id := range exposed {
 		identities[domain.PeerIdentity(id)] = struct{}{}
 	}
+	// A newly-reachable recipient also re-arms any held sender-owned delivery
+	// retry for it (dispatchEnvelopeRetry holds messages to unreachable
+	// recipients). Unlike the pending drain this is unconditional — held
+	// retries live in awaitingDelivered, not s.pending, so the pending-empty
+	// fast path must not skip them.
+	s.kickDeliveryRetriesForReachable(identities)
 	s.deliveryMu.RLock()
 	hasPending := len(s.pending) > 0
 	s.deliveryMu.RUnlock()

@@ -2,6 +2,7 @@ package node
 
 import (
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -111,9 +112,30 @@ func (s *Service) loadRoutingSnapshot() routing.Snapshot {
 // — the RPC path is statically decoupled from t.mu writers, the same
 // invariant that motivated the network_stats / peer_health phase-1
 // carve-out.
+// routingSnapshotMinInterval coalesces routingSnap rebuilds: even when the
+// table stays dirty on every tick (steady route-announce stream), the full
+// deep-copy snapshot is rebuilt at most this often. Routing decisions consume
+// the snapshot with bounded staleness, so 1s of lag is acceptable while it
+// cuts the dominant per-tick churn. Tunable; kept >= the 500ms ticker so it
+// actually throttles.
+const routingSnapshotMinInterval = 1 * time.Second
+
 func (s *Service) rebuildRoutingSnapshot() {
 	if s.routingTable == nil {
 		return
+	}
+
+	// Coalesce: throttle the (expensive) deep copy to once per
+	// routingSnapshotMinInterval even under a dirty-every-tick announce
+	// stream. Checked BEFORE ConsumeDirty so the dirty bit is preserved for
+	// the next eligible tick — a throttled rebuild must not swallow a change.
+	// The cold-start case (no prior publish) bypasses the throttle so the
+	// first RPC after Run() sees real data immediately.
+	if s.routingSnap.Load() != nil {
+		last := s.lastRoutingSnapAtNanos.Load()
+		if last != 0 && time.Since(time.Unix(0, last)) < routingSnapshotMinInterval {
+			return
+		}
 	}
 
 	// Skip the deep copy when the table is clean AND a previous
@@ -127,6 +149,7 @@ func (s *Service) rebuildRoutingSnapshot() {
 	log.Trace().Msg("routing_snapshot_refresh_begin")
 	snap := s.routingTable.Snapshot()
 	s.routingSnap.Store(&routingSnapshot{snap: snap})
+	s.lastRoutingSnapAtNanos.Store(time.Now().UnixNano())
 	log.Trace().
 		Int("total", snap.TotalEntries).
 		Int("active", snap.ActiveEntries).

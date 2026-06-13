@@ -89,7 +89,7 @@ func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	undelivered, err := store.UndeliveredOutgoing(self)
+	undelivered, err := store.UndeliveredOutgoing(self, time.Time{})
 	if err != nil {
 		t.Fatalf("undelivered outgoing: %v", err)
 	}
@@ -105,11 +105,54 @@ func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 		t.Fatalf("mark delivery failed (repeat): %v", err)
 	}
 
-	undelivered, err = store.UndeliveredOutgoing(self)
+	undelivered, err = store.UndeliveredOutgoing(self, time.Time{})
 	if err != nil {
 		t.Fatalf("undelivered outgoing: %v", err)
 	}
 	if len(undelivered) != 0 {
 		t.Fatalf("journaled-failed row must not be reseeded, got %#v", undelivered)
+	}
+}
+
+// TestUndeliveredOutgoing_AgeBounded pins the reseed horizon: an undelivered
+// DM older than the `since` bound is NOT reseeded, so a restart cannot
+// re-inject months-old zombies into the mesh. A recent one still is.
+func TestUndeliveredOutgoing_AgeBounded(t *testing.T) {
+	t.Parallel()
+	self := domain.PeerIdentity("self-identity-eeeeeeeeeeeeeeeeeeeeeeeeee")
+	store := NewStore(t.TempDir(), self, domain.ListenAddress(":0"))
+	t.Cleanup(func() { _ = store.Close() })
+
+	recipient := "remote-recipient-ffffffffffffffffffffffff"
+	old := Entry{
+		ID: "old-undelivered", Sender: string(self), Recipient: recipient, Body: "sealed",
+		CreatedAt: time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano),
+		Flag:      "immutable",
+	}
+	recent := Entry{
+		ID: "recent-undelivered", Sender: string(self), Recipient: recipient, Body: "sealed",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Flag:      "immutable",
+	}
+	if err := store.Append("dm", self, old); err != nil {
+		t.Fatalf("append old: %v", err)
+	}
+	if err := store.Append("dm", self, recent); err != nil {
+		t.Fatalf("append recent: %v", err)
+	}
+
+	out, err := store.UndeliveredOutgoing(self, time.Now().UTC().Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatalf("undelivered outgoing: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, e := range out {
+		ids[e.ID] = true
+	}
+	if ids["old-undelivered"] {
+		t.Fatal("a DM older than the reseed horizon must NOT be reseeded (zombie re-injection)")
+	}
+	if !ids["recent-undelivered"] {
+		t.Fatal("a recent undelivered DM must still be reseeded")
 	}
 }

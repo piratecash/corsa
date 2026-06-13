@@ -303,13 +303,55 @@ func TestRegisterDeliveryOutboxReseedsUndelivered(t *testing.T) {
 		{ID: "reseed-2", Topic: "dm", Sender: svc.Address(), Recipient: "peer-b", Payload: []byte("y"), CreatedAt: now},
 	}}
 	svc.RegisterDeliveryOutbox(outbox)
+	// Captured AFTER reseed: the reseed uses its own time.Now() internally, so
+	// a "due immediately" entry has NextAttemptAt <= this mark, whereas the
+	// old +first-backoff behaviour would push it ~30s past it.
+	afterReseed := time.Now().UTC()
 
 	svc.deliveryMu.RLock()
 	defer svc.deliveryMu.RUnlock()
 	for _, id := range []protocol.MessageID{"reseed-1", "reseed-2"} {
-		if _, ok := svc.awaitingDelivered[id]; !ok {
+		entry, ok := svc.awaitingDelivered[id]
+		if !ok {
 			t.Fatalf("outbox envelope %s must be reseeded into awaitingDelivered", id)
 		}
+		// Reseeded entries must be DUE IMMEDIATELY (so the first retry tick
+		// after restart evaluates reachability / sends right away instead of
+		// idling a full backoff interval) and NOT pre-marked Held (the first
+		// tick decides held-ness).
+		if entry.NextAttemptAt.After(afterReseed) {
+			t.Fatalf("reseeded %s must be due immediately; NextAttemptAt=%v > %v", id, entry.NextAttemptAt, afterReseed)
+		}
+		if entry.Held {
+			t.Fatalf("reseeded %s must not be pre-marked Held", id)
+		}
+	}
+}
+
+// TestRegisterDeliveryOutboxSkippedOnDMOptOut verifies the relay-only guard:
+// a node that opted out of direct messages does not reseed the outbox, so the
+// wake/reseed machinery never spins up even when the common composition path
+// hands it an outbox.
+func TestRegisterDeliveryOutboxSkippedOnDMOptOut(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.cfg.DisableDirectMessages = true
+
+	// The outbox panics if scanned — proving the guard short-circuits before
+	// any UndeliveredOutgoing call (no scan, no wake machinery).
+	svc.RegisterDeliveryOutbox(panicDeliveryOutbox{t: t})
+
+	svc.deliveryMu.RLock()
+	n := len(svc.awaitingDelivered)
+	svc.deliveryMu.RUnlock()
+	if n != 0 {
+		t.Fatalf("DM opt-out node must not reseed the outbox; awaitingDelivered=%d, want 0", n)
+	}
+	// ...but the lightweight durable failure journal MUST still be wired up,
+	// so an abandoned outbound DM (opt-out gates inbound only) terminalizes
+	// durably instead of resurrecting on restart.
+	if svc.deliveryFailureJournal == nil {
+		t.Fatal("DM opt-out node must still register the failure journal (lightweight ref) for its own outbound sends")
 	}
 }
 
@@ -621,6 +663,19 @@ type stubDeliveryOutbox struct{ envelopes []protocol.Envelope }
 func (s stubDeliveryOutbox) UndeliveredOutgoing() ([]protocol.Envelope, error) {
 	return s.envelopes, nil
 }
+
+// panicDeliveryOutbox fails the test if UndeliveredOutgoing is ever called —
+// used to prove the DM-opt-out guard short-circuits BEFORE the heavy scan.
+// It ALSO implements DeliveryFailureJournal so the test can assert the
+// lightweight journal ref is still wired up under opt-out.
+type panicDeliveryOutbox struct{ t *testing.T }
+
+func (p panicDeliveryOutbox) UndeliveredOutgoing() ([]protocol.Envelope, error) {
+	p.t.Fatal("UndeliveredOutgoing must NOT be called when the node opted out of DMs (guard must skip the scan)")
+	return nil, nil
+}
+
+func (p panicDeliveryOutbox) MarkDeliveryFailed(protocol.MessageID) error { return nil }
 
 // TestFailDeliverySkipsWhenReceiptAlreadyArrived pins the late-receipt
 // re-check: between the abandon decision (one deliveryMu window) and

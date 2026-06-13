@@ -93,7 +93,7 @@ func (a *MessageStoreAdapter) UndeliveredOutgoing() ([]protocol.Envelope, error)
 	if a == nil || a.chatlog == nil {
 		return nil, nil
 	}
-	entries, err := a.chatlog.UndeliveredOutgoing()
+	entries, err := a.chatlog.UndeliveredOutgoing(time.Now().UTC().Add(-reseedHorizon))
 	if err != nil {
 		return nil, err
 	}
@@ -120,11 +120,18 @@ func (a *MessageStoreAdapter) UndeliveredOutgoing() ([]protocol.Envelope, error)
 	return envelopes, nil
 }
 
-// seenReseedHorizon bounds how far back UnconfirmedSeen scans on startup.
-// Without it the first run after the seen_ack journal was introduced would
-// reseed the entire seen history; a week comfortably covers any realistic
-// retry window (the scheduler caps a single receipt at ~3.5h of attempts).
-const seenReseedHorizon = 7 * 24 * time.Hour
+// reseedHorizon bounds how far back the startup reseed scans for BOTH the
+// undelivered-DM bodies (UndeliveredOutgoing) and the unconfirmed seen
+// receipts (UnconfirmedSeen). Without it a restart reseeds the entire history
+// and re-injects ancient undelivered DMs into the mesh — the months-long
+// zombie-DM storm. A week comfortably covers any realistic retry window: the
+// scheduler caps a single message/receipt at ~3.5h of attempts, so anything
+// older is already abandoned in practice.
+const reseedHorizon = 7 * 24 * time.Hour
+
+// seenReseedHorizon is retained as an alias so existing references keep
+// compiling; both halves share the same window.
+const seenReseedHorizon = reseedHorizon
 
 // UnconfirmedSeen implements node.SeenAckJournal: the seen receipts this
 // identity sent that the original senders have not confirmed with seen_ack.

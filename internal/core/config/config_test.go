@@ -97,6 +97,42 @@ func TestEnableMeshRoutingV3FromEnv(t *testing.T) {
 	}
 }
 
+// TestHoldDMUntilReachableFromEnv pins the default-ON / kill-switch semantics
+// for the reachability gate: unset/empty/truthy/unrecognised → true (the storm
+// cure is on by default); only the explicit falsey set restores the legacy
+// blind-gossip baseline. Guards against an accidental flip back to opt-in.
+func TestHoldDMUntilReachableFromEnv(t *testing.T) {
+	// Default-on: unset and empty both enable.
+	for _, v := range []string{"", "  "} {
+		t.Setenv("CORSA_HOLD_DM_UNTIL_REACHABLE", v)
+		if !holdDMUntilReachableFromEnv() {
+			t.Fatalf("CORSA_HOLD_DM_UNTIL_REACHABLE=%q: want default true", v)
+		}
+	}
+
+	// Explicit kill-switch.
+	for _, v := range []string{"0", "false", "no", "off", "OFF", " False "} {
+		t.Setenv("CORSA_HOLD_DM_UNTIL_REACHABLE", v)
+		if holdDMUntilReachableFromEnv() {
+			t.Fatalf("CORSA_HOLD_DM_UNTIL_REACHABLE=%q: want false (kill-switch)", v)
+		}
+	}
+
+	// Truthy and unrecognised both stay enabled.
+	for _, v := range []string{"1", "true", "yes", "on", "ON", "wat"} {
+		t.Setenv("CORSA_HOLD_DM_UNTIL_REACHABLE", v)
+		if !holdDMUntilReachableFromEnv() {
+			t.Fatalf("CORSA_HOLD_DM_UNTIL_REACHABLE=%q: want true", v)
+		}
+	}
+
+	// And the wired Config default surfaces ON via Default().
+	t.Setenv("CORSA_HOLD_DM_UNTIL_REACHABLE", "")
+	if !Default().Node.HoldDMUntilReachable {
+		t.Fatal("Default().Node.HoldDMUntilReachable: want true (default ON)")
+	}
+}
+
 // TestAcceptDirectMessagesFromEnv pins the headless DM-acceptance knob:
 // default OFF (unset/empty/unrecognised) — a console node has no user
 // reading messages — only explicit truthy values enable acceptance.

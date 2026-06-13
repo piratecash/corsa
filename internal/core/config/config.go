@@ -76,6 +76,18 @@ type Node struct {
 	// Env: CORSA_DELIVERY_RETRY_MAX_ATTEMPTS.
 	DeliveryRetryMaxAttempts int
 
+	// HoldDMUntilReachable gates sender-owned DM emission on recipient
+	// reachability: a locally-authored DM (first send and every retry) is
+	// emitted only when a directed route or a direct session to the recipient
+	// exists; an unreachable recipient is HELD (no blind gossip) and delivered
+	// when a route/connection appears. ENABLED by default — this is the cure
+	// for the blind-gossip storm to offline/long-gone recipients. The env var
+	// CORSA_HOLD_DM_UNTIL_REACHABLE is a kill-switch (set falsey to restore the
+	// legacy blind-gossip baseline). NOTE: tests that build config.Node
+	// literally get the zero value (false), so the legacy path stays covered
+	// while the gated path is exercised by explicit-flag tests.
+	HoldDMUntilReachable bool
+
 	// AllowPrivatePeers disables the private/loopback IP filter for peer
 	// addresses. Production nodes never set this — it exists solely for
 	// unit tests that use RFC 1918 addresses as fake peers.
@@ -368,6 +380,7 @@ func Default() Config {
 	enableMeshRoutingV3 := enableMeshRoutingV3FromEnv()
 	pendingRingSize := pendingRingSizeFromEnv()
 	deliveryRetryMaxAttempts := deliveryRetryMaxAttemptsFromEnv()
+	holdDMUntilReachable := holdDMUntilReachableFromEnv()
 
 	return Config{
 		App: App{
@@ -396,6 +409,7 @@ func Default() Config {
 			MaxIncomingPeers:           maxIncomingPeers,
 			PendingRingSize:            pendingRingSize,
 			DeliveryRetryMaxAttempts:   deliveryRetryMaxAttempts,
+			HoldDMUntilReachable:       holdDMUntilReachable,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
 			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
 			SeqAdvanceWindow:           seqAdvanceWindow,
@@ -826,6 +840,21 @@ func overloadGoroutineThresholdFromEnv() int {
 		return 0
 	}
 	return value
+}
+
+// holdDMUntilReachableFromEnv reads CORSA_HOLD_DM_UNTIL_REACHABLE. Defaults to
+// ENABLED (reachability-gated sender-owned DM emission) — this is the storm
+// cure: a node no longer blind-gossips its own DMs to unreachable recipients.
+// The variable is a kill-switch: an explicit falsey value restores the legacy
+// blind-gossip baseline.
+func holdDMUntilReachableFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_HOLD_DM_UNTIL_REACHABLE"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		// Unset, empty, truthy, or unrecognised → enabled (the new default).
+		return true
+	}
 }
 
 // enableMeshRoutingV3FromEnv reads CORSA_ENABLE_MESH_ROUTING_V3 and returns

@@ -296,4 +296,15 @@ func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, r
 			Int("hops", entry.Hops).
 			Msg("route_query_response_ingested")
 	}
+	// Re-arm held sender-owned DMs whether the route was newly accepted OR
+	// merely reconfirmed (RouteUnchanged) — a route that was already in the
+	// table but had no usable session can become reachable again the moment
+	// the peer answers the route_query. Mirrors handleAnnounceRoutes, which
+	// treats RouteUnchanged as a drain trigger too. Self-checked inside the
+	// kick, so a route that still does not resolve to a next hop is a no-op.
+	if status == routing.RouteAccepted || status == routing.RouteUnchanged {
+		s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{
+			resp.TargetIdentity: {},
+		})
+	}
 }
