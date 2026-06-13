@@ -1578,6 +1578,14 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 			delete(s.relayRetry, key)
 			continue
 		}
+		// Origin-authored DMs belong to the sender-owned engine, not the
+		// transit relay-retry contour (relay.md INV-1/INV-2). Reap any
+		// stale/echo-armed entry and skip — re-gossiping our own message
+		// here is the indefinite-DM-spam bug. See trackRelayMessage.
+		if s.identity != nil && msg.Sender == s.identity.Address {
+			delete(s.relayRetry, key)
+			continue
+		}
 		if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
 			delete(s.relayRetry, key)
 			continue
@@ -1682,6 +1690,17 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 	// retried and would only burn the maxRelayRetryEntries quota until
 	// tombstone TTL.
 	if msg.Topic != "dm" || msg.Recipient == "" || msg.Recipient == "*" {
+		return
+	}
+	// Origin-authored DMs are owned by the sender-owned delivery engine
+	// (delivery_retry.go: registerAwaitingDelivered → dispatchEnvelopeRetry),
+	// which retries finitely (TTL / attempts cap) and terminalizes durably.
+	// The relay-retry contour is for TRANSIT forwarding only (relay.md
+	// INV-1/INV-2: "relay is forwarding-only — offline delivery is the
+	// sender's job"). Arming our own message here re-gossiped it forever —
+	// every mesh echo re-armed the relayRetryTTL window long past the
+	// sender-owned attempts cap, the source of the multi-day DM spam.
+	if s.identity != nil && msg.Sender == s.identity.Address {
 		return
 	}
 	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_wait").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
