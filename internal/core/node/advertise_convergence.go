@@ -682,9 +682,10 @@ func (s *Service) handlePeerBannedNotice(peerAddress domain.PeerAddress, frame p
 		// the offender set is never persisted.
 		return
 	}
-	// Flush immediately so the remote-ban gate survives a crash and the
-	// dialler keeps skipping this peer instead of resurrecting the storm
-	// that the notice was supposed to end. Matches the direct-flush
+	// Mark the remote-ban gate dirty so it survives a crash and the dialler
+	// keeps skipping this peer instead of resurrecting the storm the notice
+	// was supposed to end. The next bootstrapLoop tick coalesces it into a
+	// debounced flush (markPeerStateDirty) — matches the deferred-flush
 	// pattern used by manual peer registration.
-	s.flushPeerState()
+	s.markPeerStateDirty()
 }

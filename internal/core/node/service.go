@@ -328,6 +328,15 @@ type Service struct {
 	lastSync        time.Time
 	peersStatePath  string
 	lastPeerSave    time.Time
+	// peerStateDirty records that persisted peer state changed since the
+	// last successful flush. Every mutation outside the periodic catch-all
+	// — add_peer, remote-ban record (handlePeerBannedNotice) and remote-ban
+	// clear (clearRemoteBansOnAuth) — sets it via markPeerStateDirty instead
+	// of forcing a synchronous full snapshot+marshal+disk write per event,
+	// which during startup bootstrap priming made flushPeerState O(peers^2).
+	// maybeSavePeerState coalesces the marked changes into a single debounced
+	// flush (peerStateDebounceSeconds). Guarded by peerMu.
+	peerStateDirty  bool
 	lastPeerEvict   time.Time
 	dialOrigin      map[domain.PeerAddress]domain.PeerAddress // dial address → primary peer address (for fallback port tracking)
 	persistedMeta   map[domain.PeerAddress]*peerEntry         // stable metadata from peers.json, keyed by address

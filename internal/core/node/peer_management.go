@@ -111,14 +111,47 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 	}
 }
 
-// maybeSavePeerState persists peer addresses if enough time has elapsed
-// since the last flush.
+// markPeerStateDirty records that persisted peer state changed and lets the
+// next bootstrapLoop tick coalesce the change into a single debounced flush.
+// It replaces the synchronous per-event flushPeerState() calls on every path
+// that mutates persisted peer state outside the periodic catch-all:
+//
+//   - add_peer (operator add and startup bootstrap priming),
+//   - remote-ban RECORD on a peer-banned notice (handlePeerBannedNotice),
+//   - remote-ban CLEAR on auth success (clearRemoteBansOnAuth).
+//
+// Those used to fire a full O(peers) snapshot+marshal+disk write for every
+// single event, so startup bootstrap priming (dozens of back-to-back
+// add_peer) cost O(peers^2) allocations and writes. Any NEW call site that
+// changes a persisted peer field must use this, not a synchronous
+// flushPeerState(). Takes peerMu.Lock; callers MUST NOT already hold peerMu.
+func (s *Service) markPeerStateDirty() {
+	s.peerMu.Lock()
+	s.peerStateDirty = true
+	s.peerMu.Unlock()
+}
+
+// maybeSavePeerState is the single coalescing flush point, driven by the 2s
+// bootstrapLoop tick. It flushes when EITHER:
+//
+//   - peer state was marked dirty (markPeerStateDirty) and at least
+//     peerStateDebounceSeconds has elapsed since the last save — collapses a
+//     burst of add_peer / ban-clear events into one flush; or
+//   - the periodic catch-all interval (peerStateSaveMinutes) has elapsed —
+//     captures slowly-evolving persisted fields (health, score, version
+//     policy) that mutate without an explicit dirty mark.
+//
+// flushPeerState clears the dirty flag, so a clean node performs no
+// snapshot/marshal/disk work on the dirty path at all.
 func (s *Service) maybeSavePeerState() {
 	s.peerMu.RLock()
 	elapsed := time.Since(s.lastPeerSave)
+	dirty := s.peerStateDirty
 	s.peerMu.RUnlock()
 
-	if elapsed < time.Duration(peerStateSaveMinutes)*time.Minute {
+	debounceElapsed := dirty && elapsed >= time.Duration(peerStateDebounceSeconds)*time.Second
+	periodicElapsed := elapsed >= time.Duration(peerStateSaveMinutes)*time.Minute
+	if !debounceElapsed && !periodicElapsed {
 		return
 	}
 	s.flushPeerState()
@@ -145,6 +178,11 @@ func (s *Service) flushPeerState() {
 	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "flushPeerState").Str("phase", "lock_held").Msg("peer_mu_writer")
+	// Clear the dirty flag at snapshot time, not after the disk write: a
+	// mutation that lands AFTER we copy entries but BEFORE the write
+	// finishes must re-mark the state so the next tick flushes again,
+	// rather than being swallowed by a clear that runs post-write.
+	s.peerStateDirty = false
 	entries := s.buildPeerEntriesLocked(providerSnap)
 	path := s.peersStatePath
 
@@ -199,6 +237,13 @@ func (s *Service) flushPeerState() {
 	}
 	if err := savePeerState(path, state); err != nil {
 		log.Error().Str("path", path).Err(err).Msg("peer state save failed")
+		// Re-mark dirty so the next tick retries on the debounce path
+		// instead of waiting out the full periodic interval. lastPeerSave
+		// is deliberately left untouched (the failed write did not happen),
+		// so periodicElapsed also still holds as a second safety net.
+		s.peerMu.Lock()
+		s.peerStateDirty = true
+		s.peerMu.Unlock()
 		return
 	}
 
@@ -1352,15 +1397,18 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	s.ipStateMu.Unlock()
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "clearRemoteBansOnAuth").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
-	// Mirror handlePeerBannedNotice: flush immediately when any scope
-	// mutated so the cleared state survives a crash/restart. Without
-	// this, peers.json would be re-read with stale per-peer
-	// RemoteBannedUntil or remote_banned_ips entries and the gate would
-	// keep suppressing this peer (and any siblings behind the same IP)
-	// until the old window elapses, even though the responder has
+	// Mirror handlePeerBannedNotice: mark dirty when any scope mutated so
+	// the cleared state survives a crash/restart. The next bootstrapLoop
+	// tick coalesces it into a debounced flush (markPeerStateDirty) — do
+	// NOT call flushPeerState synchronously here; that O(peers) snapshot
+	// per auth is exactly the churn the dirty-flag replaced. Without
+	// persisting the clear at all, peers.json would be re-read with stale
+	// per-peer RemoteBannedUntil or remote_banned_ips entries and the gate
+	// would keep suppressing this peer (and any siblings behind the same
+	// IP) until the old window elapses, even though the responder has
 	// already accepted us.
 	if remoteBanCleared || remoteIPBanCleared {
-		s.flushPeerState()
+		s.markPeerStateDirty()
 	}
 }
 
@@ -1789,9 +1837,13 @@ func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "applyAddPeer").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
-	// Flush immediately so the freshly added peer (operator or bootstrap)
-	// survives a crash before the next periodic flush.
-	s.flushPeerState()
+	// Mark the freshly added peer (operator or bootstrap) for persistence.
+	// The next bootstrapLoop tick coalesces this with any sibling adds into
+	// one debounced flush (markPeerStateDirty) — a synchronous flush here
+	// made startup priming O(peers^2) in snapshot+marshal+disk cost. The
+	// durability window is peerStateDebounceSeconds; a peer lost in that
+	// window is re-primed on the next start.
+	s.markPeerStateDirty()
 
 	// Register in PeerProvider so the CM can pick it up as a candidate.
 	// Operator add_peer uses Promote (re-stamps Source=Manual and refreshes

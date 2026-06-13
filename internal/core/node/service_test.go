@@ -5446,18 +5446,35 @@ func TestAddPeerFrameUpdatesSourceToManual(t *testing.T) {
 	}
 }
 
-func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
+// TestAddPeerFrameDefersFlushViaDirtyMark verifies the post-refactor
+// persistence contract for operator add_peer: applyAddPeer no longer flushes
+// synchronously per event (that made startup bootstrap priming O(peers^2) in
+// snapshot+marshal+disk cost). Instead it marks peer state dirty, and
+// maybeSavePeerState coalesces the write on a later tick. So the peer must
+// NOT be on disk immediately after add_peer returns, and MUST be persisted
+// once the debounced flush fires.
+//
+// Built via NewService WITHOUT Run, so no bootstrapLoop tick races the
+// assertions (EmitSlot/EmitHint are no-ops while the CM is not accepting).
+func TestAddPeerFrameDefersFlushViaDirtyMark(t *testing.T) {
 	t.Parallel()
 
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
 	peersPath := filepath.Join(t.TempDir(), "peers.json")
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
+	svc := NewService(config.Node{
+		ListenAddress:  ":0",
 		PeersStatePath: peersPath,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
-	})
-	defer stop()
+		// buildPeerEntriesLocked deliberately drops private/LAN peers from
+		// peers.json unless this is set; startTestNode enables it for the
+		// same reason. Without it the 10.0.0.1 manual peer is never
+		// persisted and the post-flush assertion sees an empty set.
+		AllowPrivatePeers: true,
+	}, id, nil)
 
 	reply := svc.addPeerFrame(protocol.Frame{
 		Peers: []string{"10.0.0.1:64646"},
@@ -5466,10 +5483,33 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 		t.Fatalf("expected ok, got %#v", reply)
 	}
 
-	// The file must already exist on disk after add_peer returns.
+	// Contract: the add marks state dirty rather than flushing synchronously.
+	if _, dirty := svc.peerSaveStateForTest(); !dirty {
+		t.Fatal("add_peer must mark peer state dirty")
+	}
+
+	// And it must NOT have written peers.json yet. loadPeerState returns an
+	// empty state for a missing file without error.
+	pre, err := loadPeerState(peersPath)
+	if err != nil {
+		t.Fatalf("loadPeerState before flush: %v", err)
+	}
+	for _, p := range pre.Peers {
+		if p.Address == "10.0.0.1:64646" {
+			t.Fatal("add_peer must not flush synchronously; peer already on disk")
+		}
+	}
+
+	// Drive the coalesced flush: pretend the debounce gap has elapsed, then
+	// run the tick's flush point.
+	svc.peerMu.Lock()
+	svc.lastPeerSave = time.Now().Add(-time.Duration(peerStateDebounceSeconds+1) * time.Second)
+	svc.peerMu.Unlock()
+	svc.maybeSavePeerState()
+
 	state, err := loadPeerState(peersPath)
 	if err != nil {
-		t.Fatalf("loadPeerState: %v", err)
+		t.Fatalf("loadPeerState after flush: %v", err)
 	}
 	found := false
 	for _, p := range state.Peers {
@@ -5478,7 +5518,10 @@ func TestAddPeerFrameFlushesPeerStateToDisk(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected manual peer 10.0.0.1:64646 in persisted state, got: %+v", state.Peers)
+		t.Fatalf("expected manual peer 10.0.0.1:64646 persisted after debounced flush, got: %+v", state.Peers)
+	}
+	if _, dirty := svc.peerSaveStateForTest(); dirty {
+		t.Fatal("dirty flag must be cleared after the coalesced flush")
 	}
 }
 

@@ -151,9 +151,21 @@ const (
 	peerScoreMax         = 100
 	peerScoreMin         = -50
 	maxPersistedPeers    = 500
-	peerStateSaveMinutes = 5                // minimum interval between periodic saves
-	peerCooldownBase     = 30 * time.Second // base cooldown after first failure
-	peerCooldownMax      = 30 * time.Minute // cap on exponential backoff
+	peerStateSaveMinutes = 5 // minimum interval between periodic catch-all saves
+	// peerStateDebounceSeconds is the minimum gap between two debounced
+	// flushes triggered by markPeerStateDirty. A burst of persisted-state
+	// mutations — add_peer, remote-ban record/clear (startup bootstrap
+	// priming alone primes dozens of peers back-to-back) — sets the dirty
+	// flag repeatedly; the 2s bootstrapLoop tick then collapses the whole
+	// burst into a single flush once this gap has elapsed since the last
+	// successful save, instead of one full snapshot+marshal+disk write per
+	// event. The worst-case durability loss window for any one such change
+	// is this gap — acceptable because a lost bootstrap peer is re-primed
+	// on the next start and a lost remote-ban entry is re-learned on the
+	// next notice.
+	peerStateDebounceSeconds = 3
+	peerCooldownBase         = 30 * time.Second // base cooldown after first failure
+	peerCooldownMax          = 30 * time.Minute // cap on exponential backoff
 
 	// Eviction thresholds.
 	// A peer is evictable when its score drops below the threshold AND it has
