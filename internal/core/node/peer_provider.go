@@ -135,9 +135,20 @@ type PeerProviderConfig struct {
 	NowFn func() time.Time
 
 	// AllowPrivateCandidates disables the private/loopback IP filter in
-	// Candidates(). Production nodes never set this — it exists solely
-	// for unit tests that use RFC 1918 addresses as fake peers.
+	// Candidates(), letting RFC1918 / loopback peers become automatic dial
+	// candidates. In production it is wired from cfg.AllowPrivatePeers — the
+	// dev/LAN mode (see service.go) — and is off by default; unit tests that
+	// use RFC1918 addresses as fake peers also set it. The subnet-diversity
+	// filter exempts private addresses in this same mode (see
+	// subnetGroupKey), so the two carve-outs stay aligned.
 	AllowPrivateCandidates bool
+
+	// AllowSameSubnetCandidates disables the subnet-diversity filter in
+	// Candidates() (one automatic outbound connection per subnet group:
+	// /24 for IPv4, /64 for IPv6). Production nodes never set this — it
+	// exists solely for unit tests that use many fake peers inside one
+	// public subnet.
+	AllowSameSubnetCandidates bool
 }
 
 // PeerProvider manages the set of known peers and produces filtered
@@ -207,9 +218,13 @@ func (pp *PeerProvider) Add(address domain.PeerAddress, source domain.PeerSource
 	}
 }
 
-// Promote updates an existing peer's Source and refreshes AddedAt so that it
-// sorts higher in Candidates(). Used by add_peer to move a known peer to the
-// front of the dial queue. If the address is unknown, it is added as new.
+// Promote updates an existing peer's Source and refreshes AddedAt, marking it
+// as freshly seen. Used by add_peer to re-stamp a known peer with
+// Source=Manual. NOTE: this does not raise the peer within Candidates() among
+// equal scores — that list sorts by AddedAt ascending, so a refreshed (newer)
+// timestamp actually sorts later. Operator dial priority comes from the
+// immediate ManualPeerRequested path that bypasses Candidates() entirely, not
+// from this re-stamp. If the address is unknown, it is added as new.
 func (pp *PeerProvider) Promote(address domain.PeerAddress, source domain.PeerSource) {
 	address = domain.PeerAddress(strings.TrimSpace(string(address)))
 	if address == "" {
@@ -346,9 +361,10 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 			continue
 		}
 
-		// 6a.1: never auto-dial loopback / RFC1918 IPv4 peers. Private
-		// addresses are reachable only as a runtime-only dial intent
-		// driven by the operator: `addpeer` enqueues a slot directly via
+		// 6a.1: never auto-dial loopback / RFC1918 IPv4 peers in the
+		// default (public) mode. Private addresses are reachable only as
+		// a runtime-only dial intent driven by the operator: `addpeer`
+		// enqueues a slot directly via
 		// ConnectionManager.EmitSlot(ManualPeerRequested), which bypasses
 		// this filter entirely. Persisted Source=Manual entries do NOT
 		// get a free pass here — granting one would turn the operator's
@@ -357,6 +373,13 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		// from localhost would also teach the node ephemeral 127.0.0.1:*
 		// addresses (Source=Announce) and drive CM into a
 		// connect→EOF→re-dial storm.
+		//
+		// The explicit AllowPrivateCandidates escape hatch (wired from
+		// cfg.AllowPrivatePeers — the dev/LAN mode) disables this guard
+		// so private peers DO become automatic candidates. That is the
+		// same mode under which subnetGroupKey deliberately exempts
+		// private addresses from the subnet-diversity filter (see
+		// netgroup.go) — the two carve-outs are intentionally aligned.
 		if !cfg.AllowPrivateCandidates && shouldSkipPersistedPrivatePeer(kp) {
 			continue
 		}
@@ -498,12 +521,36 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		return deduped[i].peer.Address < deduped[j].peer.Address
 	})
 
-	// Steps 9-10: generate DialAddresses and build result.
+	// Step 9: subnet-diversity filter — at most one automatic outbound
+	// connection per subnet group (/24 IPv4, /64 IPv6). The occupied set
+	// is seeded from connected (inbound + outbound) and queued (dialing)
+	// IPs, so a candidate sharing a subnet with an existing or in-flight
+	// connection is skipped entirely. Within the candidate list itself
+	// the sorted order decides the winner: the best-ranked candidate
+	// claims the subnet, the rest are skipped. Manual add_peer bypasses
+	// Candidates() via ManualPeerRequested and is deliberately exempt.
+	occupiedSubnets := pp.occupiedSubnetGroups(connectedIPs, queuedIPs)
+
+	// Step 10: generate DialAddresses and build result.
 	result := make([]domain.CandidatePeer, 0, len(deduped))
 	for _, s := range deduped {
+		subnetKey := ""
+		if occupiedSubnets != nil {
+			subnetKey = subnetGroupKey(s.peer.IP)
+			if subnetKey != "" {
+				if _, taken := occupiedSubnets[subnetKey]; taken {
+					continue
+				}
+			}
+		}
+
 		dialAddrs := pp.buildDialAddresses(s.peer)
 		if len(dialAddrs) == 0 {
 			continue
+		}
+
+		if subnetKey != "" {
+			occupiedSubnets[subnetKey] = struct{}{}
 		}
 		result = append(result, domain.CandidatePeer{
 			Address:       s.peer.Address,
@@ -514,6 +561,28 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 	}
 
 	return result
+}
+
+// occupiedSubnetGroups builds the initial set of subnet-diversity group
+// keys occupied by active connections and queued CM slots. Returns nil
+// when the filter is disabled (AllowSameSubnetCandidates) — callers use
+// the nil map as the "filter off" signal.
+func (pp *PeerProvider) occupiedSubnetGroups(connectedIPs, queuedIPs map[string]struct{}) map[string]struct{} {
+	if pp.config.AllowSameSubnetCandidates {
+		return nil
+	}
+	occupied := make(map[string]struct{}, len(connectedIPs)+len(queuedIPs))
+	for ip := range connectedIPs {
+		if key := subnetGroupKey(ip); key != "" {
+			occupied[key] = struct{}{}
+		}
+	}
+	for ip := range queuedIPs {
+		if key := subnetGroupKey(ip); key != "" {
+			occupied[key] = struct{}{}
+		}
+	}
+	return occupied
 }
 
 // KnownPeers returns the full unfiltered list of all known peers with
@@ -537,7 +606,14 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 	for _, kp := range pp.known {
 		var reasons []domain.ExcludeReason
 
-		if shouldSkipPersistedPrivatePeer(kp) {
+		// Mirror the Candidates() gate exactly: private/loopback peers are
+		// only forbidden in the default (public) mode. With
+		// AllowPrivateCandidates (dev/LAN mode, wired from AllowPrivatePeers)
+		// they are valid automatic candidates, so list_peers must not report
+		// them as excluded. ForbiddenFn below also relaxes for private IPs in
+		// that mode, so the two forbidden sources stay consistent with
+		// Candidates() steps 6a.1 and 6b.
+		if !cfg.AllowPrivateCandidates && shouldSkipPersistedPrivatePeer(kp) {
 			reasons = append(reasons, domain.ExcludeReasonForbidden)
 		}
 
@@ -678,6 +754,46 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 		} else {
 			// Current entry loses.
 			r.ExcludeReasons = append(r.ExcludeReasons, domain.ExcludeReasonIPDedup)
+		}
+	}
+
+	// Subnet-diversity pass: mirrors Candidates() step 9. Among entries
+	// that survived all other filters, walk them in the same order
+	// Candidates() selects (score desc, AddedAt asc, Address asc) and
+	// mark every entry whose subnet group is already occupied — by a
+	// connected/queued IP or by a better-ranked surviving entry — with
+	// ExcludeReasonSameSubnet.
+	if occupiedSubnets := pp.occupiedSubnetGroups(connectedIPs, queuedIPs); occupiedSubnets != nil {
+		eligible := make([]int, 0, len(result))
+		for i := range result {
+			if len(result[i].ExcludeReasons) == 0 {
+				eligible = append(eligible, i)
+			}
+		}
+		sort.Slice(eligible, func(a, b int) bool {
+			ri, rj := result[eligible[a]], result[eligible[b]]
+			if ri.Score != rj.Score {
+				return ri.Score > rj.Score
+			}
+			if !ri.AddedAt.Equal(rj.AddedAt) {
+				return ri.AddedAt.Before(rj.AddedAt)
+			}
+			return ri.Address < rj.Address
+		})
+		for _, i := range eligible {
+			kp := pp.known[result[i].Address]
+			if kp == nil {
+				continue
+			}
+			key := subnetGroupKey(kp.IP)
+			if key == "" {
+				continue
+			}
+			if _, taken := occupiedSubnets[key]; taken {
+				result[i].ExcludeReasons = append(result[i].ExcludeReasons, domain.ExcludeReasonSameSubnet)
+				continue
+			}
+			occupiedSubnets[key] = struct{}{}
 		}
 	}
 

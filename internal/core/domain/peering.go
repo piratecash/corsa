@@ -53,6 +53,11 @@ const (
 	ExcludeReasonQueued       ExcludeReason = "queued"
 	ExcludeReasonUnreachable  ExcludeReason = "unreachable"
 	ExcludeReasonIPDedup      ExcludeReason = "ip_dedup"
+	// ExcludeReasonSameSubnet marks a peer whose subnet group (/24 for
+	// IPv4, /64 for IPv6) is already occupied by an active connection,
+	// a queued CM slot, or a better-ranked candidate. One subnet — one
+	// automatic outbound connection; manual add_peer is exempt.
+	ExcludeReasonSameSubnet ExcludeReason = "same_subnet"
 )
 
 // KnownPeerInfo is the unfiltered diagnostic view returned by

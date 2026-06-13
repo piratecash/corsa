@@ -73,6 +73,50 @@ func classifyHost(host string) domain.NetGroup {
 	return domain.NetGroupIPv6
 }
 
+// subnetGroupBits define the subnet-diversity group sizes used by
+// PeerProvider.Candidates(): one automatic outbound connection per
+// group. /24 is the smallest commonly allocated IPv4 block, so peers
+// inside one /24 are very likely operated by a single entity; /64 is
+// the standard single-site assignment in IPv6 — the closest analog.
+// The idea of limiting outbound connections per address group is
+// borrowed from netgroup-based diversification in p2p networks, but
+// the group sizes follow our own model.
+const (
+	subnetGroupBitsIPv4 = 24
+	subnetGroupBitsIPv6 = 64
+)
+
+// subnetGroupKey returns the subnet-diversity group key for a host:
+// the masked /24 network for public IPv4 and the masked /64 network
+// for public IPv6 (e.g. "1.2.3.0/24", "2001:db8:1:1::/64").
+//
+// Returns "" (no group — never filtered) for:
+//   - non-IP hosts (.onion, .i2p, plain hostnames): overlay addresses
+//     carry no topological subnet information;
+//   - non-routable IPs (loopback, RFC 1918, ULA, CGNAT, link-local):
+//     dev and LAN clusters legitimately co-locate many nodes inside
+//     one private subnet, while the eclipse-resistance rationale for
+//     subnet diversity only applies to the public Internet.
+//
+// CONTRACT: the non-routable carve-out is a deliberate second exemption
+// from subnet diversity (alongside the operator add_peer bypass), not a
+// gap. It is only reachable in AllowPrivatePeers mode — without that
+// flag, private addresses never become automatic candidates at all
+// (shouldSkipPersistedPrivatePeer / ForbiddenFn) — and in that dev/LAN
+// mode stacking several same-subnet private connections is the entire
+// point of the flag. Pinned by TestCandidates_PrivateSubnetExempt;
+// documented in docs/protocol/peers.md ("subnet diversity").
+func subnetGroupKey(host string) string {
+	ip := net.ParseIP(host)
+	if ip == nil || isNonRoutableIP(ip) {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.Mask(net.CIDRMask(subnetGroupBitsIPv4, 32)).String() + "/24"
+	}
+	return ip.Mask(net.CIDRMask(subnetGroupBitsIPv6, 128)).String() + "/64"
+}
+
 // computeReachableGroups builds the set of NetGroups a node can reach
 // based on its configuration:
 //   - IPv4 and IPv6 are always reachable (direct TCP).

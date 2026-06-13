@@ -595,8 +595,10 @@ func (cm *ConnectionManager) handleHintEvent(ctx context.Context, event HintEven
 }
 
 // handleManualPeer creates a slot and starts dialling immediately for a peer
-// added via add_peer. Unlike fill(), this bypasses Candidates() filtering
-// (the operator explicitly requested this peer).
+// added via add_peer. Unlike fill(), this bypasses Candidates() filtering —
+// including the subnet-diversity gate (one connection per /24 for IPv4,
+// /64 for IPv6): the operator explicitly requested this peer, so a
+// same-subnet connection is allowed here and only here.
 //
 // Dedup: checks both exact address AND IP to prevent two slots to the same host.
 // Slot limit: if at capacity, evicts the lowest-scoring non-active slot (or the

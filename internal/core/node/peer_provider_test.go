@@ -35,6 +35,11 @@ func testProviderConfig() PeerProviderConfig {
 		IsSelfAddress:          func(domain.PeerAddress) bool { return false },
 		NowFn:                  func() time.Time { return time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC) },
 		AllowPrivateCandidates: true,
+		// Most tests use several fake peers inside one public /24
+		// (1.2.3.x); the subnet-diversity filter would collapse them
+		// to a single candidate. Tests for the filter itself reset
+		// this to false explicitly (see peer_provider_subnet_test.go).
+		AllowSameSubnetCandidates: true,
 	}
 }
 
@@ -934,7 +939,13 @@ func TestKnownPeers_MultipleReasons(t *testing.T) {
 }
 
 func TestKnownPeers_PersistedPrivateIPv4MarkedForbidden(t *testing.T) {
-	pp := NewPeerProvider(testProviderConfig())
+	cfg := testProviderConfig()
+	// Default (public) mode: the helper enables AllowPrivateCandidates, but
+	// the persisted-private "forbidden" reason only applies when private
+	// auto-dial is OFF — mirroring Candidates(). In dev/LAN mode the peer is
+	// a valid candidate (covered by TestKnownPeers_PrivatePeerNotForbiddenInPrivateMode).
+	cfg.AllowPrivateCandidates = false
+	pp := NewPeerProvider(cfg)
 	pp.Restore(domain.RestoreEntry{
 		Address: mustAddr("192.168.1.10:64646"),
 		Source:  domain.PeerSourcePersisted,

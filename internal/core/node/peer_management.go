@@ -1552,10 +1552,59 @@ func (s *Service) announcePeerToSessions(peerAddress, nodeType string) {
 	log.Debug().Str("peer", peerAddress).Str("node_type", nodeType).Int("sessions", len(sessions)).Msg("announce_peer sent to neighbors")
 }
 
+// addPeerMode selects the full semantics applied to a just-added peer.
+// The two callers differ on three correlated axes, so a single mode drives
+// all of them rather than a bare dial flag:
+//
+//   - source tag stamped in s.peers / persistedMeta / PeerProvider
+//     (Manual is an operator assertion; bootstrap entries must stay
+//     Bootstrap or list_peers / peers.json would misreport their origin);
+//   - whether the automated penalty state (cooldown, ban, version
+//     lockout) is cleared — that is an explicit operator override and
+//     must NOT fire for an automatic startup prime;
+//   - how the dial is enqueued: immediate ManualPeerRequested (bypasses
+//     Candidates() and with it the subnet-diversity gate — /24 for public
+//     IPv4, /64 for public IPv6) versus the NewPeersDiscovered hint (CM
+//     fills through Candidates() with every gate applied).
+type addPeerMode int
+
+const (
+	// addPeerModeOperator is an explicit operator add_peer: stamp Source
+	// Manual, override automated penalties, and dial immediately past the
+	// subnet-diversity gate. Operator intent is authoritative.
+	addPeerModeOperator addPeerMode = iota
+
+	// addPeerModeBootstrap is automatic startup priming of compiled/default
+	// bootstrap peers: stamp Source Bootstrap, leave penalty state intact,
+	// and dial through Candidates() so the subnet-diversity gate applies
+	// (a default list may legitimately hold many nodes in one /24).
+	addPeerModeBootstrap
+)
+
+// operatorOverride reports whether the mode carries operator authority to
+// rewrite source and clear automated penalties.
+func (m addPeerMode) operatorOverride() bool { return m == addPeerModeOperator }
+
+// peerSource is the source tag this mode stamps on the added peer.
+func (m addPeerMode) peerSource() domain.PeerSource {
+	if m == addPeerModeBootstrap {
+		return domain.PeerSourceBootstrap
+	}
+	return domain.PeerSourceManual
+}
+
+// addPeerFrame handles the operator "add_peer" command (console / RPC).
+// Operator intent dials immediately and bypasses candidate filtering.
 func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
+	return s.applyAddPeer(frame, addPeerModeOperator)
+}
+
+func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.Frame {
 	if len(frame.Peers) == 0 || strings.TrimSpace(frame.Peers[0]) == "" {
 		return protocol.Frame{Type: "error", Error: "address is required"}
 	}
+	peerSource := mode.peerSource()
+	operatorOverride := mode.operatorOverride()
 	address := strings.TrimSpace(frame.Peers[0])
 
 	// Ensure host:port format.
@@ -1571,46 +1620,49 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 		return protocol.Frame{Type: "error", Error: "cannot add self as peer"}
 	}
 	if s.shouldSkipDialAddress(peerAddress) {
-		// A forbidden address is normally rejected, but the operator may
-		// deliberately want to reach a peer on the local network (e.g.
-		// `addpeer 192.168.0.8`). Allow loopback / RFC1918 / ULA LAN
-		// targets through as a RUNTIME-ONLY dial intent: the immediate
-		// connect flows via EmitSlot(ManualPeerRequested) below, which
-		// bypasses Candidates() filtering. These addresses are still
-		// excluded from announce (classifyAddress==local guard in the
-		// auth path), from peer exchange / candidate selection
-		// (shouldSkipPersistedPrivatePeer + shouldHidePeerExchangeAddress),
-		// and from peers.json persistence (buildPeerEntriesLocked) — so a
-		// private LAN address is never leaked to neighbours or re-selected
-		// from disk. Structurally undialable forbidden addresses
-		// (link-local, unspecified, multicast) and non-IP hosts remain
-		// rejected. When the node already runs in private-peer mode the
-		// address is not forbidden and never reaches this branch.
+		// A forbidden address is normally rejected, but a loopback / RFC1918
+		// / ULA LAN target is admitted as a RUNTIME-ONLY dial intent. For an
+		// operator add_peer (addPeerModeOperator) the immediate connect flows
+		// via EmitSlot(ManualPeerRequested) below; for startup bootstrap
+		// priming (addPeerModeBootstrap) it is offered to Candidates() — but
+		// shouldSkipPersistedPrivatePeer there keeps private addresses out of
+		// auto-selection, so in practice only an operator add actually dials
+		// one. Either way these addresses stay excluded from announce
+		// (classifyAddress==local guard in the auth path), peer exchange
+		// (shouldHidePeerExchangeAddress), and peers.json persistence
+		// (buildPeerEntriesLocked) — a private LAN address is never leaked to
+		// neighbours. Structurally undialable forbidden addresses (link-local,
+		// unspecified, multicast) and non-IP hosts remain rejected. When the
+		// node already runs in private-peer mode the address is not forbidden
+		// and never reaches this branch.
 		host, _, _ := splitHostPort(address)
 		if !isManualLocalDialIP(net.ParseIP(host)) {
 			return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in a forbidden IP range", address)}
 		}
-		log.Info().Str("address", address).Msg("add_peer_local_allowed")
+		log.Info().Str("address", address).Str("source", string(peerSource)).Msg("add_peer_local_allowed")
 	}
 	if !s.canReach(peerAddress) {
 		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(peerAddress))}
 	}
 
-	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "applyAddPeer").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
-	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "applyAddPeer").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
 	now := time.Now().UTC()
 
-	// If already known, move to front and update source to manual.
+	// If already known, stamp the mode's source. Operator add_peer also
+	// moves the entry to the front (explicit prioritisation); bootstrap
+	// priming is automatic and must not reorder the user's queue.
 	found := false
 	for i, peer := range s.peers {
 		if peer.Address == peerAddress {
-			s.peers[i].Source = domain.PeerSourceManual
-			if i > 0 {
+			s.peers[i].Source = peerSource
+			if operatorOverride && i > 0 {
+				moved := s.peers[i]
 				copy(s.peers[1:i+1], s.peers[:i])
-				s.peers[0] = peer
-				s.peers[0].Source = domain.PeerSourceManual
+				s.peers[0] = moved
+				s.peers[0].Source = peerSource
 			}
 			found = true
 			break
@@ -1622,146 +1674,178 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 		copy(s.peers[1:], s.peers[:len(s.peers)-1])
 		s.peers[0] = transport.Peer{
 			Address: peerAddress,
-			Source:  domain.PeerSourceManual,
+			Source:  peerSource,
 		}
 		s.peerTypes[peerAddress] = domain.NodeTypeFull
 	}
 
-	// Always stamp source as manual — whether the peer is new or was
-	// previously discovered via bootstrap/peer_exchange.
+	// Stamp source — Manual for operator add_peer, Bootstrap for startup
+	// priming — whether the peer is new or was previously discovered.
 	if pm := s.persistedMeta[peerAddress]; pm != nil {
-		pm.Source = domain.PeerSourceManual
+		pm.Source = peerSource
 	} else {
 		s.persistedMeta[peerAddress] = &peerEntry{
 			Address:  peerAddress,
 			NodeType: domain.NodeTypeFull,
-			Source:   domain.PeerSourceManual,
+			Source:   peerSource,
 			AddedAt:  &now,
 		}
 	}
 
-	// Reset cooldown, ban, and version lockout so the peer is dialled
-	// immediately. A manual add_peer is an explicit operator action that
-	// overrides any automated penalty (incompatible protocol, exponential
-	// backoff, version lockout).
-	if h := s.health[peerAddress]; h != nil {
-		resetPeerHealthForRecoveryLocked(h)
-	}
+	// The penalty-clearing block below is an explicit operator override:
+	// it resets cooldown/ban/version-lockout so the peer is dialled
+	// immediately regardless of prior failures. Automatic bootstrap
+	// priming has no such authority — a peer that earned a penalty must
+	// keep it across a restart — so the entire block is gated on
+	// operatorOverride. Bootstrap relies on the normal Candidates() gates
+	// instead.
+	if operatorOverride {
+		// Reset cooldown, ban, and version lockout so the peer is dialled
+		// immediately. A manual add_peer is an explicit operator action that
+		// overrides any automated penalty (incompatible protocol, exponential
+		// backoff, version lockout).
+		if h := s.health[peerAddress]; h != nil {
+			resetPeerHealthForRecoveryLocked(h)
+		}
 
-	// Clear persisted version lockout — the operator explicitly wants
-	// to retry this peer regardless of prior incompatibility evidence.
-	// Identity-wide clearing: lockouts are propagated across all addresses
-	// of the same identity (see setVersionLockoutLocked), so clearing must
-	// also be identity-wide. Otherwise sibling addresses remain suppressed
-	// and can keep the lockout-based update signal alive unexpectedly.
-	peerID := s.peerIDs[peerAddress]
-	if pm := s.persistedMeta[peerAddress]; pm != nil {
-		if pm.VersionLockout.IsActive() {
-			log.Info().
-				Str("peer", string(peerAddress)).
-				Str("identity", string(peerID)).
-				Str("reason", string(pm.VersionLockout.Reason)).
-				Msg("version_lockout_cleared_operator_override")
-			pm.VersionLockout = domain.VersionLockoutSnapshot{}
-		}
-	}
-	if peerID != "" {
-		// Remove from the incompatible-reporter dedup set so the
-		// operator override also reduces the reporter count.
-		// statusMu guards s.versionPolicy (INNERMOST — acquired while
-		// peerMu is held per canonical order).
-		if s.versionPolicy != nil {
-			s.statusMu.Lock()
-			delete(s.versionPolicy.incompatibleReporters, peerID)
-			s.statusMu.Unlock()
-		}
-		// Clear lockout, health diagnostics, and dial-suppression state
-		// for all sibling addresses of the same identity. Without this,
-		// stale ban/cooldown fields keep siblings out of candidate
-		// selection even though the operator explicitly overrode the
-		// penalty on the primary address.
-		//
-		// Cross-domain: sibling loop reads peer-domain state
-		// (peerIDs, persistedMeta, health) under peerMu and mutates
-		// ipState-domain bannedIPSet.  Canonical order
-		// peerMu → ipStateMu.
-		s.ipStateMu.Lock()
-		for otherAddr, otherID := range s.peerIDs {
-			if otherAddr == peerAddress || otherID != peerID {
-				continue
-			}
-			if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
+		// Clear persisted version lockout — the operator explicitly wants
+		// to retry this peer regardless of prior incompatibility evidence.
+		// Identity-wide clearing: lockouts are propagated across all addresses
+		// of the same identity (see setVersionLockoutLocked), so clearing must
+		// also be identity-wide. Otherwise sibling addresses remain suppressed
+		// and can keep the lockout-based update signal alive unexpectedly.
+		peerID := s.peerIDs[peerAddress]
+		if pm := s.persistedMeta[peerAddress]; pm != nil {
+			if pm.VersionLockout.IsActive() {
 				log.Info().
-					Str("peer", string(otherAddr)).
-					Str("peer_identity", string(peerID)).
-					Str("source_address", string(peerAddress)).
-					Msg("version_lockout_cleared_by_identity_on_operator_override")
-				otherEntry.VersionLockout = domain.VersionLockoutSnapshot{}
-			}
-			if siblingHealth := s.health[otherAddr]; siblingHealth != nil {
-				resetPeerHealthForRecoveryLocked(siblingHealth)
-			}
-			// Clear the IP-wide ban for the sibling's IP.
-			if ip, _, ok := splitHostPort(string(otherAddr)); ok {
-				delete(s.bannedIPSet, ip)
+					Str("peer", string(peerAddress)).
+					Str("identity", string(peerID)).
+					Str("reason", string(pm.VersionLockout.Reason)).
+					Msg("version_lockout_cleared_operator_override")
+				pm.VersionLockout = domain.VersionLockoutSnapshot{}
 			}
 		}
-		s.ipStateMu.Unlock()
-	}
+		if peerID != "" {
+			// Remove from the incompatible-reporter dedup set so the
+			// operator override also reduces the reporter count.
+			// statusMu guards s.versionPolicy (INNERMOST — acquired while
+			// peerMu is held per canonical order).
+			if s.versionPolicy != nil {
+				s.statusMu.Lock()
+				delete(s.versionPolicy.incompatibleReporters, peerID)
+				s.statusMu.Unlock()
+			}
+			// Clear lockout, health diagnostics, and dial-suppression state
+			// for all sibling addresses of the same identity. Without this,
+			// stale ban/cooldown fields keep siblings out of candidate
+			// selection even though the operator explicitly overrode the
+			// penalty on the primary address.
+			//
+			// Cross-domain: sibling loop reads peer-domain state
+			// (peerIDs, persistedMeta, health) under peerMu and mutates
+			// ipState-domain bannedIPSet.  Canonical order
+			// peerMu → ipStateMu.
+			s.ipStateMu.Lock()
+			for otherAddr, otherID := range s.peerIDs {
+				if otherAddr == peerAddress || otherID != peerID {
+					continue
+				}
+				if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
+					log.Info().
+						Str("peer", string(otherAddr)).
+						Str("peer_identity", string(peerID)).
+						Str("source_address", string(peerAddress)).
+						Msg("version_lockout_cleared_by_identity_on_operator_override")
+					otherEntry.VersionLockout = domain.VersionLockoutSnapshot{}
+				}
+				if siblingHealth := s.health[otherAddr]; siblingHealth != nil {
+					resetPeerHealthForRecoveryLocked(siblingHealth)
+				}
+				// Clear the IP-wide ban for the sibling's IP.
+				if ip, _, ok := splitHostPort(string(otherAddr)); ok {
+					delete(s.bannedIPSet, ip)
+				}
+			}
+			s.ipStateMu.Unlock()
+		}
 
-	// Recompute version policy since we may have removed lockouts and/or
-	// a reporter that were contributing to the update_available signal.
-	// statusMu is INNERMOST per canonical peerMu → statusMu order.
-	s.statusMu.Lock()
-	s.recomputeVersionPolicyLocked(time.Now().UTC())
-	s.statusMu.Unlock()
+		// Recompute version policy since we may have removed lockouts and/or
+		// a reporter that were contributing to the update_available signal.
+		// statusMu is INNERMOST per canonical peerMu → statusMu order.
+		s.statusMu.Lock()
+		s.recomputeVersionPolicyLocked(time.Now().UTC())
+		s.statusMu.Unlock()
 
-	// Also clear the IP-wide ban — without this, buildBannedIPsSet still
-	// excludes the peer from Candidates() even though per-address health
-	// is unbanned.  Short ipStateMu section nested inside s.peerMu.
-	if ip, _, ok := splitHostPort(string(peerAddress)); ok {
-		s.ipStateMu.Lock()
-		delete(s.bannedIPSet, ip)
-		s.ipStateMu.Unlock()
+		// Also clear the IP-wide ban — without this, buildBannedIPsSet still
+		// excludes the peer from Candidates() even though per-address health
+		// is unbanned.  Short ipStateMu section nested inside s.peerMu.
+		if ip, _, ok := splitHostPort(string(peerAddress)); ok {
+			s.ipStateMu.Lock()
+			delete(s.bannedIPSet, ip)
+			s.ipStateMu.Unlock()
+		}
 	}
 
 	s.peerMu.Unlock()
-	log.Trace().Str("site", "addPeerFrame").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "applyAddPeer").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
-	// Flush immediately so the manual peer survives a crash.
+	// Flush immediately so the freshly added peer (operator or bootstrap)
+	// survives a crash before the next periodic flush.
 	s.flushPeerState()
 
 	// Register in PeerProvider so the CM can pick it up as a candidate.
-	// Promote (not just Add) so that an already-known peer gets Source=manual
-	// and a refreshed AddedAt, moving it to the front of Candidates().
+	// Operator add_peer uses Promote (re-stamps Source=Manual and refreshes
+	// AddedAt); bootstrap priming uses Add with Source=Bootstrap so it does
+	// not overwrite the origin tag with an operator assertion it never made.
+	// Neither call reorders Candidates() — operator dial priority comes from
+	// the ManualPeerRequested bypass below, not from this registration.
 	if s.peerProvider != nil {
-		s.peerProvider.Promote(peerAddress, domain.PeerSourceManual)
-	}
-	// Enqueue an immediate dial — ManualPeerRequested creates a slot directly,
-	// bypassing the Candidates() round-trip that NewPeersDiscovered would use.
-	// Uses EmitSlot (blocking) to guarantee delivery.
-	//
-	// Build the same primary+fallback dial address list that Candidates()
-	// would produce. Without this, a manual add of a non-default-port peer
-	// (e.g. 1.2.3.4:7777) would never attempt the standard fallback port
-	// (1.2.3.4:64646), making manual recovery strictly weaker than ordinary
-	// candidate dialing.
-	if s.connManager != nil {
-		dialAddrs := []domain.PeerAddress{peerAddress}
-		if s.peerProvider != nil {
-			dialAddrs = s.peerProvider.BuildDialAddresses(peerAddress)
+		if operatorOverride {
+			s.peerProvider.Promote(peerAddress, domain.PeerSourceManual)
+		} else {
+			s.peerProvider.Add(peerAddress, domain.PeerSourceBootstrap)
 		}
-		s.connManager.EmitSlot(ManualPeerRequested{
-			Address:       peerAddress,
-			DialAddresses: dialAddrs,
-		})
+	}
+	// Enqueue the dial according to caller intent.
+	if s.connManager != nil {
+		switch mode {
+		case addPeerModeOperator:
+			// ManualPeerRequested creates a slot directly, bypassing the
+			// Candidates() round-trip (and every gate in it, including
+			// subnet diversity) that NewPeersDiscovered would use. Uses
+			// EmitSlot (blocking) to guarantee delivery.
+			//
+			// Build the same primary+fallback dial address list that
+			// Candidates() would produce. Without this, a manual add of a
+			// non-default-port peer (e.g. 1.2.3.4:7777) would never attempt
+			// the standard fallback port (1.2.3.4:64646), making manual
+			// recovery strictly weaker than ordinary candidate dialing.
+			dialAddrs := []domain.PeerAddress{peerAddress}
+			if s.peerProvider != nil {
+				dialAddrs = s.peerProvider.BuildDialAddresses(peerAddress)
+			}
+			s.connManager.EmitSlot(ManualPeerRequested{
+				Address:       peerAddress,
+				DialAddresses: dialAddrs,
+			})
+		case addPeerModeBootstrap:
+			// Hint-only: the next fill() picks the peer up through
+			// Candidates() with full gating. Pre-bootstrap the hint is
+			// dropped by design — NotifyBootstrapReady triggers the first
+			// fill() right after startup priming completes, so the peer
+			// is still picked up without a special case.
+			s.connManager.EmitHint(NewPeersDiscovered{Count: 1})
+		}
 	}
 
 	action := "added"
 	if found {
-		action = "already known, moved to front"
+		action = "already known"
+		if operatorOverride {
+			action = "already known, moved to front"
+		}
 	}
-	log.Info().Str("address", address).Str("network", classifyAddress(peerAddress).String()).Str("action", action).Msg("add_peer")
+	log.Info().Str("address", address).Str("network", classifyAddress(peerAddress).String()).Str("action", action).Str("source", string(peerSource)).Msg("add_peer")
 
 	return protocol.Frame{
 		Type:   "ok",
@@ -1770,16 +1854,23 @@ func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
 	}
 }
 
-// applyStartupBootstrapPeer adds a compiled/default bootstrap peer using the
-// same local command path as CommandTable.addPeer:
-// addPeer -> HandleLocalFrame -> add_peer -> addPeerFrame.
+// applyStartupBootstrapPeer adds a compiled/default bootstrap peer through
+// the shared add-peer body in addPeerModeBootstrap. That mode reuses the
+// add-peer bookkeeping (validation, s.peers / persistedMeta / PeerProvider
+// registration, persistence) but withholds every operator-only behaviour:
+// the peer is stamped Source=Bootstrap (not Manual), its automated penalties
+// are left intact, and the dial goes through Candidates() so the
+// subnet-diversity gate applies. Without the mode split a default peer list
+// with several nodes in one /24 would open that many immediate outbound
+// dials, and bootstrap entries would masquerade as operator-added peers in
+// list_peers / peers.json while silently clearing their own penalties.
 func (s *Service) applyStartupBootstrapPeer(address string) {
 	address = strings.TrimSpace(address)
 	if address == "" {
 		return
 	}
 
-	frame := s.HandleLocalFrame(protocol.Frame{Type: "add_peer", Peers: []string{address}})
+	frame := s.applyAddPeer(protocol.Frame{Type: "add_peer", Peers: []string{address}}, addPeerModeBootstrap)
 	if frame.Type == "error" {
 		log.Debug().Str("address", address).Str("error", frame.Error).Msg("startup bootstrap peer skipped")
 		return
@@ -1788,7 +1879,8 @@ func (s *Service) applyStartupBootstrapPeer(address string) {
 
 // PrimeBootstrapPeers applies compiled/default bootstrap peers once at startup.
 // Injection happens later in Run(), after ConnectionManager is ready, so the
-// add_peer path can enqueue immediate dials instead of being called too early.
+// shared add-peer path can register the peers and emit a NewPeersDiscovered
+// hint (addPeerModeBootstrap) instead of being called before the CM exists.
 func (s *Service) PrimeBootstrapPeers() {
 	log.Trace().Str("site", "PrimeBootstrapPeers").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -1799,21 +1891,40 @@ func (s *Service) PrimeBootstrapPeers() {
 }
 
 // primeStartupBootstrapPeers applies compiled/default bootstrap peers once the
-// ConnectionManager is running. Peers already restored from persisted state are
-// left untouched; bootstrap-only entries are promoted through the manual-add
-// path so startup behaves like an operator-issued add_peer.
+// ConnectionManager is running. Peers already restored from persisted state
+// are left untouched; bootstrap-only entries reuse the add-peer bookkeeping
+// (validation, registration, persistence) but in addPeerModeBootstrap — they
+// keep Source=Bootstrap, retain any automated penalty (no health/ban reset),
+// and dial through the regular candidate path. See applyStartupBootstrapPeer
+// for why the operator-only ManualPeerRequested bypass must not apply here.
 func (s *Service) primeStartupBootstrapPeers() {
+	// Snapshot the "already restored from persisted state" decision for the
+	// WHOLE list BEFORE applying any peer. applyStartupBootstrapPeer ->
+	// applyAddPeer writes a persistedMeta row for the peer it adds (and
+	// flushPeerState persists the rest), so reading persistedMeta inside the
+	// loop would let the first applied peer flip the skip condition for every
+	// later bootstrap address — they would look restoredFromState and be
+	// dropped. Computing the set up front keeps the decision stable across
+	// the mutations the loop itself causes.
+	restored := make(map[domain.PeerAddress]struct{}, len(s.cfg.BootstrapPeers))
+	s.peerMu.RLock()
 	for _, address := range s.cfg.BootstrapPeers {
 		peerAddress := domain.PeerAddress(strings.TrimSpace(address))
 		if peerAddress == "" {
 			continue
 		}
+		if _, ok := s.persistedMeta[peerAddress]; ok {
+			restored[peerAddress] = struct{}{}
+		}
+	}
+	s.peerMu.RUnlock()
 
-		s.peerMu.RLock()
-		_, restoredFromState := s.persistedMeta[peerAddress]
-		s.peerMu.RUnlock()
-
-		if restoredFromState {
+	for _, address := range s.cfg.BootstrapPeers {
+		peerAddress := domain.PeerAddress(strings.TrimSpace(address))
+		if peerAddress == "" {
+			continue
+		}
+		if _, ok := restored[peerAddress]; ok {
 			continue
 		}
 
