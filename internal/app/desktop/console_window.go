@@ -107,6 +107,28 @@ type ConsoleWindow struct {
 	donateList      widget.List
 	fileList        widget.List
 
+	// peerRows memoizes per-frame-derived peers/info-tab data so the O(peers)
+	// derivations run on state change instead of on every frame. The peers
+	// tab redraws at 60 fps while peers are connected (layoutPeersTab) and
+	// each derivation allocated fresh — the active-rows merge was the top
+	// desktop-side allocator in the heap-churn profile (activePeerHealth
+	// ~240 MB).
+	//
+	// Two independently-keyed parts so the info tab (counts only) never pays
+	// for the active-rows merge:
+	//   - counts (connected/unique) — both tabs read these;
+	//   - activeRows — the filtered+merged slice, peers tab only.
+	//
+	// Cache key is RouterSnapshot.Generation. NOTE this is bumped on EVERY
+	// DMRouter state mutation — DM/sidebar/beep events included (UIEventBeep
+	// bumps it even though it carries no data change) — not only on
+	// peer-status changes. So a burst of incoming messages can invalidate
+	// this cache even when the peer set is unchanged; that only costs a
+	// recompute of cheap O(peers) derivations on the visible tab, never a
+	// correctness problem (an unchanged generation still guarantees
+	// identical inputs). Read and written only on the UI goroutine, no lock.
+	peerRows peerRowCache
+
 	// File-tab per-row Clickables, keyed by FileID. Created lazily
 	// on layout and garbage-collected by pruneFileTabButtons when
 	// the FileID disappears from the snapshot.
@@ -449,16 +471,18 @@ func (c *ConsoleWindow) layoutTabButton(gtx layout.Context, clickable *widget.Cl
 }
 
 func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
-	status := c.parent.router.Snapshot().NodeStatus
+	// Capture the full snapshot (not just NodeStatus): the peers/info tabs
+	// key their per-frame derived-data cache on snap.Generation.
+	snap := c.parent.router.Snapshot()
 	switch c.currentTab() {
 	case consoleTabPeers:
-		return c.layoutPeersTab(gtx, status)
+		return c.layoutPeersTab(gtx, snap)
 	case consoleTabTraffic:
 		return c.layoutTrafficTab(gtx)
 	case consoleTabFile:
 		return c.layoutFileTab(gtx)
 	case consoleTabInfo:
-		return c.layoutInfoTab(gtx, status)
+		return c.layoutInfoTab(gtx, snap)
 	case consoleTabDonate:
 		return c.layoutDonateTab(gtx)
 	default:
@@ -466,11 +490,15 @@ func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
 	}
 }
 
-func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
+func (c *ConsoleWindow) infoRows(snap service.RouterSnapshot) []string {
+	status := snap.NodeStatus
 	// Both counters consume the full NodeStatus: orphan CaptureSessions count
 	// as connected/known peers during the capture-start race, matching the
-	// peers-tab liveness contract enshrined by activeRowsForTab.
-	connectedPeers := countConnectedPeers(status)
+	// peers-tab liveness contract enshrined by activeRowsForTab. peerCounts
+	// shares the counts cache with the peers tab and — unlike the old
+	// inline path — never builds the active-rows merge the info tab has no
+	// use for.
+	connectedPeers, uniquePeers := c.peerCounts(snap)
 	// Pre-probe NodeStatus has ProtocolVersion = 0 because the first welcome
 	// has not yet populated the field. Fall back to the runtime's compiled
 	// value (config.ProtocolVersion) so the row never renders a misleading
@@ -489,7 +517,7 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 		c.parent.t("node.services", fallback(joinOrNone(status.Services), "identity,contacts,messages,gazeta,relay")),
 		c.parent.t("node.capabilities", fallback(joinOrNone(status.Capabilities), "none")),
 		c.parent.t("node.connected", status.Connected),
-		c.parent.t("node.known_peers", countUniquePeers(status)),
+		c.parent.t("node.known_peers", uniquePeers),
 		c.parent.t("node.connected_peers", connectedPeers),
 	}
 
@@ -517,8 +545,8 @@ func (c *ConsoleWindow) infoRows(status service.NodeStatus) []string {
 	return rows
 }
 
-func (c *ConsoleWindow) layoutInfoTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
-	return c.card(gtx, c.parent.t("console.info_title"), c.infoRows(status))
+func (c *ConsoleWindow) layoutInfoTab(gtx layout.Context, snap service.RouterSnapshot) layout.Dimensions {
+	return c.card(gtx, c.parent.t("console.info_title"), c.infoRows(snap))
 }
 
 func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
@@ -543,7 +571,8 @@ func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
+func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, snap service.RouterSnapshot) layout.Dimensions {
+	status := snap.NodeStatus
 	// activeRowsForTab merges orphan CaptureSessions into the active-peer
 	// set so the empty-state gate, summary, and section renderer all agree
 	// on what "active" means during the capture-start race. The counter,
@@ -552,9 +581,14 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, status service.NodeSt
 	// multiple inbound conn_id rows, or one row plus an orphan capture for
 	// the same identity, would inflate len(activePeers) relative to the
 	// label's meaning.
-	activePeers := activeRowsForTab(status)
+	//
+	// Both the merged rows and the connected count come from the
+	// generation-keyed cache so this 60-fps path re-derives them only when
+	// the snapshot actually changed (see activePeerRows / peerCounts).
+	activePeers := c.activePeerRows(snap)
+	connectedPeers, _ := c.peerCounts(snap)
 	rows := []string{
-		c.parent.t("node.connected_peers", countConnectedPeers(status)),
+		c.parent.t("node.connected_peers", connectedPeers),
 	}
 
 	// Schedule a redraw every second so the uptime counter stays fresh.
@@ -2145,6 +2179,52 @@ func activePeerHealth(peers []service.PeerHealth) []service.PeerHealth {
 // must consult CaptureSessions. Otherwise it is category 2 and should not.
 func activeRowsForTab(status service.NodeStatus) []service.PeerHealth {
 	return mergeCapturesIntoPeers(activePeerHealth(status.PeerHealth), status.CaptureSessions)
+}
+
+// peerRowCache holds peers/info-tab derived data, split into two
+// independently-keyed parts so the info tab never builds the active-rows
+// merge it does not use. Both keys are a RouterSnapshot.Generation.
+// UI-goroutine-only — no synchronisation.
+type peerRowCache struct {
+	countsGen      uint64
+	countsValid    bool
+	connectedPeers int
+	uniquePeers    int
+
+	rowsGen    uint64
+	rowsValid  bool
+	activeRows []service.PeerHealth
+}
+
+// peerCounts returns the connected/unique peer counts for snap, recomputing
+// only when the generation advanced. Used by both the peers tab (connected)
+// and the info tab (connected + unique). Does NOT build the active-rows merge.
+func (c *ConsoleWindow) peerCounts(snap service.RouterSnapshot) (connected, unique int) {
+	if c.peerRows.countsValid && c.peerRows.countsGen == snap.Generation {
+		return c.peerRows.connectedPeers, c.peerRows.uniquePeers
+	}
+	status := snap.NodeStatus
+	c.peerRows.connectedPeers = countConnectedPeers(status)
+	c.peerRows.uniquePeers = countUniquePeers(status)
+	c.peerRows.countsGen = snap.Generation
+	c.peerRows.countsValid = true
+	return c.peerRows.connectedPeers, c.peerRows.uniquePeers
+}
+
+// activePeerRows returns the filtered+merged active-peer rows for snap,
+// recomputing only when the generation advanced. Peers tab only — the info
+// tab must not call this. An unchanged generation guarantees identical inputs
+// (PeerHealth + CaptureSessions), so the cached slice is safe to reuse;
+// callers MUST treat it as read-only — it is shared across frames until the
+// next generation.
+func (c *ConsoleWindow) activePeerRows(snap service.RouterSnapshot) []service.PeerHealth {
+	if c.peerRows.rowsValid && c.peerRows.rowsGen == snap.Generation {
+		return c.peerRows.activeRows
+	}
+	c.peerRows.activeRows = activeRowsForTab(snap.NodeStatus)
+	c.peerRows.rowsGen = snap.Generation
+	c.peerRows.rowsValid = true
+	return c.peerRows.activeRows
 }
 
 func (c *ConsoleWindow) layoutPeerSection(
