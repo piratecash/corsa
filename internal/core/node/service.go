@@ -528,15 +528,19 @@ type Service struct {
 	// decoupling.  Rebuilt by hotReadsRefreshLoop on its own ticker; see
 	// cm_slots_snapshot.go.
 	cmSlotsSnap cmSlotsSnapPtr
-	// routingSnap caches routing.Table.Snapshot() so fetchRouteTable /
+	// routingSnap caches the routing snapshot so fetchRouteTable /
 	// fetchRouteSummary / fetchRouteLookup, the file router's RouteSnap
-	// callback and the desktop reachability path do not perform a deep
-	// copy of the full routing table on every call.  At ~9000 entries
-	// today and a projected 10⁵-10⁶ at 1000 nodes, the per-call deep
-	// copy under routing.Table.t.mu.RLock blocks every routing writer
-	// (announce loop, TickTTL, hop_ack confirmation) for the duration
-	// of the copy. Rebuilt by hotReadsRefreshLoop on the same ticker
-	// shape as the four snapshots above; see routing_snapshot.go.
+	// callback and the desktop reachability path do not snapshot the
+	// routing table on every call.  At ~9000 entries today and a projected
+	// 10⁵-10⁶ at 1000 nodes, building that view under routing.Table.t.mu
+	// blocks routing writers (announce loop, TickTTL, hop_ack confirmation)
+	// for the build duration. The publisher uses routing.Table.
+	// SnapshotIncremental (copy-on-write: t.mu.Lock, reuses the unchanged
+	// route slices of the previous snapshot, re-copies only churned
+	// identities), so the per-publish allocation is proportional to the
+	// churn rather than the whole table. Rebuilt by hotReadsRefreshLoop on
+	// the same ticker shape as the four snapshots above; see
+	// routing_snapshot.go.
 	routingSnap routingSnapPtr
 	// lastRoutingSnapAtNanos coalesces routingSnap rebuilds: under a steady
 	// route-announce stream the table is dirty on nearly every 500ms tick, so
@@ -546,6 +550,24 @@ type Service struct {
 	// (UnixNano) because rebuildRoutingSnapshot runs both at startup priming
 	// and on the dedicated ticker goroutine.
 	lastRoutingSnapAtNanos atomic.Int64
+
+	// lastRoutingFullSnapAtNanos timestamps the last FULL (non-incremental)
+	// routing snapshot. It drives the periodic self-heal of the
+	// copy-on-write incremental projection on a wall-clock cadence
+	// (routingSnapshotFullInterval): once that long has elapsed, the next
+	// rebuild that is happening ANYWAY (the table was dirty) is upgraded to
+	// a full re-copy, healing any identity a mis-marked mutation left stale
+	// in the reuse cache. It does NOT wake a clean table — see
+	// routingSnapshotFullInterval for why a clean idle node has nothing to
+	// heal. Wall-clock-gated (not a pass counter) so the cadence does not
+	// drift with the refresher tick rate. Stamped on EVERY actual full
+	// re-copy (SnapshotIncremental's second return), not only the ones the
+	// publisher explicitly forced — a bulk mutation (snapFullDirty) or cold
+	// start that produced a full resets the interval too, so the publisher
+	// does not redundantly force another full shortly after. atomic.Int64
+	// (UnixNano) mirrors lastRoutingSnapAtNanos: set by rebuildRoutingSnapshot
+	// on the refresher goroutine and the sequential startup prime.
+	lastRoutingFullSnapAtNanos atomic.Int64
 
 	// File transfer subsystem (Iteration 21).
 	//

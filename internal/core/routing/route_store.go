@@ -635,6 +635,94 @@ func (s *routeStore) SnapshotRoutes(now time.Time) (routes map[PeerIdentity][]Ro
 	return routes, total, active
 }
 
+// SnapshotRoutesIncremental is the copy-on-write variant of
+// SnapshotRoutes. It reuses the caller's previous projection (prev)
+// for every identity that is NOT in dirty and whose bucket length is
+// unchanged, deep-copying only dirty / newly-appeared / length-changed
+// buckets. This removes the per-rebuild full-table allocation that
+// dominated routing churn on otherwise-idle nodes (the published
+// projection of a bucket is a pure function of its UplinkClaim values —
+// see toRouteEntry, which does not read `now` — so an untouched bucket's
+// projection is byte-for-byte reusable).
+//
+// total and active are ALWAYS recomputed by walking every bucket (cheap
+// field reads, no allocation), so time-driven expiry (IsExpired(now) on
+// a finite-TTL claim that aged out without a writer event) stays exact
+// even for reused buckets — only the slice allocation is skipped, never
+// the count.
+//
+// Safety against a missed dirty-mark: the len(prev[id]) == len(bucket)
+// guard re-copies any bucket whose claim count changed even if the
+// mutation site forgot to mark it dirty (every add/remove is caught
+// immediately). The only residual gap is a same-length in-place field
+// mutation on an unmarked identity. The caller's periodic full rebuild
+// (full == true) heals it, but note the node-side contract
+// (rebuildRoutingSnapshot): that periodic full only rides a rebuild that
+// is already happening because the table was dirty — a clean idle table is
+// not woken, so the heal is bounded by "the next dirty rebuild after the
+// interval", not by a fixed wall-clock period. A mis-marked mutation that
+// is the very last one before the table goes permanently idle therefore
+// stays until the next mutation; in practice any live node sees dirty
+// activity (TickTTL, announces) well within the interval.
+//
+// When prev is nil or full is true every bucket is copied (cold start /
+// self-heal pass). Caller must hold t.mu (writer: the Table wrapper
+// consumes its snap dirty-set in the same critical section).
+func (s *routeStore) SnapshotRoutesIncremental(
+	prev map[PeerIdentity][]RouteEntry,
+	dirty map[PeerIdentity]struct{},
+	full bool,
+	now time.Time,
+) (routes map[PeerIdentity][]RouteEntry, total int, active int) {
+	routes = make(map[PeerIdentity][]RouteEntry, len(s.buckets))
+	for id, bucket := range s.buckets {
+		total += len(bucket)
+
+		projected, reused := s.reuseBucketProjection(prev, dirty, full, id, bucket)
+		if !reused {
+			projected = make([]RouteEntry, len(bucket))
+			for i := range bucket {
+				projected[i] = toRouteEntry(id, s.localOrigin, bucket[i])
+			}
+		}
+		routes[id] = projected
+
+		// Active count walks live state every call (time-driven expiry
+		// must not lag behind the reused projection).
+		for i := range bucket {
+			if !bucket[i].IsWithdrawn() && !bucket[i].IsExpired(now) {
+				active++
+			}
+		}
+	}
+	return routes, total, active
+}
+
+// reuseBucketProjection returns the cached projection for id when it is
+// safe to reuse (not a full rebuild, prev exists, id not marked dirty,
+// and the cached slice length still matches the live bucket). The second
+// return reports whether the cache was reused; on false the caller
+// deep-copies the bucket. Caller must hold t.mu.
+func (s *routeStore) reuseBucketProjection(
+	prev map[PeerIdentity][]RouteEntry,
+	dirty map[PeerIdentity]struct{},
+	full bool,
+	id PeerIdentity,
+	bucket []UplinkClaim,
+) ([]RouteEntry, bool) {
+	if full || prev == nil {
+		return nil, false
+	}
+	if _, isDirty := dirty[id]; isDirty {
+		return nil, false
+	}
+	cached, ok := prev[id]
+	if !ok || len(cached) != len(bucket) {
+		return nil, false
+	}
+	return cached, true
+}
+
 // CapStats returns a value-copy of the monotonic counters
 // surfaced under the legacy `cap_admission` JSON envelope. The
 // envelope today carries FOUR independent policies (see

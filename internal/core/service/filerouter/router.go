@@ -89,13 +89,15 @@ type PeerRouteMeta struct {
 //
 // Two routing-table reads coexist deliberately. The hot transit path
 // inside HandleInbound uses the cached snapshot (routeSnap) — a frame
-// in flight has its own metadata and a one-tick delay on a freshly
+// in flight has its own metadata and a ~1–1.5 s delay (the cached
+// snapshot's coalescing floor plus a refresh tick) on a freshly
 // added route is harmless. Locally-originated paths (SendFileCommand
 // and the diagnostic ExplainRoute) read through the per-destination
 // fresh oracle (routeLookup) so a route accepted right before the
 // user-initiated send is visible immediately, without waiting for the
-// cached snapshot's next dirty-flag publish (~500 ms after the writer
-// touched the table). See "Two distinct staleness bounds" in
+// cached snapshot's next dirty-flag publish (~1–1.5 s after the writer
+// touched the table — routingSnapshotMinInterval's 1 s coalescing floor
+// plus the next refresh tick). See "Two distinct staleness bounds" in
 // docs/routing.md "Snapshot freshness" for the broader contract.
 type Router struct {
 	nonceCache                  NonceCache
@@ -137,10 +139,11 @@ type RouterConfig struct {
 	IsFullNode func() bool
 
 	// RouteSnap returns the cached routing snapshot used by the hot
-	// transit path inside HandleInbound. Bounded staleness ≤ one
-	// refresh tick (currently 500 ms) is acceptable for in-flight
+	// transit path inside HandleInbound. Bounded staleness ≤ the routing
+	// snapshot's coalescing floor (1 s) plus the next refresh tick
+	// (~1–1.5 s) is acceptable for in-flight
 	// frames: their next-hop decision is bounded by the wire frame
-	// metadata and a one-tick delay on a freshly added route is
+	// metadata and a ~1–1.5 s delay on a freshly added route is
 	// strictly better than blocking the routing writers (announce
 	// loop, TickTTL, hop_ack confirmation) for a deep copy on every
 	// transit-forward decision.
@@ -153,7 +156,8 @@ type RouterConfig struct {
 	// accepted right before a user-initiated file send becomes
 	// visible immediately, without waiting for the cached snapshot's
 	// next publish. Without this oracle the user would observe a
-	// 0–500 ms window where isPeerReachable reports the destination
+	// 0–1.5 s window (the routing snapshot's 1 s coalescing floor plus
+	// the next refresh tick) where isPeerReachable reports the destination
 	// as reachable (it reads the fresh table) but SendFileCommand
 	// fails with "no route to <dst>" because collectRouteCandidates
 	// reads the still-stale cached snapshot.
@@ -547,7 +551,7 @@ type peerRouteMetaResult struct {
 //
 // This variant reads the cached routing snapshot. It is the right call
 // for the hot transit path inside HandleInbound (per-frame, bounded by
-// wire metadata, a one-tick delay on a freshly added route is harmless).
+// wire metadata, a ~1–1.5 s delay on a freshly added route is harmless).
 // Locally-originated paths must use collectFreshRouteCandidates instead
 // — see that function and RouterConfig.RouteLookup for why.
 //
@@ -573,8 +577,9 @@ func (r *Router) collectRouteCandidates(dst, excludeVia domain.PeerIdentity) []r
 // per-destination fresh oracle (RouterConfig.RouteLookup), so a route
 // accepted right before SendFileCommand or ExplainRoute is visible
 // immediately. The cached snapshot path would only see this route after
-// the next dirty-flag publish (~500 ms after the writer touched the
-// table), which produces the user-visible regression: isPeerReachable
+// the next dirty-flag publish (~1–1.5 s after the writer touched the
+// table — routingSnapshotMinInterval's 1 s coalescing floor plus the next
+// refresh tick), which produces the user-visible regression: isPeerReachable
 // already reports reachable (it queries the fresh table), but the send
 // fails because the cached snapshot has not republished yet.
 //
@@ -888,7 +893,8 @@ func (r *Router) SendFileCommand(
 	// oracle (RouterConfig.RouteLookup) so a route accepted right
 	// before this user-initiated send is visible immediately. The
 	// cached snapshot used by the transit path would only see the
-	// route after the next dirty-flag publish (~500 ms), which would
+	// route after the next dirty-flag publish (~1–1.5 s — the 1 s
+	// coalescing floor plus the next refresh tick), which would
 	// reproduce the original "isPeerReachable says yes, send fails"
 	// regression on the very next pipeline step.
 	candidates := r.collectFreshRouteCandidates(dst, "")

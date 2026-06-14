@@ -176,8 +176,9 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		// 11.25 / 11.26 alignment).
 		//
 		// Build the per-(Identity, Uplink) Dead lookup from
-		// snap.Health (cached alongside Routes by Table.Snapshot,
-		// PR 11.27 P2#1) — no extra RoutingProvider call.
+		// snap.Health (cached alongside Routes by the publisher's
+		// Table.SnapshotIncremental, PR 11.27 P2#1) — no extra
+		// RoutingProvider call.
 		deadPair := make(map[routing.PeerIdentity]map[routing.PeerIdentity]struct{})
 		for _, h := range snap.Health {
 			if h.Health != routing.HealthDead {
@@ -351,9 +352,9 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 // PR 11.26 P2#1 / 11.27 P2#1 — cached hot-read. Both the route
 // entries AND the per-(Identity, Uplink) Health labels are read
 // from the SAME atomic RoutingSnapshot pointer (routing.Snapshot
-// carries Health alongside Routes, populated atomically by
-// Table.Snapshot under one t.mu.RLock). The RPC handler never
-// touches t.mu directly — it grabs the cached snapshot via
+// carries Health alongside Routes, populated atomically by the
+// publisher's Table.SnapshotIncremental under one t.mu.Lock). The
+// RPC handler never touches t.mu directly — it grabs the cached snapshot via
 // rp.RoutingSnapshot() (Load on an atomic.Pointer) and walks it
 // in process. This preserves the "fetchRouteLookup is a cached
 // hot-read; no routing-mutex blocking" contract documented in
@@ -409,9 +410,10 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 		// claim is RouteSourceDirect (Direct stays selectable; see
 		// table_lookup.go "Direct exemption" branch). The synthetic
 		// self-route (RouteSourceLocal, Hops=0) IS present in the
-		// cached snapshot because Table.Snapshot injects it for the
-		// node's own identity (see Table.Snapshot in
-		// internal/core/routing/table_lookup.go). It flows through
+		// cached snapshot because the publisher's snapshot build injects
+		// it for the node's own identity — both Table.Snapshot and the
+		// hot path's Table.SnapshotIncremental inject the same synthetic
+		// self-route (see internal/core/routing/table_lookup.go). It flows through
 		// this filter+score path unchanged — RouteSourceLocal
 		// carries the +20 source bonus and Hops=0, so it ranks
 		// first when the caller queries the local identity. Matches

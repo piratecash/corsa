@@ -149,6 +149,34 @@ type Table struct {
 	// refresher.
 	dirty atomic.Bool
 
+	// snapDirtyIDs accumulates the identities whose route buckets changed
+	// since the last SnapshotIncremental consumed them. Marked under t.mu
+	// by every single-identity route-mutating wrapper; consumed and cleared
+	// inside SnapshotIncremental. It refines the coarse `dirty atomic.Bool`
+	// (which only answers "did anything change?") into the per-identity
+	// granularity the copy-on-write projection needs to reuse the unchanged
+	// buckets of the previous snapshot. Guarded by t.mu (not atomic): it is
+	// only ever touched inside a writer critical section or by the single
+	// snapshot publisher.
+	snapDirtyIDs map[PeerIdentity]struct{}
+
+	// snapFullDirty forces the next SnapshotIncremental to re-copy every
+	// bucket regardless of snapDirtyIDs. Set by the bulk wrappers
+	// (RemoveDirectPeer, InvalidateTransitRoutes, TickTTL) that touch an
+	// unbounded identity set in one shot, where enumerating the affected
+	// identities for snapDirtyIDs would cost more than a full rebuild.
+	// Guarded by t.mu.
+	snapFullDirty bool
+
+	// snapRawCache is the raw projection (pre self-route injection) returned
+	// by the previous SnapshotIncremental, reused for clean identities. nil
+	// until the first snapshot. Guarded by t.mu; safe to cache without extra
+	// synchronization because the sole caller (Service.rebuildRoutingSnapshot)
+	// is single-threaded. Holds RouteEntry slices shared (read-only) with
+	// every published snapshot generation that reused them — copy-on-write,
+	// never mutated in place.
+	snapRawCache map[PeerIdentity][]RouteEntry
+
 	// health owns the RouteHealthState map keyed per (Identity,
 	// Uplink) — the Phase 2 quality-signal layer introduced in
 	// docs/protocol/route_health.md. healthStore has no
@@ -505,4 +533,22 @@ func (t *Table) ConsumeDirty() bool {
 // load-then-consume race that IsDirty introduces.
 func (t *Table) IsDirty() bool {
 	return t.dirty.Load()
+}
+
+// markSnapDirtyLocked records a single identity whose route bucket
+// changed, so the next SnapshotIncremental re-copies it instead of
+// reusing the cached projection. Caller must hold t.mu in W mode (every
+// call site already holds it for the storage mutation it accompanies).
+func (t *Table) markSnapDirtyLocked(identity PeerIdentity) {
+	if t.snapDirtyIDs == nil {
+		t.snapDirtyIDs = make(map[PeerIdentity]struct{})
+	}
+	t.snapDirtyIDs[identity] = struct{}{}
+}
+
+// markSnapFullDirtyLocked forces the next SnapshotIncremental to re-copy
+// every bucket. Used by bulk mutations that touch an unbounded identity
+// set. Caller must hold t.mu in W mode.
+func (t *Table) markSnapFullDirtyLocked() {
+	t.snapFullDirty = true
 }

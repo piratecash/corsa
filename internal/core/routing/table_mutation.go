@@ -120,6 +120,7 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	status, mutated := t.store.ApplyUpdate(entry, t.clock())
 	if mutated {
 		t.dirty.Store(true)
+		t.markSnapDirtyLocked(entry.Identity)
 	}
 	// Phase 2 health bookkeeping at the live-update boundary
 	// (review concerns P1#1 / P1#2 / 11.21 P2#1):
@@ -298,6 +299,7 @@ func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
 	mutated := t.store.WithdrawTriple(key, seqNo+1, now)
 	if mutated {
 		t.dirty.Store(true)
+		t.markSnapDirtyLocked(identity)
 	}
 	return mutated
 }
@@ -316,6 +318,7 @@ func (t *Table) WithdrawRoute(identity, origin, nextHop PeerIdentity, seqNo uint
 	mutated := t.store.WithdrawTriple(key, seqNo, t.clock())
 	if mutated {
 		t.dirty.Store(true)
+		t.markSnapDirtyLocked(identity)
 	}
 	return mutated
 }
@@ -357,6 +360,10 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 	entry, mutated := t.store.AdmitDirectPeer(peerIdentity, now)
 	if mutated {
 		t.dirty.Store(true)
+		// Only the storage mutation changes the route projection; the
+		// health-only resets below affect snap.Health (still fully
+		// copied), not the incremental Routes map.
+		t.markSnapDirtyLocked(peerIdentity)
 	}
 
 	// PR 11.26 P2#3 — health seeding for direct peers. UpdateRoute's
@@ -501,6 +508,10 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 	// InvalidateAllVia rewrites every affected route's
 	// Hops/SeqNo/ExpiresAt. Both are part of the published Snapshot.
 	t.dirty.Store(true)
+	// InvalidateAllVia touches an unbounded set of identities (every
+	// destination reachable through the lost uplink) and returns only a
+	// count, not the affected set — force a full incremental re-copy.
+	t.markSnapFullDirtyLocked()
 
 	return RemoveDirectPeerResult{
 		Withdrawals:        withdrawals,
@@ -528,6 +539,9 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 	invalidated, exposed := t.store.InvalidateTransitVia(peerIdentity, t.clock())
 	if invalidated > 0 {
 		t.dirty.Store(true)
+		// Transit invalidation spans every identity routed via this
+		// next-hop; force a full incremental re-copy.
+		t.markSnapFullDirtyLocked()
 	}
 	return invalidated, exposed
 }
@@ -590,6 +604,14 @@ func (t *Table) TickTTL() TickTTLResult {
 	t.store.pruneOutboundCachesLocked(now)
 	if totalRemoved > 0 || flapMutated {
 		t.dirty.Store(true)
+	}
+	// CompactExpired physically removes claims across an unbounded set of
+	// identities; force a full incremental re-copy so dropped buckets and
+	// shrunken bucket lengths are reflected. flap-only ticks do not change
+	// the Routes projection (flap is a separate, fully-copied snapshot
+	// field), so they do not force a full route rebuild.
+	if totalRemoved > 0 {
+		t.markSnapFullDirtyLocked()
 	}
 	return TickTTLResult{Exposed: exposed, Removed: totalRemoved}
 }

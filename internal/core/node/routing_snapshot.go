@@ -24,11 +24,15 @@ import (
 //
 // Bounded-staleness contract for structural changes (route accepted/
 // withdrawn/replaced, direct peer added/removed, flap burst arming
-// hold-down, flap-state cleanup after a writer touched the table)
-// matches the other hot-read snapshots (network_stats, peer_health,
-// peers_exchange, cm_slots): worst-case staleness equals
-// networkStatsSnapshotInterval plus the time the refresher needs to
-// acquire routing.Table.t.mu.RLock.
+// hold-down, flap-state cleanup after a writer touched the table): unlike
+// the other hot-read snapshots (network_stats, peer_health, peers_exchange,
+// cm_slots) the routing rebuild is additionally coalesced by
+// routingSnapshotMinInterval (1 s), checked BEFORE ConsumeDirty. Worst-case
+// staleness is therefore that 1 s floor plus the next refresh tick that
+// crosses it (~500 ms) plus the time the refresher needs to acquire
+// routing.Table.t.mu (now an exclusive Lock for the incremental projection
+// build, see rebuildRoutingSnapshot) — on the order of 1–1.5 s, the churn
+// reduction routing trades for the tighter ~500 ms bound of the others.
 //
 // Time-derived state is bounded more loosely — the dirty-flag publisher
 // only republishes when a writer touches the table, but wall-clock
@@ -36,12 +40,15 @@ import (
 //
 //   - A finite-TTL route silently aging out is not a writer event until
 //     TickTTL rewrites it (every 10 s). IsExpired(snap.TakenAt) and
-//     ttl_seconds therefore can lag up to TickTTL_interval (≈10 s)
-//     plus one refresh tick.
+//     ttl_seconds therefore can lag up to TickTTL_interval (≈10 s) plus
+//     the structural publish bound — TickTTL's dirty mark still flows
+//     through the routingSnapshotMinInterval floor + a refresh tick
+//     (~1–1.5 s), so ≈11–11.5 s total.
 //   - FlapEntry.InHoldDown flipping from true to false is also driven
 //     by wall-clock — fs.holdDownUntil elapsing. TickTTL clears the
 //     deadline on its 10 s cadence and marks the table dirty, so the
-//     transition is published within TickTTL_interval + one refresh.
+//     transition is published within TickTTL_interval + the structural
+//     publish bound (~1–1.5 s), i.e. ≈11–11.5 s.
 //     Hold-down arming is a writer event (the disconnect that crossed
 //     the flap threshold) and is reflected within the structural
 //     bound. Both Snapshot and FlapSnapshot normalize HoldDownUntil
@@ -101,31 +108,57 @@ func (s *Service) loadRoutingSnapshot() routing.Snapshot {
 // The dirty/consume protocol intentionally races with concurrent
 // writers. A writer that sets dirty=true after ConsumeDirty has
 // already returned true (and the rebuild has started) leaves the next
-// refresh tick observing dirty=true again and producing one more
-// rebuild — a single missed mutation is therefore visible no later
-// than 2 × networkStatsSnapshotInterval, well inside the bounded-
-// staleness contract.
+// eligible refresh observing dirty=true again and producing one more
+// rebuild — a single missed mutation is therefore visible no later than
+// the next rebuild that passes the routingSnapshotMinInterval (1 s) floor
+// plus one refresh tick, well inside the bounded-staleness contract above.
 //
-// routing.Table.Snapshot acquires t.mu.RLock for the deep copy. If a
-// writer storm queues on t.mu.Lock the refresher itself stalls, but
-// the previously published snapshot continues to satisfy every reader
-// — the RPC path is statically decoupled from t.mu writers, the same
-// invariant that motivated the network_stats / peer_health phase-1
-// carve-out.
+// routing.Table.SnapshotIncremental acquires t.mu.Lock (exclusive — it
+// consumes the per-identity snap dirty-set and updates the reuse cache,
+// both writes) for the projection build. The build reuses the unchanged
+// route slices of the previous snapshot and re-copies only the churned
+// identities, so the exclusive hold is shorter than the old full deep
+// copy even though it now also blocks the few direct t.mu.RLock readers
+// (the Lookup callsites) for its duration. If a writer storm queues on
+// t.mu the refresher itself stalls, but the previously published snapshot
+// continues to satisfy every cached reader — the RPC path is statically
+// decoupled from t.mu writers, the same invariant that motivated the
+// network_stats / peer_health phase-1 carve-out.
 // routingSnapshotMinInterval coalesces routingSnap rebuilds: even when the
-// table stays dirty on every tick (steady route-announce stream), the full
-// deep-copy snapshot is rebuilt at most this often. Routing decisions consume
-// the snapshot with bounded staleness, so 1s of lag is acceptable while it
-// cuts the dominant per-tick churn. Tunable; kept >= the 500ms ticker so it
-// actually throttles.
+// table stays dirty on every tick (steady route-announce stream), the
+// incremental snapshot is rebuilt at most this often. Routing decisions
+// consume the snapshot with bounded staleness, so 1s of lag is acceptable
+// while it cuts the dominant per-tick churn. Tunable; kept >= the 500ms
+// ticker so it actually throttles.
 const routingSnapshotMinInterval = 1 * time.Second
+
+// routingSnapshotFullInterval upgrades a rebuild that is happening anyway
+// (the table was dirty) to a FULL (non-incremental) re-copy once this much
+// wall-clock time has elapsed since the last full one. It is the self-heal
+// safety net for the copy-on-write projection (SnapshotIncremental): the
+// route-mutation surface in route_store_*.go is broad, and a site that
+// changes a claim in place without marking its identity dirty would leave
+// that identity's projection stale in the reuse cache. A full re-copy
+// re-projects every bucket, healing such a stale entry.
+//
+// Crucially this does NOT wake a clean table: a missed snap-mark can only
+// produce a stale published snapshot if a rebuild ran at all (the coarse
+// `dirty` flag was set but the per-identity mark was missed), so the heal
+// only needs to ride along on a future dirty rebuild — an idle/headless
+// node with no route churn and nothing to heal is still skipped entirely,
+// matching the sibling hot-read snapshots. The residual gap (a mis-marked
+// mutation that is the very last one before the table goes permanently
+// idle) is accepted: any live node sees dirty activity well within this
+// interval via TickTTL / route announces. Wall-clock-gated (not a pass
+// counter) so the cadence does not drift with the refresher tick rate.
+const routingSnapshotFullInterval = 60 * time.Second
 
 func (s *Service) rebuildRoutingSnapshot() {
 	if s.routingTable == nil {
 		return
 	}
 
-	// Coalesce: throttle the (expensive) deep copy to once per
+	// Coalesce: throttle the projection build to once per
 	// routingSnapshotMinInterval even under a dirty-every-tick announce
 	// stream. Checked BEFORE ConsumeDirty so the dirty bit is preserved for
 	// the next eligible tick — a throttled rebuild must not swallow a change.
@@ -138,18 +171,36 @@ func (s *Service) rebuildRoutingSnapshot() {
 		}
 	}
 
-	// Skip the deep copy when the table is clean AND a previous
-	// publish exists. The cold-start case (no prior publish) must
-	// always rebuild so loadRoutingSnapshot returns real data on the
-	// first RPC immediately after Run() opens the listener.
-	if !s.routingTable.ConsumeDirty() && s.routingSnap.Load() != nil {
+	// Skip entirely when the table is clean AND a previous publish exists:
+	// a steady-state idle/headless node pays nothing (no wake), the same
+	// invariant honoured by the sibling hot-read snapshots. Cold start (no
+	// prior publish) always proceeds so the first RPC after Run() sees data.
+	dirty := s.routingTable.ConsumeDirty()
+	if !dirty && s.routingSnap.Load() != nil {
 		return
 	}
 
+	// A rebuild is warranted (dirty or cold start). Upgrade it to a full
+	// re-copy when the self-heal interval has elapsed since the last full —
+	// this never wakes an idle table; it only periodically makes one of the
+	// rebuilds that are happening anyway a full one. Cold start (lastFull==0)
+	// is full regardless.
+	lastFull := s.lastRoutingFullSnapAtNanos.Load()
+	forceFull := lastFull == 0 || time.Since(time.Unix(0, lastFull)) >= routingSnapshotFullInterval
+
 	log.Trace().Msg("routing_snapshot_refresh_begin")
-	snap := s.routingTable.Snapshot()
+	// wasFull reflects whether the build actually re-copied every bucket —
+	// true for our forceFull, but ALSO when a bulk mutation set snapFullDirty
+	// or on cold start. Timestamp the self-heal cadence off the real full so
+	// a bulk-driven full resets the interval and we do not redundantly force
+	// another one shortly after.
+	snap, wasFull := s.routingTable.SnapshotIncremental(forceFull)
 	s.routingSnap.Store(&routingSnapshot{snap: snap})
-	s.lastRoutingSnapAtNanos.Store(time.Now().UnixNano())
+	now := time.Now()
+	s.lastRoutingSnapAtNanos.Store(now.UnixNano())
+	if wasFull {
+		s.lastRoutingFullSnapAtNanos.Store(now.UnixNano())
+	}
 	log.Trace().
 		Int("total", snap.TotalEntries).
 		Int("active", snap.ActiveEntries).

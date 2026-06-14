@@ -393,8 +393,9 @@ func (f *FlapDetector) tickLocked(now time.Time) bool {
 			// actually ended on defaults: 30 s hold-down + 120 s
 			// flap window). Hold-down expiry is time-derived flap
 			// state — see docs/routing.md "Snapshot freshness" — so
-			// it is bounded by TickTTL_interval + one refresh, not
-			// by a single refresh tick. TickTTL is the schedule that
+			// it is bounded by TickTTL_interval + the structural publish
+			// bound (routingSnapshotMinInterval floor + a refresh tick,
+			// ~1–1.5 s) ≈ 11–11.5 s, not by a single refresh tick. TickTTL is the schedule that
 			// converts the wall-clock transition into a writer event;
 			// without the clear here, even running TickTTL would not
 			// flip InHoldDown until withdrawTimes drained, breaking

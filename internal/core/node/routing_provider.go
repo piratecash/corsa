@@ -9,23 +9,28 @@ import (
 // RoutingSnapshot returns the cached routing snapshot maintained by the
 // hot-reads refresher (see routing_snapshot.go and hot_reads_refresh.go).
 // Reads are lock-free: a single atomic.Pointer.Load with no acquisition
-// of routing.Table.t.mu.RLock on the RPC path.
+// of routing.Table.t.mu (neither RLock nor the publisher's Lock) on the
+// RPC path.
 //
 // Two staleness bounds apply (see docs/routing.md "Snapshot freshness"):
 //
 //   - Structural changes (route accepted/withdrawn/replaced, direct peer
 //     added/removed, flap burst arming hold-down, flap-state cleanup
 //     after a writer touched the table) are reflected within
-//     networkStatsSnapshotInterval (~500 ms) plus the publisher's
-//     t.mu.RLock acquisition time.
+//     routingSnapshotMinInterval (1 s — the coalescing floor that throttles
+//     the 500 ms refresher) plus the next refresh tick that crosses that
+//     floor (~500 ms) plus the publisher's t.mu.Lock acquisition time
+//     (SnapshotIncremental takes the exclusive lock to consume the snap
+//     dirty-set and update the reuse cache) — on the order of 1–1.5 s.
 //   - Time-derived state (`IsExpired`, `ttl_seconds` evaluated against
 //     `snap.TakenAt`, `FlapEntry.InHoldDown` flipping from true to
 //     false on hold-down expiry) lags up to TickTTL_interval (≈10 s)
-//     plus one refresh tick: the dirty-flag publisher only republishes
-//     when a writer touches the table, but TTL elapse and hold-down
-//     expiry are wall-clock events without a writer until TickTTL
-//     rewrites the entry. Hold-down arming is a writer event and is
-//     reflected within the structural bound.
+//     plus the structural publish bound (routingSnapshotMinInterval
+//     floor + a refresh tick, ~1–1.5 s), i.e. ≈11–11.5 s: the dirty-flag
+//     publisher only republishes when a writer touches the table, but
+//     TTL elapse and hold-down expiry are wall-clock events without a
+//     writer until TickTTL rewrites the entry. Hold-down arming is a
+//     writer event and is reflected within the structural bound (~1–1.5 s).
 //
 // Returned routing.Snapshot must NOT be mutated by callers — the underlying
 // routes map is shared between every concurrent reader of the same
@@ -95,10 +100,12 @@ func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domai
 // Reads from the cached routing snapshot — the same lock-free path that
 // fetchRouteTable / fetchRouteSummary use. Two staleness bounds apply
 // (see RoutingSnapshot doc): structural reachability changes (peer
-// connect / withdraw) are visible within ~500 ms; TTL-derived expiry
+// connect / withdraw) are visible within ~1–1.5 s (routingSnapshotMinInterval
+// floor plus the next refresh tick plus the publisher's t.mu.Lock); TTL-derived expiry
 // inside BestRoute is evaluated against snap.TakenAt and may lag up
-// to TickTTL_interval + refresh (~10.5 s) for routes that age out
-// without any other table mutation. Both bounds are acceptable for a
+// to TickTTL_interval + the structural publish bound (~1–1.5 s), i.e.
+// ~11–11.5 s, for routes that age out without any other table
+// mutation. Both bounds are acceptable for a
 // UI reachability indicator: this frame feeds desktop polling, not
 // message routing — operators see reachable=true for an aged-out route
 // for at most one TickTTL cycle, never an action that depends on

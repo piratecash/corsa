@@ -837,7 +837,8 @@ func TestSendFileCommandRouteTableFallbackPrefersLongestConnectedEqualHop(t *tes
 }
 
 // TestSendFileCommandUsesFreshRouteLookupWhenSnapshotIsStale pins the
-// fix for the "route just arrived, send fails for ~500 ms" regression.
+// fix for the "route just arrived, send fails for ~1–1.5 s" regression
+// (the cached routing snapshot's coalescing floor plus a refresh tick).
 //
 // Scenario: a route is accepted into the routing table at T=0. The
 // hot-reads refresher's dirty-flag publish has not yet republished

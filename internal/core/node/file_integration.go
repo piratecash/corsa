@@ -74,13 +74,16 @@ func (s *Service) initFileTransfer() {
 		RouteSnap: func() routing.Snapshot {
 			// Reads the cached routing snapshot maintained by the
 			// hot-reads refresher (routing_snapshot.go). Bounded
-			// staleness ≤ networkStatsSnapshotInterval is acceptable
-			// for the transit path inside HandleInbound: the in-flight
-			// frame has its own metadata and a 500 ms-stale view at
-			// worst delays the failover by one tick — strictly
-			// better than blocking the routing writers (announce
-			// loop, TickTTL, hop_ack confirmation) for a deep copy
-			// on every file-routing decision. Locally-originated
+			// staleness ≤ routingSnapshotMinInterval (1 s) + one
+			// refresh tick (~1–1.5 s) is acceptable for the transit path
+			// inside HandleInbound: the in-flight frame has its own
+			// metadata and an ~1–1.5 s-stale view at worst delays the
+			// failover by ~1–1.5 s. Each file-routing decision is then a
+			// cheap atomic.Pointer load of the cached snapshot — strictly
+			// better than taking a fresh routing-table snapshot (t.mu.Lock
+			// + deep copy) per decision, which would block the routing
+			// writers (announce loop, TickTTL, hop_ack confirmation).
+			// Locally-originated
 			// paths (SendFileCommand, ExplainRoute) read through
 			// RouteLookup below instead, which goes straight to the
 			// table and so sees a route the moment it lands.

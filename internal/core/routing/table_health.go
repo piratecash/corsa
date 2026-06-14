@@ -68,8 +68,8 @@ func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
 	// wire-up contract.
 	state.applyHopAckSuccess(now)
 	// PR 11.28 P2#1: health is part of the published Snapshot
-	// (Snapshot.Health, populated atomically by Table.Snapshot
-	// alongside Routes). Without marking dirty here the snapshot
+	// (Snapshot.Health, populated atomically by the publisher's
+	// Table.SnapshotIncremental alongside Routes). Without marking dirty here the snapshot
 	// publisher's ConsumeDirty fast-path skips the rebuild on
 	// health-only mutations, leaving fetchRouteLookup/fetchRouteHealth
 	// reading stale labels until the next structural route mutation.
@@ -193,6 +193,9 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 	status, mutated := t.store.ApplyUpdate(confirmed, now)
 	if mutated {
 		t.dirty.Store(true)
+		// Source promotion rewrote the claim (Announcement → HopAck),
+		// which changes the route projection — re-copy this identity.
+		t.markSnapDirtyLocked(identity)
 	}
 	return status, true
 }

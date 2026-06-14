@@ -48,11 +48,19 @@ func (s *Service) primeHotReadSnapshots() {
 //     this specific rebuild even with other domains quiet.
 //   - cm_slots — cm.mu.RLock only (separate mutex inside
 //     ConnectionManager, not covered by the Service domain split).
-//   - routing — routing.Table.t.mu.RLock only (separate mutex inside the
-//     routing package, not covered by the Service domain split).  Skipped
-//     entirely when ConsumeDirty returns false and a previous publish
-//     exists — the deep copy runs only when the table actually mutated
-//     since the last refresh.
+//   - routing — routing.Table.t.mu.Lock (exclusive: SnapshotIncremental
+//     consumes the per-identity snap dirty-set and updates the reuse cache)
+//     on a separate mutex inside the routing package, not covered by the
+//     Service domain split.  Skipped entirely when ConsumeDirty returns
+//     false and a previous publish exists — the projection build runs only
+//     when the table actually mutated since the last refresh; a clean
+//     idle/headless node is never woken.  The build reuses the unchanged
+//     route slices of the previous snapshot and re-copies only the churned
+//     identities, so it is no longer a full deep copy of the whole table on
+//     every publish.  Periodically (routingSnapshotFullInterval) a rebuild
+//     that is already happening because the table was dirty is upgraded to
+//     a full re-copy as a self-heal net — this rides an existing dirty
+//     rebuild, it does NOT wake a clean table.
 //
 // The snapshots feed different UI panels and there is no correctness
 // relationship between them, so this fan-out is safe.
@@ -78,14 +86,16 @@ func (s *Service) primeHotReadSnapshots() {
 //   - A finite-TTL route silently aging out is not a writer event
 //     until TickTTL rewrites it (every 10 s). `IsExpired` against
 //     `snap.TakenAt` and `ttl_seconds` therefore can lag up to
-//     TickTTL_interval (≈10 s) plus one refresh tick.
+//     TickTTL_interval (≈10 s) plus the structural publish bound
+//     (routingSnapshotMinInterval floor + a refresh tick, ~1–1.5 s),
+//     i.e. ≈11–11.5 s.
 //   - `FlapEntry.InHoldDown` flipping from true to false on hold-down
 //     expiry is also driven by wall-clock — `fs.holdDownUntil`
 //     elapsing. TickTTL clears the deadline on its 10 s cadence and
 //     marks the table dirty, so the transition is published within
-//     TickTTL_interval + one refresh. (Hold-down ARMING is structural
-//     and falls under the 500 ms bound; the false→true transition is
-//     a writer event.)
+//     TickTTL_interval + the structural publish bound (~1–1.5 s), i.e.
+//     ≈11–11.5 s. (Hold-down ARMING is structural and falls under the
+//     ~1–1.5 s bound; the false→true transition is a writer event.)
 //
 // Consumers that depend on strict freshness for any time-derived field
 // must read the table directly via `routing.Table.Snapshot()` or

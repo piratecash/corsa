@@ -136,11 +136,17 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 // informational metadata (the receiver ignores it for routing
 // decisions — see handleRouteQueryResponse's BestUplink note).
 //
-// Side effects: advances per-receiver outbound SeqNo for the
-// target identity via nextOutboundSeqLockedPerPeer; marks the
-// table dirty so the snapshot publisher republishes the new
-// outbound counter value on its next tick (without dirty the
-// publisher's ConsumeDirty fast-path would skip the rebuild).
+// Side effects: advances the per-receiver outbound SeqNo for the
+// target identity via nextOutboundSeqLockedPerPeer. That watermark
+// is internal to routeStore and is NOT part of routing.Snapshot, so
+// a normal emit does NOT mark the table dirty — waking the snapshot
+// publisher for a change it cannot observe would let route_query
+// traffic keep the publisher rebuilding once per second for nothing.
+// The table is marked dirty ONLY when the advance engages the SeqNo
+// flap-cap hold-down (the `armed` branch below): that bumps the
+// published SeqNoFlapHoldowns CapStats counter, which the snapshot
+// DOES carry. This mirrors AnnounceTo / AnnounceProjectionFor, where
+// `mutated` (and thus dirty) is set only on the armed path.
 //
 // Lock contract: acquires t.mu in W mode. Callers must not hold
 // any other domain mutex of node.Service at invocation time.
@@ -287,11 +293,13 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 		//
 		// Mark dirty so the snapshot publisher republishes the
 		// SeqNoFlapHoldowns counter bump (visible via
-		// fetchRouteSummary).
+		// fetchRouteSummary). This is the ONLY published-state change
+		// AnnounceTargetFor can produce — the normal emit below only
+		// advances the unpublished outbound-SeqNo watermark, so it
+		// must NOT mark dirty (see the side-effects note above).
 		t.dirty.Store(true)
 		return AnnounceEntry{}, "", false
 	}
-	t.dirty.Store(true)
 
 	return AnnounceEntry{
 		Identity: target,
@@ -604,6 +612,86 @@ func (t *Table) Snapshot() Snapshot {
 	snap.CapStats = t.store.CapStats()
 
 	return snap
+}
+
+// SnapshotIncremental is the copy-on-write variant of Snapshot used by
+// the single-threaded snapshot publisher (Service.rebuildRoutingSnapshot).
+// It reuses the previous projection for identities untouched since the
+// last call and deep-copies only dirty / bulk-invalidated buckets, which
+// removes the per-rebuild full-table route allocation that dominated
+// routing churn on otherwise-idle nodes. TotalEntries / ActiveEntries are
+// recomputed exactly every call, so time-driven expiry stays accurate.
+//
+// forceFull bypasses the reuse path and re-copies every bucket. The
+// publisher passes it on a periodic cadence to heal any route mutation
+// that set the coarse dirty flag but failed to mark its identity dirty
+// (the safety net for the broad mutation surface in route_store_*.go).
+// A full re-copy ALSO happens when a bulk mutation set snapFullDirty or on
+// the cold-start (no reuse cache); the second return value reports whether
+// THIS call performed a full re-copy (for any of those reasons) so the
+// publisher can timestamp its self-heal cadence off actual fulls rather
+// than only the ones it explicitly requested.
+//
+// NOT safe for concurrent callers: the reuse cache (snapRawCache) and the
+// consumed snap dirty-set assume a single publisher. Any other consumer
+// that needs an independent, always-complete copy must call Snapshot.
+//
+// Unlike Snapshot this takes t.mu in W mode because it consumes
+// (clears) the snap dirty-set and updates the reuse cache. The write lock
+// is held only for the projection build; the publisher runs at most once
+// per routingSnapshotMinInterval so the added writer contention is
+// negligible against the eliminated allocation.
+func (t *Table) SnapshotIncremental(forceFull bool) (Snapshot, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.clock()
+
+	full := forceFull || t.snapFullDirty || t.snapRawCache == nil
+	raw, totalEntries, activeEntries := t.store.SnapshotRoutesIncremental(
+		t.snapRawCache, t.snapDirtyIDs, full, now,
+	)
+	t.snapRawCache = raw
+	t.snapFullDirty = false
+	if len(t.snapDirtyIDs) > 0 {
+		// Drop the consumed set; a fresh map keeps memory bounded to the
+		// churn of the next interval rather than the high-water mark.
+		t.snapDirtyIDs = make(map[PeerIdentity]struct{})
+	}
+
+	// The published Routes map must not alias snapRawCache: the self-route
+	// injection below rewrites Routes[localOrigin], and that key must stay
+	// the raw (no self-route) slice in the cache for the next reuse. A
+	// shallow top-level copy keeps the per-identity slices shared
+	// (read-only, copy-on-write) while isolating the map structure.
+	routes := make(map[PeerIdentity][]RouteEntry, len(raw)+1)
+	for id, slice := range raw {
+		routes[id] = slice
+	}
+
+	snap := Snapshot{
+		Routes:        routes,
+		TakenAt:       now,
+		TotalEntries:  totalEntries,
+		ActiveEntries: activeEntries,
+	}
+
+	// Self-route injection, flap / health / cap capture — identical to
+	// Snapshot, same `now`, same critical section. append() on a fresh
+	// one-element literal allocates a new backing array, so the cached
+	// raw slice for localOrigin is never mutated in place.
+	if t.localOrigin != "" {
+		localEntry := t.localRouteEntry()
+		snap.Routes[t.localOrigin] = append(
+			[]RouteEntry{localEntry},
+			snap.Routes[t.localOrigin]...,
+		)
+	}
+	snap.FlapState = t.flap.snapshotLocked(now)
+	snap.Health = t.health.snapshotLocked()
+	snap.CapStats = t.store.CapStats()
+
+	return snap, full
 }
 
 // sortRoutesByCompositeScoreLocked sorts routes by Phase 2

@@ -467,11 +467,12 @@ func TestInvalidateTransitRoutesMarksDirtyOnlyOnRealInvalidation(t *testing.T) {
 // any writer event, so the dirty-flag publisher cannot observe it on
 // its own. TickTTL is the schedule that converts the wall-clock
 // transition into a writer event (clear holdDownUntil + dirty mark);
-// the refresher then republishes within one refresh tick.
+// the refresher then republishes within the structural publish bound.
 //
 // End-to-end visibility for the InHoldDown=true → false transition is
-// therefore TickTTL_interval (≈10 s in production) + one refresh
-// (≈500 ms), NOT a single refresh tick. This test fixes only the
+// therefore TickTTL_interval (≈10 s in production) + the structural
+// publish bound (routingSnapshotMinInterval floor + a refresh tick,
+// ~1–1.5 s) ≈ 11–11.5 s, NOT a single refresh tick. This test fixes only the
 // "after TickTTL observes expiry" half of that chain — without the
 // fix, even running TickTTL while withdrawTimes were still inside
 // flapWindow left InHoldDown=true and a stale HoldDownUntil cached

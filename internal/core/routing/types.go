@@ -522,8 +522,22 @@ type RouteTriple struct {
 // Snapshot is an immutable point-in-time view of the routing table.
 // Safe to read concurrently without locks. All fields are captured
 // under a single lock acquisition, so they represent a consistent state.
+//
+// READ-ONLY CONTRACT — consumers MUST treat every field (the Routes map,
+// its per-identity RouteEntry slices, FlapState, Health) as immutable: no
+// element writes, no in-place sort, no append that could alias-grow a
+// shared backing array. The publisher (Table.SnapshotIncremental) builds
+// snapshots copy-on-write: a route slice that did not change since the
+// previous publish is REUSED by reference, so the same backing array is
+// shared between every concurrent reader of multiple generations AND with
+// the publisher's internal reuse cache. A single in-place mutation would
+// therefore corrupt other live readers and poison later "clean" snapshots
+// that reuse the same array. Copy a slice/entry before modifying it.
 type Snapshot struct {
-	// Routes maps destination identity to all known routes for that identity.
+	// Routes maps destination identity to all known routes for that
+	// identity. The slices are shared copy-on-write across snapshot
+	// generations (see the read-only contract on Snapshot) — do not mutate
+	// them in place.
 	Routes map[PeerIdentity][]RouteEntry
 
 	// TakenAt is the timestamp when the snapshot was captured.
@@ -549,13 +563,15 @@ type Snapshot struct {
 	CapStats RouteCapStats
 
 	// Health is the deep-copied Phase 2 RouteHealthState slice
-	// captured under the same t.mu.RLock as Routes/FlapState/CapStats
-	// (PR 11.27 P2#1). RPC handlers that need to apply the live
-	// Lookup contract (Dead filter, CompositeScore ranking) can read
-	// this directly from the cached snapshot without taking
-	// t.mu.RLock per request — restoring the documented hot-read
-	// behaviour for fetchRouteLookup. Refresh latency matches the
-	// rest of the snapshot (≤ rebuildRoutingSnapshot interval).
+	// captured under the same lock as Routes/FlapState/CapStats — the
+	// publisher's SnapshotIncremental build holds t.mu.Lock (exclusive,
+	// since it consumes the snap dirty-set) for all of them in one
+	// critical section (PR 11.27 P2#1). RPC handlers that need to apply
+	// the live Lookup contract (Dead filter, CompositeScore ranking) can
+	// read this directly from the cached snapshot without taking t.mu at
+	// all per request — restoring the documented hot-read behaviour for
+	// fetchRouteLookup. Refresh latency matches the rest of the snapshot
+	// (≤ rebuildRoutingSnapshot interval).
 	//
 	// Returned as a value slice (not a map keyed by (Identity,
 	// Uplink)) because RouteHealthState already carries Identity
@@ -588,6 +604,12 @@ type Snapshot struct {
 // need the live ranking should call Table.Lookup directly;
 // BestRoute is the snapshot-cached convenience for "is there
 // SOMETHING usable here?".
+//
+// The returned *RouteEntry points INTO the snapshot's shared,
+// copy-on-write Routes slice (see the read-only contract on
+// Snapshot). Treat it as read-only — mutating through this pointer
+// would corrupt other readers and poison later reused snapshots.
+// Copy the value (`r := *snap.BestRoute(id)`) before modifying.
 func (s Snapshot) BestRoute(identity PeerIdentity) *RouteEntry {
 	routes, ok := s.Routes[identity]
 	if !ok {

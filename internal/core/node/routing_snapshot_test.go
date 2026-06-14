@@ -299,7 +299,8 @@ func TestRebuildRoutingSnapshotRacePostConsume(t *testing.T) {
 // chain is TickTTL clears holdDownUntil + marks dirty → refresh
 // republishes. End-to-end visibility for the cached InHoldDown=true →
 // false transition is therefore bounded by TickTTL_interval (≈10 s in
-// production) + one refresh (≈500 ms), not by a single refresh tick.
+// production) + the structural publish bound (routingSnapshotMinInterval
+// floor + a refresh tick, ~1–1.5 s) ≈ 11–11.5 s, not by a single refresh tick.
 // See docs/routing.md "Snapshot freshness" for the full contract.
 //
 // This test exercises the second half of that chain: it advances the
@@ -403,6 +404,76 @@ func TestServiceRoutingSnapshotReflectsHoldDownExpiry(t *testing.T) {
 	}
 	if refreshed.RecentWithdrawals == 0 {
 		t.Fatal("RecentWithdrawals dropped to zero too eagerly; withdrawTimes were still inside the window")
+	}
+}
+
+// TestRebuildRoutingSnapshotPeriodicFullSelfHeal verifies the wall-clock
+// self-heal cadence for the copy-on-write incremental projection AND that
+// it never wakes a clean table. The self-heal upgrades a rebuild that is
+// happening anyway (the table was dirty) to a full re-copy once
+// routingSnapshotFullInterval has elapsed since the last full one; a clean
+// idle table is always skipped (no wake), so the cure does not regress the
+// headless idle invariant honoured by the sibling hot-read snapshots.
+func TestRebuildRoutingSnapshotPeriodicFullSelfHeal(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.rebuildRoutingSnapshot() // cold publish — forced full (lastFull was 0)
+	first := svc.routingSnap.Load()
+	if first == nil {
+		t.Fatal("test setup: first rebuild did not publish")
+	}
+	if svc.lastRoutingFullSnapAtNanos.Load() == 0 {
+		t.Fatal("cold-start rebuild did not stamp the full-snapshot timestamp")
+	}
+
+	mutate := func(nextHop routing.PeerIdentity) {
+		t.Helper()
+		if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+			Identity: "alice", Origin: "bob", NextHop: nextHop,
+			Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+		}); err != nil {
+			t.Fatalf("UpdateRoute: %v", err)
+		}
+	}
+
+	// Key invariant (P2 fix): a CLEAN table is skipped even when the full
+	// interval has elapsed. Age the full timestamp, clear the throttle, but
+	// make no mutation — the publisher must NOT wake.
+	svc.lastRoutingFullSnapAtNanos.Store(time.Now().Add(-routingSnapshotFullInterval - time.Second).UnixNano())
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	if svc.routingSnap.Load() != first {
+		t.Fatal("clean table was woken by the self-heal interval; headless idle invariant regressed")
+	}
+
+	// A dirty rebuild while the interval has NOT elapsed: republishes, but
+	// stays incremental (lastFull unchanged).
+	svc.lastRoutingFullSnapAtNanos.Store(time.Now().UnixNano())
+	freshFull := svc.lastRoutingFullSnapAtNanos.Load()
+	mutate("charlie")
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	second := svc.routingSnap.Load()
+	if second == first {
+		t.Fatal("dirty rebuild did not republish")
+	}
+	if svc.lastRoutingFullSnapAtNanos.Load() != freshFull {
+		t.Fatal("incremental rebuild within the interval restamped the full timestamp")
+	}
+
+	// A dirty rebuild AFTER the interval elapsed: upgraded to a full
+	// re-copy, which restamps lastRoutingFullSnapAtNanos.
+	aged := time.Now().Add(-routingSnapshotFullInterval - time.Second).UnixNano()
+	svc.lastRoutingFullSnapAtNanos.Store(aged)
+	mutate("delta")
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	if svc.routingSnap.Load() == second {
+		t.Fatal("dirty rebuild after the interval did not republish")
+	}
+	if svc.lastRoutingFullSnapAtNanos.Load() <= aged {
+		t.Fatal("self-heal did not upgrade the dirty rebuild to a full re-copy (timestamp not restamped)")
 	}
 }
 
