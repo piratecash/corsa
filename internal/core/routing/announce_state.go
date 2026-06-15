@@ -62,9 +62,16 @@ type AnnouncePeerState struct {
 	// lastDeltaSendAt is the timestamp of the last successful delta send.
 	lastDeltaSendAt time.Time
 
-	// disconnectedAt records when the peer disconnected. Used for eviction
-	// timing. Zero means the peer is connected or state was just created.
-	disconnectedAt time.Time
+	// lastSeenLiveAt is the last time this peer appeared in the announce
+	// loop's authoritative live routing-capable set. It is seeded at
+	// creation and refreshed every cycle by ReconcileLiveSet. Eviction is
+	// driven solely by this watermark: a state that stops appearing in the
+	// live set is reclaimed after 2*flapWindow regardless of whether
+	// MarkDisconnected ever ran. This removes the old, implicit dependency
+	// where eviction needed a disconnectedAt stamp that only the
+	// session-close hook wrote — a skipped or asymmetric teardown could
+	// then retain per-peer state (including its lastSentSnapshot) forever.
+	lastSeenLiveAt time.Time
 
 	// capabilities is the peer's negotiated capability set as a derived
 	// view of the session AnnounceLoop selected as the per-cycle target.
@@ -467,7 +474,10 @@ func (r *AnnounceStateRegistry) GetOrCreate(peerID PeerIdentity) *AnnouncePeerSt
 	s := &AnnouncePeerState{
 		peerIdentity:    peerID,
 		needsFullResync: true,
-		// All timestamps zero — see type doc.
+		// Seed the liveness watermark so a freshly created state is not
+		// reclaimed by ReconcileLiveSet before the first cycle observes
+		// the peer in the live set.
+		lastSeenLiveAt: r.clock(),
 	}
 	r.peers[peerID] = s
 	return s
@@ -480,13 +490,19 @@ func (r *AnnounceStateRegistry) Get(peerID PeerIdentity) *AnnouncePeerState {
 	return r.peers[peerID]
 }
 
-// MarkDisconnected sets the peer to needsFullResync and records the
-// disconnect timestamp for eviction. Called on peer session close.
-// The rate limit timer is reset so that the first announce cycle after
-// reconnect is not throttled. The baseline-received flag is cleared
-// because a new session starts with no baseline regardless of whether
-// the peer identity was previously known — see
+// MarkDisconnected marks a peer's session boundary on session close: it
+// forces a full resync for the next session and resets the per-session
+// baseline gates and the forced-full rate-limit timer so the first announce
+// cycle after reconnect is not throttled. The baseline-received flag is
+// cleared because a new session starts with no baseline regardless of
+// whether the peer identity was previously known — see
 // AnnouncePeerState.hasReceivedBaseline for the session-boundary contract.
+//
+// Eviction is NOT tied to this call. ReconcileLiveSet reclaims state purely
+// from the live set, so a skipped MarkDisconnected (asymmetric teardown,
+// relay-gate drift) can no longer leak per-peer state — at worst the stale
+// baseline gates are re-cleared by the next MarkReconnected, which is
+// already idempotent for exactly this reason.
 func (r *AnnounceStateRegistry) MarkDisconnected(peerID PeerIdentity) {
 	r.mu.Lock()
 	s, ok := r.peers[peerID]
@@ -496,7 +512,6 @@ func (r *AnnounceStateRegistry) MarkDisconnected(peerID PeerIdentity) {
 		return
 	}
 
-	now := r.clock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.needsFullResync = true
@@ -504,7 +519,6 @@ func (r *AnnounceStateRegistry) MarkDisconnected(peerID PeerIdentity) {
 	// digest may suppress this full sync. Reset explicitly so a prior
 	// hard resync (request_resync) does not bleed across the boundary.
 	s.resyncIsHard = false
-	s.disconnectedAt = now
 	// Reset rate limit timer — reconnect resets forced-full rate limit.
 	s.lastFullSyncAttemptAt = time.Time{}
 	// A new session must re-deliver the baseline before any v2 routes_update
@@ -552,6 +566,7 @@ func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity, caps []Peer
 			peerIdentity:    peerID,
 			needsFullResync: true,
 			capabilities:    capsCopy,
+			lastSeenLiveAt:  r.clock(),
 		}
 		r.mu.Unlock()
 		return
@@ -566,7 +581,9 @@ func (r *AnnounceStateRegistry) MarkReconnected(peerID PeerIdentity, caps []Peer
 	// (request_resync that never got serviced) does not survive into the
 	// new session and block the digest optimisation.
 	s.resyncIsHard = false
-	s.disconnectedAt = time.Time{}
+	// Refresh the liveness watermark: the peer is live again, so it must
+	// not be a reconcile-eviction candidate.
+	s.lastSeenLiveAt = r.clock()
 	s.lastFullSyncAttemptAt = time.Time{}
 	s.capabilities = capsCopy
 	// Reset the baseline flag for the new session. MarkDisconnected already
@@ -607,25 +624,48 @@ func copyCapabilities(caps []PeerCapability) []PeerCapability {
 	return out
 }
 
-// EvictStale removes state for peers that have been disconnected longer
-// than 2 * flapWindow. Returns the count of evicted entries.
-func (r *AnnounceStateRegistry) EvictStale() int {
+// ReconcileLiveSet refreshes the liveness watermark for every peer in the
+// authoritative live set and evicts any state not observed in that set for
+// longer than 2*flapWindow. Returns the count of evicted entries.
+//
+// This is the registry's sole garbage collector. It depends ONLY on the
+// live routing-capable peer set the announce loop already computes each
+// cycle — never on a matching MarkDisconnected. A state created by any path
+// (the session-lifecycle MarkReconnected hook or a relay-gated receive-path
+// GetOrCreate) cannot outlive the peer's membership in the live set, so a
+// skipped or asymmetric teardown hook can no longer leak per-peer state
+// (including its lastSentSnapshot). The previous design keyed eviction on a
+// disconnectedAt stamp that only MarkDisconnected wrote, which silently
+// retained any state whose teardown hook never fired.
+//
+// Locking: r.mu is held for the whole sweep (map iteration + delete); each
+// entry's own s.mu guards the per-state watermark read/write. The nesting
+// is always r.mu → s.mu, never the reverse — see GetOrCreate / MarkReconnected.
+func (r *AnnounceStateRegistry) ReconcileLiveSet(live []PeerIdentity, now time.Time) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now := r.clock()
+	liveSet := make(map[PeerIdentity]struct{}, len(live))
+	for _, id := range live {
+		liveSet[id] = struct{}{}
+	}
+
 	evictAfter := 2 * r.flapWindow
 	evicted := 0
 
 	for id, s := range r.peers {
-		s.mu.Lock()
-		disc := s.disconnectedAt
-		s.mu.Unlock()
+		_, isLive := liveSet[id]
 
-		if disc.IsZero() {
+		s.mu.Lock()
+		if isLive {
+			s.lastSeenLiveAt = now
+			s.mu.Unlock()
 			continue
 		}
-		if now.Sub(disc) > evictAfter {
+		stale := now.Sub(s.lastSeenLiveAt) > evictAfter
+		s.mu.Unlock()
+
+		if stale {
 			delete(r.peers, id)
 			evicted++
 		}

@@ -1021,12 +1021,25 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	a.table.RefreshDirectPeers()
 
 	peers := a.peersFn()
+
+	// Reconcile per-peer announce state against the authoritative live set
+	// every cycle, BEFORE the empty-peers early return. Eviction is driven
+	// purely by membership in the live routing-capable set — not by a
+	// matching MarkDisconnected — so per-peer state (and its
+	// lastSentSnapshot) cannot leak if a teardown hook is ever skipped
+	// (full isolation, relay-gate drift, session-counter desync). Running
+	// before the early return guarantees an isolated node (zero live peers)
+	// still reclaims everything that has aged out.
+	reconcileNow := a.stateRegistry.Clock()
+	liveIDs := make([]PeerIdentity, len(peers))
+	for i := range peers {
+		liveIDs[i] = peers[i].Identity
+	}
+	a.stateRegistry.ReconcileLiveSet(liveIDs, reconcileNow)
+
 	if len(peers) == 0 {
 		return
 	}
-
-	// Periodic eviction of stale disconnected peer state.
-	a.stateRegistry.EvictStale()
 
 	var (
 		totalRaw               atomic.Int32

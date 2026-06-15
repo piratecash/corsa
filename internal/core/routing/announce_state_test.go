@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -62,8 +63,9 @@ func TestAnnounceStateRegistry_MarkDisconnected(t *testing.T) {
 
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
-	// Set up initial state: resync done, attempt recorded.
+	// Set up initial state: resync done, baseline received.
 	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, now.Add(-time.Minute))
+	s.MarkBaselineReceived()
 
 	r.MarkDisconnected(domaintest.ID("peer-A"))
 
@@ -75,23 +77,32 @@ func TestAnnounceStateRegistry_MarkDisconnected(t *testing.T) {
 		t.Fatal("expected rate limit timer reset after disconnect")
 	}
 
+	// MarkDisconnected no longer stamps an eviction timestamp — cleanup is
+	// driven by ReconcileLiveSet against the live set. It must still reset
+	// the per-session baseline gate.
 	s.mu.Lock()
-	disc := s.disconnectedAt
+	baseline := s.hasReceivedBaseline
 	s.mu.Unlock()
-	if disc.IsZero() {
-		t.Fatal("expected disconnectedAt to be set")
+	if baseline {
+		t.Fatal("expected hasReceivedBaseline cleared after disconnect")
 	}
 }
 
 func TestAnnounceStateRegistry_MarkReconnected(t *testing.T) {
-	r := NewAnnounceStateRegistry()
+	clk := time.Now()
+	r := NewAnnounceStateRegistry(
+		WithRegistryClock(func() time.Time { return clk }),
+	)
 
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Set up: mark as synced, then record an attempt.
-	now := time.Now()
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, now)
-	s.RecordFullSyncAttempt(now)
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, clk)
+	s.RecordFullSyncAttempt(clk)
+
+	// Advance the clock so the reconnect watermark refresh is observable.
+	clk = clk.Add(time.Minute)
+	reconnectAt := clk
 
 	r.MarkReconnected(domaintest.ID("peer-A"), nil)
 
@@ -103,11 +114,13 @@ func TestAnnounceStateRegistry_MarkReconnected(t *testing.T) {
 		t.Fatal("expected rate limit timer reset after reconnect")
 	}
 
+	// Reconnect refreshes the liveness watermark so the peer is not a
+	// reconcile-eviction candidate.
 	s.mu.Lock()
-	disc := s.disconnectedAt
+	seen := s.lastSeenLiveAt
 	s.mu.Unlock()
-	if !disc.IsZero() {
-		t.Fatal("expected disconnectedAt cleared after reconnect")
+	if !seen.Equal(reconnectAt) {
+		t.Fatalf("expected lastSeenLiveAt refreshed to reconnect time %v, got %v", reconnectAt, seen)
 	}
 }
 
@@ -248,7 +261,7 @@ func TestAnnounceStateRegistry_MarkReconnectedNilCapabilities(t *testing.T) {
 	}
 }
 
-func TestAnnounceStateRegistry_EvictStale(t *testing.T) {
+func TestAnnounceStateRegistry_ReconcileLiveSetEvictsAbsent(t *testing.T) {
 	now := time.Now()
 	r := NewAnnounceStateRegistry(
 		WithRegistryClock(func() time.Time { return now }),
@@ -256,41 +269,22 @@ func TestAnnounceStateRegistry_EvictStale(t *testing.T) {
 	)
 
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
-	// Simulate disconnect 3 minutes ago (180s > 2*60s evict threshold).
+	// Last seen live 3 minutes ago (180s > 2*60s evict threshold).
 	s.mu.Lock()
-	s.disconnectedAt = now.Add(-3 * time.Minute)
+	s.lastSeenLiveAt = now.Add(-3 * time.Minute)
 	s.mu.Unlock()
 
-	evicted := r.EvictStale()
+	// Empty live set: the peer is no longer routing-capable.
+	evicted := r.ReconcileLiveSet(nil, now)
 	if evicted != 1 {
 		t.Fatalf("expected 1 evicted, got %d", evicted)
 	}
-
 	if r.Get(domaintest.ID("peer-A")) != nil {
 		t.Fatal("expected peer-A to be evicted")
 	}
 }
 
-func TestAnnounceStateRegistry_EvictStaleKeepsConnected(t *testing.T) {
-	now := time.Now()
-	r := NewAnnounceStateRegistry(
-		WithRegistryClock(func() time.Time { return now }),
-		WithRegistryFlapWindow(60*time.Second),
-	)
-
-	// Connected peer (disconnectedAt = zero) should not be evicted.
-	r.GetOrCreate(domaintest.ID("peer-A"))
-
-	evicted := r.EvictStale()
-	if evicted != 0 {
-		t.Fatalf("expected 0 evicted, got %d", evicted)
-	}
-	if r.Get(domaintest.ID("peer-A")) == nil {
-		t.Fatal("connected peer should not be evicted")
-	}
-}
-
-func TestAnnounceStateRegistry_EvictStaleKeepsRecent(t *testing.T) {
+func TestAnnounceStateRegistry_ReconcileLiveSetKeepsAndRefreshesLive(t *testing.T) {
 	now := time.Now()
 	r := NewAnnounceStateRegistry(
 		WithRegistryClock(func() time.Time { return now }),
@@ -298,14 +292,82 @@ func TestAnnounceStateRegistry_EvictStaleKeepsRecent(t *testing.T) {
 	)
 
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
-	// Disconnect 30s ago (30s < 2*60s evict threshold).
+	// Even a peer whose watermark is already stale must survive — and be
+	// refreshed — as long as it is in the authoritative live set.
 	s.mu.Lock()
-	s.disconnectedAt = now.Add(-30 * time.Second)
+	s.lastSeenLiveAt = now.Add(-3 * time.Minute)
 	s.mu.Unlock()
 
-	evicted := r.EvictStale()
+	evicted := r.ReconcileLiveSet([]PeerIdentity{domaintest.ID("peer-A")}, now)
 	if evicted != 0 {
-		t.Fatalf("expected 0 evicted for recent disconnect, got %d", evicted)
+		t.Fatalf("expected 0 evicted for live peer, got %d", evicted)
+	}
+	if r.Get(domaintest.ID("peer-A")) == nil {
+		t.Fatal("live peer must not be evicted")
+	}
+	s.mu.Lock()
+	seen := s.lastSeenLiveAt
+	s.mu.Unlock()
+	if !seen.Equal(now) {
+		t.Fatalf("expected live peer watermark refreshed to now, got %v", seen)
+	}
+}
+
+func TestAnnounceStateRegistry_ReconcileLiveSetKeepsRecentlyAbsent(t *testing.T) {
+	now := time.Now()
+	r := NewAnnounceStateRegistry(
+		WithRegistryClock(func() time.Time { return now }),
+		WithRegistryFlapWindow(60*time.Second),
+	)
+
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
+	// Absent for 30s (< 2*60s) — inside the grace window, must survive so a
+	// quick reconnect can reuse the cached snapshot / digest.
+	s.mu.Lock()
+	s.lastSeenLiveAt = now.Add(-30 * time.Second)
+	s.mu.Unlock()
+
+	evicted := r.ReconcileLiveSet(nil, now)
+	if evicted != 0 {
+		t.Fatalf("expected 0 evicted for recently-absent peer, got %d", evicted)
+	}
+	if r.Get(domaintest.ID("peer-A")) == nil {
+		t.Fatal("recently-absent peer must not be evicted")
+	}
+}
+
+// TestAnnounceLoop_ReconcileEvictsOrphanWithoutMarkDisconnected is the
+// regression test for the residual leak: cleanup must NOT depend on a
+// matching MarkDisconnected. A state created purely via GetOrCreate (the
+// receive-path shape) and never marked disconnected must still be reclaimed
+// by the announce cycle once the peer drops out of the live set — even when
+// the node is fully isolated (zero live peers, empty-peers early return).
+func TestAnnounceLoop_ReconcileEvictsOrphanWithoutMarkDisconnected(t *testing.T) {
+	clk := time.Now()
+	registry := NewAnnounceStateRegistry(
+		WithRegistryClock(func() time.Time { return clk }),
+		WithRegistryFlapWindow(60*time.Second),
+	)
+
+	// Orphan: created via GetOrCreate, NO MarkDisconnected ever called.
+	registry.GetOrCreate(domaintest.ID("peer-A"))
+
+	// Advance past the 2*flapWindow eviction threshold.
+	clk = clk.Add(3 * time.Minute)
+
+	// Zero routing-capable peers this cycle — the empty-peers early-return
+	// path. Sender is never exercised on this path, so nil is safe.
+	loop := NewAnnounceLoop(
+		NewTable(),
+		nil,
+		func() []AnnounceTarget { return nil },
+		WithStateRegistry(registry),
+	)
+
+	loop.announceToAllPeers(context.Background())
+
+	if registry.Get(domaintest.ID("peer-A")) != nil {
+		t.Fatal("orphan state must be reclaimed by reconcile even without MarkDisconnected")
 	}
 }
 
