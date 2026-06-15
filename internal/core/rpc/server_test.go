@@ -716,10 +716,14 @@ func TestFrameEndpointChatlogDispatch(t *testing.T) {
 		t.Fatalf("create server: %v", err)
 	}
 
+	// peer_address must now be a real peer identity: the fetchChatlog command
+	// validates it at the boundary (400 on malformed/all-zero) before calling
+	// the gateway, so this dispatch test uses a well-formed 40-hex address.
+	const framePeerAddress = "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"
 	code, result := postJSON(t, server, "/rpc/v1/frame", map[string]interface{}{
 		"type":    "fetch_chatlog",
 		"topic":   "dm",
-		"address": "peer-addr-123",
+		"address": framePeerAddress,
 	})
 
 	expectStatusCode(t, code, 200)
@@ -732,8 +736,8 @@ func TestFrameEndpointChatlogDispatch(t *testing.T) {
 	}
 
 	// Verify normalizeFrameArgs mapped "address" → "peer_address".
-	if chatlogPeerAddress != "peer-addr-123" {
-		t.Errorf("expected peer_address='peer-addr-123', got %q", chatlogPeerAddress)
+	if chatlogPeerAddress != framePeerAddress {
+		t.Errorf("expected peer_address=%q, got %q", framePeerAddress, chatlogPeerAddress)
 	}
 }
 

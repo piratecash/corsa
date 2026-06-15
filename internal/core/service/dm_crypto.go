@@ -42,7 +42,7 @@ func NewDMCrypto(rpc *LocalRPCClient, chatlog *ChatlogGateway, id *identity.Iden
 // message in the active conversation without a round-trip through the
 // decrypt path.
 func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity, msg domain.OutgoingDM) (*DirectMessage, error) {
-	to = domain.PeerIdentity(strings.TrimSpace(string(to)))
+	to = domain.PeerIdentityFromWire(strings.TrimSpace(to.String()))
 	msg.Body = strings.TrimSpace(msg.Body)
 	msg.ReplyTo = domain.MessageID(strings.TrimSpace(string(msg.ReplyTo)))
 
@@ -58,7 +58,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		return nil, fmt.Errorf("control DM (command=%s) must be sent through SendControlMessage, not SendDirectMessage", msg.Command)
 	}
 
-	if to == "" || msg.Body == "" {
+	if to.IsZero() || msg.Body == "" {
 		return nil, fmt.Errorf("recipient and message are required")
 	}
 	if !msg.ReplyTo.IsValidOrEmpty() {
@@ -71,7 +71,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		}
 	}
 
-	contact, err := d.ensureRecipientContact(ctx, string(to))
+	contact, err := d.ensureRecipientContact(ctx, to.String())
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		Topic:      "dm",
 		ID:         string(messageID),
 		Address:    d.id.Address,
-		Recipient:  string(to),
+		Recipient:  to.String(),
 		Flag:       string(protocol.MessageFlagSenderDelete),
 		CreatedAt:  createdAt,
 		TTLSeconds: 0,
@@ -115,7 +115,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 
 	return &DirectMessage{
 		ID:            string(messageID),
-		Sender:        domain.PeerIdentity(d.id.Address),
+		Sender:        domain.PeerIdentityFromWire(d.id.Address),
 		Recipient:     to,
 		Body:          msg.Body, // plaintext — already known to us
 		ReplyTo:       msg.ReplyTo,
@@ -165,7 +165,7 @@ func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *Dire
 			if event.Sender == d.id.Address {
 				peerAddress = event.Recipient
 			}
-			if !store.HasEntryInConversation(domain.PeerIdentity(peerAddress), domain.MessageID(replyTo)) {
+			if !store.HasEntryInConversation(domain.PeerIdentityFromWire(peerAddress), domain.MessageID(replyTo)) {
 				replyTo = ""
 			}
 		}
@@ -173,8 +173,8 @@ func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *Dire
 
 	return &DirectMessage{
 		ID:            event.MessageID,
-		Sender:        domain.PeerIdentity(event.Sender),
-		Recipient:     domain.PeerIdentity(event.Recipient),
+		Sender:        domain.PeerIdentityFromWire(event.Sender),
+		Recipient:     domain.PeerIdentityFromWire(event.Recipient),
 		Body:          msg.Body,
 		ReplyTo:       replyTo,
 		Command:       domain.DMCommand(msg.Command),
@@ -287,8 +287,8 @@ func (d *DMCrypto) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresse
 // when the user switches conversation rather than keeping every thread in
 // memory.
 func (d *DMCrypto) FetchConversation(ctx context.Context, peerAddress domain.PeerIdentity) ([]DirectMessage, error) {
-	peerAddress = domain.PeerIdentity(strings.TrimSpace(string(peerAddress)))
-	if peerAddress == "" {
+	peerAddress = domain.PeerIdentityFromWire(strings.TrimSpace(peerAddress.String()))
+	if peerAddress.IsZero() {
 		return nil, fmt.Errorf("peer address is required")
 	}
 	store := d.chatlog.Store()
@@ -382,9 +382,9 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 
 	out := make([]ConversationPreview, 0, len(lastEntries))
 	for peerAddr, entry := range lastEntries {
-		peer := domain.PeerIdentity(peerAddr)
+		peer := domain.PeerIdentityFromWire(peerAddr)
 		senderRaw := entry.Sender
-		sender := domain.PeerIdentity(senderRaw)
+		sender := domain.PeerIdentityFromWire(senderRaw)
 
 		var senderPubKey string
 		if senderRaw == d.id.Address {
@@ -434,8 +434,8 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 // FetchSinglePreview loads and decrypts the last message for a single
 // conversation. Returns (nil, nil) when the conversation is empty.
 func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.PeerIdentity) (*ConversationPreview, error) {
-	peerAddress = domain.PeerIdentity(strings.TrimSpace(string(peerAddress)))
-	if peerAddress == "" {
+	peerAddress = domain.PeerIdentityFromWire(strings.TrimSpace(peerAddress.String()))
+	if peerAddress.IsZero() {
 		return nil, fmt.Errorf("peer address is required")
 	}
 	if d.chatlog.Store() == nil {
@@ -451,7 +451,7 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 	}
 
 	senderRaw := entry.Sender
-	sender := domain.PeerIdentity(senderRaw)
+	sender := domain.PeerIdentityFromWire(senderRaw)
 	contacts, err := d.fetchContactsForDecrypt(ctx, []string{senderRaw})
 	if err != nil {
 		return nil, err
@@ -498,8 +498,8 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 // sent by counterparty. Silently skips messages that are already at seen
 // status or originated from the local identity.
 func (d *DMCrypto) MarkConversationSeen(ctx context.Context, counterparty domain.PeerIdentity, messages []DirectMessage) error {
-	counterparty = domain.PeerIdentity(strings.TrimSpace(string(counterparty)))
-	if counterparty == "" {
+	counterparty = domain.PeerIdentityFromWire(strings.TrimSpace(counterparty.String()))
+	if counterparty.IsZero() {
 		return nil
 	}
 
@@ -507,7 +507,7 @@ func (d *DMCrypto) MarkConversationSeen(ctx context.Context, counterparty domain
 	seenAt := time.Now().UTC().Format(time.RFC3339)
 
 	for _, message := range messages {
-		if message.Sender != counterparty || message.Recipient != domain.PeerIdentity(d.id.Address) {
+		if message.Sender != counterparty || message.Recipient != domain.PeerIdentityFromWire(d.id.Address) {
 			continue
 		}
 		if message.ReceiptStatus == protocol.ReceiptStatusSeen {
@@ -518,7 +518,7 @@ func (d *DMCrypto) MarkConversationSeen(ctx context.Context, counterparty domain
 			Type:        "send_delivery_receipt",
 			ID:          message.ID,
 			Address:     d.id.Address,
-			Recipient:   string(counterparty),
+			Recipient:   counterparty.String(),
 			Status:      protocol.ReceiptStatusSeen,
 			DeliveredAt: seenAt,
 		})
@@ -648,18 +648,18 @@ func (d *DMCrypto) importIncomingDMHeaderContacts(trustedContacts, networkContac
 	toImport := make(map[string]protocol.ContactFrame)
 
 	for _, h := range headers {
-		if h.Recipient != domain.PeerIdentity(d.id.Address) || h.Sender == domain.PeerIdentity(d.id.Address) {
+		if h.Recipient != domain.PeerIdentityFromWire(d.id.Address) || h.Sender == domain.PeerIdentityFromWire(d.id.Address) {
 			continue
 		}
-		if _, ok := trustedContacts[string(h.Sender)]; ok {
+		if _, ok := trustedContacts[h.Sender.String()]; ok {
 			continue
 		}
-		contact, ok := networkContacts[string(h.Sender)]
+		contact, ok := networkContacts[h.Sender.String()]
 		if !ok || contact.BoxKey == "" || contact.PubKey == "" || contact.BoxSignature == "" {
 			continue
 		}
-		toImport[string(h.Sender)] = protocol.ContactFrame{
-			Address: string(h.Sender),
+		toImport[h.Sender.String()] = protocol.ContactFrame{
+			Address: h.Sender.String(),
 			PubKey:  contact.PubKey,
 			BoxKey:  contact.BoxKey,
 			BoxSig:  contact.BoxSignature,

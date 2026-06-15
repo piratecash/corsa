@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -127,7 +128,7 @@ func TestFireAndForgetBufferFullDoesNotFeedDisconnectHistory(t *testing.T) {
 	defer func() { _ = remote.Close() }()
 
 	peerAddr := domain.PeerAddress("10.0.0.53:64646")
-	peerID := domain.PeerIdentity("ff-drop-peer-identity")
+	peerID := domaintest.ID("ff-drop-peer-identity")
 	session := &peerSession{
 		address:      peerAddr,
 		peerIdentity: peerID,

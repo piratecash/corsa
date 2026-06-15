@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/rpc"
 )
@@ -68,8 +69,8 @@ func TestFetchRouteReputation_EmitsCounterFields(t *testing.T) {
 	provider := &stubRoutingProvider{
 		reputation: []routing.RouteReputationState{
 			{
-				Identity:            "id-target",
-				Uplink:              "id-uplink",
+				Identity:            domaintest.ID("id-target"),
+				Uplink:              domaintest.ID("id-uplink"),
 				HopAckAttempts:      42,
 				HopAckSuccesses:     37,
 				ReliabilityScore:    0.88,
@@ -96,10 +97,10 @@ func TestFetchRouteReputation_EmitsCounterFields(t *testing.T) {
 		t.Fatalf("count = %d, want 1", payload.Count)
 	}
 	state := payload.States[0]
-	if state["identity"] != "id-target" {
+	if state["identity"] != domaintest.ID("id-target").String() {
 		t.Fatalf("identity = %v, want id-target", state["identity"])
 	}
-	if state["uplink"] != "id-uplink" {
+	if state["uplink"] != domaintest.ID("id-uplink").String() {
 		t.Fatalf("uplink = %v, want id-uplink", state["uplink"])
 	}
 	if got, _ := state["hop_ack_attempts"].(float64); got != 42 {
@@ -129,8 +130,8 @@ func TestFetchRouteReputation_OmitsCooldownUntilWhenZero(t *testing.T) {
 	provider := &stubRoutingProvider{
 		reputation: []routing.RouteReputationState{
 			{
-				Identity:        "id-target",
-				Uplink:          "id-uplink",
+				Identity:        domaintest.ID("id-target"),
+				Uplink:          domaintest.ID("id-uplink"),
 				HopAckAttempts:  5,
 				HopAckSuccesses: 5,
 			},
@@ -156,10 +157,10 @@ func TestFetchRouteReputation_OmitsCooldownUntilWhenZero(t *testing.T) {
 func TestFetchRouteReputation_SortStableByIdentityThenUplink(t *testing.T) {
 	provider := &stubRoutingProvider{
 		reputation: []routing.RouteReputationState{
-			{Identity: "id-z", Uplink: "id-b"},
-			{Identity: "id-a", Uplink: "id-c"},
-			{Identity: "id-a", Uplink: "id-b"},
-			{Identity: "id-m", Uplink: "id-a"},
+			{Identity: domaintest.ID("id-z"), Uplink: domaintest.ID("id-b")},
+			{Identity: domaintest.ID("id-a"), Uplink: domaintest.ID("id-c")},
+			{Identity: domaintest.ID("id-a"), Uplink: domaintest.ID("id-b")},
+			{Identity: domaintest.ID("id-m"), Uplink: domaintest.ID("id-a")},
 		},
 	}
 	table := rpc.NewCommandTable()
@@ -176,10 +177,10 @@ func TestFetchRouteReputation_SortStableByIdentityThenUplink(t *testing.T) {
 		t.Fatalf("unmarshal: %v (body=%s)", err, resp.Data)
 	}
 	want := []struct{ Identity, Uplink string }{
-		{"id-a", "id-b"},
-		{"id-a", "id-c"},
-		{"id-m", "id-a"},
-		{"id-z", "id-b"},
+		{domaintest.ID("id-a").String(), domaintest.ID("id-b").String()},
+		{domaintest.ID("id-a").String(), domaintest.ID("id-c").String()},
+		{domaintest.ID("id-m").String(), domaintest.ID("id-a").String()},
+		{domaintest.ID("id-z").String(), domaintest.ID("id-b").String()},
 	}
 	if len(payload.States) != len(want) {
 		t.Fatalf("len(states) = %d, want %d", len(payload.States), len(want))
@@ -203,7 +204,7 @@ func TestFetchRouteReputation_SortStableByIdentityThenUplink(t *testing.T) {
 func TestFetchRouteReputation_RPCDoesNotMutateProvider(t *testing.T) {
 	provider := &stubRoutingProvider{
 		reputation: []routing.RouteReputationState{
-			{Identity: "id-target", Uplink: "id-uplink", HopAckAttempts: 10},
+			{Identity: domaintest.ID("id-target"), Uplink: domaintest.ID("id-uplink"), HopAckAttempts: 10},
 		},
 	}
 	before := provider.reputation[0]

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ func TestCM_DialPacer_LimitsSpawnRate(t *testing.T) {
 	dialTimes := make(chan time.Time, peers)
 	b.Cfg.DialFn = func(ctx context.Context, a []domain.PeerAddress) (DialResult, error) {
 		dialTimes <- time.Now()
-		session := fakePeerSession(a[0], "id-"+domain.PeerIdentity(a[0]))
+		session := fakePeerSession(a[0], domaintest.ID("id-"+string(a[0])))
 		return DialResult{Session: session, ConnectedAddress: a[0]}, nil
 	}
 
@@ -111,7 +112,7 @@ func TestCM_DialPacer_ManualBypasses(t *testing.T) {
 	var manualDials int32
 	b.Cfg.DialFn = func(_ context.Context, a []domain.PeerAddress) (DialResult, error) {
 		atomic.AddInt32(&manualDials, 1)
-		session := fakePeerSession(a[0], "id-"+domain.PeerIdentity(a[0]))
+		session := fakePeerSession(a[0], domaintest.ID("id-"+string(a[0])))
 		return DialResult{Session: session, ConnectedAddress: a[0]}, nil
 	}
 
@@ -159,7 +160,7 @@ func TestCM_DialPacer_BurstAllowsParallelStart(t *testing.T) {
 	dialTimes := make(chan time.Time, burst)
 	b.Cfg.DialFn = func(_ context.Context, a []domain.PeerAddress) (DialResult, error) {
 		dialTimes <- time.Now()
-		session := fakePeerSession(a[0], "id-"+domain.PeerIdentity(a[0]))
+		session := fakePeerSession(a[0], domaintest.ID("id-"+string(a[0])))
 		return DialResult{Session: session, ConnectedAddress: a[0]}, nil
 	}
 
@@ -209,7 +210,7 @@ func TestCM_DialPacer_NilDisabled(t *testing.T) {
 	var dialCount int32
 	b.Cfg.DialFn = func(_ context.Context, a []domain.PeerAddress) (DialResult, error) {
 		atomic.AddInt32(&dialCount, 1)
-		session := fakePeerSession(a[0], "id-"+domain.PeerIdentity(a[0]))
+		session := fakePeerSession(a[0], domaintest.ID("id-"+string(a[0])))
 		return DialResult{Session: session, ConnectedAddress: a[0]}, nil
 	}
 

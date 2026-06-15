@@ -40,7 +40,7 @@ import (
 func (s *Service) inboundPeerIdentity(id domain.ConnID) domain.PeerIdentity {
 	pc := s.netCoreForID(id)
 	if pc == nil {
-		return ""
+		return domain.PeerIdentity{}
 	}
 	return pc.Identity()
 }
@@ -68,15 +68,15 @@ func (s *Service) inboundPeerIdentity(id domain.ConnID) domain.PeerIdentity {
 // routing table — AddDirectPeer is idempotent at the model level, but
 // the session-count gate here is the primary defense against churn.
 func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		return
 	}
 
 	hasRelayCap := sessionHasCap(caps, domain.CapMeshRelayV1)
 
-	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_wait").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
 	s.peerMu.Lock()
-	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_held").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
 	s.identitySessions[peerIdentity]++
 
 	if hasRelayCap {
@@ -84,11 +84,11 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	}
 	firstRelay := s.identityRelaySessions[peerIdentity] == 1
 	s.peerMu.Unlock()
-	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_released").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
 
 	if !hasRelayCap {
 		log.Debug().
-			Str("peer", string(peerIdentity)).
+			Str("peer", peerIdentity.String()).
 			Msg("routing_peer_no_relay_cap_skip_direct_route")
 		return
 	}
@@ -110,7 +110,7 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 		// lifecycle-hook variant can match it without re-implementing the
 		// same selection rule routingCapablePeers uses.
 		log.Debug().
-			Str("peer", string(peerIdentity)).
+			Str("peer", peerIdentity.String()).
 			Msg("routing_additional_session_no_table_update")
 		return
 	}
@@ -143,7 +143,7 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 		// fixtures may run without a routing table.
 		if s.routingTable != nil && s.routingTable.ClearDirectPairCooldown(peerIdentity) {
 			log.Info().
-				Str("peer", string(peerIdentity)).
+				Str("peer", peerIdentity.String()).
 				Msg("routing_direct_pair_cooldown_cleared_on_grace_reconnect")
 		}
 		return
@@ -151,12 +151,12 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 
 	result, err := s.routingTable.AddDirectPeer(peerIdentity)
 	if err != nil {
-		log.Error().Err(err).Str("peer", string(peerIdentity)).Msg("routing_add_direct_peer_failed")
+		log.Error().Err(err).Str("peer", peerIdentity.String()).Msg("routing_add_direct_peer_failed")
 		return
 	}
 
 	log.Info().
-		Str("peer", string(peerIdentity)).
+		Str("peer", peerIdentity.String()).
 		Uint64("seq", result.Entry.SeqNo).
 		Bool("penalized", result.Penalized).
 		Msg("routing_direct_peer_added")
@@ -177,7 +177,7 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	// giving the link time to stabilize.
 	if result.Penalized {
 		log.Warn().
-			Str("peer", string(peerIdentity)).
+			Str("peer", peerIdentity.String()).
 			Msg("routing_peer_in_holddown_skipping_announce")
 		return
 	}
@@ -251,19 +251,19 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 // quarantine accounting; every other close-path effect is identical
 // for both causes.
 func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity, caps []domain.Capability, cause sessionCloseCause) {
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		return
 	}
 
 	hadRelayCap := sessionHasCap(caps, domain.CapMeshRelayV1)
 
-	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_wait").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_wait").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
 	s.peerMu.Lock()
-	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_held").Str("peer_identity", string(peerIdentity)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_held").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
 	count := s.identitySessions[peerIdentity]
 	if count <= 0 {
 		s.peerMu.Unlock()
-		log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Str("reason", "no_session").Msg("peer_mu_writer")
+		log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", peerIdentity.String()).Str("reason", "no_session").Msg("peer_mu_writer")
 		return
 	}
 	s.identitySessions[peerIdentity]--
@@ -297,7 +297,7 @@ func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity,
 		s.maybeArmRouteQuarantineOnCloseLocked(peerIdentity, time.Now())
 	}
 	s.peerMu.Unlock()
-	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", string(peerIdentity)).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("peer_mu_writer")
+	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", peerIdentity.String()).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("peer_mu_writer")
 
 	// Phase 3 PR 12.5 — record the per-peer digest snapshot BEFORE
 	// any storage-mutating cleanup below (RemoveDirectPeer /
@@ -329,7 +329,7 @@ func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity,
 			invalidated, exposed := s.routingTable.InvalidateTransitRoutes(peerIdentity)
 			if invalidated > 0 {
 				log.Info().
-					Str("peer", string(peerIdentity)).
+					Str("peer", peerIdentity.String()).
 					Int("transit_invalidated", invalidated).
 					Msg("routing_transit_routes_invalidated_on_disconnect")
 
@@ -347,7 +347,7 @@ func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity,
 			s.triggerDrainForExposed(exposed)
 		} else {
 			log.Debug().
-				Str("peer", string(peerIdentity)).
+				Str("peer", peerIdentity.String()).
 				Int("remaining", count-1).
 				Msg("routing_session_closed_others_remain")
 		}

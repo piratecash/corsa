@@ -23,6 +23,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
@@ -1590,7 +1591,7 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 	svc.health[domain.PeerAddress("client:1")] = &peerHealth{Address: domain.PeerAddress("client:1"), Connected: true, State: peerStateHealthy, LastUsefulReceiveAt: now}
 	svc.peerTypes[domain.PeerAddress("full:1")] = domain.NodeTypeFull
 	svc.peerTypes[domain.PeerAddress("client:1")] = domain.NodeTypeClient
-	svc.peerIDs[domain.PeerAddress("client:1")] = domain.PeerIdentity("client-id")
+	svc.peerIDs[domain.PeerAddress("client:1")] = domaintest.ID("client-id")
 
 	globalTargets := svc.routingTargetsForMessage(protocol.Envelope{
 		Topic:     "global",
@@ -1604,7 +1605,7 @@ func TestRoutingTargetsSkipClientRelayUnlessRecipientMatches(t *testing.T) {
 	dmTargets := svc.routingTargetsForMessage(protocol.Envelope{
 		Topic:     "dm",
 		Sender:    "sender",
-		Recipient: "client-id",
+		Recipient: domaintest.ID("client-id").String(),
 	})
 	if len(dmTargets) != 2 {
 		t.Fatalf("direct message should allow relay and direct recipient session: %#v", dmTargets)
@@ -1714,7 +1715,7 @@ func TestDirectedMessageDeliveredToRecipientInbox(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(nodeB.Address()),
+			Address:      domain.PeerIdentityFromWire(nodeB.Address()),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "secret-for-b"},
@@ -1827,7 +1828,7 @@ func TestFullNodePushRoutesDirectMessageToClientNode(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(nodeB.Address()),
+			Address:      domain.PeerIdentityFromWire(nodeB.Address()),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "push-route-secret"},
@@ -1938,7 +1939,7 @@ func TestNodeRejectsInvalidDirectMessageSignature(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(nodeB.Address()),
+			Address:      domain.PeerIdentityFromWire(nodeB.Address()),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "tampered"},
@@ -2024,7 +2025,7 @@ func TestDirectMessageAllowsHistoricalTimestampWithoutTTL(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		svc.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "late-but-valid"},
@@ -2059,7 +2060,7 @@ func TestDirectMessageRejectsExpiredTTL(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		svc.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "already-expired"},
@@ -2349,7 +2350,7 @@ func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		nodeA.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(idB.Address),
+			Address:      domain.PeerIdentityFromWire(idB.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(idB.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "retry-route-secret"},
@@ -2402,7 +2403,7 @@ func TestClientReceivesBacklogInboxWhenPeerSessionSubscribes(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		fullNode.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(idClient.Address),
+			Address:      domain.PeerIdentityFromWire(idClient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(idClient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "backlog-secret"},
@@ -2521,7 +2522,7 @@ func TestClientSenderDeliversStoredDirectMessageThroughFullNodeWhenRecipientAppe
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderNode.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(idRecipient.Address),
+			Address:      domain.PeerIdentityFromWire(idRecipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "sender-client-backlog-secret"},
@@ -2645,7 +2646,7 @@ func TestRelayMessageDoesNotStallGossipDelivery(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderNode.identity,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(idRecipient.Address),
+			Address:      domain.PeerIdentityFromWire(idRecipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(idRecipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "relay-stall-test-secret"},
@@ -2830,7 +2831,7 @@ func TestRecipientNodeDoesNotRouteMessageAddressedToSelf(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "for-myself-no-reroute"},
@@ -3421,8 +3422,8 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 	})
 
 	// Add peers and mark one as connected.
-	svc1.addPeerAddress("10.0.0.5:64646", "full", "")
-	svc1.addPeerAddress("10.0.0.6:64646", "full", "")
+	svc1.addPeerAddress("10.0.0.5:64646", "full", domain.PeerIdentity{})
+	svc1.addPeerAddress("10.0.0.6:64646", "full", domain.PeerIdentity{})
 	svc1.markPeerConnected("10.0.0.5:64646", "outbound")
 	svc1.markPeerDisconnected("10.0.0.6:64646", fmt.Errorf("refused"))
 
@@ -3684,9 +3685,9 @@ func TestPeerDialCandidatesSortedByScore(t *testing.T) {
 	defer stop()
 
 	// Add three peers with different scores.
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
-	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
-	svc.addPeerAddress("10.0.0.3:64646", "full", "peer-3")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
+	svc.addPeerAddress("10.0.0.2:64646", "full", domaintest.ID("peer-2"))
+	svc.addPeerAddress("10.0.0.3:64646", "full", domaintest.ID("peer-3"))
 
 	// Simulate scoring: peer-2 is best, peer-3 is worst.
 	svc.markPeerConnected("10.0.0.2:64646", "outbound") // +10
@@ -3725,8 +3726,8 @@ func TestPeerDialCandidatesSkipsCooldown(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
-	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
+	svc.addPeerAddress("10.0.0.2:64646", "full", domaintest.ID("peer-2"))
 
 	// Simulate multiple failures for peer-1 (recently disconnected).
 	for i := 0; i < 3; i++ {
@@ -3766,7 +3767,7 @@ func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
 
 	// One failure: no cooldown (first failure is exempt), but we still
 	// backdate to verify the expiry path for future failures.
@@ -3804,8 +3805,8 @@ func TestPeerDialCandidatesSkipsBannedPeer(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
-	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
+	svc.addPeerAddress("10.0.0.2:64646", "full", domaintest.ID("peer-2"))
 
 	// Ban peer-1 for 24 hours (incompatible protocol).
 	svc.peerMu.Lock()
@@ -3843,7 +3844,7 @@ func TestPeerDialCandidatesBanExpires(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
 
 	// Set an expired ban (1 minute ago).
 	svc.peerMu.Lock()
@@ -3878,7 +3879,7 @@ func TestPromotePeerAddressDoesNotClearBannedUntil(t *testing.T) {
 	defer stop()
 
 	peer := domain.PeerAddress("10.0.0.99:64646")
-	svc.addPeerAddress(peer, "full", "peer-99")
+	svc.addPeerAddress(peer, "full", domaintest.ID("peer-99"))
 
 	// Set an active ban (23 hours from now).
 	svc.peerMu.Lock()
@@ -3931,7 +3932,7 @@ func TestPromotePeerAddressDoesNotClearIPWideBanForAlternatePort(t *testing.T) {
 
 	primary := domain.PeerAddress("10.0.0.99:64646")
 	alternate := domain.PeerAddress("10.0.0.99:7777")
-	svc.addPeerAddress(primary, "full", "peer-99")
+	svc.addPeerAddress(primary, "full", domaintest.ID("peer-99"))
 	// Simulate 4 incompatible-version attempts to trigger the timed ban.
 	for i := 0; i < 4; i++ {
 		svc.penalizeOldProtocolPeer(primary, 0, 0)
@@ -3971,8 +3972,8 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
-	svc.addPeerAddress("10.0.0.2:64646", "full", "peer-2")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
+	svc.addPeerAddress("10.0.0.2:64646", "full", domaintest.ID("peer-2"))
 
 	// Make peer-1 terrible: low score, last seen >24h ago.
 	svc.peerMu.Lock()
@@ -4070,7 +4071,7 @@ func TestEvictStalePeersRespectsInterval(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
 
 	svc.peerMu.Lock()
 	svc.health[domain.PeerAddress("10.0.0.1:64646")] = &peerHealth{
@@ -4114,7 +4115,7 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
 
 	addedAt := time.Now().Add(-48 * time.Hour)
 	svc.peerMu.Lock()
@@ -4165,8 +4166,8 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 	lockedAddr := domain.PeerAddress("10.0.0.1:64646")
 	normalAddr := domain.PeerAddress("10.0.0.2:64646")
 
-	svc.addPeerAddress(lockedAddr, "full", "peer-locked")
-	svc.addPeerAddress(normalAddr, "full", "peer-normal")
+	svc.addPeerAddress(lockedAddr, "full", domaintest.ID("peer-locked"))
+	svc.addPeerAddress(normalAddr, "full", domaintest.ID("peer-normal"))
 
 	now := time.Now()
 	staleTime := now.Add(-48 * time.Hour)
@@ -4258,7 +4259,7 @@ func TestEvictOrphanedHealthEntries(t *testing.T) {
 	defer stop()
 
 	// Add one real peer (in s.peers with a health entry) so we can verify it survives.
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-real")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-real"))
 
 	staleTime := time.Now().Add(-20 * time.Minute) // well past orphanedHealthEvictWindow
 
@@ -4285,7 +4286,7 @@ func TestEvictOrphanedHealthEntries(t *testing.T) {
 		LastConnectedAt:    staleTime.Add(-time.Minute),
 		LastDisconnectedAt: staleTime,
 	}
-	svc.peerIDs[orphanAddr] = "orphan-identity"
+	svc.peerIDs[orphanAddr] = domaintest.ID("orphan-identity")
 	svc.peerTypes[orphanAddr] = "full"
 
 	// Recent orphan: not in s.peers, but disconnected only 1 minute ago — should survive.
@@ -4416,7 +4417,7 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 	defer stop()
 
 	// Add peer with non-default port — will generate fallback :64646 variant.
-	svc.addPeerAddress("10.0.0.1:64647", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.1:64647", "full", domaintest.ID("peer-1"))
 
 	// Simulate what ensurePeerSessions does: register dialOrigin for fallback.
 	svc.peerMu.Lock()
@@ -4471,7 +4472,7 @@ func TestFallbackCooldownAppliesToAllVariants(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.1:64647", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.1:64647", "full", domaintest.ID("peer-1"))
 
 	// Simulate failures on the primary address.
 	for i := 0; i < 5; i++ {
@@ -4501,7 +4502,7 @@ func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
 	defer stop()
 
 	// Add a client peer with a non-default port.
-	svc.addPeerAddress("10.0.0.1:64647", "client", "client-identity-abc")
+	svc.addPeerAddress("10.0.0.1:64647", "client", domaintest.ID("client-identity-abc"))
 
 	// Simulate a fallback session on :64646.
 	fallbackAddr := domain.PeerAddress("10.0.0.1:64646")
@@ -4521,7 +4522,9 @@ func TestFallbackSessionRoutingUsePrimaryMetadata(t *testing.T) {
 	}
 
 	// routingTargetsForRecipient with the correct peerID should include it.
-	targets = svc.routingTargetsForRecipient("client-identity-abc")
+	// The recipient is matched against peerID.String() (canonical hex), so
+	// the query must use the same hex rendering of the seeded identity.
+	targets = svc.routingTargetsForRecipient(domaintest.ID("client-identity-abc").String())
 	found := false
 	for _, target := range targets {
 		if target == fallbackAddr {
@@ -4548,7 +4551,7 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 	defer stop()
 
 	// Add a peer at runtime (simulating peer exchange discovery).
-	svc.addPeerAddress("10.0.0.1:64646", "full", "peer-1")
+	svc.addPeerAddress("10.0.0.1:64646", "full", domaintest.ID("peer-1"))
 
 	// Backdate the AddedAt so it looks old.
 	svc.peerMu.Lock()
@@ -4678,8 +4681,8 @@ func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
 	defer stop()
 
 	// Add some non-bootstrap peers (they are appended after bootstrap in iteration).
-	svc.addPeerAddress("10.0.0.4:64646", "full", "peer-4")
-	svc.addPeerAddress("10.0.0.5:64646", "full", "peer-5")
+	svc.addPeerAddress("10.0.0.4:64646", "full", domaintest.ID("peer-4"))
+	svc.addPeerAddress("10.0.0.5:64646", "full", domaintest.ID("peer-5"))
 
 	// All peers have zero score (default), so the sort should preserve
 	// insertion order: bootstrap peers first, then discovered peers.
@@ -4917,8 +4920,8 @@ func TestRecordObservedAddressIgnoresEmpty(t *testing.T) {
 		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
-	svc.recordObservedAddress("peer-fingerprint-a", "")
-	svc.recordObservedAddress("", "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "")
+	svc.recordObservedAddress(domain.PeerIdentity{}, "203.0.113.50")
 	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
 	svc.peerMu.RUnlock()
@@ -4934,9 +4937,9 @@ func TestRecordObservedAddressIgnoresPrivate(t *testing.T) {
 		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
-	svc.recordObservedAddress("peer-fingerprint-a", "10.0.0.1")
-	svc.recordObservedAddress("peer-fingerprint-b", "192.168.1.5")
-	svc.recordObservedAddress("peer-fingerprint-c", "127.0.0.1")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "10.0.0.1")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-b"), "192.168.1.5")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-c"), "127.0.0.1")
 	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
 	svc.peerMu.RUnlock()
@@ -4952,9 +4955,9 @@ func TestRecordObservedAddressStoresPublicIP(t *testing.T) {
 		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
-	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "203.0.113.50")
 	svc.peerMu.RLock()
-	got := svc.observedAddrs["peer-fingerprint-a"]
+	got := svc.observedAddrs[domaintest.ID("peer-fingerprint-a")]
 	svc.peerMu.RUnlock()
 	if got != "203.0.113.50" {
 		t.Fatalf("expected observed IP 203.0.113.50, got %q", got)
@@ -4969,7 +4972,7 @@ func TestRecordObservedAddressConsensusRequiresTwoPeers(t *testing.T) {
 	}, id, nil)
 
 	// Single observation — no consensus yet.
-	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "203.0.113.50")
 	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
 	svc.peerMu.RUnlock()
@@ -4978,7 +4981,7 @@ func TestRecordObservedAddressConsensusRequiresTwoPeers(t *testing.T) {
 	}
 
 	// Second peer (different identity) agrees — consensus reached.
-	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-b"), "203.0.113.50")
 	svc.peerMu.RLock()
 	count = len(svc.observedAddrs)
 	svc.peerMu.RUnlock()
@@ -4995,8 +4998,8 @@ func TestRecordObservedAddressSameNodeOneVote(t *testing.T) {
 	}, id, nil)
 
 	// Same peer identity reached via two different addresses — still one vote.
-	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
-	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "203.0.113.50")
 	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
 	svc.peerMu.RUnlock()
@@ -5012,8 +5015,8 @@ func TestRecordObservedAddressNoConsensusWhenPeersDisagree(t *testing.T) {
 		ListenAddress: "127.0.0.1:64646",
 	}, id, nil)
 
-	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
-	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.99")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-b"), "203.0.113.99")
 
 	// Both stored, but they disagree — no consensus.
 	svc.peerMu.RLock()
@@ -5037,8 +5040,8 @@ func TestRecordObservedAddressSkipsWhenBindIsUnspecified(t *testing.T) {
 		ListenAddress: "0.0.0.0:64646",
 	}, id, nil)
 
-	svc.recordObservedAddress("peer-fingerprint-a", "203.0.113.50")
-	svc.recordObservedAddress("peer-fingerprint-b", "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-a"), "203.0.113.50")
+	svc.recordObservedAddress(domaintest.ID("peer-fingerprint-b"), "203.0.113.50")
 	svc.peerMu.RLock()
 	count := len(svc.observedAddrs)
 	svc.peerMu.RUnlock()
@@ -5060,9 +5063,9 @@ func TestMarkPeerDisconnectedClearsObservedAddress(t *testing.T) {
 
 	// Simulate what openPeerSession does: record observation keyed by identity,
 	// and register the peerID mapping so markPeerDisconnected can find it.
-	svc.recordObservedAddress(domain.PeerIdentity(peerID.Address), "203.0.113.50")
+	svc.recordObservedAddress(domain.PeerIdentityFromWire(peerID.Address), "203.0.113.50")
 	svc.peerMu.Lock()
-	svc.peerIDs[peerAddr] = domain.PeerIdentity(peerID.Address)
+	svc.peerIDs[peerAddr] = domain.PeerIdentityFromWire(peerID.Address)
 	svc.peerMu.Unlock()
 
 	svc.peerMu.RLock()
@@ -5092,13 +5095,13 @@ func TestMarkPeerDisconnectedClearsObservedAddressViaFallback(t *testing.T) {
 	}, id, nil)
 
 	// Record observation under peer identity.
-	svc.recordObservedAddress(domain.PeerIdentity(peerID.Address), "203.0.113.50")
+	svc.recordObservedAddress(domain.PeerIdentityFromWire(peerID.Address), "203.0.113.50")
 
 	// Set up dialOrigin (fallback → primary) and peerIDs (primary → fingerprint)
 	// as the real code does when a fallback connection succeeds.
 	svc.peerMu.Lock()
 	svc.dialOrigin[fallbackAddr] = primaryAddr
-	svc.peerIDs[primaryAddr] = domain.PeerIdentity(peerID.Address)
+	svc.peerIDs[primaryAddr] = domain.PeerIdentityFromWire(peerID.Address)
 	svc.peerMu.Unlock()
 
 	// Disconnect using fallback address — resolveHealthAddress maps to primary,
@@ -5188,7 +5191,7 @@ func TestAddPeerFrameResetsCooldown(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("10.0.0.5:64646", "full", "peer-5")
+	svc.addPeerAddress("10.0.0.5:64646", "full", domaintest.ID("peer-5"))
 	for i := 0; i < 5; i++ {
 		svc.markPeerDisconnected("10.0.0.5:64646", fmt.Errorf("refused"))
 	}
@@ -5596,7 +5599,7 @@ func TestMessageStoreCalledForLocalDM(t *testing.T) {
 	sealed, err := directmsg.EncryptForParticipants(
 		peerID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(svc.identity.Address),
+			Address:      domain.PeerIdentityFromWire(svc.identity.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello from peer"},
@@ -5690,7 +5693,7 @@ func TestMessageStoreDuplicateSuppressesEvent(t *testing.T) {
 	sealed, err := directmsg.EncryptForParticipants(
 		peerID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(svc.identity.Address),
+			Address:      domain.PeerIdentityFromWire(svc.identity.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello"},
@@ -5833,7 +5836,7 @@ func TestDuplicateMessageExcludedFromDMHeaders(t *testing.T) {
 	sealed, err := directmsg.EncryptForParticipants(
 		peerID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(svc.identity.Address),
+			Address:      domain.PeerIdentityFromWire(svc.identity.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello headers"},
@@ -5937,7 +5940,7 @@ func TestMessageStoreNotCalledForTransitDM(t *testing.T) {
 	sealed, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "transit message"},
@@ -6011,7 +6014,7 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 	localSealed, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(relayID.Address),
+			Address:      domain.PeerIdentityFromWire(relayID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(relayID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "local message for me"},
@@ -6031,7 +6034,7 @@ func TestFetchDMHeadersIncludesLocalExcludesTransit(t *testing.T) {
 	transitSealed, err := directmsg.EncryptForParticipants(
 		foreignID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "transit only"},
@@ -6100,7 +6103,7 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "status-race-test"},
@@ -6201,7 +6204,7 @@ func TestNodeWithoutMessageStoreStillRelays(t *testing.T) {
 	sealed, err := directmsg.EncryptForParticipants(
 		peerID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(svc.identity.Address),
+			Address:      domain.PeerIdentityFromWire(svc.identity.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello"},
@@ -6673,7 +6676,7 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 	defer stop()
 
 	// Add a peer as "full" — simulates trusted initial discovery.
-	svc.addPeerAddress("5.5.5.5:64646", "full", "")
+	svc.addPeerAddress("5.5.5.5:64646", "full", domain.PeerIdentity{})
 
 	svc.peerMu.RLock()
 	before := svc.peerTypes[domain.PeerAddress("5.5.5.5:64646")]
@@ -6683,7 +6686,7 @@ func TestAddPeerAddressNoRetag(t *testing.T) {
 	}
 
 	// Call addPeerAddress again with "client" — must not overwrite.
-	svc.addPeerAddress("5.5.5.5:64646", "client", "")
+	svc.addPeerAddress("5.5.5.5:64646", "client", domain.PeerIdentity{})
 
 	svc.peerMu.RLock()
 	after := svc.peerTypes[domain.PeerAddress("5.5.5.5:64646")]
@@ -6703,7 +6706,7 @@ func TestAddPeerAddressWithoutNodeTypeKeepsTypeUnknown(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("6.6.6.6:64646", "", "")
+	svc.addPeerAddress("6.6.6.6:64646", "", domain.PeerIdentity{})
 
 	svc.peerMu.RLock()
 	defer svc.peerMu.RUnlock()
@@ -6990,8 +6993,8 @@ func TestPromotePeerAddress(t *testing.T) {
 	defer stop()
 
 	// Seed two peers so we can verify ordering is preserved.
-	svc.addPeerAddress("1.1.1.1:64646", "full", "")
-	svc.addPeerAddress("2.2.2.2:64646", "full", "")
+	svc.addPeerAddress("1.1.1.1:64646", "full", domain.PeerIdentity{})
+	svc.addPeerAddress("2.2.2.2:64646", "full", domain.PeerIdentity{})
 
 	// Set cooldown on first peer to simulate failed connections.
 	svc.peerMu.Lock()
@@ -7066,13 +7069,13 @@ func TestAddPeerAddressSkipsAlternatePortOnKnownIP(t *testing.T) {
 	})
 	defer stop()
 
-	svc.addPeerAddress("9.9.9.9:64646", "full", "")
+	svc.addPeerAddress("9.9.9.9:64646", "full", domain.PeerIdentity{})
 
 	svc.peerMu.RLock()
 	before := len(svc.peers)
 	svc.peerMu.RUnlock()
 
-	svc.addPeerAddress("9.9.9.9:7777", "client", "")
+	svc.addPeerAddress("9.9.9.9:7777", "client", domain.PeerIdentity{})
 
 	svc.peerMu.RLock()
 	defer svc.peerMu.RUnlock()
@@ -7257,7 +7260,7 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 		ct, err := directmsg.EncryptForParticipants(
 			senderID,
 			domain.DMRecipient{
-				Address:      domain.PeerIdentity(recipientAddr),
+				Address:      domain.PeerIdentityFromWire(recipientAddr),
 				BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 			},
 			domain.OutgoingDM{Body: fmt.Sprintf("body-%d", i)},
@@ -7776,8 +7779,8 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 
 	// Add two peers: one whose host matches the inbound connection's
 	// real remote IP (127.0.0.1), and one that doesn't.
-	svc.addPeerAddress("127.0.0.1:64646", "full", "test")
-	svc.addPeerAddress("10.0.0.3:64646", "full", "test")
+	svc.addPeerAddress("127.0.0.1:64646", "full", domaintest.ID("test"))
+	svc.addPeerAddress("10.0.0.3:64646", "full", domaintest.ID("test"))
 
 	// Create a real TCP connection so conn.RemoteAddr() returns 127.0.0.1.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -7905,8 +7908,8 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	// Two inbound connections to the same peer.
 	id1a, _ := svc.connIDFor(conn1a)
 	id2a, _ := svc.connIDFor(conn2a)
-	svc.trackInboundConnect(id1a, peer, "test-peer-identity")
-	svc.trackInboundConnect(id2a, peer, "test-peer-identity")
+	svc.trackInboundConnect(id1a, peer, domaintest.ID("test-peer-identity"))
+	svc.trackInboundConnect(id2a, peer, domaintest.ID("test-peer-identity"))
 
 	// Peer should be connected.
 	svc.peerMu.RLock()
@@ -7996,8 +7999,8 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 
 	// Set the NetCore mirror and the persistence cache to different values
 	// so the test can unambiguously attribute which source was used.
-	netcoreIdentity := domain.PeerIdentity("netcore-mirror-identity")
-	mapIdentity := domain.PeerIdentity("persistence-cache-identity")
+	netcoreIdentity := domaintest.ID("netcore-mirror-identity")
+	mapIdentity := domaintest.ID("persistence-cache-identity")
 
 	svc.peerMu.Lock()
 	if e := svc.testConnEntry(connA); e != nil && e.core != nil {
@@ -8063,7 +8066,7 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 
 	// Deliberately do NOT call SetIdentity on the NetCore — only populate
 	// the persistence cache so the fallback path is exercised.
-	mapIdentity := domain.PeerIdentity("fallback-map-identity")
+	mapIdentity := domaintest.ID("fallback-map-identity")
 	svc.peerMu.Lock()
 	svc.peerIDs[peer] = mapIdentity
 	svc.peerMu.Unlock()
@@ -8201,7 +8204,7 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 	ct, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientAddr),
+			Address:      domain.PeerIdentityFromWire(recipientAddr),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello via transit relay"},
@@ -8377,7 +8380,7 @@ func TestTransitDMNotReplayedFromBacklog(t *testing.T) {
 	ct, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientAddr),
+			Address:      domain.PeerIdentityFromWire(recipientAddr),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "backlog recovery test"},
@@ -8875,7 +8878,7 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(nodeB.Address()),
+			Address:      domain.PeerIdentityFromWire(nodeB.Address()),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(nodeB.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "relay-sync-test-secret"},
@@ -9369,7 +9372,7 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(99), staleConn, netcore.Inbound, netcore.Options{
 		Address:  peerAddr,
-		Identity: domain.PeerIdentity("stale-identity"),
+		Identity: domaintest.ID("stale-identity"),
 	})
 	svc.setTestConnEntryLocked(staleConn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -9497,9 +9500,13 @@ func TestDeleteTrustedContactNotFound(t *testing.T) {
 	})
 	defer stopA()
 
+	// A well-formed but unknown identity: PeerIdentityFromWire only round-trips
+	// canonical 40-char lowercase hex, so the prior "nonexistent..." literal
+	// (non-hex chars) decoded to the zero identity and hit the "address is
+	// required" guard instead of the idempotent not-found path.
 	reply := nodeA.HandleLocalFrame(protocol.Frame{
 		Type:    "delete_trusted_contact",
-		Address: "nonexistent1234567890abcdef12345678901234",
+		Address: domaintest.ID("unknown-addr").String(),
 	})
 	if reply.Type != "ok" {
 		t.Fatalf("expected ok for unknown address (idempotent), got %s: %s", reply.Type, reply.Error)

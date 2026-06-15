@@ -1138,7 +1138,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// the same self-looping address on the very next tick. Route through
 	// applySelfIdentityCooldown directly to converge on the same wall-
 	// clock ban window the CM paths produce.
-	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+	if s.isSelfIdentity(domain.PeerIdentityFromWire(welcome.Address)) {
 		log.Warn().
 			Str("peer", string(address)).
 			Str("local_identity", s.identity.Address).
@@ -1228,7 +1228,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			if err == nil {
 				peersImported := 0
 				for _, peer := range frame.Peers {
-					if s.addPeerAddress(domain.PeerAddress(peer), "", "") {
+					if s.addPeerAddress(domain.PeerAddress(peer), "", domain.PeerIdentity{}) {
 						peersImported++
 					}
 				}
@@ -1263,7 +1263,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
 				continue
 			}
-			s.addKnownIdentity(domain.PeerIdentity(contact.Address))
+			s.addKnownIdentity(domain.PeerIdentityFromWire(contact.Address))
 			s.addKnownBoxKey(contact.Address, contact.BoxKey)
 			s.addKnownPubKey(contact.Address, contact.PubKey)
 			s.addKnownBoxSig(contact.Address, contact.BoxSig)
@@ -1333,7 +1333,10 @@ func (s *Service) recordOutboundAuthSuccess(peerAddress domain.PeerAddress, remo
 	if err != nil {
 		return
 	}
-	s.recordOutboundConfirmed(peerAddress, domain.PeerIP(dialedIP), domain.PeerPort(dialedPortInt))
+	// dialedIP is an already-canonical IP string (canonicalIPFromHost,
+	// non-empty checked above), so ParsePeerIP cannot fail; error discarded.
+	dialedPeerIP, _ := domain.ParsePeerIP(dialedIP)
+	s.recordOutboundConfirmed(peerAddress, dialedPeerIP, domain.PeerPort(dialedPortInt))
 	// A successful handshake clears any remote-ban window we had recorded
 	// against this peer: the responder just let us in, so the prior
 	// peer-banned notice is no longer authoritative. Without this clear,
@@ -1456,14 +1459,14 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 			if normalizedAddr, ok := s.normalizePeerAddress(domain.PeerAddress(observedAddr), domain.PeerAddress(advertised)); ok {
 				s.promotePeerAddress(normalizedAddr)
 				s.rememberPeerType(normalizedAddr, frame.NodeType)
-				s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
+				s.addPeerID(normalizedAddr, domain.PeerIdentityFromWire(frame.Address))
 				s.addPeerVersion(normalizedAddr, frame.ClientVersion)
 				s.addPeerBuild(normalizedAddr, frame.ClientBuild)
 			}
 		}
 	}
 	if frame.Address != "" {
-		s.addKnownIdentity(domain.PeerIdentity(frame.Address))
+		s.addKnownIdentity(domain.PeerIdentityFromWire(frame.Address))
 	}
 	// When all key fields are present, verify the box key binding before storing.
 	// If verification fails the keys are discarded; if any field is absent the
@@ -1767,13 +1770,13 @@ func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.
 			if pm.VersionLockout.IsActive() {
 				log.Info().
 					Str("peer", string(peerAddress)).
-					Str("identity", string(peerID)).
+					Str("identity", peerID.String()).
 					Str("reason", string(pm.VersionLockout.Reason)).
 					Msg("version_lockout_cleared_operator_override")
 				pm.VersionLockout = domain.VersionLockoutSnapshot{}
 			}
 		}
-		if peerID != "" {
+		if !peerID.IsZero() {
 			// Remove from the incompatible-reporter dedup set so the
 			// operator override also reduces the reporter count.
 			// statusMu guards s.versionPolicy (INNERMOST — acquired while
@@ -1801,7 +1804,7 @@ func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.
 				if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
 					log.Info().
 						Str("peer", string(otherAddr)).
-						Str("peer_identity", string(peerID)).
+						Str("peer_identity", peerID.String()).
 						Str("source_address", string(peerAddress)).
 						Msg("version_lockout_cleared_by_identity_on_operator_override")
 					otherEntry.VersionLockout = domain.VersionLockoutSnapshot{}
@@ -2005,7 +2008,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 			// (bootstrap config, manual add, direct hello/welcome). Allowing
 			// any network-discovered path to retag it would let senders
 			// downgrade a "full" peer to "client" and break routing.
-			if peerID != "" {
+			if !peerID.IsZero() {
 				s.peerIDs[address] = peerID
 			}
 			s.peerMu.Unlock()
@@ -2027,7 +2030,7 @@ func (s *Service) addPeerAddress(address domain.PeerAddress, nodeType string, pe
 	if peerType, ok := domain.ParseNodeType(nodeType); ok {
 		s.peerTypes[address] = peerType
 	}
-	if peerID != "" {
+	if !peerID.IsZero() {
 		s.peerIDs[address] = peerID
 	}
 	// Eagerly populate persistedMeta so that AddedAt is available for
@@ -2115,7 +2118,7 @@ func (s *Service) findKnownPeerByIPLocked(address domain.PeerAddress) (domain.Pe
 // addPeerID associates a peer identity (fingerprint) with a dial address.
 // Safe to call multiple times; empty values are ignored.
 func (s *Service) addPeerID(address domain.PeerAddress, peerID domain.PeerIdentity) {
-	if address == "" || peerID == "" {
+	if address == "" || peerID.IsZero() {
 		return
 	}
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
@@ -2459,7 +2462,7 @@ func (s *Service) syncPeerSession(session *peerSession, requestPeers bool, path 
 		}
 		peersImported := 0
 		for _, peer := range peersFrame.Peers {
-			if s.addPeerAddress(domain.PeerAddress(peer), "", "") {
+			if s.addPeerAddress(domain.PeerAddress(peer), "", domain.PeerIdentity{}) {
 				peersImported++
 			}
 		}
@@ -2501,7 +2504,7 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 		if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
 			continue
 		}
-		s.addKnownIdentity(domain.PeerIdentity(contact.Address))
+		s.addKnownIdentity(domain.PeerIdentityFromWire(contact.Address))
 		s.addKnownBoxKey(contact.Address, contact.BoxKey)
 		s.addKnownPubKey(contact.Address, contact.PubKey)
 		s.addKnownBoxSig(contact.Address, contact.BoxSig)
@@ -2694,7 +2697,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// control DMs (TopicControlDM) — have cryptographic verification
 		// in storeIncomingMessage (VerifyEnvelope); this gate targets
 		// only topics where no per-message signature exists.
-		peerID := domain.PeerIdentity("")
+		peerID := domain.PeerIdentity{}
 		if session != nil {
 			peerID = session.peerIdentity
 		}
@@ -2991,7 +2994,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if marshalErr != nil {
 			log.Warn().
 				Err(marshalErr).
-				Str("peer_identity", string(session.peerIdentity)).
+				Str("peer_identity", session.peerIdentity.String()).
 				Msg("route_sync_summary_marshal_failed_outbound_reply")
 			return
 		}
@@ -3000,7 +3003,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			RawLine: string(raw) + "\n",
 		})
 		log.Debug().
-			Str("peer_identity", string(session.peerIdentity)).
+			Str("peer_identity", session.peerIdentity.String()).
 			Str("their_digest", digestFrame.Digest).
 			Uint32("their_count", digestFrame.KnownIdentitiesCount).
 			Str("our_digest", localDigest).
@@ -3781,7 +3784,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 		h := &rec.health
 		phf := protocol.PeerHealthFrame{
 			Address:             string(h.Address),
-			PeerID:              string(rec.peerID),
+			PeerID:              rec.peerID.String(),
 			Network:             classifyAddress(h.Address).String(),
 			Direction:           string(h.Direction),
 			ClientVersion:       rec.clientVersion,
@@ -3859,7 +3862,7 @@ func (s *Service) peerHealthFrames() []protocol.PeerHealthFrame {
 	for _, ilr := range snap.inboundOnly {
 		inboundPHF := protocol.PeerHealthFrame{
 			Address:         string(ilr.address),
-			PeerID:          string(ilr.peerID),
+			PeerID:          ilr.peerID.String(),
 			Network:         classifyAddress(ilr.address).String(),
 			Direction:       string(peerDirectionInbound),
 			ClientVersion:   ilr.clientVersion,
@@ -4598,7 +4601,7 @@ func (s *Service) evictStaleInboundConns() {
 	ctx := context.Background()
 	network := s.Network()
 	for _, e := range stale {
-		log.Warn().Str("peer", string(e.addr)).Str("identity", string(e.ident)).Str("remote", e.remote).Msg("force-closing stale inbound connection")
+		log.Warn().Str("peer", string(e.addr)).Str("identity", e.ident.String()).Str("remote", e.remote).Msg("force-closing stale inbound connection")
 		_ = network.Close(ctx, e.id)
 	}
 }
@@ -5408,7 +5411,7 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 		connections = append(connections, activeConnection{
 			PeerAddress:   addr,
 			RemoteAddress: remoteAddr,
-			Identity:      domain.PeerIdentity(f.PeerID),
+			Identity:      domain.PeerIdentityFromWire(f.PeerID),
 			Direction:     dir,
 			Network:       net,
 			State:         state,
@@ -5440,7 +5443,7 @@ func (s *Service) ActiveConnectionsJSON() (json.RawMessage, error) {
 		entries[i] = activeConnectionJSON{
 			PeerAddress:   string(c.PeerAddress),
 			RemoteAddress: string(c.RemoteAddress),
-			Identity:      string(c.Identity),
+			Identity:      c.Identity.String(),
 			Direction:     c.Direction.String(),
 			Network:       c.Network.String(),
 			State:         c.State,

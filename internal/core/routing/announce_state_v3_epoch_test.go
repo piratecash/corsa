@@ -3,7 +3,7 @@ package routing
 import (
 	"testing"
 
-	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // announce_state_v3_epoch_test.go covers the Phase 4 per-peer
@@ -11,13 +11,13 @@ import (
 // overview §7.1): first-sight adoption, stale rewind protection, reset
 // detection on increase, and the session-boundary reset.
 
-const idV3EpochPeer = "ee00000000000000000000000000000000000009"
+var idV3EpochPeer = domaintest.ID("ee00000000000000000000000000000000000009")
 
 func newEpochState(t *testing.T) *AnnouncePeerState {
 	t.Helper()
 	r := NewAnnounceStateRegistry()
-	r.MarkReconnected(domain.PeerIdentity(idV3EpochPeer), nil)
-	s := r.Get(domain.PeerIdentity(idV3EpochPeer))
+	r.MarkReconnected(idV3EpochPeer, nil)
+	s := r.Get(idV3EpochPeer)
 	if s == nil {
 		t.Fatalf("state must exist after MarkReconnected")
 	}
@@ -68,7 +68,7 @@ func TestObserveV3Epoch_IncreaseSignalsReset(t *testing.T) {
 
 func TestObserveV3Epoch_SessionBoundaryResetsWatermark(t *testing.T) {
 	r := NewAnnounceStateRegistry()
-	pid := domain.PeerIdentity(idV3EpochPeer)
+	pid := idV3EpochPeer
 	r.MarkReconnected(pid, nil)
 	s := r.Get(pid)
 	s.ObserveV3Epoch(9)

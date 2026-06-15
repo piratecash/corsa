@@ -127,7 +127,7 @@ func TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot(t *testing.T) {
 		}
 		foundC := false
 		for _, r := range frame.AnnounceRoutes {
-			if r.Identity == idPeerC {
+			if r.Identity == idPeerC.String() {
 				foundC = true
 				break
 			}
@@ -246,7 +246,7 @@ func TestConnectTimeFullSync_UsesV3FullSender_NonEmptySnapshot(t *testing.T) {
 		}
 		foundC := false
 		for _, e := range v3.Entries {
-			if e.Identity == string(idPeerC) {
+			if e.Identity == idPeerC.String() {
 				foundC = true
 				break
 			}

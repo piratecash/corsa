@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -72,7 +73,7 @@ func TestRecordAttemptBudgetArithmetic(t *testing.T) {
 	state := newDeleteRetryState()
 	state.add(&pendingDelete{
 		target:      target,
-		peer:        "peer",
+		peer:        domaintest.ID("peer"),
 		sentAt:      time.Now(),
 		nextRetryAt: time.Now().Add(deleteRetryInitial),
 		attempt:     1,
@@ -114,10 +115,8 @@ func TestRecordAttemptBudgetArithmetic(t *testing.T) {
 func TestProcessDeleteRetryDueExactlyFiveRetries(t *testing.T) {
 	t.Parallel()
 
-	const (
-		target = domain.MessageID("a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5")
-		peer   = domain.PeerIdentity("peer")
-	)
+	const target = domain.MessageID("a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5")
+	peer := domaintest.ID("peer")
 
 	counter := &dispatchCounter{}
 	bus := ebus.New()
@@ -226,11 +225,9 @@ func TestProcessDeleteRetryDueExactlyFiveRetries(t *testing.T) {
 func TestAuthorizedToDelete(t *testing.T) {
 	t.Parallel()
 
-	const (
-		alice = domain.PeerIdentity("alice")
-		bob   = domain.PeerIdentity("bob")
-		eve   = domain.PeerIdentity("eve")
-	)
+	alice := domaintest.ID("alice")
+	bob := domaintest.ID("bob")
+	eve := domaintest.ID("eve")
 
 	cases := []struct {
 		name         string
@@ -311,8 +308,8 @@ func TestApplyInboundDeleteOnRealChatlog(t *testing.T) {
 		t.Fatal("chatlog store is nil; test setup is wrong")
 	}
 
-	myAddr := domain.PeerIdentity(id.Address)
-	const peer = domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	myAddr := domain.PeerIdentityFromWire(id.Address)
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 	insert := func(t *testing.T, id, sender, recipient string, flag protocol.MessageFlag) {
 		t.Helper()
@@ -327,9 +324,9 @@ func TestApplyInboundDeleteOnRealChatlog(t *testing.T) {
 		// Use the conversation peer (the "other" party) as the owner
 		// passed to AppendReportNew. For an outgoing row that's the
 		// recipient; for an incoming row it's the sender.
-		owner := domain.PeerIdentity(recipient)
-		if domain.PeerIdentity(sender) != myAddr {
-			owner = domain.PeerIdentity(sender)
+		owner := domain.PeerIdentityFromWire(recipient)
+		if domain.PeerIdentityFromWire(sender) != myAddr {
+			owner = domain.PeerIdentityFromWire(sender)
 		}
 		if _, err := c.chatlog.AppendReportNew("dm", owner, entry); err != nil {
 			t.Fatalf("AppendReportNew(%s): %v", id, err)
@@ -405,7 +402,7 @@ func TestApplyInboundDeleteOnRealChatlog(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.insertEntry {
-				insert(t, tc.targetID, string(tc.entrySender), string(tc.entryRecipient), tc.entryFlag)
+				insert(t, tc.targetID, tc.entrySender.String(), tc.entryRecipient.String(), tc.entryFlag)
 			}
 
 			status := r.applyInboundDelete(tc.envelopeSender, domain.MessageID(tc.targetID))
@@ -442,8 +439,8 @@ func TestHandleInboundMessageDeleteAckPessimisticOrdering(t *testing.T) {
 		t.Fatal("chatlog store is nil; test setup is wrong")
 	}
 
-	myAddr := domain.PeerIdentity(id.Address)
-	const peer = domain.PeerIdentity("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	myAddr := domain.PeerIdentityFromWire(id.Address)
+	peer := domain.PeerIdentityFromWire("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
 	type setup struct {
 		name         string
@@ -495,7 +492,7 @@ func TestHandleInboundMessageDeleteAckPessimisticOrdering(t *testing.T) {
 		{
 			name:         "ack_from_wrong_peer_restores_pending",
 			targetID:     "abc55555-6666-4777-8888-999999999999",
-			ackPeer:      "ccccccccccccccccccccccccccccccccccccccccc", // imposter
+			ackPeer:      domaintest.ID("imposter"), // imposter
 			pendingPeer:  peer,
 			ackStatus:    domain.MessageDeleteStatusDeleted,
 			wantRowAfter: true, // imposter's deleted ack must NOT remove the row
@@ -519,8 +516,8 @@ func TestHandleInboundMessageDeleteAckPessimisticOrdering(t *testing.T) {
 			// post-ack DELETE has something to remove.
 			entry := chatlog.Entry{
 				ID:        tc.targetID,
-				Sender:    string(myAddr),
-				Recipient: string(peer),
+				Sender:    myAddr.String(),
+				Recipient: peer.String(),
 				Body:      "ciphertext",
 				CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 				Flag:      string(protocol.MessageFlagSenderDelete),
@@ -587,7 +584,7 @@ func newTestDMRouterForDelete(t *testing.T) (*DMRouter, *DesktopClient, domain.P
 		startupDone:             make(chan struct{}),
 		dispatchControlDeleteFn: counter.record,
 	}
-	return r, c, domain.PeerIdentity(id.Address), counter
+	return r, c, domain.PeerIdentityFromWire(id.Address), counter
 }
 
 func insertChatlogEntry(t *testing.T, gw *ChatlogGateway, owner domain.PeerIdentity, entry chatlog.Entry) {
@@ -611,14 +608,12 @@ func TestSendMessageDeleteOutgoingPreservesRowUntilAck(t *testing.T) {
 
 	r, c, myAddr, counter := newTestDMRouterForDelete(t)
 
-	const (
-		target    = "10000000-2222-4444-8888-cccccccccccc"
-		recipient = domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	)
+	const target = "10000000-2222-4444-8888-cccccccccccc"
+	recipient := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	insertChatlogEntry(t, c.chatlog, recipient, chatlog.Entry{
 		ID:        target,
-		Sender:    string(myAddr),
-		Recipient: string(recipient),
+		Sender:    myAddr.String(),
+		Recipient: recipient.String(),
 		Body:      "ciphertext",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      string(protocol.MessageFlagSenderDelete),
@@ -662,14 +657,12 @@ func TestSendMessageDeleteIncomingIsLocalOnlySync(t *testing.T) {
 
 	r, c, myAddr, counter := newTestDMRouterForDelete(t)
 
-	const (
-		target = "20000000-2222-4444-8888-cccccccccccc"
-		peer   = domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	)
+	const target = "20000000-2222-4444-8888-cccccccccccc"
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	insertChatlogEntry(t, c.chatlog, peer, chatlog.Entry{
 		ID:        target,
-		Sender:    string(peer),
-		Recipient: string(myAddr),
+		Sender:    peer.String(),
+		Recipient: myAddr.String(),
 		Body:      "ciphertext",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      string(protocol.MessageFlagSenderDelete),
@@ -708,15 +701,13 @@ func TestSendMessageDeleteOverridesWrongCallerPeer(t *testing.T) {
 
 	r, c, myAddr, counter := newTestDMRouterForDelete(t)
 
-	const (
-		target       = "30000000-2222-4444-8888-cccccccccccc"
-		realPeer     = domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-		strangerPeer = domain.PeerIdentity("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	)
+	const target = "30000000-2222-4444-8888-cccccccccccc"
+	realPeer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	strangerPeer := domain.PeerIdentityFromWire("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	insertChatlogEntry(t, c.chatlog, realPeer, chatlog.Entry{
 		ID:        target,
-		Sender:    string(myAddr),
-		Recipient: string(realPeer),
+		Sender:    myAddr.String(),
+		Recipient: realPeer.String(),
 		Body:      "ciphertext",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      string(protocol.MessageFlagSenderDelete),
@@ -756,10 +747,8 @@ func TestSendMessageDeleteAbsentTargetUsesRecoveryWirePath(t *testing.T) {
 
 	r, _, _, counter := newTestDMRouterForDelete(t)
 
-	const (
-		target = "40000000-2222-4444-8888-cccccccccccc"
-		peer   = domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	)
+	const target = "40000000-2222-4444-8888-cccccccccccc"
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 	// No insert — the row is intentionally absent.
 
@@ -795,14 +784,12 @@ func TestSendMessageDeleteImmutableRefuses(t *testing.T) {
 
 	r, c, myAddr, counter := newTestDMRouterForDelete(t)
 
-	const (
-		target = "50000000-2222-4444-8888-cccccccccccc"
-		peer   = domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	)
+	const target = "50000000-2222-4444-8888-cccccccccccc"
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	insertChatlogEntry(t, c.chatlog, peer, chatlog.Entry{
 		ID:        target,
-		Sender:    string(myAddr),
-		Recipient: string(peer),
+		Sender:    myAddr.String(),
+		Recipient: peer.String(),
 		Body:      "ciphertext",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      string(protocol.MessageFlagImmutable),

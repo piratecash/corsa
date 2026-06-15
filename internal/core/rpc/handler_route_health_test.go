@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/rpc"
 )
@@ -114,8 +115,8 @@ func TestFetchRouteHealth_PopulatedSnapshotReturnsAllStates(t *testing.T) {
 		snapshot: routing.Snapshot{Routes: map[routing.PeerIdentity][]routing.RouteEntry{}, TakenAt: now},
 		health: []routing.RouteHealthState{
 			{
-				Identity:      "id-target-A",
-				Uplink:        "id-uplink-1",
+				Identity:      domaintest.ID("id-target-A"),
+				Uplink:        domaintest.ID("id-uplink-1"),
 				Health:        routing.HealthGood,
 				RTT:           45 * time.Millisecond,
 				LastHopAck:    now.Add(-30 * time.Second),
@@ -124,8 +125,8 @@ func TestFetchRouteHealth_PopulatedSnapshotReturnsAllStates(t *testing.T) {
 				TransitionAt:  now.Add(-5 * time.Minute),
 			},
 			{
-				Identity:      "id-target-B",
-				Uplink:        "id-uplink-2",
+				Identity:      domaintest.ID("id-target-B"),
+				Uplink:        domaintest.ID("id-uplink-2"),
 				Health:        routing.HealthBad,
 				RTT:           250 * time.Millisecond,
 				LastHopAck:    now.Add(-150 * time.Second),
@@ -168,7 +169,7 @@ func TestFetchRouteHealth_PopulatedSnapshotReturnsAllStates(t *testing.T) {
 	}
 
 	// Sort is by identity asc, uplink asc — target-A first.
-	if payload.States[0].Identity != "id-target-A" {
+	if payload.States[0].Identity != domaintest.ID("id-target-A").String() {
 		t.Fatalf("States[0].Identity = %q, want id-target-A", payload.States[0].Identity)
 	}
 	if payload.States[0].Health != "good" {
@@ -184,7 +185,7 @@ func TestFetchRouteHealth_PopulatedSnapshotReturnsAllStates(t *testing.T) {
 		t.Fatalf("States[0].LastProbe should be empty when zero-time, got %q", payload.States[0].LastProbe)
 	}
 
-	if payload.States[1].Identity != "id-target-B" {
+	if payload.States[1].Identity != domaintest.ID("id-target-B").String() {
 		t.Fatalf("States[1].Identity = %q, want id-target-B", payload.States[1].Identity)
 	}
 	if payload.States[1].Health != "bad" {
@@ -207,9 +208,9 @@ func TestFetchRouteHealth_DeterministicSort(t *testing.T) {
 	provider := &stubRoutingProvider{
 		snapshot: routing.Snapshot{Routes: map[routing.PeerIdentity][]routing.RouteEntry{}, TakenAt: time.Now()},
 		health: []routing.RouteHealthState{
-			{Identity: "id-target-B", Uplink: "id-uplink-2", Health: routing.HealthGood},
-			{Identity: "id-target-A", Uplink: "id-uplink-9", Health: routing.HealthGood},
-			{Identity: "id-target-A", Uplink: "id-uplink-1", Health: routing.HealthQuestionable},
+			{Identity: domaintest.ID("id-target-B"), Uplink: domaintest.ID("id-uplink-2"), Health: routing.HealthGood},
+			{Identity: domaintest.ID("id-target-A"), Uplink: domaintest.ID("id-uplink-9"), Health: routing.HealthGood},
+			{Identity: domaintest.ID("id-target-A"), Uplink: domaintest.ID("id-uplink-1"), Health: routing.HealthQuestionable},
 		},
 	}
 	table := rpc.NewCommandTable()
@@ -234,9 +235,9 @@ func TestFetchRouteHealth_DeterministicSort(t *testing.T) {
 	}
 
 	want := [][2]string{
-		{"id-target-A", "id-uplink-1"},
-		{"id-target-A", "id-uplink-9"},
-		{"id-target-B", "id-uplink-2"},
+		{domaintest.ID("id-target-A").String(), domaintest.ID("id-uplink-1").String()},
+		{domaintest.ID("id-target-A").String(), domaintest.ID("id-uplink-9").String()},
+		{domaintest.ID("id-target-B").String(), domaintest.ID("id-uplink-2").String()},
 	}
 	for i, w := range want {
 		if payload.States[i].Identity != w[0] || payload.States[i].Uplink != w[1] {
@@ -252,10 +253,10 @@ func TestFetchRouteHealth_HealthLabelsMatchRouteHealth(t *testing.T) {
 	provider := &stubRoutingProvider{
 		snapshot: routing.Snapshot{Routes: map[routing.PeerIdentity][]routing.RouteEntry{}, TakenAt: time.Now()},
 		health: []routing.RouteHealthState{
-			{Identity: "id-1", Uplink: "u-1", Health: routing.HealthGood},
-			{Identity: "id-2", Uplink: "u-1", Health: routing.HealthQuestionable},
-			{Identity: "id-3", Uplink: "u-1", Health: routing.HealthBad},
-			{Identity: "id-4", Uplink: "u-1", Health: routing.HealthDead},
+			{Identity: domaintest.ID("id-1"), Uplink: domaintest.ID("u-1"), Health: routing.HealthGood},
+			{Identity: domaintest.ID("id-2"), Uplink: domaintest.ID("u-1"), Health: routing.HealthQuestionable},
+			{Identity: domaintest.ID("id-3"), Uplink: domaintest.ID("u-1"), Health: routing.HealthBad},
+			{Identity: domaintest.ID("id-4"), Uplink: domaintest.ID("u-1"), Health: routing.HealthDead},
 		},
 	}
 	table := rpc.NewCommandTable()
@@ -278,7 +279,7 @@ func TestFetchRouteHealth_HealthLabelsMatchRouteHealth(t *testing.T) {
 // returns the same data (no side effects, no probe triggering).
 func TestFetchRouteHealth_DoesNotMutateProviderState(t *testing.T) {
 	original := []routing.RouteHealthState{
-		{Identity: "id-x", Uplink: "u-1", Health: routing.HealthQuestionable, ProbeFailures: 2},
+		{Identity: domaintest.ID("id-x"), Uplink: domaintest.ID("u-1"), Health: routing.HealthQuestionable, ProbeFailures: 2},
 	}
 	provider := &stubRoutingProvider{
 		snapshot: routing.Snapshot{Routes: map[routing.PeerIdentity][]routing.RouteEntry{}, TakenAt: time.Now()},
@@ -316,15 +317,15 @@ func TestFetchRouteHealth_OmitsLastHopAckWhenNotConfirmed(t *testing.T) {
 		snapshot: routing.Snapshot{Routes: map[routing.PeerIdentity][]routing.RouteEntry{}, TakenAt: now},
 		health: []routing.RouteHealthState{
 			{
-				Identity:   "id-confirmed",
-				Uplink:     "id-uplink-1",
+				Identity:   domaintest.ID("id-confirmed"),
+				Uplink:     domaintest.ID("id-uplink-1"),
 				Health:     routing.HealthGood,
 				LastHopAck: now.Add(-30 * time.Second),
 				Confirmed:  true,
 			},
 			{
-				Identity:   "id-unconfirmed",
-				Uplink:     "id-uplink-2",
+				Identity:   domaintest.ID("id-unconfirmed"),
+				Uplink:     domaintest.ID("id-uplink-2"),
 				Health:     routing.HealthQuestionable,
 				LastHopAck: now, // timer reference stamped at creation; not a real confirmation.
 				Confirmed:  false,
@@ -353,13 +354,13 @@ func TestFetchRouteHealth_OmitsLastHopAckWhenNotConfirmed(t *testing.T) {
 	}
 
 	// Sort is by identity asc: id-confirmed first (c < u).
-	if payload.States[0].Identity != "id-confirmed" {
+	if payload.States[0].Identity != domaintest.ID("id-confirmed").String() {
 		t.Fatalf("States[0].Identity = %q, want id-confirmed", payload.States[0].Identity)
 	}
 	if payload.States[0].LastHopAck == "" {
 		t.Fatal("Confirmed=true state: last_hop_ack must be emitted, got empty")
 	}
-	if payload.States[1].Identity != "id-unconfirmed" {
+	if payload.States[1].Identity != domaintest.ID("id-unconfirmed").String() {
 		t.Fatalf("States[1].Identity = %q, want id-unconfirmed", payload.States[1].Identity)
 	}
 	if payload.States[1].LastHopAck != "" {

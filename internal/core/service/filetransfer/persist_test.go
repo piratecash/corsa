@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // sha256Hex returns the hex-encoded SHA-256 of data. Used to generate valid
@@ -57,7 +58,7 @@ func TestSenderMappingRoundTrip(t *testing.T) {
 		FileName:     "photo.jpg",
 		FileSize:     1024000,
 		ContentType:  "image/jpeg",
-		Recipient:    "peer-bob",
+		Recipient:    domaintest.ID("peer-bob"),
 		State:        senderServing,
 		CreatedAt:    now,
 		CompletedAt:  time.Time{},
@@ -105,7 +106,7 @@ func TestReceiverMappingRoundTrip(t *testing.T) {
 		FileName:          "doc.pdf",
 		FileSize:          2048000,
 		ContentType:       "application/pdf",
-		Sender:            "peer-alice",
+		Sender:            domaintest.ID("peer-alice"),
 		State:             receiverWaitingAck,
 		CreatedAt:         now,
 		BytesReceived:     2048000,
@@ -208,7 +209,7 @@ func TestSaveThenLoad(t *testing.T) {
 		FileName:    "test.txt",
 		FileSize:    100,
 		ContentType: "text/plain",
-		Recipient:   "bob",
+		Recipient:   domaintest.ID("bob"),
 		State:       senderAnnounced,
 		CreatedAt:   now,
 	}
@@ -219,7 +220,7 @@ func TestSaveThenLoad(t *testing.T) {
 		FileName:      "image.png",
 		FileSize:      50000,
 		ContentType:   "image/png",
-		Sender:        "alice",
+		Sender:        domaintest.ID("alice"),
 		State:         receiverDownloading,
 		CreatedAt:     now,
 		BytesReceived: 25000,
@@ -252,7 +253,7 @@ func TestSaveThenLoad(t *testing.T) {
 	if sm.FileHash != senderHash {
 		t.Errorf("sender FileHash: got %q, want %q", sm.FileHash, senderHash)
 	}
-	if sm.Recipient != "bob" {
+	if sm.Recipient != domaintest.ID("bob") {
 		t.Errorf("sender Recipient: got %q, want %q", sm.Recipient, "bob")
 	}
 	if sm.State != senderAnnounced {
@@ -264,7 +265,7 @@ func TestSaveThenLoad(t *testing.T) {
 	if !ok {
 		t.Fatal("receiver mapping file-2 not loaded")
 	}
-	if rm.Sender != "alice" {
+	if rm.Sender != domaintest.ID("alice") {
 		t.Errorf("receiver Sender: got %q, want %q", rm.Sender, "alice")
 	}
 	if rm.BytesReceived != 25000 {
@@ -325,7 +326,7 @@ func TestSaveMappings_CompletedSenderHoldsRefCount(t *testing.T) {
 		FileName:    "done.txt",
 		FileSize:    100,
 		ContentType: "text/plain",
-		Recipient:   "bob",
+		Recipient:   domaintest.ID("bob"),
 		State:       senderCompleted,
 		CreatedAt:   time.Now(),
 		CompletedAt: time.Now(),
@@ -371,25 +372,25 @@ func TestTransfersMappingsPath(t *testing.T) {
 	}{
 		{
 			name:         "standard identity and port",
-			identity:     "11ed0457abcdef1234567890abcdef1234567890",
+			identity:     mustID(t, "11ed0457abcdef1234567890abcdef1234567890"),
 			listenAddr:   ":64647",
 			wantContains: "transfers-11ed0457-64647.json",
 		},
 		{
-			name:         "short identity",
-			identity:     "abcd",
+			name:         "zero identity",
+			identity:     domain.PeerIdentity{},
 			listenAddr:   ":9999",
-			wantContains: "transfers-abcd-9999.json",
+			wantContains: "transfers--9999.json",
 		},
 		{
 			name:         "full address with host",
-			identity:     "aabbccddee112233445566778899aabbccddeeff",
+			identity:     mustID(t, "aabbccddee112233445566778899aabbccddeeff"),
 			listenAddr:   "127.0.0.1:64646",
 			wantContains: "transfers-aabbccdd-64646.json",
 		},
 		{
 			name:         "no port in listen address",
-			identity:     "1234567890abcdef",
+			identity:     mustID(t, "1234567890abcdef1234567890abcdef12345678"),
 			listenAddr:   "noport",
 			wantContains: "transfers-12345678-default.json",
 		},
@@ -447,7 +448,7 @@ func TestReconcileVerifying_CompletedFileExists(t *testing.T) {
 		FileHash:  fileHash,
 		FileName:  fileName,
 		FileSize:  uint64(len(content)),
-		Sender:    domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
 		State:     receiverVerifying,
 		CreatedAt: time.Now(),
 	}
@@ -496,7 +497,7 @@ func TestReconcileVerifying_PartialFileExists(t *testing.T) {
 		FileHash:  fileHash,
 		FileName:  "data.bin",
 		FileSize:  100000,
-		Sender:    domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
 		State:     receiverVerifying,
 		CreatedAt: time.Now(),
 	}
@@ -535,7 +536,7 @@ func TestReconcileVerifying_NoFilesOnDisk(t *testing.T) {
 		FileHash:  "c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2c3c4c5c6c1c2",
 		FileName:  "gone.txt",
 		FileSize:  1024,
-		Sender:    domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
 		State:     receiverVerifying,
 		CreatedAt: time.Now(),
 	}
@@ -596,7 +597,7 @@ func TestReconcileVerifying_PartialFileClearsStaleCompletedPath(t *testing.T) {
 		FileHash:      fileHash,
 		FileName:      "data.bin",
 		FileSize:      100000,
-		Sender:        domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:        domaintest.ID("sender-identity-1234567890abcd"),
 		State:         receiverVerifying,
 		CompletedPath: stalePath,
 		CreatedAt:     time.Now(),
@@ -641,7 +642,7 @@ func TestReconcileVerifying_NoFilesClearsStaleCompletedPath(t *testing.T) {
 		FileHash:      "f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2f3f4f5f6f1f2",
 		FileName:      "gone.txt",
 		FileSize:      1024,
-		Sender:        domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:        domaintest.ID("sender-identity-1234567890abcd"),
 		State:         receiverVerifying,
 		CompletedPath: stalePath,
 		CreatedAt:     time.Now(),
@@ -694,7 +695,7 @@ func TestReconcileVerifying_OversizedPartialFileResetsOffset(t *testing.T) {
 		FileHash:  fileHash,
 		FileName:  "oversized.bin",
 		FileSize:  fileSize,
-		Sender:    domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
 		State:     receiverVerifying,
 		CreatedAt: time.Now(),
 	}
@@ -734,7 +735,7 @@ func TestLoadMappings_RejectsReceiverInvalidHash(t *testing.T) {
 				FileHash: "not-a-valid-hex-hash",
 				FileName: "doc.pdf",
 				FileSize: 1024,
-				Peer:     "sender-1234567890abcdef",
+				Peer:     domaintest.ID("sender-1234567890abcdef"),
 				Role:     "receiver",
 				State:    string(receiverAvailable),
 			},
@@ -773,7 +774,7 @@ func TestLoadMappings_RejectsReceiverZeroSize(t *testing.T) {
 				FileHash: validHash,
 				FileName: "empty.bin",
 				FileSize: 0,
-				Peer:     "sender-1234567890abcdef",
+				Peer:     domaintest.ID("sender-1234567890abcdef"),
 				Role:     "receiver",
 				State:    string(receiverAvailable),
 			},
@@ -812,7 +813,7 @@ func TestLoadMappings_RejectsReceiverEmptyName(t *testing.T) {
 				FileHash: validHash,
 				FileName: "",
 				FileSize: 512,
-				Peer:     "sender-1234567890abcdef",
+				Peer:     domaintest.ID("sender-1234567890abcdef"),
 				Role:     "receiver",
 				State:    string(receiverAvailable),
 			},
@@ -849,7 +850,7 @@ func TestLoadMappings_RejectsSenderInvalidHash(t *testing.T) {
 				FileHash: "ZZZZ-not-hex",
 				FileName: "test.txt",
 				FileSize: 100,
-				Peer:     "recipient-1234567890abcdef",
+				Peer:     domaintest.ID("recipient-1234567890abcdef"),
 				Role:     "sender",
 				State:    string(senderAnnounced),
 			},
@@ -892,7 +893,7 @@ func TestLoadMappings_AcceptsValidEntries(t *testing.T) {
 				FileHash: sHash,
 				FileName: "report.pdf",
 				FileSize: 2048,
-				Peer:     "recipient-abc",
+				Peer:     domaintest.ID("recipient-abc"),
 				Role:     "sender",
 				State:    string(senderAnnounced),
 			},
@@ -901,7 +902,7 @@ func TestLoadMappings_AcceptsValidEntries(t *testing.T) {
 				FileHash: rHash,
 				FileName: "photo.jpg",
 				FileSize: 4096,
-				Peer:     "sender-xyz",
+				Peer:     domaintest.ID("sender-xyz"),
 				Role:     "receiver",
 				State:    string(receiverAvailable),
 			},
@@ -959,7 +960,7 @@ func TestLoadMappings_SenderPreServeStateRoundTrip(t *testing.T) {
 				FileHash:      hash,
 				FileName:      "photo.jpg",
 				FileSize:      4096,
-				Peer:          "bob",
+				Peer:          domaintest.ID("bob"),
 				Role:          "sender",
 				State:         string(senderServing),
 				PreServeState: string(senderCompleted),
@@ -1041,7 +1042,7 @@ func TestSaveLoadSenderPreServeStateOmittedWhenEmpty(t *testing.T) {
 		FileHash:     hash,
 		FileName:     "first.bin",
 		FileSize:     1024,
-		Recipient:    "bob",
+		Recipient:    domaintest.ID("bob"),
 		State:        senderServing,
 		LastServedAt: time.Now(),
 		// PreServeState intentionally zero-value.
@@ -1084,6 +1085,10 @@ func TestLoadMappings_InvalidPreServeStateSanitised(t *testing.T) {
 	hash := sha256Hex([]byte("pre-serve-tamper"))
 
 	// Write a JSON file with a valid State but a tampered PreServeState.
+	// The "peer" field must be a canonical 40-hex fingerprint: it
+	// unmarshals into domain.PeerIdentity (UnmarshalText), so a short
+	// literal like "bob" fails to decode and aborts the whole file parse,
+	// leaving senderMaps empty.
 	raw := fmt.Sprintf(`{
   "version": 1,
   "transfers": [
@@ -1093,13 +1098,13 @@ func TestLoadMappings_InvalidPreServeStateSanitised(t *testing.T) {
       "file_hash": "%s",
       "file_name": "doc.bin",
       "file_size": 512,
-      "peer": "bob",
+      "peer": "%s",
       "state": "serving",
       "pre_serve_state": "corrupted_garbage",
       "created_at": "2026-01-01T00:00:00Z"
     }
   ]
-}`, hash)
+}`, hash, domaintest.ID("bob").String())
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write test JSON: %v", err)
@@ -1161,7 +1166,7 @@ func TestSaveLoadServingEpochRoundTrip(t *testing.T) {
 		FileHash:     hash,
 		FileName:     "x.bin",
 		FileSize:     13,
-		Recipient:    "bob",
+		Recipient:    domaintest.ID("bob"),
 		State:        senderCompleted,
 		ServingEpoch: 42,
 		CreatedAt:    time.Now(),
@@ -1172,7 +1177,7 @@ func TestSaveLoadServingEpochRoundTrip(t *testing.T) {
 		FileHash:     hash,
 		FileName:     "x.bin",
 		FileSize:     13,
-		Sender:       "alice",
+		Sender:       domaintest.ID("alice"),
 		State:        receiverCompleted,
 		ServingEpoch: 42,
 		ChunkSize:    domain.DefaultChunkSize,
@@ -1246,7 +1251,7 @@ func TestSaveLoadServingEpochOmittedWhenZero(t *testing.T) {
 		FileHash:  hash,
 		FileName:  "x.bin",
 		FileSize:  15,
-		Recipient: "bob",
+		Recipient: domaintest.ID("bob"),
 		State:     senderAnnounced,
 		CreatedAt: time.Now(),
 	}
@@ -1281,7 +1286,7 @@ func TestLoadMappings_RejectsSenderUnknownState(t *testing.T) {
 				FileHash: validHash,
 				FileName: "test.bin",
 				FileSize: 100,
-				Peer:     "recipient-1234567890abcdef",
+				Peer:     domaintest.ID("recipient-1234567890abcdef"),
 				Role:     "sender",
 				State:    "bogus_state",
 			},
@@ -1324,7 +1329,7 @@ func TestLoadMappings_RejectsReceiverUnknownState(t *testing.T) {
 				FileHash: validHash,
 				FileName: "photo.jpg",
 				FileSize: 4096,
-				Peer:     "sender-1234567890abcdef",
+				Peer:     domaintest.ID("sender-1234567890abcdef"),
 				Role:     "receiver",
 				State:    "invented_state",
 			},
@@ -1360,7 +1365,7 @@ func TestLoadMappings_AcceptsAllKnownSenderStates(t *testing.T) {
 			FileHash: sha256Hex([]byte(fmt.Sprintf("sender-state-%s", st))),
 			FileName: "file.bin",
 			FileSize: 100,
-			Peer:     "recipient-1234567890abcdef",
+			Peer:     domaintest.ID("recipient-1234567890abcdef"),
 			Role:     "sender",
 			State:    string(st),
 		}
@@ -1412,7 +1417,7 @@ func TestLoadMappings_AcceptsAllKnownReceiverStates(t *testing.T) {
 			FileHash: sha256Hex([]byte(fmt.Sprintf("recv-state-%s", st))),
 			FileName: "file.bin",
 			FileSize: 100,
-			Peer:     "sender-1234567890abcdef",
+			Peer:     domaintest.ID("sender-1234567890abcdef"),
 			Role:     "receiver",
 			State:    string(st),
 		}
@@ -1460,7 +1465,7 @@ func TestEntryToReceiverMapping_ZeroChunkSizeNormalized(t *testing.T) {
 		FileHash:  "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8",
 		FileName:  "data.bin",
 		FileSize:  100000,
-		Peer:      "sender-identity-1234567890abcd",
+		Peer:      domaintest.ID("sender-identity-1234567890abcd"),
 		State:     string(receiverWaitingRoute),
 		ChunkSize: 0, // legacy or corrupted entry
 		CreatedAt: time.Now(),
@@ -1483,7 +1488,7 @@ func TestEntryToReceiverMapping_NonZeroChunkSizePreserved(t *testing.T) {
 		FileHash:  "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8",
 		FileName:  "data.bin",
 		FileSize:  50000,
-		Peer:      "sender-identity-1234567890abcd",
+		Peer:      domaintest.ID("sender-identity-1234567890abcd"),
 		State:     string(receiverDownloading),
 		ChunkSize: 8192,
 		CreatedAt: time.Now(),
@@ -1528,7 +1533,7 @@ func TestLoadMappingsTombstonesActiveSenderWithMissingBlob(t *testing.T) {
 				FileName:    "ghost.bin",
 				FileSize:    5000,
 				ContentType: "application/octet-stream",
-				Peer:        "recipient-identity-1234567890ab",
+				Peer:        domaintest.ID("recipient-identity-1234567890ab"),
 				Role:        "sender",
 				State:       string(senderAnnounced),
 				CreatedAt:   time.Now().Add(-time.Hour),
@@ -1600,7 +1605,7 @@ func TestLoadMappingsResurrectsTombstoneWhenBlobExists(t *testing.T) {
 				FileName:    "photo.png",
 				FileSize:    9,
 				ContentType: "image/png",
-				Peer:        "recipient-identity-1234567890ab",
+				Peer:        domaintest.ID("recipient-identity-1234567890ab"),
 				Role:        "sender",
 				State:       string(senderTombstone),
 				CreatedAt:   time.Now().Add(-time.Hour),
@@ -1676,7 +1681,7 @@ func TestResurrectedTombstoneResetsCompletedAt(t *testing.T) {
 				FileName:    "doc.pdf",
 				FileSize:    7,
 				ContentType: "application/pdf",
-				Peer:        "peer-identity-abcdef1234567890",
+				Peer:        domaintest.ID("peer-identity-abcdef1234567890"),
 				Role:        "sender",
 				State:       string(senderTombstone),
 				CreatedAt:   oldCompletedAt.Add(-time.Hour),
@@ -1754,7 +1759,7 @@ func TestLoadMappingsKeepsActiveSenderWithExistingBlob(t *testing.T) {
 				FileName:    "real.bin",
 				FileSize:    4,
 				ContentType: "application/octet-stream",
-				Peer:        "recipient-identity-1234567890ab",
+				Peer:        domaintest.ID("recipient-identity-1234567890ab"),
 				Role:        "sender",
 				State:       string(senderServing),
 				CreatedAt:   time.Now().Add(-time.Hour),
@@ -1827,7 +1832,7 @@ func TestOnDownloadCompleteProceedsOnPersistFailure(t *testing.T) {
 	expectedHash := hex.EncodeToString(h[:])
 
 	fileID := domain.FileID("persist-rollback-test")
-	sender := domain.PeerIdentity("sender-identity-1234567890ab")
+	sender := domaintest.ID("sender-identity-1234567890ab")
 
 	// Create the partial file (onDownloadComplete will verify and rename it).
 	partialPath := filepath.Join(downloadDir, "partial", string(fileID)+".part")
@@ -1902,7 +1907,7 @@ func TestReconcileVerifyingPersistsToDisk(t *testing.T) {
 	mappingsPath := filepath.Join(dir, "transfers.json")
 
 	fileID := domain.FileID("reconcile-persist-test")
-	sender := domain.PeerIdentity("sender-identity-1234567890ab")
+	sender := domaintest.ID("sender-identity-1234567890ab")
 	fileHash := "d1d2d3d4d5d6d1d2d3d4d5d6d1d2d3d4d5d6d1d2d3d4d5d6d1d2d3d4d5d6d1d2"
 
 	// Write a transfers.json with a receiverVerifying entry (no files on disk
@@ -1998,7 +2003,7 @@ func TestSenderTombstonePersistsToDisk(t *testing.T) {
 			FileHash:  hash,
 			FileName:  "ghost.bin",
 			FileSize:  4096,
-			Peer:      domain.PeerIdentity("recipient-identity-1234567890ab"),
+			Peer:      domaintest.ID("recipient-identity-1234567890ab"),
 			Role:      "sender",
 			State:     string(senderAnnounced),
 			CreatedAt: time.Now().Add(-time.Hour),

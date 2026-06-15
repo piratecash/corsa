@@ -41,7 +41,7 @@ func TestFileAnnounceDMRoundTrip(t *testing.T) {
 	ciphertext, err := EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{
@@ -118,7 +118,7 @@ func TestFileAnnounceDMBothPartiesCanDecrypt(t *testing.T) {
 	ciphertext, err := EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{

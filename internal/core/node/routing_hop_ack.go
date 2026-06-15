@@ -59,9 +59,9 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 	// ackSenderAddress is a transport address. Resolve to peer identity
 	// so we can match against routing table entries (keyed by identity).
 	nextHopIdentity := s.resolvePeerIdentity(ackSenderAddress)
-	if nextHopIdentity == "" {
+	if nextHopIdentity.IsZero() {
 		// Session may have closed. Try using ackSenderAddress as identity directly.
-		nextHopIdentity = domain.PeerIdentity(ackSenderAddress)
+		nextHopIdentity = domain.PeerIdentityFromWire(string(ackSenderAddress))
 	}
 
 	// PR 11.12 P2#1 — atomic confirmation. Table.ConfirmHopAck
@@ -89,16 +89,16 @@ func (s *Service) confirmRouteViaHopAck(recipientIdentity domain.PeerIdentity, a
 	status, applied := s.routingTable.ConfirmHopAck(recipientIdentity, nextHopIdentity, 0)
 	if !applied {
 		log.Debug().
-			Str("identity", string(recipientIdentity)).
-			Str("next_hop", string(nextHopIdentity)).
+			Str("identity", recipientIdentity.String()).
+			Str("next_hop", nextHopIdentity.String()).
 			Str("ack_sender", string(ackSenderAddress)).
 			Msg("route_hop_ack_no_matching_route")
 		return
 	}
 	if status == routing.RouteAccepted {
 		log.Debug().
-			Str("identity", string(recipientIdentity)).
-			Str("next_hop", string(nextHopIdentity)).
+			Str("identity", recipientIdentity.String()).
+			Str("next_hop", nextHopIdentity.String()).
 			Msg("route_confirmed_via_hop_ack")
 	}
 }

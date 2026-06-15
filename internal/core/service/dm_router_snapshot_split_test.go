@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 )
 
@@ -42,8 +43,8 @@ func TestSnapshotSplit_StatusNotifyReusesDMCollections(t *testing.T) {
 
 	// Populate the DM half via a sidebar notify.
 	r.mu.Lock()
-	r.peers["peer-1"] = &RouterPeerState{Unread: 2}
-	r.peerOrder = []domain.PeerIdentity{"peer-1"}
+	r.peers[domaintest.ID("peer-1")] = &RouterPeerState{Unread: 2}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("peer-1")}
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 
@@ -83,15 +84,15 @@ func TestSnapshotSplit_DMNotifyRebuildsCollections(t *testing.T) {
 	r := newSnapshotTestRouter(t)
 
 	r.mu.Lock()
-	r.peers["peer-1"] = &RouterPeerState{}
-	r.peerOrder = []domain.PeerIdentity{"peer-1"}
+	r.peers[domaintest.ID("peer-1")] = &RouterPeerState{}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("peer-1")}
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 	snap1 := r.Snapshot()
 
 	r.mu.Lock()
-	r.peers["peer-2"] = &RouterPeerState{}
-	r.peerOrder = []domain.PeerIdentity{"peer-1", "peer-2"}
+	r.peers[domaintest.ID("peer-2")] = &RouterPeerState{}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("peer-1"), domaintest.ID("peer-2")}
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 	snap2 := r.Snapshot()
@@ -115,7 +116,7 @@ func TestSnapshotSplit_BeepReusesBothHalves(t *testing.T) {
 	r := newSnapshotTestRouter(t)
 
 	r.mu.Lock()
-	r.peers["peer-1"] = &RouterPeerState{}
+	r.peers[domaintest.ID("peer-1")] = &RouterPeerState{}
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 	snap1 := r.Snapshot()

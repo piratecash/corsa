@@ -237,7 +237,7 @@ func TestReview_v2_P2_4_HandleRouteQueryResponse_DropsInvalidTarget(t *testing.T
 		svc.handleRouteQueryResponse(idPeerB, protocol.RouteQueryResponseFrame{
 			Type:           protocol.RouteQueryResponseFrameType,
 			QueryID:        100,
-			TargetIdentity: domain.PeerIdentity(junk),
+			TargetIdentity: domain.PeerIdentityFromWire(junk),
 			Found:          true,
 			BestUplink:     idPeerD,
 			BestHops:       2,
@@ -246,7 +246,7 @@ func TestReview_v2_P2_4_HandleRouteQueryResponse_DropsInvalidTarget(t *testing.T
 		// Lookup on the junk target must return nothing — the
 		// handler must have rejected the ingest before
 		// UpdateRoute.
-		if routes := svc.routingTable.Lookup(routing.PeerIdentity(junk)); len(routes) != 0 {
+		if routes := svc.routingTable.Lookup(domain.PeerIdentityFromWire(junk)); len(routes) != 0 {
 			t.Fatalf("junk target %q produced %d ingested routes; want 0", junk, len(routes))
 		}
 	}
@@ -274,12 +274,12 @@ func TestReview_v2_P2_4_TriggerRouteQueryAsync_RejectsInvalidTarget(t *testing.T
 		"abc",
 	}
 	for _, junk := range junkTargets {
-		svc.triggerRouteQueryAsync(domain.PeerIdentity(junk))
+		svc.triggerRouteQueryAsync(domain.PeerIdentityFromWire(junk))
 	}
 	// Even after some scheduler slack, the budget must be untouched.
 	time.Sleep(50 * time.Millisecond)
 	for _, junk := range junkTargets {
-		if got := svc.queryRateLimit.PendingCount(domain.PeerIdentity(junk)); got != 0 {
+		if got := svc.queryRateLimit.PendingCount(domain.PeerIdentityFromWire(junk)); got != 0 {
 			t.Fatalf("junk target %q consumed %d rate-limit slot(s); want 0", junk, got)
 		}
 	}
@@ -292,10 +292,10 @@ func TestReview_v2_P2_4_SendRouteQuery_RejectsInvalidTarget(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.queryRateLimit = newQueryRateLimit(nil, 30*time.Second, queryFanOutLimit)
 
-	if got := svc.SendRouteQuery("*"); got != 0 {
+	if got := svc.SendRouteQuery(domain.PeerIdentityFromWire("*")); got != 0 {
 		t.Fatalf("SendRouteQuery(\"*\") = %d, want 0", got)
 	}
-	if got := svc.queryRateLimit.PendingCount(domain.PeerIdentity("*")); got != 0 {
+	if got := svc.queryRateLimit.PendingCount(domain.PeerIdentityFromWire("*")); got != 0 {
 		t.Fatalf("rate-limit consumed for invalid target: %d", got)
 	}
 }

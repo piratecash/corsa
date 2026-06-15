@@ -76,7 +76,7 @@ func (p *Preferences) Alias(identity domain.PeerIdentity) string {
 	if p == nil || p.Aliases == nil {
 		return ""
 	}
-	return p.Aliases[string(identity)]
+	return p.Aliases[identity.String()]
 }
 
 // SetAlias assigns a display name for the given identity.
@@ -88,7 +88,7 @@ func (p *Preferences) SetAlias(identity domain.PeerIdentity, alias string) {
 	if p.Aliases == nil {
 		p.Aliases = make(map[string]string)
 	}
-	key := string(identity)
+	key := identity.String()
 	if alias == "" {
 		delete(p.Aliases, key)
 	} else {

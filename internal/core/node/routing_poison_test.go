@@ -26,7 +26,7 @@ import (
 // concrete (identity, uplink) slot to poison.
 func addDirectViaIdentity(t *testing.T, svc *Service, peer domain.PeerIdentity) {
 	t.Helper()
-	if _, err := svc.routingTable.AddDirectPeer(domain.PeerIdentity(peer)); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(peer); err != nil {
 		t.Fatalf("AddDirectPeer(%q): %v", peer, err)
 	}
 }
@@ -39,14 +39,14 @@ func TestSendRoutePoison_EmitsRawLineFrameWithSenderSig(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
 	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
 	svc.peerMu.Unlock()
 
-	if !svc.SendRoutePoison(context.Background(), senderAddr, domain.PeerIdentity(idTargetX), protocol.RoutePoisonReasonUplinkLost) {
+	if !svc.SendRoutePoison(context.Background(), senderAddr, idTargetX, protocol.RoutePoisonReasonUplinkLost) {
 		t.Fatalf("SendRoutePoison returned false against a capable session")
 	}
 
@@ -59,7 +59,7 @@ func TestSendRoutePoison_EmitsRawLineFrameWithSenderSig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RawLine did not parse as poison: %v (raw=%q)", err, got.RawLine)
 		}
-		if parsed.Identity != idTargetX || parsed.Reason != protocol.RoutePoisonReasonUplinkLost {
+		if parsed.Identity != idTargetX.String() || parsed.Reason != protocol.RoutePoisonReasonUplinkLost {
 			t.Fatalf("payload wrong: %+v", parsed)
 		}
 		if parsed.SenderSig == "" {
@@ -86,14 +86,14 @@ func TestSendRoutePoison_RefusesPeerWithoutCapability(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
 	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
 	svc.peerMu.Unlock()
 
-	if svc.SendRoutePoison(context.Background(), senderAddr, domain.PeerIdentity(idTargetX), protocol.RoutePoisonReasonUplinkLost) {
+	if svc.SendRoutePoison(context.Background(), senderAddr, idTargetX, protocol.RoutePoisonReasonUplinkLost) {
 		t.Fatalf("SendRoutePoison must return false when peer lacks poison-reverse cap")
 	}
 	select {
@@ -111,14 +111,14 @@ func TestHandleRoutePoison_InvalidatesOnlySenderUplinkClaim(t *testing.T) {
 	// alternate uplink for the same target). Both have a direct claim
 	// for themselves; we also seed a transit announcement so the same
 	// target identity (idTargetX) is reachable via BOTH peers.
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idPeerB))
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idOriginC))
+	addDirectViaIdentity(t, svc, idPeerB)
+	addDirectViaIdentity(t, svc, idOriginC)
 
 	// Insert a transit claim for idTargetX via idPeerB.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 		Hops:     2,
 		SeqNo:    5,
 		Source:   routing.RouteSourceAnnouncement,
@@ -127,9 +127,9 @@ func TestHandleRoutePoison_InvalidatesOnlySenderUplinkClaim(t *testing.T) {
 	}
 	// And a transit claim for idTargetX via idOriginC.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idOriginC),
-		NextHop:  domain.PeerIdentity(idOriginC),
+		Identity: idTargetX,
+		Origin:   idOriginC,
+		NextHop:  idOriginC,
 		Hops:     3,
 		SeqNo:    7,
 		Source:   routing.RouteSourceAnnouncement,
@@ -138,7 +138,7 @@ func TestHandleRoutePoison_InvalidatesOnlySenderUplinkClaim(t *testing.T) {
 	}
 
 	// Sanity precondition: both uplinks reachable.
-	pre := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	pre := svc.routingTable.Lookup(idTargetX)
 	if len(pre) < 2 {
 		t.Fatalf("precondition: expected 2 uplinks for target, got %d", len(pre))
 	}
@@ -146,11 +146,11 @@ func TestHandleRoutePoison_InvalidatesOnlySenderUplinkClaim(t *testing.T) {
 	// Receive an unsigned poison from idPeerB targeting idTargetX.
 	frame := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	}
-	svc.handleRoutePoison(domain.PeerIdentity(idPeerB), frame)
+	svc.handleRoutePoison(idPeerB, frame)
 
 	// Lookup filters withdrawn / expired entries (see table_lookup.go),
 	// so the invalidated claim disappears from the result: post must
@@ -158,15 +158,15 @@ func TestHandleRoutePoison_InvalidatesOnlySenderUplinkClaim(t *testing.T) {
 	// at least one entry with NextHop == idOriginC — that uplink slot
 	// is untouched (overview §4.2 trust budget: poison invalidates ONLY
 	// the sender's own slot).
-	post := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	post := svc.routingTable.Lookup(idTargetX)
 	for _, r := range post {
-		if r.NextHop == domain.PeerIdentity(idPeerB) {
+		if r.NextHop == idPeerB {
 			t.Fatalf("idPeerB uplink claim must be invalidated and filtered from Lookup; got %+v", r)
 		}
 	}
 	found := false
 	for _, r := range post {
-		if r.NextHop == domain.PeerIdentity(idOriginC) {
+		if r.NextHop == idOriginC {
 			found = true
 			break
 		}
@@ -184,11 +184,11 @@ func TestHandleRoutePoison_InvalidSenderSigDropsFrame(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(peer.Address))
+	addDirectViaIdentity(t, svc, domain.PeerIdentityFromWire(peer.Address))
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(peer.Address),
-		NextHop:  domain.PeerIdentity(peer.Address),
+		Identity: idTargetX,
+		Origin:   domain.PeerIdentityFromWire(peer.Address),
+		NextHop:  domain.PeerIdentityFromWire(peer.Address),
 		Hops:     2,
 		SeqNo:    5,
 		Source:   routing.RouteSourceAnnouncement,
@@ -199,20 +199,20 @@ func TestHandleRoutePoison_InvalidSenderSigDropsFrame(t *testing.T) {
 	// Build a poison frame with a corrupt SenderSig.
 	frame := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonHealthDead,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	}
 	goodSig := ed25519.Sign(peer.PrivateKey, frame.CanonicalSenderSigBytes())
 	goodSig[0] ^= 0xff // corrupt
 	frame.SenderSig = base64.StdEncoding.EncodeToString(goodSig)
-	svc.handleRoutePoison(domain.PeerIdentity(peer.Address), frame)
+	svc.handleRoutePoison(domain.PeerIdentityFromWire(peer.Address), frame)
 
 	// The claim must NOT have been invalidated: Lookup still returns
 	// a live entry for (idTargetX, peer.Address).
 	stillLive := false
-	for _, r := range svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)) {
-		if r.NextHop == domain.PeerIdentity(peer.Address) {
+	for _, r := range svc.routingTable.Lookup(idTargetX) {
+		if r.NextHop == domain.PeerIdentityFromWire(peer.Address) {
 			stillLive = true
 			break
 		}
@@ -248,7 +248,7 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(peer.Address))
+	addDirectViaIdentity(t, svc, domain.PeerIdentityFromWire(peer.Address))
 
 	// Arm route quarantine for the sender FIRST. Arming now locally
 	// invalidates existing transit claims via the peer (see
@@ -258,16 +258,16 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 	// — this test is about handleRoutePoison's gate, not the
 	// announce-ingest one).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer.Address), "test", time.Now())
+	svc.armRouteQuarantineLocked(domain.PeerIdentityFromWire(peer.Address), "test", time.Now())
 	svc.peerMu.Unlock()
 
 	// Seed a transit claim through the sender so the poison frame
 	// has something to invalidate. Without the seed, InvalidateUplinkClaim
 	// is a no-op and the test would pass even without the gate.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(peer.Address),
-		NextHop:  domain.PeerIdentity(peer.Address),
+		Identity: idTargetX,
+		Origin:   domain.PeerIdentityFromWire(peer.Address),
+		NextHop:  domain.PeerIdentityFromWire(peer.Address),
 		Hops:     2,
 		SeqNo:    5,
 		Source:   routing.RouteSourceAnnouncement,
@@ -276,10 +276,10 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 	}
 
 	// Sanity: the seeded claim is live before the handler call.
-	pre := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	pre := svc.routingTable.Lookup(idTargetX)
 	preLive := false
 	for _, r := range pre {
-		if r.NextHop == domain.PeerIdentity(peer.Address) {
+		if r.NextHop == domain.PeerIdentityFromWire(peer.Address) {
 			preLive = true
 			break
 		}
@@ -294,21 +294,21 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 	// mutation, so the frame's payload is correct on purpose.
 	frame := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonHealthDead,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	}
 	sig := ed25519.Sign(peer.PrivateKey, frame.CanonicalSenderSigBytes())
 	frame.SenderSig = base64.StdEncoding.EncodeToString(sig)
 
-	svc.handleRoutePoison(domain.PeerIdentity(peer.Address), frame)
+	svc.handleRoutePoison(domain.PeerIdentityFromWire(peer.Address), frame)
 
 	// The claim must still be live — quarantine gate fired before
 	// InvalidateUplinkClaim.
-	post := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	post := svc.routingTable.Lookup(idTargetX)
 	stillLive := false
 	for _, r := range post {
-		if r.NextHop == domain.PeerIdentity(peer.Address) {
+		if r.NextHop == domain.PeerIdentityFromWire(peer.Address) {
 			stillLive = true
 			break
 		}
@@ -324,11 +324,11 @@ func TestHandleRoutePoison_AbsentSigAccepted(t *testing.T) {
 	// the Tier-2 lenient policy for unsigned attested-links entries.
 	svc, _ := newTestServiceWithIdentity(t)
 	svc.eventBus = newStormBus(t)
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idPeerB))
+	addDirectViaIdentity(t, svc, idPeerB)
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 		Hops:     2,
 		SeqNo:    5,
 		Source:   routing.RouteSourceAnnouncement,
@@ -338,14 +338,14 @@ func TestHandleRoutePoison_AbsentSigAccepted(t *testing.T) {
 
 	// Sanity precondition: the seeded claim is reachable in Lookup
 	// before poison runs.
-	pre := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	pre := svc.routingTable.Lookup(idTargetX)
 	if len(pre) == 0 {
 		t.Fatalf("precondition: target must be reachable via idPeerB before poison")
 	}
 
-	svc.handleRoutePoison(domain.PeerIdentity(idPeerB), protocol.RoutePoisonFrame{
+	svc.handleRoutePoison(idPeerB, protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonLoopDetected,
 		IssuedAt: "2026-05-28T12:00:00Z",
 		// SenderSig deliberately empty.
@@ -354,9 +354,9 @@ func TestHandleRoutePoison_AbsentSigAccepted(t *testing.T) {
 	// disappears from the result. With idPeerB the only uplink, the
 	// post-Lookup result must be empty — proving the invalidation
 	// landed.
-	post := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	post := svc.routingTable.Lookup(idTargetX)
 	for _, r := range post {
-		if r.NextHop == domain.PeerIdentity(idPeerB) {
+		if r.NextHop == idPeerB {
 			t.Fatalf("unsigned poison from a session-known sender must invalidate the claim; got live %+v", r)
 		}
 	}
@@ -376,12 +376,12 @@ func TestHandleRoutePoison_AbsentSigAccepted(t *testing.T) {
 func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 	svc, _ := newTestServiceWithIdentity(t)
 	svc.eventBus = newStormBus(t)
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idPeerB))
+	addDirectViaIdentity(t, svc, idPeerB)
 	const seededSeqNo = uint64(5)
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 		Hops:     2,
 		SeqNo:    seededSeqNo,
 		Source:   routing.RouteSourceAnnouncement,
@@ -391,7 +391,7 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 
 	frame := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	}
@@ -399,11 +399,11 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 	// First poison: live claim → withdraw → tombstone at SeqNo=6
 	// (seededSeqNo + 1, the strictly-newer SeqNo InvalidateUplinkClaim
 	// synthesises against the live claim).
-	svc.handleRoutePoison(domain.PeerIdentity(idPeerB), frame)
+	svc.handleRoutePoison(idPeerB, frame)
 	first := svc.routingTable.InspectTriple(routing.RouteTriple{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 	})
 	if first == nil {
 		t.Fatalf("first poison must leave a tombstone for inspection")
@@ -417,11 +417,11 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 
 	// Second poison for the same (identity, sender): the live-claim
 	// gate makes this a clean no-op — tombstone SeqNo must NOT move.
-	svc.handleRoutePoison(domain.PeerIdentity(idPeerB), frame)
+	svc.handleRoutePoison(idPeerB, frame)
 	second := svc.routingTable.InspectTriple(routing.RouteTriple{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 	})
 	if second == nil {
 		t.Fatalf("second poison must not delete the tombstone")
@@ -431,11 +431,11 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 	}
 
 	// Third poison drives the point home: still the same SeqNo.
-	svc.handleRoutePoison(domain.PeerIdentity(idPeerB), frame)
+	svc.handleRoutePoison(idPeerB, frame)
 	third := svc.routingTable.InspectTriple(routing.RouteTriple{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 	})
 	if third == nil || third.SeqNo != first.SeqNo {
 		t.Fatalf("third poison must remain a no-op; SeqNo: got %d want %d", third.SeqNo, first.SeqNo)
@@ -467,11 +467,11 @@ func TestHandleRoutePoison_RateLimited(t *testing.T) {
 	// limiter explicitly — same shape NewService gives the production
 	// service.
 	svc.announceLimiter = newAnnounceRateLimiter()
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idPeerB))
+	addDirectViaIdentity(t, svc, idPeerB)
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 		Hops:     2,
 		SeqNo:    5,
 		Source:   routing.RouteSourceAnnouncement,
@@ -486,35 +486,35 @@ func TestHandleRoutePoison_RateLimited(t *testing.T) {
 	// per-route budgeting — one call with cost=burst drops the
 	// bucket to exactly zero, which is what we want for the
 	// "next allow must fail" precondition).
-	if !svc.announceLimiter.allow(domain.PeerIdentity(idPeerB), announceBurstRoutesPerPeer) {
+	if !svc.announceLimiter.allow(idPeerB, announceBurstRoutesPerPeer) {
 		t.Fatalf("precondition: full-burst allow against fresh bucket must pass")
 	}
-	if svc.announceLimiter.allow(domain.PeerIdentity(idPeerB), 1) {
+	if svc.announceLimiter.allow(idPeerB, 1) {
 		t.Fatalf("precondition: bucket should be exhausted after burst drain")
 	}
 	// Re-seed exactly zero tokens to remove any micro-refill that
 	// elapsed between the drain and this point. After this the next
 	// poison allow (cost=1) is precisely the one that should fail.
 	svc.announceLimiter.mu.Lock()
-	svc.announceLimiter.buckets[domain.PeerIdentity(idPeerB)].tokens = 0
+	svc.announceLimiter.buckets[idPeerB].tokens = 0
 	svc.announceLimiter.mu.Unlock()
 
 	frame := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-28T12:00:00Z",
 		// No SenderSig — the test would still pass with a sig (verify
 		// is gated behind the rate-limit), but absence keeps the test
 		// focused on the limiter and avoids per-test key plumbing.
 	}
-	svc.handleRoutePoison(domain.PeerIdentity(idPeerB), frame)
+	svc.handleRoutePoison(idPeerB, frame)
 
 	// Storage must not have been touched: the live transit claim
 	// stays in Lookup.
 	stillLive := false
-	for _, r := range svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)) {
-		if r.NextHop == domain.PeerIdentity(idPeerB) {
+	for _, r := range svc.routingTable.Lookup(idTargetX) {
+		if r.NextHop == idPeerB {
 			stillLive = true
 			break
 		}
@@ -548,8 +548,8 @@ func TestHandleRoutePoison_FansOutWhenNoBackupUplink(t *testing.T) {
 	// enqueue frames.
 	senderAddr := domain.PeerAddress("addr-sender")
 	otherAddr := domain.PeerAddress("addr-other")
-	senderID := domain.PeerIdentity(idPeerB)
-	otherID := domain.PeerIdentity(idOriginC)
+	senderID := idPeerB
+	otherID := idOriginC
 	_ = peerSessionFixture(t, svc, senderAddr, senderID,
 		[]domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1})
 	otherCh := peerSessionFixture(t, svc, otherAddr, otherID,
@@ -562,7 +562,7 @@ func TestHandleRoutePoison_FansOutWhenNoBackupUplink(t *testing.T) {
 	// the poison invalidates this slot, len(Lookup) == 0 and the
 	// fan-out branch must fire.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
+		Identity: idTargetX,
 		Origin:   senderID,
 		NextHop:  senderID,
 		Hops:     2,
@@ -584,7 +584,7 @@ done:
 
 	svc.handleRoutePoison(senderID, protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-30T12:00:00Z",
 	})
@@ -601,7 +601,7 @@ done:
 		if err != nil {
 			t.Fatalf("otherPeer RawLine did not parse as poison: %v", err)
 		}
-		if parsed.Identity != idTargetX {
+		if parsed.Identity != idTargetX.String() {
 			t.Fatalf("fan-out poison about wrong identity: got %q want %q", parsed.Identity, idTargetX)
 		}
 	case <-time.After(200 * time.Millisecond):
@@ -622,9 +622,9 @@ func TestHandleRoutePoison_NoFanOutWhenBackupUplinkSurvives(t *testing.T) {
 	senderAddr := domain.PeerAddress("addr-sender")
 	otherAddr := domain.PeerAddress("addr-other")
 	backupAddr := domain.PeerAddress("addr-backup")
-	senderID := domain.PeerIdentity(idPeerB)
-	otherID := domain.PeerIdentity(idOriginC)
-	backupID := domain.PeerIdentity("dd00000000000000000000000000000000000020")
+	senderID := idPeerB
+	otherID := idOriginC
+	backupID := domain.PeerIdentityFromWire("dd00000000000000000000000000000000000020")
 
 	_ = peerSessionFixture(t, svc, senderAddr, senderID,
 		[]domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1})
@@ -641,7 +641,7 @@ func TestHandleRoutePoison_NoFanOutWhenBackupUplinkSurvives(t *testing.T) {
 	// survives — fan-out must be suppressed.
 	for _, uplink := range []domain.PeerIdentity{senderID, backupID} {
 		if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-			Identity: domain.PeerIdentity(idTargetX),
+			Identity: idTargetX,
 			Origin:   uplink,
 			NextHop:  uplink,
 			Hops:     2,
@@ -664,7 +664,7 @@ done:
 
 	svc.handleRoutePoison(senderID, protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-30T12:00:00Z",
 	})
@@ -687,13 +687,13 @@ func TestHandleRoutePoison_NoClaimShortCircuits(t *testing.T) {
 	svc, _ := newTestServiceWithIdentity(t)
 	svc.eventBus = newStormBus(t)
 
-	svc.handleRoutePoison(domain.PeerIdentity(idPeerB), protocol.RoutePoisonFrame{
+	svc.handleRoutePoison(idPeerB, protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	})
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("table must stay empty when no claim to poison; got %d entries", len(got))
 	}
 }

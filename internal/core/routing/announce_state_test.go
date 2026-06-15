@@ -3,16 +3,18 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 func TestAnnounceStateRegistry_GetOrCreate(t *testing.T) {
 	r := NewAnnounceStateRegistry()
 
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 	if s == nil {
 		t.Fatal("expected non-nil state")
 	}
-	if s.PeerIdentity() != "peer-A" {
+	if s.PeerIdentity() != domaintest.ID("peer-A") {
 		t.Fatalf("expected peer-A, got %s", s.PeerIdentity())
 	}
 
@@ -25,7 +27,7 @@ func TestAnnounceStateRegistry_GetOrCreate(t *testing.T) {
 	}
 
 	// Second call returns same object.
-	s2 := r.GetOrCreate("peer-A")
+	s2 := r.GetOrCreate(domaintest.ID("peer-A"))
 	if s2 != s {
 		t.Fatal("expected same state object")
 	}
@@ -33,7 +35,7 @@ func TestAnnounceStateRegistry_GetOrCreate(t *testing.T) {
 
 func TestAnnounceStateRegistry_TimestampsInitializedToZero(t *testing.T) {
 	r := NewAnnounceStateRegistry()
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	view := s.View()
 	if !view.LastSuccessfulFullSyncAt.IsZero() {
@@ -58,12 +60,12 @@ func TestAnnounceStateRegistry_MarkDisconnected(t *testing.T) {
 		WithRegistryClock(func() time.Time { return now }),
 	)
 
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Set up initial state: resync done, attempt recorded.
 	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, now.Add(-time.Minute))
 
-	r.MarkDisconnected("peer-A")
+	r.MarkDisconnected(domaintest.ID("peer-A"))
 
 	view := s.View()
 	if !view.NeedsFullResync {
@@ -84,14 +86,14 @@ func TestAnnounceStateRegistry_MarkDisconnected(t *testing.T) {
 func TestAnnounceStateRegistry_MarkReconnected(t *testing.T) {
 	r := NewAnnounceStateRegistry()
 
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Set up: mark as synced, then record an attempt.
 	now := time.Now()
 	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, now)
 	s.RecordFullSyncAttempt(now)
 
-	r.MarkReconnected("peer-A", nil)
+	r.MarkReconnected(domaintest.ID("peer-A"), nil)
 
 	view := s.View()
 	if !view.NeedsFullResync {
@@ -113,9 +115,9 @@ func TestAnnounceStateRegistry_MarkReconnectedCreatesNew(t *testing.T) {
 	r := NewAnnounceStateRegistry()
 
 	// MarkReconnected for unknown peer should create new state.
-	r.MarkReconnected("peer-new", nil)
+	r.MarkReconnected(domaintest.ID("peer-new"), nil)
 
-	s := r.Get("peer-new")
+	s := r.Get(domaintest.ID("peer-new"))
 	if s == nil {
 		t.Fatal("expected state to be created")
 	}
@@ -138,9 +140,9 @@ func TestAnnounceStateRegistry_MarkReconnectedStoresCapabilitiesNewPeer(t *testi
 		PeerCapability("mesh_relay_v1"),
 		PeerCapability("mesh_routing_v1"),
 	}
-	r.MarkReconnected("peer-new", caps)
+	r.MarkReconnected(domaintest.ID("peer-new"), caps)
 
-	s := r.Get("peer-new")
+	s := r.Get(domaintest.ID("peer-new"))
 	if s == nil {
 		t.Fatal("expected state to be created")
 	}
@@ -168,12 +170,12 @@ func TestAnnounceStateRegistry_MarkReconnectedStoresCapabilitiesExistingPeer(t *
 	r := NewAnnounceStateRegistry()
 
 	// Prime state with one capability set.
-	r.MarkReconnected("peer-A", []PeerCapability{PeerCapability("mesh_relay_v1")})
+	r.MarkReconnected(domaintest.ID("peer-A"), []PeerCapability{PeerCapability("mesh_relay_v1")})
 
 	// Reconnect with a different (smaller) set.
-	r.MarkReconnected("peer-A", []PeerCapability{PeerCapability("mesh_routing_v1")})
+	r.MarkReconnected(domaintest.ID("peer-A"), []PeerCapability{PeerCapability("mesh_routing_v1")})
 
-	s := r.Get("peer-A")
+	s := r.Get(domaintest.ID("peer-A"))
 	if s == nil {
 		t.Fatal("expected state to exist")
 	}
@@ -202,13 +204,13 @@ func TestAnnounceStateRegistry_MarkReconnectedDefensiveCopy(t *testing.T) {
 		PeerCapability("mesh_relay_v1"),
 		PeerCapability("mesh_routing_v1"),
 	}
-	r.MarkReconnected("peer-A", caps)
+	r.MarkReconnected(domaintest.ID("peer-A"), caps)
 
 	// Mutate the caller's slice after the call.
 	caps[0] = PeerCapability("corrupted")
 	caps[1] = PeerCapability("also_corrupted")
 
-	s := r.Get("peer-A")
+	s := r.Get(domaintest.ID("peer-A"))
 	if s == nil {
 		t.Fatal("expected state to exist")
 	}
@@ -230,9 +232,9 @@ func TestAnnounceStateRegistry_MarkReconnectedDefensiveCopy(t *testing.T) {
 func TestAnnounceStateRegistry_MarkReconnectedNilCapabilities(t *testing.T) {
 	r := NewAnnounceStateRegistry()
 
-	r.MarkReconnected("peer-A", nil)
+	r.MarkReconnected(domaintest.ID("peer-A"), nil)
 
-	s := r.Get("peer-A")
+	s := r.Get(domaintest.ID("peer-A"))
 	if s == nil {
 		t.Fatal("expected state to exist")
 	}
@@ -253,7 +255,7 @@ func TestAnnounceStateRegistry_EvictStale(t *testing.T) {
 		WithRegistryFlapWindow(60*time.Second),
 	)
 
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 	// Simulate disconnect 3 minutes ago (180s > 2*60s evict threshold).
 	s.mu.Lock()
 	s.disconnectedAt = now.Add(-3 * time.Minute)
@@ -264,7 +266,7 @@ func TestAnnounceStateRegistry_EvictStale(t *testing.T) {
 		t.Fatalf("expected 1 evicted, got %d", evicted)
 	}
 
-	if r.Get("peer-A") != nil {
+	if r.Get(domaintest.ID("peer-A")) != nil {
 		t.Fatal("expected peer-A to be evicted")
 	}
 }
@@ -277,13 +279,13 @@ func TestAnnounceStateRegistry_EvictStaleKeepsConnected(t *testing.T) {
 	)
 
 	// Connected peer (disconnectedAt = zero) should not be evicted.
-	r.GetOrCreate("peer-A")
+	r.GetOrCreate(domaintest.ID("peer-A"))
 
 	evicted := r.EvictStale()
 	if evicted != 0 {
 		t.Fatalf("expected 0 evicted, got %d", evicted)
 	}
-	if r.Get("peer-A") == nil {
+	if r.Get(domaintest.ID("peer-A")) == nil {
 		t.Fatal("connected peer should not be evicted")
 	}
 }
@@ -295,7 +297,7 @@ func TestAnnounceStateRegistry_EvictStaleKeepsRecent(t *testing.T) {
 		WithRegistryFlapWindow(60*time.Second),
 	)
 
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 	// Disconnect 30s ago (30s < 2*60s evict threshold).
 	s.mu.Lock()
 	s.disconnectedAt = now.Add(-30 * time.Second)
@@ -310,7 +312,7 @@ func TestAnnounceStateRegistry_EvictStaleKeepsRecent(t *testing.T) {
 func TestAnnounceStateRegistry_MarkInvalid(t *testing.T) {
 	r := NewAnnounceStateRegistry()
 
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Clear the initial NeedsFullResync via a successful full sync.
 	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, time.Now())
@@ -320,7 +322,7 @@ func TestAnnounceStateRegistry_MarkInvalid(t *testing.T) {
 		t.Fatal("expected NeedsFullResync=false after full sync success")
 	}
 
-	r.MarkInvalid("peer-A")
+	r.MarkInvalid(domaintest.ID("peer-A"))
 
 	view = s.View()
 	if !view.NeedsFullResync {
@@ -336,7 +338,7 @@ func TestAnnounceStateRegistry_MarkInvalid(t *testing.T) {
 // and IS suppressible. RecordFullSyncSuccess clears both flags.
 func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
 	r := NewAnnounceStateRegistry()
-	s := r.GetOrCreate("peer-A")
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// A fresh peer needs a full resync, but it is soft — the hardness
 	// only matters once a baseline exists, and a brand-new peer is
@@ -353,7 +355,7 @@ func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
 	}
 
 	// request_resync / consistency loss → HARD.
-	r.MarkInvalid("peer-A")
+	r.MarkInvalid(domaintest.ID("peer-A"))
 	if v := s.View(); !v.NeedsFullResync || !v.ResyncIsHard {
 		t.Fatalf("MarkInvalid must set a hard resync, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
 	}
@@ -365,15 +367,15 @@ func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
 	}
 
 	// Session boundary → SOFT, even if a hard resync preceded it.
-	r.MarkInvalid("peer-A")
-	r.MarkReconnected("peer-A", nil)
+	r.MarkInvalid(domaintest.ID("peer-A"))
+	r.MarkReconnected(domaintest.ID("peer-A"), nil)
 	if v := s.View(); !v.NeedsFullResync || v.ResyncIsHard {
 		t.Fatalf("MarkReconnected must reclassify to a soft resync, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
 	}
 
 	// MarkDisconnected is likewise a soft resync.
-	r.MarkInvalid("peer-A")
-	r.MarkDisconnected("peer-A")
+	r.MarkInvalid(domaintest.ID("peer-A"))
+	r.MarkDisconnected(domaintest.ID("peer-A"))
 	if v := s.View(); !v.NeedsFullResync || v.ResyncIsHard {
 		t.Fatalf("MarkDisconnected must reclassify to a soft resync, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
 	}

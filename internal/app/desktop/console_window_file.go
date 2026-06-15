@@ -620,7 +620,7 @@ func (c *ConsoleWindow) layoutFileRowPeerLine(gtx layout.Context, t filetransfer
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutSelectableText(gtx, &sel.Peer, string(t.Peer), fg)
+			return c.layoutSelectableText(gtx, &sel.Peer, t.Peer.String(), fg)
 		}),
 	)
 }
@@ -1309,7 +1309,7 @@ func fileStateBadgeColors(state string) (bg, fg color.NRGBA) {
 
 // truncatePeerIdentity shortens a peer identity for the row layout.
 func truncatePeerIdentity(p domain.PeerIdentity) string {
-	s := string(p)
+	s := p.String()
 	if len(s) <= 24 {
 		return s
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -154,9 +155,9 @@ func makeSignedFrame(
 func TestFileRouterLocalDelivery(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 
@@ -166,7 +167,7 @@ func TestFileRouterLocalDelivery(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "test-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	deliveries := tr.localDeliveries()
 	if len(deliveries) != 1 {
@@ -180,9 +181,9 @@ func TestFileRouterLocalDelivery(t *testing.T) {
 func TestFileRouterReplayRejection(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -191,8 +192,8 @@ func TestFileRouterReplayRejection(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "test-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
-	tr.router.HandleInbound(json.RawMessage(raw), "") // replay
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{}) // replay
 
 	deliveries := tr.localDeliveries()
 	if len(deliveries) != 1 {
@@ -203,14 +204,14 @@ func TestFileRouterReplayRejection(t *testing.T) {
 func TestFileRouterForwardMultipleRoutes(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
-	relay2 := domain.PeerIdentity("relay2-node-identity-1234567890a")
-	relay3 := domain.PeerIdentity("relay3-node-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relay1 := domaintest.ID("relay1-node-identity-1234567890a")
+	relay2 := domaintest.ID("relay2-node-identity-1234567890a")
+	relay3 := domaintest.ID("relay3-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -238,7 +239,7 @@ func TestFileRouterForwardMultipleRoutes(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// Frame should have been forwarded to relay2 (first reachable, sorted by hops).
 	sentToRelay1 := tr.sentTo(relay1)
@@ -259,13 +260,13 @@ func TestFileRouterForwardMultipleRoutes(t *testing.T) {
 func TestFileRouterForwardAllRoutesFail(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
-	relay2 := domain.PeerIdentity("relay2-node-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relay1 := domaintest.ID("relay1-node-identity-1234567890a")
+	relay2 := domaintest.ID("relay2-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -291,7 +292,7 @@ func TestFileRouterForwardAllRoutesFail(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// No frames should have been sent.
 	if len(tr.sentTo(relay1)) != 0 || len(tr.sentTo(relay2)) != 0 {
@@ -307,12 +308,12 @@ func TestFileRouterForwardAllRoutesFail(t *testing.T) {
 func TestFileRouterClientNodeNoRelay(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("client-node-identity-123456789a")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
+	localID := domaintest.ID("client-node-identity-123456789a")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relay1 := domaintest.ID("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -364,7 +365,7 @@ func TestFileRouterClientNodeNoRelay(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "client-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.sentTo(relay1)) != 0 {
 		t.Error("client node should not relay file commands")
@@ -381,12 +382,12 @@ func TestFileRouterClientNodeNoRelay(t *testing.T) {
 func TestFileRouterSkipsSelfRoutes(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relay1 := domaintest.ID("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -409,7 +410,7 @@ func TestFileRouterSkipsSelfRoutes(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "test-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// Should forward via relay1, not self.
 	if len(tr.sentTo(relay1)) != 1 {
@@ -425,9 +426,9 @@ func TestFileRouterSkipsSelfRoutes(t *testing.T) {
 func TestFileRouterConcurrentDuplicateDelivery(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -462,7 +463,7 @@ func TestFileRouterConcurrentDuplicateDelivery(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			router.HandleInbound(json.RawMessage(raw), "")
+			router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 		}()
 	}
 
@@ -484,13 +485,13 @@ func TestFileRouterConcurrentDuplicateDelivery(t *testing.T) {
 func TestFileRouterSplitHorizonExcludesIncomingPeer(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	neighborA := domain.PeerIdentity("neighbor-a-identity-1234567890a")
-	neighborB := domain.PeerIdentity("neighbor-b-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	neighborA := domaintest.ID("neighbor-a-identity-1234567890a")
+	neighborB := domaintest.ID("neighbor-b-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -533,12 +534,12 @@ func TestFileRouterSplitHorizonExcludesIncomingPeer(t *testing.T) {
 func TestFileRouterSplitHorizonAllRoutesExcluded(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	onlyNeighbor := domain.PeerIdentity("only-neighbor-identity-12345678")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	onlyNeighbor := domaintest.ID("only-neighbor-identity-12345678")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -575,12 +576,12 @@ func TestFileRouterSplitHorizonAllRoutesExcluded(t *testing.T) {
 func TestFileRouterEmptyIncomingPeerDisablesSplitHorizon(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	neighborA := domain.PeerIdentity("neighbor-a-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	neighborA := domaintest.ID("neighbor-a-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -601,7 +602,7 @@ func TestFileRouterEmptyIncomingPeerDisablesSplitHorizon(t *testing.T) {
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
 	// Empty incomingPeer → no split-horizon, neighborA should receive the frame.
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.sentTo(neighborA)) != 1 {
 		t.Fatalf("empty incomingPeer should not exclude any route; expected 1 send to neighborA, got %d", len(tr.sentTo(neighborA)))
@@ -611,13 +612,13 @@ func TestFileRouterEmptyIncomingPeerDisablesSplitHorizon(t *testing.T) {
 func TestFileRouterEqualHopsPrefersLongestConnectedPeer(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayOld := domain.PeerIdentity("relay-old-identity-1234567890ab")
-	relayNew := domain.PeerIdentity("relay-new-identity-1234567890ab")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayOld := domaintest.ID("relay-old-identity-1234567890ab")
+	relayNew := domaintest.ID("relay-new-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -671,7 +672,7 @@ func TestFileRouterEqualHopsPrefersLongestConnectedPeer(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "tie-break-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.sentTo(relayOld)) != 1 {
 		t.Fatalf("expected file router to prefer longer-connected equal-hop peer relayOld, got %d sends", len(tr.sentTo(relayOld)))
@@ -684,13 +685,13 @@ func TestFileRouterEqualHopsPrefersLongestConnectedPeer(t *testing.T) {
 func TestFileRouterSkipsUnusablePeerFromPeerRouteMeta(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	stalledRelay := domain.PeerIdentity("relay-stalled-identity-123456789")
-	healthyRelay := domain.PeerIdentity("relay-healthy-identity-123456789")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	stalledRelay := domaintest.ID("relay-stalled-identity-123456789")
+	healthyRelay := domaintest.ID("relay-healthy-identity-123456789")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -742,7 +743,7 @@ func TestFileRouterSkipsUnusablePeerFromPeerRouteMeta(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "skip-stalled-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.sentTo(stalledRelay)) != 0 {
 		t.Fatalf("stalled relay must be filtered out before send attempt, got %d sends", len(tr.sentTo(stalledRelay)))
@@ -755,10 +756,10 @@ func TestFileRouterSkipsUnusablePeerFromPeerRouteMeta(t *testing.T) {
 func TestSendFileCommandRouteTableFallbackPrefersLongestConnectedEqualHop(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("sender-node-identity-1234567890")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayOld := domain.PeerIdentity("relay-old-identity-1234567890ab")
-	relayNew := domain.PeerIdentity("relay-new-identity-1234567890ab")
+	localID := domaintest.ID("sender-node-identity-1234567890")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayOld := domaintest.ID("relay-old-identity-1234567890ab")
+	relayNew := domaintest.ID("relay-new-identity-1234567890ab")
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 
@@ -864,9 +865,9 @@ func TestSendFileCommandRouteTableFallbackPrefersLongestConnectedEqualHop(t *tes
 func TestSendFileCommandUsesFreshRouteLookupWhenSnapshotIsStale(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("sender-node-identity-1234567890")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayID := domain.PeerIdentity("relay-identity-1234567890abcdef")
+	localID := domaintest.ID("sender-node-identity-1234567890")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayID := domaintest.ID("relay-identity-1234567890abcdef")
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 
@@ -1013,9 +1014,9 @@ func TestSendFileCommandUsesFreshRouteLookupWhenSnapshotIsStale(t *testing.T) {
 func TestRouterExplainRouteUsesFreshRouteLookup(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("sender-node-identity-1234567890")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayID := domain.PeerIdentity("relay-identity-1234567890abcdef")
+	localID := domaintest.ID("sender-node-identity-1234567890")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayID := domaintest.ID("relay-identity-1234567890abcdef")
 
 	now := time.Now()
 	staleSnap := routing.Snapshot{
@@ -1070,13 +1071,13 @@ func TestRouterExplainRouteUsesFreshRouteLookup(t *testing.T) {
 func TestFileRouterDeduplicatesCandidatesByNextHop(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayA := domain.PeerIdentity("relay-a-identity-1234567890ab")
-	relayB := domain.PeerIdentity("relay-b-identity-1234567890ab")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayA := domaintest.ID("relay-a-identity-1234567890ab")
+	relayB := domaintest.ID("relay-b-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1123,7 +1124,7 @@ func TestFileRouterDeduplicatesCandidatesByNextHop(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "dedup-next-hop-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if attempts[relayA] != 1 {
 		t.Fatalf("expected relayA to be attempted once despite duplicate next-hop routes, got %d", attempts[relayA])
@@ -1153,32 +1154,32 @@ func TestRouteCandidateLessOrdering(t *testing.T) {
 	}{
 		{
 			name:      "higher protocol version beats lower hops",
-			a:         routeCandidate{nextHop: "a", hops: 5, protocolVersion: 7, connectedAt: base},
-			b:         routeCandidate{nextHop: "b", hops: 1, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 5, protocolVersion: 7, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 1, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
 			wantALess: true,
 		},
 		{
 			name:      "equal version: fewer hops wins",
-			a:         routeCandidate{nextHop: "a", hops: 1, protocolVersion: 6, connectedAt: base},
-			b:         routeCandidate{nextHop: "b", hops: 2, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 1, protocolVersion: 6, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
 			wantALess: true,
 		},
 		{
 			name:      "equal version and hops: longer uptime (older connectedAt) wins",
-			a:         routeCandidate{nextHop: "a", hops: 2, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
-			b:         routeCandidate{nextHop: "b", hops: 2, protocolVersion: 6, connectedAt: base},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: 6, connectedAt: base.Add(-time.Hour)},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: base},
 			wantALess: true,
 		},
 		{
 			name:      "equal everything: lexicographic nextHop wins",
-			a:         routeCandidate{nextHop: "a", hops: 2, protocolVersion: 6, connectedAt: base},
-			b:         routeCandidate{nextHop: "b", hops: 2, protocolVersion: 6, connectedAt: base},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: 6, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: base},
 			wantALess: true,
 		},
 		{
 			name:      "known connectedAt beats zero connectedAt under equal version and hops",
-			a:         routeCandidate{nextHop: "a", hops: 2, protocolVersion: 6, connectedAt: base},
-			b:         routeCandidate{nextHop: "b", hops: 2, protocolVersion: 6, connectedAt: time.Time{}},
+			a:         routeCandidate{nextHop: domaintest.ID("a"), hops: 2, protocolVersion: 6, connectedAt: base},
+			b:         routeCandidate{nextHop: domaintest.ID("b"), hops: 2, protocolVersion: 6, connectedAt: time.Time{}},
 			wantALess: true,
 		},
 	}
@@ -1228,13 +1229,13 @@ func TestRouteCandidateLessOrdering(t *testing.T) {
 func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayClose := domain.PeerIdentity("relay-close-identity-12345678901")
-	relayFar := domain.PeerIdentity("relay-far-identity-1234567890123")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayClose := domaintest.ID("relay-close-identity-12345678901")
+	relayFar := domaintest.ID("relay-far-identity-1234567890123")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	// Equal hops so the inflation lie cannot win via the hops
@@ -1293,7 +1294,7 @@ func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 
 	frame := makeSignedFrame(senderID, dstID, 5, "legit-over-inflated-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.sentTo(relayClose)) != 1 {
 		t.Fatalf("expected file router to choose legit-uptime relayClose (PV=Raw=fixtureLocal) over inflated relayFar (PV=fixtureLocal capped, Raw=fixtureLocal+1) on uptime tie-break, got %d sends", len(tr.sentTo(relayClose)))
@@ -1308,13 +1309,13 @@ func TestFileRouterPrefersLegitOverInflatedVersion(t *testing.T) {
 func TestFileRouterEqualVersionFallsBackToHopsThenUptime(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayClose := domain.PeerIdentity("relay-close-identity-12345678901")
-	relayFar := domain.PeerIdentity("relay-far-identity-1234567890123")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayClose := domaintest.ID("relay-close-identity-12345678901")
+	relayFar := domaintest.ID("relay-far-identity-1234567890123")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1358,7 +1359,7 @@ func TestFileRouterEqualVersionFallsBackToHopsThenUptime(t *testing.T) {
 
 	frame := makeSignedFrame(senderID, dstID, 5, "version-equal-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// At equal version, hops dominates uptime; relayClose with fewer hops wins
 	// even though relayFar has the longer uptime.
@@ -1378,10 +1379,10 @@ func TestFileRouterEqualVersionFallsBackToHopsThenUptime(t *testing.T) {
 func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relayClose := domain.PeerIdentity("relay-close-identity-12345678901")
-	relayFar := domain.PeerIdentity("relay-far-identity-1234567890123")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relayClose := domaintest.ID("relay-close-identity-12345678901")
+	relayFar := domaintest.ID("relay-far-identity-1234567890123")
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1480,9 +1481,9 @@ func TestRouterExplainRouteReturnsRankedPlan(t *testing.T) {
 func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890abc")
-	dst := domain.PeerIdentity("destination-identity-1234567890a")
-	relay := domain.PeerIdentity("relay-identity-1234567890aabbccdd")
+	localID := domaintest.ID("local-node-identity-1234567890abc")
+	dst := domaintest.ID("destination-identity-1234567890a")
+	relay := domaintest.ID("relay-identity-1234567890aabbccdd")
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1556,9 +1557,9 @@ func TestRouterExplainRoutePromotesDirectSession(t *testing.T) {
 func TestRouterExplainRouteDeduplicatesDirectAndRoutingTable(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890abc")
-	dst := domain.PeerIdentity("destination-identity-1234567890a")
-	relay := domain.PeerIdentity("relay-identity-1234567890aabbccdd")
+	localID := domaintest.ID("local-node-identity-1234567890abc")
+	dst := domaintest.ID("destination-identity-1234567890a")
+	relay := domaintest.ID("relay-identity-1234567890aabbccdd")
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1620,9 +1621,9 @@ func TestRouterExplainRouteDeduplicatesDirectAndRoutingTable(t *testing.T) {
 func TestSendFileCommandSkipsRoutingTableDirectAfterFailedDirectAttempt(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890abc")
-	dst := domain.PeerIdentity("destination-identity-1234567890a")
-	relay := domain.PeerIdentity("relay-identity-1234567890aabbccdd")
+	localID := domaintest.ID("local-node-identity-1234567890abc")
+	dst := domaintest.ID("destination-identity-1234567890a")
+	relay := domaintest.ID("relay-identity-1234567890aabbccdd")
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1700,8 +1701,8 @@ func TestSendFileCommandSkipsRoutingTableDirectAfterFailedDirectAttempt(t *testi
 func TestRouterExplainRouteEmptyWhenNoRoute(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	unknown := domain.PeerIdentity("unknown-destination-1234567890ab")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	unknown := domaintest.ID("unknown-destination-1234567890ab")
 
 	snap := routing.Snapshot{
 		TakenAt: time.Now(),
@@ -1737,10 +1738,10 @@ func TestRouterExplainRouteEmptyWhenNoRoute(t *testing.T) {
 func TestFileRouterExcludeViaWinsOverHigherVersion(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	via := domain.PeerIdentity("incoming-neighbor-identity-12345")
-	other := domain.PeerIdentity("other-relay-identity-12345678901")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	via := domaintest.ID("incoming-neighbor-identity-12345")
+	other := domaintest.ID("other-relay-identity-12345678901")
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1872,12 +1873,12 @@ func newTestFileRouterAuthorize(
 func TestRouter_RelayForwardsAuthenticatedFrameUntrustedSRC(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	hop := domain.PeerIdentity("nexthop-identity-1234567890abcde")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	hop := domaintest.ID("nexthop-identity-1234567890abcde")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
+	dstID := domaintest.ID("destination-identity-1234567890a")
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -1896,7 +1897,7 @@ func TestRouter_RelayForwardsAuthenticatedFrameUntrustedSRC(t *testing.T) {
 
 	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if got := tr.sentTo(hop); len(got) != 1 {
 		t.Fatalf("relay must forward an authenticated frame regardless of local trust; sent=%d", len(got))
@@ -1913,11 +1914,11 @@ func TestRouter_RelayForwardsAuthenticatedFrameUntrustedSRC(t *testing.T) {
 func TestRouter_DropsFrameWhenSrcPubKeyFingerprintMismatch(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 	// Use a SRC that is NOT the fingerprint of this pubkey.
-	wrongSRC := domain.PeerIdentity("not-the-fingerprint-of-pub-1234")
+	wrongSRC := domaintest.ID("not-the-fingerprint-of-pub-1234")
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	authorized := map[domain.PeerIdentity]bool{wrongSRC: true} // even if "trusted"
@@ -1925,7 +1926,7 @@ func TestRouter_DropsFrameWhenSrcPubKeyFingerprintMismatch(t *testing.T) {
 
 	frame := makeSignedFrame(wrongSRC, localID, 5, "payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if got := tr.localDeliveries(); len(got) != 0 {
 		t.Fatalf("frame with mismatched SrcPubKey/SRC must be dropped, got %d deliveries", len(got))
@@ -1938,10 +1939,10 @@ func TestRouter_DropsFrameWhenSrcPubKeyFingerprintMismatch(t *testing.T) {
 func TestRouter_DropsFrameWhenSignatureInvalid(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	authorized := map[domain.PeerIdentity]bool{senderID: true}
@@ -1958,7 +1959,7 @@ func TestRouter_DropsFrameWhenSignatureInvalid(t *testing.T) {
 		frame.Signature = frame.Signature[:len(frame.Signature)-1] + string(rep)
 	}
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if got := tr.localDeliveries(); len(got) != 0 {
 		t.Fatalf("frame with tampered signature must be dropped, got %d deliveries", len(got))
@@ -1971,10 +1972,10 @@ func TestRouter_DropsFrameWhenSignatureInvalid(t *testing.T) {
 func TestRouter_LocalDeliveryRejectsUntrustedSRC(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	// Authorization map empty — SRC is authenticated but NOT trusted.
@@ -1982,7 +1983,7 @@ func TestRouter_LocalDeliveryRejectsUntrustedSRC(t *testing.T) {
 
 	frame := makeSignedFrame(senderID, localID, 5, "payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if got := tr.localDeliveries(); len(got) != 0 {
 		t.Fatalf("local delivery must drop an authenticated-but-untrusted SRC, got %d deliveries", len(got))
@@ -2005,10 +2006,10 @@ func TestRouter_LocalDeliveryRejectsUntrustedSRC(t *testing.T) {
 func TestRouter_LocalDeliveryUntrustedSRCDoesNotConsumeNonceSlot(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 
@@ -2048,7 +2049,7 @@ func TestRouter_LocalDeliveryUntrustedSRCDoesNotConsumeNonceSlot(t *testing.T) {
 
 	frame := makeSignedFrame(senderID, localID, 5, "payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if got := tr.localDeliveries(); len(got) != 0 {
 		t.Fatalf("untrusted SRC must NOT be delivered locally, got %d deliveries", len(got))
@@ -2067,10 +2068,10 @@ func TestRouter_LocalDeliveryUntrustedSRCDoesNotConsumeNonceSlot(t *testing.T) {
 func TestRouter_LocalDeliveryAcceptsTrustedSRC(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	authorized := map[domain.PeerIdentity]bool{senderID: true}
@@ -2078,7 +2079,7 @@ func TestRouter_LocalDeliveryAcceptsTrustedSRC(t *testing.T) {
 
 	frame := makeSignedFrame(senderID, localID, 5, "payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if got := tr.localDeliveries(); len(got) != 1 {
 		t.Fatalf("authenticated trusted SRC must be delivered locally, got %d deliveries", len(got))

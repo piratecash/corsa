@@ -45,7 +45,7 @@ import "time"
 // the hop_ack is already complete by the time the receive path calls
 // this, so there is no socket I/O inside the critical section.
 func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return
 	}
 	t.mu.Lock()
@@ -123,7 +123,7 @@ func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
 // any other domain mutex of node.Service at invocation time. The
 // wire send of the hop_ack is already complete.
 func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) (RouteUpdateStatus, bool) {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return RouteRejected, false
 	}
 
@@ -241,7 +241,7 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 // docs/locking.md ("Cluster-mesh Phase 2"). The wire send of the ack
 // is already complete by the time this is called.
 func (t *Table) MarkProbeAck(identity, uplink PeerIdentity, reachable bool, rtt time.Duration) {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return
 	}
 	t.mu.Lock()
@@ -298,7 +298,7 @@ func (t *Table) MarkProbeAck(identity, uplink PeerIdentity, reachable bool, rtt 
 // there is no concurrent wire I/O for this (identity, uplink) pair
 // to coordinate with.
 func (t *Table) MarkProbeFailure(identity, uplink PeerIdentity) {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return
 	}
 	t.mu.Lock()
@@ -355,7 +355,7 @@ func (t *Table) MarkProbeFailure(identity, uplink PeerIdentity) {
 // there is no concurrent wire I/O for this (identity, uplink) pair to
 // coordinate with.
 func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return
 	}
 	t.mu.Lock()
@@ -434,7 +434,7 @@ func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
 // Returns true when state changed (snapshot republish was scheduled).
 // Safe to call from any goroutine; acquires t.mu in W mode.
 func (t *Table) ClearDirectPairCooldown(peerIdentity PeerIdentity) bool {
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		return false
 	}
 	t.mu.Lock()
@@ -583,7 +583,7 @@ func (t *Table) TickHealth() {
 // Lock contract: acquires t.mu in R mode. Cheap (single map
 // lookup); safe for the hot relay path.
 func (t *Table) HealthFor(identity, uplink PeerIdentity) (RouteHealth, bool) {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return HealthGood, false
 	}
 	t.mu.RLock()
@@ -680,7 +680,7 @@ func (t *Table) ReputationSnapshot() []RouteReputationState {
 //
 // Lock contract: acquires t.mu in W mode like every other writer.
 func (t *Table) ForceHealthForTest(identity, uplink PeerIdentity, h RouteHealth) {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return
 	}
 	t.mu.Lock()

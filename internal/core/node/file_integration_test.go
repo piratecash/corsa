@@ -68,7 +68,7 @@ func announceRouteVia(svc *Service, nextHopID domain.PeerIdentity, targetID doma
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: string(targetID), Origin: string(nextHopID), Hops: hops, SeqNo: 1},
+			{Identity: targetID.String(), Origin: nextHopID.String(), Hops: hops, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(nextHopID, frame)
@@ -193,7 +193,7 @@ func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 	// The local node has file_transfer_v1 — so it appears in fileCapable.
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		address:      domain.PeerAddress("addr-A"),
-		peerIdentity: domain.PeerIdentity(idNodeA),
+		peerIdentity: idNodeA,
 		version:      12,
 		capabilities: []domain.Capability{domain.CapFileTransferV1},
 	}
@@ -209,7 +209,7 @@ func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 	_, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity: idTargetX,
 		Origin:   idPeerB,
-		NextHop:  domain.PeerIdentity(idNodeA),
+		NextHop:  idNodeA,
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -222,7 +222,7 @@ func TestIsPeerReachable_SelfRouteSkipped(t *testing.T) {
 	if len(routes) == 0 {
 		t.Fatal("expected route to exist")
 	}
-	if routes[0].NextHop != domain.PeerIdentity(idNodeA) {
+	if routes[0].NextHop != idNodeA {
 		t.Fatalf("expected self-route NextHop=%s, got %s", idNodeA, routes[0].NextHop)
 	}
 
@@ -245,7 +245,7 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 
 	pc := netcore.New(netcore.ConnID(1), pipeLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-B"),
-		Identity:        domain.PeerIdentity(idPeerB),
+		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 		ProtocolVersion: 12,
 	})
@@ -394,7 +394,7 @@ func installTestFileRouter(svc *Service) {
 	defer svc.fileMu.Unlock()
 	svc.fileRouter = filerouter.NewRouter(filerouter.RouterConfig{
 		NonceCache: newDefaultNonceCache(),
-		LocalID:    domain.PeerIdentity(svc.identity.Address),
+		LocalID:    domain.PeerIdentityFromWire(svc.identity.Address),
 		IsFullNode: func() bool { return true },
 		RouteSnap: func() routing.Snapshot {
 			if svc.routingTable == nil {
@@ -485,7 +485,7 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	}
 
 	first := entries[0]
-	if first["next_hop"] != string(idPeerB) {
+	if first["next_hop"] != idPeerB.String() {
 		t.Fatalf("expected best entry next_hop=%s, got %v", idPeerB, first["next_hop"])
 	}
 	if first["best"] != true {
@@ -505,7 +505,7 @@ func TestExplainFileRouteReturnsRankedJSON(t *testing.T) {
 	}
 
 	second := entries[1]
-	if second["next_hop"] != string(idPeerC) {
+	if second["next_hop"] != idPeerC.String() {
 		t.Fatalf("expected fall-back entry next_hop=%s, got %v", idPeerC, second["next_hop"])
 	}
 	if second["best"] == true {
@@ -674,7 +674,7 @@ func TestExplainFileRouteCapsInflatedVersionAtLocal(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d (payload=%s)", len(entries), string(raw))
 	}
-	if entries[0]["next_hop"] != string(idPeerB) {
+	if entries[0]["next_hop"] != idPeerB.String() {
 		t.Fatalf("expected legit peer at head of plan, got %v", entries[0]["next_hop"])
 	}
 	if entries[0]["best"] != true {
@@ -686,7 +686,7 @@ func TestExplainFileRouteCapsInflatedVersionAtLocal(t *testing.T) {
 	// Inflated peer is in the plan at fall-back position, with the
 	// CAPPED ranking value (== legitVersion) — the wire surface
 	// reports the cap, never the raw inflated value.
-	if entries[1]["next_hop"] != string(idPeerC) {
+	if entries[1]["next_hop"] != idPeerC.String() {
 		t.Fatalf("expected inflated peer at fall-back position, got %v", entries[1]["next_hop"])
 	}
 	if v, _ := entries[1]["protocol_version"].(float64); int(v) != int(legitVersion) {
@@ -818,7 +818,7 @@ func TestExplainFileRouteRanksUpgradedPeerByTiebreak(t *testing.T) {
 	// (2 hops). Under the old clamp-to-0 behaviour the upgraded peer
 	// would have ProtocolVersion=0 and would lose the primary key, so
 	// the legit peer would incorrectly take the head of the plan.
-	if entries[0]["next_hop"] != string(idPeerC) {
+	if entries[0]["next_hop"] != idPeerC.String() {
 		t.Fatalf("expected upgraded peer (%s, 1 hop) to win the plan, got %v at head", idPeerC, entries[0]["next_hop"])
 	}
 	if entries[0]["best"] != true {
@@ -830,7 +830,7 @@ func TestExplainFileRouteRanksUpgradedPeerByTiebreak(t *testing.T) {
 	if v, _ := entries[0]["protocol_version"].(float64); int(v) != int(localVersion) {
 		t.Fatalf("upgraded entry: expected protocol_version=%d (capped), got %v", localVersion, entries[0]["protocol_version"])
 	}
-	if entries[1]["next_hop"] != string(idPeerB) {
+	if entries[1]["next_hop"] != idPeerB.String() {
 		t.Fatalf("expected legit v=local peer at fall-back position, got %v", entries[1]["next_hop"])
 	}
 }

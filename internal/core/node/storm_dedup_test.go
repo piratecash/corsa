@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
 )
 
@@ -172,9 +173,9 @@ func TestRecomputeVersionPolicyLocked_PublishesOnRealChange(t *testing.T) {
 
 	// Cross the threshold (3 distinct reporters) to flip UpdateAvailable.
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-bbb"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, now)
 	svc.peerMu.Unlock()
 
 	if got := count.Load(); got <= baseline {

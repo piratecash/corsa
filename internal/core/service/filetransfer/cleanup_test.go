@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestCleanupPeerTransfersSenderReleasesRef verifies that cleaning up a peer
@@ -39,8 +40,8 @@ func TestCleanupPeerTransfersSenderReleasesRef(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	peerBob := domain.PeerIdentity("bob")
-	peerAlice := domain.PeerIdentity("alice")
+	peerBob := domaintest.ID("bob")
+	peerAlice := domaintest.ID("alice")
 
 	// Sender mapping: we sent file to bob (announced, not yet completed).
 	m.senderMaps["file-1"] = &senderFileMapping{
@@ -116,8 +117,8 @@ func TestCleanupPeerTransfersReceiverDeletesFiles(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	peerAlice := domain.PeerIdentity("alice")
-	peerBob := domain.PeerIdentity("bob")
+	peerAlice := domaintest.ID("alice")
+	peerBob := domaintest.ID("bob")
 
 	// Completed download from alice.
 	completedFile := filepath.Join(receivedDir, "hash123.pdf")
@@ -213,7 +214,7 @@ func TestCleanupPeerTransfersCompletedSenderReleasesRef(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	peer := domain.PeerIdentity("bob")
+	peer := domaintest.ID("bob")
 	m.senderMaps["file-c1"] = &senderFileMapping{
 		FileID:    "file-c1",
 		FileHash:  hash,
@@ -246,7 +247,7 @@ func TestCleanupPeerTransfersCompletedSenderReleasesRef(t *testing.T) {
 // utility constructions that instantiate Manager without
 // a file store.
 func TestCleanupPeerTransfersNilStoreDoesNotPanic(t *testing.T) {
-	peer := domain.PeerIdentity("peer-nil-store")
+	peer := domaintest.ID("peer-nil-store")
 
 	m := &Manager{
 		senderMaps:   make(map[domain.FileID]*senderFileMapping),

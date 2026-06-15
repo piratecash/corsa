@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestSeenAckJournal pins the durable seen-confirmation journal: an inbound
@@ -12,14 +13,14 @@ import (
 // records the original sender's seen_ack.
 func TestSeenAckJournal(t *testing.T) {
 	t.Parallel()
-	self := domain.PeerIdentity("self-identity-aaaaaaaaaaaaaaaaaaaaaaaaaa")
+	self := domaintest.ID("self-identity-aaaaaaaaaaaaaaaaaaaaaaaaaa")
 	store := NewStore(t.TempDir(), self, domain.ListenAddress(":0"))
 	t.Cleanup(func() { _ = store.Close() })
 
 	entry := Entry{
 		ID:        "seen-journal-1",
 		Sender:    "remote-sender-bbbbbbbbbbbbbbbbbbbbbbbbbb",
-		Recipient: string(self),
+		Recipient: self.String(),
 		Body:      "sealed",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      "immutable",
@@ -39,7 +40,7 @@ func TestSeenAckJournal(t *testing.T) {
 		t.Fatalf("non-seen entry must not be reported, got %#v", unconfirmed)
 	}
 
-	if _, err := store.UpdateStatus("dm", domain.PeerIdentity(entry.Sender), domain.MessageID(entry.ID), StatusSeen); err != nil {
+	if _, err := store.UpdateStatus("dm", domaintest.ID(entry.Sender), domain.MessageID(entry.ID), StatusSeen); err != nil {
 		t.Fatalf("update status: %v", err)
 	}
 
@@ -73,13 +74,13 @@ func TestSeenAckJournal(t *testing.T) {
 // stops reseeding it even though the row is still in "sent".
 func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 	t.Parallel()
-	self := domain.PeerIdentity("self-identity-cccccccccccccccccccccccccc")
+	self := domaintest.ID("self-identity-cccccccccccccccccccccccccc")
 	store := NewStore(t.TempDir(), self, domain.ListenAddress(":0"))
 	t.Cleanup(func() { _ = store.Close() })
 
 	entry := Entry{
 		ID:        "fail-journal-1",
-		Sender:    string(self),
+		Sender:    self.String(),
 		Recipient: "remote-recipient-dddddddddddddddddddddddd",
 		Body:      "sealed",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -119,18 +120,18 @@ func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 // re-inject months-old zombies into the mesh. A recent one still is.
 func TestUndeliveredOutgoing_AgeBounded(t *testing.T) {
 	t.Parallel()
-	self := domain.PeerIdentity("self-identity-eeeeeeeeeeeeeeeeeeeeeeeeee")
+	self := domaintest.ID("self-identity-eeeeeeeeeeeeeeeeeeeeeeeeee")
 	store := NewStore(t.TempDir(), self, domain.ListenAddress(":0"))
 	t.Cleanup(func() { _ = store.Close() })
 
 	recipient := "remote-recipient-ffffffffffffffffffffffff"
 	old := Entry{
-		ID: "old-undelivered", Sender: string(self), Recipient: recipient, Body: "sealed",
+		ID: "old-undelivered", Sender: self.String(), Recipient: recipient, Body: "sealed",
 		CreatedAt: time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano),
 		Flag:      "immutable",
 	}
 	recent := Entry{
-		ID: "recent-undelivered", Sender: string(self), Recipient: recipient, Body: "sealed",
+		ID: "recent-undelivered", Sender: self.String(), Recipient: recipient, Body: "sealed",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      "immutable",
 	}

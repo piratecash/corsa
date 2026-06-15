@@ -18,7 +18,7 @@ package routing
 // Empty peerIdentity short-circuits as a no-op so callers can pass
 // zero-value identities through without a nil-check.
 func (t *Table) RecordSuccessfulRouteAdd(peerIdentity PeerIdentity) {
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		return
 	}
 	t.mu.Lock()

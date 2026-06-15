@@ -468,7 +468,7 @@ func (f *FlapDetector) recordSeqAdvanceLocked(identity, trigger PeerIdentity, no
 	// honouring it here keeps the operator-facing knob behaviour
 	// consistent with both env vars (`CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW=0`
 	// and `CORSA_SEQNO_ADVANCE_WINDOW_SECONDS=0`).
-	if f == nil || f.maxSeqAdvancePerWindow <= 0 || f.seqAdvanceWindow <= 0 || identity == "" {
+	if f == nil || f.maxSeqAdvancePerWindow <= 0 || f.seqAdvanceWindow <= 0 || identity.IsZero() {
 		return false
 	}
 
@@ -509,8 +509,8 @@ func (f *FlapDetector) recordSeqAdvanceLocked(identity, trigger PeerIdentity, no
 		// One log per engage event (not per advance during an
 		// active hold-down) so the burst rate matches the counter.
 		log.Warn().
-			Str("identity", string(identity)).
-			Str("trigger_origin", string(trigger)).
+			Str("identity", identity.String()).
+			Str("trigger_origin", trigger.String()).
 			Int("window_advances", len(sv.advances)).
 			Int("max_per_window", f.maxSeqAdvancePerWindow).
 			Dur("window", f.seqAdvanceWindow).
@@ -538,7 +538,7 @@ func (f *FlapDetector) isInSeqHoldDownLocked(identity PeerIdentity, now time.Tim
 	// from a window>0 test could continue to suppress wire emit after
 	// the operator switched the env to "0" — surprising behaviour
 	// for a documented disable signal.
-	if f == nil || f.maxSeqAdvancePerWindow <= 0 || f.seqAdvanceWindow <= 0 || identity == "" {
+	if f == nil || f.maxSeqAdvancePerWindow <= 0 || f.seqAdvanceWindow <= 0 || identity.IsZero() {
 		return false
 	}
 	sv := f.seqVelocities[identity]
@@ -579,12 +579,12 @@ func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) bool {
 			// docs/routing.md "SeqNo flap cap" for the
 			// operator-facing observability contract.
 			log.Warn().
-				Str("identity", string(id)).
-				Str("trigger_origin", string(sv.holdTrigger)).
+				Str("identity", id.String()).
+				Str("trigger_origin", sv.holdTrigger.String()).
 				Int("retained_advances", len(sv.advances)).
 				Msg("routing_seqno_flap_hold_down_released")
 			sv.holdUntil = time.Time{}
-			sv.holdTrigger = ""
+			sv.holdTrigger = PeerIdentity{}
 			mutated = true
 		}
 
@@ -622,7 +622,7 @@ func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) bool {
 // either knob disables the hysteresis. Returns whether hold-down was
 // newly armed by this event.
 func (f *FlapDetector) recordBadHopsInvalidationLocked(identity, trigger PeerIdentity, now time.Time, holdownCounter *atomic.Uint64) bool {
-	if f == nil || f.maxBadHopsPerWindow <= 0 || f.badHopsWindow <= 0 || identity == "" {
+	if f == nil || f.maxBadHopsPerWindow <= 0 || f.badHopsWindow <= 0 || identity.IsZero() {
 		return false
 	}
 
@@ -659,8 +659,8 @@ func (f *FlapDetector) recordBadHopsInvalidationLocked(identity, trigger PeerIde
 			holdownCounter.Add(1)
 		}
 		log.Warn().
-			Str("identity", string(identity)).
-			Str("trigger_origin", string(trigger)).
+			Str("identity", identity.String()).
+			Str("trigger_origin", trigger.String()).
 			Int("window_events", len(bs.events)).
 			Int("max_per_window", f.maxBadHopsPerWindow).
 			Dur("window", f.badHopsWindow).
@@ -678,7 +678,7 @@ func (f *FlapDetector) recordBadHopsInvalidationLocked(identity, trigger PeerIde
 // the top of ApplyUpdate's P3 branch. Caller must hold the owning
 // Table's t.mu (reader OK).
 func (f *FlapDetector) isInBadHopsHoldDownLocked(identity PeerIdentity, now time.Time) bool {
-	if f == nil || f.maxBadHopsPerWindow <= 0 || f.badHopsWindow <= 0 || identity == "" {
+	if f == nil || f.maxBadHopsPerWindow <= 0 || f.badHopsWindow <= 0 || identity.IsZero() {
 		return false
 	}
 	bs := f.badHops[identity]
@@ -705,12 +705,12 @@ func (f *FlapDetector) clearExpiredBadHopsHoldDownsLocked(now time.Time) bool {
 	for id, bs := range f.badHops {
 		if !bs.holdUntil.IsZero() && !now.Before(bs.holdUntil) {
 			log.Warn().
-				Str("identity", string(id)).
-				Str("trigger_origin", string(bs.trigger)).
+				Str("identity", id.String()).
+				Str("trigger_origin", bs.trigger.String()).
 				Int("strikes", bs.strikes).
 				Msg("routing_bad_hops_hold_down_released")
 			bs.holdUntil = time.Time{}
-			bs.trigger = ""
+			bs.trigger = PeerIdentity{}
 			mutated = true
 		}
 

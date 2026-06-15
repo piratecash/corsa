@@ -87,7 +87,7 @@ func (s *Service) newSelfIdentityError(address domain.PeerAddress, peerListen st
 	return &selfIdentityError{
 		Address:       address,
 		PeerListen:    domain.PeerAddress(strings.TrimSpace(peerListen)),
-		LocalIdentity: domain.PeerIdentity(s.identity.Address),
+		LocalIdentity: domain.PeerIdentityFromWire(s.identity.Address),
 	}
 }
 
@@ -101,10 +101,10 @@ func (s *Service) newSelfIdentityError(address domain.PeerAddress, peerListen st
 // (unauthenticated hello path). This keeps the helper monotone: adding
 // an empty guard upstream never flips an existing true to false.
 func (s *Service) isSelfIdentity(id domain.PeerIdentity) bool {
-	if id == "" {
+	if id.IsZero() {
 		return false
 	}
-	return string(id) == s.identity.Address
+	return id.String() == s.identity.Address
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ func (s *Service) tryApplySelfIdentityCooldown(address domain.PeerAddress, err e
 	if errors.Is(err, protocol.ErrSelfIdentity) {
 		s.applySelfIdentityCooldown(address, &selfIdentityError{
 			Address:       address,
-			LocalIdentity: domain.PeerIdentity(s.identity.Address),
+			LocalIdentity: domain.PeerIdentityFromWire(s.identity.Address),
 		})
 		return true
 	}

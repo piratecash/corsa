@@ -151,8 +151,8 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 // Lock contract: acquires t.mu in W mode. Callers must not hold
 // any other domain mutex of node.Service at invocation time.
 func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry, PeerIdentity, bool) {
-	if target == "" || requester == "" || target == requester {
-		return AnnounceEntry{}, "", false
+	if target.IsZero() || requester.IsZero() || target == requester {
+		return AnnounceEntry{}, PeerIdentity{}, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -173,12 +173,12 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 	// hold-down is active. Receive-side state stays accurate
 	// regardless (this gate is wire-emit only).
 	if t.flap.isInSeqHoldDownLocked(target, now) {
-		return AnnounceEntry{}, "", false
+		return AnnounceEntry{}, PeerIdentity{}, false
 	}
 
 	bucket, ok := t.store.buckets[target]
 	if !ok {
-		return AnnounceEntry{}, "", false
+		return AnnounceEntry{}, PeerIdentity{}, false
 	}
 
 	// Pick live winner using the SAME CompositeScore ranking
@@ -248,7 +248,7 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 		}
 	}
 	if liveWinner == nil {
-		return AnnounceEntry{}, "", false
+		return AnnounceEntry{}, PeerIdentity{}, false
 	}
 
 	// emitOrigin matches AnnounceProjectionFor's sender-originated
@@ -256,7 +256,7 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 	// with the empty-fallback-to-identity guard for test fixtures
 	// that build Tables without WithLocalOrigin.
 	emitOrigin := t.localOrigin
-	if emitOrigin == "" {
+	if emitOrigin.IsZero() {
 		emitOrigin = target
 	}
 
@@ -298,7 +298,7 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 		// advances the unpublished outbound-SeqNo watermark, so it
 		// must NOT mark dirty (see the side-effects note above).
 		t.dirty.Store(true)
-		return AnnounceEntry{}, "", false
+		return AnnounceEntry{}, PeerIdentity{}, false
 	}
 
 	return AnnounceEntry{
@@ -344,7 +344,7 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 
 	now := t.clock()
 	var candidates []RouteEntry
-	if t.localOrigin != "" && identity == t.localOrigin {
+	if !t.localOrigin.IsZero() && identity == t.localOrigin {
 		candidates = append(candidates, t.localRouteEntry())
 	}
 	candidates = append(candidates, t.store.LookupActive(identity, now)...)
@@ -580,7 +580,7 @@ func (t *Table) Snapshot() Snapshot {
 	// Inject synthetic local route for own identity. See Lookup for
 	// the rationale — the self-route is a routing-domain invariant
 	// layered on top of the raw storage view.
-	if t.localOrigin != "" {
+	if !t.localOrigin.IsZero() {
 		localEntry := t.localRouteEntry()
 		snap.Routes[t.localOrigin] = append(
 			[]RouteEntry{localEntry},
@@ -680,7 +680,7 @@ func (t *Table) SnapshotIncremental(forceFull bool) (Snapshot, bool) {
 	// Snapshot, same `now`, same critical section. append() on a fresh
 	// one-element literal allocates a new backing array, so the cached
 	// raw slice for localOrigin is never mutated in place.
-	if t.localOrigin != "" {
+	if !t.localOrigin.IsZero() {
 		localEntry := t.localRouteEntry()
 		snap.Routes[t.localOrigin] = append(
 			[]RouteEntry{localEntry},

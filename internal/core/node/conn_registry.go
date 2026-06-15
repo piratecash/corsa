@@ -322,7 +322,7 @@ func (s *Service) connInfoByIDLocked(id domain.ConnID) (connInfo, bool) {
 func (s *Service) overlayIdentityByIDLocked(id domain.ConnID) (domain.PeerAddress, domain.PeerIdentity, domain.PeerDirection) {
 	entry := s.conns[id]
 	if entry == nil || entry.core == nil {
-		return "", "", ""
+		return "", domain.PeerIdentity{}, ""
 	}
 	return entry.core.Address(), entry.core.Identity(), coreToPeerDirection(entry.core.Dir())
 }
@@ -465,7 +465,7 @@ func (s *Service) trackedInboundAddressByIDLocked(id domain.ConnID) domain.PeerA
 func (s *Service) connIdentityByIDLocked(id domain.ConnID) domain.PeerIdentity {
 	entry := s.conns[id]
 	if entry == nil || entry.core == nil {
-		return ""
+		return domain.PeerIdentity{}
 	}
 	return entry.core.Identity()
 }

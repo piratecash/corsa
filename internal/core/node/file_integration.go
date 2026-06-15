@@ -40,7 +40,7 @@ func (s *Service) initFileTransfer() {
 	manager := filetransfer.NewFileTransferManager(filetransfer.Config{
 		Store:        store,
 		DownloadDir:  downloadDir,
-		MappingsPath: filetransfer.TransfersMappingsPath(dataDir, domain.PeerIdentity(s.identity.Address), domain.ListenAddress(s.cfg.ListenAddress)),
+		MappingsPath: filetransfer.TransfersMappingsPath(dataDir, domain.PeerIdentityFromWire(s.identity.Address), domain.ListenAddress(s.cfg.ListenAddress)),
 		LocalID:      s.identity,
 		SendCommand: func(dst domain.PeerIdentity, payload domain.FileCommandPayload) error {
 			return s.sendFileCommandToPeer(dst, payload)
@@ -69,7 +69,7 @@ func (s *Service) initFileTransfer() {
 
 	router := filerouter.NewRouter(filerouter.RouterConfig{
 		NonceCache: newDefaultNonceCache(),
-		LocalID:    domain.PeerIdentity(s.identity.Address),
+		LocalID:    domain.PeerIdentityFromWire(s.identity.Address),
 		IsFullNode: func() bool { return s.CanForward() },
 		RouteSnap: func() routing.Snapshot {
 			// Reads the cached routing snapshot maintained by the
@@ -113,7 +113,7 @@ func (s *Service) initFileTransfer() {
 		// self-contained SrcPubKey field on the wire frame, so the
 		// node only needs to express the trust policy here.
 		IsAuthorizedForLocalDelivery: func(id domain.PeerIdentity) bool {
-			_, ok := s.trust.trustedContacts()[string(id)]
+			_, ok := s.trust.trustedContacts()[id.String()]
 			return ok
 		},
 		SessionSend: func(dst domain.PeerIdentity, data []byte) bool {
@@ -190,7 +190,7 @@ func (s *Service) handleLocalFileCommand(frame protocol.FileCommandFrame) {
 	// Decrypt payload using local identity's box key.
 	payload, err := directmsg.DecryptFileCommandPayload(s.identity, frame.Payload)
 	if err != nil {
-		log.Debug().Err(err).Str("src", string(frame.SRC)).Msg("file_transfer: decrypt payload failed")
+		log.Debug().Err(err).Str("src", frame.SRC.String()).Msg("file_transfer: decrypt payload failed")
 		return
 	}
 
@@ -225,7 +225,7 @@ func (s *Service) sendFileCommandToPeer(dst domain.PeerIdentity, payload domain.
 // peerBoxKeyBase64 returns the base64-encoded box key for a trusted peer.
 func (s *Service) peerBoxKeyBase64(peer domain.PeerIdentity) (string, bool) {
 	trusted := s.trust.trustedContacts()
-	contact, ok := trusted[string(peer)]
+	contact, ok := trusted[peer.String()]
 	if !ok {
 		return "", false
 	}
@@ -394,7 +394,7 @@ func trustedFileRouteVersion(peer domain.PeerIdentity, reported domain.ProtocolV
 		event = log.Warn()
 	}
 	event.
-		Str("peer", string(peer)).
+		Str("peer", peer.String()).
 		Int("reported_version", int(reported)).
 		Int("local_version", int(localVersion)).
 		Msg("file_router: peer reports newer protocol version, capping at local for ranking")
@@ -453,7 +453,7 @@ func (s *Service) isPeerReachable(peer domain.PeerIdentity) bool {
 	// now timestamp is used for both the direct-peer and routed-peer checks
 	// to avoid threshold drift around the healthy/degraded/stalled boundary.
 	fileCapable := s.usableFileTransferPeersLocked(now)
-	localID := domain.PeerIdentity(s.identity.Address)
+	localID := domain.PeerIdentityFromWire(s.identity.Address)
 	s.peerMu.RUnlock()
 
 	// Phase 2: per-destination routing read, lock-sequential with Phase 1.
@@ -713,7 +713,7 @@ func (s *Service) ExplainFileRoute(dst domain.PeerIdentity) (json.RawMessage, er
 	out := make([]wireEntry, len(plan))
 	for i, e := range plan {
 		entry := wireEntry{
-			NextHop:         string(e.NextHop),
+			NextHop:         e.NextHop.String(),
 			Hops:            e.Hops,
 			ProtocolVersion: int(e.ProtocolVersion),
 			Best:            i == 0,

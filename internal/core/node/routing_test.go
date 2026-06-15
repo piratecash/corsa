@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -27,7 +28,7 @@ func TestRoutingDecisionFieldsExist(t *testing.T) {
 	if len(rd.DirectPeers) != 1 || rd.DirectPeers[0] != "peer-1" {
 		t.Fatal("DirectPeers field not populated correctly")
 	}
-	if rd.RelayNextHop == nil || *rd.RelayNextHop != domain.PeerIdentity("relay-1") {
+	if rd.RelayNextHop == nil || *rd.RelayNextHop != domaintest.ID("relay-1") {
 		t.Fatal("RelayNextHop field not populated correctly")
 	}
 	if len(rd.GossipTargets) != 2 {
@@ -100,6 +101,6 @@ func TestServiceRouterFieldIsUsed(t *testing.T) {
 }
 
 func peerIdentityPtr(s string) *domain.PeerIdentity {
-	id := domain.PeerIdentity(s)
+	id := domaintest.ID(s)
 	return &id
 }

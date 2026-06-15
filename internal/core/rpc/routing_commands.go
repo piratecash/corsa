@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -108,7 +108,7 @@ func routeTableHandler(rp RoutingProvider) CommandHandler {
 					ttl = 0
 				}
 
-				nhKey := string(e.NextHop)
+				nhKey := e.NextHop.String()
 				nh, ok := nextHopCache[nhKey]
 				if !ok {
 					addr, net := rp.PeerTransport(e.NextHop)
@@ -117,8 +117,8 @@ func routeTableHandler(rp RoutingProvider) CommandHandler {
 				}
 
 				routes = append(routes, wireRoute{
-					Identity:   string(e.Identity),
-					Origin:     string(e.Origin),
+					Identity:   e.Identity.String(),
+					Origin:     e.Origin.String(),
 					NextHop:    nh,
 					Hops:       e.Hops,
 					SeqNo:      e.SeqNo,
@@ -238,9 +238,9 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 				if _, cooled := cooledPair[ident][e.NextHop]; cooled {
 					continue
 				}
-				destinations[string(ident)] = struct{}{}
+				destinations[ident.String()] = struct{}{}
 				if e.Source == routing.RouteSourceDirect {
-					directPeers[string(ident)] = struct{}{}
+					directPeers[ident.String()] = struct{}{}
 				}
 			}
 		}
@@ -256,7 +256,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		var flapState []wireFlapEntry
 		for _, fe := range snap.FlapState {
 			wfe := wireFlapEntry{
-				PeerIdentity:      string(fe.PeerIdentity),
+				PeerIdentity:      fe.PeerIdentity.String(),
 				RecentWithdrawals: fe.RecentWithdrawals,
 				InHoldDown:        fe.InHoldDown,
 			}
@@ -369,13 +369,22 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 		if identityArg == "" {
 			return validationError(fmt.Errorf("identity is required"))
 		}
-		if err := identity.ValidateAddress(identityArg); err != nil {
-			return validationError(fmt.Errorf("invalid identity format: %w", err))
+		// Parse at the boundary so a malformed or all-zero identity is
+		// rejected with 400 here instead of being coerced to the zero
+		// (absent) identity by PeerIdentityFromWire and silently looking
+		// up no routes. ParsePeerIdentity accepts the all-zero 40-hex form
+		// with nil error, so the explicit IsZero gate is required.
+		target, err := domain.ParsePeerIdentity(identityArg)
+		if err != nil {
+			return validationError(fmt.Errorf("identity must be a valid peer identity: %w", err))
+		}
+		if target.IsZero() {
+			return validationError(fmt.Errorf("identity must not be the zero peer identity"))
 		}
 
 		snap := rp.RoutingSnapshot()
 		snapTime := snap.TakenAt
-		entries := snap.Routes[routing.PeerIdentity(identityArg)]
+		entries := snap.Routes[target]
 
 		// Build a (uplink) → *RouteHealthState index keyed by Uplink
 		// only — we are looking at a single Identity, so all entries
@@ -384,7 +393,7 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 		// happens against the immutable snapshot, no lock taken.
 		healthByUplink := map[routing.PeerIdentity]*routing.RouteHealthState{}
 		for _, state := range snap.Health {
-			if state.Identity != routing.PeerIdentity(identityArg) {
+			if state.Identity != target {
 				continue
 			}
 			s := state // capture by value, take address of the copy
@@ -451,8 +460,8 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 			}
 			scored = append(scored, scoredEntry{
 				wire: wireRoute{
-					Origin:     string(e.Origin),
-					NextHop:    string(e.NextHop),
+					Origin:     e.Origin.String(),
+					NextHop:    e.NextHop.String(),
 					Hops:       e.Hops,
 					SeqNo:      e.SeqNo,
 					Source:     e.Source.String(),
@@ -566,8 +575,8 @@ func routeHealthHandler(rp RoutingProvider) CommandHandler {
 		states := make([]wireState, 0, len(snap))
 		for _, s := range snap {
 			ws := wireState{
-				Identity:      string(s.Identity),
-				Uplink:        string(s.Uplink),
+				Identity:      s.Identity.String(),
+				Uplink:        s.Uplink.String(),
 				Health:        s.Health.String(),
 				RTTMs:         s.RTT.Milliseconds(),
 				ProbeFailures: s.ProbeFailures,
@@ -663,8 +672,8 @@ func routeReputationHandler(rp RoutingProvider) CommandHandler {
 		states := make([]wireState, 0, len(snap))
 		for _, s := range snap {
 			ws := wireState{
-				Identity:            string(s.Identity),
-				Uplink:              string(s.Uplink),
+				Identity:            s.Identity.String(),
+				Uplink:              s.Uplink.String(),
 				HopAckAttempts:      s.HopAckAttempts,
 				HopAckSuccesses:     s.HopAckSuccesses,
 				ReliabilityScore:    s.ReliabilityScore,

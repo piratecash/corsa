@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // snapshotsEqual compares the route-projection-relevant parts of two
@@ -39,16 +41,16 @@ func TestSnapshotIncrementalMatchesFullUnderRandomMutations(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	clock := func() time.Time { return now }
 	tbl := NewTable(
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithClock(clock),
 		WithDefaultTTL(120*time.Second),
 	)
 
 	identities := make([]PeerIdentity, 0, 8)
 	for i := 0; i < 8; i++ {
-		identities = append(identities, PeerIdentity(fmt.Sprintf("id-%02d", i)))
+		identities = append(identities, domaintest.ID(fmt.Sprintf("id-%02d", i)))
 	}
-	uplinks := []PeerIdentity{"up-a", "up-b", "up-c"}
+	uplinks := []PeerIdentity{domaintest.ID("up-a"), domaintest.ID("up-b"), domaintest.ID("up-c")}
 
 	rng := rand.New(rand.NewSource(42))
 	seq := uint64(1)
@@ -76,12 +78,12 @@ func TestSnapshotIncrementalMatchesFullUnderRandomMutations(t *testing.T) {
 		case 0, 1:
 			// Learn / improve a transit route.
 			_, _ = tbl.UpdateRoute(RouteEntry{
-				Identity: id, Origin: "self", NextHop: up,
+				Identity: id, Origin: domaintest.ID("self"), NextHop: up,
 				Hops: 1 + rng.Intn(4), SeqNo: seq, Source: RouteSourceAnnouncement,
 			})
 		case 2:
 			// Withdraw a specific (identity, uplink) route from the wire.
-			tbl.WithdrawRoute(id, "self", up, seq)
+			tbl.WithdrawRoute(id, domaintest.ID("self"), up, seq)
 		case 3:
 			// Poison-reverse style single-claim invalidation.
 			tbl.InvalidateUplinkClaim(id, up)
@@ -123,26 +125,26 @@ func TestSnapshotIncrementalReusesCleanBuckets(t *testing.T) {
 
 	now := time.Unix(1_700_000_000, 0)
 	tbl := NewTable(
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithClock(func() time.Time { return now }),
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "self", NextHop: "up-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("self"), NextHop: domaintest.ID("up-a"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "self", NextHop: "up-b",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("self"), NextHop: domaintest.ID("up-b"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	first, _ := tbl.SnapshotIncremental(false)
-	aliceFirst := first.Routes["alice"]
-	bobFirst := first.Routes["bob"]
+	aliceFirst := first.Routes[domaintest.ID("alice")]
+	bobFirst := first.Routes[domaintest.ID("bob")]
 
 	// Mutate only bob.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "self", NextHop: "up-b",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("self"), NextHop: domaintest.ID("up-b"),
 		Hops: 1, SeqNo: 2, Source: RouteSourceAnnouncement,
 	})
 
@@ -150,14 +152,14 @@ func TestSnapshotIncrementalReusesCleanBuckets(t *testing.T) {
 
 	// alice was untouched: the published slice must be the same backing
 	// array (reused, not re-allocated).
-	if !sameBackingArray(aliceFirst, second.Routes["alice"]) {
+	if !sameBackingArray(aliceFirst, second.Routes[domaintest.ID("alice")]) {
 		t.Fatal("clean identity alice was re-copied instead of reused")
 	}
 	// bob changed: must be a fresh copy reflecting the new hops/seq.
-	if sameBackingArray(bobFirst, second.Routes["bob"]) {
+	if sameBackingArray(bobFirst, second.Routes[domaintest.ID("bob")]) {
 		t.Fatal("dirty identity bob reused stale backing array")
 	}
-	if got := second.Routes["bob"][0].SeqNo; got != 2 {
+	if got := second.Routes[domaintest.ID("bob")][0].SeqNo; got != 2 {
 		t.Fatalf("bob projection stale: SeqNo=%d want 2", got)
 	}
 }
@@ -170,11 +172,11 @@ func TestSnapshotIncrementalForceFullRecopies(t *testing.T) {
 
 	now := time.Unix(1_700_000_000, 0)
 	tbl := NewTable(
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithClock(func() time.Time { return now }),
 	)
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "self", NextHop: "up-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("self"), NextHop: domaintest.ID("up-a"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
@@ -183,14 +185,14 @@ func TestSnapshotIncrementalForceFullRecopies(t *testing.T) {
 	if !firstFull {
 		t.Fatal("first snapshot (cold cache) should report a full re-copy")
 	}
-	aliceFirst := first.Routes["alice"]
+	aliceFirst := first.Routes[domaintest.ID("alice")]
 
 	// No mutation; a non-forced pass reuses the slice and reports NOT full.
 	reused, reusedFull := tbl.SnapshotIncremental(false)
 	if reusedFull {
 		t.Fatal("clean non-forced pass should report incremental (not full)")
 	}
-	if !sameBackingArray(aliceFirst, reused.Routes["alice"]) {
+	if !sameBackingArray(aliceFirst, reused.Routes[domaintest.ID("alice")]) {
 		t.Fatal("expected reuse on clean non-forced pass")
 	}
 
@@ -199,7 +201,7 @@ func TestSnapshotIncrementalForceFullRecopies(t *testing.T) {
 	if !forcedFull {
 		t.Fatal("forceFull pass should report a full re-copy")
 	}
-	if sameBackingArray(aliceFirst, forced.Routes["alice"]) {
+	if sameBackingArray(aliceFirst, forced.Routes[domaintest.ID("alice")]) {
 		t.Fatal("forceFull did not re-copy the clean bucket")
 	}
 	// Content must still be identical to a full snapshot.

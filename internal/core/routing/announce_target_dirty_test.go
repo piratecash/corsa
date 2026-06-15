@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestAnnounceTargetForDirtyContract pins the dirty-marking contract of
@@ -19,21 +21,21 @@ import (
 func TestAnnounceTargetForDirtyContract(t *testing.T) {
 	t.Run("normal_emit_does_not_mark_dirty", func(t *testing.T) {
 		now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-		tbl := NewTable(WithLocalOrigin("self"), WithClock(func() time.Time { return now }))
+		tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(func() time.Time { return now }))
 
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "id-target", Origin: "self", NextHop: "id-uplink",
+			Identity: domaintest.ID("id-target"), Origin: domaintest.ID("self"), NextHop: domaintest.ID("id-uplink"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		// Clear the dirty bit the route insert legitimately set, so the
 		// assertion below observes only what AnnounceTargetFor does.
 		tbl.ConsumeDirty()
 
-		entry, uplink, ok := tbl.AnnounceTargetFor("id-target", "id-requester")
+		entry, uplink, ok := tbl.AnnounceTargetFor(domaintest.ID("id-target"), domaintest.ID("id-requester"))
 		if !ok {
 			t.Fatal("AnnounceTargetFor returned ok=false; want a live winner")
 		}
-		if uplink != "id-uplink" || entry.Identity != "id-target" {
+		if uplink != domaintest.ID("id-uplink") || entry.Identity != domaintest.ID("id-target") {
 			t.Fatalf("AnnounceTargetFor winner = (%q, %q), want (id-target, id-uplink)", entry.Identity, uplink)
 		}
 		if tbl.IsDirty() {
@@ -44,10 +46,10 @@ func TestAnnounceTargetForDirtyContract(t *testing.T) {
 
 	t.Run("seqno_flap_cap_engage_marks_dirty", func(t *testing.T) {
 		now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
-		const (
-			localID PeerIdentity = "node-A"
-			victim  PeerIdentity = "victim"
-			viewer  PeerIdentity = "peer-Z"
+		var (
+			localID = domaintest.ID("node-A")
+			victim  = domaintest.ID("victim")
+			viewer  = domaintest.ID("peer-Z")
 		)
 		tbl := NewTable(
 			WithClock(func() time.Time { return now }),
@@ -58,9 +60,9 @@ func TestAnnounceTargetForDirtyContract(t *testing.T) {
 		)
 
 		// Three in-threshold advances via AnnounceTo.
-		for i, up := range []PeerIdentity{"u1", "u2", "u3"} {
+		for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3")} {
 			mustUpdate(t, tbl, RouteEntry{
-				Identity: victim, Origin: "src-v", NextHop: up,
+				Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 				Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 			})
 			_ = tbl.AnnounceTo(viewer)
@@ -73,7 +75,7 @@ func TestAnnounceTargetForDirtyContract(t *testing.T) {
 		// Land the 4th distinct-content claim and clear the dirty bit it
 		// set, so the next assertion isolates AnnounceTargetFor's effect.
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: "u4",
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u4"),
 			Hops: 2, SeqNo: 14, Source: RouteSourceAnnouncement,
 		})
 		tbl.ConsumeDirty()

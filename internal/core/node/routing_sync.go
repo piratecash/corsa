@@ -74,7 +74,7 @@ func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, c
 	if err != nil {
 		log.Warn().
 			Err(err).
-			Str("peer_identity", string(peer)).
+			Str("peer_identity", peer.String()).
 			Str("digest", digest).
 			Msg("route_sync_digest_marshal_failed")
 		return
@@ -85,13 +85,13 @@ func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, c
 	}
 	if !s.sendFrameToIdentity(peer, wire, domain.CapMeshRouteSyncV1) {
 		log.Debug().
-			Str("peer_identity", string(peer)).
+			Str("peer_identity", peer.String()).
 			Str("digest", digest).
 			Msg("route_sync_digest_send_skipped")
 		return
 	}
 	log.Debug().
-		Str("peer_identity", string(peer)).
+		Str("peer_identity", peer.String()).
 		Str("digest", digest).
 		Uint32("count", count).
 		Msg("route_sync_digest_emitted")
@@ -124,7 +124,7 @@ func (s *Service) recordPeerDigestOnSessionClose(peer domain.PeerIdentity) {
 	digest, count := s.routingTable.AnnounceDigestFor(peer)
 	s.routingTable.RecordPeerDigestSnapshot(peer, digest, count, time.Now().UTC())
 	log.Debug().
-		Str("peer_identity", string(peer)).
+		Str("peer_identity", peer.String()).
 		Str("digest", digest).
 		Uint32("count", count).
 		Msg("route_sync_digest_recorded_for_reconnect")
@@ -152,7 +152,7 @@ func (s *Service) recordPeerDigestOnSessionClose(peer domain.PeerIdentity) {
 // waiting for the summary and proceed with its normal full sync,
 // which is the safe degradation path.
 func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity domain.PeerIdentity, frame protocol.RouteSyncDigestFrame) {
-	if senderIdentity == "" {
+	if senderIdentity.IsZero() {
 		// Sender identity not yet resolved (race against auth
 		// completion). The frame can't be answered meaningfully
 		// because the digest only makes sense scoped to a
@@ -176,7 +176,7 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 	if err != nil {
 		log.Warn().
 			Err(err).
-			Str("sender_identity", string(senderIdentity)).
+			Str("sender_identity", senderIdentity.String()).
 			Str("digest", frame.Digest).
 			Bool("match", match).
 			Msg("route_sync_summary_marshal_failed")
@@ -189,7 +189,7 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 	})
 
 	log.Debug().
-		Str("sender_identity", string(senderIdentity)).
+		Str("sender_identity", senderIdentity.String()).
 		Str("their_digest", frame.Digest).
 		Uint32("their_count", frame.KnownIdentitiesCount).
 		Str("our_digest", localDigest).
@@ -223,7 +223,7 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 // transferred through this exchange — the announce plane
 // remains the source of truth for routing state.
 func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, frame protocol.RouteSyncSummaryFrame) {
-	if senderIdentity == "" {
+	if senderIdentity.IsZero() {
 		log.Debug().
 			Str("digest", frame.Digest).
 			Bool("match", frame.Match).
@@ -238,7 +238,7 @@ func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, fra
 		// actually emitted, so a malformed or future summary must never
 		// move the suppression state in either direction.
 		log.Debug().
-			Str("sender_identity", string(senderIdentity)).
+			Str("sender_identity", senderIdentity.String()).
 			Bool("match", frame.Match).
 			Msg("route_sync_summary_dropped_empty_digest")
 		return
@@ -248,7 +248,7 @@ func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, fra
 		// Tests that build a partial Service (no AnnounceLoop)
 		// would otherwise dereference a nil interface here.
 		log.Debug().
-			Str("sender_identity", string(senderIdentity)).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_sync_summary_dropped_no_announce_loop")
 		return
 	}
@@ -262,7 +262,7 @@ func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, fra
 		// digest churn since their last reconnect.
 		s.announceLoop.ClearPeerDigestSuppression(senderIdentity)
 		log.Debug().
-			Str("sender_identity", string(senderIdentity)).
+			Str("sender_identity", senderIdentity.String()).
 			Str("digest", frame.Digest).
 			Msg("route_sync_summary_mismatch_cleared_suppression")
 		return
@@ -273,13 +273,13 @@ func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, fra
 	// cannot suppress a forced full sync it has no relation to.
 	if s.announceLoop.ConfirmPeerDigestMatch(senderIdentity, frame.Digest, time.Now().UTC()) {
 		log.Debug().
-			Str("sender_identity", string(senderIdentity)).
+			Str("sender_identity", senderIdentity.String()).
 			Str("digest", frame.Digest).
 			Msg("route_sync_summary_match_suppression_armed")
 		return
 	}
 	log.Debug().
-		Str("sender_identity", string(senderIdentity)).
+		Str("sender_identity", senderIdentity.String()).
 		Str("digest", frame.Digest).
 		Msg("route_sync_summary_match_uncorrelated_ignored")
 }

@@ -155,7 +155,7 @@ func (b *FileTransferBridge) RegisterIncoming(msg DirectMessage) error {
 	); err != nil {
 		log.Warn().Err(err).
 			Str("file_id", string(fileID)).
-			Str("sender", string(msg.Sender)).
+			Str("sender", msg.Sender.String()).
 			Msg("file_transfer_bridge: rejected file_announce with invalid metadata")
 		return fmt.Errorf("register receiver mapping: %w", err)
 	}

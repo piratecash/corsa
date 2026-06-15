@@ -25,13 +25,13 @@ func TestHandleRequestResync_MarksInvalidAndTriggersUpdate(t *testing.T) {
 	// the state record does not exist — the production hook MarkReconnected
 	// always creates the record before request_resync can race in.
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 
 	// MarkReconnected leaves NeedsFullResync==true. Clear it via a recorded
 	// success so the assertion below proves handleRequestResync re-set it,
 	// not that the flag was already left over from MarkReconnected.
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
@@ -43,7 +43,7 @@ func TestHandleRequestResync_MarksInvalidAndTriggersUpdate(t *testing.T) {
 		t.Fatalf("precondition: trigger channel must be empty before handler call")
 	}
 
-	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	svc.handleRequestResync(idPeerB)
 
 	if !state.View().NeedsFullResync {
 		t.Fatalf("handleRequestResync must MarkInvalid (NeedsFullResync=true)")
@@ -72,9 +72,9 @@ func TestHandleRequestResync_QuarantinedSender_DropsSilently(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
@@ -88,10 +88,10 @@ func TestHandleRequestResync_QuarantinedSender_DropsSilently(t *testing.T) {
 
 	// Arm quarantine for idPeerB.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(idPeerB), "test", time.Now())
+	svc.armRouteQuarantineLocked(idPeerB, "test", time.Now())
 	svc.peerMu.Unlock()
 
-	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	svc.handleRequestResync(idPeerB)
 
 	if state.View().NeedsFullResync {
 		t.Fatal("quarantined peer's request_resync was honoured: NeedsFullResync flipped (MarkInvalid leaked)")
@@ -115,16 +115,16 @@ func TestHandleRequestResync_DebouncesRepeatedRequests(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
 
 	// First request: accepted.
-	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	svc.handleRequestResync(idPeerB)
 	if !state.View().NeedsFullResync {
 		t.Fatal("first request_resync must be honoured (MarkInvalid)")
 	}
@@ -138,17 +138,16 @@ func TestHandleRequestResync_DebouncesRepeatedRequests(t *testing.T) {
 	// token is still pending; the no-trigger side of the debounce is
 	// covered by the fresh-service test below.)
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
-	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	svc.handleRequestResync(idPeerB)
 	if state.View().NeedsFullResync {
 		t.Fatal("repeat request_resync inside the debounce window must NOT MarkInvalid")
 	}
 
 	// Age the acceptance stamp past the debounce window: honoured again.
 	svc.peerMu.Lock()
-	svc.lastResyncAccepted[domain.PeerIdentity(idPeerB)] =
-		time.Now().Add(-requestResyncAcceptDebounce - time.Second)
+	svc.lastResyncAccepted[idPeerB] = time.Now().Add(-requestResyncAcceptDebounce - time.Second)
 	svc.peerMu.Unlock()
-	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	svc.handleRequestResync(idPeerB)
 	if !state.View().NeedsFullResync {
 		t.Fatal("request_resync after the debounce window must be honoured again")
 	}
@@ -164,9 +163,9 @@ func TestHandleRequestResync_DebouncedRequestDoesNotTrigger(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
@@ -181,10 +180,10 @@ func TestHandleRequestResync_DebouncedRequestDoesNotTrigger(t *testing.T) {
 	if svc.lastResyncAccepted == nil {
 		svc.lastResyncAccepted = make(map[domain.PeerIdentity]time.Time)
 	}
-	svc.lastResyncAccepted[domain.PeerIdentity(idPeerB)] = time.Now()
+	svc.lastResyncAccepted[idPeerB] = time.Now()
 	svc.peerMu.Unlock()
 
-	svc.handleRequestResync(domain.PeerIdentity(idPeerB))
+	svc.handleRequestResync(idPeerB)
 
 	if state.View().NeedsFullResync {
 		t.Fatal("debounced request_resync must NOT MarkInvalid")
@@ -203,8 +202,8 @@ func TestHandleRequestResync_MalformedSenderIsRejected(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB), nil)
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	registry.MarkReconnected(idPeerB, nil)
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist")
 	}
@@ -220,7 +219,11 @@ func TestHandleRequestResync_MalformedSenderIsRejected(t *testing.T) {
 	// the package level, but the loop's trigger channel is shared state).
 	svc.announceLoop.PendingTrigger()
 
-	svc.handleRequestResync(domain.PeerIdentity("not-a-valid-hex-identity"))
+	// A zero/empty identity is the malformed case: its String() is "" which
+	// fails identity.IsValidAddress. (Under byte-identity semantics any
+	// domaintest.ID label renders as a valid 40-char hex address, so the
+	// empty identity is the only way to exercise the rejection guard.)
+	svc.handleRequestResync(domain.PeerIdentity{})
 
 	if state.View().NeedsFullResync {
 		t.Fatalf("malformed sender must NOT mutate per-peer state")
@@ -244,7 +247,7 @@ func TestHandleRoutesUpdate_BeforeBaseline_EmitsRequestResync(t *testing.T) {
 	// Establish state without baseline: MarkReconnected leaves
 	// HasReceivedBaseline==false on a fresh record.
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 
 	// Wire a session keyed by the sender address so SendRequestResync can
@@ -255,7 +258,7 @@ func TestHandleRoutesUpdate_BeforeBaseline_EmitsRequestResync(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
@@ -267,14 +270,14 @@ func TestHandleRoutesUpdate_BeforeBaseline_EmitsRequestResync(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleRoutesUpdate(domain.PeerIdentity(idPeerB), senderAddr, frame)
+	svc.handleRoutesUpdate(idPeerB, senderAddr, frame)
 
 	// Delta must NOT have been applied — table stays empty.
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("baseline gate failed: routes_update applied without baseline (entries=%d)", len(got))
 	}
 
@@ -299,18 +302,18 @@ func TestHandleRoutesUpdate_AfterBaseline_AppliesEntries(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 	// Simulate the baseline arrival explicitly — production sets this via
 	// handleAnnounceRoutes → applyAnnounceEntries(legacy) → MarkBaselineReceived.
-	registry.GetOrCreate(domain.PeerIdentity(idPeerB)).MarkBaselineReceived()
+	registry.GetOrCreate(idPeerB).MarkBaselineReceived()
 
 	senderAddr := domain.PeerAddress("addr-peerB")
 	sendCh := make(chan protocol.Frame, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
@@ -322,14 +325,14 @@ func TestHandleRoutesUpdate_AfterBaseline_AppliesEntries(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleRoutesUpdate(domain.PeerIdentity(idPeerB), senderAddr, frame)
+	svc.handleRoutesUpdate(idPeerB, senderAddr, frame)
 
 	// Route must be in the table at hops=2 (wire 1 + receiver +1).
-	got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	got := svc.routingTable.Lookup(idTargetX)
 	if len(got) == 0 {
 		t.Fatalf("post-baseline routes_update must apply: target not learned")
 	}
@@ -357,9 +360,9 @@ func TestHandleAnnounceRoutes_LegacyEmptyFrame_StillFlipsBaseline(t *testing.T) 
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB), nil)
+	registry.MarkReconnected(idPeerB, nil)
 
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
@@ -371,7 +374,7 @@ func TestHandleAnnounceRoutes_LegacyEmptyFrame_StillFlipsBaseline(t *testing.T) 
 		Type:           "announce_routes",
 		AnnounceRoutes: nil,
 	}
-	svc.handleAnnounceRoutes(domain.PeerIdentity(idPeerB), frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("legacy announce_routes (even empty) must flip baseline to true")
@@ -398,7 +401,7 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 	// invariant we will assert after the call (state must not be
 	// created by the handler when the sender is quarantined).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(idPeerB), "test", time.Now())
+	svc.armRouteQuarantineLocked(idPeerB, "test", time.Now())
 	svc.peerMu.Unlock()
 
 	// Wire a session so a SendRequestResync, if it slipped through,
@@ -408,7 +411,7 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
@@ -420,14 +423,14 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleRoutesUpdate(domain.PeerIdentity(idPeerB), senderAddr, frame)
+	svc.handleRoutesUpdate(idPeerB, senderAddr, frame)
 
 	// 1. Delta must NOT have been applied — table stays empty.
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("quarantine gate failed: routes_update applied (entries=%d)", len(got))
 	}
 	// 2. No request_resync must have been emitted — that's the
@@ -439,7 +442,7 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 	}
 	// 3. AnnouncePeerState must NOT have been created (top-level
 	//    drop, before GetOrCreate).
-	if state := svc.announceLoop.StateRegistry().Get(domain.PeerIdentity(idPeerB)); state != nil {
+	if state := svc.announceLoop.StateRegistry().Get(idPeerB); state != nil {
 		t.Fatalf("quarantine gate must short-circuit before GetOrCreate; per-peer state was created")
 	}
 }
@@ -456,21 +459,21 @@ func TestHandleRoutesUpdate_BeforeBaseline_NoSenderAddress_DropsSilently(t *test
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB), nil)
+	registry.MarkReconnected(idPeerB, nil)
 
 	frame := protocol.Frame{
 		Type: "routes_update",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
 	// Empty senderAddress — the handler must short-circuit without crashing.
-	svc.handleRoutesUpdate(domain.PeerIdentity(idPeerB), domain.PeerAddress(""), frame)
+	svc.handleRoutesUpdate(idPeerB, domain.PeerAddress(""), frame)
 
 	// Delta still must not have been applied — the gate is the dominant
 	// decision, not the address.
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("baseline gate must drop the delta even when senderAddress is empty")
 	}
 }
@@ -503,10 +506,10 @@ func TestOnPeerSessionEstablished_OverlappingReconnect_RelayOnlyAdditionalSessio
 
 	// Session 1: full routing-capable v1+v2 — sets the persistent caps.
 	caps1 := []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1, domain.CapMeshRoutingV2}
-	svc.onPeerSessionEstablished(domain.PeerIdentity(idPeerB), caps1)
+	svc.onPeerSessionEstablished(idPeerB, caps1)
 
 	registry := svc.announceLoop.StateRegistry()
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("first session must materialise per-peer announce state")
 	}
@@ -516,7 +519,7 @@ func TestOnPeerSessionEstablished_OverlappingReconnect_RelayOnlyAdditionalSessio
 	// non-firstRelay branch, but the UpdateCapabilities gate must skip
 	// because session 2 cannot serve as an announce target.
 	caps2 := []domain.Capability{domain.CapMeshRelayV1}
-	svc.onPeerSessionEstablished(domain.PeerIdentity(idPeerB), caps2)
+	svc.onPeerSessionEstablished(idPeerB, caps2)
 
 	view := state.View()
 	wantCaps := map[routing.PeerCapability]bool{
@@ -549,16 +552,16 @@ func TestOnPeerSessionEstablished_OverlappingReconnect_SkipsRefreshWithoutRelayC
 
 	// Session 1: relay-capable v1+v2.
 	caps1 := []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1, domain.CapMeshRoutingV2}
-	svc.onPeerSessionEstablished(domain.PeerIdentity(idPeerB), caps1)
+	svc.onPeerSessionEstablished(idPeerB, caps1)
 
 	registry := svc.announceLoop.StateRegistry()
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("first session must materialise per-peer announce state")
 	}
 
 	// Session 2: legacy peer (no relay cap) — must not overwrite caps.
-	svc.onPeerSessionEstablished(domain.PeerIdentity(idPeerB), nil)
+	svc.onPeerSessionEstablished(idPeerB, nil)
 
 	view := state.View()
 	wantCaps := map[routing.PeerCapability]bool{
@@ -601,7 +604,7 @@ func TestSendRoutesUpdate_NoV2OnLiveSession_SkipsWire(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
@@ -611,7 +614,7 @@ func TestSendRoutesUpdate_NoV2OnLiveSession_SkipsWire(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	delta := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 	}
 
 	if got := svc.SendRoutesUpdate(context.Background(), addr, delta); got {
@@ -640,7 +643,7 @@ func TestSendRoutesUpdate_V2OnLiveSession_SendsFrame(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
@@ -650,7 +653,7 @@ func TestSendRoutesUpdate_V2OnLiveSession_SendsFrame(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	delta := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 	}
 
 	if got := svc.SendRoutesUpdate(context.Background(), addr, delta); !got {
@@ -679,7 +682,7 @@ func TestSendRoutesUpdate_SessionGone_ReturnsFalse(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	delta := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 	}
 
 	// No session at this address — the check resolves to "no v2 cap" and
@@ -715,7 +718,7 @@ func TestSendRoutesUpdate_NarrowReplacementSession_SkipsWire(t *testing.T) {
 			svc.peerMu.Lock()
 			svc.sessions[addr] = &peerSession{
 				address:      addr,
-				peerIdentity: domain.PeerIdentity(idPeerB),
+				peerIdentity: idPeerB,
 				capabilities: tc.caps,
 				sendCh:       sendCh,
 			}
@@ -725,7 +728,7 @@ func TestSendRoutesUpdate_NarrowReplacementSession_SkipsWire(t *testing.T) {
 			svc.peerMu.Unlock()
 
 			delta := []routing.AnnounceEntry{
-				{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+				{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 			}
 
 			if got := svc.SendRoutesUpdate(context.Background(), addr, delta); got {
@@ -761,7 +764,7 @@ func TestSendRequestResync_V2OnlyOnLiveSession_SendsFrame(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		// Only v2 — no v1, no relay. The receive dispatcher accepts
 		// request_resync against this gate, so the send gate must too.
 		capabilities: []domain.Capability{domain.CapMeshRoutingV2},
@@ -801,7 +804,7 @@ func TestSendRequestResync_NoV2OnLiveSession_SkipsWire(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}

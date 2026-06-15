@@ -3,6 +3,9 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // triggerFlapBurst drives N consecutive add/remove cycles within the
@@ -64,7 +67,7 @@ func TestRecordWithdrawal_ExpBackoff(t *testing.T) {
 	current := now
 	const base = 30 * time.Second
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapWindow(60*time.Second),
 		WithFlapThreshold(3),
@@ -72,11 +75,11 @@ func TestRecordWithdrawal_ExpBackoff(t *testing.T) {
 	)
 
 	// Burst 1: hold-down = base.
-	triggerFlapBurst(t, tbl, "flappy", &current, 3)
-	if got := consecutiveFlapsFor(t, tbl, "flappy"); got != 1 {
+	triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
+	if got := consecutiveFlapsFor(t, tbl, domaintest.ID("flappy")); got != 1 {
 		t.Fatalf("after burst 1 consecutiveFlaps=%d, want 1", got)
 	}
-	if got := holdDownLeft(t, tbl, "flappy"); got != base {
+	if got := holdDownLeft(t, tbl, domaintest.ID("flappy")); got != base {
 		t.Fatalf("after burst 1 hold-down=%v, want %v", got, base)
 	}
 
@@ -85,21 +88,21 @@ func TestRecordWithdrawal_ExpBackoff(t *testing.T) {
 	current = current.Add(base + time.Second)
 
 	// Burst 2: hold-down = 2*base.
-	triggerFlapBurst(t, tbl, "flappy", &current, 3)
-	if got := consecutiveFlapsFor(t, tbl, "flappy"); got != 2 {
+	triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
+	if got := consecutiveFlapsFor(t, tbl, domaintest.ID("flappy")); got != 2 {
 		t.Fatalf("after burst 2 consecutiveFlaps=%d, want 2", got)
 	}
-	if got := holdDownLeft(t, tbl, "flappy"); got != 2*base {
+	if got := holdDownLeft(t, tbl, domaintest.ID("flappy")); got != 2*base {
 		t.Fatalf("after burst 2 hold-down=%v, want %v", got, 2*base)
 	}
 
 	// Burst 3: hold-down = 4*base = 120s, still under cap.
 	current = current.Add(2*base + time.Second)
-	triggerFlapBurst(t, tbl, "flappy", &current, 3)
-	if got := consecutiveFlapsFor(t, tbl, "flappy"); got != 3 {
+	triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
+	if got := consecutiveFlapsFor(t, tbl, domaintest.ID("flappy")); got != 3 {
 		t.Fatalf("after burst 3 consecutiveFlaps=%d, want 3", got)
 	}
-	if got := holdDownLeft(t, tbl, "flappy"); got != 4*base {
+	if got := holdDownLeft(t, tbl, domaintest.ID("flappy")); got != 4*base {
 		t.Fatalf("after burst 3 hold-down=%v, want %v", got, 4*base)
 	}
 }
@@ -123,7 +126,7 @@ func TestRecordWithdrawal_ExpBackoffCapsAtMax(t *testing.T) {
 	// max=600s, anything ≥ 600s works; we pick 1h to leave headroom.
 	const flapWindow = 1 * time.Hour
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapWindow(flapWindow),
 		WithFlapThreshold(3),
@@ -134,7 +137,7 @@ func TestRecordWithdrawal_ExpBackoffCapsAtMax(t *testing.T) {
 	// past MaxHoldDownDuration: 60 * 2^FlapBackoffShiftCap = 1920s,
 	// well above the 600s cap.
 	for i := 0; i < FlapBackoffShiftCap+3; i++ {
-		triggerFlapBurst(t, tbl, "flappy", &current, 3)
+		triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
 		// Stay inside the stable window so consecutiveFlaps keeps
 		// growing, but past the previous hold-down so the next burst
 		// is a real "new" burst rather than a no-op double-arm.
@@ -142,7 +145,7 @@ func TestRecordWithdrawal_ExpBackoffCapsAtMax(t *testing.T) {
 	}
 
 	tbl.mu.Lock()
-	fs := tbl.flap.state["flappy"]
+	fs := tbl.flap.state[domaintest.ID("flappy")]
 	tbl.mu.Unlock()
 	if fs == nil {
 		t.Fatal("flap state must exist after bursts")
@@ -168,7 +171,7 @@ func TestFlapBackoff_ResetAfterStableWindow(t *testing.T) {
 	const base = 30 * time.Second
 	const flapWindow = 60 * time.Second
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapWindow(flapWindow),
 		WithFlapThreshold(3),
@@ -176,8 +179,8 @@ func TestFlapBackoff_ResetAfterStableWindow(t *testing.T) {
 	)
 
 	// Burst 1.
-	triggerFlapBurst(t, tbl, "flappy", &current, 3)
-	if got := consecutiveFlapsFor(t, tbl, "flappy"); got != 1 {
+	triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
+	if got := consecutiveFlapsFor(t, tbl, domaintest.ID("flappy")); got != 1 {
 		t.Fatalf("after burst 1 consecutiveFlaps=%d, want 1", got)
 	}
 
@@ -189,11 +192,11 @@ func TestFlapBackoff_ResetAfterStableWindow(t *testing.T) {
 	// Burst 2 starts fresh — first withdrawal alone won't arm hold-down,
 	// so we run another full burst and check that the resulting streak
 	// counter is 1 (reset), not 2 (preserved).
-	triggerFlapBurst(t, tbl, "flappy", &current, 3)
-	if got := consecutiveFlapsFor(t, tbl, "flappy"); got != 1 {
+	triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
+	if got := consecutiveFlapsFor(t, tbl, domaintest.ID("flappy")); got != 1 {
 		t.Fatalf("after stable gap + burst consecutiveFlaps=%d, want 1 (reset)", got)
 	}
-	if got := holdDownLeft(t, tbl, "flappy"); got != base {
+	if got := holdDownLeft(t, tbl, domaintest.ID("flappy")); got != base {
 		t.Fatalf("after stable gap + burst hold-down=%v, want %v (reset to base)", got, base)
 	}
 }
@@ -208,20 +211,20 @@ func TestRecordSuccessfulRouteAdd_ResetsStreak(t *testing.T) {
 	current := now
 	const base = 30 * time.Second
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapWindow(60*time.Second),
 		WithFlapThreshold(3),
 		WithHoldDownDuration(base),
 	)
 
-	triggerFlapBurst(t, tbl, "flappy", &current, 3)
-	if got := consecutiveFlapsFor(t, tbl, "flappy"); got != 1 {
+	triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
+	if got := consecutiveFlapsFor(t, tbl, domaintest.ID("flappy")); got != 1 {
 		t.Fatalf("after burst consecutiveFlaps=%d, want 1", got)
 	}
 
-	tbl.RecordSuccessfulRouteAdd("flappy")
-	if got := consecutiveFlapsFor(t, tbl, "flappy"); got != 0 {
+	tbl.RecordSuccessfulRouteAdd(domaintest.ID("flappy"))
+	if got := consecutiveFlapsFor(t, tbl, domaintest.ID("flappy")); got != 0 {
 		t.Fatalf("after RecordSuccessfulRouteAdd consecutiveFlaps=%d, want 0", got)
 	}
 
@@ -229,8 +232,8 @@ func TestRecordSuccessfulRouteAdd_ResetsStreak(t *testing.T) {
 	// outside the flap window and a fresh burst arms hold-down at
 	// base again.
 	current = current.Add(2 * time.Minute)
-	triggerFlapBurst(t, tbl, "flappy", &current, 3)
-	if got := holdDownLeft(t, tbl, "flappy"); got != base {
+	triggerFlapBurst(t, tbl, domaintest.ID("flappy"), &current, 3)
+	if got := holdDownLeft(t, tbl, domaintest.ID("flappy")); got != base {
 		t.Fatalf("after reset + new burst hold-down=%v, want %v", got, base)
 	}
 }
@@ -240,8 +243,8 @@ func TestRecordSuccessfulRouteAdd_ResetsStreak(t *testing.T) {
 // flap-state entry. Without this guard a misbehaving caller could
 // pollute the flap-state map by passing zero-value identities.
 func TestRecordSuccessfulRouteAdd_EmptyIdentityNoOp(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
-	tbl.RecordSuccessfulRouteAdd("")
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
+	tbl.RecordSuccessfulRouteAdd(domain.PeerIdentity{})
 	tbl.mu.Lock()
 	defer tbl.mu.Unlock()
 	if len(tbl.flap.state) != 0 {

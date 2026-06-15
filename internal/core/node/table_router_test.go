@@ -8,23 +8,35 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
+// These fingerprints are used across this file. TableRouter.Route
+// decodes Envelope.Recipient via domain.PeerIdentityFromWire, so any
+// identity that flows through a Recipient (the destination, and the
+// direct-peer in the relay-only-cap test) must be valid 40-char hex
+// for the table lookup to resolve to the seeded route Identity.
+const (
+	tableRouterTargetXHex = "dd00000000000000000000000000000000000001"
+	tableRouterPeerBHex   = "bb00000000000000000000000000000000000002"
+	tableRouterPeerCHex   = "bb00000000000000000000000000000000000003"
+	tableRouterNodeAHex   = "aa00000000000000000000000000000000000001"
+)
+
 func TestTableRouterImplementsRouter(t *testing.T) {
 	var _ Router = (*TableRouter)(nil)
 }
 
 func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domain.PeerIdentityFromWire(tableRouterNodeAHex)))
 
 	// Add a direct peer so there is a route.
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domain.PeerIdentityFromWire(tableRouterPeerBHex)); err != nil {
 		t.Fatal(err)
 	}
 
 	// Add a route to "target-X" via "peer-B".
 	status, err := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "peer-B",
-		NextHop:  "peer-B",
+		Identity: domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		Origin:   domain.PeerIdentityFromWire(tableRouterPeerBHex),
+		NextHop:  domain.PeerIdentityFromWire(tableRouterPeerBHex),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -38,7 +50,7 @@ func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
 		table: table,
 		// Mock: peer-B has an active session.
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			if peerIdentity == "peer-B" {
+			if peerIdentity == domain.PeerIdentityFromWire(tableRouterPeerBHex) {
 				return domain.PeerAddress("addr-B")
 			}
 			return ""
@@ -49,7 +61,7 @@ func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
 		ID:        "msg-1",
 		Topic:     "dm",
 		Sender:    "node-A",
-		Recipient: "target-X",
+		Recipient: tableRouterTargetXHex,
 	}
 
 	decision := tr.Route(msg)
@@ -57,19 +69,19 @@ func TestTableRouterLookupReturnsRelayNextHop(t *testing.T) {
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop to be set")
 	}
-	if *decision.RelayNextHop != domain.PeerIdentity("peer-B") {
+	if *decision.RelayNextHop != domain.PeerIdentityFromWire(tableRouterPeerBHex) {
 		t.Fatalf("expected RelayNextHop=peer-B, got %s", *decision.RelayNextHop)
 	}
 }
 
 func TestTableRouterNoRouteGossipFallback(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domain.PeerIdentityFromWire(tableRouterNodeAHex)))
 
 	tr := &TableRouter{
 		svc:   &Service{},
 		table: table,
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			return domain.PeerAddress("addr-" + string(peerIdentity))
+			return domain.PeerAddress("addr-" + peerIdentity.String())
 		},
 	}
 
@@ -88,13 +100,13 @@ func TestTableRouterNoRouteGossipFallback(t *testing.T) {
 }
 
 func TestTableRouterNoSessionGossipFallback(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domain.PeerIdentityFromWire(tableRouterNodeAHex)))
 
 	// Route exists but no session available.
 	status, err := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "peer-B",
-		NextHop:  "peer-B",
+		Identity: domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		Origin:   domain.PeerIdentityFromWire(tableRouterPeerBHex),
+		NextHop:  domain.PeerIdentityFromWire(tableRouterPeerBHex),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -116,7 +128,7 @@ func TestTableRouterNoSessionGossipFallback(t *testing.T) {
 		ID:        "msg-1",
 		Topic:     "dm",
 		Sender:    "node-A",
-		Recipient: "target-X",
+		Recipient: tableRouterTargetXHex,
 	}
 
 	decision := tr.Route(msg)
@@ -127,7 +139,7 @@ func TestTableRouterNoSessionGossipFallback(t *testing.T) {
 }
 
 func TestTableRouterPrefersBetterRoute(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domain.PeerIdentityFromWire(tableRouterNodeAHex)))
 
 	// Phase 2 changed Lookup ranking from "source-tier first, then
 	// hops" to a single CompositeScore (base − hops×10 + RTTBonus +
@@ -142,9 +154,9 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 
 	// announcement via peer-C, 2 hops → score 80
 	status, _ := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "target-X",
-		NextHop:  "peer-C",
+		Identity: domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		Origin:   domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		NextHop:  domain.PeerIdentityFromWire(tableRouterPeerCHex),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -155,9 +167,9 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 
 	// hop_ack via peer-B, 2 hops → score 90 (wins by +10 source bonus)
 	status, _ = table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "target-X",
-		NextHop:  "peer-B",
+		Identity: domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		Origin:   domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		NextHop:  domain.PeerIdentityFromWire(tableRouterPeerBHex),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceHopAck,
@@ -170,7 +182,7 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 		svc:   &Service{},
 		table: table,
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			return domain.PeerAddress("addr-" + string(peerIdentity))
+			return domain.PeerAddress("addr-" + peerIdentity.String())
 		},
 	}
 
@@ -178,7 +190,7 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 		ID:        "msg-1",
 		Topic:     "dm",
 		Sender:    "node-A",
-		Recipient: "target-X",
+		Recipient: tableRouterTargetXHex,
 	}
 
 	decision := tr.Route(msg)
@@ -187,19 +199,19 @@ func TestTableRouterPrefersBetterRoute(t *testing.T) {
 		t.Fatal("expected RelayNextHop to be set")
 	}
 	// hop_ack peer-B should be preferred over announcement peer-C.
-	if *decision.RelayNextHop != domain.PeerIdentity("peer-B") {
+	if *decision.RelayNextHop != domain.PeerIdentityFromWire(tableRouterPeerBHex) {
 		t.Fatalf("expected RelayNextHop=peer-B (hop_ack), got %s", *decision.RelayNextHop)
 	}
 }
 
 func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domain.PeerIdentityFromWire(tableRouterNodeAHex)))
 
 	// Two routes: best via peer-B (no session), secondary via peer-C (has session).
 	status, _ := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "target-X",
-		NextHop:  "peer-B",
+		Identity: domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		Origin:   domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		NextHop:  domain.PeerIdentityFromWire(tableRouterPeerBHex),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceHopAck,
@@ -209,9 +221,9 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 	}
 
 	status, _ = table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "target-X",
-		NextHop:  "peer-C",
+		Identity: domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		Origin:   domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		NextHop:  domain.PeerIdentityFromWire(tableRouterPeerCHex),
 		Hops:     3,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -224,7 +236,7 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 		svc:   &Service{},
 		table: table,
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			if peerIdentity == "peer-C" {
+			if peerIdentity == domain.PeerIdentityFromWire(tableRouterPeerCHex) {
 				return domain.PeerAddress("addr-C")
 			}
 			return "" // peer-B has no session
@@ -235,7 +247,7 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 		ID:        "msg-1",
 		Topic:     "dm",
 		Sender:    "node-A",
-		Recipient: "target-X",
+		Recipient: tableRouterTargetXHex,
 	}
 
 	decision := tr.Route(msg)
@@ -243,16 +255,16 @@ func TestTableRouterFallsBackToSecondRoute(t *testing.T) {
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop to be set via fallback route")
 	}
-	if *decision.RelayNextHop != domain.PeerIdentity("peer-C") {
+	if *decision.RelayNextHop != domain.PeerIdentityFromWire(tableRouterPeerCHex) {
 		t.Fatalf("expected RelayNextHop=peer-C (fallback), got %s", *decision.RelayNextHop)
 	}
 }
 
 func TestTableRouterDirectPeerRelayOnlyCap(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domain.PeerIdentityFromWire(tableRouterNodeAHex)))
 
 	// Add a direct route to peer-B (hops=1).
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domain.PeerIdentityFromWire(tableRouterPeerBHex)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -262,7 +274,7 @@ func TestTableRouterDirectPeerRelayOnlyCap(t *testing.T) {
 		// Simulate: peer-B has only relay cap (no routing cap).
 		// For direct routes (hops=1), relay-only should suffice.
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			if peerIdentity == "peer-B" && hops <= 1 {
+			if peerIdentity == domain.PeerIdentityFromWire(tableRouterPeerBHex) && hops <= 1 {
 				return domain.PeerAddress("addr-B")
 			}
 			// For transit (hops>1), reject relay-only peers.
@@ -274,7 +286,7 @@ func TestTableRouterDirectPeerRelayOnlyCap(t *testing.T) {
 		ID:        "msg-1",
 		Topic:     "dm",
 		Sender:    "node-A",
-		Recipient: "peer-B",
+		Recipient: tableRouterPeerBHex,
 	}
 
 	decision := tr.Route(msg)
@@ -282,19 +294,19 @@ func TestTableRouterDirectPeerRelayOnlyCap(t *testing.T) {
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop for direct peer with relay-only cap")
 	}
-	if *decision.RelayNextHop != domain.PeerIdentity("peer-B") {
+	if *decision.RelayNextHop != domain.PeerIdentityFromWire(tableRouterPeerBHex) {
 		t.Fatalf("expected RelayNextHop=peer-B, got %s", *decision.RelayNextHop)
 	}
 }
 
 func TestTableRouterTransitPeerNeedsBothCaps(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domain.PeerIdentityFromWire(tableRouterNodeAHex)))
 
 	// Route to target-X via peer-B (hops=2, transit).
 	status, err := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-X",
-		Origin:   "peer-B",
-		NextHop:  "peer-B",
+		Identity: domain.PeerIdentityFromWire(tableRouterTargetXHex),
+		Origin:   domain.PeerIdentityFromWire(tableRouterPeerBHex),
+		NextHop:  domain.PeerIdentityFromWire(tableRouterPeerBHex),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -309,7 +321,7 @@ func TestTableRouterTransitPeerNeedsBothCaps(t *testing.T) {
 		// Simulate: peer-B has only relay cap. Transit requires both.
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
 			if hops <= 1 {
-				return domain.PeerAddress("addr-" + string(peerIdentity))
+				return domain.PeerAddress("addr-" + peerIdentity.String())
 			}
 			// Transit: reject relay-only peers.
 			return ""
@@ -320,7 +332,7 @@ func TestTableRouterTransitPeerNeedsBothCaps(t *testing.T) {
 		ID:        "msg-1",
 		Topic:     "dm",
 		Sender:    "node-A",
-		Recipient: "target-X",
+		Recipient: tableRouterTargetXHex,
 	}
 
 	decision := tr.Route(msg)

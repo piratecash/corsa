@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 )
@@ -91,16 +92,16 @@ func TestAnnounceLoop_NoopSuppression(t *testing.T) {
 	// asserting it advanced ≥3 after three follow-up triggers
 	// pins that the suppression actually came from the no-op
 	// branch and not from any other early-return.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -185,16 +186,16 @@ func TestAnnounceLoop_NoopSuppression(t *testing.T) {
 func TestAnnounceLoop_FailedSendPreservesCache(t *testing.T) {
 	// When send fails, the cache should not be updated. The next cycle
 	// should retry.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -231,21 +232,21 @@ func TestAnnounceLoop_FailedSendPreservesCache(t *testing.T) {
 func TestAnnounceLoop_DeltaOnlyAfterFullSync(t *testing.T) {
 	// After initial full sync, adding a new route should produce a
 	// delta-only send with just the new entry.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
 	// Start with two direct peers so the initial full sync contains
 	// at least 2 routes — making the delta (1 new route) strictly smaller.
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := table.AddDirectPeer("peer-E"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-E")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -269,7 +270,7 @@ func TestAnnounceLoop_DeltaOnlyAfterFullSync(t *testing.T) {
 	}
 
 	// Add another direct peer.
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -295,7 +296,7 @@ func TestAnnounceLoop_DeltaOnlyAfterFullSync(t *testing.T) {
 	// Delta should contain the new route.
 	foundD := false
 	for _, r := range secondRoutes {
-		if r.Identity == "peer-D" {
+		if r.Identity == domaintest.ID("peer-D") {
 			foundD = true
 		}
 	}
@@ -315,16 +316,16 @@ func TestAnnounceLoop_RateLimitForcedFullSync(t *testing.T) {
 
 	registry := routing.NewAnnounceStateRegistry(routing.WithRegistryClock(clock))
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -335,7 +336,7 @@ func TestAnnounceLoop_RateLimitForcedFullSync(t *testing.T) {
 
 	// Manually set up state: simulate a peer that had a successful baseline
 	// but now needs forced full resync (e.g. after reconnect).
-	state := registry.GetOrCreate("peer-C")
+	state := registry.GetOrCreate(domaintest.ID("peer-C"))
 	// Establish a prior baseline so the rate limiter applies.
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now.Add(-1*time.Minute))
 	// Mark as needing full resync (simulating reconnect).
@@ -367,16 +368,16 @@ func TestAnnounceLoop_UnchangedTriggerNoSend(t *testing.T) {
 	// After initial full sync, a TriggerUpdate with no table changes
 	// should not produce any additional sends. This verifies that
 	// delta suppression works correctly on triggered cycles too.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -412,19 +413,19 @@ func TestAnnounceLoop_UnchangedTriggerNoSend(t *testing.T) {
 
 func TestAnnounceLoop_NewPeerAlwaysGetsFull(t *testing.T) {
 	// A brand new peer should always receive a full sync on the first cycle.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -457,16 +458,16 @@ func TestAnnounceLoop_ReconnectedPeerGetsForcedFullSync(t *testing.T) {
 	// After a peer disconnects and reconnects (MarkDisconnected +
 	// MarkReconnected), the cache is invalidated and the next announce
 	// cycle sends a full sync — not a delta from the stale cache.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -492,11 +493,11 @@ func TestAnnounceLoop_ReconnectedPeerGetsForcedFullSync(t *testing.T) {
 	}
 
 	// Simulate disconnect + reconnect.
-	registry.MarkDisconnected("peer-C")
-	registry.MarkReconnected("peer-C", nil)
+	registry.MarkDisconnected(domaintest.ID("peer-C"))
+	registry.MarkReconnected(domaintest.ID("peer-C"), nil)
 
 	// Verify state requires full resync.
-	state := registry.Get("peer-C")
+	state := registry.Get(domaintest.ID("peer-C"))
 	view := state.View()
 	if !view.NeedsFullResync {
 		t.Fatal("expected NeedsFullResync=true after reconnect")
@@ -526,19 +527,19 @@ func TestAnnounceLoop_FailedWithdrawalRetriedViaDelta(t *testing.T) {
 	// tombstone in the table should appear in the next announce snapshot
 	// and be delivered via delta to that peer.
 	table := routing.NewTable(
-		routing.WithLocalOrigin("node-A"),
+		routing.WithLocalOrigin(domaintest.ID("node-A")),
 		routing.WithDefaultTTL(120*time.Second),
 	)
 	sender, rec := newControllableMockPeerSender(t)
 
 	// Add a direct peer and establish baseline.
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -563,7 +564,7 @@ func TestAnnounceLoop_FailedWithdrawalRetriedViaDelta(t *testing.T) {
 	// Simulate disconnect: remove the direct peer (creates tombstone).
 	// The immediate withdrawal path would normally send to all peers,
 	// but we're testing the retry-via-delta mechanism.
-	if _, err := table.RemoveDirectPeer("peer-B"); err != nil {
+	if _, err := table.RemoveDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -581,7 +582,7 @@ func TestAnnounceLoop_FailedWithdrawalRetriedViaDelta(t *testing.T) {
 	secondCall := calls[1]
 	foundWithdrawal := false
 	for _, r := range secondCall.Routes {
-		if r.Identity == "peer-B" && r.Hops == routing.HopsInfinity {
+		if r.Identity == domaintest.ID("peer-B") && r.Hops == routing.HopsInfinity {
 			foundWithdrawal = true
 		}
 	}
@@ -598,21 +599,21 @@ func TestAnnounceLoop_PartialDeltaDoesNotDestroyExistingRoutes(t *testing.T) {
 	// Verify that a delta send containing only new routes does not
 	// remove existing routes from the receiver's table. This is the
 	// fundamental "announce frame is not a destructive snapshot" invariant.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 
 	// Set up receiver table with existing route.
-	receiver := routing.NewTable(routing.WithLocalOrigin("node-C"))
+	receiver := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-C")))
 
 	// Add direct peer (peer-B) to sender's table.
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	// Simulate receiver learning about peer-B from a previous full sync.
 	_, err := receiver.UpdateRoute(routing.RouteEntry{
-		Identity: "peer-B",
-		Origin:   "node-A",
-		NextHop:  "node-A",
+		Identity: domaintest.ID("peer-B"),
+		Origin:   domaintest.ID("node-A"),
+		NextHop:  domaintest.ID("node-A"),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -622,13 +623,13 @@ func TestAnnounceLoop_PartialDeltaDoesNotDestroyExistingRoutes(t *testing.T) {
 	}
 
 	// Verify route exists in receiver.
-	routes := receiver.Lookup("peer-B")
+	routes := receiver.Lookup(domaintest.ID("peer-B"))
 	if len(routes) == 0 {
 		t.Fatal("expected peer-B route in receiver before delta")
 	}
 
 	// Now sender adds peer-D (new route).
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -638,16 +639,16 @@ func TestAnnounceLoop_PartialDeltaDoesNotDestroyExistingRoutes(t *testing.T) {
 	// does NOT participate in either, so the Origin value on the
 	// manually-built oldSnap is independent of what AnnounceTo
 	// emits as far as delta-matching is concerned. We still set
-	// Origin to "node-A" here to match the sender table's
-	// localOrigin (created with WithLocalOrigin("node-A"), and
-	// AnnounceTo emits Origin = "node-A" — the sender-originated
+	// Origin to domaintest.ID("node-A") here to match the sender table's
+	// localOrigin (created with WithLocalOrigin(domaintest.ID("node-A")), and
+	// AnnounceTo emits Origin = domaintest.ID("node-A") — the sender-originated
 	// migration contract from route_store_lookup.go), keeping the
 	// fixture's shape representative of a real cached snapshot
 	// even though equality is unaffected.
 	oldSnap := routing.BuildAnnounceSnapshot([]routing.AnnounceEntry{
-		{Identity: "peer-B", Origin: "node-A", SeqNo: 1, Hops: 1},
+		{Identity: domaintest.ID("peer-B"), Origin: domaintest.ID("node-A"), SeqNo: 1, Hops: 1},
 	})
-	newSnap := routing.BuildAnnounceSnapshot(table.AnnounceTo("peer-C"))
+	newSnap := routing.BuildAnnounceSnapshot(table.AnnounceTo(domaintest.ID("peer-C")))
 
 	delta := routing.ComputeDelta(oldSnap, newSnap)
 
@@ -655,10 +656,10 @@ func TestAnnounceLoop_PartialDeltaDoesNotDestroyExistingRoutes(t *testing.T) {
 	foundB := false
 	foundD := false
 	for _, e := range delta {
-		if e.Identity == "peer-B" {
+		if e.Identity == domaintest.ID("peer-B") {
 			foundB = true
 		}
-		if e.Identity == "peer-D" {
+		if e.Identity == domaintest.ID("peer-D") {
 			foundD = true
 		}
 	}
@@ -674,7 +675,7 @@ func TestAnnounceLoop_PartialDeltaDoesNotDestroyExistingRoutes(t *testing.T) {
 		_, updateErr := receiver.UpdateRoute(routing.RouteEntry{
 			Identity: e.Identity,
 			Origin:   e.Origin,
-			NextHop:  "node-A",
+			NextHop:  domaintest.ID("node-A"),
 			Hops:     e.Hops + 1,
 			SeqNo:    e.SeqNo,
 			Source:   routing.RouteSourceAnnouncement,
@@ -685,11 +686,11 @@ func TestAnnounceLoop_PartialDeltaDoesNotDestroyExistingRoutes(t *testing.T) {
 	}
 
 	// Verify both routes exist in receiver after delta.
-	routesB := receiver.Lookup("peer-B")
+	routesB := receiver.Lookup(domaintest.ID("peer-B"))
 	if len(routesB) == 0 {
 		t.Fatal("peer-B route should still exist after delta apply")
 	}
-	routesD := receiver.Lookup("peer-D")
+	routesD := receiver.Lookup(domaintest.ID("peer-D"))
 	if len(routesD) == 0 {
 		t.Fatal("peer-D route should exist after delta apply")
 	}

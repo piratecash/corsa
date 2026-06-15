@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestCommitChunkProgressLockedOwnershipMatrix is the table-driven
@@ -358,7 +359,7 @@ func TestPostValidationDuplicateRaceDropsLoserWithoutWriting(t *testing.T) {
 
 	downloadDir := testDownloadDir(t)
 
-	sender := domain.PeerIdentity("dup-race-sender-identity-1234")
+	sender := domaintest.ID("dup-race-sender-identity-1234")
 	fileID := domain.FileID("dup-race-file")
 	chunkSize := uint32(64)
 	// Two-chunk file so the first chunk is non-final and

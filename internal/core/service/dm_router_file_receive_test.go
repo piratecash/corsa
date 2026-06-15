@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/service/filetransfer"
 )
@@ -66,8 +67,8 @@ func TestTryRegisterFileReceiveRegistersAndPublishesOnSuccess(t *testing.T) {
 		fileName = "report.pdf"
 		fileSize = uint64(2048)
 		ctype    = "application/pdf"
-		sender   = domain.PeerIdentity("peer-incoming-12345678abcd")
 	)
+	sender := domaintest.ID("peer-incoming-12345678abcd")
 
 	bus := ebus.New()
 	var (
@@ -161,7 +162,7 @@ func TestTryRegisterFileReceiveSkipsPublishOnRegistrationFailure(t *testing.T) {
 
 	msg := &DirectMessage{
 		ID:        "fail-1",
-		Sender:    "peer-x",
+		Sender:    domaintest.ID("peer-x"),
 		Recipient: r.client.Address(),
 		Command:   domain.DMCommandFileAnnounce,
 		CommandData: `{"file_hash":"` + validTestFileHash +
@@ -194,7 +195,7 @@ func TestTryRegisterFileReceiveSkipsPublishOnMalformedPayload(t *testing.T) {
 
 	msg := &DirectMessage{
 		ID:          "malformed-1",
-		Sender:      "peer-x",
+		Sender:      domaintest.ID("peer-x"),
 		Recipient:   r.client.Address(),
 		Command:     domain.DMCommandFileAnnounce,
 		CommandData: `{not json`, // malformed — RegisterIncoming returns parse error
@@ -234,7 +235,7 @@ func TestTryRegisterFileReceiveSkipsOutgoing(t *testing.T) {
 	msg := &DirectMessage{
 		ID:        "outgoing-announce",
 		Sender:    r.client.Address(), // we are the sender
-		Recipient: "peer-recipient",
+		Recipient: domaintest.ID("peer-recipient"),
 		Command:   domain.DMCommandFileAnnounce,
 		CommandData: `{"file_hash":"` + validTestFileHash +
 			`","file_name":"x","file_size":1}`,
@@ -275,7 +276,7 @@ func TestTryRegisterFileReceiveSkipsNonFileAnnounce(t *testing.T) {
 			name: "plain_dm_no_command",
 			msg: &DirectMessage{
 				ID:        "plain-1",
-				Sender:    "peer-x",
+				Sender:    domaintest.ID("peer-x"),
 				Recipient: r.client.Address(),
 				Body:      "hello world",
 			},
@@ -284,7 +285,7 @@ func TestTryRegisterFileReceiveSkipsNonFileAnnounce(t *testing.T) {
 			name: "file_announce_with_empty_command_data",
 			msg: &DirectMessage{
 				ID:          "fa-empty-1",
-				Sender:      "peer-x",
+				Sender:      domaintest.ID("peer-x"),
 				Recipient:   r.client.Address(),
 				Command:     domain.DMCommandFileAnnounce,
 				CommandData: "", // missing payload — must skip
@@ -322,12 +323,12 @@ func TestApplyDecryptedMessageToSidebarRegistersFileReceiveForNonActive(t *testi
 		fileName = "doc.pdf"
 		fileSize = uint64(4096)
 		ctype    = "application/pdf"
-		sender   = domain.PeerIdentity("peer-nonactive-12345678abcd")
-		// peerID identifies the conversation that is NOT currently
-		// active. By construction (newTestRouter has activePeer = ""
-		// zero value), this is a non-active conversation.
-		peerID = sender
 	)
+	sender := domaintest.ID("peer-nonactive-12345678abcd")
+	// peerID identifies the conversation that is NOT currently
+	// active. By construction (newTestRouter has activePeer = ""
+	// zero value), this is a non-active conversation.
+	peerID := sender
 
 	bus := ebus.New()
 	var (
@@ -446,7 +447,7 @@ func TestTryRegisterFileReceiveDefensiveNils(t *testing.T) {
 	r2.eventBus = bus
 	r2.fileBridge = nil
 	msg := &DirectMessage{
-		Sender:      "peer-x",
+		Sender:      domaintest.ID("peer-x"),
 		Recipient:   r2.client.Address(),
 		Command:     domain.DMCommandFileAnnounce,
 		CommandData: `{"file_id":"x"}`,

@@ -234,6 +234,9 @@ func (t *SenderAnnounceToken) Commit(fileID domain.FileID, recipient domain.Peer
 	if t.committed {
 		return fmt.Errorf("sender announce token already committed")
 	}
+	if recipient.IsZero() {
+		return fmt.Errorf("sender announce token: zero recipient identity")
+	}
 
 	t.manager.mu.Lock()
 	defer t.manager.mu.Unlock()
@@ -290,7 +293,7 @@ func (t *SenderAnnounceToken) Commit(fileID domain.FileID, recipient domain.Peer
 
 	log.Info().
 		Str("file_id", string(fileID)).
-		Str("recipient", string(recipient)).
+		Str("recipient", recipient.String()).
 		Str("file_name", t.fileName).
 		Uint64("file_size", t.fileSize).
 		Msg("file_transfer: registered sender mapping")
@@ -555,7 +558,7 @@ func (m *Manager) HandleChunkRequest(
 	if err != nil {
 		log.Debug().Err(err).
 			Str("file_id", string(req.FileID)).
-			Str("sender", string(senderIdentity)).
+			Str("sender", senderIdentity.String()).
 			Msg("file_transfer: chunk_request rejected")
 		return
 	}
@@ -590,7 +593,7 @@ func (m *Manager) HandleChunkRequest(
 
 	log.Info().
 		Str("file_id", string(req.FileID)).
-		Str("receiver", string(senderIdentity)).
+		Str("receiver", senderIdentity.String()).
 		Uint64("offset", prep.offset).
 		Int("chunk_bytes", len(data)).
 		Msg("file_transfer: serving chunk_response")
@@ -613,7 +616,7 @@ func (m *Manager) HandleChunkRequest(
 	}); err != nil {
 		log.Warn().Err(err).
 			Str("file_id", string(req.FileID)).
-			Str("receiver", string(senderIdentity)).
+			Str("receiver", senderIdentity.String()).
 			Msg("file_transfer: send chunk_response failed")
 		rollbackState()
 		return
@@ -677,7 +680,7 @@ func (m *Manager) HandleFileDownloaded(
 		m.mu.Unlock()
 		log.Warn().
 			Str("file_id", string(downloaded.FileID)).
-			Str("recipient", string(senderIdentity)).
+			Str("recipient", senderIdentity.String()).
 			Str("state", string(currentState)).
 			Msg("file_transfer: file_downloaded rejected — sender not in serving or completed state")
 		return
@@ -695,7 +698,7 @@ func (m *Manager) HandleFileDownloaded(
 		m.mu.Unlock()
 		log.Warn().
 			Str("file_id", string(downloaded.FileID)).
-			Str("recipient", string(senderIdentity)).
+			Str("recipient", senderIdentity.String()).
 			Uint64("received_epoch", downloaded.Epoch).
 			Uint64("current_epoch", currentEpoch).
 			Str("current_state", string(currentState)).
@@ -745,7 +748,7 @@ func (m *Manager) HandleFileDownloaded(
 	if !wasAlreadyCompleted {
 		log.Info().
 			Str("file_id", string(downloaded.FileID)).
-			Str("recipient", string(senderIdentity)).
+			Str("recipient", senderIdentity.String()).
 			Msg("file_transfer: transfer completed (sender)")
 	}
 }
@@ -901,7 +904,7 @@ func (m *Manager) tickSenderMappings() {
 				changed = true
 				log.Info().
 					Str("file_id", string(sm.FileID)).
-					Str("recipient", string(sm.Recipient)).
+					Str("recipient", sm.Recipient.String()).
 					Str("restored_state", string(reclaimedState)).
 					Dur("stalled_for", now.Sub(sm.LastServedAt)).
 					Msg("file_transfer: reclaimed stalled serving slot")
@@ -1197,7 +1200,7 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 
 	if changed {
 		log.Info().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Int("sender_removed", len(senderIDs)).
 			Int("receiver_removed", len(receiverEntries)).
 			Msg("file_transfer: peer transfers cleaned up")

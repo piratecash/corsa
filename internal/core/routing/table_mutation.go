@@ -110,7 +110,7 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	// entry with a foreign Origin would outrank all announcement /
 	// hop_ack routes in Lookup and never be eligible for own-origin
 	// withdrawal on disconnect.
-	if entry.Source == RouteSourceDirect && t.localOrigin != "" && entry.Origin != t.localOrigin {
+	if entry.Source == RouteSourceDirect && !t.localOrigin.IsZero() && entry.Origin != t.localOrigin {
 		return RouteRejected, ErrDirectForeignOrigin
 	}
 
@@ -215,7 +215,7 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 // safe to use outside the lock because it carries value-typed
 // PeerIdentity entries (no aliasing into storage).
 func (t *Table) IdentitiesViaUplink(uplink PeerIdentity) []PeerIdentity {
-	if uplink == "" {
+	if uplink.IsZero() {
 		return nil
 	}
 	t.mu.RLock()
@@ -273,7 +273,7 @@ func (t *Table) IdentitiesViaUplink(uplink PeerIdentity) []PeerIdentity {
 // (a poisoned slot may expose a surviving backup uplink that the
 // next Lookup will now prefer).
 func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
-	if identity == "" || uplink == "" {
+	if identity.IsZero() || uplink.IsZero() {
 		return false
 	}
 	t.mu.Lock()
@@ -310,7 +310,17 @@ func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
 // use RemoveDirectPeer instead.
 //
 // Returns true if the withdrawal was applied.
+//
+// A withdrawal for the zero (absent) identity is never legitimate: it
+// would tombstone a claim under the zero key, polluting the snapshot and
+// TotalEntries without ever corresponding to a real route. It is rejected
+// before any mutation — symmetric with UpdateRoute, where RouteEntry.Validate
+// rejects a zero Identity.
 func (t *Table) WithdrawRoute(identity, origin, nextHop PeerIdentity, seqNo uint64) bool {
+	if identity.IsZero() {
+		return false
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -345,10 +355,10 @@ func (t *Table) WithdrawRoute(identity, origin, nextHop PeerIdentity, seqNo uint
 // Returns ErrNoLocalOrigin if localOrigin was not configured, or
 // ErrEmptyPeerID if peerIdentity is empty.
 func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, error) {
-	if t.localOrigin == "" {
+	if t.localOrigin.IsZero() {
 		return AddDirectPeerResult{}, ErrNoLocalOrigin
 	}
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		return AddDirectPeerResult{}, ErrEmptyPeerID
 	}
 
@@ -484,10 +494,10 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 // Returns ErrNoLocalOrigin if localOrigin was not configured, or
 // ErrEmptyPeerID if peerIdentity is empty.
 func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerResult, error) {
-	if t.localOrigin == "" {
+	if t.localOrigin.IsZero() {
 		return RemoveDirectPeerResult{}, ErrNoLocalOrigin
 	}
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		return RemoveDirectPeerResult{}, ErrEmptyPeerID
 	}
 
@@ -529,7 +539,7 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 // where the invalidation exposed a surviving non-withdrawn backup route via
 // a different next-hop (same semantics as TickTTL's exposed return value).
 func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerIdentity) {
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		return 0, nil
 	}
 

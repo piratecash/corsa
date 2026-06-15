@@ -61,7 +61,7 @@ import (
 // defers them until the generation check passes.
 func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3 bool) {
 	session.version = welcome.Version
-	session.peerIdentity = domain.PeerIdentity(welcome.Address)
+	session.peerIdentity = domain.PeerIdentityFromWire(welcome.Address)
 	session.capabilities = intersectCapabilities(localCapabilities(enableV3), welcome.Capabilities)
 	if session.netCore == nil {
 		return
@@ -174,7 +174,7 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			// object still owns it here since we just removed it from
 			// s.sessions and no other goroutine mutates session.capabilities
 			// after applyWelcomeMetadata.
-			if closedSession != nil && closedSession.peerIdentity != "" {
+			if closedSession != nil && !closedSession.peerIdentity.IsZero() {
 				s.onPeerSessionClosedWithCause(closedSession.peerIdentity, closedSession.capabilities, sessionCloseCauseFromError(err))
 			}
 			// Self-identity short-circuit — must run BEFORE the generic
@@ -262,7 +262,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	log.Trace().Str("site", "openPeerSession_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	session = &peerSession{
 		address:      address,
-		peerIdentity: "",
+		peerIdentity: domain.PeerIdentity{},
 		connID:       cid,
 		conn:         conn,
 		metered:      conn,
@@ -302,7 +302,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// → NetCore.Close(), no raw socket operations. The typed error is
 	// propagated to the caller so health/peer_provider penalty paths can
 	// detect self-identity via errors.As and apply the cooldown.
-	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+	if s.isSelfIdentity(domain.PeerIdentityFromWire(welcome.Address)) {
 		log.Warn().
 			Str("peer", string(address)).
 			Str("local_identity", s.identity.Address).
@@ -329,7 +329,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	}
 	// Record observed address only after authentication succeeds so that
 	// an unauthenticated responder cannot influence NAT consensus.
-	s.recordObservedAddress(domain.PeerIdentity(welcome.Address), welcome.ObservedAddress)
+	s.recordObservedAddress(domain.PeerIdentityFromWire(welcome.Address), welcome.ObservedAddress)
 
 	// Evaluate peer exchange policy BEFORE markPeerConnected so that the
 	// aggregate status snapshot does not yet include the peer being set up.
@@ -372,7 +372,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
-	if session.peerIdentity != "" && s.sessionHasCapability(address, domain.CapMeshRoutingV1) && s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+	if !session.peerIdentity.IsZero() && s.sessionHasCapability(address, domain.CapMeshRoutingV1) && s.sessionHasCapability(address, domain.CapMeshRelayV1) {
 		s.sendOutboundFullTableSync(ctx, session.peerIdentity, address)
 	}
 
@@ -386,7 +386,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	// onPeerSessionEstablished before we entered the main loop. Now that
 	// inboxCh is actively read (preventing overflow), drain any pending
 	// frames (push_message, etc.) that target this peer's identity.
-	if session.peerIdentity != "" {
+	if !session.peerIdentity.IsZero() {
 		peerID := session.peerIdentity
 		reachable := map[domain.PeerIdentity]struct{}{peerID: {}}
 		// The peer's identity just became directly reachable: re-arm any held
@@ -622,7 +622,7 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	// Remove from the incompatible-reporter dedup set if present.
 	// statusMu guards s.versionPolicy (INNERMOST — acquired while peerMu
 	// and ipStateMu are held; nested self-contained section).
-	if peerID != "" && s.versionPolicy != nil {
+	if !peerID.IsZero() && s.versionPolicy != nil {
 		s.statusMu.Lock()
 		delete(s.versionPolicy.incompatibleReporters, peerID)
 		s.statusMu.Unlock()
@@ -636,14 +636,14 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	if pm := s.persistedMeta[address]; pm != nil && pm.VersionLockout.IsActive() {
 		log.Info().
 			Str("peer", string(address)).
-			Str("identity", string(peerID)).
+			Str("identity", peerID.String()).
 			Str("reason", string(pm.VersionLockout.Reason)).
 			Msg("version_lockout_cleared_by_successful_handshake")
 		pm.VersionLockout = domain.VersionLockoutSnapshot{}
 	}
 	// Propagate lockout and health clearing to all sibling addresses of
 	// the same identity — mirrors setVersionLockoutLocked propagation.
-	if peerID != "" {
+	if !peerID.IsZero() {
 		for otherAddr, otherID := range s.peerIDs {
 			if otherAddr == address || otherID != peerID {
 				continue
@@ -651,7 +651,7 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 			if otherEntry, ok := s.persistedMeta[otherAddr]; ok && otherEntry.VersionLockout.IsActive() {
 				log.Info().
 					Str("peer", string(otherAddr)).
-					Str("peer_identity", string(peerID)).
+					Str("peer_identity", peerID.String()).
 					Str("source_address", string(address)).
 					Msg("version_lockout_cleared_by_identity_on_handshake")
 				otherEntry.VersionLockout = domain.VersionLockoutSnapshot{}
@@ -724,7 +724,7 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 		health.Score = clampScore(health.Score + peerScoreDisconnect)
 	}
 	peerID := s.peerIDs[address]
-	if peerID != "" {
+	if !peerID.IsZero() {
 		// observedAddrs is IP/advertise-domain state; nest s.ipStateMu
 		// inside the already-held s.peerMu per the canonical peerMu →
 		// ipStateMu order documented in docs/locking.md.
@@ -805,7 +805,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	log.Trace().Str("site", "openPeerSessionForCM_nextCID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 	session := &peerSession{
 		address:      address,
-		peerIdentity: "",
+		peerIdentity: domain.PeerIdentity{},
 		connID:       cid,
 		conn:         conn,
 		metered:      conn,
@@ -850,7 +850,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	// through the wrapper (closeOnError → session.Close() → NetCore.Close())
 	// and surface a structured selfIdentityError so the CM dial-fail
 	// path applies an address-level cooldown instead of retrying.
-	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+	if s.isSelfIdentity(domain.PeerIdentityFromWire(welcome.Address)) {
 		closeOnError()
 		log.Warn().
 			Str("peer", string(address)).
@@ -979,7 +979,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			// brakes on the same root signal. See
 			// routing_route_quarantine.go and
 			// docs/refactoring/route-withdrawal-grace-period.md.
-			if session.peerIdentity != "" && s.setupFailureExceedsThresholdLocked(slotAddress) {
+			if !session.peerIdentity.IsZero() && s.setupFailureExceedsThresholdLocked(slotAddress) {
 				s.armRouteQuarantineLocked(session.peerIdentity, quarantineReasonSetupFailureCycle, now)
 			}
 			s.peerMu.Unlock()
@@ -1044,7 +1044,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		s.onPeerSessionEstablished(session.peerIdentity, session.capabilities)
 
 		// Send full table sync to the new peer (Phase 1.2).
-		if session.peerIdentity != "" && s.sessionHasCapability(dialAddress, domain.CapMeshRoutingV1) && s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1) {
+		if !session.peerIdentity.IsZero() && s.sessionHasCapability(dialAddress, domain.CapMeshRoutingV1) && s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1) {
 			s.sendOutboundFullTableSync(s.runCtx, session.peerIdentity, dialAddress)
 		}
 
@@ -1098,7 +1098,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 
 		// Routing table: deregister direct peer only if this goroutine
 		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
-		if ownedCleanup && session.peerIdentity != "" {
+		if ownedCleanup && !session.peerIdentity.IsZero() {
 			s.onPeerSessionClosedWithCause(session.peerIdentity, session.capabilities, sessionCloseCauseFromError(err))
 		}
 
@@ -1188,7 +1188,7 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// deactivateSlot path emits this callback) and attributes the
 	// close from the actual session error, so this branch never
 	// shadows a genuine peer-side flap.
-	if ownedCleanup && info.Identity != "" {
+	if ownedCleanup && !info.Identity.IsZero() {
 		s.onPeerSessionClosedWithCause(info.Identity, info.Capabilities, sessionCloseLocalEviction)
 	}
 }
@@ -1348,7 +1348,7 @@ func (s *Service) applySelfIdentityCooldown(address domain.PeerAddress, selfErr 
 
 	log.Warn().
 		Str("peer", string(address)).
-		Str("local_identity", string(selfErr.LocalIdentity)).
+		Str("local_identity", selfErr.LocalIdentity.String()).
 		Str("welcome_listen", string(selfErr.PeerListen)).
 		Time("banned_until", bannedUntil).
 		Bool("first_observation", firstObservation).

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -125,7 +126,7 @@ func TestWithdrawalGrace_ReconnectAfterThirdBackoffCancels(t *testing.T) {
 	scaledGrace := (cmReconnectRetryBudget() + routeWithdrawalGraceSlack) / compress
 
 	svc := newGraceFixture(t, scaledGrace)
-	peer := domain.PeerIdentity("test-peer-third-backoff")
+	peer := domaintest.ID("test-peer-third-backoff")
 
 	svc.maybeScheduleDeferredWithdrawal(peer, nil)
 	if !peerInPendingMap(svc, peer) {
@@ -167,7 +168,7 @@ func TestWithdrawalGrace_ScheduleArmsTimer(t *testing.T) {
 	t.Parallel()
 
 	svc := newGraceFixture(t, time.Hour) // long enough never to fire during the test
-	peer := domain.PeerIdentity("test-peer-schedule")
+	peer := domaintest.ID("test-peer-schedule")
 
 	svc.maybeScheduleDeferredWithdrawal(peer, nil)
 
@@ -186,7 +187,7 @@ func TestWithdrawalGrace_ReconnectInsideWindowCancels(t *testing.T) {
 	t.Parallel()
 
 	svc := newGraceFixture(t, 200*time.Millisecond)
-	peer := domain.PeerIdentity("test-peer-reconnect")
+	peer := domaintest.ID("test-peer-reconnect")
 
 	svc.maybeScheduleDeferredWithdrawal(peer, nil)
 	if !peerInPendingMap(svc, peer) {
@@ -219,7 +220,7 @@ func TestWithdrawalGrace_TimerFiresIfNoReconnect(t *testing.T) {
 	t.Parallel()
 
 	svc := newGraceFixture(t, 50*time.Millisecond)
-	peer := domain.PeerIdentity("test-peer-timeout")
+	peer := domaintest.ID("test-peer-timeout")
 
 	svc.maybeScheduleDeferredWithdrawal(peer, nil)
 	if !peerInPendingMap(svc, peer) {
@@ -246,7 +247,7 @@ func TestWithdrawalGrace_DoubleScheduleKeepsFirstTimer(t *testing.T) {
 	t.Parallel()
 
 	svc := newGraceFixture(t, time.Hour)
-	peer := domain.PeerIdentity("test-peer-double-close")
+	peer := domaintest.ID("test-peer-double-close")
 
 	svc.maybeScheduleDeferredWithdrawal(peer, nil)
 	svc.peerMu.RLock()
@@ -276,7 +277,7 @@ func TestWithdrawalGrace_ShutdownCancelsAll(t *testing.T) {
 
 	svc := newGraceFixture(t, time.Hour)
 	peers := []domain.PeerIdentity{
-		"p1", "p2", "p3", "p4",
+		domaintest.ID("p1"), domaintest.ID("p2"), domaintest.ID("p3"), domaintest.ID("p4"),
 	}
 	for _, p := range peers {
 		svc.maybeScheduleDeferredWithdrawal(p, nil)
@@ -304,7 +305,7 @@ func TestWithdrawalGrace_CancelOnUnarmedReturnsFalse(t *testing.T) {
 	t.Parallel()
 
 	svc := newGraceFixture(t, time.Hour)
-	peer := domain.PeerIdentity("test-peer-no-timer")
+	peer := domaintest.ID("test-peer-no-timer")
 
 	if svc.tryCancelPendingWithdrawal(peer) {
 		t.Fatal("tryCancelPendingWithdrawal returned true on identity with no armed timer")
@@ -335,7 +336,7 @@ func TestWithdrawalGrace_CancelReturnsTrueEvenWhenTimerStopRaceLost(t *testing.T
 	t.Parallel()
 
 	svc := newGraceFixture(t, time.Hour)
-	peer := domain.PeerIdentity("test-peer-stop-race")
+	peer := domaintest.ID("test-peer-stop-race")
 
 	// Real timer, but with a no-op AfterFunc body: we never let it
 	// actually invoke firePendingWithdrawal — the test drives the
@@ -381,7 +382,7 @@ func TestWithdrawalGrace_LegacySyncFiresInline(t *testing.T) {
 		pendingWithdrawals:             make(map[domain.PeerIdentity]*pendingWithdrawal),
 		routeWithdrawalGracePeriodTest: -1, // explicit disable
 	}
-	peer := domain.PeerIdentity("test-peer-legacy-sync")
+	peer := domaintest.ID("test-peer-legacy-sync")
 
 	svc.maybeScheduleDeferredWithdrawal(peer, nil)
 
@@ -411,8 +412,8 @@ func TestWithdrawalGrace_LegacySyncFiresInline(t *testing.T) {
 func TestWithdrawalGrace_TimerCallbackAbortedAfterShutdownClaim(t *testing.T) {
 	t.Parallel()
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
-	const peer = routing.PeerIdentity("peer-shutdown-race")
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
+	peer := domaintest.ID("peer-shutdown-race")
 	if _, err := table.AddDirectPeer(peer); err != nil {
 		t.Fatalf("setup: AddDirectPeer: %v", err)
 	}
@@ -427,7 +428,7 @@ func TestWithdrawalGrace_TimerCallbackAbortedAfterShutdownClaim(t *testing.T) {
 		identityRelaySessions:          map[domain.PeerIdentity]int{},
 		routeWithdrawalGracePeriodTest: time.Hour,
 	}
-	peerID := domain.PeerIdentity(peer)
+	peerID := peer
 
 	// Schedule pending entry (long grace so the timer never fires
 	// during the test on its own).
@@ -467,7 +468,7 @@ func TestWithdrawalGrace_ConcurrentScheduleCancelSafe(t *testing.T) {
 	t.Parallel()
 
 	svc := newGraceFixture(t, time.Hour)
-	peer := domain.PeerIdentity("test-peer-concurrent")
+	peer := domaintest.ID("test-peer-concurrent")
 
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {

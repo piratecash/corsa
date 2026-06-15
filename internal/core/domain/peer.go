@@ -8,6 +8,7 @@ package domain
 import (
 	"bytes"
 	"encoding/json"
+	"net/netip"
 	"strconv"
 	"time"
 )
@@ -16,10 +17,15 @@ import (
 // Typed scalars
 // ---------------------------------------------------------------------------
 
-// PeerIdentity is an Ed25519 fingerprint (40-char lowercase hex).
-// Used for routing, announce targets, split horizon filtering,
-// and identity-level deduplication.
-type PeerIdentity string
+// PeerIdentity is an Ed25519 fingerprint: SHA-256(pubkey) truncated to
+// 20 bytes. Stored as a fixed 20-byte array rather than the 40-char hex
+// string so the value is inline (no separate backing allocation, no
+// 16-byte string header), pointer-free (cheaper GC mark phase — it is a
+// map key across the routing hot path), and directly comparable / usable
+// as a map key. The canonical textual form (40-char lowercase hex) is
+// produced by String / MarshalText; absence is the zero value, reported
+// by IsZero — never an empty sentinel.
+type PeerIdentity [20]byte
 
 // PeerAddress is a remote peer's transport address (host:port).
 // Used for health tracking, dial candidates, TCP connections,
@@ -45,16 +51,20 @@ type PeerBoxSignature string
 // with remote transport addresses at compile time.
 type ListenAddress string
 
-// PeerIP is the canonical bare-IP form of a peer endpoint (IPv4 or
-// IPv6 textual representation after IPv4-mapped IPv6 has been collapsed
-// to the bare IPv4 form). Distinct from PeerAddress, which carries the
-// host:port tuple used for dialling. Used by the advertise-address
-// convergence layer for trusted-advertise triples, observed-IP history,
-// consensus computation, and self-advertise overrides. An empty value
-// is a legal "no value" sentinel — absence is encoded by the zero value
-// rather than a separate optional wrapper because the canonical form of
-// a missing IP is still an empty string on the wire.
-type PeerIP string
+// PeerIP is the canonical bare-IP form of a peer endpoint (IPv4 or IPv6,
+// with IPv4-mapped IPv6 collapsed to the bare IPv4 form via Unmap).
+// Distinct from PeerAddress, which carries the host:port tuple used for
+// dialling. Used by the advertise-address convergence layer for
+// trusted-advertise triples, observed-IP history, consensus computation,
+// and self-advertise overrides.
+//
+// Backed by netip.Addr (value type, comparable, allocation-free, valid
+// as a map key) instead of a string. The "no value" sentinel is the
+// zero/invalid Addr, reported by IsValid — its textual form is still the
+// empty string (see String / MarshalText), preserving the canonical
+// missing-IP shape. Optional persisted fields use *PeerIP so a missing
+// value is encoded as an absent JSON field (nil), not an empty string.
+type PeerIP netip.Addr
 
 // PeerPort is a peer's listening port. Kept as a distinct type so the
 // compiler prevents silent mix-ups between a port and any other small

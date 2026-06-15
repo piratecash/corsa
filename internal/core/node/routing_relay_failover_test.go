@@ -29,12 +29,12 @@ import (
 // makeRelayFrameLine builds the serialised wire line for a synthetic
 // relay_message. Tests use it to populate relayForwardState.FrameLine
 // the same way the production sites (sendRelayMessage, etc.) do.
-func makeRelayFrameLine(t *testing.T, messageID, recipient string) string {
+func makeRelayFrameLine(t *testing.T, messageID string, recipient domain.PeerIdentity) string {
 	t.Helper()
 	frame := protocol.Frame{
 		Type:      "relay_message",
 		ID:        messageID,
-		Recipient: recipient,
+		Recipient: recipient.String(),
 		HopCount:  1,
 		MaxHops:   defaultMaxHops,
 	}
@@ -104,7 +104,7 @@ func TestFailoverRelay_FailoverOnHopAckTimeout(t *testing.T) {
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "msg-failover",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopCount:             1,
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
@@ -118,7 +118,7 @@ func TestFailoverRelay_FailoverOnHopAckTimeout(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:            "msg-failover",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopCount:             1,
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 0,
@@ -134,7 +134,7 @@ func TestFailoverRelay_FailoverOnHopAckTimeout(t *testing.T) {
 		if frame.ID != "msg-failover" {
 			t.Fatalf("retried frame ID = %q, want msg-failover", frame.ID)
 		}
-		if frame.Recipient != idTargetX {
+		if frame.Recipient != idTargetX.String() {
 			t.Fatalf("retried frame Recipient = %q, want %q", frame.Recipient, idTargetX)
 		}
 	default:
@@ -213,7 +213,7 @@ func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "msg-failover-q",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopCount:             1,
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
@@ -223,7 +223,7 @@ func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:            "msg-failover-q",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopCount:             1,
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 0,
@@ -266,9 +266,9 @@ func TestFailoverRelay_RespectsMaxRetries(t *testing.T) {
 
 	// Three uplinks — but we have already retried once so the third
 	// attempt must NOT fire.
-	for i, id := range []string{idPeerA, idPeerC, idPeerD} {
+	for i, id := range []string{idPeerA.String(), idPeerC.String(), idPeerD.String()} {
 		if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-			Identity: idTargetX, Origin: idTargetX, NextHop: domain.PeerIdentity(id),
+			Identity: idTargetX, Origin: idTargetX, NextHop: domain.PeerIdentityFromWire(id),
 			Hops: i + 1, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 		}); err != nil {
 			t.Fatalf("UpdateRoute(%s): %v", id, err)
@@ -284,7 +284,7 @@ func TestFailoverRelay_RespectsMaxRetries(t *testing.T) {
 		MessageID:            "msg-maxed",
 		ForwardedTo:          domain.PeerAddress("addr-C"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopCount:             1,
 		RemainingTTL:         60,
 		RetryAttempt:         MaxFailoverRetries, // already at the cap
@@ -297,7 +297,7 @@ func TestFailoverRelay_RespectsMaxRetries(t *testing.T) {
 		MessageID:            "msg-maxed",
 		ForwardedTo:          domain.PeerAddress("addr-C"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopCount:             1,
 		RetryAttempt:         MaxFailoverRetries,
 		HopAckObserved:       true,
@@ -354,7 +354,7 @@ func TestFailoverRelay_NoAlternativeUplink_SkipsRetry(t *testing.T) {
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "msg-solo",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 0,
 		HopAckObserved:       true,
@@ -364,7 +364,7 @@ func TestFailoverRelay_NoAlternativeUplink_SkipsRetry(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:      "msg-solo",
 		ForwardedTo:    domain.PeerAddress("addr-A"),
-		Recipient:      domain.PeerIdentity(idTargetX),
+		Recipient:      idTargetX,
 		HopAckObserved: true,
 		FrameLine:      line,
 	}
@@ -411,7 +411,7 @@ func TestFailoverRelay_SkipsPreviousHop_SplitHorizon(t *testing.T) {
 		MessageID:            "msg-splitH",
 		PreviousHop:          domain.PeerAddress("addr-C"), // C handed us the relay
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopAckRemainingTicks: 0,
 		HopAckObserved:       true,
 		FrameLine:            line,
@@ -422,7 +422,7 @@ func TestFailoverRelay_SkipsPreviousHop_SplitHorizon(t *testing.T) {
 		MessageID:      "msg-splitH",
 		PreviousHop:    domain.PeerAddress("addr-C"),
 		ForwardedTo:    domain.PeerAddress("addr-A"),
-		Recipient:      domain.PeerIdentity(idTargetX),
+		Recipient:      idTargetX,
 		HopAckObserved: true,
 		FrameLine:      line,
 	}
@@ -446,9 +446,9 @@ func TestFailoverRelay_SkipsAbandonedUplinks(t *testing.T) {
 	// Three uplinks. The state already abandoned A (initial) and B
 	// (previous retry); the current retry attempt is "what's left
 	// after the abandoned list".
-	for i, id := range []string{idPeerA, idPeerC, idPeerD} {
+	for i, id := range []string{idPeerA.String(), idPeerC.String(), idPeerD.String()} {
 		if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-			Identity: idTargetX, Origin: idTargetX, NextHop: domain.PeerIdentity(id),
+			Identity: idTargetX, Origin: idTargetX, NextHop: domain.PeerIdentityFromWire(id),
 			Hops: i + 1, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 		}); err != nil {
 			t.Fatalf("UpdateRoute(%s): %v", id, err)
@@ -469,7 +469,7 @@ func TestFailoverRelay_SkipsAbandonedUplinks(t *testing.T) {
 		MessageID:            "msg-aban",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-C"},
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopAckRemainingTicks: 0,
 		HopAckObserved:       true,
 		RemainingTTL:         60,
@@ -480,7 +480,7 @@ func TestFailoverRelay_SkipsAbandonedUplinks(t *testing.T) {
 		MessageID:            "msg-aban",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-C"},
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopAckObserved:       true,
 		FrameLine:            line,
 	}
@@ -529,7 +529,7 @@ func TestFailoverRelay_EmptyFrameLine_SkipsRetry(t *testing.T) {
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "msg-nopayload",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopAckRemainingTicks: 0,
 		HopAckObserved:       true,
 		RemainingTTL:         60,
@@ -539,7 +539,7 @@ func TestFailoverRelay_EmptyFrameLine_SkipsRetry(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:      "msg-nopayload",
 		ForwardedTo:    domain.PeerAddress("addr-A"),
-		Recipient:      domain.PeerIdentity(idTargetX),
+		Recipient:      idTargetX,
 		HopAckObserved: true,
 		FrameLine:      "",
 	}
@@ -586,7 +586,7 @@ func TestFailoverRelay_TTLEvictedBetweenFireAndRetry(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:      "msg-evicted",
 		ForwardedTo:    domain.PeerAddress("addr-A"),
-		Recipient:      domain.PeerIdentity(idTargetX),
+		Recipient:      idTargetX,
 		HopAckObserved: true,
 		FrameLine:      makeRelayFrameLine(t, "msg-evicted", idTargetX),
 	}

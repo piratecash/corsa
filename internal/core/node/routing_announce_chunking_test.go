@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -100,16 +101,14 @@ func TestChunkAnnounceEntriesBySize_LargeExtraTriggersSplit(t *testing.T) {
 	const fatExtraSize = 10 * 1024
 	const count = 20
 	entries := make([]routing.AnnounceEntry, count)
-	identityStem := strings.Repeat("a", 60)
-	originStem := strings.Repeat("b", 60)
 	extraBlob, err := json.Marshal(map[string]string{"blob": strings.Repeat("z", fatExtraSize)})
 	if err != nil {
 		t.Fatalf("extra blob marshal: %v", err)
 	}
 	for i := 0; i < count; i++ {
 		entries[i] = routing.AnnounceEntry{
-			Identity: routing.PeerIdentity(identityStem + intToHex4(i)),
-			Origin:   routing.PeerIdentity(originStem + intToHex4(i)),
+			Identity: domaintest.ID("id" + intToHex4(i)),
+			Origin:   domaintest.ID("og" + intToHex4(i)),
 			Hops:     1,
 			SeqNo:    uint64(i + 1),
 			Extra:    extraBlob,
@@ -137,8 +136,6 @@ func TestChunkAnnounceEntriesBySize_LargeExtraTriggersSplit(t *testing.T) {
 // single broken entry would silently take down the entire announce
 // frame and stall convergence for unrelated routes.
 func TestChunkAnnounceEntriesBySize_SingleEntryTooLargeSkipped(t *testing.T) {
-	identityStem := strings.Repeat("a", 60)
-	originStem := strings.Repeat("b", 60)
 	// Build a giant Extra that, even alone, blows past MaxFrameLine.
 	giantExtra, err := json.Marshal(map[string]string{"blob": strings.Repeat("z", protocol.MaxFrameLine+1024)})
 	if err != nil {
@@ -146,21 +143,21 @@ func TestChunkAnnounceEntriesBySize_SingleEntryTooLargeSkipped(t *testing.T) {
 	}
 	entries := []routing.AnnounceEntry{
 		{
-			Identity: routing.PeerIdentity(identityStem + intToHex4(0)),
-			Origin:   routing.PeerIdentity(originStem + intToHex4(0)),
+			Identity: domaintest.ID("id" + intToHex4(0)),
+			Origin:   domaintest.ID("og" + intToHex4(0)),
 			Hops:     1,
 			SeqNo:    1,
 		},
 		{
-			Identity: routing.PeerIdentity(identityStem + intToHex4(1)),
-			Origin:   routing.PeerIdentity(originStem + intToHex4(1)),
+			Identity: domaintest.ID("id" + intToHex4(1)),
+			Origin:   domaintest.ID("og" + intToHex4(1)),
 			Hops:     1,
 			SeqNo:    2,
 			Extra:    giantExtra,
 		},
 		{
-			Identity: routing.PeerIdentity(identityStem + intToHex4(2)),
-			Origin:   routing.PeerIdentity(originStem + intToHex4(2)),
+			Identity: domaintest.ID("id" + intToHex4(2)),
+			Origin:   domaintest.ID("og" + intToHex4(2)),
 			Hops:     1,
 			SeqNo:    3,
 		},
@@ -192,8 +189,8 @@ func TestChunkAnnounceEntriesBySize_SingleEntryTooLargeSkipped(t *testing.T) {
 // estimate to be >= that for a spread of entry shapes.
 func TestAnnounceEntryWireEstimate_IsOverEstimate(t *testing.T) {
 	base := routing.AnnounceEntry{
-		Identity: routing.PeerIdentity(strings.Repeat("a", 64)),
-		Origin:   routing.PeerIdentity(strings.Repeat("b", 64)),
+		Identity: domaintest.ID("a"),
+		Origin:   domaintest.ID("b"),
 		Hops:     1,
 		SeqNo:    1,
 	}
@@ -215,16 +212,17 @@ func TestAnnounceEntryWireEstimate_IsOverEstimate(t *testing.T) {
 	// instead of worst-case escape expansion.
 	escapeExtra := json.RawMessage(`{"k":"` + strings.Repeat("<", 500) + `"}`)
 	cases := []routing.AnnounceEntry{
-		{Identity: routing.PeerIdentity(strings.Repeat("c", 64)), Origin: routing.PeerIdentity(strings.Repeat("d", 64)), Hops: 15, SeqNo: 1 << 40},
-		{Identity: "short", Origin: "x", Hops: 0, SeqNo: 0},
-		{Identity: routing.PeerIdentity(strings.Repeat("e", 64)), Origin: routing.PeerIdentity(strings.Repeat("f", 64)), Hops: 3, SeqNo: 42, Extra: smallExtra},
-		{Identity: routing.PeerIdentity(strings.Repeat("g", 64)), Origin: routing.PeerIdentity(strings.Repeat("h", 64)), Hops: 7, SeqNo: 99, Extra: bigExtra},
-		{Identity: routing.PeerIdentity(strings.Repeat("i", 64)), Origin: routing.PeerIdentity(strings.Repeat("j", 64)), Hops: 2, SeqNo: 7, Extra: escapeExtra},
-		// Identity/Origin themselves carry literal '<'/'>'/'&' bytes — Validate
-		// does not enforce a hex shape, so these reach announce and must be
-		// covered by the per-field escape overhead, not just Extra.  Fails if
-		// the estimate counts identity/origin at raw length.
-		{Identity: routing.PeerIdentity("id" + strings.Repeat("<", 300)), Origin: routing.PeerIdentity("og" + strings.Repeat("&", 200)), Hops: 1, SeqNo: 1},
+		{Identity: domaintest.ID("c"), Origin: domaintest.ID("d"), Hops: 15, SeqNo: 1 << 40},
+		{Identity: domaintest.ID("short"), Origin: domaintest.ID("x"), Hops: 0, SeqNo: 0},
+		{Identity: domaintest.ID("e"), Origin: domaintest.ID("f"), Hops: 3, SeqNo: 42, Extra: smallExtra},
+		{Identity: domaintest.ID("g"), Origin: domaintest.ID("h"), Hops: 7, SeqNo: 99, Extra: bigExtra},
+		{Identity: domaintest.ID("i"), Origin: domaintest.ID("j"), Hops: 2, SeqNo: 7, Extra: escapeExtra},
+		// Identity/Origin are now fixed-width [20]byte fingerprints, so they
+		// serialize to a constant 40-hex string regardless of input — the
+		// per-field escape-overhead concern that the original variable-length
+		// string identities exercised no longer applies to these fields. The
+		// escape-expansion coverage now lives entirely in the Extra cases above.
+		{Identity: domaintest.ID("idlt"), Origin: domaintest.ID("ogamp"), Hops: 1, SeqNo: 1},
 	}
 	for i, e := range cases {
 		twoLine, err := protocol.MarshalFrameLineWithLimit(
@@ -255,7 +253,7 @@ func TestAnnounceEntryWireEstimate_V3IsOverEstimate(t *testing.T) {
 	const epoch = uint64(7)
 
 	base := routing.AnnounceEntry{
-		Identity: routing.PeerIdentity(strings.Repeat("a", 64)),
+		Identity: domaintest.ID("a"),
 		Hops:     1,
 		SeqNo:    1,
 	}
@@ -271,17 +269,18 @@ func TestAnnounceEntryWireEstimate_V3IsOverEstimate(t *testing.T) {
 	escapeExtra := json.RawMessage(`{"k":"` + strings.Repeat("<", 500) + `"}`)
 	cases := []routing.AnnounceEntry{
 		// Plain entry.
-		{Identity: routing.PeerIdentity(strings.Repeat("c", 64)), Hops: 15, SeqNo: 1 << 40},
+		{Identity: domaintest.ID("c"), Hops: 15, SeqNo: 1 << 40},
 		// With Extra.
-		{Identity: routing.PeerIdentity(strings.Repeat("e", 64)), Hops: 3, SeqNo: 42, Extra: smallExtra},
+		{Identity: domaintest.ID("e"), Hops: 3, SeqNo: 42, Extra: smallExtra},
 		// With a 64-byte attested signature (Ed25519 size) → base64 on the wire.
-		{Identity: routing.PeerIdentity(strings.Repeat("g", 64)), Hops: 7, SeqNo: 99, AttestedSig: bytesRepeat(0xAB, 64)},
+		{Identity: domaintest.ID("g"), Hops: 7, SeqNo: 99, AttestedSig: bytesRepeat(0xAB, 64)},
 		// Extra + sig together.
-		{Identity: routing.PeerIdentity(strings.Repeat("h", 64)), Hops: 2, SeqNo: 5, Extra: smallExtra, AttestedSig: bytesRepeat(0xCD, 64)},
+		{Identity: domaintest.ID("h"), Hops: 2, SeqNo: 5, Extra: smallExtra, AttestedSig: bytesRepeat(0xCD, 64)},
 		// Escapable Extra → exercises the escape overhead on the v3 path.
-		{Identity: routing.PeerIdentity(strings.Repeat("k", 64)), Hops: 1, SeqNo: 3, Extra: escapeExtra},
-		// Escapable Identity (Validate does not enforce hex) on the v3 path.
-		{Identity: routing.PeerIdentity("id" + strings.Repeat("<", 300)), Hops: 1, SeqNo: 4},
+		{Identity: domaintest.ID("k"), Hops: 1, SeqNo: 3, Extra: escapeExtra},
+		// Identity is now a fixed-width [20]byte fingerprint (constant 40-hex
+		// on the wire); the previous escapable-identity case no longer applies.
+		{Identity: domaintest.ID("idlt"), Hops: 1, SeqNo: 4},
 	}
 	for i, e := range cases {
 		twoFrame, err := buildRouteAnnounceV3Frame(kind, epoch, []routing.AnnounceEntry{base, e})
@@ -311,14 +310,13 @@ func bytesRepeat(v byte, n int) []byte {
 // the per-chunk size estimate honest.
 func makeAnnounceEntries(n int) []routing.AnnounceEntry {
 	out := make([]routing.AnnounceEntry, n)
-	// 64-char Ed25519-like hex string — same wire footprint as real
-	// identities. Vary by index so encoded entries are not identical.
-	identityStem := strings.Repeat("a", 60)
-	originStem := strings.Repeat("b", 60)
+	// Distinct fixed-width identities per index so the encoded entries are
+	// not identical. Each serializes to a constant 40-hex string on the wire,
+	// matching the real identity footprint.
 	for i := 0; i < n; i++ {
 		out[i] = routing.AnnounceEntry{
-			Identity: routing.PeerIdentity(identityStem + intToHex4(i)),
-			Origin:   routing.PeerIdentity(originStem + intToHex4(i)),
+			Identity: domaintest.ID("id" + intToHex4(i)),
+			Origin:   domaintest.ID("og" + intToHex4(i)),
 			Hops:     i % 16,
 			SeqNo:    uint64(i + 1),
 		}

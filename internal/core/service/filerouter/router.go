@@ -290,7 +290,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	isLocal := frame.DST == r.localID
 	if !isLocal {
 		if !r.hasViableRoute(frame.DST, now) {
-			log.Debug().Str("dst", string(frame.DST)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no viable route to destination, dropping")
+			log.Debug().Str("dst", frame.DST.String()).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no viable route to destination, dropping")
 			return
 		}
 	}
@@ -309,7 +309,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	// 4. TTL decrement: apply hop budget after validation.
 	decremented, err := frame.DecrementTTL()
 	if err != nil {
-		log.Debug().Str("dst", string(frame.DST)).Uint8("ttl", frame.TTL).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: TTL exhausted, dropping")
+		log.Debug().Str("dst", frame.DST.String()).Uint8("ttl", frame.TTL).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: TTL exhausted, dropping")
 		return
 	}
 	frame = decremented
@@ -327,7 +327,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	// regardless of the sender's protocol version.
 	if frame.SrcPubKey == "" {
 		log.Debug().
-			Str("src", string(frame.SRC)).
+			Str("src", frame.SRC.String()).
 			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: missing src_pubkey")
 		return
@@ -336,22 +336,22 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	if err != nil || len(srcPubKey) != ed25519.PublicKeySize {
 		log.Debug().
 			Err(err).
-			Str("src", string(frame.SRC)).
+			Str("src", frame.SRC.String()).
 			Str("nonce", noncePrefix(frame.Nonce)).
 			Int("src_pubkey_len", len(srcPubKey)).
 			Msg("file_router: invalid src_pubkey encoding")
 		return
 	}
-	if expected := identity.Fingerprint(ed25519.PublicKey(srcPubKey)); expected != string(frame.SRC) {
+	if expected := identity.Fingerprint(ed25519.PublicKey(srcPubKey)); expected != frame.SRC.String() {
 		log.Debug().
-			Str("src", string(frame.SRC)).
+			Str("src", frame.SRC.String()).
 			Str("expected_fingerprint", expected).
 			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: src_pubkey fingerprint does not match SRC")
 		return
 	}
 	if err := protocol.VerifyFileCommandSignature(frame.Nonce, frame.Signature, ed25519.PublicKey(srcPubKey)); err != nil {
-		log.Debug().Err(err).Str("src", string(frame.SRC)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: signature verification failed")
+		log.Debug().Err(err).Str("src", frame.SRC.String()).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: signature verification failed")
 		return
 	}
 
@@ -372,7 +372,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	if isLocal {
 		if !r.isAuthorizedForLocalDeliver(frame.SRC) {
 			log.Debug().
-				Str("src", string(frame.SRC)).
+				Str("src", frame.SRC.String()).
 				Str("nonce", noncePrefix(frame.Nonce)).
 				Msg("file_router: SRC not authorized for local delivery")
 			return
@@ -396,7 +396,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	// genuine replays without committing anything, which is enough
 	// dedupe for a non-forwarder.
 	if !r.isFullNode() {
-		log.Debug().Str("dst", string(frame.DST)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: client node, dropping non-local file command")
+		log.Debug().Str("dst", frame.DST.String()).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: client node, dropping non-local file command")
 		return
 	}
 
@@ -419,8 +419,8 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	candidates := r.collectRouteCandidates(frame.DST, incomingPeer)
 	if len(candidates) == 0 {
 		log.Debug().
-			Str("dst", string(frame.DST)).
-			Str("exclude_via", string(incomingPeer)).
+			Str("dst", frame.DST.String()).
+			Str("exclude_via", incomingPeer.String()).
 			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: no viable forwarding candidate (split-horizon or all expired), dropping without nonce commit")
 		return
@@ -448,14 +448,14 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 	}
 	if r.trySendToCandidates(frame.DST, frame.Nonce, candidates, data) {
 		log.Debug().
-			Str("dst", string(frame.DST)).
+			Str("dst", frame.DST.String()).
 			Uint8("ttl", frame.TTL).
 			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: forwarded")
 		return
 	}
 	log.Debug().
-		Str("dst", string(frame.DST)).
+		Str("dst", frame.DST.String()).
 		Int("routes_tried", len(candidates)).
 		Str("nonce", noncePrefix(frame.Nonce)).
 		Msg("file_router: all routes exhausted, relay forward failed")
@@ -642,7 +642,7 @@ func (r *Router) rankRouteCandidates(routes []routing.RouteEntry, dst, excludeVi
 		if re.NextHop == r.localID {
 			continue
 		}
-		if excludeVia != "" && re.NextHop == excludeVia {
+		if !excludeVia.IsZero() && re.NextHop == excludeVia {
 			continue
 		}
 		var meta PeerRouteMeta
@@ -778,7 +778,7 @@ func (r *Router) ExplainRoute(dst domain.PeerIdentity) []RoutePlanEntry {
 	// must read the same source — the fresh per-destination oracle —
 	// otherwise an operator's diagnostic would disagree with the live
 	// send during the cached snapshot's republish window.
-	candidates := r.collectFreshRouteCandidates(dst, "")
+	candidates := r.collectFreshRouteCandidates(dst, domain.PeerIdentity{})
 	for _, c := range candidates {
 		if directReachable && c.nextHop == dst {
 			continue
@@ -824,7 +824,7 @@ func routeCandidateLess(a, b routeCandidate) bool {
 		return a.connectedAt.Before(b.connectedAt)
 	}
 	// 4. nextHop lexicographic — final deterministic tie-break.
-	return a.nextHop < b.nextHop
+	return a.nextHop.Compare(b.nextHop) < 0
 }
 
 // trySendToCandidates iterates route candidates in order and sends data to
@@ -835,8 +835,8 @@ func (r *Router) trySendToCandidates(dst domain.PeerIdentity, nonce string, cand
 			return true
 		}
 		log.Debug().
-			Str("dst", string(dst)).
-			Str("next_hop", string(c.nextHop)).
+			Str("dst", dst.String()).
+			Str("next_hop", c.nextHop.String()).
 			Str("nonce", noncePrefix(nonce)).
 			Msg("file_router: next hop send failed, trying next route")
 	}
@@ -880,11 +880,11 @@ func (r *Router) SendFileCommand(
 
 	// 1. Try direct session to destination.
 	if r.sessionSend(dst, data) {
-		log.Debug().Str("dst", string(dst)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: sent via direct session")
+		log.Debug().Str("dst", dst.String()).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: sent via direct session")
 		return nil
 	}
 
-	log.Debug().Str("dst", string(dst)).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no direct session, trying route table")
+	log.Debug().Str("dst", dst.String()).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: no direct session, trying route table")
 
 	// 2. Route table fallback: collect active routes ranked by
 	// routeCandidateLess (see its godoc for the canonical order).
@@ -897,7 +897,7 @@ func (r *Router) SendFileCommand(
 	// coalescing floor plus the next refresh tick), which would
 	// reproduce the original "isPeerReachable says yes, send fails"
 	// regression on the very next pipeline step.
-	candidates := r.collectFreshRouteCandidates(dst, "")
+	candidates := r.collectFreshRouteCandidates(dst, domain.PeerIdentity{})
 
 	// Filter out routing-table entries whose next_hop == dst: the
 	// direct sessionSend(dst, data) above already attempted that exact
@@ -918,7 +918,7 @@ func (r *Router) SendFileCommand(
 
 	if len(candidates) == 0 {
 		log.Warn().
-			Str("dst", string(dst)).
+			Str("dst", dst.String()).
 			Str("nonce", noncePrefix(frame.Nonce)).
 			Msg("file_router: no viable route to peer")
 		return fmt.Errorf("no route to %s", dst)
@@ -929,7 +929,7 @@ func (r *Router) SendFileCommand(
 	}
 
 	log.Warn().
-		Str("dst", string(dst)).
+		Str("dst", dst.String()).
 		Int("routes_tried", len(candidates)).
 		Str("nonce", noncePrefix(frame.Nonce)).
 		Msg("file_router: all routes exhausted, file command not delivered")

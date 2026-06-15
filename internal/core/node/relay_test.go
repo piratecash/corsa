@@ -13,6 +13,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -58,7 +59,7 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewOrigin(t *testing.T) {
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		ForwardedTo:      "peer-b",
-		RouteOrigin:      "origin-1",
+		RouteOrigin:      domaintest.ID("origin-1"),
 		RemainingTTL:     relayStateTTLSeconds,
 	}
 	// Same next-hop peer but different route origin (e.g. origin
@@ -68,7 +69,7 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewOrigin(t *testing.T) {
 		PreviousHop:      "peer-c",
 		ReceiptForwardTo: "peer-c",
 		ForwardedTo:      "peer-b", // same destination
-		RouteOrigin:      "origin-2",
+		RouteOrigin:      domaintest.ID("origin-2"),
 		RemainingTTL:     relayStateTTLSeconds / 2,
 	}
 
@@ -92,7 +93,7 @@ func TestRelayStateStoreIdempotentUpsertSameDestNewOrigin(t *testing.T) {
 	s := rs.states["msg-1"]
 	rs.mu.Unlock()
 	// RouteOrigin must be updated even if ForwardedTo is the same.
-	if s.RouteOrigin != "origin-2" {
+	if s.RouteOrigin != domaintest.ID("origin-2") {
 		t.Fatalf("expected RouteOrigin='origin-2' (updated for same-hop reroute), got %q", s.RouteOrigin)
 	}
 	if s.RemainingTTL != relayStateTTLSeconds/2 {
@@ -108,7 +109,7 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 		PreviousHop:      "peer-a",
 		ReceiptForwardTo: "peer-a",
 		ForwardedTo:      "peer-b",
-		RouteOrigin:      "origin-1",
+		RouteOrigin:      domaintest.ID("origin-1"),
 		RemainingTTL:     relayStateTTLSeconds,
 	}
 	// Route changed — ForwardedTo and RouteOrigin must both update.
@@ -117,7 +118,7 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 		PreviousHop:      "peer-c",
 		ReceiptForwardTo: "peer-c",
 		ForwardedTo:      "peer-d", // different destination
-		RouteOrigin:      "origin-2",
+		RouteOrigin:      domaintest.ID("origin-2"),
 		RemainingTTL:     relayStateTTLSeconds / 2,
 	}
 
@@ -130,7 +131,7 @@ func TestRelayStateStoreIdempotentUpsertReroute(t *testing.T) {
 	if s.ForwardedTo != "peer-d" {
 		t.Fatalf("expected ForwardedTo='peer-d' (rerouted), got %q", s.ForwardedTo)
 	}
-	if s.RouteOrigin != "origin-2" {
+	if s.RouteOrigin != domaintest.ID("origin-2") {
 		t.Fatalf("expected RouteOrigin='origin-2' (updated for new route), got %q", s.RouteOrigin)
 	}
 	// PreviousHop preserved from original.
@@ -152,7 +153,7 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 		MessageID:    "msg-1",
 		PreviousHop:  "upstream",
 		ForwardedTo:  "peer-a:1234",
-		RouteOrigin:  "origin-x",
+		RouteOrigin:  domaintest.ID("origin-x"),
 		RemainingTTL: relayStateTTLSeconds,
 	})
 
@@ -160,7 +161,7 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:    "msg-1",
 		ForwardedTo:  "peer-b:5678",
-		RouteOrigin:  "origin-y",
+		RouteOrigin:  domaintest.ID("origin-y"),
 		RemainingTTL: relayStateTTLSeconds,
 	})
 
@@ -168,7 +169,7 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:    "msg-1",
 		ForwardedTo:  "peer-c:9012",
-		RouteOrigin:  "",
+		RouteOrigin:  domain.PeerIdentity{},
 		RemainingTTL: relayStateTTLSeconds,
 	})
 
@@ -187,7 +188,7 @@ func TestRelayStateStoreAbandonedForwardedToAccumulates(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:    "msg-1",
 		ForwardedTo:  "peer-c:9012",
-		RouteOrigin:  "",
+		RouteOrigin:  domain.PeerIdentity{},
 		RemainingTTL: relayStateTTLSeconds,
 	})
 	abandoned = rs.lookupAbandonedForwardedTo("msg-1")
@@ -543,7 +544,7 @@ func sealDMBody(t *testing.T, sender *identity.Identity, recipientAddress, recip
 	sealed, err := directmsg.EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientAddress),
+			Address:      domain.PeerIdentityFromWire(recipientAddress),
 			BoxKeyBase64: recipientBoxKeyBase64,
 		},
 		domain.OutgoingDM{Body: "test-body"},
@@ -791,7 +792,7 @@ func TestRelayedDMEmitsDeliveryReceipt(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(svc.Address()),
+			Address:      domain.PeerIdentityFromWire(svc.Address()),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "relay-receipt-test-secret"},
@@ -1341,7 +1342,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.peerMu.Lock()
 		pc := netcore.New(netcore.ConnID(1), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-peer-1"),
-			Identity: domain.PeerIdentity("inbound-peer-1"),
+			Identity: domaintest.ID("inbound-peer-1"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
@@ -1378,13 +1379,13 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 			address:      domain.PeerAddress(peerAddr),
-			peerIdentity: domain.PeerIdentity(peerID),
+			peerIdentity: domaintest.ID(peerID),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
 		pc := netcore.New(netcore.ConnID(2), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress(peerAddr),
-			Identity: domain.PeerIdentity(peerID),
+			Identity: domaintest.ID(peerID),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
@@ -1419,13 +1420,13 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress("outbound-peer")] = &peerSession{
 			address:      "outbound-peer",
-			peerIdentity: "outbound-id",
+			peerIdentity: domaintest.ID("outbound-id"),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
 		pc := netcore.New(netcore.ConnID(3), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-peer-2"),
-			Identity: domain.PeerIdentity("inbound-id-2"),
+			Identity: domaintest.ID("inbound-id-2"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
@@ -1470,13 +1471,13 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress("outbound-addr-X")] = &peerSession{
 			address:      "outbound-addr-X",
-			peerIdentity: domain.PeerIdentity(sharedID),
+			peerIdentity: domaintest.ID(sharedID),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
 		pc := netcore.New(netcore.ConnID(4), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
-			Identity: domain.PeerIdentity(sharedID),
+			Identity: domaintest.ID(sharedID),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
@@ -1523,13 +1524,13 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		svc.peerMu.Lock()
 		svc.sessions[domain.PeerAddress("outbound-preactivation")] = &peerSession{
 			address:      "outbound-preactivation",
-			peerIdentity: "preactivation-id-1",
+			peerIdentity: domaintest.ID("preactivation-id-1"),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan protocol.Frame),
 		}
 		pc := netcore.New(netcore.ConnID(5), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-preactivation"),
-			Identity: domain.PeerIdentity("preactivation-id-2"),
+			Identity: domaintest.ID("preactivation-id-2"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
 		})
 		svc.setTestConnEntryLocked(c1, &connEntry{core: pc})
@@ -1645,14 +1646,14 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		address:      "addr-A",
-		peerIdentity: domain.PeerIdentity(recipientID.Address),
+		peerIdentity: domain.PeerIdentityFromWire(recipientID.Address),
 		capabilities: []domain.Capability{}, // no relay capability
 		sendCh:       make(chan protocol.Frame, 10),
 	}
 	svc.health[domain.PeerAddress("addr-A")] = &peerHealth{Connected: true}
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		address:      "addr-B",
-		peerIdentity: domain.PeerIdentity(recipientID.Address),
+		peerIdentity: domain.PeerIdentityFromWire(recipientID.Address),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 		sendCh:       capableCh,
 	}

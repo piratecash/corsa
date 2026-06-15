@@ -404,7 +404,7 @@ func (rs *relayStateStore) lookupRecipient(messageID string) domain.PeerIdentity
 	defer rs.mu.Unlock()
 	state, ok := rs.states[messageID]
 	if !ok {
-		return ""
+		return domain.PeerIdentity{}
 	}
 	return state.Recipient
 }
@@ -420,7 +420,7 @@ func (rs *relayStateStore) lookupRouteOrigin(messageID string) domain.PeerIdenti
 	defer rs.mu.Unlock()
 	state, ok := rs.states[messageID]
 	if !ok {
-		return ""
+		return domain.PeerIdentity{}
 	}
 	return state.RouteOrigin
 }
@@ -549,7 +549,7 @@ func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress doma
 		state.AbandonedForwardedTo = append(state.AbandonedForwardedTo, state.ForwardedTo)
 	}
 	state.ForwardedTo = newAddress
-	state.RouteOrigin = ""
+	state.RouteOrigin = domain.PeerIdentity{}
 	state.RetryAttempt++
 	state.HopAckRemainingTicks = defaultHopAckBudgetSeconds
 	state.HopAckObserved = false
@@ -641,7 +641,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "",
-			Recipient:        domain.PeerIdentity(recipient),
+			Recipient:        domain.PeerIdentityFromWire(recipient),
 			HopCount:         hopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
@@ -715,7 +715,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// Try direct peer first — is the recipient directly connected?
 	// A recipient identity may have multiple session addresses (reconnects,
 	// address changes), so we try all matching sessions until one succeeds.
-	forwardedTo := s.tryForwardToDirectPeer(domain.PeerIdentity(recipient), forwardFrame)
+	forwardedTo := s.tryForwardToDirectPeer(domain.PeerIdentityFromWire(recipient), forwardFrame)
 
 	// Table-directed relay (Phase 1.2): if no direct peer, consult the
 	// routing table for a next-hop. This enables multi-hop relay chains
@@ -724,7 +724,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// incoming frame.PreviousHop) to prevent sending the message back.
 	var tableRouteOrigin domain.PeerIdentity
 	if forwardedTo == "" {
-		result := s.tryForwardViaRoutingTable(s.runCtx, domain.PeerIdentity(recipient), forwardFrame, domain.PeerIdentity(frame.PreviousHop))
+		result := s.tryForwardViaRoutingTable(s.runCtx, domain.PeerIdentityFromWire(recipient), forwardFrame, domain.PeerIdentityFromWire(frame.PreviousHop))
 		forwardedTo = result.Address
 		tableRouteOrigin = result.RouteOrigin
 	}
@@ -780,7 +780,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 			PreviousHop:      senderAddress,
 			ReceiptForwardTo: senderAddress,
 			ForwardedTo:      "", // stored locally, not forwarded
-			Recipient:        domain.PeerIdentity(recipient),
+			Recipient:        domain.PeerIdentityFromWire(recipient),
 			HopCount:         newHopCount,
 			RemainingTTL:     relayStateTTLSeconds,
 		})
@@ -825,7 +825,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		PreviousHop:          senderAddress,
 		ReceiptForwardTo:     senderAddress,
 		ForwardedTo:          forwardedTo,
-		Recipient:            domain.PeerIdentity(recipient),
+		Recipient:            domain.PeerIdentityFromWire(recipient),
 		RouteOrigin:          tableRouteOrigin,
 		HopCount:             newHopCount,
 		RemainingTTL:         relayStateTTLSeconds,
@@ -1010,7 +1010,7 @@ func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, frame prot
 
 	if frame.Status == "delivered" || frame.Status == "forwarded" {
 		recipient := s.relayStates.lookupRecipient(frame.ID)
-		if recipient == "" {
+		if recipient.IsZero() {
 			return
 		}
 		s.confirmRouteViaHopAck(recipient, senderAddress, routeOrigin)
@@ -1026,16 +1026,16 @@ func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, frame prot
 // current (the existing behaviour; resolution races are rare and a
 // false-current only costs one extra timer suppression).
 func (s *Service) isStaleHopAckSender(messageID string, ackIdentity domain.PeerIdentity, forwardedTo domain.PeerAddress, routeOrigin domain.PeerIdentity) bool {
-	if ackIdentity == "" {
+	if ackIdentity.IsZero() {
 		return false
 	}
-	if routeOrigin != "" {
+	if !routeOrigin.IsZero() {
 		fwdIdentity := s.resolvePeerIdentity(forwardedTo)
-		if fwdIdentity != "" && fwdIdentity != ackIdentity {
+		if !fwdIdentity.IsZero() && fwdIdentity != ackIdentity {
 			log.Debug().
 				Str("id", messageID).
-				Str("ack_identity", string(ackIdentity)).
-				Str("forwarded_identity", string(fwdIdentity)).
+				Str("ack_identity", ackIdentity.String()).
+				Str("forwarded_identity", fwdIdentity.String()).
 				Msg("relay_hop_ack_stale_sender_ignored")
 			return true
 		}
@@ -1045,8 +1045,8 @@ func (s *Service) isStaleHopAckSender(messageID string, ackIdentity domain.PeerI
 		if s.resolvePeerIdentity(abandoned) == ackIdentity {
 			log.Debug().
 				Str("id", messageID).
-				Str("ack_identity", string(ackIdentity)).
-				Str("abandoned_forwarded_identity", string(ackIdentity)).
+				Str("ack_identity", ackIdentity.String()).
+				Str("abandoned_forwarded_identity", ackIdentity.String()).
 				Msg("relay_hop_ack_stale_prev_route_ignored")
 			return true
 		}
@@ -1343,7 +1343,7 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          address,
-		Recipient:            domain.PeerIdentity(msg.Recipient),
+		Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
 		HopCount:             1,
 		RemainingTTL:         relayStateTTLSeconds,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
@@ -1425,7 +1425,7 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          address,
-		Recipient:            domain.PeerIdentity(msg.Recipient),
+		Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
 		RouteOrigin:          routeOrigin,
 		HopCount:             1,
 		RemainingTTL:         relayStateTTLSeconds,
@@ -1444,7 +1444,7 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 		Str("id", string(msg.ID)).
 		Str("recipient", msg.Recipient).
 		Str("peer", string(address)).
-		Str("origin", string(routeOrigin)).
+		Str("origin", routeOrigin.String()).
 		Str("mode", "session").
 		Msg("relay_message_sent_table_directed")
 	return true

@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // table_lookup_shaping_test.go covers Phase 3 PR 12.6 — the
@@ -86,25 +88,25 @@ func setNonShapingTierPair(t *testing.T, tbl *Table, identity, uplink PeerIdenti
 // shaping candidate stays on top (Phase 3 §4.6).
 func TestLookupForRelay_BadAlternativeNotPromotedOverShapingCandidate(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-bad", 2, RouteSourceAnnouncement)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-fast", ReliabilityShapingMinAttempts-1)
-	setNonShapingTierPair(t, tbl, "id-target", "id-uplink-bad", HealthBad)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-bad"), 2, RouteSourceAnnouncement)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), ReliabilityShapingMinAttempts-1)
+	setNonShapingTierPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-bad"), HealthBad)
 
 	// Precondition: the Good shaping candidate still outranks the Bad
 	// alternative (the −500 Bad penalty sinks it).
-	plain := tbl.Lookup("id-target")
-	if len(plain) != 2 || plain[0].NextHop != "id-uplink-fast" {
+	plain := tbl.Lookup(domaintest.ID("id-target"))
+	if len(plain) != 2 || plain[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("precondition: plain Lookup order = %v, want fast first", plain)
 	}
 
-	shaped := tbl.LookupForRelay("id-target", 0)
+	shaped := tbl.LookupForRelay(domaintest.ID("id-target"), 0)
 	if len(shaped) != 2 {
 		t.Fatalf("LookupForRelay length = %d, want 2", len(shaped))
 	}
-	if shaped[0].NextHop != "id-uplink-fast" {
+	if shaped[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("shaped[0].NextHop = %q, want id-uplink-fast (Bad alternative must not be promoted)", shaped[0].NextHop)
 	}
 }
@@ -115,26 +117,26 @@ func TestLookupForRelay_BadAlternativeNotPromotedOverShapingCandidate(t *testing
 // a healthy warmup candidate. The gate must reject Dead alternatives.
 func TestLookupForRelay_DirectDeadAlternativeNotPromoted(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// Direct route to id-target (NextHop == id-target, hops=1, Direct):
 	// kept in Lookup even when Dead. Plus a 2-hop announcement path that
 	// is a Good shaping candidate and outranks the Dead direct (Dead
 	// scores the −1 sentinel).
-	if _, err := tbl.AddDirectPeer("id-target"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-target")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 2, RouteSourceAnnouncement)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-fast", ReliabilityShapingMinAttempts-1)
-	setNonShapingTierPair(t, tbl, "id-target", "id-target", HealthDead)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 2, RouteSourceAnnouncement)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), ReliabilityShapingMinAttempts-1)
+	setNonShapingTierPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-target"), HealthDead)
 
-	plain := tbl.Lookup("id-target")
-	if len(plain) < 2 || plain[0].NextHop != "id-uplink-fast" {
+	plain := tbl.Lookup(domaintest.ID("id-target"))
+	if len(plain) < 2 || plain[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("precondition: plain Lookup order = %v, want fast (Good) first", plain)
 	}
 
-	shaped := tbl.LookupForRelay("id-target", 0)
-	if shaped[0].NextHop != "id-uplink-fast" {
+	shaped := tbl.LookupForRelay(domaintest.ID("id-target"), 0)
+	if shaped[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("shaped[0].NextHop = %q, want id-uplink-fast (Dead direct must not be promoted)", shaped[0].NextHop)
 	}
 }
@@ -147,7 +149,7 @@ func TestLookupForRelay_DirectDeadAlternativeNotPromoted(t *testing.T) {
 // index 1.
 func TestLookupForRelay_HintZeroRotatesWhenTopIsShapingCandidate(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// Two uplinks for the target. The 1-hop path normally wins
 	// CompositeScore by hops; we set it up as a warmup-stage
@@ -155,25 +157,25 @@ func TestLookupForRelay_HintZeroRotatesWhenTopIsShapingCandidate(t *testing.T) {
 	// the 2-hop path as a past-warmup non-shaping alternative
 	// with neutral reliability (so the reliability term does not
 	// flip the plain ranking against the hop-count advantage).
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-stable", 2, RouteSourceAnnouncement)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-fast", ReliabilityShapingMinAttempts-1)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-stable", ReliabilityShapingMinAttempts+5)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), 2, RouteSourceAnnouncement)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), ReliabilityShapingMinAttempts-1)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), ReliabilityShapingMinAttempts+5)
 
 	// Sanity precondition: plain Lookup ranks the 1-hop on top.
-	plain := tbl.Lookup("id-target")
-	if len(plain) != 2 || plain[0].NextHop != "id-uplink-fast" {
+	plain := tbl.Lookup(domaintest.ID("id-target"))
+	if len(plain) != 2 || plain[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("precondition: plain Lookup order = %v, want fast first", plain)
 	}
 
-	shaped := tbl.LookupForRelay("id-target", 0)
+	shaped := tbl.LookupForRelay(domaintest.ID("id-target"), 0)
 	if len(shaped) != 2 {
 		t.Fatalf("LookupForRelay length = %d, want 2", len(shaped))
 	}
-	if shaped[0].NextHop != "id-uplink-stable" {
+	if shaped[0].NextHop != domaintest.ID("id-uplink-stable") {
 		t.Fatalf("shaped[0].NextHop = %q, want id-uplink-stable (shaping rotation)", shaped[0].NextHop)
 	}
-	if shaped[1].NextHop != "id-uplink-fast" {
+	if shaped[1].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("shaped[1].NextHop = %q, want id-uplink-fast (demoted shaping candidate)", shaped[1].NextHop)
 	}
 }
@@ -183,16 +185,16 @@ func TestLookupForRelay_HintZeroRotatesWhenTopIsShapingCandidate(t *testing.T) {
 // return the plain Lookup result unmodified.
 func TestLookupForRelay_HintNonZeroDoesNotRotate(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-stable", 2, RouteSourceAnnouncement)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-fast", ReliabilityShapingMinAttempts-1)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-stable", ReliabilityShapingMinAttempts+5)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), 2, RouteSourceAnnouncement)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), ReliabilityShapingMinAttempts-1)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), ReliabilityShapingMinAttempts+5)
 
 	for hint := uint64(1); hint < ShapingProbeRatio; hint++ {
-		shaped := tbl.LookupForRelay("id-target", hint)
-		if len(shaped) != 2 || shaped[0].NextHop != "id-uplink-fast" {
+		shaped := tbl.LookupForRelay(domaintest.ID("id-target"), hint)
+		if len(shaped) != 2 || shaped[0].NextHop != domaintest.ID("id-uplink-fast") {
 			t.Fatalf("hint=%d: shaped[0] = %q, want fast (no rotation for non-multiple hint)", hint, shaped[0].NextHop)
 		}
 	}
@@ -206,17 +208,17 @@ func TestLookupForRelay_HintNonZeroDoesNotRotate(t *testing.T) {
 // downgraded.
 func TestLookupForRelay_NoRotationWhenTopIsNotShapingCandidate(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-stable", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), 2, RouteSourceAnnouncement)
 	// Both pairs are fully attested — neither qualifies for
 	// shaping, so even hint=0 leaves the ranking alone.
-	markPairFullyAttested(t, tbl, "id-target", "id-uplink-fast")
-	markPairFullyAttested(t, tbl, "id-target", "id-uplink-stable")
+	markPairFullyAttested(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"))
+	markPairFullyAttested(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"))
 
-	shaped := tbl.LookupForRelay("id-target", 0)
-	if len(shaped) != 2 || shaped[0].NextHop != "id-uplink-fast" {
+	shaped := tbl.LookupForRelay(domaintest.ID("id-target"), 0)
+	if len(shaped) != 2 || shaped[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("shaped[0] = %q, want fast (no shaping candidate on top)", shaped[0].NextHop)
 	}
 }
@@ -228,16 +230,16 @@ func TestLookupForRelay_NoRotationWhenTopIsNotShapingCandidate(t *testing.T) {
 // helper leaves the order alone.
 func TestLookupForRelay_NoRotationWhenNoNonShapingAlternative(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-mid", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-far", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-mid"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-far"), 3, RouteSourceAnnouncement)
 	// No MarkHopAck on any of them — all three are shaping
 	// candidates by the warmup criterion.
 
-	shaped := tbl.LookupForRelay("id-target", 0)
-	if len(shaped) != 3 || shaped[0].NextHop != "id-uplink-fast" {
+	shaped := tbl.LookupForRelay(domaintest.ID("id-target"), 0)
+	if len(shaped) != 3 || shaped[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("shaped[0] = %q, want fast (no non-shaping alternative)", shaped[0].NextHop)
 	}
 }
@@ -247,13 +249,13 @@ func TestLookupForRelay_NoRotationWhenNoNonShapingAlternative(t *testing.T) {
 // regardless of hint.
 func TestLookupForRelay_SingleUplinkNeverRotates(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 1, RouteSourceAnnouncement)
 
 	for hint := uint64(0); hint < 8; hint++ {
-		shaped := tbl.LookupForRelay("id-target", hint)
-		if len(shaped) != 1 || shaped[0].NextHop != "id-uplink" {
+		shaped := tbl.LookupForRelay(domaintest.ID("id-target"), hint)
+		if len(shaped) != 1 || shaped[0].NextHop != domaintest.ID("id-uplink") {
 			t.Fatalf("hint=%d single-uplink: got %v, want [id-uplink]", hint, shaped)
 		}
 	}
@@ -262,8 +264,8 @@ func TestLookupForRelay_SingleUplinkNeverRotates(t *testing.T) {
 // TestLookupForRelay_EmptyLookupReturnsNil — when the underlying
 // Lookup returns nil (no routes), shaping is a no-op.
 func TestLookupForRelay_EmptyLookupReturnsNil(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
-	if got := tbl.LookupForRelay("id-never-seen", 0); got != nil {
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
+	if got := tbl.LookupForRelay(domaintest.ID("id-never-seen"), 0); got != nil {
 		t.Fatalf("LookupForRelay on empty table = %v, want nil", got)
 	}
 }
@@ -276,7 +278,7 @@ func TestLookupForRelay_EmptyLookupReturnsNil(t *testing.T) {
 // rather than picking routes[1] blindly.
 func TestLookupForRelay_PicksHighestRankedNonShapingAlternative(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// Top is shaping (1 hop, warmup attempts). routes[1] is
 	// ALSO a shaping candidate (3 hops, warmup attempts).
@@ -290,18 +292,18 @@ func TestLookupForRelay_PicksHighestRankedNonShapingAlternative(t *testing.T) {
 	// upsertClaim-seeded Health) would put far-attested above
 	// fast in plain ranking and the rotation path would never
 	// fire.
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-mid-shaping", 3, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-far-attested", 4, RouteSourceAnnouncement)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-fast", ReliabilityShapingMinAttempts-1)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-mid-shaping", ReliabilityShapingMinAttempts-1)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-far-attested", ReliabilityShapingMinAttempts+5)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-mid-shaping"), 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-far-attested"), 4, RouteSourceAnnouncement)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), ReliabilityShapingMinAttempts-1)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-mid-shaping"), ReliabilityShapingMinAttempts-1)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-far-attested"), ReliabilityShapingMinAttempts+5)
 
-	shaped := tbl.LookupForRelay("id-target", 0)
+	shaped := tbl.LookupForRelay(domaintest.ID("id-target"), 0)
 	if len(shaped) != 3 {
 		t.Fatalf("LookupForRelay length = %d, want 3", len(shaped))
 	}
-	if shaped[0].NextHop != "id-uplink-far-attested" {
+	if shaped[0].NextHop != domaintest.ID("id-uplink-far-attested") {
 		t.Fatalf("shaped[0].NextHop = %q, want id-uplink-far-attested", shaped[0].NextHop)
 	}
 }
@@ -321,15 +323,15 @@ func TestLookupForRelay_PicksHighestRankedNonShapingAlternative(t *testing.T) {
 // t.mu, isolating the criterion under test.
 func TestLookupForRelay_PostCooldownPairIsShapingCandidate(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-stable", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), 2, RouteSourceAnnouncement)
 	// Fully attest BOTH pairs so the warmup criterion never
 	// matches; only the post-cooldown criterion is left to
 	// trigger shaping.
-	markPairFullyAttested(t, tbl, "id-target", "id-uplink-fast")
-	markPairFullyAttested(t, tbl, "id-target", "id-uplink-stable")
+	markPairFullyAttested(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"))
+	markPairFullyAttested(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"))
 
 	// Stamp LastCooldownClearedAt directly on the fast pair so
 	// it qualifies as a shaping candidate by the recency
@@ -338,7 +340,7 @@ func TestLookupForRelay_PostCooldownPairIsShapingCandidate(t *testing.T) {
 	// brief t.mu.Lock to touch the reputation field without
 	// going through the apply-method machinery.
 	tbl.mu.Lock()
-	state := tbl.health.getLocked("id-target", "id-uplink-fast")
+	state := tbl.health.getLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"))
 	if state == nil {
 		tbl.mu.Unlock()
 		t.Fatal("fast pair health entry missing after attestation")
@@ -346,11 +348,11 @@ func TestLookupForRelay_PostCooldownPairIsShapingCandidate(t *testing.T) {
 	state.LastCooldownClearedAt = now
 	tbl.mu.Unlock()
 
-	shaped := tbl.LookupForRelay("id-target", 0)
+	shaped := tbl.LookupForRelay(domaintest.ID("id-target"), 0)
 	if len(shaped) != 2 {
 		t.Fatalf("LookupForRelay length = %d, want 2", len(shaped))
 	}
-	if shaped[0].NextHop != "id-uplink-stable" {
+	if shaped[0].NextHop != domaintest.ID("id-uplink-stable") {
 		t.Fatalf("shaped[0].NextHop = %q, want id-uplink-stable (post-cooldown rotation)", shaped[0].NextHop)
 	}
 }
@@ -363,18 +365,18 @@ func TestLookupForRelay_PostCooldownPairIsShapingCandidate(t *testing.T) {
 // monotonic or constant.
 func TestLookupForRelay_RatioRotationFires1InN(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-stable", 2, RouteSourceAnnouncement)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-fast", ReliabilityShapingMinAttempts-1)
-	setShapingTestPair(t, tbl, "id-target", "id-uplink-stable", ReliabilityShapingMinAttempts+5)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), 2, RouteSourceAnnouncement)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), ReliabilityShapingMinAttempts-1)
+	setShapingTestPair(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-stable"), ReliabilityShapingMinAttempts+5)
 
 	const totalCalls uint64 = 100
 	rotated := 0
 	for hint := uint64(1); hint <= totalCalls; hint++ {
-		shaped := tbl.LookupForRelay("id-target", hint)
-		if shaped[0].NextHop == "id-uplink-stable" {
+		shaped := tbl.LookupForRelay(domaintest.ID("id-target"), hint)
+		if shaped[0].NextHop == domaintest.ID("id-uplink-stable") {
 			rotated++
 		}
 	}

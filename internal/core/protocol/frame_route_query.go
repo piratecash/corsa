@@ -140,10 +140,31 @@ func UnmarshalRouteQueryFrame(data []byte) (RouteQueryFrame, error) {
 	if f.Type != RouteQueryFrameType {
 		return RouteQueryFrame{}, fmt.Errorf("unexpected frame type %q, expected %q", f.Type, RouteQueryFrameType)
 	}
-	if f.TargetIdentity == "" {
+	if f.TargetIdentity.IsZero() {
 		return RouteQueryFrame{}, fmt.Errorf("route query frame: empty target_identity")
 	}
 	return f, nil
+}
+
+// MarshalJSON keeps the documented wire contract that best_* fields are
+// omitted when Found=false. BestUplink is a fixed-size domain.PeerIdentity
+// ([20]byte), and encoding/json's omitempty does not drop a non-empty
+// array — so without this override a Found=false response would emit
+// "best_uplink":"" instead of omitting it. The field stays a value type
+// (not a pointer) so RouteQueryResponseFrame remains comparable with ==,
+// which the round-trip tests rely on; the omission is handled here at the
+// marshal boundary by projecting the zero identity to a nil pointer.
+func (f RouteQueryResponseFrame) MarshalJSON() ([]byte, error) {
+	type alias RouteQueryResponseFrame
+	aux := struct {
+		alias
+		BestUplink *domain.PeerIdentity `json:"best_uplink,omitempty"`
+	}{alias: alias(f)}
+	if !f.BestUplink.IsZero() {
+		uplink := f.BestUplink
+		aux.BestUplink = &uplink
+	}
+	return json.Marshal(aux)
 }
 
 // MarshalRouteQueryResponseFrame serialises a RouteQueryResponseFrame
@@ -169,7 +190,7 @@ func UnmarshalRouteQueryResponseFrame(data []byte) (RouteQueryResponseFrame, err
 	if f.Type != RouteQueryResponseFrameType {
 		return RouteQueryResponseFrame{}, fmt.Errorf("unexpected frame type %q, expected %q", f.Type, RouteQueryResponseFrameType)
 	}
-	if f.TargetIdentity == "" {
+	if f.TargetIdentity.IsZero() {
 		return RouteQueryResponseFrame{}, fmt.Errorf("route query response frame: empty target_identity")
 	}
 	return f, nil

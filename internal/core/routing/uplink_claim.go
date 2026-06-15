@@ -255,7 +255,7 @@ type UplinkClaim struct {
 // stale-replay guard's expectations. See SeenOriginSeqs field
 // doc-comment for the mixed-version rationale.
 func mergeOriginObservation(prior map[PeerIdentity]uint64, origin PeerIdentity, seqNo uint64) map[PeerIdentity]uint64 {
-	if origin == "" {
+	if origin.IsZero() {
 		return prior
 	}
 	seen := prior
@@ -295,7 +295,7 @@ func mergeOriginObservationCopy(prior map[PeerIdentity]uint64, origin PeerIdenti
 	for k, v := range prior {
 		out[k] = v
 	}
-	if origin == "" {
+	if origin.IsZero() {
 		return out
 	}
 	if cur, ok := out[origin]; !ok || seqNo > cur {
@@ -362,7 +362,7 @@ func (c UplinkClaim) IsExpired(now time.Time) bool {
 //     (1..15). HopsInfinity for a non-Withdrawn claim would be
 //     ambiguous against the wire sentinel and is rejected.
 func (c UplinkClaim) Validate() error {
-	if string(c.Uplink) == "" {
+	if c.Uplink.IsZero() {
 		return ErrEmptyUplink
 	}
 	if c.Source == RouteSourceLocal {
@@ -464,7 +464,7 @@ func toRouteEntry(identity, localOrigin PeerIdentity, claim UplinkClaim) RouteEn
 		hops = HopsInfinity
 	}
 	origin := localOrigin
-	if origin == "" {
+	if origin.IsZero() {
 		origin = identity
 	}
 	return RouteEntry{

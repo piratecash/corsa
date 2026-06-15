@@ -453,13 +453,13 @@ type RouteEntry struct {
 //   - RouteSourceDirect: Hops must be 1, NextHop must equal Identity
 //     (a direct route means the destination is our immediate neighbor).
 func (e RouteEntry) Validate() error {
-	if string(e.Identity) == "" {
+	if e.Identity.IsZero() {
 		return ErrEmptyIdentity
 	}
-	if string(e.Origin) == "" {
+	if e.Origin.IsZero() {
 		return ErrEmptyOrigin
 	}
-	if string(e.NextHop) == "" {
+	if e.NextHop.IsZero() {
 		return ErrEmptyNextHop
 	}
 	if e.Source == RouteSourceLocal {

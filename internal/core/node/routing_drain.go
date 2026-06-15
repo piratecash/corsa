@@ -180,7 +180,7 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 			if recipient == "" {
 				continue
 			}
-			if _, ok := identities[domain.PeerIdentity(recipient)]; !ok {
+			if _, ok := identities[domain.PeerIdentityFromWire(recipient)]; !ok {
 				continue
 			}
 			// A matching recipient still under drain backoff (no route on a
@@ -212,7 +212,7 @@ func (s *Service) drainPendingForIdentities(identities map[domain.PeerIdentity]s
 				// falls through to kept so it stays queued (same predicate as
 				// the pre-scan above — the two MUST agree or a gated frame
 				// could be counted as a match yet never extracted).
-				if _, ok := identities[domain.PeerIdentity(recipient)]; ok && frameDrainEligible(item, now) {
+				if _, ok := identities[domain.PeerIdentityFromWire(recipient)]; ok && frameDrainEligible(item, now) {
 					meta.extractedPos = append(meta.extractedPos, i)
 					extracted = append(extracted, pendingMatch{peerAddr: addr, item: item, origIdx: i})
 					delete(s.pendingKeys, pendingFrameKey(addr, item.Frame))
@@ -590,7 +590,7 @@ func (s *Service) drainSendMessage(ctx context.Context, frame protocol.Frame, or
 	log.Info().
 		Str("id", frame.ID).
 		Str("recipient", frame.Recipient).
-		Str("next_hop", string(*decision.RelayNextHop)).
+		Str("next_hop", decision.RelayNextHop.String()).
 		Str("original_peer", string(originalPeer)).
 		Msg("pending_drained_via_new_route")
 	return true, true

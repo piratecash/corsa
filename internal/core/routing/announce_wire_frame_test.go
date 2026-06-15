@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 )
@@ -91,16 +92,16 @@ func newWireFramePeerSender(t *testing.T) (*routingmocks.MockPeerSender, *wireFr
 // NEVER fire on this path, regardless of any negotiated v2 state,
 // because the peer has no baseline a delta could diff against.
 func TestAnnounceLoop_FullSync_UsesLegacyFrame(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, counter := newWireFramePeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -138,21 +139,21 @@ func TestAnnounceLoop_FullSync_UsesLegacyFrame(t *testing.T) {
 // explicit at the call site; v1 never flips the delta path to
 // routes_update because that frame is reserved for capability-gated v2.
 func TestAnnounceLoop_Delta_UsesLegacyFrame(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, counter := newWireFramePeerSender(t)
 
 	// Two direct peers so the initial full sync has at least 2 entries —
 	// the subsequent delta (1 new route) must be strictly smaller.
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
-	if _, err := table.AddDirectPeer("peer-E"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-E")); err != nil {
 		t.Fatalf("AddDirectPeer peer-E: %v", err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -175,7 +176,7 @@ func TestAnnounceLoop_Delta_UsesLegacyFrame(t *testing.T) {
 	}
 
 	// Add a new route so the next cycle has a non-empty delta.
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatalf("AddDirectPeer peer-D: %v", err)
 	}
 
@@ -223,10 +224,10 @@ func TestAnnounceLoop_Delta_UsesLegacyFrame(t *testing.T) {
 // calls); the contract it pins today is "no-upgrade-cap fallback to
 // legacy", not the original "loop doesn't read caps yet".
 func TestAnnounceLoop_DoesNotReadCapabilities_Yet(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, counter := newWireFramePeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 
@@ -242,12 +243,12 @@ func TestAnnounceLoop_DoesNotReadCapabilities_Yet(t *testing.T) {
 		return []routing.AnnounceTarget{
 			{
 				Address:      "addr-noCaps",
-				Identity:     "peer-noCaps",
+				Identity:     domaintest.ID("peer-noCaps"),
 				Capabilities: nil,
 			},
 			{
 				Address:  "addr-withCaps",
-				Identity: "peer-withCaps",
+				Identity: domaintest.ID("peer-withCaps"),
 				Capabilities: []routing.PeerCapability{
 					routing.PeerCapability("mesh_routing_v2"),
 				},

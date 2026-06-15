@@ -691,7 +691,7 @@ func (pc *NetCore) ApplyOpts(opts Options) {
 	if opts.Address != "" {
 		pc.address = opts.Address
 	}
-	if opts.Identity != "" {
+	if !opts.Identity.IsZero() {
 		pc.identity = opts.Identity
 	}
 	if opts.Caps != nil {

@@ -58,7 +58,7 @@ func (g *ChatlogGateway) Store() *chatlog.Store {
 // Useful when sub-services need to filter incoming/outgoing messages.
 func (g *ChatlogGateway) SelfAddress() domain.PeerIdentity {
 	if g == nil {
-		return ""
+		return domain.PeerIdentity{}
 	}
 	return g.selfAddr
 }
@@ -79,7 +79,7 @@ func (g *ChatlogGateway) HasEntryInConversation(peerAddress, messageID string) b
 	if g == nil || g.store == nil {
 		return false
 	}
-	return g.store.HasEntryInConversation(domain.PeerIdentity(peerAddress), domain.MessageID(messageID))
+	return g.store.HasEntryInConversation(domain.PeerIdentityFromWire(peerAddress), domain.MessageID(messageID))
 }
 
 // DeletePeerHistory removes all chat messages for the given identity.
@@ -101,7 +101,22 @@ func (g *ChatlogGateway) FetchChatlog(topic, peerAddress string) (string, error)
 	if topic == "" {
 		topic = "dm"
 	}
-	entries, err := g.store.Read(topic, domain.PeerIdentity(peerAddress))
+	// Distinguish an omitted peer (empty string → zero identity, treated
+	// as "no DM filter") from a malformed non-empty one. Best-effort
+	// decoding would silently turn a bad peer into the zero identity and
+	// fall through to the global topic; reject it explicitly instead.
+	var peer domain.PeerIdentity
+	if peerAddress != "" {
+		parsed, err := domain.ParsePeerIdentity(peerAddress)
+		if err != nil {
+			return "", fmt.Errorf("invalid peer address %q: %w", peerAddress, err)
+		}
+		if parsed.IsZero() {
+			return "", fmt.Errorf("invalid peer address %q: zero identity", peerAddress)
+		}
+		peer = parsed
+	}
+	entries, err := g.store.Read(topic, peer)
 	if err != nil {
 		return "", fmt.Errorf("chatlog read: %w", err)
 	}

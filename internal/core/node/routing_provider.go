@@ -119,7 +119,7 @@ func (s *Service) reachableIDsFrame() protocol.Frame {
 	for id := range snap.Routes {
 		best := snap.BestRoute(id)
 		if best != nil && best.Source != routing.RouteSourceLocal {
-			ids = append(ids, string(id))
+			ids = append(ids, id.String())
 		}
 	}
 	return protocol.Frame{

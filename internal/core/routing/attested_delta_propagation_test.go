@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // attested_delta_propagation_test.go pins the Round-14 fix that
@@ -57,8 +59,8 @@ func TestBuildAnnounceSnapshot_PreservesVerbatimExtra(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			snap := BuildAnnounceSnapshot([]AnnounceEntry{{
-				Identity: "dest",
-				Origin:   "src",
+				Identity: domaintest.ID("dest"),
+				Origin:   domaintest.ID("src"),
 				Hops:     2,
 				SeqNo:    5,
 				Extra:    c.raw,
@@ -83,8 +85,8 @@ func TestBuildAnnounceSnapshot_PreservesVerbatimExtra(t *testing.T) {
 // move to verbatim, not the equality definition.
 func TestBuildAnnounceSnapshot_NormalizationStillCollapsesEquivalentDedups(t *testing.T) {
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "src", Hops: 2, SeqNo: 5, Extra: json.RawMessage(`  {"anchor":"x"}  `)},
-		{Identity: "dest", Origin: "src", Hops: 2, SeqNo: 5, Extra: json.RawMessage(`{"anchor":"x"}`)},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"), Hops: 2, SeqNo: 5, Extra: json.RawMessage(`  {"anchor":"x"}  `)},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"), Hops: 2, SeqNo: 5, Extra: json.RawMessage(`{"anchor":"x"}`)},
 	}
 	snap := BuildAnnounceSnapshot(raw)
 	if snap == nil {
@@ -110,12 +112,12 @@ func TestBuildAnnounceSnapshot_NormalizationStillCollapsesEquivalentDedups(t *te
 // wire content. AttestedSigVerified stays local-only.
 func TestAnnounceEntryEqual_SigDifferenceProducesInequality(t *testing.T) {
 	a := AnnounceSnapshot{Entries: []AnnounceEntry{{
-		Identity: "dest", Origin: "src",
+		Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"),
 		Hops: 2, SeqNo: 5,
 		AttestedSig: []byte("sig-A"),
 	}}}
 	b := AnnounceSnapshot{Entries: []AnnounceEntry{{
-		Identity: "dest", Origin: "src",
+		Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"),
 		Hops: 2, SeqNo: 5,
 		AttestedSig: []byte("sig-B"),
 	}}}
@@ -126,13 +128,13 @@ func TestAnnounceEntryEqual_SigDifferenceProducesInequality(t *testing.T) {
 	// Verified-flip alone must NOT affect equality: it is a local
 	// observation that never travels on the wire.
 	c := AnnounceSnapshot{Entries: []AnnounceEntry{{
-		Identity: "dest", Origin: "src",
+		Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"),
 		Hops: 2, SeqNo: 5,
 		AttestedSig:         []byte("sig-stable"),
 		AttestedSigVerified: false,
 	}}}
 	d := AnnounceSnapshot{Entries: []AnnounceEntry{{
-		Identity: "dest", Origin: "src",
+		Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"),
 		Hops: 2, SeqNo: 5,
 		AttestedSig:         []byte("sig-stable"),
 		AttestedSigVerified: true,
@@ -152,8 +154,8 @@ func TestAnnounceEntryEqual_SigDifferenceProducesInequality(t *testing.T) {
 // upgrade through Stage 1.
 func TestBuildAnnounceSnapshot_Stage1DedupKeepsSigDifferentEntries(t *testing.T) {
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "src", Hops: 2, SeqNo: 5, AttestedSig: []byte("sig-A")},
-		{Identity: "dest", Origin: "src", Hops: 2, SeqNo: 5, AttestedSig: []byte("sig-B")},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"), Hops: 2, SeqNo: 5, AttestedSig: []byte("sig-A")},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("src"), Hops: 2, SeqNo: 5, AttestedSig: []byte("sig-B")},
 	}
 	snap := BuildAnnounceSnapshot(raw)
 	if snap == nil {
@@ -188,8 +190,8 @@ func TestComputeDelta_SigOnlyChangeEmits(t *testing.T) {
 	oldSnap := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
 			{
-				Identity:    "dest",
-				Origin:      "src",
+				Identity:    domaintest.ID("dest"),
+				Origin:      domaintest.ID("src"),
 				Hops:        2,
 				SeqNo:       5,
 				AttestedSig: nil,
@@ -199,8 +201,8 @@ func TestComputeDelta_SigOnlyChangeEmits(t *testing.T) {
 	newSnap := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
 			{
-				Identity:    "dest",
-				Origin:      "src",
+				Identity:    domaintest.ID("dest"),
+				Origin:      domaintest.ID("src"),
 				Hops:        2,
 				SeqNo:       5,
 				AttestedSig: []byte("verified-sig"),
@@ -227,8 +229,8 @@ func TestComputeDelta_VerifiedFlipAloneDoesNotEmit(t *testing.T) {
 	oldSnap := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
 			{
-				Identity:            "dest",
-				Origin:              "src",
+				Identity:            domaintest.ID("dest"),
+				Origin:              domaintest.ID("src"),
 				Hops:                2,
 				SeqNo:               5,
 				AttestedSig:         sigBytes,
@@ -239,8 +241,8 @@ func TestComputeDelta_VerifiedFlipAloneDoesNotEmit(t *testing.T) {
 	newSnap := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
 			{
-				Identity:            "dest",
-				Origin:              "src",
+				Identity:            domaintest.ID("dest"),
+				Origin:              domaintest.ID("src"),
 				Hops:                2,
 				SeqNo:               5,
 				AttestedSig:         sigBytes,
@@ -264,14 +266,14 @@ func TestOutboundEmitSig_SigUpgradeForcesFreshSeqNo(t *testing.T) {
 	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("local"),
+		WithLocalOrigin(domaintest.ID("local")),
 	)
 
-	const (
-		dest   PeerIdentity = "alice"
-		origin PeerIdentity = "bob"
-		uplink PeerIdentity = "uplink"
-		peerY  PeerIdentity = "peer-Y"
+	var (
+		dest   = domaintest.ID("alice")
+		origin = domaintest.ID("bob")
+		uplink = domaintest.ID("uplink")
+		peerY  = domaintest.ID("peer-Y")
 	)
 
 	// Seed the unsigned claim.

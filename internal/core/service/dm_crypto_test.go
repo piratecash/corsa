@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -41,7 +42,7 @@ func TestSendDirectMessageRejectsControlCommands(t *testing.T) {
 			// the rest of the message looks well-formed.
 			_, err := d.SendDirectMessage(
 				context.Background(),
-				domain.PeerIdentity("any-peer"),
+				domaintest.ID("any-peer"),
 				domain.OutgoingDM{
 					Body:    "looks like a normal message",
 					Command: cmd,
@@ -86,7 +87,7 @@ func TestSendControlMessageRejectsNonControlCommands(t *testing.T) {
 
 			_, err := d.SendControlMessage(
 				context.Background(),
-				domain.PeerIdentity("any-peer"),
+				domaintest.ID("any-peer"),
 				cmd,
 				`{}`,
 			)
@@ -111,7 +112,7 @@ func TestSendControlMessageRequiresRecipient(t *testing.T) {
 	d := &DMCrypto{}
 	_, err := d.SendControlMessage(
 		context.Background(),
-		domain.PeerIdentity("   "), // whitespace-only — trims to empty
+		domain.PeerIdentity{}, // zero (absent) identity — recipient required
 		domain.DMCommandMessageDelete,
 		`{}`,
 	)
@@ -223,7 +224,7 @@ func TestSendDirectMessageGuardIgnoresDataCommands(t *testing.T) {
 
 			_, err := d.SendDirectMessage(
 				context.Background(),
-				domain.PeerIdentity("peer"),
+				domaintest.ID("peer"),
 				domain.OutgoingDM{
 					Body:    "", // forces guard #2 to fire before any I/O
 					Command: cmd,

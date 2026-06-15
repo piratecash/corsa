@@ -262,7 +262,7 @@ func (s *Service) dropRelayRetryEntries(ids []protocol.MessageID) {
 // peerMu. Empty result when the identity is not (yet) established.
 func (s *Service) viaIdentityForAddress(addr domain.PeerAddress) domain.PeerIdentity {
 	if addr == "" {
-		return ""
+		return domain.PeerIdentity{}
 	}
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
@@ -278,7 +278,7 @@ func (s *Service) viaIdentityForAddress(addr domain.PeerAddress) domain.PeerIden
 // fallback for ingress links whose identity was not established at
 // admission time.
 func (s *Service) isIngressNextHop(msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, address domain.PeerAddress) bool {
-	if msg.ViaIdentity != "" && string(nextHopIdentity) == msg.ViaIdentity {
+	if msg.ViaIdentity != "" && nextHopIdentity.String() == msg.ViaIdentity {
 		return true
 	}
 	return msg.Via != "" && s.sameCanonicalAddress(address, domain.PeerAddress(msg.Via))

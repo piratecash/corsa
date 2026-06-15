@@ -44,7 +44,7 @@ func seedChattyHistoryNearThreshold(svc *Service, peer domain.PeerIdentity) {
 }
 
 func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
-	peer := domain.PeerIdentity(idPeerB)
+	peer := idPeerB
 
 	// --- Baselines must NOT arm chatty_routes ---
 

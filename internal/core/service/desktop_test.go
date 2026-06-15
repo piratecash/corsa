@@ -13,6 +13,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
@@ -118,7 +119,7 @@ func TestDecryptDirectMessages(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "secret phrase"},
@@ -143,8 +144,8 @@ func TestDecryptDirectMessages(t *testing.T) {
 	}}, nil, nil)
 	want := []DirectMessage{{
 		ID:        "id-1",
-		Sender:    domain.PeerIdentity(sender.Address),
-		Recipient: domain.PeerIdentity(recipient.Address),
+		Sender:    domain.PeerIdentityFromWire(sender.Address),
+		Recipient: domain.PeerIdentityFromWire(recipient.Address),
 		Body:      "secret phrase",
 		Timestamp: mustTime(t, "2026-03-19T10:00:00Z"),
 	}}
@@ -176,7 +177,7 @@ func TestDecryptDirectMessagesSanitizesDanglingReplyTo(t *testing.T) {
 	}
 
 	dmRecipient := domain.DMRecipient{
-		Address:      domain.PeerIdentity(recipient.Address),
+		Address:      domain.PeerIdentityFromWire(recipient.Address),
 		BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 	}
 
@@ -263,7 +264,7 @@ func TestDecryptDirectMessagesMarksLifecycleStatuses(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "queued later"},
@@ -334,7 +335,7 @@ func TestDecryptOutgoingWithoutSelfInContacts(t *testing.T) {
 	outCipher, err := directmsg.EncryptForParticipants(
 		self,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(peer.Address),
+			Address:      domain.PeerIdentityFromWire(peer.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "outgoing text"},
@@ -347,7 +348,7 @@ func TestDecryptOutgoingWithoutSelfInContacts(t *testing.T) {
 	inCipher, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(self.Address),
+			Address:      domain.PeerIdentityFromWire(self.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(self.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "incoming text"},
@@ -403,7 +404,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello after restart"},
@@ -450,7 +451,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 			{ID: "msg-adv", Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext, Timestamp: ts, PersistedStatus: "delivered"},
 		}
 		receipts := []DeliveryReceipt{
-			{MessageID: "msg-adv", Sender: domain.PeerIdentity(sender.Address), Recipient: domain.PeerIdentity(recipient.Address), Status: "seen", DeliveredAt: time.Now()},
+			{MessageID: "msg-adv", Sender: domain.PeerIdentityFromWire(sender.Address), Recipient: domain.PeerIdentityFromWire(recipient.Address), Status: "seen", DeliveredAt: time.Now()},
 		}
 		got := decryptDirectMessages(recipient, contacts, records, receipts, nil)
 		if got[0].ReceiptStatus != "seen" {
@@ -464,7 +465,7 @@ func TestPersistedStatusSurvivesRestart(t *testing.T) {
 			{ID: "msg-noreg", Sender: sender.Address, Recipient: recipient.Address, Body: ciphertext, Timestamp: ts, PersistedStatus: "seen"},
 		}
 		receipts := []DeliveryReceipt{
-			{MessageID: "msg-noreg", Sender: domain.PeerIdentity(sender.Address), Recipient: domain.PeerIdentity(recipient.Address), Status: "delivered", DeliveredAt: time.Now()},
+			{MessageID: "msg-noreg", Sender: domain.PeerIdentityFromWire(sender.Address), Recipient: domain.PeerIdentityFromWire(recipient.Address), Status: "delivered", DeliveredAt: time.Now()},
 		}
 		got := decryptDirectMessages(recipient, contacts, records, receipts, nil)
 		if got[0].ReceiptStatus != "seen" {
@@ -538,26 +539,34 @@ func TestPendingMessagesFromFrame(t *testing.T) {
 func TestIncomingContactsToTrustIncludesUnknownIncomingSender(t *testing.T) {
 	t.Parallel()
 
+	// self and the contact-map keys are the canonical hex forms of the
+	// byte-typed identities, because incomingContactsToTrust keys contacts
+	// (and stamps ContactFrame.Address) by message.Sender.String().
+	me := domaintest.ID("me").String()
+	alice := domaintest.ID("alice").String()
+	trusted := domaintest.ID("trusted").String()
+	bob := domaintest.ID("bob").String()
+
 	got := incomingContactsToTrust(
-		"me",
+		me,
 		map[string]Contact{
-			"trusted": {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
+			trusted: {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
 		},
 		map[string]Contact{
-			"alice":   {BoxKey: "alice-box", PubKey: "alice-pub", BoxSignature: "alice-sig"},
-			"trusted": {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
-			"bob":     {BoxKey: "bob-box", PubKey: "bob-pub"},
+			alice:   {BoxKey: "alice-box", PubKey: "alice-pub", BoxSignature: "alice-sig"},
+			trusted: {BoxKey: "trusted-box", PubKey: "trusted-pub", BoxSignature: "trusted-sig"},
+			bob:     {BoxKey: "bob-box", PubKey: "bob-pub"},
 		},
 		[]DirectMessage{
-			{Sender: "alice", Recipient: "me", Body: "hello"},
-			{Sender: "trusted", Recipient: "me", Body: "known"},
-			{Sender: "bob", Recipient: "me", Body: "missing signature"},
-			{Sender: "me", Recipient: "alice", Body: "outgoing"},
+			{Sender: domaintest.ID("alice"), Recipient: domaintest.ID("me"), Body: "hello"},
+			{Sender: domaintest.ID("trusted"), Recipient: domaintest.ID("me"), Body: "known"},
+			{Sender: domaintest.ID("bob"), Recipient: domaintest.ID("me"), Body: "missing signature"},
+			{Sender: domaintest.ID("me"), Recipient: domaintest.ID("alice"), Body: "outgoing"},
 		},
 	)
 
 	want := []protocol.ContactFrame{
-		{Address: "alice", PubKey: "alice-pub", BoxKey: "alice-box", BoxSig: "alice-sig"},
+		{Address: alice, PubKey: "alice-pub", BoxKey: "alice-box", BoxSig: "alice-sig"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected contacts to trust: got %#v want %#v", got, want)
@@ -795,7 +804,7 @@ func TestDeliveredAtSynthesizedAfterRestart(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: body},
@@ -927,7 +936,7 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 	}
 
 	svc := node.NewService(cfg, id, ebus.New())
-	store := chatlog.NewStore(dir, domain.PeerIdentity(id.Address), domain.ListenAddress(":0"))
+	store := chatlog.NewStore(dir, domain.PeerIdentityFromWire(id.Address), domain.ListenAddress(":0"))
 
 	// WaitBackground must run before TempDir cleanup to avoid
 	// "directory not empty" races caused by async disk writes
@@ -960,7 +969,7 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		id,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(peer.Address),
+			Address:      domain.PeerIdentityFromWire(peer.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello from test"},
@@ -970,7 +979,7 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 	}
 
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-out-1",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -982,7 +991,7 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	msgs, err := c.FetchConversation(context.Background(), domain.PeerIdentity(peer.Address))
+	msgs, err := c.FetchConversation(context.Background(), domain.PeerIdentityFromWire(peer.Address))
 	if err != nil {
 		t.Fatalf("FetchConversation: %v", err)
 	}
@@ -1007,7 +1016,7 @@ func TestFetchConversationEmptyPeerReturnsError(t *testing.T) {
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	_, err := c.FetchConversation(context.Background(), "")
+	_, err := c.FetchConversation(context.Background(), domain.PeerIdentity{})
 	if err == nil {
 		t.Fatal("expected error for empty peer address")
 	}
@@ -1027,7 +1036,7 @@ func TestFetchConversationNilChatlogReturnsError(t *testing.T) {
 	c := &DesktopClient{id: id, appCfg: config.App{Version: "test"}}
 	c.wireSubServices()
 
-	_, err = c.FetchConversation(context.Background(), "somepeer")
+	_, err = c.FetchConversation(context.Background(), domaintest.ID("somepeer"))
 	if err == nil {
 		t.Fatal("expected error when chatlog is nil")
 	}
@@ -1046,7 +1055,7 @@ func TestFetchConversationRespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, err := c.FetchConversation(ctx, "somepeer")
+	_, err := c.FetchConversation(ctx, domaintest.ID("somepeer"))
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
 	}
@@ -1081,7 +1090,7 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 		ct, encErr := directmsg.EncryptForParticipants(
 			id,
 			domain.DMRecipient{
-				Address:      domain.PeerIdentity(tc.peerAddr),
+				Address:      domain.PeerIdentityFromWire(tc.peerAddr),
 				BoxKeyBase64: identity.BoxPublicKeyBase64(tc.peerID.BoxPublicKey),
 			},
 			domain.OutgoingDM{Body: tc.body},
@@ -1089,7 +1098,7 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 		if encErr != nil {
 			t.Fatalf("encrypt for %s: %v", tc.peerAddr, encErr)
 		}
-		err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+		err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 			ID:             tc.msgID,
 			Sender:         id.Address,
 			Recipient:      tc.peerAddr,
@@ -1115,12 +1124,12 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 	for _, p := range previews {
 		byPeer[p.PeerAddress] = p
 	}
-	if p, ok := byPeer[domain.PeerIdentity(peer1.Address)]; !ok {
+	if p, ok := byPeer[domain.PeerIdentityFromWire(peer1.Address)]; !ok {
 		t.Fatal("missing preview for peer1")
 	} else if p.Body != "hello peer1" {
 		t.Fatalf("peer1 preview body = %q, want %q", p.Body, "hello peer1")
 	}
-	if p, ok := byPeer[domain.PeerIdentity(peer2.Address)]; !ok {
+	if p, ok := byPeer[domain.PeerIdentityFromWire(peer2.Address)]; !ok {
 		t.Fatal("missing preview for peer2")
 	} else if p.Body != "hello peer2" {
 		t.Fatalf("peer2 preview body = %q, want %q", p.Body, "hello peer2")
@@ -1161,7 +1170,7 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	outCt, err := directmsg.EncryptForParticipants(
 		id,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(peer.Address),
+			Address:      domain.PeerIdentityFromWire(peer.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello from me"},
@@ -1169,7 +1178,7 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt outgoing: %v", err)
 	}
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-out",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1185,7 +1194,7 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	inCt, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "reply from peer"},
@@ -1193,7 +1202,7 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt incoming: %v", err)
 	}
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-in",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -1214,10 +1223,10 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	}
 
 	p := previews[0]
-	if p.PeerAddress != domain.PeerIdentity(peer.Address) {
+	if p.PeerAddress != domain.PeerIdentityFromWire(peer.Address) {
 		t.Fatalf("preview peer = %q, want %q", p.PeerAddress, peer.Address)
 	}
-	if p.Sender != domain.PeerIdentity(peer.Address) {
+	if p.Sender != domain.PeerIdentityFromWire(peer.Address) {
 		t.Fatalf("preview sender = %q, want peer %q (incoming message should be shown)", p.Sender, peer.Address)
 	}
 	if p.Body != "reply from peer" {
@@ -1251,11 +1260,11 @@ func TestFetchSinglePreviewShowsIncomingMessage(t *testing.T) {
 
 	// Self sends a message, then peer replies.
 	outCt, _ := directmsg.EncryptForParticipants(id, domain.DMRecipient{
-		Address:      domain.PeerIdentity(peer.Address),
+		Address:      domain.PeerIdentityFromWire(peer.Address),
 		BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 	}, domain.OutgoingDM{Body: "my message"})
 
-	_ = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	_ = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:        "out-1",
 		Sender:    id.Address,
 		Recipient: peer.Address,
@@ -1264,11 +1273,11 @@ func TestFetchSinglePreviewShowsIncomingMessage(t *testing.T) {
 	})
 
 	inCt, _ := directmsg.EncryptForParticipants(peer, domain.DMRecipient{
-		Address:      domain.PeerIdentity(id.Address),
+		Address:      domain.PeerIdentityFromWire(id.Address),
 		BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 	}, domain.OutgoingDM{Body: "peer reply"})
 
-	_ = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	_ = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:        "in-1",
 		Sender:    peer.Address,
 		Recipient: id.Address,
@@ -1276,14 +1285,14 @@ func TestFetchSinglePreviewShowsIncomingMessage(t *testing.T) {
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
 
-	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity(peer.Address))
+	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentityFromWire(peer.Address))
 	if err != nil {
 		t.Fatalf("FetchSinglePreview: %v", err)
 	}
 	if preview == nil {
 		t.Fatal("expected non-nil preview")
 	}
-	if preview.Sender != domain.PeerIdentity(peer.Address) {
+	if preview.Sender != domain.PeerIdentityFromWire(peer.Address) {
 		t.Fatalf("sender = %q, want %q", preview.Sender, peer.Address)
 	}
 	if preview.Body != "peer reply" {
@@ -1326,7 +1335,7 @@ func TestFetchConversationPreviewsIncludesUnreadCount(t *testing.T) {
 	ct, err := directmsg.EncryptForParticipants(
 		id,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(peer.Address),
+			Address:      domain.PeerIdentityFromWire(peer.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "msg body"},
@@ -1335,7 +1344,7 @@ func TestFetchConversationPreviewsIncludesUnreadCount(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 	// Insert as incoming (from peer) with status "delivered" so it counts as unread.
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-unread",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1425,7 +1434,7 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 	ct, err := directmsg.EncryptForParticipants(
 		id,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(peer.Address),
+			Address:      domain.PeerIdentityFromWire(peer.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "single preview body"},
@@ -1433,7 +1442,7 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-single",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1445,14 +1454,14 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity(peer.Address))
+	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentityFromWire(peer.Address))
 	if err != nil {
 		t.Fatalf("FetchSinglePreview: %v", err)
 	}
 	if preview == nil {
 		t.Fatal("expected non-nil preview")
 	}
-	if preview.PeerAddress != domain.PeerIdentity(peer.Address) {
+	if preview.PeerAddress != domain.PeerIdentityFromWire(peer.Address) {
 		t.Fatalf("unexpected peer: %s", preview.PeerAddress)
 	}
 	if preview.Body != "single preview body" {
@@ -1467,7 +1476,7 @@ func TestFetchSinglePreviewNonExistentPeerReturnsNil(t *testing.T) {
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	preview, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity("nonexistent-peer"))
+	preview, err := c.FetchSinglePreview(context.Background(), domaintest.ID("nonexistent-peer"))
 	if err != nil {
 		t.Fatalf("FetchSinglePreview: %v", err)
 	}
@@ -1486,7 +1495,7 @@ func TestFetchSinglePreviewNilChatlogReturnsError(t *testing.T) {
 	c := &DesktopClient{id: id, appCfg: config.App{Version: "test"}}
 	c.wireSubServices()
 
-	_, err = c.FetchSinglePreview(context.Background(), domain.PeerIdentity("somepeer"))
+	_, err = c.FetchSinglePreview(context.Background(), domaintest.ID("somepeer"))
 	if err == nil {
 		t.Fatal("expected error when chatlog is nil")
 	}
@@ -1502,7 +1511,7 @@ func TestFetchSinglePreviewEmptyPeerReturnsError(t *testing.T) {
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	_, err := c.FetchSinglePreview(context.Background(), "")
+	_, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity{})
 	if err == nil {
 		t.Fatal("expected error for empty peer address")
 	}
@@ -1511,14 +1520,16 @@ func TestFetchSinglePreviewEmptyPeerReturnsError(t *testing.T) {
 	}
 }
 
-// TestFetchSinglePreviewWhitespacePeerReturnsError verifies that a
-// whitespace-only peer address is trimmed and rejected as empty.
+// TestFetchSinglePreviewWhitespacePeerReturnsError verifies that the zero
+// (absent) peer identity is rejected as empty. With the byte-typed
+// PeerIdentity the old whitespace-string case collapses to the zero value:
+// FetchSinglePreview trims the hex String() and checks IsZero().
 func TestFetchSinglePreviewWhitespacePeerReturnsError(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
 	defer func() { _ = c.Close() }()
 
-	_, err := c.FetchSinglePreview(context.Background(), "   ")
+	_, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity{})
 	if err == nil {
 		t.Fatal("expected error for whitespace-only peer address")
 	}
@@ -1545,7 +1556,7 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 		ct, encErr := directmsg.EncryptForParticipants(
 			id,
 			domain.DMRecipient{
-				Address:      domain.PeerIdentity(peer.Address),
+				Address:      domain.PeerIdentityFromWire(peer.Address),
 				BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 			},
 			domain.OutgoingDM{Body: body},
@@ -1553,7 +1564,7 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 		if encErr != nil {
 			t.Fatalf("encrypt msg %d: %v", i, encErr)
 		}
-		err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+		err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 			ID:             fmt.Sprintf("msg-%d", i),
 			Sender:         id.Address,
 			Recipient:      peer.Address,
@@ -1566,7 +1577,7 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 		}
 	}
 
-	msgs, err := c.FetchConversation(context.Background(), domain.PeerIdentity(peer.Address))
+	msgs, err := c.FetchConversation(context.Background(), domain.PeerIdentityFromWire(peer.Address))
 	if err != nil {
 		t.Fatalf("FetchConversation: %v", err)
 	}

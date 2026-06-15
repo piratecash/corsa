@@ -422,7 +422,7 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 		if !entry.Held {
 			continue
 		}
-		if _, ok := identities[domain.PeerIdentity(entry.Envelope.Recipient)]; ok {
+		if _, ok := identities[domain.PeerIdentityFromWire(entry.Envelope.Recipient)]; ok {
 			held = append(held, heldEnvelope{id, entry.Envelope})
 		}
 	}

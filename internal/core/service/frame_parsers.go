@@ -86,8 +86,8 @@ func receiptRecordsFromFrames(receipts []protocol.ReceiptFrame) []DeliveryReceip
 		}
 		out = append(out, DeliveryReceipt{
 			MessageID:   receipt.MessageID,
-			Sender:      domain.PeerIdentity(receipt.Sender),
-			Recipient:   domain.PeerIdentity(receipt.Recipient),
+			Sender:      domain.PeerIdentityFromWire(receipt.Sender),
+			Recipient:   domain.PeerIdentityFromWire(receipt.Recipient),
 			Status:      receipt.Status,
 			DeliveredAt: deliveredAt.UTC(),
 		})
@@ -180,7 +180,7 @@ func captureSessionsFromFrame(frame protocol.Frame) map[domain.ConnID]CaptureSes
 		sessions[connID] = CaptureSession{
 			ConnID:    connID,
 			Address:   domain.PeerAddress(item.Address),
-			PeerID:    domain.PeerIdentity(item.PeerID),
+			PeerID:    domain.PeerIdentityFromWire(item.PeerID),
 			Direction: domain.PeerDirection(item.Direction),
 			FilePath:  item.RecordingFile,
 			StartedAt: parseOptionalTime(item.RecordingStartedAt),
@@ -337,8 +337,8 @@ func dmHeadersFromFrame(frame protocol.Frame) []DMHeader {
 		}
 		out = append(out, DMHeader{
 			ID:        h.ID,
-			Sender:    domain.PeerIdentity(h.Sender),
-			Recipient: domain.PeerIdentity(h.Recipient),
+			Sender:    domain.PeerIdentityFromWire(h.Sender),
+			Recipient: domain.PeerIdentityFromWire(h.Recipient),
 			Timestamp: ts.UTC(),
 		})
 	}
@@ -352,7 +352,7 @@ func dmHeadersFromFrame(frame protocol.Frame) []DMHeader {
 func missingDMHeaderContacts(self string, contacts map[string]Contact, headers []DMHeader) []string {
 	missing := make(map[string]struct{})
 	for _, h := range headers {
-		for _, address := range []string{string(h.Sender), string(h.Recipient)} {
+		for _, address := range []string{h.Sender.String(), h.Recipient.String()} {
 			address = strings.TrimSpace(address)
 			if address == "" || address == "*" || address == self {
 				continue
@@ -424,18 +424,18 @@ func incomingContactsToTrust(self string, trustedContacts, decryptContacts map[s
 	toImport := make(map[string]protocol.ContactFrame)
 
 	for _, message := range messages {
-		if message.Recipient != domain.PeerIdentity(self) || message.Sender == domain.PeerIdentity(self) {
+		if message.Recipient != domain.PeerIdentityFromWire(self) || message.Sender == domain.PeerIdentityFromWire(self) {
 			continue
 		}
-		if _, ok := trustedContacts[string(message.Sender)]; ok {
+		if _, ok := trustedContacts[message.Sender.String()]; ok {
 			continue
 		}
-		contact, ok := decryptContacts[string(message.Sender)]
+		contact, ok := decryptContacts[message.Sender.String()]
 		if !ok || contact.BoxKey == "" || contact.PubKey == "" || contact.BoxSignature == "" {
 			continue
 		}
-		toImport[string(message.Sender)] = protocol.ContactFrame{
-			Address: string(message.Sender),
+		toImport[message.Sender.String()] = protocol.ContactFrame{
+			Address: message.Sender.String(),
 			PubKey:  contact.PubKey,
 			BoxKey:  contact.BoxKey,
 			BoxSig:  contact.BoxSignature,
@@ -549,8 +549,8 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 
 		out = append(out, DirectMessage{
 			ID:            item.ID,
-			Sender:        domain.PeerIdentity(sender),
-			Recipient:     domain.PeerIdentity(recipient),
+			Sender:        domain.PeerIdentityFromWire(sender),
+			Recipient:     domain.PeerIdentityFromWire(recipient),
 			Body:          message.Body,
 			ReplyTo:       replyTo,
 			Command:       domain.DMCommand(message.Command),
@@ -580,7 +580,7 @@ func sanitizeReplyReferences(messages []DirectMessage, store *chatlog.Store, sel
 			continue
 		}
 		peerAddr := messages[i].Sender
-		if peerAddr == domain.PeerIdentity(selfAddress) {
+		if peerAddr == domain.PeerIdentityFromWire(selfAddress) {
 			peerAddr = messages[i].Recipient
 		}
 		if !store.HasEntryInConversation(peerAddr, domain.MessageID(messages[i].ReplyTo)) {

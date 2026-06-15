@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
@@ -120,22 +121,22 @@ func TestFetchRouteTable(t *testing.T) {
 	now := time.Now()
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"peer-A": {
+			domaintest.ID("peer-A"): {
 				{
-					Identity:  "peer-A",
-					Origin:    "self",
-					NextHop:   "peer-A",
+					Identity:  domaintest.ID("peer-A"),
+					Origin:    domaintest.ID("self"),
+					NextHop:   domaintest.ID("peer-A"),
 					Hops:      1,
 					SeqNo:     5,
 					Source:    routing.RouteSourceDirect,
 					ExpiresAt: now.Add(100 * time.Second),
 				},
 			},
-			"peer-B": {
+			domaintest.ID("peer-B"): {
 				{
-					Identity:  "peer-B",
-					Origin:    "peer-A",
-					NextHop:   "peer-A",
+					Identity:  domaintest.ID("peer-B"),
+					Origin:    domaintest.ID("peer-A"),
+					NextHop:   domaintest.ID("peer-A"),
 					Hops:      2,
 					SeqNo:     3,
 					Source:    routing.RouteSourceAnnouncement,
@@ -181,11 +182,11 @@ func TestFetchRouteTableNextHopObject(t *testing.T) {
 	now := time.Now()
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"peer-A": {
+			domaintest.ID("peer-A"): {
 				{
-					Identity:  "peer-A",
-					Origin:    "self",
-					NextHop:   "peer-A",
+					Identity:  domaintest.ID("peer-A"),
+					Origin:    domaintest.ID("self"),
+					NextHop:   domaintest.ID("peer-A"),
 					Hops:      1,
 					SeqNo:     1,
 					Source:    routing.RouteSourceDirect,
@@ -197,7 +198,7 @@ func TestFetchRouteTableNextHopObject(t *testing.T) {
 		TotalEntries:  1,
 		ActiveEntries: 1,
 	}, map[domain.PeerIdentity][2]string{
-		"peer-A": {"65.108.204.190:64646", "ipv4"},
+		domaintest.ID("peer-A"): {"65.108.204.190:64646", "ipv4"},
 	})
 
 	table := rpc.NewCommandTable()
@@ -223,7 +224,7 @@ func TestFetchRouteTableNextHopObject(t *testing.T) {
 	if !ok {
 		t.Fatal("next_hop should be an object")
 	}
-	if id, _ := nextHop["identity"].(string); id != "peer-A" {
+	if id, _ := nextHop["identity"].(string); id != domaintest.ID("peer-A").String() {
 		t.Errorf("expected next_hop.identity='peer-A', got %q", id)
 	}
 	if addr, _ := nextHop["address"].(string); addr != "65.108.204.190:64646" {
@@ -238,11 +239,11 @@ func TestFetchRouteTableNextHopDisconnected(t *testing.T) {
 	now := time.Now()
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"peer-A": {
+			domaintest.ID("peer-A"): {
 				{
-					Identity:  "peer-A",
-					Origin:    "self",
-					NextHop:   "peer-A",
+					Identity:  domaintest.ID("peer-A"),
+					Origin:    domaintest.ID("self"),
+					NextHop:   domaintest.ID("peer-A"),
 					Hops:      1,
 					SeqNo:     1,
 					Source:    routing.RouteSourceDirect,
@@ -278,7 +279,7 @@ func TestFetchRouteTableNextHopDisconnected(t *testing.T) {
 	if !ok {
 		t.Fatal("next_hop should be an object")
 	}
-	if id, _ := nextHop["identity"].(string); id != "peer-A" {
+	if id, _ := nextHop["identity"].(string); id != domaintest.ID("peer-A").String() {
 		t.Errorf("expected next_hop.identity='peer-A', got %q", id)
 	}
 	// address and network omitted when peer is disconnected.
@@ -294,11 +295,11 @@ func TestFetchRouteSummary(t *testing.T) {
 	now := time.Now()
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"peer-A": {
+			domaintest.ID("peer-A"): {
 				{
-					Identity:  "peer-A",
-					Origin:    "self",
-					NextHop:   "peer-A",
+					Identity:  domaintest.ID("peer-A"),
+					Origin:    domaintest.ID("self"),
+					NextHop:   domaintest.ID("peer-A"),
 					Hops:      1,
 					SeqNo:     5,
 					Source:    routing.RouteSourceDirect,
@@ -311,7 +312,7 @@ func TestFetchRouteSummary(t *testing.T) {
 		ActiveEntries: 1,
 		FlapState: []routing.FlapEntry{
 			{
-				PeerIdentity:      "flappy-peer",
+				PeerIdentity:      domaintest.ID("flappy-peer"),
 				RecentWithdrawals: 4,
 				InHoldDown:        true,
 				HoldDownUntil:     now.Add(20 * time.Second),
@@ -357,7 +358,7 @@ func TestFetchRouteSummary(t *testing.T) {
 		t.Fatalf("expected 1 flap entry, got %v", result["flap_state"])
 	}
 	flapEntry, _ := flap[0].(map[string]interface{})
-	if peer, _ := flapEntry["peer_identity"].(string); peer != "flappy-peer" {
+	if peer, _ := flapEntry["peer_identity"].(string); peer != domaintest.ID("flappy-peer").String() {
 		t.Errorf("expected peer_identity='flappy-peer', got %q", peer)
 	}
 	if inHD, _ := flapEntry["in_hold_down"].(bool); !inHD {
@@ -442,20 +443,20 @@ func TestFetchRouteLookup(t *testing.T) {
 	now := time.Now()
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44": {
+			domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"): {
 				{
-					Identity:  "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
-					Origin:    "self",
-					NextHop:   "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
+					Identity:  domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"),
+					Origin:    domaintest.ID("self"),
+					NextHop:   domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"),
 					Hops:      1,
 					SeqNo:     10,
 					Source:    routing.RouteSourceDirect,
 					ExpiresAt: now.Add(100 * time.Second),
 				},
 				{
-					Identity:  "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44",
-					Origin:    "neighbor",
-					NextHop:   "neighbor",
+					Identity:  domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"),
+					Origin:    domaintest.ID("neighbor"),
+					NextHop:   domaintest.ID("neighbor"),
 					Hops:      2,
 					SeqNo:     7,
 					Source:    routing.RouteSourceAnnouncement,
@@ -541,6 +542,29 @@ func TestFetchRouteLookupRejectsMalformedIdentity(t *testing.T) {
 	}
 }
 
+// TestFetchRouteLookupRejectsZeroIdentity pins the second half of the boundary:
+// the all-zero 40-hex address parses with a nil error through
+// domain.ParsePeerIdentity, so without the explicit IsZero gate the absent
+// sentinel would slip through and look up the zero key. It must be rejected
+// with ErrValidation and the provider snapshot must never be read.
+func TestFetchRouteLookupRejectsZeroIdentity(t *testing.T) {
+	// Build the mock WITHOUT a RoutingSnapshot expectation so that any
+	// attempt to reach past the validation gate fails the test.
+	provider := rpcmocks.NewMockRoutingProvider(t)
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "fetchRouteLookup",
+		Args: map[string]interface{}{"identity": "0000000000000000000000000000000000000000"},
+	})
+	if resp.ErrorKind != rpc.ErrValidation {
+		t.Errorf("expected ErrValidation for zero identity, got %v", resp.ErrorKind)
+	}
+	provider.AssertNotCalled(t, "RoutingSnapshot")
+}
+
 func TestFetchRouteLookupNoRoutes(t *testing.T) {
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
@@ -573,11 +597,11 @@ func TestFetchRouteTableUsesSnapshotTime(t *testing.T) {
 	snapTime := time.Now().Add(-10 * time.Second)
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"peer-A": {
+			domaintest.ID("peer-A"): {
 				{
-					Identity:  "peer-A",
-					Origin:    "self",
-					NextHop:   "peer-A",
+					Identity:  domaintest.ID("peer-A"),
+					Origin:    domaintest.ID("self"),
+					NextHop:   domaintest.ID("peer-A"),
 					Hops:      1,
 					SeqNo:     1,
 					Source:    routing.RouteSourceDirect,
@@ -626,11 +650,11 @@ func TestFetchRouteSummaryUsesSnapshotTime(t *testing.T) {
 	snapTime := time.Now().Add(-10 * time.Second)
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"peer-A": {
+			domaintest.ID("peer-A"): {
 				{
-					Identity:  "peer-A",
-					Origin:    "self",
-					NextHop:   "peer-A",
+					Identity:  domaintest.ID("peer-A"),
+					Origin:    domaintest.ID("self"),
+					NextHop:   domaintest.ID("peer-A"),
 					Hops:      1,
 					SeqNo:     1,
 					Source:    routing.RouteSourceDirect,
@@ -667,13 +691,13 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 	// Snapshot taken 10s ago with a route expiring 50s after snapshot time.
 	// TTL should be ~50s (from snapshot), not ~40s (from wall clock).
 	snapTime := time.Now().Add(-10 * time.Second)
-	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	targetID := domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 			targetID: {
 				{
 					Identity:  targetID,
-					Origin:    "self",
+					Origin:    domaintest.ID("self"),
 					NextHop:   targetID,
 					Hops:      1,
 					SeqNo:     1,
@@ -690,7 +714,7 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetchRouteLookup",
-		Args: map[string]interface{}{"identity": string(targetID)},
+		Args: map[string]interface{}{"identity": targetID.String()},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -715,14 +739,14 @@ func TestFetchRouteLookupUsesSnapshotTime(t *testing.T) {
 
 func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 	now := time.Now()
-	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	targetID := domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 			targetID: {
 				{
 					Identity:  targetID,
-					Origin:    "remote",
-					NextHop:   "remote",
+					Origin:    domaintest.ID("remote"),
+					NextHop:   domaintest.ID("remote"),
 					Hops:      3,
 					SeqNo:     1,
 					Source:    routing.RouteSourceAnnouncement,
@@ -730,7 +754,7 @@ func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 				},
 				{
 					Identity:  targetID,
-					Origin:    "self",
+					Origin:    domaintest.ID("self"),
 					NextHop:   targetID,
 					Hops:      1,
 					SeqNo:     5,
@@ -747,7 +771,7 @@ func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetchRouteLookup",
-		Args: map[string]interface{}{"identity": string(targetID)},
+		Args: map[string]interface{}{"identity": targetID.String()},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -772,13 +796,13 @@ func TestFetchRouteLookupSortsByPreference(t *testing.T) {
 
 func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 	now := time.Now()
-	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	targetID := domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 			targetID: {
 				{
 					Identity:  targetID,
-					Origin:    "self",
+					Origin:    domaintest.ID("self"),
 					NextHop:   targetID,
 					Hops:      1,
 					SeqNo:     5,
@@ -787,8 +811,8 @@ func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 				},
 				{
 					Identity:  targetID,
-					Origin:    "remote-withdrawn",
-					NextHop:   "relay",
+					Origin:    domaintest.ID("remote-withdrawn"),
+					NextHop:   domaintest.ID("relay"),
 					Hops:      16, // withdrawn
 					SeqNo:     3,
 					Source:    routing.RouteSourceAnnouncement,
@@ -796,8 +820,8 @@ func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 				},
 				{
 					Identity:  targetID,
-					Origin:    "remote-expired",
-					NextHop:   "relay2",
+					Origin:    domaintest.ID("remote-expired"),
+					NextHop:   domaintest.ID("relay2"),
 					Hops:      2,
 					SeqNo:     4,
 					Source:    routing.RouteSourceAnnouncement,
@@ -813,7 +837,7 @@ func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetchRouteLookup",
-		Args: map[string]interface{}{"identity": string(targetID)},
+		Args: map[string]interface{}{"identity": targetID.String()},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -848,7 +872,7 @@ func TestFetchRouteLookupFiltersWithdrawnAndExpired(t *testing.T) {
 // non-expired) entry.
 func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
 	now := time.Now()
-	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	targetID := domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	// PR 11.27 P2#1: Health travels alongside Routes inside the
 	// cached routing.Snapshot, so the test fixture seeds both
 	// halves in the same struct.
@@ -857,8 +881,8 @@ func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
 			targetID: {
 				{
 					Identity:  targetID,
-					Origin:    "good",
-					NextHop:   "uplink-good",
+					Origin:    domaintest.ID("good"),
+					NextHop:   domaintest.ID("uplink-good"),
 					Hops:      3,
 					SeqNo:     1,
 					Source:    routing.RouteSourceAnnouncement,
@@ -866,8 +890,8 @@ func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
 				},
 				{
 					Identity:  targetID,
-					Origin:    "dead",
-					NextHop:   "uplink-dead",
+					Origin:    domaintest.ID("dead"),
+					NextHop:   domaintest.ID("uplink-dead"),
 					Hops:      2, // would normally win on hops alone
 					SeqNo:     2,
 					Source:    routing.RouteSourceAnnouncement,
@@ -877,7 +901,7 @@ func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
 		},
 		TakenAt: now,
 		Health: []routing.RouteHealthState{
-			{Identity: targetID, Uplink: "uplink-dead", Health: routing.HealthDead},
+			{Identity: targetID, Uplink: domaintest.ID("uplink-dead"), Health: routing.HealthDead},
 		},
 	}, nil)
 
@@ -886,7 +910,7 @@ func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetchRouteLookup",
-		Args: map[string]interface{}{"identity": string(targetID)},
+		Args: map[string]interface{}{"identity": targetID.String()},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -901,7 +925,7 @@ func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
 		t.Fatalf("expected 1 route after Dead filter, got %d: %v", len(routes), routes)
 	}
 	first, _ := routes[0].(map[string]interface{})
-	if nh, _ := first["next_hop"].(string); nh != "uplink-good" {
+	if nh, _ := first["next_hop"].(string); nh != domaintest.ID("uplink-good").String() {
 		t.Fatalf("Dead transit leaked into response: NextHop = %q, want uplink-good", nh)
 	}
 }
@@ -914,13 +938,13 @@ func TestFetchRouteLookupFiltersDeadTransit(t *testing.T) {
 // (PR 11.24 P2#1), so the relay-path RPC view must agree.
 func TestFetchRouteLookupExemptsDirectFromDeadFilter(t *testing.T) {
 	now := time.Now()
-	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	targetID := domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 			targetID: {
 				{
 					Identity:  targetID,
-					Origin:    "self",
+					Origin:    domaintest.ID("self"),
 					NextHop:   targetID,
 					Hops:      1,
 					SeqNo:     1,
@@ -940,7 +964,7 @@ func TestFetchRouteLookupExemptsDirectFromDeadFilter(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetchRouteLookup",
-		Args: map[string]interface{}{"identity": string(targetID)},
+		Args: map[string]interface{}{"identity": targetID.String()},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -1001,22 +1025,22 @@ func TestFetchRouteSummaryExcludesSelfRoute(t *testing.T) {
 	// reachable_identities or direct_peers.
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
-			"nodeA": {
+			domaintest.ID("nodeA"): {
 				// Synthetic local self-route (as injected by Table.Snapshot).
 				{
-					Identity: "nodeA",
-					Origin:   "nodeA",
-					NextHop:  "nodeA",
+					Identity: domaintest.ID("nodeA"),
+					Origin:   domaintest.ID("nodeA"),
+					NextHop:  domaintest.ID("nodeA"),
 					Hops:     0,
 					SeqNo:    0,
 					Source:   routing.RouteSourceLocal,
 				},
 			},
-			"peer-B": {
+			domaintest.ID("peer-B"): {
 				{
-					Identity:  "peer-B",
-					Origin:    "nodeA",
-					NextHop:   "peer-B",
+					Identity:  domaintest.ID("peer-B"),
+					Origin:    domaintest.ID("nodeA"),
+					NextHop:   domaintest.ID("peer-B"),
 					Hops:      1,
 					SeqNo:     3,
 					Source:    routing.RouteSourceDirect,

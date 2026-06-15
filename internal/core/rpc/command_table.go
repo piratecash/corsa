@@ -14,7 +14,6 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/service"
 )
@@ -1017,6 +1016,13 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				if strings.TrimSpace(peer) == "" {
 					return validationError(fmt.Errorf("peer is required"))
 				}
+				recipient, err := domain.ParsePeerIdentity(strings.TrimSpace(peer))
+				if err != nil {
+					return validationError(fmt.Errorf("peer must be a valid peer identity: %w", err))
+				}
+				if recipient.IsZero() {
+					return validationError(fmt.Errorf("peer must not be the zero peer identity"))
+				}
 				messageID, _ := req.Args["message_id"].(string)
 				if strings.TrimSpace(messageID) == "" {
 					return validationError(fmt.Errorf("message_id is required"))
@@ -1025,7 +1031,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				if !targetID.IsValid() {
 					return validationError(fmt.Errorf("message_id must be a valid UUID v4"))
 				}
-				if err := dmRouter.SendMessageDelete(req.Ctx, domain.PeerIdentity(peer), targetID); err != nil {
+				if err := dmRouter.SendMessageDelete(req.Ctx, recipient, targetID); err != nil {
 					return internalError(fmt.Errorf("delete dm: %w", err))
 				}
 				return jsonResponse(map[string]interface{}{
@@ -1049,8 +1055,18 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				}
 				to, _ := req.Args["to"].(string)
 				body, _ := req.Args["body"].(string)
+				// Normalise once so the parse, the reply_to chatlog lookup and
+				// the recipient all use the same canonical address.
+				to = strings.TrimSpace(to)
 				if strings.TrimSpace(to) == "" {
 					return validationError(fmt.Errorf("to is required"))
+				}
+				recipient, err := domain.ParsePeerIdentity(strings.TrimSpace(to))
+				if err != nil {
+					return validationError(fmt.Errorf("to must be a valid peer identity: %w", err))
+				}
+				if recipient.IsZero() {
+					return validationError(fmt.Errorf("to must not be the zero peer identity"))
 				}
 				if strings.TrimSpace(body) == "" {
 					return validationError(fmt.Errorf("body is required"))
@@ -1072,7 +1088,7 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 						return validationError(fmt.Errorf("reply_to references a message that does not exist in this conversation"))
 					}
 				}
-				if err := dmRouter.SendMessage(domain.PeerIdentity(to), domain.OutgoingDM{
+				if err := dmRouter.SendMessage(recipient, domain.OutgoingDM{
 					Body:    body,
 					ReplyTo: replyToID,
 				}); err != nil {
@@ -1169,6 +1185,13 @@ func registerFileAnnounceCommand(t *CommandTable, node NodeProvider, dmRouter DM
 		if strings.TrimSpace(to) == "" {
 			return validationError(fmt.Errorf("to is required"))
 		}
+		recipient, err := domain.ParsePeerIdentity(strings.TrimSpace(to))
+		if err != nil {
+			return validationError(fmt.Errorf("to must be a valid peer identity: %w", err))
+		}
+		if recipient.IsZero() {
+			return validationError(fmt.Errorf("to must not be the zero peer identity"))
+		}
 
 		fileName, _ := req.Args["file_name"].(string)
 		if strings.TrimSpace(fileName) == "" {
@@ -1220,7 +1243,7 @@ func registerFileAnnounceCommand(t *CommandTable, node NodeProvider, dmRouter DM
 		// synchronously. The actual DM delivery and sender mapping
 		// registration happen asynchronously inside SendFileAnnounce —
 		// the response reflects only pre-send validation, not delivery.
-		if err := dmRouter.SendFileAnnounce(domain.PeerIdentity(to), domain.OutgoingDM{
+		if err := dmRouter.SendFileAnnounce(recipient, domain.OutgoingDM{
 			Body:        body,
 			Command:     domain.DMCommandFileAnnounce,
 			CommandData: string(commandData),
@@ -1406,14 +1429,20 @@ func RegisterFileCommands(t *CommandTable, node NodeProvider, dmRouter DMRouterP
 			if identityArg == "" {
 				return validationError(fmt.Errorf("identity is required"))
 			}
-			// Validate the destination address up-front so a typo from the
+			// Parse the destination at the boundary so a typo from the
 			// console does not leak into the file router as an empty/garbled
-			// PeerIdentity. ValidateAddress is the same gate fetchRouteLookup
-			// uses, keeping the two diagnostic surfaces consistent.
-			if err := identity.ValidateAddress(identityArg); err != nil {
-				return validationError(fmt.Errorf("invalid identity format: %w", err))
+			// PeerIdentity. This is the same gate fetchRouteLookup uses,
+			// keeping the two diagnostic surfaces consistent. ParsePeerIdentity
+			// accepts the all-zero 40-hex form with nil error, so the explicit
+			// IsZero gate is required to reject the absent sentinel.
+			target, err := domain.ParsePeerIdentity(identityArg)
+			if err != nil {
+				return validationError(fmt.Errorf("identity must be a valid peer identity: %w", err))
 			}
-			data, err := node.ExplainFileRoute(domain.PeerIdentity(identityArg))
+			if target.IsZero() {
+				return validationError(fmt.Errorf("identity must not be the zero peer identity"))
+			}
+			data, err := node.ExplainFileRoute(target)
 			if err != nil {
 				return internalError(fmt.Errorf("explain file route: %w", err))
 			}
@@ -1443,11 +1472,31 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 			}
 			topic, _ := req.Args["topic"].(string)
 			peerAddress, _ := req.Args["peer_address"].(string)
+			// Normalise once so validation, the IsZero gate and the gateway
+			// call all see the same canonical value (a padded valid identity
+			// must not 400, and whitespace-only must collapse to "all entries"
+			// rather than reaching the gateway as a 500).
+			peerAddress = strings.TrimSpace(peerAddress)
 			if strings.TrimSpace(topic) == "" {
 				topic = "dm"
 			}
-			// peer_address is optional: empty string returns all entries for the topic,
-			// matching the old desktop console behavior (consoleFetchChatlog).
+			// peer_address is optional: empty string returns all entries for the
+			// topic, matching the old desktop console behavior
+			// (consoleFetchChatlog). When non-empty it must be a real peer
+			// identity — validate at the boundary so a malformed or all-zero
+			// value returns 400 here rather than surfacing as a 500 from the
+			// gateway (which keeps its own check as defense-in-depth).
+			// ParsePeerIdentity accepts the all-zero 40-hex form with nil error,
+			// so the explicit IsZero gate is required.
+			if strings.TrimSpace(peerAddress) != "" {
+				peer, err := domain.ParsePeerIdentity(peerAddress)
+				if err != nil {
+					return validationError(fmt.Errorf("peer_address must be a valid peer identity: %w", err))
+				}
+				if peer.IsZero() {
+					return validationError(fmt.Errorf("peer_address must not be the zero peer identity"))
+				}
+			}
 			entries, err := chatlog.FetchChatlog(topic, peerAddress)
 			if err != nil {
 				return internalError(fmt.Errorf("fetch chatlog: %w", err))

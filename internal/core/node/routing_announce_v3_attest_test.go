@@ -31,7 +31,7 @@ func newTestServiceWithIdentity(t *testing.T) (*Service, *identity.Identity) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc := newTestServiceWithRouting(t, id.Address)
+	svc := newTestServiceWithRouting(t, domain.PeerIdentityFromWire(id.Address))
 	svc.identity = id
 	// publicKeyForIdentity reads s.pubKeys under knowledgeMu; the fixture
 	// leaves the map nil by default so add a defensive initialiser.
@@ -59,12 +59,12 @@ func TestSignOwnOriginV3Entries_SignsOnlyOwnIdentityWithEmptySig(t *testing.T) {
 	foreignSig := []byte("forwarded-from-elsewhere")
 	entries := []routing.AnnounceEntry{
 		// Own-origin entry without sig → must be signed.
-		{Identity: domain.PeerIdentity(id.Address), SeqNo: 7, Extra: nil},
+		{Identity: domain.PeerIdentityFromWire(id.Address), SeqNo: 7, Extra: nil},
 		// Own-origin entry with an existing sig → must NOT be overwritten.
-		{Identity: domain.PeerIdentity(id.Address), SeqNo: 8, AttestedSig: foreignSig},
+		{Identity: domain.PeerIdentityFromWire(id.Address), SeqNo: 8, AttestedSig: foreignSig},
 		// Foreign identity → must NOT be signed by us (we have no
 		// authority over another identity's announcements).
-		{Identity: domain.PeerIdentity(idPeerB), SeqNo: 9},
+		{Identity: idPeerB, SeqNo: 9},
 	}
 	out := svc.signOwnOriginV3Entries(entries, 42)
 	if len(out[0].AttestedSig) != ed25519.SignatureSize {
@@ -92,7 +92,7 @@ func TestSignOwnOriginV3Entries_NoPrivateKeyShortCircuits(t *testing.T) {
 	// returns the slice untouched.
 	svc := newTestServiceWithRouting(t, idNodeA)
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idNodeA), SeqNo: 1},
+		{Identity: idNodeA, SeqNo: 1},
 	}
 	out := svc.signOwnOriginV3Entries(entries, 1)
 	if len(out[0].AttestedSig) != 0 {
@@ -121,7 +121,7 @@ func TestVerifyRouteAnnounceV3Sigs_ValidPassesInvalidDropped(t *testing.T) {
 	}
 	sigs := [][]byte{goodSig, badSig}
 
-	outFrames, outSigs, verified := svc.verifyRouteAnnounceV3Sigs(domain.PeerIdentity(idPeerB), frames, sigs, epoch)
+	outFrames, outSigs, verified := svc.verifyRouteAnnounceV3Sigs(idPeerB, frames, sigs, epoch)
 	if len(outFrames) != 1 || outFrames[0].SeqNo != 1 {
 		t.Fatalf("verifier filter wrong: outFrames=%v want only SeqNo=1", outFrames)
 	}
@@ -137,12 +137,12 @@ func TestVerifyRouteAnnounceV3Sigs_UnsignedPassthrough(t *testing.T) {
 	svc, _ := newTestServiceWithIdentity(t)
 
 	frames := []protocol.AnnounceRouteFrame{
-		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
-		{Identity: idPeerB, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
+		{Identity: idPeerB.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 	}
 	sigs := [][]byte{nil, nil}
 
-	outFrames, outSigs, verified := svc.verifyRouteAnnounceV3Sigs(domain.PeerIdentity(idOriginC), frames, sigs, 1)
+	outFrames, outSigs, verified := svc.verifyRouteAnnounceV3Sigs(idOriginC, frames, sigs, 1)
 	if len(outFrames) != 2 || len(outSigs) != 2 || len(verified) != 2 {
 		t.Fatalf("unsigned entries must pass through (got frames=%d sigs=%d verified=%d)", len(outFrames), len(outSigs), len(verified))
 	}
@@ -161,11 +161,11 @@ func TestVerifyRouteAnnounceV3Sigs_SigWithUnknownPubkeyPassthrough(t *testing.T)
 	svc, _ := newTestServiceWithIdentity(t)
 
 	frames := []protocol.AnnounceRouteFrame{
-		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 	}
 	sigs := [][]byte{[]byte("garbage-but-pubkey-unknown")}
 
-	outFrames, outSigs, verified := svc.verifyRouteAnnounceV3Sigs(domain.PeerIdentity(idOriginC), frames, sigs, 1)
+	outFrames, outSigs, verified := svc.verifyRouteAnnounceV3Sigs(idOriginC, frames, sigs, 1)
 	if len(outFrames) != 1 {
 		t.Fatalf("sig with unknown pubkey must pass through; got %d", len(outFrames))
 	}
@@ -189,7 +189,7 @@ func TestHandleRouteAnnounceV3_SignedEntryStoresVerifiedSig(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
-	svc.announceLoop.StateRegistry().MarkReconnected(domain.PeerIdentity(peer.Address),
+	svc.announceLoop.StateRegistry().MarkReconnected(domain.PeerIdentityFromWire(peer.Address),
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshAttestedLinksV1})
 	// Phase 4 P2: verifier is gated on per-session mesh_attested_links_v1
 	// negotiation. Wire a session at the sender address with the cap so
@@ -198,7 +198,7 @@ func TestHandleRouteAnnounceV3_SignedEntryStoresVerifiedSig(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(peer.Address),
+		peerIdentity: domain.PeerIdentityFromWire(peer.Address),
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshAttestedLinksV1, domain.CapMeshRelayV1},
 	}
 	svc.peerMu.Unlock()
@@ -214,9 +214,9 @@ func TestHandleRouteAnnounceV3_SignedEntryStoresVerifiedSig(t *testing.T) {
 			{Identity: peer.Address, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sigBytes)},
 		},
 	}
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(peer.Address), senderAddr, frame)
+	svc.handleRouteAnnounceV3(domain.PeerIdentityFromWire(peer.Address), senderAddr, frame)
 
-	got := svc.routingTable.Lookup(domain.PeerIdentity(peer.Address))
+	got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(peer.Address))
 	if len(got) == 0 {
 		t.Fatalf("verified entry was not applied to the table")
 	}
@@ -241,7 +241,7 @@ func TestHandleRouteAnnounceV3_InvalidSignatureDropsEntry(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
-	svc.announceLoop.StateRegistry().MarkReconnected(domain.PeerIdentity(peer.Address),
+	svc.announceLoop.StateRegistry().MarkReconnected(domain.PeerIdentityFromWire(peer.Address),
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshAttestedLinksV1})
 	// Phase 4 P2: verifier is gated on per-session
 	// mesh_attested_links_v1 negotiation — wire a session so the
@@ -250,7 +250,7 @@ func TestHandleRouteAnnounceV3_InvalidSignatureDropsEntry(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(peer.Address),
+		peerIdentity: domain.PeerIdentityFromWire(peer.Address),
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshAttestedLinksV1, domain.CapMeshRelayV1},
 	}
 	svc.peerMu.Unlock()
@@ -267,9 +267,9 @@ func TestHandleRouteAnnounceV3_InvalidSignatureDropsEntry(t *testing.T) {
 			{Identity: peer.Address, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sigBytes)},
 		},
 	}
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(peer.Address), senderAddr, frame)
+	svc.handleRouteAnnounceV3(domain.PeerIdentityFromWire(peer.Address), senderAddr, frame)
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(peer.Address)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(peer.Address)); len(got) > 0 {
 		t.Fatalf("invalid-signature entry must NOT reach storage; got %d entries", len(got))
 	}
 }
@@ -293,7 +293,7 @@ func TestHandleRouteAnnounceV3_NoAttestedCapPreservesInvalidSigInformational(t *
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
-	svc.announceLoop.StateRegistry().MarkReconnected(domain.PeerIdentity(peer.Address),
+	svc.announceLoop.StateRegistry().MarkReconnected(domain.PeerIdentityFromWire(peer.Address),
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 	// Wire a session WITHOUT mesh_attested_links_v1 — only v1+v3+relay.
 	// peerSupportsAttestedLinks must return false → verifier skipped.
@@ -301,7 +301,7 @@ func TestHandleRouteAnnounceV3_NoAttestedCapPreservesInvalidSigInformational(t *
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(peer.Address),
+		peerIdentity: domain.PeerIdentityFromWire(peer.Address),
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1},
 	}
 	svc.peerMu.Unlock()
@@ -322,9 +322,9 @@ func TestHandleRouteAnnounceV3_NoAttestedCapPreservesInvalidSigInformational(t *
 			{Identity: peer.Address, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sigBytes)},
 		},
 	}
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(peer.Address), senderAddr, frame)
+	svc.handleRouteAnnounceV3(domain.PeerIdentityFromWire(peer.Address), senderAddr, frame)
 
-	got := svc.routingTable.Lookup(domain.PeerIdentity(peer.Address))
+	got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(peer.Address))
 	if len(got) == 0 {
 		t.Fatalf("entry must reach storage when attested-links cap is not negotiated (verifier is skipped)")
 	}

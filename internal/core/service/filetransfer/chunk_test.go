@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestHandleChunkResponse_RejectsOversizedChunk verifies that a chunk_response
@@ -23,7 +24,7 @@ func TestHandleChunkResponse_RejectsOversizedChunk(t *testing.T) {
 	partialDir := filepath.Join(downloadDir, "partial")
 	_ = os.MkdirAll(partialDir, 0o700)
 
-	sender := domain.PeerIdentity("malicious-sender")
+	sender := domaintest.ID("malicious-sender")
 	fileID := domain.FileID("oversized-test")
 	chunkSize := uint32(1024) // 1 KB requested
 
@@ -86,7 +87,7 @@ func TestHandleChunkResponse_AcceptsExactSizeChunk(t *testing.T) {
 	partialDir := filepath.Join(downloadDir, "partial")
 	_ = os.MkdirAll(partialDir, 0o700)
 
-	sender := domain.PeerIdentity("good-sender")
+	sender := domaintest.ID("good-sender")
 	fileID := domain.FileID("exact-size-test")
 	chunkSize := uint32(512)
 	fileSize := uint64(2048)
@@ -146,7 +147,7 @@ func TestHandleChunkResponse_AcceptsSmallerLastChunk(t *testing.T) {
 	partialDir := filepath.Join(downloadDir, "partial")
 	_ = os.MkdirAll(partialDir, 0o700)
 
-	sender := domain.PeerIdentity("good-sender")
+	sender := domaintest.ID("good-sender")
 	fileID := domain.FileID("small-last-chunk")
 	chunkSize := uint32(1024)
 	fileSize := uint64(100) // entire file smaller than one chunk
@@ -196,7 +197,7 @@ func TestHandleChunkResponse_RejectsOneByteOverLimit(t *testing.T) {
 	partialDir := filepath.Join(downloadDir, "partial")
 	_ = os.MkdirAll(partialDir, 0o700)
 
-	sender := domain.PeerIdentity("boundary-sender")
+	sender := domaintest.ID("boundary-sender")
 	fileID := domain.FileID("boundary-test")
 	chunkSize := uint32(256)
 
@@ -253,7 +254,7 @@ func TestHandleChunkResponse_RejectsEmptyChunkBeforeComplete(t *testing.T) {
 	partialDir := filepath.Join(downloadDir, "partial")
 	_ = os.MkdirAll(partialDir, 0o700)
 
-	sender := domain.PeerIdentity("livelock-sender")
+	sender := domaintest.ID("livelock-sender")
 	fileID := domain.FileID("empty-chunk-test")
 	chunkSize := uint32(1024)
 	fileSize := uint64(4096)
@@ -324,7 +325,7 @@ func TestHandleChunkResponse_RejectsUndersizedNonFinalChunk(t *testing.T) {
 	partialDir := filepath.Join(downloadDir, "partial")
 	_ = os.MkdirAll(partialDir, 0o700)
 
-	sender := domain.PeerIdentity("truncating-sender")
+	sender := domaintest.ID("truncating-sender")
 	fileID := domain.FileID("undersize-chunk-test")
 	chunkSize := uint32(1024)
 	fileSize := uint64(4096)
@@ -383,7 +384,7 @@ func TestHandleChunkResponse_AcceptsUndersizedFinalChunk(t *testing.T) {
 	partialDir := filepath.Join(downloadDir, "partial")
 	_ = os.MkdirAll(partialDir, 0o700)
 
-	sender := domain.PeerIdentity("final-chunk-sender")
+	sender := domaintest.ID("final-chunk-sender")
 	fileID := domain.FileID("final-undersize-chunk")
 	chunkSize := uint32(1024)
 	fileSize := uint64(500) // entire file is smaller than one chunk

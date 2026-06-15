@@ -42,32 +42,32 @@ func TestHandleRouteAnnounceV3_FullAppliesEntriesAndSynthesisesOrigin(t *testing
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 
 	frame := protocol.RouteAnnounceV3Frame{
 		Kind:  protocol.RouteAnnounceV3KindFull,
 		Epoch: 1,
 		Entries: []protocol.RouteAnnounceV3Entry{
-			{Identity: idTargetX, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(idPeerB, domain.PeerAddress("addr-peerB"), frame)
 
-	got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	got := svc.routingTable.Lookup(idTargetX)
 	if len(got) == 0 {
 		t.Fatalf("v3 full frame did not land in the routing table")
 	}
 	// Hops = wire 1 + receiver convention 1 = 2; NextHop is the sender.
-	if got[0].NextHop != domain.PeerIdentity(idPeerB) {
+	if got[0].NextHop != idPeerB {
 		t.Fatalf("NextHop synthesised wrong: got %q want %q", got[0].NextHop, idPeerB)
 	}
 	if got[0].Hops != 2 {
 		t.Fatalf("hops: got %d want 2 (wire 1 + receiver +1)", got[0].Hops)
 	}
 	// Full kind must establish the receive-side baseline.
-	if state := registry.Get(domain.PeerIdentity(idPeerB)); state == nil || !state.HasReceivedBaseline() {
+	if state := registry.Get(idPeerB); state == nil || !state.HasReceivedBaseline() {
 		t.Fatalf("v3 full must establish receive baseline")
 	}
 }
@@ -77,23 +77,23 @@ func TestHandleRouteAnnounceV3_DeltaBeforeBaselineRequestsResync(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := v3PeerSession(t, svc, senderAddr, domain.PeerIdentity(idPeerB))
+	sendCh := v3PeerSession(t, svc, senderAddr, idPeerB)
 
 	frame := protocol.RouteAnnounceV3Frame{
 		Kind:  protocol.RouteAnnounceV3KindDelta,
 		Epoch: 1,
 		Entries: []protocol.RouteAnnounceV3Entry{
-			{Identity: idTargetX, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), senderAddr, frame)
+	svc.handleRouteAnnounceV3(idPeerB, senderAddr, frame)
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("delta before baseline must NOT be applied (entries=%d)", len(got))
 	}
 	select {
@@ -122,11 +122,11 @@ func TestHandleRouteAnnounceV3_QuarantinedSender_DropsSilentlyNoResync(t *testin
 	// asserting the handler does not even reach GetOrCreate, so the
 	// registry must start empty for this peer.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(idPeerB), "test", time.Now())
+	svc.armRouteQuarantineLocked(idPeerB, "test", time.Now())
 	svc.peerMu.Unlock()
 
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := v3PeerSession(t, svc, senderAddr, domain.PeerIdentity(idPeerB))
+	sendCh := v3PeerSession(t, svc, senderAddr, idPeerB)
 
 	// Delta frame — the worst-case for our gate. Without the top-level
 	// quarantine check, the baseline-gate branch would call
@@ -135,14 +135,14 @@ func TestHandleRouteAnnounceV3_QuarantinedSender_DropsSilentlyNoResync(t *testin
 		Kind:  protocol.RouteAnnounceV3KindDelta,
 		Epoch: 1,
 		Entries: []protocol.RouteAnnounceV3Entry{
-			{Identity: idTargetX, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), senderAddr, frame)
+	svc.handleRouteAnnounceV3(idPeerB, senderAddr, frame)
 
 	// 1. Delta must NOT be applied.
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("quarantined v3 sender bypassed gate; entries applied: %d", len(got))
 	}
 	// 2. No wire frame must have been emitted on the sender's send
@@ -154,7 +154,7 @@ func TestHandleRouteAnnounceV3_QuarantinedSender_DropsSilentlyNoResync(t *testin
 	}
 	// 3. AnnouncePeerState must not exist — top-level gate fires
 	//    before GetOrCreate/ObserveV3Epoch.
-	if state := svc.announceLoop.StateRegistry().Get(domain.PeerIdentity(idPeerB)); state != nil {
+	if state := svc.announceLoop.StateRegistry().Get(idPeerB); state != nil {
 		t.Fatalf("quarantine gate must short-circuit before GetOrCreate; per-peer state was created")
 	}
 }
@@ -164,25 +164,25 @@ func TestHandleRouteAnnounceV3_StaleEpochDropped(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 
 	// Advance the watermark to epoch 5 with a full frame (also applies).
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), domain.PeerAddress("addr-peerB"),
+	svc.handleRouteAnnounceV3(idPeerB, domain.PeerAddress("addr-peerB"),
 		protocol.RouteAnnounceV3Frame{Kind: protocol.RouteAnnounceV3KindFull, Epoch: 5})
 
 	// A later frame with a lower epoch is a stale-process replay: dropped
 	// before any table mutation regardless of its entries.
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), domain.PeerAddress("addr-peerB"),
+	svc.handleRouteAnnounceV3(idPeerB, domain.PeerAddress("addr-peerB"),
 		protocol.RouteAnnounceV3Frame{
 			Kind:  protocol.RouteAnnounceV3KindFull,
 			Epoch: 2,
 			Entries: []protocol.RouteAnnounceV3Entry{
-				{Identity: idTargetX, Hops: 1, SeqNo: 1},
+				{Identity: idTargetX.String(), Hops: 1, SeqNo: 1},
 			},
 		})
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("stale-epoch frame must be dropped, but %d entries were applied", len(got))
 	}
 }
@@ -196,26 +196,26 @@ func TestHandleRouteAnnounceV3_EpochResetFullRebaselinesWithoutResync(t *testing
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := v3PeerSession(t, svc, senderAddr, domain.PeerIdentity(idPeerB))
+	sendCh := v3PeerSession(t, svc, senderAddr, idPeerB)
 
 	// Seed watermark + baseline at epoch 1.
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(idPeerB, senderAddr,
 		protocol.RouteAnnounceV3Frame{Kind: protocol.RouteAnnounceV3KindFull, Epoch: 1})
 
 	// Higher epoch + full → re-baseline and apply, no resync.
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(idPeerB, senderAddr,
 		protocol.RouteAnnounceV3Frame{
 			Kind:  protocol.RouteAnnounceV3KindFull,
 			Epoch: 9,
 			Entries: []protocol.RouteAnnounceV3Entry{
-				{Identity: idTargetX, Hops: 1, SeqNo: 1},
+				{Identity: idTargetX.String(), Hops: 1, SeqNo: 1},
 			},
 		})
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) == 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) == 0 {
 		t.Fatalf("epoch-reset full frame must be applied")
 	}
 	select {
@@ -234,26 +234,26 @@ func TestHandleRouteAnnounceV3_EpochResetDeltaRequestsResync(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := v3PeerSession(t, svc, senderAddr, domain.PeerIdentity(idPeerB))
+	sendCh := v3PeerSession(t, svc, senderAddr, idPeerB)
 
 	// Seed watermark + baseline at epoch 1.
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(idPeerB, senderAddr,
 		protocol.RouteAnnounceV3Frame{Kind: protocol.RouteAnnounceV3KindFull, Epoch: 1})
 
 	// Higher epoch + delta → baseline invalid → request_resync, delta dropped.
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), senderAddr,
+	svc.handleRouteAnnounceV3(idPeerB, senderAddr,
 		protocol.RouteAnnounceV3Frame{
 			Kind:  protocol.RouteAnnounceV3KindDelta,
 			Epoch: 9,
 			Entries: []protocol.RouteAnnounceV3Entry{
-				{Identity: idTargetX, Hops: 1, SeqNo: 1},
+				{Identity: idTargetX.String(), Hops: 1, SeqNo: 1},
 			},
 		})
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("epoch-reset delta must NOT be applied (entries=%d)", len(got))
 	}
 	select {

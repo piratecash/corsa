@@ -32,8 +32,8 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "m-stale-table",
 		ForwardedTo:          domain.PeerAddress("addr-B"),
-		Recipient:            domain.PeerIdentity(idTargetX),
-		RouteOrigin:          domain.PeerIdentity(idTargetX), // non-empty → table-routed stale branch
+		Recipient:            idTargetX,
+		RouteOrigin:          idTargetX, // non-empty → table-routed stale branch
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
 		HopAckRemainingTicks: 5,
 		HopAckObserved:       false,
@@ -73,8 +73,8 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "m-stale-gossip",
 		ForwardedTo:          domain.PeerAddress("addr-G"),
-		Recipient:            domain.PeerIdentity(idTargetX),
-		RouteOrigin:          "", // empty → table→gossip fallback stale branch
+		Recipient:            idTargetX,
+		RouteOrigin:          domain.PeerIdentity{}, // empty → table→gossip fallback stale branch
 		AbandonedForwardedTo: []domain.PeerAddress{"addr-A"},
 		HopAckRemainingTicks: 5,
 		HopAckObserved:       false,

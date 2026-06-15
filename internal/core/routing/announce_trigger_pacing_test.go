@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -33,16 +34,16 @@ import (
 // test overrides the interval).
 func pacingFixture(t *testing.T, spacing, interval time.Duration) (*routing.Table, *senderRecorder, *routing.AnnounceLoop, func()) {
 	t.Helper()
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -69,9 +70,9 @@ func pacingFixture(t *testing.T, spacing, interval time.Duration) (*routing.Tabl
 func addTransitRoute(t *testing.T, table *routing.Table, identity string, seq uint64) {
 	t.Helper()
 	status, err := table.UpdateRoute(routing.RouteEntry{
-		Identity: routing.PeerIdentity(identity),
-		Origin:   "peer-B",
-		NextHop:  "peer-B",
+		Identity: domaintest.ID(identity),
+		Origin:   domaintest.ID("peer-B"),
+		NextHop:  domaintest.ID("peer-B"),
 		Hops:     2,
 		SeqNo:    seq,
 		Source:   routing.RouteSourceAnnouncement,

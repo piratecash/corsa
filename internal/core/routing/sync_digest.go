@@ -71,11 +71,11 @@ type DigestEntry struct {
 // gathering that feeds entries in.
 func ComputeSyncDigest(entries []DigestEntry) string {
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Identity < entries[j].Identity
+		return entries[i].Identity.Compare(entries[j].Identity) < 0
 	})
 	h := sha256.New()
 	for _, e := range entries {
-		h.Write([]byte(string(e.Identity)))
+		h.Write([]byte(e.Identity.String()))
 		h.Write([]byte{':'})
 		h.Write([]byte(strconv.FormatUint(e.MaxSeqNo, 10)))
 		h.Write([]byte{'\n'})
@@ -224,7 +224,7 @@ func (t *Table) AnnounceDigestFor(peer PeerIdentity) (string, uint32) {
 // disconnect events firing for the same peer in quick succession)
 // is harmless — the second overwrite refreshes the TTL anchor.
 func (t *Table) RecordPeerDigestSnapshot(peer PeerIdentity, digest string, entryCount uint32, generatedAt time.Time) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	t.mu.Lock()
@@ -257,7 +257,7 @@ func (t *Table) RecordPeerDigestSnapshot(peer PeerIdentity, digest string, entry
 //
 // Lock contract: acquires t.mu in W mode (we mutate the cache).
 func (t *Table) ConsumePeerDigestSnapshot(peer PeerIdentity, now time.Time) (digest string, entryCount uint32, generatedAt time.Time, ok bool) {
-	if peer == "" {
+	if peer.IsZero() {
 		return "", 0, time.Time{}, false
 	}
 	t.mu.Lock()
@@ -286,7 +286,7 @@ func (t *Table) ConsumePeerDigestSnapshot(peer PeerIdentity, now time.Time) (dig
 //
 // Lock contract: acquires t.mu in W mode.
 func (t *Table) PurgeDigestSnapshot(peer PeerIdentity) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	t.mu.Lock()

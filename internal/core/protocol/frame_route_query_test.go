@@ -3,6 +3,8 @@ package protocol
 import (
 	"strings"
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestRouteQueryFrame_MarshalUnmarshalRoundTrip — Marshal+Unmarshal
@@ -12,7 +14,7 @@ func TestRouteQueryFrame_MarshalUnmarshalRoundTrip(t *testing.T) {
 	orig := RouteQueryFrame{
 		Type:           RouteQueryFrameType,
 		QueryID:        87654321,
-		TargetIdentity: "alice-fp",
+		TargetIdentity: domaintest.ID("alice-fp"),
 		MaxHops:        8,
 		IssuedAt:       "2026-05-23T12:00:00Z",
 	}
@@ -32,7 +34,7 @@ func TestRouteQueryFrame_MarshalUnmarshalRoundTrip(t *testing.T) {
 // TestRouteQueryFrame_MarshalSetsTypeWhenEmpty — auto-fill behaviour
 // for senders that forget the literal type string.
 func TestRouteQueryFrame_MarshalSetsTypeWhenEmpty(t *testing.T) {
-	orig := RouteQueryFrame{QueryID: 1, TargetIdentity: "x"}
+	orig := RouteQueryFrame{QueryID: 1, TargetIdentity: domaintest.ID("x")}
 	data, err := MarshalRouteQueryFrame(orig)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -75,9 +77,9 @@ func TestRouteQueryResponseFrame_MarshalUnmarshalRoundTripFound(t *testing.T) {
 	orig := RouteQueryResponseFrame{
 		Type:           RouteQueryResponseFrameType,
 		QueryID:        87654321,
-		TargetIdentity: "alice-fp",
+		TargetIdentity: domaintest.ID("alice-fp"),
 		Found:          true,
-		BestUplink:     "uplink-fp",
+		BestUplink:     domaintest.ID("uplink-fp"),
 		BestHops:       2,
 		BestSeqNo:      55,
 		IssuedAt:       "2026-05-23T12:00:01Z",
@@ -102,12 +104,16 @@ func TestRouteQueryResponseFrame_FoundFalseHasEmptyBestFields(t *testing.T) {
 	orig := RouteQueryResponseFrame{
 		Type:           RouteQueryResponseFrameType,
 		QueryID:        99,
-		TargetIdentity: "unknown-fp",
+		TargetIdentity: domaintest.ID("unknown-fp"),
 		Found:          false,
 	}
 	data, err := MarshalRouteQueryResponseFrame(orig)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
+	}
+	// Wire contract: best_uplink must be ABSENT (not "") when Found=false.
+	if strings.Contains(string(data), "best_uplink") {
+		t.Fatalf("Found=false must omit best_uplink on the wire, got: %s", data)
 	}
 	got, err := UnmarshalRouteQueryResponseFrame(data)
 	if err != nil {
@@ -116,7 +122,7 @@ func TestRouteQueryResponseFrame_FoundFalseHasEmptyBestFields(t *testing.T) {
 	if got != orig {
 		t.Fatalf("round-trip mismatch: got %+v, want %+v", got, orig)
 	}
-	if got.BestUplink != "" || got.BestHops != 0 || got.BestSeqNo != 0 {
+	if !got.BestUplink.IsZero() || got.BestHops != 0 || got.BestSeqNo != 0 {
 		t.Fatalf("Found=false should zero best_*: got %+v", got)
 	}
 }
@@ -124,7 +130,7 @@ func TestRouteQueryResponseFrame_FoundFalseHasEmptyBestFields(t *testing.T) {
 // TestRouteQueryResponseFrame_MarshalSetsTypeWhenEmpty — mirror of
 // the request-side auto-fill behaviour.
 func TestRouteQueryResponseFrame_MarshalSetsTypeWhenEmpty(t *testing.T) {
-	orig := RouteQueryResponseFrame{QueryID: 1, TargetIdentity: "x", Found: false}
+	orig := RouteQueryResponseFrame{QueryID: 1, TargetIdentity: domaintest.ID("x"), Found: false}
 	data, err := MarshalRouteQueryResponseFrame(orig)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -160,7 +166,7 @@ func TestRouteQueryFrame_OptionalFieldsOmitemptyOnWire(t *testing.T) {
 	orig := RouteQueryFrame{
 		Type:           RouteQueryFrameType,
 		QueryID:        1,
-		TargetIdentity: "x",
+		TargetIdentity: domaintest.ID("x"),
 	}
 	data, err := MarshalRouteQueryFrame(orig)
 	if err != nil {

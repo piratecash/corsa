@@ -109,7 +109,7 @@ func UnmarshalRouteProbeFrame(data []byte) (RouteProbeFrame, error) {
 	if f.Type != RouteProbeFrameType {
 		return RouteProbeFrame{}, fmt.Errorf("unexpected frame type %q, expected %q", f.Type, RouteProbeFrameType)
 	}
-	if f.TargetIdentity == "" {
+	if f.TargetIdentity.IsZero() {
 		return RouteProbeFrame{}, fmt.Errorf("route probe frame: empty target_identity")
 	}
 	return f, nil

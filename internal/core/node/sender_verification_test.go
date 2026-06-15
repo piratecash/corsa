@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -23,7 +24,7 @@ func TestIsVerifiedSender_OwnIdentity(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
-	if !svc.isVerifiedSender(svc.identity.Address, "") {
+	if !svc.isVerifiedSender(svc.identity.Address, domain.PeerIdentity{}) {
 		t.Fatal("own identity must always be accepted as verified sender")
 	}
 }
@@ -34,8 +35,8 @@ func TestIsVerifiedSender_RelayPeerIdentity(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
-	peerID := domain.PeerIdentity("peer-identity-abc")
-	if !svc.isVerifiedSender(string(peerID), peerID) {
+	peerID := domaintest.ID("peer-identity-abc")
+	if !svc.isVerifiedSender(peerID.String(), peerID) {
 		t.Fatal("sender matching relay peer identity must be accepted")
 	}
 }
@@ -55,7 +56,7 @@ func TestIsVerifiedSender_KnownPubKey(t *testing.T) {
 	svc.pubKeys[knownID.Address] = identity.PublicKeyBase64(knownID.PublicKey)
 	svc.knowledgeMu.Unlock()
 
-	if !svc.isVerifiedSender(knownID.Address, "unrelated-peer") {
+	if !svc.isVerifiedSender(knownID.Address, domaintest.ID("unrelated-peer")) {
 		t.Fatal("sender with registered pubKey must be accepted")
 	}
 }
@@ -66,7 +67,7 @@ func TestIsVerifiedSender_UnknownSenderRejected(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
-	if svc.isVerifiedSender("forged-unknown-address", "real-peer-identity") {
+	if svc.isVerifiedSender("forged-unknown-address", domaintest.ID("real-peer-identity")) {
 		t.Fatal("unknown sender with no pubKey must be rejected")
 	}
 }
@@ -94,7 +95,7 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("inbound-peer-1"),
-		Identity: domain.PeerIdentity(peerID.Address),
+		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -165,7 +166,7 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(2), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-2"),
-		Identity: domain.PeerIdentity(peerID.Address),
+		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -215,7 +216,7 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(3), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-3"),
-		Identity: domain.PeerIdentity(peerID.Address),
+		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -266,7 +267,7 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(4), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-4"),
-		Identity: domain.PeerIdentity(peerID.Address),
+		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -416,7 +417,7 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(5), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("ban-test-peer"),
-		Identity: domain.PeerIdentity(peerID.Address),
+		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -506,7 +507,7 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(17), peerConn, netcore.Inbound, netcore.Options{
 		Address:  relayAddr,
-		Identity: domain.PeerIdentity(peerID.Address),
+		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
 	svc.setTestConnEntryLocked(peerConn, &connEntry{core: pc})
 	svc.peerMu.Unlock()

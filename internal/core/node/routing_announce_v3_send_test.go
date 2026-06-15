@@ -20,8 +20,8 @@ import (
 
 func TestBuildRouteAnnounceV3Frame_RoundTripPreservesEntries(t *testing.T) {
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 2, SeqNo: 7, Extra: json.RawMessage(`{"k":"v"}`)},
-		{Identity: domain.PeerIdentity(idPeerB), Origin: domain.PeerIdentity(idOriginC), Hops: int(routing.HopsInfinity), SeqNo: 8},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 2, SeqNo: 7, Extra: json.RawMessage(`{"k":"v"}`)},
+		{Identity: idPeerB, Origin: idOriginC, Hops: int(routing.HopsInfinity), SeqNo: 8},
 	}
 
 	frame, err := buildRouteAnnounceV3Frame(protocol.RouteAnnounceV3KindFull, 42, entries)
@@ -46,7 +46,7 @@ func TestBuildRouteAnnounceV3Frame_RoundTripPreservesEntries(t *testing.T) {
 	if len(got.Entries) != 2 {
 		t.Fatalf("entries: got %d want 2", len(got.Entries))
 	}
-	if got.Entries[0].Identity != idTargetX || got.Entries[0].Hops != 2 || got.Entries[0].SeqNo != 7 {
+	if got.Entries[0].Identity != idTargetX.String() || got.Entries[0].Hops != 2 || got.Entries[0].SeqNo != 7 {
 		t.Fatalf("entry 0: %+v", got.Entries[0])
 	}
 	if string(got.Entries[0].Extra) != `{"k":"v"}` {
@@ -67,7 +67,7 @@ func TestBuildRouteAnnounceV3Frame_HopsClampedAtHopsInfinity(t *testing.T) {
 	// HopsInfinity so it still reads as a withdrawal after type narrowing
 	// (uint8 wrap would otherwise turn 257 into 1 — a live route).
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 257},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 257},
 	}
 	frame, err := buildRouteAnnounceV3Frame(protocol.RouteAnnounceV3KindDelta, 1, entries)
 	if err != nil {
@@ -99,8 +99,8 @@ func TestChunkRouteAnnounceV3_NilAndEmpty(t *testing.T) {
 
 func TestChunkRouteAnnounceV3_SmallSetSingleChunk(t *testing.T) {
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
-		{Identity: domain.PeerIdentity(idPeerB), Origin: domain.PeerIdentity(idOriginC), Hops: 2, SeqNo: 2},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		{Identity: idPeerB, Origin: idOriginC, Hops: 2, SeqNo: 2},
 	}
 	chunks, skipped := chunkRouteAnnounceV3EntriesBySize(entries, protocol.RouteAnnounceV3KindFull, 1, protocol.MaxFrameLine)
 	if len(chunks) != 1 || len(chunks[0]) != 2 {
@@ -115,8 +115,8 @@ func TestChunkRouteAnnounceV3_SplitsWhenBudgetTight(t *testing.T) {
 	// Force a split with a tight per-frame budget. Two small entries with a
 	// budget that fits exactly one entry per chunk → two chunks.
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
-		{Identity: domain.PeerIdentity(idPeerB), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		{Identity: idPeerB, Origin: idOriginC, Hops: 1, SeqNo: 1},
 	}
 	// Measure a single-entry frame to size the budget at exactly that.
 	frame, err := buildRouteAnnounceV3Frame(protocol.RouteAnnounceV3KindFull, 1, entries[:1])
@@ -138,7 +138,7 @@ func TestChunkRouteAnnounceV3_SkipsSingleEntryOverBudget(t *testing.T) {
 	// chunked further — reported via skipped and dropped from chunks.
 	huge := json.RawMessage(strings.Repeat("a", 1024))
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1, Extra: huge},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1, Extra: huge},
 	}
 	chunks, skipped := chunkRouteAnnounceV3EntriesBySize(entries, protocol.RouteAnnounceV3KindFull, 1, 128)
 	if len(chunks) != 0 {
@@ -158,7 +158,7 @@ func TestSendRouteAnnounceV3_EmitsRawLineFrameOverCapableSession(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
@@ -166,7 +166,7 @@ func TestSendRouteAnnounceV3_EmitsRawLineFrameOverCapableSession(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 	}
 	ok := svc.SendRouteAnnounceV3(context.Background(), senderAddr, protocol.RouteAnnounceV3KindFull, 7, entries)
 	if !ok {
@@ -185,7 +185,7 @@ func TestSendRouteAnnounceV3_EmitsRawLineFrameOverCapableSession(t *testing.T) {
 		if parsed.Kind != protocol.RouteAnnounceV3KindFull || parsed.Epoch != 7 || len(parsed.Entries) != 1 {
 			t.Fatalf("parsed header/entries wrong: %+v", parsed)
 		}
-		if parsed.Entries[0].Identity != idTargetX || parsed.Entries[0].SeqNo != 1 {
+		if parsed.Entries[0].Identity != idTargetX.String() || parsed.Entries[0].SeqNo != 1 {
 			t.Fatalf("entry payload wrong: %+v", parsed.Entries[0])
 		}
 	case <-time.After(100 * time.Millisecond):
@@ -202,7 +202,7 @@ func TestSendRouteAnnounceV3_DropsAndReturnsFalseWhenPeerLacksV3Cap(t *testing.T
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		// v1+v2+relay — no v3 cap. The v3-gated send must refuse to ship
 		// to a session that did not negotiate the compact frame.
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
@@ -212,7 +212,7 @@ func TestSendRouteAnnounceV3_DropsAndReturnsFalseWhenPeerLacksV3Cap(t *testing.T
 	svc.peerMu.Unlock()
 
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 	}
 	if svc.SendRouteAnnounceV3(context.Background(), senderAddr, protocol.RouteAnnounceV3KindFull, 1, entries) {
 		t.Fatalf("SendRouteAnnounceV3 must return false when peer lacks v3 cap")

@@ -286,8 +286,11 @@ func announceEntryWireEstimate(e routing.AnnounceEntry) int {
 	// "extra":}, the trailing comma, and worst-case 20-digit hops/seq_no.
 	const fixedSlack = 160
 	n := fixedSlack
-	n += len(e.Identity) + jsonStringEscapeOverhead(e.Identity)
-	n += len(e.Origin) + jsonStringEscapeOverhead(e.Origin)
+	// A 20-byte fingerprint serialises as 40-char lowercase hex, which
+	// never needs JSON escaping — so the wire cost is exactly 2×len, no
+	// escape overhead.
+	n += 2 * len(e.Identity)
+	n += 2 * len(e.Origin)
 	n += len(e.Extra) + jsonStringEscapeOverhead(e.Extra)
 	if len(e.AttestedSig) > 0 {
 		// v3 only: base64 of the sig (~4/3 expansion) plus its "sig":"" wrapper.
@@ -423,8 +426,8 @@ func logSkippedAnnounceEntries(peerAddress domain.PeerAddress, routes []routing.
 		log.Error().
 			Str("peer_address", string(peerAddress)).
 			Str("wire_type", wireType).
-			Str("route_identity", string(routes[idx].Identity)).
-			Str("route_origin", string(routes[idx].Origin)).
+			Str("route_identity", routes[idx].Identity.String()).
+			Str("route_origin", routes[idx].Origin.String()).
 			Msg("announce_routes_entry_oversize_dropped")
 	}
 }
@@ -595,8 +598,8 @@ func buildAnnounceFrame(kind announceWireType, entries []routing.AnnounceEntry) 
 	wireRoutes := make([]protocol.AnnounceRouteFrame, len(entries))
 	for i, r := range entries {
 		wireRoutes[i] = protocol.AnnounceRouteFrame{
-			Identity: string(r.Identity),
-			Origin:   string(r.Origin),
+			Identity: r.Identity.String(),
+			Origin:   r.Origin.String(),
 			Hops:     r.Hops,
 			SeqNo:    r.SeqNo,
 			Extra:    r.Extra,
@@ -639,7 +642,7 @@ func buildRouteAnnounceV3Frame(kind string, epoch uint64, entries []routing.Anno
 	wireEntries := make([]protocol.RouteAnnounceV3Entry, len(entries))
 	for i, e := range entries {
 		wireEntries[i] = protocol.RouteAnnounceV3Entry{
-			Identity: string(e.Identity),
+			Identity: e.Identity.String(),
 			Hops:     hopsIntToUint8(e.Hops),
 			SeqNo:    e.SeqNo,
 			Extra:    e.Extra,
@@ -896,11 +899,11 @@ func (s *Service) signOwnOriginV3Entries(entries []routing.AnnounceEntry, epoch 
 		if len(entries[i].AttestedSig) > 0 {
 			continue
 		}
-		if string(entries[i].Identity) != localIdentity {
+		if entries[i].Identity.String() != localIdentity {
 			continue
 		}
 		v3e := protocol.RouteAnnounceV3Entry{
-			Identity: string(entries[i].Identity),
+			Identity: entries[i].Identity.String(),
 			SeqNo:    entries[i].SeqNo,
 			Extra:    entries[i].Extra,
 		}
@@ -930,12 +933,12 @@ func (s *Service) signOwnOriginV3Entries(entries []routing.AnnounceEntry, epoch 
 // arbitrary; the marshal step rejects unknown reasons. Returns true
 // when the frame was enqueued.
 func (s *Service) SendRoutePoison(ctx context.Context, peerAddress domain.PeerAddress, identity domain.PeerIdentity, reason string) bool {
-	if peerAddress == "" || identity == "" {
+	if peerAddress == "" || identity.IsZero() {
 		return false
 	}
 	frame := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: string(identity),
+		Identity: identity.String(),
 		Reason:   reason,
 		IssuedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -949,7 +952,7 @@ func (s *Service) SendRoutePoison(ctx context.Context, peerAddress domain.PeerAd
 		log.Warn().
 			Err(err).
 			Str("peer_address", string(peerAddress)).
-			Str("identity", string(identity)).
+			Str("identity", identity.String()).
 			Str("reason", reason).
 			Msg("route_poison_marshal_failed")
 		return false
@@ -964,7 +967,7 @@ func (s *Service) SendRoutePoison(ctx context.Context, peerAddress domain.PeerAd
 	) {
 		log.Debug().
 			Str("peer_address", string(peerAddress)).
-			Str("identity", string(identity)).
+			Str("identity", identity.String()).
 			Str("reason", reason).
 			Msg("route_poison_skipped_or_failed_at_send_time")
 		return false
@@ -994,8 +997,8 @@ func (s *Service) SendRoutePoison(ctx context.Context, peerAddress domain.PeerAd
 // AnnounceProjectionFor only emits own-direct tombstones; transit
 // tombstones from InvalidateUplinkClaim are filtered out.
 func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame protocol.RoutePoisonFrame) {
-	if !identity.IsValidAddress(string(senderIdentity)) {
-		log.Warn().Str("sender", string(senderIdentity)).Msg("route_poison_malformed_sender")
+	if !identity.IsValidAddress(senderIdentity.String()) {
+		log.Warn().Str("sender", senderIdentity.String()).Msg("route_poison_malformed_sender")
 		return
 	}
 	// Route-quarantine gate (top-level) — symmetric with
@@ -1014,7 +1017,7 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 	// quarantined peer cannot soak CPU on signature work either.
 	if s.IsPeerInRouteQuarantine(senderIdentity) {
 		log.Debug().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "route_poison_v1").
 			Str("identity", frame.Identity).
 			Str("reason", frame.Reason).
@@ -1037,7 +1040,7 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 	// announce capacity but doesn't get artificially inflated.
 	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, 1) {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "route_poison_v1").
 			Str("identity", frame.Identity).
 			Str("reason", frame.Reason).
@@ -1046,7 +1049,7 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 	}
 	if !identity.IsValidAddress(frame.Identity) {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_identity", frame.Identity).
 			Msg("route_poison_malformed_identity")
 		return
@@ -1065,7 +1068,7 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 		if err != nil {
 			log.Warn().
 				Err(err).
-				Str("from", string(senderIdentity)).
+				Str("from", senderIdentity.String()).
 				Str("identity", frame.Identity).
 				Str("reason", frame.Reason).
 				Msg("route_poison_sig_malformed_drop")
@@ -1074,7 +1077,7 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 		if pubkey, ok := s.publicKeyForIdentity(senderIdentity); ok {
 			if !ed25519.Verify(pubkey, frame.CanonicalSenderSigBytes(), sig) {
 				log.Warn().
-					Str("from", string(senderIdentity)).
+					Str("from", senderIdentity.String()).
 					Str("identity", frame.Identity).
 					Str("reason", frame.Reason).
 					Msg("route_poison_sig_invalid_drop")
@@ -1082,10 +1085,10 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 			}
 		}
 	}
-	target := domain.PeerIdentity(frame.Identity)
+	target := domain.PeerIdentityFromWire(frame.Identity)
 	mutated := s.routingTable.InvalidateUplinkClaim(target, senderIdentity)
 	log.Debug().
-		Str("from", string(senderIdentity)).
+		Str("from", senderIdentity.String()).
 		Str("identity", frame.Identity).
 		Str("reason", frame.Reason).
 		Bool("mutated", mutated).
@@ -1416,7 +1419,7 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	// Outbound sessions — one announce per identity, even if multiple
 	// sessions exist for the same peer.
 	for address, session := range s.sessions {
-		if session.peerIdentity == "" {
+		if session.peerIdentity.IsZero() {
 			continue
 		}
 		if _, dup := seen[session.peerIdentity]; dup {
@@ -1435,7 +1438,7 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 	// Inbound connections — only if identity not already covered by an
 	// outbound session above (dedup by identity).
 	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
-		if info.identity == "" {
+		if info.identity.IsZero() {
 			return true
 		}
 		if _, dup := seen[info.identity]; dup {
@@ -1494,8 +1497,8 @@ func copyCapabilitiesForAnnounce(caps []domain.Capability) []routing.PeerCapabil
 // service shutdown aborts a half-flushed inbound write instead of letting
 // NetCore.SendRawSync burn through the full syncFlushTimeout.
 func (s *Service) sendFullTableSyncToInbound(ctx context.Context, id domain.ConnID, peerIdentity domain.PeerIdentity) {
-	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", string(peerIdentity)).Msg("send_full_table_sync_inbound_begin")
-	if peerIdentity == "" {
+	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", peerIdentity.String()).Msg("send_full_table_sync_inbound_begin")
+	if peerIdentity.IsZero() {
 		log.Trace().Uint64("conn_id", uint64(id)).Msg("send_full_table_sync_inbound_no_identity")
 		return
 	}
@@ -1554,14 +1557,14 @@ func (s *Service) sendOutboundFullTableSync(ctx context.Context, peerIdentity do
 // sendFrameBytesViaNetworkSync; cancelling ctx aborts the inbound
 // sync-flush wait rather than waiting for the internal syncFlushTimeout.
 func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
-	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Msg("connect_time_full_sync_begin")
+	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Msg("connect_time_full_sync_begin")
 	routes := s.routingTable.AnnounceTo(peerIdentity)
 	snapshot := routing.BuildAnnounceSnapshot(routes)
 	registry := s.announceLoop.StateRegistry()
 
 	now := registry.Clock()
 	peerState := registry.GetOrCreate(peerIdentity)
-	log.Trace().Str("peer_identity", string(peerIdentity)).Int("entries", len(snapshot.Entries)).Msg("connect_time_full_sync_snapshot_built")
+	log.Trace().Str("peer_identity", peerIdentity.String()).Int("entries", len(snapshot.Entries)).Msg("connect_time_full_sync_snapshot_built")
 
 	if len(snapshot.Entries) == 0 {
 		// No routes to send, but register the empty baseline so that future
@@ -1573,7 +1576,7 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 		// announce_routes frame nor the v2 routes_update frame.
 		peerState.RecordFullSyncSuccess(snapshot, now)
 		log.Debug().
-			Str("peer", string(peerIdentity)).
+			Str("peer", peerIdentity.String()).
 			Str("address", string(address)).
 			Msg("routing_connect_time_full_sync_empty_baseline")
 		return
@@ -1581,7 +1584,7 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 
 	peerState.RecordFullSyncAttempt(now)
 
-	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Int("routes", len(snapshot.Entries)).Msg("connect_time_full_sync_before_send")
+	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Int("routes", len(snapshot.Entries)).Msg("connect_time_full_sync_before_send")
 	// Phase 4 wire selection. When the peer advertises the v3 triplet
 	// (v1+v3+relay), the very first session sync ships as
 	// route_announce_v3 kind="full" — the compact frame is self-
@@ -1599,10 +1602,10 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 	} else {
 		sendOk = s.SendAnnounceRoutes(ctx, address, snapshot.Entries)
 	}
-	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Bool("sent", sendOk).Bool("v3", v3).Msg("connect_time_full_sync_after_send")
+	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Bool("sent", sendOk).Bool("v3", v3).Msg("connect_time_full_sync_after_send")
 	if !sendOk {
 		log.Warn().
-			Str("peer", string(peerIdentity)).
+			Str("peer", peerIdentity.String()).
 			Str("address", string(address)).
 			Bool("v3", v3).
 			Int("routes", len(snapshot.Entries)).
@@ -1624,7 +1627,7 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 		peerState.MarkWireBaselineSent()
 	}
 	peerState.RecordFullSyncSuccess(snapshot, now)
-	log.Trace().Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Msg("connect_time_full_sync_end")
+	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Msg("connect_time_full_sync_end")
 }
 
 // handleAnnounceRoutes processes an incoming announce_routes frame from a
@@ -1640,8 +1643,8 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 // against the known-good first-sync snapshot. See docs/routing.md
 // "First-sync wire-frame invariant" for the protocol-level contract.
 func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame protocol.Frame) {
-	if !identity.IsValidAddress(string(senderIdentity)) {
-		log.Warn().Str("sender", string(senderIdentity)).Msg("announce_routes_malformed_sender")
+	if !identity.IsValidAddress(senderIdentity.String()) {
+		log.Warn().Str("sender", senderIdentity.String()).Msg("announce_routes_malformed_sender")
 		return
 	}
 	// chatty_routes accounting is DELIBERATELY skipped: announce_routes
@@ -1666,7 +1669,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 	// see announceBurstRoutesPerPeer doc for the new sizing.
 	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.AnnounceRoutes))) {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "announce_routes").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Msg("announce_rate_limit_drop")
@@ -1681,7 +1684,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 	// announce cycle.
 	if len(frame.AnnounceRoutes) > maxRoutesPerAnnounceFrame {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "announce_routes").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Int("cap", maxRoutesPerAnnounceFrame).
@@ -1703,8 +1706,8 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 // senderAddress is the peer's routing-key address (outbound session or
 // "inbound:" prefix) used to dispatch the request_resync reply.
 func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderAddress domain.PeerAddress, frame protocol.Frame) {
-	if !identity.IsValidAddress(string(senderIdentity)) {
-		log.Warn().Str("sender", string(senderIdentity)).Msg("routes_update_malformed_sender")
+	if !identity.IsValidAddress(senderIdentity.String()) {
+		log.Warn().Str("sender", senderIdentity.String()).Msg("routes_update_malformed_sender")
 		return
 	}
 	// chatty_routes quarantine trigger. routes_update is the v2 DELTA
@@ -1721,7 +1724,7 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 	// the matching comment in handleAnnounceRoutes.
 	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.AnnounceRoutes))) {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "routes_update").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Msg("announce_rate_limit_drop")
@@ -1734,7 +1737,7 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 	// maxRoutesPerAnnounceFrame doc-comment for the rationale.
 	if len(frame.AnnounceRoutes) > maxRoutesPerAnnounceFrame {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "routes_update").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Int("cap", maxRoutesPerAnnounceFrame).
@@ -1755,7 +1758,7 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 	// produces a clean "as if peer was never heard from" state.
 	if s.IsPeerInRouteQuarantine(senderIdentity) {
 		log.Debug().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "routes_update").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Msg("routing_announce_drop_quarantined_sender")
@@ -1771,7 +1774,7 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 		// state is either empty (fresh session) or belongs to a prior
 		// session whose SeqNo space may have rolled over.
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("address", string(senderAddress)).
 			Int("delta_routes", len(frame.AnnounceRoutes)).
 			Msg("routes_update_before_baseline_request_resync")
@@ -1804,8 +1807,8 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 // triplet. Either way the recovery frame is a self-contained baseline,
 // never a delta.
 func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
-	if !identity.IsValidAddress(string(senderIdentity)) {
-		log.Warn().Str("sender", string(senderIdentity)).Msg("request_resync_malformed_sender")
+	if !identity.IsValidAddress(senderIdentity.String()) {
+		log.Warn().Str("sender", senderIdentity.String()).Msg("request_resync_malformed_sender")
 		return
 	}
 	// chatty_routes accounting is DELIBERATELY skipped for
@@ -1835,7 +1838,7 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	// announce token budget either.
 	if s.IsPeerInRouteQuarantine(senderIdentity) {
 		log.Debug().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "request_resync").
 			Msg("routing_announce_drop_quarantined_sender")
 		return
@@ -1844,7 +1847,7 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	// control frame, not entry-bearing.
 	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, 1) {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "request_resync").
 			Msg("announce_rate_limit_drop")
 		return
@@ -1864,13 +1867,13 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	// are dropped without touching the state registry.
 	if !s.acceptRequestResyncDebounced(senderIdentity, time.Now()) {
 		log.Debug().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "request_resync").
 			Msg("request_resync_debounced_drop")
 		return
 	}
 	log.Info().
-		Str("from", string(senderIdentity)).
+		Str("from", senderIdentity.String()).
 		Msg("request_resync_received_forcing_full_sync")
 	s.announceLoop.StateRegistry().MarkInvalid(senderIdentity)
 	s.announceLoop.TriggerUpdate()
@@ -1892,7 +1895,7 @@ const requestResyncAcceptDebounce = 30 * time.Second
 // purgeRouteQuarantineState alongside the other per-peer sliding
 // windows.
 func (s *Service) acceptRequestResyncDebounced(peer domain.PeerIdentity, now time.Time) bool {
-	if peer == "" {
+	if peer.IsZero() {
 		return false
 	}
 	s.peerMu.Lock()
@@ -1946,8 +1949,8 @@ func (s *Service) acceptRequestResyncDebounced(peer domain.PeerIdentity, now tim
 // optimisation, not a correctness requirement. kind="full" is
 // self-contained and establishes the baseline.
 func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, senderAddress domain.PeerAddress, frame protocol.RouteAnnounceV3Frame) {
-	if !identity.IsValidAddress(string(senderIdentity)) {
-		log.Warn().Str("sender", string(senderIdentity)).Msg("route_announce_v3_malformed_sender")
+	if !identity.IsValidAddress(senderIdentity.String()) {
+		log.Warn().Str("sender", senderIdentity.String()).Msg("route_announce_v3_malformed_sender")
 		return
 	}
 	// chatty_routes quarantine trigger — only v3 kind="delta" counts.
@@ -1973,7 +1976,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	// 30-frame burst.
 	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.Entries))) {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "route_announce_v3").
 			Str("kind", frame.Kind).
 			Int("entries", len(frame.Entries)).
@@ -1987,7 +1990,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	// bound — see maxRoutesPerAnnounceFrame doc-comment for rationale.
 	if len(frame.Entries) > maxRoutesPerAnnounceFrame {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "route_announce_v3").
 			Str("kind", frame.Kind).
 			Int("entries", len(frame.Entries)).
@@ -2006,7 +2009,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	// residue.
 	if s.IsPeerInRouteQuarantine(senderIdentity) {
 		log.Debug().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("frame_type", "route_announce_v3").
 			Str("kind", frame.Kind).
 			Int("entries", len(frame.Entries)).
@@ -2019,7 +2022,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	verdict := peerState.ObserveV3Epoch(frame.Epoch)
 	if verdict == routing.V3EpochStale {
 		log.Debug().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Uint64("frame_epoch", frame.Epoch).
 			Msg("route_announce_v3_stale_epoch_dropped")
 		return
@@ -2031,7 +2034,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	// baseline, both force the resync recovery path.
 	if !isFull && (verdict == routing.V3EpochReset || !peerState.HasReceivedBaseline()) {
 		log.Warn().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Str("address", string(senderAddress)).
 			Uint64("frame_epoch", frame.Epoch).
 			Bool("epoch_reset", verdict == routing.V3EpochReset).
@@ -2045,7 +2048,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 
 	if verdict == routing.V3EpochReset {
 		log.Info().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Uint64("frame_epoch", frame.Epoch).
 			Msg("route_announce_v3_epoch_advanced_full_rebaseline")
 	}
@@ -2127,7 +2130,7 @@ func (s *Service) verifyRouteAnnounceV3Sigs(senderIdentity domain.PeerIdentity, 
 			verified = append(verified, false)
 			continue
 		}
-		pubkey, ok := s.publicKeyForIdentity(domain.PeerIdentity(f.Identity))
+		pubkey, ok := s.publicKeyForIdentity(domain.PeerIdentityFromWire(f.Identity))
 		if !ok {
 			// Sig present but we cannot resolve the destination
 			// pubkey — treat as unverified (Tier-2 lenient: we cannot
@@ -2139,7 +2142,7 @@ func (s *Service) verifyRouteAnnounceV3Sigs(senderIdentity domain.PeerIdentity, 
 			// independently; locally the entry is ranked as
 			// unverified (verified=false) by CompositeScore.
 			log.Debug().
-				Str("from", string(senderIdentity)).
+				Str("from", senderIdentity.String()).
 				Str("entry_identity", f.Identity).
 				Msg("route_announce_v3_sig_pubkey_unknown_passthrough")
 			outFrames = append(outFrames, f)
@@ -2156,7 +2159,7 @@ func (s *Service) verifyRouteAnnounceV3Sigs(senderIdentity domain.PeerIdentity, 
 			// Present-but-invalid signature — concrete malicious or
 			// corrupted claim. Drop the entry; do NOT pass to storage.
 			log.Warn().
-				Str("from", string(senderIdentity)).
+				Str("from", senderIdentity.String()).
 				Str("entry_identity", f.Identity).
 				Uint64("seq_no", f.SeqNo).
 				Uint64("epoch", epoch).
@@ -2202,7 +2205,7 @@ func routeAnnounceV3EntriesToWire(senderIdentity domain.PeerIdentity, entries []
 	for i, e := range entries {
 		frames[i] = protocol.AnnounceRouteFrame{
 			Identity: e.Identity,
-			Origin:   string(senderIdentity),
+			Origin:   senderIdentity.String(),
 			Hops:     int(e.Hops),
 			SeqNo:    e.SeqNo,
 			Extra:    e.Extra,
@@ -2212,7 +2215,7 @@ func routeAnnounceV3EntriesToWire(senderIdentity domain.PeerIdentity, entries []
 			if err != nil {
 				log.Debug().
 					Err(err).
-					Str("from", string(senderIdentity)).
+					Str("from", senderIdentity.String()).
 					Str("entry_identity", e.Identity).
 					Msg("route_announce_v3_sig_decode_failed")
 				// Leave sigs[i] nil — verification path treats this as
@@ -2306,7 +2309,7 @@ func (m announceReceiveMode) wireTypeLabel() string {
 // CompositeScore can apply the trust-score bonus at rank time without
 // re-verifying.
 func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireRoutes []protocol.AnnounceRouteFrame, attestedSigs [][]byte, attestedVerified []bool, mode announceReceiveMode) {
-	if senderIdentity == "" {
+	if senderIdentity.IsZero() {
 		log.Warn().Msg("announce_routes_no_sender_identity")
 		return
 	}
@@ -2319,7 +2322,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 	// the quarantine window elapses. See routing_route_quarantine.go.
 	if s.IsPeerInRouteQuarantine(senderIdentity) {
 		log.Debug().
-			Str("from", string(senderIdentity)).
+			Str("from", senderIdentity.String()).
 			Int("entries", len(wireRoutes)).
 			Msg("announce_routes_dropped_quarantined_peer")
 		return
@@ -2344,7 +2347,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 			log.Warn().
 				Str("identity", wireRoute.Identity).
 				Str("origin", wireRoute.Origin).
-				Str("from", string(senderIdentity)).
+				Str("from", senderIdentity.String()).
 				Msg("announce_rejected_malformed_address")
 			continue
 		}
@@ -2364,7 +2367,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 			log.Debug().
 				Str("identity", wireRoute.Identity).
 				Str("origin", wireRoute.Origin).
-				Str("from", string(senderIdentity)).
+				Str("from", senderIdentity.String()).
 				Msg("announce_rejected_forged_own_origin")
 			continue
 		}
@@ -2375,20 +2378,20 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 			// stop advertising — they must not forward hops=16 on the wire.
 			// Accepting a withdrawal from a non-origin sender would let an
 			// intermediate neighbor unilaterally kill a route it does not own.
-			if wireRoute.Origin != string(senderIdentity) {
+			if wireRoute.Origin != senderIdentity.String() {
 				rejected++
 				log.Warn().
 					Str("identity", wireRoute.Identity).
 					Str("origin", wireRoute.Origin).
-					Str("from", string(senderIdentity)).
+					Str("from", senderIdentity.String()).
 					Msg("announce_rejected_transit_withdrawal")
 				continue
 			}
 
-			withdrawnID := domain.PeerIdentity(wireRoute.Identity)
+			withdrawnID := domain.PeerIdentityFromWire(wireRoute.Identity)
 			if s.routingTable.WithdrawRoute(
 				withdrawnID,
-				domain.PeerIdentity(wireRoute.Origin),
+				domain.PeerIdentityFromWire(wireRoute.Origin),
 				senderIdentity,
 				wireRoute.SeqNo,
 			) {
@@ -2410,7 +2413,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 					Str("identity", wireRoute.Identity).
 					Str("origin", wireRoute.Origin).
 					Uint64("seq", wireRoute.SeqNo).
-					Str("from", string(senderIdentity)).
+					Str("from", senderIdentity.String()).
 					Msg("route_withdrawal_applied")
 			} else {
 				rejected++
@@ -2428,8 +2431,8 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 		// own defaultTTL and clock, ensuring consistent TTL policy between
 		// local (AddDirectPeer) and learned (announcement) routes.
 		entry := routing.RouteEntry{
-			Identity: domain.PeerIdentity(wireRoute.Identity),
-			Origin:   domain.PeerIdentity(wireRoute.Origin),
+			Identity: domain.PeerIdentityFromWire(wireRoute.Identity),
+			Origin:   domain.PeerIdentityFromWire(wireRoute.Origin),
 			NextHop:  senderIdentity,
 			Hops:     receivedHops,
 			SeqNo:    wireRoute.SeqNo,
@@ -2457,7 +2460,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 				Err(err).
 				Str("identity", wireRoute.Identity).
 				Str("origin", wireRoute.Origin).
-				Str("from", string(senderIdentity)).
+				Str("from", senderIdentity.String()).
 				Msg("route_update_rejected_invalid")
 			rejected++
 			continue
@@ -2465,10 +2468,10 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 		switch status {
 		case routing.RouteAccepted:
 			accepted++
-			drainIdentities[domain.PeerIdentity(wireRoute.Identity)] = struct{}{}
+			drainIdentities[domain.PeerIdentityFromWire(wireRoute.Identity)] = struct{}{}
 		case routing.RouteUnchanged:
 			unchanged++
-			drainIdentities[domain.PeerIdentity(wireRoute.Identity)] = struct{}{}
+			drainIdentities[domain.PeerIdentityFromWire(wireRoute.Identity)] = struct{}{}
 		case routing.RouteRejected:
 			rejected++
 			existing := s.routingTable.InspectTriple(entry.DedupKey())
@@ -2476,7 +2479,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 				log.Debug().
 					Str("identity", wireRoute.Identity).
 					Str("origin", wireRoute.Origin).
-					Str("from", string(senderIdentity)).
+					Str("from", senderIdentity.String()).
 					Int("incoming_hops", receivedHops).
 					Uint64("incoming_seq", wireRoute.SeqNo).
 					Int("existing_hops", existing.Hops).
@@ -2489,7 +2492,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 				log.Debug().
 					Str("identity", wireRoute.Identity).
 					Str("origin", wireRoute.Origin).
-					Str("from", string(senderIdentity)).
+					Str("from", senderIdentity.String()).
 					Int("incoming_hops", receivedHops).
 					Uint64("incoming_seq", wireRoute.SeqNo).
 					Msg("route_rejected_no_existing_triple")
@@ -2499,7 +2502,7 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 
 	wireType := mode.wireTypeLabel()
 	log.Debug().
-		Str("from", string(senderIdentity)).
+		Str("from", senderIdentity.String()).
 		Str("wire_type", wireType).
 		Int("total", len(wireRoutes)).
 		Int("accepted", accepted).

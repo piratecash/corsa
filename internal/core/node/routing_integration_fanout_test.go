@@ -12,7 +12,6 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
-	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // Test cluster: withdrawal fanout inside onPeerSessionClosed.
@@ -195,7 +194,7 @@ func setupFanoutFixture(t *testing.T, disconnectingIdentity domain.PeerIdentity,
 	svc.identitySessions[disconnectingIdentity] = 1
 	svc.identityRelaySessions[disconnectingIdentity] = 1
 
-	if _, err := svc.routingTable.AddDirectPeer(routing.PeerIdentity(disconnectingIdentity)); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(disconnectingIdentity); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 
@@ -217,7 +216,7 @@ func setupFanoutFixture(t *testing.T, disconnectingIdentity domain.PeerIdentity,
 		}
 
 		pc := netcore.New(id, conn, netcore.Inbound, netcore.Options{
-			Address:  domain.PeerAddress(target.identity),
+			Address:  domain.PeerAddress(target.identity.String()),
 			Identity: target.identity,
 			Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 		})
@@ -363,10 +362,10 @@ func TestOnPeerSessionClosed_CollectsSentAndDroppedCounters(t *testing.T) {
 	const stuckDelay = 100 * time.Millisecond
 
 	targets := []fanoutTarget{
-		{identity: idPeerA, remoteAddr: "10.2.0.1:7001", delay: 0, err: nil},                           // sent
-		{identity: idPeerC, remoteAddr: "10.2.0.3:7003", delay: stuckDelay, err: netcore.ErrSendTimeout}, // dropped
-		{identity: idPeerD, remoteAddr: "10.2.0.4:7004", delay: 0, err: nil},                           // sent
-		{identity: "ee00000000000000000000000000000000000005", remoteAddr: "10.2.0.5:7005", delay: stuckDelay, err: netcore.ErrSendTimeout}, // dropped
+		{identity: idPeerA, remoteAddr: "10.2.0.1:7001", delay: 0, err: nil},                                                                                             // sent
+		{identity: idPeerC, remoteAddr: "10.2.0.3:7003", delay: stuckDelay, err: netcore.ErrSendTimeout},                                                                 // dropped
+		{identity: idPeerD, remoteAddr: "10.2.0.4:7004", delay: 0, err: nil},                                                                                             // sent
+		{identity: domain.PeerIdentityFromWire("ee00000000000000000000000000000000000005"), remoteAddr: "10.2.0.5:7005", delay: stuckDelay, err: netcore.ErrSendTimeout}, // dropped
 	}
 	fx := setupFanoutFixture(t, idPeerB, targets)
 

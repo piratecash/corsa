@@ -12,6 +12,41 @@ import (
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
+// mustPeerIPPtr parses s into a *domain.PeerIP for persistedPeerMeta
+// fixtures whose TrustedAdvertiseIP/LastObservedIP fields became
+// pointer-typed in the PeerIP migration. A parse failure is a test-fixture
+// bug, so it panics rather than returning an error.
+func mustPeerIPPtr(s string) *domain.PeerIP {
+	ip, err := domain.ParsePeerIP(s)
+	if err != nil {
+		panic("mustPeerIPPtr: " + err.Error())
+	}
+	return &ip
+}
+
+// peerIPPtrString renders a *domain.PeerIP for assertions/messages,
+// yielding "" for the nil (absent) pointer so comparisons against an
+// expected IP literal stay nil-safe.
+func peerIPPtrString(p *domain.PeerIP) string {
+	if p == nil {
+		return ""
+	}
+	return p.String()
+}
+
+// mustPeerIP parses s into a domain.PeerIP for value-typed PeerIP sinks
+// (advertiseValidationResult fields, recordObservedIPHintLocked args). A
+// parse failure is a test-fixture bug, so it fails the test rather than
+// returning an error.
+func mustPeerIP(t *testing.T, s string) domain.PeerIP {
+	t.Helper()
+	ip, err := domain.ParsePeerIP(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ip
+}
+
 // TestValidateAdvertisedAddress covers every accept branch of the v12
 // advertise convergence decision matrix. The helper is a pure function:
 // no Service state, no network side effects — so each row of the matrix
@@ -248,7 +283,7 @@ func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 			svc.persistedMeta[peerAddr] = &peerEntry{
 				Address:                peerAddr,
 				AnnounceState:          announceStateAnnounceable,
-				TrustedAdvertiseIP:     "203.0.113.40",
+				TrustedAdvertiseIP:     mustPeerIPPtr("203.0.113.40"),
 				TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
 				TrustedAdvertisePort:   config.DefaultPeerPort,
 			}
@@ -264,8 +299,8 @@ func TestApplyAdvertiseValidationResult_StickyState(t *testing.T) {
 			if pm.AnnounceState != announceStateAnnounceable {
 				t.Fatalf("announce_state downgraded: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
 			}
-			if pm.TrustedAdvertiseIP != "203.0.113.40" {
-				t.Fatalf("trusted_advertise_ip mutated: got %q", pm.TrustedAdvertiseIP)
+			if peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.40" {
+				t.Fatalf("trusted_advertise_ip mutated: got %q", peerIPPtrString(pm.TrustedAdvertiseIP))
 			}
 			if pm.TrustedAdvertiseSource != trustedAdvertiseSourceInbound {
 				t.Fatalf("trusted_advertise_source mutated: got %q", pm.TrustedAdvertiseSource)
@@ -284,7 +319,7 @@ func TestApplyAdvertiseValidationResult_UpdateExistingSkipsCreate(t *testing.T) 
 	const peerAddr domain.PeerAddress = "203.0.113.42:64646"
 	svc.applyAdvertiseValidationResult(peerAddr, advertiseValidationResult{
 		Decision:             advertiseDecisionLocalException,
-		ObservedIPHint:       "198.51.100.42",
+		ObservedIPHint:       mustPeerIP(t, "198.51.100.42"),
 		PersistAnnounceState: announceStateDirectOnly,
 		PersistWriteMode:     persistWriteModeUpdateExisting,
 	})
@@ -308,12 +343,12 @@ func TestApplyAdvertiseValidationResult_LocalExceptionDowngrades(t *testing.T) {
 	svc.persistedMeta[peerAddr] = &peerEntry{
 		Address:                peerAddr,
 		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.43",
+		TrustedAdvertiseIP:     mustPeerIPPtr("203.0.113.43"),
 		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
 	}
 	svc.applyAdvertiseValidationResult(peerAddr, advertiseValidationResult{
 		Decision:             advertiseDecisionLocalException,
-		ObservedIPHint:       "192.168.0.17",
+		ObservedIPHint:       mustPeerIP(t, "192.168.0.17"),
 		PersistAnnounceState: announceStateDirectOnly,
 		PersistWriteMode:     persistWriteModeCreateOrUpdate,
 	})
@@ -336,11 +371,11 @@ func TestValidateAdvertisedAddress_IPv6Mapped(t *testing.T) {
 	if result.Decision != advertiseDecisionMatch {
 		t.Fatalf("expected match on IPv4-mapped IPv6, got %q", result.Decision)
 	}
-	if result.NormalizedObservedIP != "203.0.113.50" {
-		t.Fatalf("observed IP not canonicalised: got %q", result.NormalizedObservedIP)
+	if result.NormalizedObservedIP.String() != "203.0.113.50" {
+		t.Fatalf("observed IP not canonicalised: got %q", result.NormalizedObservedIP.String())
 	}
-	if result.NormalizedAdvertisedIP != "203.0.113.50" {
-		t.Fatalf("advertised IP not canonicalised: got %q", result.NormalizedAdvertisedIP)
+	if result.NormalizedAdvertisedIP.String() != "203.0.113.50" {
+		t.Fatalf("advertised IP not canonicalised: got %q", result.NormalizedAdvertisedIP.String())
 	}
 }
 
@@ -364,12 +399,12 @@ func TestValidateAdvertisedAddress_ForbiddenAdvertiseListenIgnored(t *testing.T)
 	if result.Decision != advertiseDecisionMatch {
 		t.Fatalf("expected match (hello.listen is ignored as truth), got %q", result.Decision)
 	}
-	if result.NormalizedAdvertisedIP != "203.0.113.60" {
+	if result.NormalizedAdvertisedIP.String() != "203.0.113.60" {
 		t.Fatalf("NormalizedAdvertisedIP: got %q want %q (must mirror observed IP, never the forbidden listen host)",
-			result.NormalizedAdvertisedIP, "203.0.113.60")
+			result.NormalizedAdvertisedIP.String(), "203.0.113.60")
 	}
-	if result.ObservedIPHint != "203.0.113.60" {
-		t.Fatalf("ObservedIPHint: got %q want %q", result.ObservedIPHint, "203.0.113.60")
+	if result.ObservedIPHint.String() != "203.0.113.60" {
+		t.Fatalf("ObservedIPHint: got %q want %q", result.ObservedIPHint.String(), "203.0.113.60")
 	}
 	if !result.AllowAnnounce {
 		t.Fatalf("AllowAnnounce must be true for world-routable observed IP, got false")
@@ -862,9 +897,9 @@ func TestRecordObservedIPHistory_BoundAndDedup(t *testing.T) {
 
 	// Adjacent duplicates fold to a single entry.
 	svc.ipStateMu.Lock()
-	svc.recordObservedIPHintLocked(peerAddr, "203.0.113.200")
-	svc.recordObservedIPHintLocked(peerAddr, "203.0.113.200")
-	svc.recordObservedIPHintLocked(peerAddr, "203.0.113.200")
+	svc.recordObservedIPHintLocked(peerAddr, mustPeerIP(t, "203.0.113.200"))
+	svc.recordObservedIPHintLocked(peerAddr, mustPeerIP(t, "203.0.113.200"))
+	svc.recordObservedIPHintLocked(peerAddr, mustPeerIP(t, "203.0.113.200"))
 	svc.ipStateMu.Unlock()
 	if history := svc.observedIPHistoryForPeer(peerAddr); len(history) != 1 {
 		t.Fatalf("adjacent duplicates must be deduplicated: %v", history)
@@ -896,7 +931,11 @@ func TestRecordObservedIPHistory_BoundAndDedup(t *testing.T) {
 // fixtures — using 198.51.100.0/24 (RFC 5737 documentation range).
 func entryIP(i int) domain.PeerIP {
 	// Only i < 256 is exercised by the tests above, so no overflow.
-	return domain.PeerIP("198.51.100." + strconv.Itoa(i+1))
+	ip, err := domain.ParsePeerIP("198.51.100." + strconv.Itoa(i+1))
+	if err != nil {
+		panic("entryIP: " + err.Error())
+	}
+	return ip
 }
 
 // TestRecordOutboundConfirmed_WritesTrustedAdvertise verifies that the
@@ -906,7 +945,7 @@ func entryIP(i int) domain.PeerIP {
 func TestRecordOutboundConfirmed_WritesTrustedAdvertise(t *testing.T) {
 	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "203.0.113.120:64646"
-	svc.recordOutboundConfirmed(peerAddr, "203.0.113.120", domain.PeerPort(64646))
+	svc.recordOutboundConfirmed(peerAddr, mustPeerIP(t, "203.0.113.120"), domain.PeerPort(64646))
 
 	pm := svc.persistedMeta[peerAddr]
 	if pm == nil {
@@ -915,8 +954,8 @@ func TestRecordOutboundConfirmed_WritesTrustedAdvertise(t *testing.T) {
 	if pm.AnnounceState != announceStateAnnounceable {
 		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
 	}
-	if pm.TrustedAdvertiseIP != "203.0.113.120" {
-		t.Fatalf("trusted_advertise_ip: got %q", pm.TrustedAdvertiseIP)
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.120" {
+		t.Fatalf("trusted_advertise_ip: got %q", peerIPPtrString(pm.TrustedAdvertiseIP))
 	}
 	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceOutbound {
 		t.Fatalf("trusted_advertise_source: got %q want %q",
@@ -933,14 +972,14 @@ func TestRecordOutboundConfirmed_WritesTrustedAdvertise(t *testing.T) {
 func TestRecordOutboundConfirmed_CanonicalisesMappedIPv6(t *testing.T) {
 	svc := newAdvertiseTestService()
 	const peerAddr domain.PeerAddress = "203.0.113.121:64646"
-	svc.recordOutboundConfirmed(peerAddr, "::ffff:203.0.113.121", domain.PeerPort(64646))
+	svc.recordOutboundConfirmed(peerAddr, mustPeerIP(t, "::ffff:203.0.113.121"), domain.PeerPort(64646))
 
 	pm := svc.persistedMeta[peerAddr]
 	if pm == nil {
 		t.Fatalf("persistedMeta row not created")
 	}
-	if pm.TrustedAdvertiseIP != "203.0.113.121" {
-		t.Fatalf("trusted_advertise_ip not canonicalised: got %q", pm.TrustedAdvertiseIP)
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.121" {
+		t.Fatalf("trusted_advertise_ip not canonicalised: got %q", peerIPPtrString(pm.TrustedAdvertiseIP))
 	}
 }
 
@@ -963,16 +1002,17 @@ func TestRecordOutboundConfirmed_RejectsHostname(t *testing.T) {
 	svc.persistedMeta[other] = &peerEntry{
 		Address:                other,
 		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.140",
+		TrustedAdvertiseIP:     mustPeerIPPtr("203.0.113.140"),
 		TrustedAdvertiseSource: trustedAdvertiseSourceInbound,
 		TrustedAdvertisePort:   config.DefaultPeerPort,
 	}
 
-	cases := []domain.PeerIP{
-		"peer.example",   // DNS hostname
-		"not.a.valid.ip", // multi-label string that is not an IP literal
-		"garbage::bad",   // looks like IPv6 but is not parseable
-	}
+	// Non-IP inputs (DNS hostnames, malformed literals) can no longer be
+	// represented as a domain.PeerIP value at all: ParsePeerIP rejects them
+	// at the boundary, so the only thing that can reach this writer is the
+	// zero/invalid PeerIP. recordOutboundConfirmed must refuse it the same
+	// way it once refused a hostname string.
+	cases := []domain.PeerIP{{}}
 	for _, badIP := range cases {
 		svc.recordOutboundConfirmed(peerAddr, badIP, domain.PeerPort(64646))
 	}
@@ -980,8 +1020,8 @@ func TestRecordOutboundConfirmed_RejectsHostname(t *testing.T) {
 	if _, exists := svc.persistedMeta[peerAddr]; exists {
 		t.Fatalf("non-IP dialedIP must never create a persistedMeta row; got one for %q", peerAddr)
 	}
-	if pm := svc.persistedMeta[other]; pm.TrustedAdvertiseIP != "203.0.113.140" {
-		t.Fatalf("unrelated row mutated by refused call: got %q", pm.TrustedAdvertiseIP)
+	if pm := svc.persistedMeta[other]; peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.140" {
+		t.Fatalf("unrelated row mutated by refused call: got %q", peerIPPtrString(pm.TrustedAdvertiseIP))
 	}
 	if pm := svc.persistedMeta[other]; pm.AnnounceState != announceStateAnnounceable {
 		t.Fatalf("unrelated row announce_state mutated: got %q", pm.AnnounceState)
@@ -999,12 +1039,15 @@ func TestRecordOutboundConfirmed_PreservesExistingRowOnHostname(t *testing.T) {
 	svc.persistedMeta[peerAddr] = &peerEntry{
 		Address:                peerAddr,
 		AnnounceState:          announceStateAnnounceable,
-		TrustedAdvertiseIP:     "203.0.113.150", // canonical IP from a prior session
+		TrustedAdvertiseIP:     mustPeerIPPtr("203.0.113.150"), // canonical IP from a prior session
 		TrustedAdvertiseSource: trustedAdvertiseSourceOutbound,
 		TrustedAdvertisePort:   "64646",
 	}
 
-	svc.recordOutboundConfirmed(peerAddr, domain.PeerIP("peer.example"), domain.PeerPort(64646))
+	// An invalid (zero) PeerIP stands in for the old "hostname, not an IP"
+	// input: recordOutboundConfirmed guards on dialedIP.IsValid(), so a
+	// non-IP value is refused exactly as a hostname string once was.
+	svc.recordOutboundConfirmed(peerAddr, domain.PeerIP{}, domain.PeerPort(64646))
 
 	pm := svc.persistedMeta[peerAddr]
 	if pm == nil {
@@ -1013,9 +1056,9 @@ func TestRecordOutboundConfirmed_PreservesExistingRowOnHostname(t *testing.T) {
 	if pm.AnnounceState != announceStateAnnounceable {
 		t.Fatalf("announce_state mutated: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
 	}
-	if pm.TrustedAdvertiseIP != "203.0.113.150" {
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.150" {
 		t.Fatalf("trusted_advertise_ip overwritten by refused call: got %q want %q",
-			pm.TrustedAdvertiseIP, "203.0.113.150")
+			peerIPPtrString(pm.TrustedAdvertiseIP), "203.0.113.150")
 	}
 	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceOutbound {
 		t.Fatalf("trusted_advertise_source mutated: got %q", pm.TrustedAdvertiseSource)
@@ -1049,9 +1092,9 @@ func TestRecordOutboundAuthSuccess_HostnamePeerWritesCanonicalIP(t *testing.T) {
 	if pm.AnnounceState != announceStateAnnounceable {
 		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
 	}
-	if pm.TrustedAdvertiseIP != "203.0.113.160" {
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.160" {
 		t.Fatalf("trusted_advertise_ip: got %q want %q (must be canonical IP from RemoteAddr, not hostname)",
-			pm.TrustedAdvertiseIP, "203.0.113.160")
+			peerIPPtrString(pm.TrustedAdvertiseIP), "203.0.113.160")
 	}
 	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceOutbound {
 		t.Fatalf("trusted_advertise_source: got %q want %q",
@@ -1082,9 +1125,9 @@ func TestRecordOutboundAuthSuccess_CanonicalisesMappedIPv6RemoteAddr(t *testing.
 	if pm == nil {
 		t.Fatalf("persistedMeta row not created for hostname peer")
 	}
-	if pm.TrustedAdvertiseIP != "203.0.113.161" {
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.161" {
 		t.Fatalf("trusted_advertise_ip not canonicalised: got %q want %q",
-			pm.TrustedAdvertiseIP, "203.0.113.161")
+			peerIPPtrString(pm.TrustedAdvertiseIP), "203.0.113.161")
 	}
 }
 

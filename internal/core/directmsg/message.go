@@ -72,7 +72,7 @@ func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipi
 	unsigned := sealedEnvelope{
 		Version:   "dm-v1",
 		From:      sender.Address,
-		To:        string(recipient.Address),
+		To:        recipient.Address.String(),
 		Recipient: recipientPart,
 		Sender:    senderPart,
 	}

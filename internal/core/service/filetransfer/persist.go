@@ -355,6 +355,16 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 				// deletion happens only via identity/message removal.
 			}
 
+			// A tampered/corrupted transfers.json could carry an empty or
+			// all-zero peer (the zero identity). Such a mapping has no valid
+			// counterparty — refuse it rather than register a peer-less entry.
+			if sm.Recipient.IsZero() {
+				log.Warn().
+					Str("file_id", string(sm.FileID)).
+					Msg("file_transfer: persisted sender entry has empty peer, skipping")
+				continue
+			}
+
 			m.senderMaps[sm.FileID] = sm
 
 		case "receiver":
@@ -366,6 +376,15 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 					Str("file_id", string(rm.FileID)).
 					Str("state", string(rm.State)).
 					Msg("file_transfer: persisted receiver entry has unknown state, skipping")
+				continue
+			}
+
+			// A tampered/corrupted transfers.json could carry an empty or
+			// all-zero peer (the zero identity). Refuse a peer-less mapping.
+			if rm.Sender.IsZero() {
+				log.Warn().
+					Str("file_id", string(rm.FileID)).
+					Msg("file_transfer: persisted receiver entry has empty peer, skipping")
 				continue
 			}
 
@@ -572,7 +591,7 @@ func atomicWriteJSON(path string, v interface{}) error {
 // This allows multiple node identities on the same machine to coexist without
 // collisions. The file sits alongside identity-*.json, trust-*.json, etc.
 func TransfersMappingsPath(dataDir string, identityAddr domain.PeerIdentity, listenAddress domain.ListenAddress) string {
-	short := string(identityAddr)
+	short := identityAddr.String()
 	if len(short) > 8 {
 		short = short[:8]
 	}

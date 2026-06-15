@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestRouteHealth_StringRoundTrip — RouteHealth.String returns stable
@@ -37,8 +37,8 @@ func TestRouteHealth_StringRoundTrip(t *testing.T) {
 func TestRouteHealth_GoodToQuestionableTransitionAt60Seconds(t *testing.T) {
 	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	state := &RouteHealthState{
-		Identity:     "id-target",
-		Uplink:       "id-uplink",
+		Identity:     domaintest.ID("id-target"),
+		Uplink:       domaintest.ID("id-uplink"),
 		Health:       HealthGood,
 		LastHopAck:   base,
 		TransitionAt: base,
@@ -66,8 +66,8 @@ func TestRouteHealth_GoodToQuestionableTransitionAt60Seconds(t *testing.T) {
 func TestRouteHealth_QuestionableToBadAtHopAckTimeout(t *testing.T) {
 	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	state := &RouteHealthState{
-		Identity:     "id-target",
-		Uplink:       "id-uplink",
+		Identity:     domaintest.ID("id-target"),
+		Uplink:       domaintest.ID("id-uplink"),
 		Health:       HealthQuestionable,
 		LastHopAck:   base,
 		TransitionAt: base,
@@ -84,8 +84,8 @@ func TestRouteHealth_QuestionableToBadAtHopAckTimeout(t *testing.T) {
 func TestRouteHealth_BadToDeadAt182s(t *testing.T) {
 	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	state := &RouteHealthState{
-		Identity:     "id-target",
-		Uplink:       "id-uplink",
+		Identity:     domaintest.ID("id-target"),
+		Uplink:       domaintest.ID("id-uplink"),
 		Health:       HealthBad,
 		LastHopAck:   base,
 		TransitionAt: base,
@@ -104,8 +104,8 @@ func TestRouteHealth_BadToDeadAt182s(t *testing.T) {
 func TestRouteHealth_IdleTickSkipsBadWhenLatentToDead(t *testing.T) {
 	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	state := &RouteHealthState{
-		Identity:     "id-target",
-		Uplink:       "id-uplink",
+		Identity:     domaintest.ID("id-target"),
+		Uplink:       domaintest.ID("id-uplink"),
 		Health:       HealthQuestionable,
 		LastHopAck:   base,
 		TransitionAt: base,
@@ -316,7 +316,7 @@ func TestHealthStore_EnsureLockedCreatesGood(t *testing.T) {
 	store := newHealthStore()
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	state := store.ensureLocked("id-a", "id-uplink-1", now)
+	state := store.ensureLocked(domaintest.ID("id-a"), domaintest.ID("id-uplink-1"), now)
 	if state.Health != HealthGood {
 		t.Fatalf("new state Health = %s, want good", state.Health)
 	}
@@ -329,10 +329,10 @@ func TestHealthStore_EnsureLockedCreatesGood(t *testing.T) {
 	if !state.TransitionAt.Equal(now) {
 		t.Fatalf("TransitionAt = %v, want %v", state.TransitionAt, now)
 	}
-	if state.Identity != domain.PeerIdentity("id-a") {
+	if state.Identity != domaintest.ID("id-a") {
 		t.Fatalf("Identity = %q, want id-a", state.Identity)
 	}
-	if state.Uplink != domain.PeerIdentity("id-uplink-1") {
+	if state.Uplink != domaintest.ID("id-uplink-1") {
 		t.Fatalf("Uplink = %q, want id-uplink-1", state.Uplink)
 	}
 }
@@ -345,10 +345,10 @@ func TestHealthStore_EnsureLockedReturnsExisting(t *testing.T) {
 	store := newHealthStore()
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	first := store.ensureLocked("id-a", "id-uplink-1", now)
+	first := store.ensureLocked(domaintest.ID("id-a"), domaintest.ID("id-uplink-1"), now)
 	first.RTT = 42 * time.Millisecond
 
-	second := store.ensureLocked("id-a", "id-uplink-1", now.Add(time.Minute))
+	second := store.ensureLocked(domaintest.ID("id-a"), domaintest.ID("id-uplink-1"), now.Add(time.Minute))
 	if first != second {
 		t.Fatal("ensureLocked returned a fresh state for an existing pair")
 	}
@@ -366,8 +366,8 @@ func TestHealthStore_ScopedToUplink_HopAckForUplinkADoesNotAffectUplinkB(t *test
 	store := newHealthStore()
 	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	stateA := store.ensureLocked("id-target", "id-uplink-A", base)
-	stateB := store.ensureLocked("id-target", "id-uplink-B", base)
+	stateA := store.ensureLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), base)
+	stateB := store.ensureLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), base)
 
 	// Force B into Questionable via a passive tick after A's recent
 	// hop_ack.
@@ -392,7 +392,7 @@ func TestHealthStore_ScopedToUplink_HopAckForUplinkADoesNotAffectUplinkB(t *test
 // back to nil-health CompositeScore (by-hops + source bonus).
 func TestHealthStore_GetLockedReturnsNilForUnknownPair(t *testing.T) {
 	store := newHealthStore()
-	if got := store.getLocked("id-a", "id-uplink-1"); got != nil {
+	if got := store.getLocked(domaintest.ID("id-a"), domaintest.ID("id-uplink-1")); got != nil {
 		t.Fatalf("getLocked on cold pair = %v, want nil", got)
 	}
 }
@@ -403,19 +403,19 @@ func TestHealthStore_GetLockedReturnsNilForUnknownPair(t *testing.T) {
 func TestHealthStore_EvictUplinkLocked(t *testing.T) {
 	store := newHealthStore()
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	store.ensureLocked("id-x", "id-uplink-1", now)
-	store.ensureLocked("id-x", "id-uplink-2", now)
-	store.ensureLocked("id-y", "id-uplink-1", now)
+	store.ensureLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-1"), now)
+	store.ensureLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-2"), now)
+	store.ensureLocked(domaintest.ID("id-y"), domaintest.ID("id-uplink-1"), now)
 
-	store.evictUplinkLocked("id-x", "id-uplink-1")
+	store.evictUplinkLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-1"))
 
-	if store.getLocked("id-x", "id-uplink-1") != nil {
+	if store.getLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-1")) != nil {
 		t.Fatal("evicted pair (id-x, id-uplink-1) still tracked")
 	}
-	if store.getLocked("id-x", "id-uplink-2") == nil {
+	if store.getLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-2")) == nil {
 		t.Fatal("untouched pair (id-x, id-uplink-2) lost")
 	}
-	if store.getLocked("id-y", "id-uplink-1") == nil {
+	if store.getLocked(domaintest.ID("id-y"), domaintest.ID("id-uplink-1")) == nil {
 		t.Fatal("untouched pair (id-y, id-uplink-1) lost — eviction must not cascade across identities")
 	}
 }
@@ -426,16 +426,16 @@ func TestHealthStore_EvictUplinkLocked(t *testing.T) {
 func TestHealthStore_EvictIdentityLocked(t *testing.T) {
 	store := newHealthStore()
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	store.ensureLocked("id-x", "id-uplink-1", now)
-	store.ensureLocked("id-x", "id-uplink-2", now)
-	store.ensureLocked("id-y", "id-uplink-1", now)
+	store.ensureLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-1"), now)
+	store.ensureLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-2"), now)
+	store.ensureLocked(domaintest.ID("id-y"), domaintest.ID("id-uplink-1"), now)
 
-	store.evictIdentityLocked("id-x")
+	store.evictIdentityLocked(domaintest.ID("id-x"))
 
 	if got := store.lenLocked(); got != 1 {
 		t.Fatalf("lenLocked after evictIdentity = %d, want 1", got)
 	}
-	if store.getLocked("id-y", "id-uplink-1") == nil {
+	if store.getLocked(domaintest.ID("id-y"), domaintest.ID("id-uplink-1")) == nil {
 		t.Fatal("untouched identity id-y lost")
 	}
 }
@@ -451,7 +451,7 @@ func TestHealthStore_EvictIdentityLocked(t *testing.T) {
 func TestHealthStore_SnapshotLocked_DeepCopy(t *testing.T) {
 	store := newHealthStore()
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	state := store.ensureLocked("id-x", "id-uplink-1", now)
+	state := store.ensureLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-1"), now)
 	state.RTT = 50 * time.Millisecond
 
 	snap := store.snapshotLocked()
@@ -463,7 +463,7 @@ func TestHealthStore_SnapshotLocked_DeepCopy(t *testing.T) {
 	snap[0].RTT = 999 * time.Millisecond
 
 	// Live state must remain unchanged.
-	live := store.getLocked("id-x", "id-uplink-1")
+	live := store.getLocked(domaintest.ID("id-x"), domaintest.ID("id-uplink-1"))
 	if live.RTT != 50*time.Millisecond {
 		t.Fatalf("snapshot mutation leaked into live state: RTT = %v, want 50ms", live.RTT)
 	}
@@ -814,13 +814,13 @@ func TestRouteReputation_ApplyHopAckFailureLeavesHealthMachineUntouched(t *testi
 // Compile-time sanity: the new fields are addressable as documented.
 // If the field set drifts (rename / removal), this test stops
 // compiling — useful as a quick canary in the otherwise behaviour-
-// only suite above. Uses domain.PeerIdentity to keep the import
+// only suite above. Uses domaintest.ID to keep the import
 // honest after PR 12.1; remove if the import becomes unused in
 // future cleanups.
 func TestRouteReputation_FieldShapeCompiles(t *testing.T) {
 	_ = RouteHealthState{
-		Identity:            domain.PeerIdentity("id"),
-		Uplink:              domain.PeerIdentity("u"),
+		Identity:            domaintest.ID("id"),
+		Uplink:              domaintest.ID("u"),
 		HopAckAttempts:      0,
 		HopAckSuccesses:     0,
 		ReliabilityScore:    0,

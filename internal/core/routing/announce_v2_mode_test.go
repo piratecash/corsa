@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 )
@@ -117,11 +118,11 @@ func caps(values ...domain.Capability) []routing.PeerCapability {
 // may fire — every other test in this file asserts the negative shape
 // of that path.
 func TestAnnounceLoop_DeltaModeV2_BothCapsAgree(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry()
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
@@ -131,7 +132,7 @@ func TestAnnounceLoop_DeltaModeV2_BothCapsAgree(t *testing.T) {
 	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: v2Caps},
 		}
 	}
 
@@ -142,7 +143,7 @@ func TestAnnounceLoop_DeltaModeV2_BothCapsAgree(t *testing.T) {
 
 	// Persistent capability snapshot — populated by node.Service via
 	// MarkReconnected on session establishment in production.
-	registry.MarkReconnected("peer-C", v2Caps)
+	registry.MarkReconnected(domaintest.ID("peer-C"), v2Caps)
 
 	// First cycle: legacy baseline (first-sync invariant — full sync is
 	// always SendAnnounceRoutes regardless of v2 capability).
@@ -155,7 +156,7 @@ func TestAnnounceLoop_DeltaModeV2_BothCapsAgree(t *testing.T) {
 	}
 
 	// Add a second route so the next cycle has a non-empty delta.
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatalf("AddDirectPeer peer-D: %v", err)
 	}
 
@@ -183,18 +184,18 @@ func TestAnnounceLoop_DeltaModeV2_BothCapsAgree(t *testing.T) {
 // SendAnnounceRoutes wire frame. This is the mixed-version invariant — a
 // pre-v2 node never sees a routes_update frame.
 func TestAnnounceLoop_DeltaModeV1_LegacyPeer(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry()
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
 	// Legacy peer: empty capabilities on both sources.
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: nil},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: nil},
 		}
 	}
 
@@ -203,10 +204,10 @@ func TestAnnounceLoop_DeltaModeV1_LegacyPeer(t *testing.T) {
 		routing.WithStateRegistry(registry),
 	)
 
-	registry.MarkReconnected("peer-C", nil)
+	registry.MarkReconnected(domaintest.ID("peer-C"), nil)
 
 	runOneCycle(t, loop)
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatalf("AddDirectPeer peer-D: %v", err)
 	}
 	runOneCycle(t, loop)
@@ -225,11 +226,11 @@ func TestAnnounceLoop_DeltaModeV1_LegacyPeer(t *testing.T) {
 // CapMeshRoutingV2 — and a peer that "skips" v1 cannot receive the v2
 // frame because the first-sync legacy delivery is gated on v1.
 func TestAnnounceLoop_DeltaModeV2WithoutV1_TreatedAsV1(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry()
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
@@ -239,7 +240,7 @@ func TestAnnounceLoop_DeltaModeV2WithoutV1_TreatedAsV1(t *testing.T) {
 	v2OnlyCaps := caps(domain.CapMeshRoutingV2)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: v2OnlyCaps},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: v2OnlyCaps},
 		}
 	}
 
@@ -248,10 +249,10 @@ func TestAnnounceLoop_DeltaModeV2WithoutV1_TreatedAsV1(t *testing.T) {
 		routing.WithStateRegistry(registry),
 	)
 
-	registry.MarkReconnected("peer-C", v2OnlyCaps)
+	registry.MarkReconnected(domaintest.ID("peer-C"), v2OnlyCaps)
 
 	runOneCycle(t, loop)
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatalf("AddDirectPeer peer-D: %v", err)
 	}
 	runOneCycle(t, loop)
@@ -284,11 +285,11 @@ func TestAnnounceLoop_DeltaModeV2WithoutV1_TreatedAsV1(t *testing.T) {
 // persistent snapshot must equal the target caps and the cycle must take
 // the V1 delta path (not divergence, not MarkInvalid).
 func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry()
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
@@ -298,7 +299,7 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 	// routingCapablePeers). Round-21: the triplet is what counts as
 	// v2-capable for classifyDeltaMode.
 	stateCaps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
-	registry.MarkReconnected("peer-C", stateCaps)
+	registry.MarkReconnected(domaintest.ID("peer-C"), stateCaps)
 
 	// Per-cycle target snapshot drops v2 — the session
 	// routingCapablePeers picked this cycle does not have v2 (relay
@@ -307,7 +308,7 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 	targetCaps := caps(domain.CapMeshRoutingV1, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: targetCaps},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: targetCaps},
 		}
 	}
 
@@ -323,7 +324,7 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 		t.Fatalf("first sync must use legacy wire frame exactly once, got %d", got)
 	}
 
-	state := registry.Get("peer-C")
+	state := registry.Get(domaintest.ID("peer-C"))
 	if state == nil {
 		t.Fatalf("peer-C state missing after first cycle")
 	}
@@ -349,7 +350,7 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 	}
 
 	// Add a route so the next cycle takes the delta path.
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatalf("AddDirectPeer peer-D: %v", err)
 	}
 
@@ -377,11 +378,11 @@ func TestAnnounceLoop_PersistentVsTargetCapsDisagree_SyncsToTarget(t *testing.T)
 // is the protocol-level "First-sync wire-frame invariant" documented in
 // docs/routing.md.
 func TestAnnounceLoop_FirstSync_V2Capable_StillLegacy(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry()
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
@@ -389,7 +390,7 @@ func TestAnnounceLoop_FirstSync_V2Capable_StillLegacy(t *testing.T) {
 	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: v2Caps},
 		}
 	}
 
@@ -398,7 +399,7 @@ func TestAnnounceLoop_FirstSync_V2Capable_StillLegacy(t *testing.T) {
 		routing.WithStateRegistry(registry),
 	)
 
-	registry.MarkReconnected("peer-C", v2Caps)
+	registry.MarkReconnected(domaintest.ID("peer-C"), v2Caps)
 
 	runOneCycle(t, loop)
 
@@ -428,11 +429,11 @@ func TestAnnounceLoop_DeltaModeV2_DowngradedWithoutWireBaseline(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry(routing.WithRegistryClock(clock))
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
@@ -440,7 +441,7 @@ func TestAnnounceLoop_DeltaModeV2_DowngradedWithoutWireBaseline(t *testing.T) {
 	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: v2Caps},
 		}
 	}
 
@@ -450,13 +451,13 @@ func TestAnnounceLoop_DeltaModeV2_DowngradedWithoutWireBaseline(t *testing.T) {
 	)
 
 	// Persistent caps via MarkReconnected — both sources agree on v1+v2+relay.
-	registry.MarkReconnected("peer-C", v2Caps)
+	registry.MarkReconnected(domaintest.ID("peer-C"), v2Caps)
 
 	// Simulate the empty-baseline branch: a successful baseline was recorded
 	// locally without any wire frame having been emitted. lastSentSnapshot
 	// is non-nil so the loop takes the delta path, but the wire-baseline
 	// flag stays false so the override below must downgrade v2→v1.
-	state := registry.GetOrCreate("peer-C")
+	state := registry.GetOrCreate(domaintest.ID("peer-C"))
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now)
 	if state.HasSentWireBaseline() {
 		t.Fatalf("precondition: empty-baseline must NOT flip wire-baseline to true")
@@ -478,7 +479,7 @@ func TestAnnounceLoop_DeltaModeV2_DowngradedWithoutWireBaseline(t *testing.T) {
 
 	// Add a new route so the next cycle has a non-empty delta on top of the
 	// just-established baseline.
-	if _, err := table.AddDirectPeer("peer-D"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-D")); err != nil {
 		t.Fatalf("AddDirectPeer peer-D: %v", err)
 	}
 
@@ -503,7 +504,7 @@ func TestAnnounceLoop_DeltaModeV2_ForcedFullEmptyBaseline_KeepsWireBaselineFalse
 	clock := func() time.Time { return now }
 
 	// Empty table — every snapshot built from it is empty.
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, _ := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry(routing.WithRegistryClock(clock))
 
@@ -511,7 +512,7 @@ func TestAnnounceLoop_DeltaModeV2_ForcedFullEmptyBaseline_KeepsWireBaselineFalse
 	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: v2Caps},
 		}
 	}
 
@@ -520,12 +521,12 @@ func TestAnnounceLoop_DeltaModeV2_ForcedFullEmptyBaseline_KeepsWireBaselineFalse
 		routing.WithStateRegistry(registry),
 	)
 
-	registry.MarkReconnected("peer-C", v2Caps)
+	registry.MarkReconnected(domaintest.ID("peer-C"), v2Caps)
 
 	// Forced full sync against an empty table — records baseline, no wire.
 	runOneCycle(t, loop)
 
-	state := registry.Get("peer-C")
+	state := registry.Get(domaintest.ID("peer-C"))
 	if state == nil {
 		t.Fatalf("peer-C state must exist after the cycle")
 	}
@@ -545,11 +546,11 @@ func TestAnnounceLoop_ForcedFull_V2Capable_StillLegacy(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newV2WireSender(t)
 	registry := routing.NewAnnounceStateRegistry(routing.WithRegistryClock(clock))
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer peer-B: %v", err)
 	}
 
@@ -557,7 +558,7 @@ func TestAnnounceLoop_ForcedFull_V2Capable_StillLegacy(t *testing.T) {
 	v2Caps := caps(domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1)
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C", Capabilities: v2Caps},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C"), Capabilities: v2Caps},
 		}
 	}
 
@@ -566,13 +567,13 @@ func TestAnnounceLoop_ForcedFull_V2Capable_StillLegacy(t *testing.T) {
 		routing.WithStateRegistry(registry),
 	)
 
-	registry.MarkReconnected("peer-C", v2Caps)
+	registry.MarkReconnected(domaintest.ID("peer-C"), v2Caps)
 
 	// Seed a baseline that already exists (RecordFullSyncSuccess) and then
 	// flip NeedsFullResync via the test export. The rate-limit clamp does
 	// not bite because LastFullSyncAttemptAt is zero on a freshly recorded
 	// success.
-	state := registry.GetOrCreate("peer-C")
+	state := registry.GetOrCreate(domaintest.ID("peer-C"))
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now.Add(-1*time.Minute))
 	state.SetNeedsFullResyncForTest()
 

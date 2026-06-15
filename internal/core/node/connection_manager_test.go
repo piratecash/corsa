@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ func fakeDialFn() (func(context.Context, []domain.PeerAddress) (DialResult, erro
 	dialled := make(chan []domain.PeerAddress, 64)
 	fn := func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		dialled <- addrs
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{
 			Session:          session,
 			ConnectedAddress: addrs[0],
@@ -200,7 +201,7 @@ func TestCM_ActiveSessionLost_Reconnects(t *testing.T) {
 	var dialCount int32
 	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		atomic.AddInt32(&dialCount, 1)
-		session := fakePeerSession(addrs[0], "id-peer1")
+		session := fakePeerSession(addrs[0], domaintest.ID("id-peer1"))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -222,7 +223,7 @@ func TestCM_ActiveSessionLost_Reconnects(t *testing.T) {
 	// Simulate session loss.
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr("10.0.0.1:64646"),
-		Identity:       "id-peer1",
+		Identity:       domaintest.ID("id-peer1"),
 		Error:          errors.New("connection reset"),
 		WasHealthy:     true,
 		SlotGeneration: gen,
@@ -260,7 +261,7 @@ func TestCM_ReconnectFail_Replace(t *testing.T) {
 		if shouldFail {
 			return DialResult{}, errors.New("connection refused")
 		}
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -289,7 +290,7 @@ func TestCM_ReconnectFail_Replace(t *testing.T) {
 
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr("10.0.0.1:64646"),
-		Identity:       "id-10.0.0.1:64646",
+		Identity:       domaintest.ID("id-10.0.0.1:64646"),
 		Error:          errors.New("connection reset"),
 		WasHealthy:     true,
 		SlotGeneration: gen,
@@ -320,7 +321,7 @@ func TestCM_DialFailed_Incompatible_ImmediateReplace(t *testing.T) {
 		if count == 1 {
 			return DialResult{}, errIncompatibleProtocol
 		}
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -366,7 +367,7 @@ func TestCM_InboundClosed_TriggersFilll(t *testing.T) {
 
 	// Add second peer and emit InboundClosed.
 	b.Cfg.Provider.Add(mustAddr("10.0.0.2:64646"), domain.PeerSourceBootstrap)
-	cm.EmitHint(InboundClosed{IP: "192.168.1.1", Identity: "some-id"})
+	cm.EmitHint(InboundClosed{IP: "192.168.1.1", Identity: domaintest.ID("some-id")})
 
 	waitFor(t, 2*time.Second, "2 active slots", func() bool {
 		return cm.ActiveCount() == 2
@@ -384,7 +385,7 @@ func TestCM_InboundClosed_AtMax_NoFill(t *testing.T) {
 	var dialCount int32
 	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		atomic.AddInt32(&dialCount, 1)
-		session := fakePeerSession(addrs[0], "id-peer")
+		session := fakePeerSession(addrs[0], domaintest.ID("id-peer"))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -421,7 +422,7 @@ func TestCM_NewPeersDiscovered_AtMax_NoFill(t *testing.T) {
 	var dialCount int32
 	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		atomic.AddInt32(&dialCount, 1)
-		session := fakePeerSession(addrs[0], "id-peer")
+		session := fakePeerSession(addrs[0], domaintest.ID("id-peer"))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -537,7 +538,7 @@ func TestCM_GenerationGuard_StaleDialSucceeded_SessionClosed(t *testing.T) {
 	})
 
 	// Send a stale DialSucceeded — session should be closed, no teardown callback.
-	staleSession := fakePeerSession(mustAddr("10.0.0.1:64646"), "id-stale")
+	staleSession := fakePeerSession(mustAddr("10.0.0.1:64646"), domaintest.ID("id-stale"))
 	cm.EmitSlot(DialSucceeded{
 		Address:          mustAddr("10.0.0.1:64646"),
 		ConnectedAddress: mustAddr("10.0.0.1:64646"),
@@ -585,7 +586,7 @@ func TestCM_GenerationGuard_StaleActiveSessionLost(t *testing.T) {
 	// Simulate a session loss and reconnect (which increments generation).
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr("10.0.0.1:64646"),
-		Identity:       "id-10.0.0.1:64646",
+		Identity:       domaintest.ID("id-10.0.0.1:64646"),
 		Error:          errors.New("reset"),
 		SlotGeneration: oldGen,
 	})
@@ -605,7 +606,7 @@ func TestCM_GenerationGuard_StaleActiveSessionLost(t *testing.T) {
 	// Send stale ActiveSessionLost with old generation.
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr("10.0.0.1:64646"),
-		Identity:       "id-10.0.0.1:64646",
+		Identity:       domaintest.ID("id-10.0.0.1:64646"),
 		Error:          errors.New("late stale event"),
 		SlotGeneration: oldGen,
 	})
@@ -765,7 +766,7 @@ func TestCM_DeactivateSlot_OnSessionTeardown(t *testing.T) {
 	slots := cm.Slots()
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr("10.0.0.1:64646"),
-		Identity:       "id-10.0.0.1:64646",
+		Identity:       domaintest.ID("id-10.0.0.1:64646"),
 		Error:          errors.New("reset"),
 		WasHealthy:     true,
 		SlotGeneration: slots[0].Generation,
@@ -795,7 +796,7 @@ func TestCM_ReplaceSlot_ActiveSlot_Cleanup(t *testing.T) {
 		count := atomic.AddInt32(&dialCount, 1)
 		if count == 1 {
 			// First dial succeeds.
-			session := fakePeerSession(addrs[0], "id-peer1")
+			session := fakePeerSession(addrs[0], domaintest.ID("id-peer1"))
 			return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 		}
 		if addrs[0] == mustAddr("10.0.0.1:64646") {
@@ -803,7 +804,7 @@ func TestCM_ReplaceSlot_ActiveSlot_Cleanup(t *testing.T) {
 			return DialResult{}, errIncompatibleProtocol
 		}
 		// Peer2 succeeds.
-		session := fakePeerSession(addrs[0], "id-peer2")
+		session := fakePeerSession(addrs[0], domaintest.ID("id-peer2"))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -823,7 +824,7 @@ func TestCM_ReplaceSlot_ActiveSlot_Cleanup(t *testing.T) {
 	// Session loss → reconnect → fail incompatible → replace.
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr("10.0.0.1:64646"),
-		Identity:       "id-peer1",
+		Identity:       domaintest.ID("id-peer1"),
 		Error:          errors.New("reset"),
 		WasHealthy:     true,
 		SlotGeneration: gen,
@@ -861,7 +862,7 @@ func TestCM_ReplaceSlot_NonActive_NoTeardown(t *testing.T) {
 			_ = count
 			return DialResult{}, errIncompatibleProtocol
 		}
-		session := fakePeerSession(addrs[0], "id-peer2")
+		session := fakePeerSession(addrs[0], domaintest.ID("id-peer2"))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -983,7 +984,7 @@ func TestCM_Shutdown_DrainStaleSession(t *testing.T) {
 		close(dialStarted)
 		select {
 		case <-dialBlock:
-			session := fakePeerSession(addrs[0], "id-peer")
+			session := fakePeerSession(addrs[0], domaintest.ID("id-peer"))
 			return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 		case <-ctx.Done():
 			return DialResult{}, ctx.Err()
@@ -1105,7 +1106,7 @@ func TestCM_SlotOrder_ReplaceShiftsUp(t *testing.T) {
 		if shouldFail {
 			return DialResult{}, errIncompatibleProtocol
 		}
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -1131,7 +1132,7 @@ func TestCM_SlotOrder_ReplaceShiftsUp(t *testing.T) {
 
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        firstAddr,
-		Identity:       domain.PeerIdentity("id-" + string(firstAddr)),
+		Identity:       domaintest.ID("id-" + string(firstAddr)),
 		Error:          errors.New("reset"),
 		WasHealthy:     true,
 		SlotGeneration: firstGen,
@@ -1234,7 +1235,7 @@ func TestCM_NoFillBeforeBootstrapReady(t *testing.T) {
 	var dialCount atomic.Int32
 	b.Cfg.DialFn = func(ctx context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		dialCount.Add(1)
-		session := fakePeerSession(addrs[0], "id-peer1")
+		session := fakePeerSession(addrs[0], domaintest.ID("id-peer1"))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -1325,7 +1326,7 @@ func TestCM_Shutdown_DrainsInFlightDials(t *testing.T) {
 		close(dialStarted) // signal that dial is in progress
 		<-dialRelease      // wait for test to release — unconditionally
 
-		session := fakePeerSession(addrs[0], "id-peer1")
+		session := fakePeerSession(addrs[0], domaintest.ID("id-peer1"))
 		origConn := session.conn
 		session.conn = &closeCountingConn{Conn: origConn, counter: &closedSessions}
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
@@ -1441,13 +1442,13 @@ func TestCM_NoDuplicateWorkers(t *testing.T) {
 		count := atomic.AddInt32(&dialCount, 1)
 		if count == 1 {
 			// First dial succeeds immediately.
-			session := fakePeerSession(addrs[0], "id-peer1")
+			session := fakePeerSession(addrs[0], domaintest.ID("id-peer1"))
 			return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 		}
 		// Subsequent dials block to let us count active workers.
 		select {
 		case <-dialBlock:
-			session := fakePeerSession(addrs[0], "id-peer1")
+			session := fakePeerSession(addrs[0], domaintest.ID("id-peer1"))
 			return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 		case <-ctx.Done():
 			return DialResult{}, ctx.Err()
@@ -1473,7 +1474,7 @@ func TestCM_NoDuplicateWorkers(t *testing.T) {
 	// Emit ActiveSessionLost — triggers reconnect (one dial worker).
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr("10.0.0.1:64646"),
-		Identity:       "id-peer1",
+		Identity:       domaintest.ID("id-peer1"),
 		Error:          errors.New("reset"),
 		WasHealthy:     true,
 		SlotGeneration: gen,
@@ -1520,13 +1521,13 @@ func TestCM_ShrinkToLimit_EvictsNonActiveFirst(t *testing.T) {
 	b.Cfg.DialFn = func(ctx context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		n := dialCount.Add(1)
 		if n <= 2 {
-			session := fakePeerSession(addrs[0], domain.PeerIdentity("id-"+string(addrs[0])))
+			session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 			return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 		}
 		// Third dial blocks until released or cancelled.
 		select {
 		case <-dialBlock:
-			session := fakePeerSession(addrs[0], domain.PeerIdentity("id-"+string(addrs[0])))
+			session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 			return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 		case <-ctx.Done():
 			return DialResult{}, ctx.Err()
@@ -1750,7 +1751,7 @@ func TestCM_InitFailure_SlotNeverBecomesActive(t *testing.T) {
 	var dialCount int32
 	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		atomic.AddInt32(&dialCount, 1)
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -1911,7 +1912,7 @@ func TestCM_PeriodicFill_SuppressedBeforeBootstrap(t *testing.T) {
 	dialCalled := make(chan struct{}, 10)
 	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		dialCalled <- struct{}{}
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 

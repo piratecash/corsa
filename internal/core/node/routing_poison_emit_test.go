@@ -44,16 +44,16 @@ func TestIdentitiesViaUplink_ReturnsActiveTransitOnly(t *testing.T) {
 	// slots and IdentitiesViaUplink should NOT count them as transit
 	// identities of either uplink (the direct claim's identity equals
 	// its uplink — caller filters that explicitly when needed).
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idPeerB))
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idOriginC))
+	addDirectViaIdentity(t, svc, idPeerB)
+	addDirectViaIdentity(t, svc, idOriginC)
 
 	// Three transit destinations reachable via idPeerB; one of them
 	// also reachable via idOriginC.
-	for _, target := range []string{idTargetX, "ee00000000000000000000000000000000000099", "ff00000000000000000000000000000000000088"} {
+	for _, target := range []string{idTargetX.String(), "ee00000000000000000000000000000000000099", "ff00000000000000000000000000000000000088"} {
 		if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-			Identity: domain.PeerIdentity(target),
-			Origin:   domain.PeerIdentity(idPeerB),
-			NextHop:  domain.PeerIdentity(idPeerB),
+			Identity: domain.PeerIdentityFromWire(target),
+			Origin:   idPeerB,
+			NextHop:  idPeerB,
 			Hops:     2,
 			SeqNo:    1,
 			Source:   routing.RouteSourceAnnouncement,
@@ -62,9 +62,9 @@ func TestIdentitiesViaUplink_ReturnsActiveTransitOnly(t *testing.T) {
 		}
 	}
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idOriginC),
-		NextHop:  domain.PeerIdentity(idOriginC),
+		Identity: idTargetX,
+		Origin:   idOriginC,
+		NextHop:  idOriginC,
 		Hops:     3,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -72,7 +72,7 @@ func TestIdentitiesViaUplink_ReturnsActiveTransitOnly(t *testing.T) {
 		t.Fatalf("seed idTargetX via idOriginC: %v", err)
 	}
 
-	got := svc.routingTable.IdentitiesViaUplink(routing.PeerIdentity(idPeerB))
+	got := svc.routingTable.IdentitiesViaUplink(idPeerB)
 	// Expected: the 3 transit identities + idPeerB's own direct claim
 	// (which has uplink=idPeerB by construction). The poison emit
 	// caller is responsible for filtering the direct case if needed.
@@ -81,9 +81,9 @@ func TestIdentitiesViaUplink_ReturnsActiveTransitOnly(t *testing.T) {
 	}
 	idSet := make(map[string]bool, len(got))
 	for _, id := range got {
-		idSet[string(id)] = true
+		idSet[id.String()] = true
 	}
-	for _, want := range []string{idPeerB, idTargetX, "ee00000000000000000000000000000000000099", "ff00000000000000000000000000000000000088"} {
+	for _, want := range []string{idPeerB.String(), idTargetX.String(), "ee00000000000000000000000000000000000099", "ff00000000000000000000000000000000000088"} {
 		if !idSet[want] {
 			t.Fatalf("missing identity %q in result: %v", want, got)
 		}
@@ -100,9 +100,9 @@ func TestPoisonReverseToOtherPeers_EmitsToCapablePeersExceptLost(t *testing.T) {
 	lostAddr := domain.PeerAddress("addr-lost")
 	capableAddr := domain.PeerAddress("addr-capable")
 	noncapAddr := domain.PeerAddress("addr-noncap")
-	lostID := domain.PeerIdentity(idPeerB)
-	capableID := domain.PeerIdentity(idOriginC)
-	noncapID := domain.PeerIdentity("dd00000000000000000000000000000000000010")
+	lostID := idPeerB
+	capableID := idOriginC
+	noncapID := domain.PeerIdentityFromWire("dd00000000000000000000000000000000000010")
 	// idTargetX is the transit identity we're poisoning about.
 
 	_ = peerSessionFixture(t, svc, lostAddr, lostID,
@@ -112,7 +112,7 @@ func TestPoisonReverseToOtherPeers_EmitsToCapablePeersExceptLost(t *testing.T) {
 	noncapCh := peerSessionFixture(t, svc, noncapAddr, noncapID,
 		[]domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1}) // no poison_reverse
 
-	svc.poisonReverseToOtherPeers(context.Background(), lostID, []routing.PeerIdentity{routing.PeerIdentity(idTargetX)})
+	svc.poisonReverseToOtherPeers(context.Background(), lostID, []routing.PeerIdentity{idTargetX})
 
 	// capable peer must receive one poison frame about idTargetX.
 	select {
@@ -138,10 +138,10 @@ func TestPoisonReverseToOtherPeers_NoOtherPeersIsNoop(t *testing.T) {
 	// emit to. Must not panic.
 	svc, _ := newTestServiceWithIdentity(t)
 	lostAddr := domain.PeerAddress("addr-solo")
-	lostID := domain.PeerIdentity(idPeerB)
+	lostID := idPeerB
 	_ = peerSessionFixture(t, svc, lostAddr, lostID,
 		[]domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1})
 
-	svc.poisonReverseToOtherPeers(context.Background(), lostID, []routing.PeerIdentity{routing.PeerIdentity(idTargetX)})
+	svc.poisonReverseToOtherPeers(context.Background(), lostID, []routing.PeerIdentity{idTargetX})
 	// No assertion needed beyond "does not panic / hang".
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/netcore/netcoretest"
@@ -839,7 +840,7 @@ func TestSendSessionFrameViaNetwork_NetworkPathVisibleToBackend(t *testing.T) {
 
 			session := &peerSession{
 				address:      domain.PeerAddress("test-peer"),
-				peerIdentity: domain.PeerIdentity("test-id"),
+				peerIdentity: domaintest.ID("test-id"),
 				conn:         sessionSide,
 				connID:       connID,
 				netCore:      pc,

@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // Phase 1 P0 Phase A — tombstone-promotion cap-aware admission +
@@ -73,14 +75,14 @@ func TestStaleSeqNoCrossOriginTombstonePromotion_RespectsCap(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		u1      PeerIdentity = "u-1"
-		u2      PeerIdentity = "u-2"
-		uX      PeerIdentity = "u-X"
-		originA PeerIdentity = "origin-A"
-		originB PeerIdentity = "origin-B"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		u1      = domaintest.ID("u-1")
+		u2      = domaintest.ID("u-2")
+		uX      = domaintest.ID("u-X")
+		originA = domaintest.ID("origin-A")
+		originB = domaintest.ID("origin-B")
 	)
 	const K = 2
 
@@ -164,12 +166,12 @@ func TestTombstonePromotion_RejectedDoesNotPoisonSeenOriginSeqs(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uX      PeerIdentity = "u-X"
-		originA PeerIdentity = "origin-A"
-		originB PeerIdentity = "origin-B"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uX      = domaintest.ID("u-X")
+		originA = domaintest.ID("origin-A")
+		originB = domaintest.ID("origin-B")
 	)
 
 	tbl := NewTable(
@@ -249,12 +251,12 @@ func TestEqualSeqNoCrossOriginTombstonePromotion_DoesNotPoisonSeenOriginSeqs(t *
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uX      PeerIdentity = "u-X"
-		originA PeerIdentity = "origin-A"
-		originB PeerIdentity = "origin-B"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uX      = domaintest.ID("u-X")
+		originA = domaintest.ID("origin-A")
+		originB = domaintest.ID("origin-B")
 	)
 
 	tbl := NewTable(
@@ -320,12 +322,12 @@ func TestStaleSeqNoCrossOriginTombstonePromotion_DoesNotPoisonSeenOriginSeqs(t *
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uX      PeerIdentity = "u-X"
-		originA PeerIdentity = "origin-A"
-		originB PeerIdentity = "origin-B"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uX      = domaintest.ID("u-X")
+		originA = domaintest.ID("origin-A")
+		originB = domaintest.ID("origin-B")
 	)
 
 	tbl := NewTable(

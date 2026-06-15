@@ -48,9 +48,9 @@ func logFastInvalidation(entry RouteEntry, accepted bool, reason string) {
 		event = log.Warn()
 	}
 	event = event.
-		Str("identity", string(entry.Identity)).
-		Str("uplink", string(entry.NextHop)).
-		Str("origin", string(entry.Origin)).
+		Str("identity", entry.Identity.String()).
+		Str("uplink", entry.NextHop.String()).
+		Str("origin", entry.Origin.String()).
 		Int("observed_hops", entry.Hops).
 		Uint64("incoming_seqno", entry.SeqNo).
 		Bool("accepted", accepted)
@@ -282,7 +282,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// replay invariant requires the guard to apply EVERYWHERE
 		// we admit a state mutation against `bucket[idx]`, not
 		// just on the standard SeqNo branches. See § 3.1.5.c.
-		if entry.Origin != "" && old.LastIngressOrigin != "" && entry.Origin != old.LastIngressOrigin {
+		if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
 			if prevHigh, ok := old.SeenOriginSeqs[entry.Origin]; ok && entry.SeqNo <= prevHigh {
 				logFastInvalidation(entry, false, "cross_origin_stale_replay")
 				return RouteRejected, false
@@ -365,10 +365,10 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			incoming.LastIngressOrigin = bucket[idx].LastIngressOrigin
 			incoming.SeenOriginSeqs = bucket[idx].SeenOriginSeqs
 		} else {
-			incoming.LastIngressOrigin = ""
+			incoming.LastIngressOrigin = PeerIdentity{}
 			incoming.SeenOriginSeqs = nil
 		}
-		entry.Origin = ""
+		entry.Origin = PeerIdentity{}
 	}
 
 	if idx < 0 {
@@ -504,7 +504,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// SeqNo. Same-Origin reconfirmations at the same SeqNo are
 	// unaffected because the cross-Origin gating above already
 	// requires entry.Origin != old.LastIngressOrigin.
-	if entry.Origin != "" && old.LastIngressOrigin != "" && entry.Origin != old.LastIngressOrigin {
+	if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
 		if prevHigh, ok := old.SeenOriginSeqs[entry.Origin]; ok && entry.SeqNo <= prevHigh {
 			return RouteRejected, false
 		}
@@ -600,7 +600,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// SeqNo-resurrection guard for any future same-Origin replay
 		// against the original lineage.
 		if old.IsWithdrawn() && !incoming.IsWithdrawn() &&
-			entry.Origin != "" && old.LastIngressOrigin != "" &&
+			!entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() &&
 			entry.Origin != old.LastIngressOrigin {
 			if s.maxNextHopsPerOrigin > 0 {
 				savedTombstone := bucket[idx]
@@ -659,7 +659,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// explicitly below so the early-write here is overridden
 		// rather than lost.
 		bucket[idx].SeenOriginSeqs = mergeOriginObservation(bucket[idx].SeenOriginSeqs, entry.Origin, entry.SeqNo)
-		if incoming.LastIngressOrigin != "" && incoming.LastIngressOrigin != old.LastIngressOrigin {
+		if !incoming.LastIngressOrigin.IsZero() && incoming.LastIngressOrigin != old.LastIngressOrigin {
 			bucket[idx].LastIngressOrigin = incoming.LastIngressOrigin
 		}
 
@@ -888,7 +888,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// that construct UplinkClaim without going through
 	// toUplinkClaim / AdmitDirectPeer; we treat it as "no prior
 	// lineage observed" and stick with the standard reject.
-	if entry.Origin != "" && old.LastIngressOrigin != "" && entry.Origin != old.LastIngressOrigin {
+	if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
 		// Strictness rule: cross-Origin replace requires either
 		// strictly better hops, higher trust rank, or a withdrawn
 		// stored claim. Same-hops / same-trust cross-Origin
@@ -1200,7 +1200,7 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 				// fixtures emit Origin != "" and pass
 				// RouteEntry.Validate everywhere.
 				origin := s.localOrigin
-				if origin == "" {
+				if origin.IsZero() {
 					origin = identity
 				}
 				// Run the wire withdrawal SeqNo through the
@@ -1598,7 +1598,7 @@ func (s *routeStore) syncSeqCounterLocked(entry RouteEntry) {
 	if entry.Source != RouteSourceDirect {
 		return
 	}
-	if s.localOrigin == "" || entry.Origin != s.localOrigin {
+	if s.localOrigin.IsZero() || entry.Origin != s.localOrigin {
 		return
 	}
 	if entry.SeqNo > s.seqCounters[entry.Identity] {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -13,9 +14,9 @@ func TestBuildAnnounceSnapshot_DeduplicatesNextHopVariants(t *testing.T) {
 	// Several route entries with different NextHop but same (identity, origin, seq)
 	// should collapse into one announce entry after aggregation.
 	raw := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 3},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 3},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 4},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 3},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 3},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 4},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -48,8 +49,8 @@ func TestBuildAnnounceSnapshot_HigherSeqWinsOnHopsTie(t *testing.T) {
 	// inputs share Hops, so the higher SeqNo wins the per-Identity
 	// comparison.
 	raw := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 3, Hops: 2},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 7, Hops: 2},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 3, Hops: 2},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 7, Hops: 2},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -73,8 +74,8 @@ func TestBuildAnnounceSnapshot_MinHopsBeatsHigherSeq(t *testing.T) {
 	// Hops-first decision is just visible without the Stage 3
 	// intermediate.
 	raw := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 3, Hops: 2},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 7, Hops: 4},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 3, Hops: 2},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 7, Hops: 4},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -91,9 +92,9 @@ func TestBuildAnnounceSnapshot_MinHopsBeatsHigherSeq(t *testing.T) {
 
 func TestBuildAnnounceSnapshot_MinHopsSelected(t *testing.T) {
 	raw := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 5},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 3},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 5},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 3},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -112,8 +113,8 @@ func TestBuildAnnounceSnapshot_ExtraTieBreak(t *testing.T) {
 	extraB := json.RawMessage(`{"b":2}`)
 
 	raw := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2, Extra: extraA},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2, Extra: extraB},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2, Extra: extraA},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2, Extra: extraB},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -130,10 +131,10 @@ func TestBuildAnnounceSnapshot_NilVsNullExtraEquivalent(t *testing.T) {
 	// Extra=nil and Extra=json.RawMessage("null") should produce
 	// identical canonical entries and identical snapshots.
 	raw1 := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2, Extra: nil},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2, Extra: nil},
 	}
 	raw2 := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2, Extra: json.RawMessage("null")},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2, Extra: json.RawMessage("null")},
 	}
 
 	snap1 := BuildAnnounceSnapshot(raw1)
@@ -148,8 +149,8 @@ func TestBuildAnnounceSnapshot_NilExtraLosesToNonNil(t *testing.T) {
 	// nil extra < non-nil extra in tie-break
 	extra := json.RawMessage(`{"key":"val"}`)
 	raw := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2, Extra: nil},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2, Extra: extra},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2, Extra: nil},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2, Extra: extra},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -182,9 +183,9 @@ func TestBuildAnnounceSnapshot_DeterministicSort(t *testing.T) {
 	//      the lower Origin lexicographically — same input always
 	//      produces the same wire output.
 	raw := []AnnounceEntry{
-		{Identity: "zzz", Origin: "aaa", SeqNo: 1, Hops: 1},
-		{Identity: "aaa", Origin: "zzz", SeqNo: 1, Hops: 1},
-		{Identity: "aaa", Origin: "aaa", SeqNo: 1, Hops: 1},
+		{Identity: domaintest.ID("zzz"), Origin: domaintest.ID("aaa"), SeqNo: 1, Hops: 1},
+		{Identity: domaintest.ID("aaa"), Origin: domaintest.ID("zzz"), SeqNo: 1, Hops: 1},
+		{Identity: domaintest.ID("aaa"), Origin: domaintest.ID("aaa"), SeqNo: 1, Hops: 1},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -193,12 +194,12 @@ func TestBuildAnnounceSnapshot_DeterministicSort(t *testing.T) {
 	}
 	// Sorted by Identity. Identity "aaa" had two competing origins
 	// (aaa, zzz) tied on hops=1, seq=1, no Extra → lower Origin wins → "aaa".
-	if snap.Entries[0].Identity != "aaa" || snap.Entries[0].Origin != "aaa" {
+	if snap.Entries[0].Identity != domaintest.ID("aaa") || snap.Entries[0].Origin != domaintest.ID("aaa") {
 		t.Fatalf("first entry should be (Identity=aaa, Origin=aaa) by per-Identity tie-break, got (%s,%s)",
 			snap.Entries[0].Identity, snap.Entries[0].Origin)
 	}
 	// Identity "zzz" had one entry → unchanged.
-	if snap.Entries[1].Identity != "zzz" || snap.Entries[1].Origin != "aaa" {
+	if snap.Entries[1].Identity != domaintest.ID("zzz") || snap.Entries[1].Origin != domaintest.ID("aaa") {
 		t.Fatalf("second entry should be (Identity=zzz, Origin=aaa), got (%s,%s)",
 			snap.Entries[1].Identity, snap.Entries[1].Origin)
 	}
@@ -255,12 +256,12 @@ func TestAnnounceSnapshot_NilVsNonNilNotEqual(t *testing.T) {
 func TestComputeDelta_FieldChangeSameIdentityEmits(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "originA", SeqNo: 5, Hops: 3},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("originA"), SeqNo: 5, Hops: 3},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "originB", SeqNo: 7, Hops: 1},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("originB"), SeqNo: 7, Hops: 1},
 		},
 	}
 
@@ -268,7 +269,7 @@ func TestComputeDelta_FieldChangeSameIdentityEmits(t *testing.T) {
 	if len(delta) != 1 {
 		t.Fatalf("expected 1 delta entry on SeqNo / Hops change, got %d", len(delta))
 	}
-	if delta[0].Origin != "originB" || delta[0].Hops != 1 || delta[0].SeqNo != 7 {
+	if delta[0].Origin != domaintest.ID("originB") || delta[0].Hops != 1 || delta[0].SeqNo != 7 {
 		t.Fatalf("expected fresh entry (Origin=originB Hops=1 SeqNo=7) in delta, got Origin=%s Hops=%d SeqNo=%d",
 			delta[0].Origin, delta[0].Hops, delta[0].SeqNo)
 	}
@@ -288,12 +289,12 @@ func TestComputeDelta_FieldChangeSameIdentityEmits(t *testing.T) {
 func TestComputeDelta_OriginOnlyDiffNoEmit(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "originA", SeqNo: 5, Hops: 3},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("originA"), SeqNo: 5, Hops: 3},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "originB", SeqNo: 5, Hops: 3},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("originB"), SeqNo: 5, Hops: 3},
 		},
 	}
 
@@ -306,13 +307,13 @@ func TestComputeDelta_OriginOnlyDiffNoEmit(t *testing.T) {
 func TestComputeDelta_NewEntry(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
-			{Identity: "dest2", Origin: "origin2", SeqNo: 1, Hops: 3},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest2"), Origin: domaintest.ID("origin2"), SeqNo: 1, Hops: 3},
 		},
 	}
 
@@ -320,7 +321,7 @@ func TestComputeDelta_NewEntry(t *testing.T) {
 	if len(delta) != 1 {
 		t.Fatalf("expected 1 delta entry, got %d", len(delta))
 	}
-	if delta[0].Identity != "dest2" {
+	if delta[0].Identity != domaintest.ID("dest2") {
 		t.Fatalf("expected dest2, got %s", delta[0].Identity)
 	}
 }
@@ -328,12 +329,12 @@ func TestComputeDelta_NewEntry(t *testing.T) {
 func TestComputeDelta_ChangedSeqNo(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 2, Hops: 2},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 2, Hops: 2},
 		},
 	}
 
@@ -346,12 +347,12 @@ func TestComputeDelta_ChangedSeqNo(t *testing.T) {
 func TestComputeDelta_ChangedHops(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 5},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 5},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 3},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 3},
 		},
 	}
 
@@ -364,12 +365,12 @@ func TestComputeDelta_ChangedHops(t *testing.T) {
 func TestComputeDelta_NoChange(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
 		},
 	}
 
@@ -402,15 +403,15 @@ func TestComputeDelta_NoChangeMultiEntrySameIdentity(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
 			// Live winner via somePeer.
-			{Identity: "dest", Origin: "somePeer", SeqNo: 12, Hops: 3},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("somePeer"), SeqNo: 12, Hops: 3},
 			// Own-origin tombstone for the same Identity.
-			{Identity: "dest", Origin: "ourselves", SeqNo: 7, Hops: HopsInfinity},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ourselves"), SeqNo: 7, Hops: HopsInfinity},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest", Origin: "somePeer", SeqNo: 12, Hops: 3},
-			{Identity: "dest", Origin: "ourselves", SeqNo: 7, Hops: HopsInfinity},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("somePeer"), SeqNo: 12, Hops: 3},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ourselves"), SeqNo: 7, Hops: HopsInfinity},
 		},
 	}
 
@@ -440,15 +441,15 @@ func TestComputeDelta_TombstoneAdvancesIndependentlyFromLiveWinner(t *testing.T)
 	// delta.
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest", Origin: "somePeer", SeqNo: 12, Hops: 3},
-			{Identity: "dest", Origin: "ourselves", SeqNo: 5, Hops: HopsInfinity},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("somePeer"), SeqNo: 12, Hops: 3},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ourselves"), SeqNo: 5, Hops: HopsInfinity},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest", Origin: "somePeer", SeqNo: 12, Hops: 3},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("somePeer"), SeqNo: 12, Hops: 3},
 			// Tombstone advanced (re-disconnect after re-add).
-			{Identity: "dest", Origin: "ourselves", SeqNo: 9, Hops: HopsInfinity},
+			{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ourselves"), SeqNo: 9, Hops: HopsInfinity},
 		},
 	}
 
@@ -457,7 +458,7 @@ func TestComputeDelta_TombstoneAdvancesIndependentlyFromLiveWinner(t *testing.T)
 		t.Fatalf("expected exactly 1 delta entry (advanced tombstone only, live winner unchanged), got %d: %+v",
 			len(delta), delta)
 	}
-	if delta[0].Origin != "ourselves" || delta[0].SeqNo != 9 || delta[0].Hops != HopsInfinity {
+	if delta[0].Origin != domaintest.ID("ourselves") || delta[0].SeqNo != 9 || delta[0].Hops != HopsInfinity {
 		t.Fatalf("expected delta to contain advanced tombstone (Origin=ourselves SeqNo=9 Hops=%d), got %+v",
 			HopsInfinity, delta[0])
 	}
@@ -472,9 +473,9 @@ func TestComputeDelta_TombstoneAdvancesIndependentlyFromLiveWinner(t *testing.T)
 // "changed" on the second snapshot.
 func TestComputeDelta_IdempotentOnMultiTombstoneSnapshots(t *testing.T) {
 	raw := []AnnounceEntry{
-		{Identity: "destX", Origin: "origA", SeqNo: 10, Hops: HopsInfinity},
-		{Identity: "destX", Origin: "origB", SeqNo: 20, Hops: HopsInfinity},
-		{Identity: "destX", Origin: "origC", SeqNo: 30, Hops: HopsInfinity},
+		{Identity: domaintest.ID("destX"), Origin: domaintest.ID("origA"), SeqNo: 10, Hops: HopsInfinity},
+		{Identity: domaintest.ID("destX"), Origin: domaintest.ID("origB"), SeqNo: 20, Hops: HopsInfinity},
+		{Identity: domaintest.ID("destX"), Origin: domaintest.ID("origC"), SeqNo: 30, Hops: HopsInfinity},
 	}
 
 	snap1 := BuildAnnounceSnapshot(raw)
@@ -491,13 +492,13 @@ func TestComputeDelta_RemovedEntryNotInDelta(t *testing.T) {
 	// (absence is not implicit withdrawal).
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
-			{Identity: "dest2", Origin: "origin2", SeqNo: 1, Hops: 3},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest2"), Origin: domaintest.ID("origin2"), SeqNo: 1, Hops: 3},
 		},
 	}
 	new := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
 		},
 	}
 
@@ -563,8 +564,8 @@ func TestComputeDelta_NilOldSnapTreatsAllAsNew(t *testing.T) {
 	// should be returned as delta (equivalent to a full send).
 	newSnap := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
-			{Identity: "dest2", Origin: "origin2", SeqNo: 3, Hops: 1},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest2"), Origin: domaintest.ID("origin2"), SeqNo: 3, Hops: 1},
 		},
 	}
 
@@ -577,7 +578,7 @@ func TestComputeDelta_NilOldSnapTreatsAllAsNew(t *testing.T) {
 func TestComputeDelta_NilNewSnapReturnsNil(t *testing.T) {
 	old := &AnnounceSnapshot{
 		Entries: []AnnounceEntry{
-			{Identity: "dest1", Origin: "origin1", SeqNo: 1, Hops: 2},
+			{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 2},
 		},
 	}
 
@@ -616,12 +617,12 @@ func TestBuildAnnounceSnapshot_PerIdentityAggregationCollapsesOrigins(t *testing
 		// Two paths to dest1 via origin1 — different hops, same SeqNo
 		// (stage 2 picks min hops within a (Identity, Origin, SeqNo)
 		// bucket).
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 2},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 5, Hops: 4},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 2},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 5, Hops: 4},
 		// dest1 via origin2 with shorter path (hops=1) — wins stage 4.
-		{Identity: "dest1", Origin: "origin2", SeqNo: 3, Hops: 1},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin2"), SeqNo: 3, Hops: 1},
 		// Different dest entirely — survives stage 4 trivially.
-		{Identity: "dest2", Origin: "origin1", SeqNo: 1, Hops: 3},
+		{Identity: domaintest.ID("dest2"), Origin: domaintest.ID("origin1"), SeqNo: 1, Hops: 3},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -639,11 +640,11 @@ func TestBuildAnnounceSnapshot_PerIdentityAggregationCollapsesOrigins(t *testing
 	}
 
 	// dest1 winner: origin2 (hops=1 beats origin1's hops=2).
-	d1, ok := byIdentity["dest1"]
+	d1, ok := byIdentity[domaintest.ID("dest1")]
 	if !ok {
 		t.Fatal("missing dest1 in aggregated snapshot")
 	}
-	if d1.Origin != "origin2" {
+	if d1.Origin != domaintest.ID("origin2") {
 		t.Fatalf("expected dest1 winner Origin=origin2 (shorter hops), got Origin=%s", d1.Origin)
 	}
 	if d1.Hops != 1 {
@@ -654,11 +655,11 @@ func TestBuildAnnounceSnapshot_PerIdentityAggregationCollapsesOrigins(t *testing
 	}
 
 	// dest2 unchanged.
-	d2, ok := byIdentity["dest2"]
+	d2, ok := byIdentity[domaintest.ID("dest2")]
 	if !ok {
 		t.Fatal("missing dest2 in aggregated snapshot")
 	}
-	if d2.Origin != "origin1" || d2.Hops != 3 || d2.SeqNo != 1 {
+	if d2.Origin != domaintest.ID("origin1") || d2.Hops != 3 || d2.SeqNo != 1 {
 		t.Fatalf("dest2 should be unchanged (origin1, hops=3, seq=1), got (%s, %d, %d)",
 			d2.Origin, d2.Hops, d2.SeqNo)
 	}
@@ -671,9 +672,9 @@ func TestBuildAnnounceSnapshot_PerIdentityTieBreakBySeqNoAcrossOrigins(t *testin
 	// claim; it's the secondary tie-break documented in
 	// isBetterAnnounceEntry.
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "origA", SeqNo: 5, Hops: 2},
-		{Identity: "dest", Origin: "origB", SeqNo: 12, Hops: 2}, // newer SeqNo, same hops — wins.
-		{Identity: "dest", Origin: "origC", SeqNo: 8, Hops: 2},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("origA"), SeqNo: 5, Hops: 2},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("origB"), SeqNo: 12, Hops: 2}, // newer SeqNo, same hops — wins.
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("origC"), SeqNo: 8, Hops: 2},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -681,7 +682,7 @@ func TestBuildAnnounceSnapshot_PerIdentityTieBreakBySeqNoAcrossOrigins(t *testin
 		t.Fatalf("expected 1 entry after per-Identity aggregation, got %d", len(snap.Entries))
 	}
 	got := snap.Entries[0]
-	if got.Origin != "origB" || got.SeqNo != 12 {
+	if got.Origin != domaintest.ID("origB") || got.SeqNo != 12 {
 		t.Fatalf("expected Origin=origB SeqNo=12 (highest SeqNo on hops tie), got Origin=%s SeqNo=%d",
 			got.Origin, got.SeqNo)
 	}
@@ -708,9 +709,9 @@ func TestBuildAnnounceSnapshot_PerIdentityTieBreakByExtraAcrossOrigins(t *testin
 	extraZ := json.RawMessage(`{"z":1}`)
 
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "aaa", SeqNo: 5, Hops: 2, Extra: extraA},
-		{Identity: "dest", Origin: "bbb", SeqNo: 5, Hops: 2, Extra: extraZ}, // largest Extra — wins
-		{Identity: "dest", Origin: "ccc", SeqNo: 5, Hops: 2, Extra: extraM},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("aaa"), SeqNo: 5, Hops: 2, Extra: extraA},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("bbb"), SeqNo: 5, Hops: 2, Extra: extraZ}, // largest Extra — wins
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ccc"), SeqNo: 5, Hops: 2, Extra: extraM},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -718,7 +719,7 @@ func TestBuildAnnounceSnapshot_PerIdentityTieBreakByExtraAcrossOrigins(t *testin
 		t.Fatalf("expected 1 entry, got %d", len(snap.Entries))
 	}
 	got := snap.Entries[0]
-	if got.Origin != "bbb" {
+	if got.Origin != domaintest.ID("bbb") {
 		t.Fatalf("expected Origin=bbb (largest Extra `{\"z\":1}` wins Stage 4 Extra tie-break before Origin lex), got Origin=%s",
 			got.Origin)
 	}
@@ -735,16 +736,16 @@ func TestBuildAnnounceSnapshot_PerIdentityTieBreakByOriginLexicographic(t *testi
 	// pick different origins for the same destination, flapping no-op
 	// suppression and triggering redundant delta sends.
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "ccc", SeqNo: 1, Hops: 2},
-		{Identity: "dest", Origin: "aaa", SeqNo: 1, Hops: 2}, // lower Origin — wins by final tie-break.
-		{Identity: "dest", Origin: "bbb", SeqNo: 1, Hops: 2},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ccc"), SeqNo: 1, Hops: 2},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("aaa"), SeqNo: 1, Hops: 2}, // lower Origin — wins by final tie-break.
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("bbb"), SeqNo: 1, Hops: 2},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
 	if len(snap.Entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(snap.Entries))
 	}
-	if snap.Entries[0].Origin != "aaa" {
+	if snap.Entries[0].Origin != domaintest.ID("aaa") {
 		t.Fatalf("expected lower Origin=aaa to win deterministic tie-break, got %s",
 			snap.Entries[0].Origin)
 	}
@@ -763,8 +764,8 @@ func TestBuildAnnounceSnapshot_TombstonePreservedAlongsideLive(t *testing.T) {
 	// Post-fix: tombstones bypass the live-winner collapse and ride
 	// alongside in the snapshot. Both propagate to receivers.
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "ourselves", SeqNo: 10, Hops: HopsInfinity}, // own-origin tombstone
-		{Identity: "dest", Origin: "somePeer", SeqNo: 5, Hops: 4},              // live alternate
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ourselves"), SeqNo: 10, Hops: HopsInfinity}, // own-origin tombstone
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("somePeer"), SeqNo: 5, Hops: 4},              // live alternate
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -775,13 +776,13 @@ func TestBuildAnnounceSnapshot_TombstonePreservedAlongsideLive(t *testing.T) {
 	// Sort order: Identity ASC, Hops ASC, Origin ASC.
 	// Live winner (Hops=4) precedes tombstone (Hops=16).
 	live := snap.Entries[0]
-	if live.Hops != 4 || live.Origin != "somePeer" {
+	if live.Hops != 4 || live.Origin != domaintest.ID("somePeer") {
 		t.Fatalf("expected live winner first: Origin=somePeer Hops=4, got Origin=%s Hops=%d",
 			live.Origin, live.Hops)
 	}
 
 	tomb := snap.Entries[1]
-	if tomb.Hops != HopsInfinity || tomb.Origin != "ourselves" || tomb.SeqNo != 10 {
+	if tomb.Hops != HopsInfinity || tomb.Origin != domaintest.ID("ourselves") || tomb.SeqNo != 10 {
 		t.Fatalf("expected own-origin tombstone preserved: Origin=ourselves Hops=%d SeqNo=10, got Origin=%s Hops=%d SeqNo=%d",
 			HopsInfinity, tomb.Origin, tomb.Hops, tomb.SeqNo)
 	}
@@ -793,7 +794,7 @@ func TestBuildAnnounceSnapshot_TombstoneEmittedWhenNoLiveAlternate(t *testing.T)
 	// tombstone — receivers learn the route is gone. This is the
 	// non-edge case of the P1 fix: tombstone-only snapshot entry.
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "ourselves", SeqNo: 10, Hops: HopsInfinity},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ourselves"), SeqNo: 10, Hops: HopsInfinity},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -801,7 +802,7 @@ func TestBuildAnnounceSnapshot_TombstoneEmittedWhenNoLiveAlternate(t *testing.T)
 		t.Fatalf("expected 1 tombstone entry, got %d", len(snap.Entries))
 	}
 	got := snap.Entries[0]
-	if got.Hops != HopsInfinity || got.Origin != "ourselves" {
+	if got.Hops != HopsInfinity || got.Origin != domaintest.ID("ourselves") {
 		t.Fatalf("expected tombstone (Origin=ourselves Hops=%d), got (%s, %d)",
 			HopsInfinity, got.Origin, got.Hops)
 	}
@@ -818,13 +819,13 @@ func TestBuildAnnounceSnapshot_TombstoneAndLiveSurviveSplitHorizonAndAggregation
 	// preferring the now-stale (dest, ourselves) → us → dest route.
 	raw := []AnnounceEntry{
 		// Own-origin tombstone (post-disconnect from dest):
-		{Identity: "dest", Origin: "ourselves", SeqNo: 7, Hops: HopsInfinity},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("ourselves"), SeqNo: 7, Hops: HopsInfinity},
 		// Live transit-learned alternate (still in table from earlier announcement):
-		{Identity: "dest", Origin: "somePeer", SeqNo: 12, Hops: 3},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("somePeer"), SeqNo: 12, Hops: 3},
 		// Another live alternate via different origin (we knew before disconnect):
-		{Identity: "dest", Origin: "anotherPeer", SeqNo: 8, Hops: 5},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("anotherPeer"), SeqNo: 8, Hops: 5},
 		// Different identity — sanity check that aggregation still works:
-		{Identity: "other", Origin: "somePeer", SeqNo: 1, Hops: 2},
+		{Identity: domaintest.ID("other"), Origin: domaintest.ID("somePeer"), SeqNo: 1, Hops: 2},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -837,14 +838,14 @@ func TestBuildAnnounceSnapshot_TombstoneAndLiveSurviveSplitHorizonAndAggregation
 	}
 
 	// Sort: dest first (lex < other), within dest: live (hops=3) before tombstone (hops=16).
-	if snap.Entries[0].Identity != "dest" || snap.Entries[0].Hops != 3 || snap.Entries[0].Origin != "somePeer" {
+	if snap.Entries[0].Identity != domaintest.ID("dest") || snap.Entries[0].Hops != 3 || snap.Entries[0].Origin != domaintest.ID("somePeer") {
 		t.Fatalf("expected dest live winner first (Origin=somePeer Hops=3), got %+v", snap.Entries[0])
 	}
-	if snap.Entries[1].Identity != "dest" || snap.Entries[1].Hops != HopsInfinity || snap.Entries[1].Origin != "ourselves" {
+	if snap.Entries[1].Identity != domaintest.ID("dest") || snap.Entries[1].Hops != HopsInfinity || snap.Entries[1].Origin != domaintest.ID("ourselves") {
 		t.Fatalf("expected dest tombstone second (Origin=ourselves Hops=%d), got %+v",
 			HopsInfinity, snap.Entries[1])
 	}
-	if snap.Entries[2].Identity != "other" || snap.Entries[2].Origin != "somePeer" {
+	if snap.Entries[2].Identity != domaintest.ID("other") || snap.Entries[2].Origin != domaintest.ID("somePeer") {
 		t.Fatalf("expected other live winner third, got %+v", snap.Entries[2])
 	}
 }
@@ -866,9 +867,9 @@ func TestBuildAnnounceSnapshot_MultipleTombstonesSameIdentityCollapse(t *testing
 	// TestComputeDelta_IdempotentOnMultiTombstoneSnapshots for the
 	// follow-up contract.
 	raw := []AnnounceEntry{
-		{Identity: "dest", Origin: "origA", SeqNo: 7, Hops: HopsInfinity},
-		{Identity: "dest", Origin: "origB", SeqNo: 9, Hops: HopsInfinity},
-		{Identity: "dest", Origin: "origC", SeqNo: 5, Hops: HopsInfinity},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("origA"), SeqNo: 7, Hops: HopsInfinity},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("origB"), SeqNo: 9, Hops: HopsInfinity},
+		{Identity: domaintest.ID("dest"), Origin: domaintest.ID("origC"), SeqNo: 5, Hops: HopsInfinity},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -882,7 +883,7 @@ func TestBuildAnnounceSnapshot_MultipleTombstonesSameIdentityCollapse(t *testing
 	if winner.SeqNo != 9 {
 		t.Fatalf("expected tombstone winner SeqNo=9 (highest among the three), got SeqNo=%d", winner.SeqNo)
 	}
-	if winner.Origin != "origB" {
+	if winner.Origin != domaintest.ID("origB") {
 		t.Fatalf("expected tombstone winner Origin=origB (matches SeqNo=9), got Origin=%s", winner.Origin)
 	}
 }
@@ -912,9 +913,9 @@ func TestBuildAnnounceSnapshot_FieldDataInflationCollapse(t *testing.T) {
 
 	raw := make([]AnnounceEntry, 0, identityCount*originsPerIdentity*hopsVariants)
 	for i := 0; i < identityCount; i++ {
-		identity := PeerIdentity(formatHex16(i, "id"))
+		identity := domaintest.ID(formatHex16(i, "id"))
 		for o := 0; o < originsPerIdentity; o++ {
-			origin := PeerIdentity(formatHex16(o, "or"))
+			origin := domaintest.ID(formatHex16(o, "or"))
 			for h := 1; h <= hopsVariants; h++ {
 				raw = append(raw, AnnounceEntry{
 					Identity: identity,
@@ -962,8 +963,8 @@ func TestBuildAnnounceSnapshot_ExtraMismatchWarning(t *testing.T) {
 	extraB := json.RawMessage(`{"b":2}`)
 
 	raw := []AnnounceEntry{
-		{Identity: "dest1", Origin: "origin1", SeqNo: 10, Hops: 3, Extra: extraA},
-		{Identity: "dest1", Origin: "origin1", SeqNo: 10, Hops: 3, Extra: extraB},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 10, Hops: 3, Extra: extraA},
+		{Identity: domaintest.ID("dest1"), Origin: domaintest.ID("origin1"), SeqNo: 10, Hops: 3, Extra: extraB},
 	}
 
 	snap := BuildAnnounceSnapshot(raw)
@@ -1017,12 +1018,12 @@ func TestBuildAnnounceSnapshot_ExtraMismatchWarning(t *testing.T) {
 //   - ComputeDelta against an empty oldSnap emits only the live
 //     entry — there is no tombstone slot to track.
 func TestAnnounceTo_LiveSuppressesOwnTombstoneOnWire(t *testing.T) {
-	const (
-		nodeA  PeerIdentity = "node-A"
-		peerX  PeerIdentity = "peer-X"
-		peerY  PeerIdentity = "peer-Y"
-		peerZ  PeerIdentity = "peer-Z"
-		origin PeerIdentity = "some-foreign-origin"
+	var (
+		nodeA  = domaintest.ID("node-A")
+		peerX  = domaintest.ID("peer-X")
+		peerY  = domaintest.ID("peer-Y")
+		peerZ  = domaintest.ID("peer-Z")
+		origin = domaintest.ID("some-foreign-origin")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1101,10 +1102,10 @@ func TestAnnounceTo_LiveSuppressesOwnTombstoneOnWire(t *testing.T) {
 // where send_message frames would be routed at us with no surviving
 // uplink to forward them.
 func TestAnnounceTo_TombstoneEmittedWithoutLiveAlternative(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerZ PeerIdentity = "peer-Z"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerZ = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1162,12 +1163,12 @@ func TestAnnounceTo_TombstoneEmittedWithoutLiveAlternative(t *testing.T) {
 // different ordering scheme) still has to honour the receiver-
 // timeline contract.
 func TestAnnounceTo_LiveDominatesTombstoneOnReceiverTimeline(t *testing.T) {
-	const (
-		nodeA  PeerIdentity = "node-A"
-		peerX  PeerIdentity = "peer-X"
-		peerY  PeerIdentity = "peer-Y"
-		peerZ  PeerIdentity = "peer-Z"
-		origin PeerIdentity = "some-foreign-origin"
+	var (
+		nodeA  = domaintest.ID("node-A")
+		peerX  = domaintest.ID("peer-X")
+		peerY  = domaintest.ID("peer-Y")
+		peerZ  = domaintest.ID("peer-Z")
+		origin = domaintest.ID("some-foreign-origin")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1246,10 +1247,10 @@ func TestAnnounceTo_LiveDominatesTombstoneOnReceiverTimeline(t *testing.T) {
 // would invalidate each other's cache and burn SeqNo on every
 // announce cycle.
 func TestAnnounceTo_OutboundSeqNoForwardOnSigRevisit(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerZ PeerIdentity = "peer-Z"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerZ = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1324,18 +1325,18 @@ func TestAnnounceTo_OutboundSeqNoForwardOnSigRevisit(t *testing.T) {
 // no-op). The Extra value is part of the content-sig so a future
 // Extra change forces a fresh SeqNo assignment.
 func TestAnnounceTo_PropagatesExtraOnWire(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerY PeerIdentity = "peer-Y"
-		peerZ PeerIdentity = "peer-Z"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerY = domaintest.ID("peer-Y")
+		peerZ = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
 
 	extra := json.RawMessage(`{"onion_box":"deadbeef","future":42}`)
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "some-origin", NextHop: peerY,
+		Identity: peerX, Origin: domaintest.ID("some-origin"), NextHop: peerY,
 		Hops: 3, SeqNo: 7, Source: RouteSourceAnnouncement,
 		Extra: extra,
 	}); err != nil {
@@ -1377,11 +1378,11 @@ func TestAnnounceTo_PropagatesExtraOnWire(t *testing.T) {
 // the delta no-op invariant and forcing a routes_update on every
 // announce cycle for a stable mesh.
 func TestAnnounceTo_OutboundSeqNoStableAcrossPeersAndCycles(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerP PeerIdentity = "peer-P"
-		peerQ PeerIdentity = "peer-Q"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerP = domaintest.ID("peer-P")
+		peerQ = domaintest.ID("peer-Q")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1392,13 +1393,13 @@ func TestAnnounceTo_OutboundSeqNoStableAcrossPeersAndCycles(t *testing.T) {
 	// winner via peer-P (peer-Q filtered). Each peer's winner has
 	// a different sig (different Uplink).
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "some-origin", NextHop: peerP,
+		Identity: peerX, Origin: domaintest.ID("some-origin"), NextHop: peerP,
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute(via peer-P): %v", err)
 	}
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "some-origin", NextHop: peerQ,
+		Identity: peerX, Origin: domaintest.ID("some-origin"), NextHop: peerQ,
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute(via peer-Q): %v", err)
@@ -1467,11 +1468,11 @@ func TestAnnounceTo_OutboundSeqNoStableAcrossPeersAndCycles(t *testing.T) {
 //     but cached SeqNo < watermark → fresh assignment > prior
 //     tombstone SeqNo.
 func TestAnnounceTo_BroadcastWatermarkInvalidatesCachedLiveSig(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerY PeerIdentity = "peer-Y"
-		peerZ PeerIdentity = "peer-Z"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerY = domaintest.ID("peer-Y")
+		peerZ = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1578,25 +1579,25 @@ func TestAnnounceTo_BroadcastWatermarkInvalidatesCachedLiveSig(t *testing.T) {
 // Without outboundPeerMax tracking this test fails with the
 // receiver-side rejection symptom: cycle3.SeqNo <= cycle2.SeqNo.
 func TestAnnounceTo_PerPeerWinnerSwitchABA(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerP PeerIdentity = "peer-P"
-		peerQ PeerIdentity = "peer-Q"
-		peerZ PeerIdentity = "peer-Z"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerP = domaintest.ID("peer-P")
+		peerQ = domaintest.ID("peer-Q")
+		peerZ = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
 
 	// Two transit claims, peer-P preferred (lower hops).
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerP,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerP,
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute(via peer-P): %v", err)
 	}
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerQ,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerQ,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute(via peer-Q): %v", err)
@@ -1636,7 +1637,7 @@ func TestAnnounceTo_PerPeerWinnerSwitchABA(t *testing.T) {
 	// Restore peer-P's claim (fresh SeqNo > existing tombstone).
 	// peer-P becomes the live winner again (Hops=2 < Q's Hops=3).
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerP,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerP,
 		Hops: 2, SeqNo: 20, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute(via peer-P restore): %v", err)
@@ -1708,13 +1709,13 @@ func TestAnnounceTo_PerPeerWinnerSwitchABA(t *testing.T) {
 // Assertion: cycle6.SeqNo > cycle5.SeqNo. Without the cache-hit
 // peerMax refresh this fails with `cycle6=11 cycle5=12`.
 func TestAnnounceTo_CacheHitRefreshesPerPeerMax(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerP PeerIdentity = "peer-P"
-		peerQ PeerIdentity = "peer-Q"
-		peer1 PeerIdentity = "peer-1"
-		peer2 PeerIdentity = "peer-2"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerP = domaintest.ID("peer-P")
+		peerQ = domaintest.ID("peer-Q")
+		peer1 = domaintest.ID("peer-1")
+		peer2 = domaintest.ID("peer-2")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1722,13 +1723,13 @@ func TestAnnounceTo_CacheHitRefreshesPerPeerMax(t *testing.T) {
 	// Initial topology: peer-P preferred (Hops=2), peer-Q backup
 	// (Hops=3). Same SeqNo so the tie-break is purely Hops.
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerP,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerP,
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute initial peer-P: %v", err)
 	}
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerQ,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerQ,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute initial peer-Q: %v", err)
@@ -1761,7 +1762,7 @@ func TestAnnounceTo_CacheHitRefreshesPerPeerMax(t *testing.T) {
 
 	// Worsen peer-P → peer-Q becomes the winner.
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerP,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerP,
 		Hops: 4, SeqNo: 11, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute worsen peer-P: %v", err)
@@ -1778,7 +1779,7 @@ func TestAnnounceTo_CacheHitRefreshesPerPeerMax(t *testing.T) {
 
 	// Restore peer-P → peer-P becomes winner again.
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerP,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerP,
 		Hops: 2, SeqNo: 12, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute restore peer-P: %v", err)
@@ -1809,7 +1810,7 @@ func TestAnnounceTo_CacheHitRefreshesPerPeerMax(t *testing.T) {
 
 	// Worsen peer-P again → winner switches to sigQ.
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "origin", NextHop: peerP,
+		Identity: peerX, Origin: domaintest.ID("origin"), NextHop: peerP,
 		Hops: 4, SeqNo: 13, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute worsen peer-P again: %v", err)
@@ -1863,11 +1864,11 @@ func TestAnnounceTo_CacheHitRefreshesPerPeerMax(t *testing.T) {
 // tombstone wire SeqNo). Without the fix the wire SeqNo would
 // be 1 (foreign), which the receiver rejects.
 func TestAnnounceTo_OutboundSeqNoStaysAboveOwnTombstone(t *testing.T) {
-	const (
-		nodeA PeerIdentity = "node-A"
-		peerX PeerIdentity = "peer-X"
-		peerY PeerIdentity = "peer-Y"
-		peerZ PeerIdentity = "peer-Z"
+	var (
+		nodeA = domaintest.ID("node-A")
+		peerX = domaintest.ID("peer-X")
+		peerY = domaintest.ID("peer-Y")
+		peerZ = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(WithLocalOrigin(nodeA))
@@ -1893,7 +1894,7 @@ func TestAnnounceTo_OutboundSeqNoStaysAboveOwnTombstone(t *testing.T) {
 			foreignSeqNo, tombstoneSeqNo)
 	}
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: peerX, Origin: "some-foreign-origin", NextHop: peerY,
+		Identity: peerX, Origin: domaintest.ID("some-foreign-origin"), NextHop: peerY,
 		Hops: 3, SeqNo: foreignSeqNo, Source: RouteSourceAnnouncement,
 	})
 	if err != nil || status != RouteAccepted {
@@ -1937,9 +1938,9 @@ func TestAnnounceTo_OutboundSeqNoStaysAboveOwnTombstone(t *testing.T) {
 // axis added to seqKey keeps live and tombstone in different
 // Stage 2 buckets even at identical (Origin, SeqNo).
 func TestBuildAnnounceSnapshot_LiveAndTombstoneSameSeqNoBothSurvive(t *testing.T) {
-	const (
-		peerX  PeerIdentity = "peer-X"
-		sender PeerIdentity = "sender-localOrigin"
+	var (
+		peerX  = domaintest.ID("peer-X")
+		sender = domaintest.ID("sender-localOrigin")
 	)
 	const collidingSeqNo uint64 = 42
 

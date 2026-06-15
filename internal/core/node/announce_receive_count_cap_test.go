@@ -60,10 +60,10 @@ func TestHandleAnnounceRoutes_OverCapFrameDroppedWhole(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
@@ -76,12 +76,12 @@ func TestHandleAnnounceRoutes_OverCapFrameDroppedWhole(t *testing.T) {
 		AnnounceRoutes: buildAnnounceRouteFrames(maxRoutesPerAnnounceFrame + 1),
 	}
 
-	svc.handleAnnounceRoutes(domain.PeerIdentity(idPeerB), frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
 	// None of the over-cap entries must have been applied: probing the
 	// first identity is enough — the cap drops the WHOLE frame, so a
 	// partial apply would have stored at least the first one.
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(frame.AnnounceRoutes[0].Identity)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(frame.AnnounceRoutes[0].Identity)); len(got) > 0 {
 		t.Fatalf("over-cap legacy frame must not be applied: %d entries stored for first identity", len(got))
 	}
 	// An over-cap frame is rejected at the wire layer; it does NOT count
@@ -101,7 +101,7 @@ func TestHandleAnnounceRoutes_AtCapFrameAccepted(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 
 	entries := buildAnnounceRouteFrames(maxRoutesPerAnnounceFrame)
@@ -110,14 +110,14 @@ func TestHandleAnnounceRoutes_AtCapFrameAccepted(t *testing.T) {
 		AnnounceRoutes: entries,
 	}
 
-	svc.handleAnnounceRoutes(domain.PeerIdentity(idPeerB), frame)
+	svc.handleAnnounceRoutes(idPeerB, frame)
 
 	// First and last entries are both present — a partial apply would
 	// have shown up here.
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(entries[0].Identity)); len(got) == 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(entries[0].Identity)); len(got) == 0 {
 		t.Fatalf("at-cap legacy frame: first entry missing")
 	}
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(entries[len(entries)-1].Identity)); len(got) == 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(entries[len(entries)-1].Identity)); len(got) == 0 {
 		t.Fatalf("at-cap legacy frame: last entry missing")
 	}
 }
@@ -133,17 +133,17 @@ func TestHandleRoutesUpdate_OverCapFrameDroppedWhole(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 	// Flip baseline so the cap is the only guard in play.
-	registry.GetOrCreate(domain.PeerIdentity(idPeerB)).MarkBaselineReceived()
+	registry.GetOrCreate(idPeerB).MarkBaselineReceived()
 
 	senderAddr := domain.PeerAddress("addr-peerB")
 	sendCh := make(chan protocol.Frame, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 	}
@@ -155,9 +155,9 @@ func TestHandleRoutesUpdate_OverCapFrameDroppedWhole(t *testing.T) {
 		AnnounceRoutes: buildAnnounceRouteFrames(maxRoutesPerAnnounceFrame + 50),
 	}
 
-	svc.handleRoutesUpdate(domain.PeerIdentity(idPeerB), senderAddr, frame)
+	svc.handleRoutesUpdate(idPeerB, senderAddr, frame)
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(frame.AnnounceRoutes[0].Identity)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(frame.AnnounceRoutes[0].Identity)); len(got) > 0 {
 		t.Fatalf("over-cap v2 delta must not apply: %d entries stored for first identity", len(got))
 	}
 	// No wire frame on the send channel: the cap drops the input BEFORE
@@ -179,10 +179,10 @@ func TestHandleRouteAnnounceV3_OverCapFrameDroppedWhole(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
@@ -194,9 +194,9 @@ func TestHandleRouteAnnounceV3_OverCapFrameDroppedWhole(t *testing.T) {
 		Entries: entries,
 	}
 
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(idPeerB, domain.PeerAddress("addr-peerB"), frame)
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(entries[0].Identity)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(entries[0].Identity)); len(got) > 0 {
 		t.Fatalf("over-cap v3 frame must not apply: %d entries stored for first identity", len(got))
 	}
 	if state.HasReceivedBaseline() {
@@ -212,7 +212,7 @@ func TestHandleRouteAnnounceV3_AtCapFrameAccepted(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 
 	entries := buildRouteAnnounceV3Entries(maxRoutesPerAnnounceFrame)
@@ -222,15 +222,15 @@ func TestHandleRouteAnnounceV3_AtCapFrameAccepted(t *testing.T) {
 		Entries: entries,
 	}
 
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(idPeerB, domain.PeerAddress("addr-peerB"), frame)
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(entries[0].Identity)); len(got) == 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(entries[0].Identity)); len(got) == 0 {
 		t.Fatalf("at-cap v3 frame: first entry missing")
 	}
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(entries[len(entries)-1].Identity)); len(got) == 0 {
+	if got := svc.routingTable.Lookup(domain.PeerIdentityFromWire(entries[len(entries)-1].Identity)); len(got) == 0 {
 		t.Fatalf("at-cap v3 frame: last entry missing")
 	}
-	if state := registry.Get(domain.PeerIdentity(idPeerB)); state == nil || !state.HasReceivedBaseline() {
+	if state := registry.Get(idPeerB); state == nil || !state.HasReceivedBaseline() {
 		t.Fatalf("at-cap v3 full must establish baseline")
 	}
 }

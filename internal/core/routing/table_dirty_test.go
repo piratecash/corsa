@@ -4,6 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestNewTableNotDirty verifies that a freshly constructed Table reports
@@ -53,40 +55,40 @@ func TestUpdateRouteAcceptedMarksDirty(t *testing.T) {
 		{
 			name: "new_entry",
 			add: RouteEntry{
-				Identity: "alice", Origin: "bob", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 				Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 			},
 		},
 		{
 			name: "higher_seq",
 			seed: []RouteEntry{{
-				Identity: "alice", Origin: "bob", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 				Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 			}},
 			add: RouteEntry{
-				Identity: "alice", Origin: "bob", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 				Hops: 2, SeqNo: 2, Source: RouteSourceAnnouncement,
 			},
 		},
 		{
 			name: "higher_trust_same_seq",
 			seed: []RouteEntry{{
-				Identity: "alice", Origin: "bob", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 				Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 			}},
 			add: RouteEntry{
-				Identity: "alice", Origin: "bob", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 				Hops: 3, SeqNo: 1, Source: RouteSourceHopAck,
 			},
 		},
 		{
 			name: "fewer_hops_same_seq_same_trust",
 			seed: []RouteEntry{{
-				Identity: "alice", Origin: "bob", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 				Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 			}},
 			add: RouteEntry{
-				Identity: "alice", Origin: "bob", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 				Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 			},
 		},
@@ -125,13 +127,13 @@ func TestUpdateRouteRejectedDoesNotMarkDirty(t *testing.T) {
 	t.Run("stale_seq", func(t *testing.T) {
 		tbl := NewTable()
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		tbl.ConsumeDirty()
 
 		status, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 2, SeqNo: 3, Source: RouteSourceAnnouncement,
 		})
 		if err != nil {
@@ -148,14 +150,14 @@ func TestUpdateRouteRejectedDoesNotMarkDirty(t *testing.T) {
 	t.Run("tombstone_protection", func(t *testing.T) {
 		tbl := NewTable()
 		// Seed a withdrawal tombstone via WithdrawRoute.
-		if !tbl.WithdrawRoute("alice", "bob", "charlie", 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5) {
 			t.Fatal("WithdrawRoute returned false on first withdraw")
 		}
 		tbl.ConsumeDirty()
 
 		// Same-seq update on the tombstone must be rejected.
 		status, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 2, SeqNo: 5, Source: RouteSourceHopAck,
 		})
 		if err != nil {
@@ -172,7 +174,7 @@ func TestUpdateRouteRejectedDoesNotMarkDirty(t *testing.T) {
 	t.Run("local_source_reserved", func(t *testing.T) {
 		tbl := NewTable()
 		_, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "alice", NextHop: "alice",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("alice"), NextHop: domaintest.ID("alice"),
 			Hops: 0, SeqNo: 1, Source: RouteSourceLocal,
 		})
 		if err == nil {
@@ -200,7 +202,7 @@ func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 	t.Run("exact_reconfirmation_rewrites_ttl_marks_dirty", func(t *testing.T) {
 		tbl := NewTable(WithClock(fixedClock(now)))
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		tbl.ConsumeDirty()
@@ -209,7 +211,7 @@ func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 		// exact reconfirmation path. ExpiresAt is rewritten, snapshot
 		// must be republished.
 		status, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		if err != nil {
@@ -226,13 +228,13 @@ func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 	t.Run("worse_hops_same_source_keeps_clean", func(t *testing.T) {
 		tbl := NewTable(WithClock(fixedClock(now)))
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		tbl.ConsumeDirty()
 
 		status, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 5, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		if err != nil {
@@ -269,13 +271,13 @@ func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 		// disagreement.
 		tbl := NewTable(WithClock(fixedClock(now)))
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceHopAck,
 		})
 		tbl.ConsumeDirty()
 
 		status, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		if err != nil {
@@ -296,16 +298,16 @@ func TestUpdateRouteUnchangedDirtyContract(t *testing.T) {
 // session reattach; without this fast path the publisher would rebuild
 // on every reconnect even when the route is unchanged.
 func TestAddDirectPeerIdempotentDoesNotMarkDirty(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("alice"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("alice")))
 
 	// First add — real mutation, dirty.
-	mustAddDirect(t, tbl, "bob")
+	mustAddDirect(t, tbl, domaintest.ID("bob"))
 	if !tbl.ConsumeDirty() {
 		t.Fatal("first AddDirectPeer did not mark dirty")
 	}
 
 	// Second add for the same peer — idempotent no-op.
-	mustAddDirect(t, tbl, "bob")
+	mustAddDirect(t, tbl, domaintest.ID("bob"))
 	if tbl.IsDirty() {
 		t.Fatal("idempotent AddDirectPeer marked dirty; reconnect storms would force rebuilds")
 	}
@@ -314,12 +316,12 @@ func TestAddDirectPeerIdempotentDoesNotMarkDirty(t *testing.T) {
 // TestAddDirectPeerReactivationMarksDirty verifies that a re-add after
 // withdrawal (the actual disconnect-reconnect path) marks dirty.
 func TestAddDirectPeerReactivationMarksDirty(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("alice"))
-	mustAddDirect(t, tbl, "bob")
-	mustRemoveDirect(t, tbl, "bob")
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("alice")))
+	mustAddDirect(t, tbl, domaintest.ID("bob"))
+	mustRemoveDirect(t, tbl, domaintest.ID("bob"))
 	tbl.ConsumeDirty()
 
-	mustAddDirect(t, tbl, "bob")
+	mustAddDirect(t, tbl, domaintest.ID("bob"))
 	if !tbl.ConsumeDirty() {
 		t.Fatal("reactivation after withdrawal did not mark dirty")
 	}
@@ -340,29 +342,29 @@ func TestAddDirectPeerReactivationMarksDirty(t *testing.T) {
 // Bad/Dead, and the contract on AddDirectPeer must keep
 // Snapshot.Health honest regardless.
 func TestAddDirectPeerIdempotentWithDegradedHealthMarksDirty(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("alice"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("alice")))
 
 	// First add — real mutation, dirty.
-	mustAddDirect(t, tbl, "bob")
+	mustAddDirect(t, tbl, domaintest.ID("bob"))
 	tbl.ConsumeDirty()
 
 	// Force the direct pair into Dead via the test seam. The
 	// storage claim stays alive (own-direct, ExpiresAt=zero), so
 	// the next AddDirectPeer hits the idempotent fast-path.
-	tbl.ForceHealthForTest("bob", "bob", HealthDead)
+	tbl.ForceHealthForTest(domaintest.ID("bob"), domaintest.ID("bob"), HealthDead)
 	tbl.ConsumeDirty()
 
 	// Second add for the same peer — idempotent for storage, but
 	// the health reset path runs (Health was Dead) and the
 	// published Snapshot.Health changes.
-	mustAddDirect(t, tbl, "bob")
+	mustAddDirect(t, tbl, domaintest.ID("bob"))
 	if !tbl.ConsumeDirty() {
 		t.Fatal("idempotent AddDirectPeer with degraded health did not mark dirty; Snapshot.Health changed but readers won't see it until next unrelated mutation")
 	}
 
 	// Health must be back to Good after the reset.
 	tbl.mu.RLock()
-	state := tbl.health.getLocked("bob", "bob")
+	state := tbl.health.getLocked(domaintest.ID("bob"), domaintest.ID("bob"))
 	tbl.mu.RUnlock()
 	if state == nil || state.Health != HealthGood {
 		t.Fatalf("Direct health not reset to Good: state=%+v", state)
@@ -373,11 +375,11 @@ func TestAddDirectPeerIdempotentWithDegradedHealthMarksDirty(t *testing.T) {
 // marks dirty: at minimum recordWithdrawalLocked appends to withdrawTimes,
 // which is part of the published FlapState.
 func TestRemoveDirectPeerMarksDirty(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("alice"))
-	mustAddDirect(t, tbl, "bob")
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("alice")))
+	mustAddDirect(t, tbl, domaintest.ID("bob"))
 	tbl.ConsumeDirty()
 
-	mustRemoveDirect(t, tbl, "bob")
+	mustRemoveDirect(t, tbl, domaintest.ID("bob"))
 	if !tbl.ConsumeDirty() {
 		t.Fatal("RemoveDirectPeer did not mark dirty")
 	}
@@ -387,7 +389,7 @@ func TestRemoveDirectPeerMarksDirty(t *testing.T) {
 func TestWithdrawRouteSuccessMarksDirty(t *testing.T) {
 	t.Run("tombstone_creation", func(t *testing.T) {
 		tbl := NewTable()
-		if !tbl.WithdrawRoute("alice", "bob", "charlie", 1) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 1) {
 			t.Fatal("WithdrawRoute returned false on tombstone creation")
 		}
 		if !tbl.ConsumeDirty() {
@@ -398,12 +400,12 @@ func TestWithdrawRouteSuccessMarksDirty(t *testing.T) {
 	t.Run("active_to_withdrawn", func(t *testing.T) {
 		tbl := NewTable()
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		tbl.ConsumeDirty()
 
-		if !tbl.WithdrawRoute("alice", "bob", "charlie", 2) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 2) {
 			t.Fatal("WithdrawRoute returned false on active→withdrawn")
 		}
 		if !tbl.ConsumeDirty() {
@@ -413,12 +415,12 @@ func TestWithdrawRouteSuccessMarksDirty(t *testing.T) {
 
 	t.Run("stale_seq_keeps_clean", func(t *testing.T) {
 		tbl := NewTable()
-		if !tbl.WithdrawRoute("alice", "bob", "charlie", 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5) {
 			t.Fatal("WithdrawRoute returned false on tombstone creation")
 		}
 		tbl.ConsumeDirty()
 
-		if tbl.WithdrawRoute("alice", "bob", "charlie", 3) {
+		if tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 3) {
 			t.Fatal("WithdrawRoute should reject lower SeqNo")
 		}
 		if tbl.IsDirty() {
@@ -431,10 +433,10 @@ func TestWithdrawRouteSuccessMarksDirty(t *testing.T) {
 // the no-op path (no transit routes via the disconnected peer) leaves dirty
 // untouched, while a real invalidation marks it.
 func TestInvalidateTransitRoutesMarksDirtyOnlyOnRealInvalidation(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 
 	t.Run("no_routes_keeps_clean", func(t *testing.T) {
-		invalidated, _ := tbl.InvalidateTransitRoutes("ghost")
+		invalidated, _ := tbl.InvalidateTransitRoutes(domaintest.ID("ghost"))
 		if invalidated != 0 {
 			t.Fatalf("expected 0 invalidated for unknown peer, got %d", invalidated)
 		}
@@ -445,12 +447,12 @@ func TestInvalidateTransitRoutesMarksDirtyOnlyOnRealInvalidation(t *testing.T) {
 
 	t.Run("real_invalidation_marks_dirty", func(t *testing.T) {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "charlie",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		tbl.ConsumeDirty()
 
-		invalidated, _ := tbl.InvalidateTransitRoutes("charlie")
+		invalidated, _ := tbl.InvalidateTransitRoutes(domaintest.ID("charlie"))
 		if invalidated != 1 {
 			t.Fatalf("expected 1 invalidated, got %d", invalidated)
 		}
@@ -495,7 +497,7 @@ func TestTickTTLClearsExpiredHoldDownAndMarksDirty(t *testing.T) {
 	// remain inside it after hold-down expires.
 	tbl := NewTable(
 		WithClock(clock.nowFunc),
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithFlapWindow(120*time.Second),
 		WithFlapThreshold(2),
 		WithHoldDownDuration(30*time.Second),
@@ -505,10 +507,10 @@ func TestTickTTLClearsExpiredHoldDownAndMarksDirty(t *testing.T) {
 	// flap window arm hold-down. AddDirectPeer between the two
 	// removes is what produces a real "second disconnect" rather
 	// than a no-op.
-	mustAddDirect(t, tbl, "peerA")
-	mustRemoveDirect(t, tbl, "peerA")
-	mustAddDirect(t, tbl, "peerA")
-	mustRemoveDirect(t, tbl, "peerA")
+	mustAddDirect(t, tbl, domaintest.ID("peerA"))
+	mustRemoveDirect(t, tbl, domaintest.ID("peerA"))
+	mustAddDirect(t, tbl, domaintest.ID("peerA"))
+	mustRemoveDirect(t, tbl, domaintest.ID("peerA"))
 
 	// Sanity: the peer is in hold-down and the cached snapshot
 	// would report InHoldDown=true.
@@ -570,7 +572,7 @@ func TestUpdateRouteCapRejectionMarksDirty(t *testing.T) {
 	// per-(Identity, Uplink) dedup — Origin was dropped from the
 	// dedup key, see uplink_claim.go.)
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	tbl.ConsumeDirty()
@@ -579,7 +581,7 @@ func TestUpdateRouteCapRejectionMarksDirty(t *testing.T) {
 	// AdmissionRejectedFull. Routes map is unchanged but the
 	// rejected_full counter advanced.
 	statusFull, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-b",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 		Hops: 5, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	if err != nil {
@@ -600,14 +602,14 @@ func TestUpdateRouteCapRejectionMarksDirty(t *testing.T) {
 	// AdmissionRejectedAllProtected — also a non-routes-map change
 	// that must publish.
 	tbl2 := NewTable(
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithMaxNextHopsPerOrigin(1),
 	)
-	mustAddDirect(t, tbl2, "neighbor")
+	mustAddDirect(t, tbl2, domaintest.ID("neighbor"))
 	tbl2.ConsumeDirty()
 
 	statusProtected, err := tbl2.UpdateRoute(RouteEntry{
-		Identity: "neighbor", Origin: "self", NextHop: "transit",
+		Identity: domaintest.ID("neighbor"), Origin: domaintest.ID("self"), NextHop: domaintest.ID("transit"),
 		Hops: 1, SeqNo: 99, Source: RouteSourceHopAck,
 	})
 	if err != nil {
@@ -644,17 +646,17 @@ func TestSnapshotNormalizesHoldDownUntilWhenNotInHoldDown(t *testing.T) {
 
 	tbl := NewTable(
 		WithClock(clock.nowFunc),
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithFlapWindow(120*time.Second),
 		WithFlapThreshold(2),
 		WithHoldDownDuration(30*time.Second),
 	)
 
 	// Arm hold-down via a flap burst.
-	mustAddDirect(t, tbl, "peerA")
-	mustRemoveDirect(t, tbl, "peerA")
-	mustAddDirect(t, tbl, "peerA")
-	mustRemoveDirect(t, tbl, "peerA")
+	mustAddDirect(t, tbl, domaintest.ID("peerA"))
+	mustRemoveDirect(t, tbl, domaintest.ID("peerA"))
+	mustAddDirect(t, tbl, domaintest.ID("peerA"))
+	mustRemoveDirect(t, tbl, domaintest.ID("peerA"))
 
 	// Sanity: hold-down is currently armed and the snapshot reports
 	// a non-zero HoldDownUntil with InHoldDown=true.
@@ -713,7 +715,7 @@ func TestTickTTLMarksDirtyOnlyWhenSomethingExpired(t *testing.T) {
 
 	tbl := NewTable(WithClock(clock.nowFunc), WithDefaultTTL(10*time.Second))
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	tbl.ConsumeDirty()
@@ -742,10 +744,10 @@ func TestTickTTLMarksDirtyOnlyWhenSomethingExpired(t *testing.T) {
 // never flapped fires this code on every successful exchange — without
 // the gate the publisher would rebuild on every announce tick.
 func TestRecordSuccessfulRouteAddDirtyOnlyOnRealReset(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 
 	t.Run("no_flap_state_keeps_clean", func(t *testing.T) {
-		tbl.RecordSuccessfulRouteAdd("ghost")
+		tbl.RecordSuccessfulRouteAdd(domaintest.ID("ghost"))
 		if tbl.IsDirty() {
 			t.Fatal("RecordSuccessfulRouteAdd on unknown peer marked dirty")
 		}
@@ -754,27 +756,27 @@ func TestRecordSuccessfulRouteAddDirtyOnlyOnRealReset(t *testing.T) {
 	t.Run("real_reset_marks_dirty", func(t *testing.T) {
 		// Force a flap: configure a tiny window/threshold and burst.
 		tbl := NewTable(
-			WithLocalOrigin("self"),
+			WithLocalOrigin(domaintest.ID("self")),
 			WithFlapWindow(60*time.Second),
 			WithFlapThreshold(2),
 			WithHoldDownDuration(5*time.Second),
 		)
-		mustAddDirect(t, tbl, "peerA")
-		mustRemoveDirect(t, tbl, "peerA")
-		mustAddDirect(t, tbl, "peerA")
-		mustRemoveDirect(t, tbl, "peerA")
+		mustAddDirect(t, tbl, domaintest.ID("peerA"))
+		mustRemoveDirect(t, tbl, domaintest.ID("peerA"))
+		mustAddDirect(t, tbl, domaintest.ID("peerA"))
+		mustRemoveDirect(t, tbl, domaintest.ID("peerA"))
 		tbl.ConsumeDirty()
 
 		// Now consecutiveFlaps > 0; a successful announce after stabilisation
 		// resets it and must mark dirty (HoldDownUntil semantics change
 		// for the next burst).
-		tbl.RecordSuccessfulRouteAdd("peerA")
+		tbl.RecordSuccessfulRouteAdd(domaintest.ID("peerA"))
 		if !tbl.ConsumeDirty() {
 			t.Fatal("RecordSuccessfulRouteAdd with real reset did not mark dirty")
 		}
 
 		// Idempotent second call — no fields to reset, must stay clean.
-		tbl.RecordSuccessfulRouteAdd("peerA")
+		tbl.RecordSuccessfulRouteAdd(domaintest.ID("peerA"))
 		if tbl.IsDirty() {
 			t.Fatal("idempotent RecordSuccessfulRouteAdd marked dirty")
 		}
@@ -787,21 +789,21 @@ func TestRecordSuccessfulRouteAddDirtyOnlyOnRealReset(t *testing.T) {
 // of them flipped dirty the publisher would be forced into an infinite
 // rebuild loop driven by its own consumers.
 func TestSnapshotDoesNotMarkDirty(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	tbl.ConsumeDirty()
 
 	_ = tbl.Snapshot()
-	_ = tbl.Lookup("alice")
-	_ = tbl.Announceable("nobody")
-	_ = tbl.AnnounceTo("nobody")
+	_ = tbl.Lookup(domaintest.ID("alice"))
+	_ = tbl.Announceable(domaintest.ID("nobody"))
+	_ = tbl.AnnounceTo(domaintest.ID("nobody"))
 	_ = tbl.Size()
 	_ = tbl.ActiveSize()
 	_ = tbl.FlapSnapshot()
-	_ = tbl.InspectTriple(RouteTriple{Identity: "alice", Origin: "bob", NextHop: "charlie"})
+	_ = tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")})
 
 	if tbl.IsDirty() {
 		t.Fatal("read-only path marked dirty")
@@ -838,7 +840,7 @@ func (c *mutableClock) advance(d time.Duration) { c.now = c.now.Add(d) }
 func TestPublishedSnapshotPointerLoadIsLockFreeUnderWriteLock(t *testing.T) {
 	tbl := NewTable()
 	if _, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("seed UpdateRoute: %v", err)

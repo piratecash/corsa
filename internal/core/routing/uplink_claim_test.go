@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // --- IsWithdrawn ---
@@ -50,7 +53,7 @@ func TestUplinkClaim_IsExpired(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := UplinkClaim{Uplink: "u", Hops: 1, Source: RouteSourceDirect, ExpiresAt: tc.expires}
+			c := UplinkClaim{Uplink: domaintest.ID("u"), Hops: 1, Source: RouteSourceDirect, ExpiresAt: tc.expires}
 			if got := c.IsExpired(now); got != tc.expected {
 				t.Fatalf("IsExpired(now) = %v, want %v", got, tc.expected)
 			}
@@ -71,21 +74,21 @@ func TestUplinkClaim_ValidateRejectsRouteSourceLocal(t *testing.T) {
 	// RouteSourceLocal is synthetic — never stored as UplinkClaim.
 	// The check protects against callers bypassing the public Table
 	// API to inject a zero-hop highest-trust route.
-	c := UplinkClaim{Uplink: "self", Hops: 0, Source: RouteSourceLocal}
+	c := UplinkClaim{Uplink: domaintest.ID("self"), Hops: 0, Source: RouteSourceLocal}
 	if err := c.Validate(); !errors.Is(err, ErrLocalSourceReserved) {
 		t.Fatalf("expected ErrLocalSourceReserved, got %v", err)
 	}
 }
 
 func TestUplinkClaim_ValidateAcceptsLiveDirectAtHops1(t *testing.T) {
-	c := UplinkClaim{Uplink: "alice", Hops: 1, Source: RouteSourceDirect}
+	c := UplinkClaim{Uplink: domaintest.ID("alice"), Hops: 1, Source: RouteSourceDirect}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("well-formed direct should pass: %v", err)
 	}
 }
 
 func TestUplinkClaim_ValidateRejectsDirectWithWrongHops(t *testing.T) {
-	c := UplinkClaim{Uplink: "alice", Hops: 3, Source: RouteSourceDirect}
+	c := UplinkClaim{Uplink: domaintest.ID("alice"), Hops: 3, Source: RouteSourceDirect}
 	if err := c.Validate(); !errors.Is(err, ErrDirectHopsMust1) {
 		t.Fatalf("expected ErrDirectHopsMust1, got %v", err)
 	}
@@ -93,7 +96,7 @@ func TestUplinkClaim_ValidateRejectsDirectWithWrongHops(t *testing.T) {
 
 func TestUplinkClaim_ValidateAcceptsLiveAnnouncement(t *testing.T) {
 	for _, hops := range []uint8{1, 5, 15} {
-		c := UplinkClaim{Uplink: "n1", Hops: hops, Source: RouteSourceAnnouncement}
+		c := UplinkClaim{Uplink: domaintest.ID("n1"), Hops: hops, Source: RouteSourceAnnouncement}
 		if err := c.Validate(); err != nil {
 			t.Fatalf("live announcement hops=%d should pass: %v", hops, err)
 		}
@@ -102,7 +105,7 @@ func TestUplinkClaim_ValidateAcceptsLiveAnnouncement(t *testing.T) {
 
 func TestUplinkClaim_ValidateRejectsLiveAnnouncementOutOfRange(t *testing.T) {
 	for _, hops := range []uint8{0, HopsInfinity} {
-		c := UplinkClaim{Uplink: "n1", Hops: hops, Source: RouteSourceAnnouncement}
+		c := UplinkClaim{Uplink: domaintest.ID("n1"), Hops: hops, Source: RouteSourceAnnouncement}
 		if err := c.Validate(); !errors.Is(err, ErrInvalidClaimHops) {
 			t.Fatalf("live announcement hops=%d should fail with ErrInvalidClaimHops, got %v", hops, err)
 		}
@@ -116,7 +119,7 @@ func TestUplinkClaim_ValidateAcceptsWithdrawnAtAnyHops(t *testing.T) {
 	// Hops=HopsInfinity on direct routes that originally had Hops=1)
 	// and direct-route-cleared-with-Hops=0 paths both pass.
 	for _, hops := range []uint8{0, 1, 5, 15, HopsInfinity} {
-		c := UplinkClaim{Uplink: "alice", Hops: hops, Source: RouteSourceAnnouncement, Withdrawn: true}
+		c := UplinkClaim{Uplink: domaintest.ID("alice"), Hops: hops, Source: RouteSourceAnnouncement, Withdrawn: true}
 		if err := c.Validate(); err != nil {
 			t.Fatalf("withdrawn tombstone hops=%d should pass: %v", hops, err)
 		}
@@ -135,9 +138,9 @@ func TestToUplinkClaim_DropsOriginPreservesExtra(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	extra := json.RawMessage(`{"onion_box":"deadbeef"}`)
 	entry := RouteEntry{
-		Identity:  "alice",
-		Origin:    "bob", // foreign, transit lineage; not preserved
-		NextHop:   "charlie",
+		Identity:  domaintest.ID("alice"),
+		Origin:    domaintest.ID("bob"), // foreign, transit lineage; not preserved
+		NextHop:   domaintest.ID("charlie"),
 		Hops:      3,
 		SeqNo:     42,
 		Source:    RouteSourceAnnouncement,
@@ -147,7 +150,7 @@ func TestToUplinkClaim_DropsOriginPreservesExtra(t *testing.T) {
 
 	claim := toUplinkClaim(entry, now)
 
-	if claim.Uplink != "charlie" {
+	if claim.Uplink != domaintest.ID("charlie") {
 		t.Fatalf("Uplink should mirror NextHop: got %q, want %q", claim.Uplink, "charlie")
 	}
 	if claim.Hops != 3 {
@@ -182,9 +185,9 @@ func TestToUplinkClaim_DerivesWithdrawnFromHopsInfinity(t *testing.T) {
 	// must set Withdrawn correctly via this helper).
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	entry := RouteEntry{
-		Identity:  "alice",
-		Origin:    "alice",
-		NextHop:   "charlie",
+		Identity:  domaintest.ID("alice"),
+		Origin:    domaintest.ID("alice"),
+		NextHop:   domaintest.ID("charlie"),
 		Hops:      HopsInfinity,
 		SeqNo:     99,
 		Source:    RouteSourceAnnouncement,
@@ -204,9 +207,9 @@ func TestToUplinkClaim_DerivesWithdrawnFromHopsInfinity(t *testing.T) {
 func TestToUplinkClaim_DirectRouteHops1(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	entry := RouteEntry{
-		Identity: "alice",
-		Origin:   "me",
-		NextHop:  "alice", // direct: NextHop == Identity
+		Identity: domaintest.ID("alice"),
+		Origin:   domaintest.ID("me"),
+		NextHop:  domaintest.ID("alice"), // direct: NextHop == Identity
 		Hops:     1,
 		SeqNo:    7,
 		Source:   RouteSourceDirect,
@@ -238,7 +241,7 @@ func TestToRouteEntry_OriginEqualsLocalOriginWhenSet(t *testing.T) {
 	// Origin values across Lookup / Snapshot / Announce paths.
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	claim := UplinkClaim{
-		Uplink:    "charlie",
+		Uplink:    domaintest.ID("charlie"),
 		Hops:      3,
 		SeqNo:     42,
 		Source:    RouteSourceAnnouncement,
@@ -246,15 +249,15 @@ func TestToRouteEntry_OriginEqualsLocalOriginWhenSet(t *testing.T) {
 		ExpiresAt: now.Add(time.Hour),
 	}
 
-	entry := toRouteEntry("alice", "self-node", claim)
+	entry := toRouteEntry(domaintest.ID("alice"), domaintest.ID("self-node"), claim)
 
-	if entry.Identity != "alice" {
+	if entry.Identity != domaintest.ID("alice") {
 		t.Fatalf("Identity: got %q, want %q", entry.Identity, "alice")
 	}
-	if entry.Origin != "self-node" {
+	if entry.Origin != domaintest.ID("self-node") {
 		t.Fatalf("Origin should be set to localOrigin: got %q, want %q", entry.Origin, "self-node")
 	}
-	if entry.NextHop != "charlie" {
+	if entry.NextHop != domaintest.ID("charlie") {
 		t.Fatalf("NextHop should mirror claim.Uplink: got %q", entry.NextHop)
 	}
 	if entry.Hops != 3 {
@@ -281,13 +284,13 @@ func TestToRouteEntry_FallsBackToIdentityWhenLocalOriginEmpty(t *testing.T) {
 	// InvalidateAllVia wire-emit fallback so the boundary stays
 	// consistent across call sites.
 	claim := UplinkClaim{
-		Uplink: "charlie",
+		Uplink: domaintest.ID("charlie"),
 		Hops:   1,
 		SeqNo:  1,
 		Source: RouteSourceDirect,
 	}
-	entry := toRouteEntry("alice", "", claim)
-	if entry.Origin != "alice" {
+	entry := toRouteEntry(domaintest.ID("alice"), domain.PeerIdentity{}, claim)
+	if entry.Origin != domaintest.ID("alice") {
 		t.Fatalf("empty localOrigin should fall back to Identity: got %q, want %q",
 			entry.Origin, "alice")
 	}
@@ -301,14 +304,14 @@ func TestToRouteEntry_WithdrawnClaimShowsHopsInfinity(t *testing.T) {
 	// the stored claim.Hops value, so the boundary contract
 	// stays compatible.
 	claim := UplinkClaim{
-		Uplink:    "charlie",
+		Uplink:    domaintest.ID("charlie"),
 		Hops:      3, // pre-withdrawal hop count, kept in storage
 		SeqNo:     99,
 		Source:    RouteSourceAnnouncement,
 		Withdrawn: true,
 	}
 
-	entry := toRouteEntry("alice", "self-node", claim)
+	entry := toRouteEntry(domaintest.ID("alice"), domaintest.ID("self-node"), claim)
 
 	if entry.Hops != HopsInfinity {
 		t.Fatalf("withdrawn claim should surface as Hops=HopsInfinity on boundary RouteEntry: got %d", entry.Hops)
@@ -327,13 +330,13 @@ func TestToRouteEntry_ExtraPreserved(t *testing.T) {
 	// thread it both directions.
 	extra := json.RawMessage(`{"onion_box":"deadbeef","future":42}`)
 	claim := UplinkClaim{
-		Uplink: "charlie",
+		Uplink: domaintest.ID("charlie"),
 		Hops:   2,
 		SeqNo:  3,
 		Source: RouteSourceAnnouncement,
 		Extra:  extra,
 	}
-	entry := toRouteEntry("alice", "self-node", claim)
+	entry := toRouteEntry(domaintest.ID("alice"), domaintest.ID("self-node"), claim)
 	if string(entry.Extra) != string(extra) {
 		t.Fatalf("Extra should round-trip through toRouteEntry: got %q, want %q",
 			string(entry.Extra), string(extra))
@@ -351,7 +354,7 @@ func TestUplinkClaim_RoundTripPreservesRoutingFieldsAndExtra(t *testing.T) {
 	// comes back as localOrigin — that is the Phase A swap's
 	// migration contract, pinned here so future readers see it
 	// documented in a test.
-	const localOrigin PeerIdentity = "self-node"
+	localOrigin := domaintest.ID("self-node")
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	extra := json.RawMessage(`{"onion_box":"deadbeef"}`)
 	cases := []struct {
@@ -361,7 +364,7 @@ func TestUplinkClaim_RoundTripPreservesRoutingFieldsAndExtra(t *testing.T) {
 		{
 			name: "live announcement via transit",
 			entry: RouteEntry{
-				Identity: "alice", Origin: "transit-origin", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("transit-origin"), NextHop: domaintest.ID("charlie"),
 				Hops: 5, SeqNo: 17, Source: RouteSourceAnnouncement,
 				ExpiresAt: now.Add(time.Hour),
 				Extra:     extra,
@@ -370,7 +373,7 @@ func TestUplinkClaim_RoundTripPreservesRoutingFieldsAndExtra(t *testing.T) {
 		{
 			name: "live hop_ack",
 			entry: RouteEntry{
-				Identity: "alice", Origin: "some-origin", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("some-origin"), NextHop: domaintest.ID("charlie"),
 				Hops: 2, SeqNo: 3, Source: RouteSourceHopAck,
 				ExpiresAt: now.Add(time.Minute),
 				Extra:     extra,
@@ -379,7 +382,7 @@ func TestUplinkClaim_RoundTripPreservesRoutingFieldsAndExtra(t *testing.T) {
 		{
 			name: "direct route",
 			entry: RouteEntry{
-				Identity: "alice", Origin: "me", NextHop: "alice",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 				Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 				// ExpiresAt zero — direct
 			},
@@ -387,7 +390,7 @@ func TestUplinkClaim_RoundTripPreservesRoutingFieldsAndExtra(t *testing.T) {
 		{
 			name: "wire withdrawal",
 			entry: RouteEntry{
-				Identity: "alice", Origin: "transit-origin", NextHop: "charlie",
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("transit-origin"), NextHop: domaintest.ID("charlie"),
 				Hops: HopsInfinity, SeqNo: 99, Source: RouteSourceAnnouncement,
 				ExpiresAt: now.Add(time.Minute),
 			},

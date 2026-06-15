@@ -120,11 +120,11 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 		// the call-site stamping logic drifted. Log so we notice.
 		log.Debug().
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
+			Str("recipient", state.Recipient.String()).
 			Msg("relay_hop_ack_timeout_empty_forwarded_to")
 		return
 	}
-	if state.Recipient == "" {
+	if state.Recipient.IsZero() {
 		log.Debug().
 			Str("id", state.MessageID).
 			Str("forwarded_to", string(state.ForwardedTo)).
@@ -133,18 +133,18 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 	}
 
 	nextHopIdentity := s.resolvePeerIdentity(state.ForwardedTo)
-	if nextHopIdentity == "" {
+	if nextHopIdentity.IsZero() {
 		// Session may have closed between forward and timeout —
 		// resolvePeerIdentity returned "". Treat the address as
 		// the identity directly only when it parses as one; the
 		// "inbound:..." form would fail MarkHopFailure's empty
 		// check anyway. We log either way so the operator sees a
 		// "we timed out but couldn't blame anyone" trail.
-		nextHopIdentity = domain.PeerIdentity(state.ForwardedTo)
-		if nextHopIdentity == "" {
+		nextHopIdentity = domain.PeerIdentityFromWire(string(state.ForwardedTo))
+		if nextHopIdentity.IsZero() {
 			log.Debug().
 				Str("id", state.MessageID).
-				Str("recipient", string(state.Recipient)).
+				Str("recipient", state.Recipient.String()).
 				Str("forwarded_to", string(state.ForwardedTo)).
 				Msg("relay_hop_ack_timeout_unresolved_uplink")
 			return
@@ -155,8 +155,8 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 
 	log.Debug().
 		Str("id", state.MessageID).
-		Str("recipient", string(state.Recipient)).
-		Str("next_hop", string(nextHopIdentity)).
+		Str("recipient", state.Recipient.String()).
+		Str("next_hop", nextHopIdentity.String()).
 		Int("budget_seconds", defaultHopAckBudgetSeconds).
 		Msg("routing_hop_ack_timeout_uplink_marked_failure")
 
@@ -212,7 +212,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 	if state.FrameLine == "" {
 		log.Debug().
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
+			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_skipped_no_frame")
 		return
 	}
@@ -229,7 +229,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 	if currentAttempt >= MaxFailoverRetries {
 		log.Debug().
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
+			Str("recipient", state.Recipient.String()).
 			Int("retry_attempt", currentAttempt).
 			Int("max", MaxFailoverRetries).
 			Msg("relay_failover_skipped_max_retries")
@@ -252,7 +252,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		// docs/cluster-mesh-architecture-plan.md §0.2.
 		log.Debug().
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
+			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_skipped_overload")
 		return
 	}
@@ -262,7 +262,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		log.Warn().
 			Err(err).
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
+			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_skipped_unparseable_frame")
 		return
 	}
@@ -272,7 +272,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 	// transport sessions). state.PreviousHop is empty on the
 	// origin path (we created the message ourselves), in which
 	// case there is no incoming-sender identity to skip.
-	previousHopIdentity := domain.PeerIdentity("")
+	previousHopIdentity := domain.PeerIdentity{}
 	if state.PreviousHop != "" {
 		previousHopIdentity = s.resolvePeerIdentity(state.PreviousHop)
 	}
@@ -282,7 +282,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 	// re-resolving on each comparison.
 	abandonedIdentities := make(map[domain.PeerIdentity]struct{}, len(state.AbandonedForwardedTo))
 	for _, addr := range state.AbandonedForwardedTo {
-		if id := s.resolvePeerIdentity(addr); id != "" {
+		if id := s.resolvePeerIdentity(addr); !id.IsZero() {
 			abandonedIdentities[id] = struct{}{}
 		}
 	}
@@ -296,7 +296,7 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		if route.NextHop == failedUplink {
 			continue
 		}
-		if previousHopIdentity != "" && route.NextHop == previousHopIdentity {
+		if !previousHopIdentity.IsZero() && route.NextHop == previousHopIdentity {
 			continue
 		}
 		if _, abandoned := abandonedIdentities[route.NextHop]; abandoned {
@@ -311,8 +311,8 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		if s.routeIsBlockedByQuarantine(route.NextHop, route.Hops) {
 			log.Debug().
 				Str("id", state.MessageID).
-				Str("recipient", string(state.Recipient)).
-				Str("next_hop", string(route.NextHop)).
+				Str("recipient", state.Recipient.String()).
+				Str("next_hop", route.NextHop.String()).
 				Int("hops", route.Hops).
 				Msg("relay_failover_skip_quarantined_transit_next_hop")
 			continue
@@ -330,15 +330,15 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 			// dedupe by ID if the original arrived too.
 			log.Debug().
 				Str("id", state.MessageID).
-				Str("recipient", string(state.Recipient)).
+				Str("recipient", state.Recipient.String()).
 				Msg("relay_failover_state_evicted_after_send")
 			return
 		}
 		log.Info().
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
-			Str("failed_uplink", string(failedUplink)).
-			Str("retry_uplink", string(route.NextHop)).
+			Str("recipient", state.Recipient.String()).
+			Str("failed_uplink", failedUplink.String()).
+			Str("retry_uplink", route.NextHop.String()).
 			Str("retry_address", string(address)).
 			Int("retry_attempt", currentAttempt+1).
 			Int("hops", route.Hops).
@@ -348,8 +348,8 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 
 	log.Debug().
 		Str("id", state.MessageID).
-		Str("recipient", string(state.Recipient)).
-		Str("failed_uplink", string(failedUplink)).
+		Str("recipient", state.Recipient.String()).
+		Str("failed_uplink", failedUplink.String()).
 		Int("candidates_considered", len(routes)).
 		Msg("relay_failover_no_alternative")
 	// Phase 3 PR 12.3 (review fix): no table alternative AND we
@@ -386,7 +386,7 @@ func (s *Service) failoverGossipFallback(state relayForwardState, failedUplink d
 		log.Debug().
 			Err(err).
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
+			Str("recipient", state.Recipient.String()).
 			Msg("relay_failover_gossip_skipped_unparseable_frame")
 		return
 	}
@@ -410,15 +410,15 @@ func (s *Service) failoverGossipFallback(state relayForwardState, failedUplink d
 	if forwardedTo == "" {
 		log.Debug().
 			Str("id", state.MessageID).
-			Str("recipient", string(state.Recipient)).
-			Str("failed_uplink", string(failedUplink)).
+			Str("recipient", state.Recipient.String()).
+			Str("failed_uplink", failedUplink.String()).
 			Msg("relay_failover_gossip_no_candidates")
 		return
 	}
 	log.Info().
 		Str("id", state.MessageID).
-		Str("recipient", string(state.Recipient)).
-		Str("failed_uplink", string(failedUplink)).
+		Str("recipient", state.Recipient.String()).
+		Str("failed_uplink", failedUplink.String()).
 		Str("gossip_first_target", string(forwardedTo)).
 		Msg("relay_failover_gossip_fired")
 }
@@ -465,8 +465,8 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 		if s.routeIsBlockedByQuarantine(route.NextHop, route.Hops) {
 			log.Debug().
 				Str("id", frame.ID).
-				Str("recipient", string(recipient)).
-				Str("next_hop", string(route.NextHop)).
+				Str("recipient", recipient.String()).
+				Str("next_hop", route.NextHop.String()).
 				Int("hops", route.Hops).
 				Msg("relay_forward_skip_quarantined_transit_next_hop")
 			continue
@@ -479,10 +479,10 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 		if s.sendFrameToAddress(ctx, address, frame) {
 			log.Debug().
 				Str("id", frame.ID).
-				Str("recipient", string(recipient)).
-				Str("next_hop", string(route.NextHop)).
+				Str("recipient", recipient.String()).
+				Str("next_hop", route.NextHop.String()).
 				Str("address", string(address)).
-				Str("origin", string(route.Origin)).
+				Str("origin", route.Origin.String()).
 				Int("hops", route.Hops).
 				Msg("relay_forward_via_routing_table")
 			// PR 11.35 P2 — fast recovery when the selected route
@@ -568,7 +568,7 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 		// message sneaks out through this side door.
 		log.Debug().
 			Str("recipient", msg.Recipient).
-			Str("next_hop", string(nextHopIdentity)).
+			Str("next_hop", nextHopIdentity.String()).
 			Msg("table_relay_no_session_fallback_gossip")
 		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
 		s.tryRelayToCapableFullNodes(msg, targets)
@@ -588,7 +588,7 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 	if s.isIngressNextHop(msg, nextHopIdentity, address) {
 		log.Debug().
 			Str("recipient", msg.Recipient).
-			Str("next_hop", string(nextHopIdentity)).
+			Str("next_hop", nextHopIdentity.String()).
 			Str("address", string(address)).
 			Msg("table_relay_ingress_suppressed_fallback_gossip")
 		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
@@ -600,7 +600,7 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 		// Send failed — gossip fallback (same gates as above).
 		log.Debug().
 			Str("recipient", msg.Recipient).
-			Str("next_hop", string(nextHopIdentity)).
+			Str("next_hop", nextHopIdentity.String()).
 			Str("address", string(address)).
 			Msg("table_relay_send_failed_fallback_gossip")
 		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
@@ -610,7 +610,7 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 
 	log.Info().
 		Str("recipient", msg.Recipient).
-		Str("next_hop", string(nextHopIdentity)).
+		Str("next_hop", nextHopIdentity.String()).
 		Str("address", string(address)).
 		Msg("table_relay_sent")
 }
@@ -677,7 +677,7 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 			PreviousHop:          "",
 			ReceiptForwardTo:     "",
 			ForwardedTo:          address,
-			Recipient:            domain.PeerIdentity(msg.Recipient),
+			Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
 			RouteOrigin:          routeOrigin,
 			HopCount:             1,
 			RemainingTTL:         relayStateTTLSeconds,
@@ -784,7 +784,7 @@ func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerA
 		return s.routingTargets()
 	}
 	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity, now time.Time) bool {
-		isRecipient := string(peerID) == msg.Recipient
+		isRecipient := peerID.String() == msg.Recipient
 		if peerType.IsClient() && !isRecipient {
 			return false
 		}
@@ -818,7 +818,7 @@ func (s *Service) routingTargetsForMessage(msg protocol.Envelope) []domain.PeerA
 
 func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddress {
 	return s.routingTargetsFiltered(func(_ domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity, now time.Time) bool {
-		isRecipient := string(peerID) == recipient
+		isRecipient := peerID.String() == recipient
 		if peerType.IsClient() && !isRecipient {
 			return false
 		}
@@ -1125,7 +1125,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// caches via the auth_ok → recordOutboundAuthSuccess path. Abort
 	// with the same cooldown the notice branch above applies so both
 	// arrival shapes converge on one health record.
-	if s.isSelfIdentity(domain.PeerIdentity(welcome.Address)) {
+	if s.isSelfIdentity(domain.PeerIdentityFromWire(welcome.Address)) {
 		log.Warn().
 			Str("peer", string(address)).
 			Str("local_identity", s.identity.Address).

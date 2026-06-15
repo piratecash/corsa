@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // testDownloadDir creates the directory layout required by Manager:
@@ -96,7 +97,7 @@ func TestReceiverFullLifecycle(t *testing.T) {
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("lifecycle-sender-identity-1234")
+	sender := domaintest.ID("lifecycle-sender-identity-1234")
 	fileID := domain.FileID("lifecycle-test-file")
 
 	fileContent := []byte("Hello, this is the complete file content for lifecycle test!")
@@ -180,7 +181,7 @@ func TestEOFByBytesReceivedEqualsFileSize(t *testing.T) {
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("eof-sender")
+	sender := domaintest.ID("eof-sender")
 	fileID := domain.FileID("eof-chunk-aligned")
 	chunkSize := uint32(64)
 
@@ -238,7 +239,7 @@ func TestSHA256VerificationPass(t *testing.T) {
 	m := newTestTransferManager(t, downloadDir, nil)
 
 	fileContent := []byte("sha256 verification test content")
-	sender := domain.PeerIdentity("hash-pass-sender")
+	sender := domaintest.ID("hash-pass-sender")
 	fileID := domain.FileID("hash-pass-test")
 
 	m.receiverMaps[fileID] = testReceiverMapping(
@@ -270,7 +271,7 @@ func TestSHA256VerificationFail(t *testing.T) {
 	fileContent := []byte("tampered content")
 	wrongHash := "0000000000000000000000000000000000000000000000000000000000000000"
 
-	sender := domain.PeerIdentity("hash-fail-sender")
+	sender := domaintest.ID("hash-fail-sender")
 	fileID := domain.FileID("hash-fail-test")
 
 	m.receiverMaps[fileID] = testReceiverMapping(
@@ -364,7 +365,7 @@ func TestStaleChunkResponseDoesNotCorruptPartialFile(t *testing.T) {
 	downloadDir := testDownloadDir(t)
 	m := newTestTransferManager(t, downloadDir, nil)
 
-	sender := domain.PeerIdentity("stale-chunk-sender")
+	sender := domaintest.ID("stale-chunk-sender")
 	fileID := domain.FileID("stale-chunk-test")
 	chunkSize := uint32(64)
 
@@ -441,7 +442,7 @@ func TestStaleChunkResponseDoesNotCorruptPartialFile(t *testing.T) {
 func TestReceiverRetryBackoffOnStall(t *testing.T) {
 	t.Parallel()
 
-	sender := domain.PeerIdentity("stall-sender")
+	sender := domaintest.ID("stall-sender")
 	fileID := domain.FileID("stall-test")
 
 	var retryCount int
@@ -499,7 +500,7 @@ func TestCancelDuringVerifyDoesNotResurrectTransfer(t *testing.T) {
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("cancel-verify-race")
 
 	// Build a valid partial file so hash verification would succeed.
@@ -576,7 +577,7 @@ func TestFinalizeVerifiedDownloadStaleGenerationDoesNotResurrect(t *testing.T) {
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("stale-verifier-race")
 
 	oldContent := []byte("old attempt's verified blob")
@@ -672,7 +673,7 @@ func TestFinalizeVerifiedDownloadAfterCleanupAborts(t *testing.T) {
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("finalize-after-cleanup")
 
 	content := []byte("verified bytes ready for finalize")
@@ -756,7 +757,7 @@ func TestFinalizeVerifiedDownloadAfterReplaceMappingAborts(t *testing.T) {
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("finalize-after-replace")
 	content := []byte("verified bytes ready")
 	hash := hashContent(content)
@@ -822,7 +823,7 @@ func TestFinalizeVerifiedDownloadHappyPath(t *testing.T) {
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("finalize-happy-path")
 
 	content := []byte("happy path verified content")
@@ -885,7 +886,7 @@ func TestFinalizeVerifiedDownloadFiresCompletionCallback(t *testing.T) {
 		got = append(got, ev)
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("finalize-callback-fires")
 
 	content := []byte("notify-me content")
@@ -950,7 +951,7 @@ func TestFinalizeVerifiedDownloadDoesNotFireCallbackOnStaleGeneration(t *testing
 		calls++
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("finalize-callback-stale")
 
 	content := []byte("stale generation content")
@@ -1007,7 +1008,7 @@ func TestFinalizeVerifiedDownloadStaleCleanupPreservesNewAttemptFile(t *testing.
 	cc := &commandCollector{}
 	m := newTestTransferManager(t, downloadDir, cc)
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("stale-cleanup-preserves-new")
 
 	fileName := "shared.bin"
@@ -1106,7 +1107,7 @@ func TestMarkReceiverFailedRespectsCancel(t *testing.T) {
 		FileHash:  "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 		FileName:  "test.bin",
 		FileSize:  1024,
-		Sender:    domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:    domaintest.ID("sender-identity-1234567890abcd"),
 		State:     receiverAvailable, // cancelled
 		CreatedAt: time.Now(),
 	}

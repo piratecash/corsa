@@ -10,9 +10,18 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
+
+// peerIDPtr builds a *domain.PeerIdentity from a short label for the
+// VersionLockoutSnapshot.PeerIdentity field, which became pointer-typed
+// in the PeerIdentity migration (nil == address-only lockout).
+func peerIDPtr(label string) *domain.PeerIdentity {
+	id := domaintest.ID(label)
+	return &id
+}
 
 // ---------------------------------------------------------------------------
 // VersionPolicyState unit tests
@@ -30,8 +39,8 @@ func TestVersionPolicy_IncompatibleReporterThreshold(t *testing.T) {
 
 	// Two reporters should not trigger the signal (threshold is 3).
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-bbb"), 10, 10, now)
 	snap := svc.versionPolicy.snapshot
 	svc.peerMu.Unlock()
 
@@ -44,7 +53,7 @@ func TestVersionPolicy_IncompatibleReporterThreshold(t *testing.T) {
 
 	// Third reporter should trigger.
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, now)
 	snap = svc.versionPolicy.snapshot
 	svc.peerMu.Unlock()
 
@@ -67,9 +76,9 @@ func TestVersionPolicy_EmptyIdentityDoesNotCountAsReporter(t *testing.T) {
 	now := time.Now().UTC()
 
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("", 10, 10, now.Add(time.Second))
-	svc.recordIncompatibleObservationLocked("", 10, 10, now.Add(2*time.Second))
+	svc.recordIncompatibleObservationLocked(domain.PeerIdentity{}, 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domain.PeerIdentity{}, 10, 10, now.Add(time.Second))
+	svc.recordIncompatibleObservationLocked(domain.PeerIdentity{}, 10, 10, now.Add(2*time.Second))
 	snap := svc.versionPolicy.snapshot
 	svc.peerMu.Unlock()
 
@@ -92,9 +101,9 @@ func TestVersionPolicy_DedupByIdentity(t *testing.T) {
 	now := time.Now().UTC()
 
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now.Add(time.Minute))
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, now.Add(2*time.Minute))
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, now.Add(time.Minute))
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, now.Add(2*time.Minute))
 	snap := svc.versionPolicy.snapshot
 	svc.peerMu.Unlock()
 
@@ -114,9 +123,9 @@ func TestVersionPolicy_ObservationTTLExpiry(t *testing.T) {
 
 	stale := time.Now().UTC().Add(-25 * time.Hour)
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-bbb"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, stale)
 	svc.peerMu.Unlock()
 
 	now := time.Now().UTC()
@@ -138,8 +147,8 @@ func TestVersionPolicy_PeerBuildSignal(t *testing.T) {
 
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
-			"5.6.7.8:200": "peer-bbb",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
+			"5.6.7.8:200": domaintest.ID("peer-bbb"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild + 1,
@@ -171,8 +180,8 @@ func TestVersionPolicy_BothSignals(t *testing.T) {
 
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
-			"5.6.7.8:200": "peer-bbb",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
+			"5.6.7.8:200": domaintest.ID("peer-bbb"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild + 1,
@@ -184,9 +193,9 @@ func TestVersionPolicy_BothSignals(t *testing.T) {
 
 	svc.peerMu.Lock()
 	svc.versionPolicy = newVersionPolicyState()
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ddd"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-eee"), 10, 10, now)
 	snap := svc.versionPolicy.snapshot
 	svc.peerMu.Unlock()
 
@@ -211,7 +220,7 @@ func TestVersionLockout_SetAndCheck(t *testing.T) {
 			"1.2.3.4:100": entry,
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
 		},
 		peerVersions: make(map[domain.PeerAddress]string),
 	}
@@ -231,8 +240,8 @@ func TestVersionLockout_SetAndCheck(t *testing.T) {
 	}
 
 	// Verify identity was captured.
-	if entry.VersionLockout.PeerIdentity != "peer-aaa" {
-		t.Errorf("lockout peer_identity = %q, want %q", entry.VersionLockout.PeerIdentity, "peer-aaa")
+	if entry.VersionLockout.PeerIdentity == nil || *entry.VersionLockout.PeerIdentity != domaintest.ID("peer-aaa") {
+		t.Errorf("lockout peer_identity = %v, want %q", entry.VersionLockout.PeerIdentity, domaintest.ID("peer-aaa"))
 	}
 	if entry.VersionLockout.LockedAt.IsZero() {
 		t.Error("lockout locked_at should be set")
@@ -284,7 +293,7 @@ func TestVersionLockout_NotClearedWhenSameVersion(t *testing.T) {
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     time.Now().UTC(),
-			PeerIdentity: "peer-aaa",
+			PeerIdentity: peerIDPtr("peer-aaa"),
 		},
 	}
 	svc := &Service{
@@ -364,7 +373,7 @@ func TestPeerEntry_VersionLockoutRoundTrip(t *testing.T) {
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     lockTime,
-			PeerIdentity: "peer-xyz",
+			PeerIdentity: peerIDPtr("peer-xyz"),
 		},
 	}
 
@@ -394,8 +403,8 @@ func TestPeerEntry_VersionLockoutRoundTrip(t *testing.T) {
 	if !got.VersionLockout.LockedAt.Equal(lockTime) {
 		t.Errorf("locked_at = %v, want %v", got.VersionLockout.LockedAt, lockTime)
 	}
-	if got.VersionLockout.PeerIdentity != "peer-xyz" {
-		t.Errorf("peer_identity = %q, want %q", got.VersionLockout.PeerIdentity, "peer-xyz")
+	if got.VersionLockout.PeerIdentity == nil || *got.VersionLockout.PeerIdentity != domaintest.ID("peer-xyz") {
+		t.Errorf("peer_identity = %v, want %q", got.VersionLockout.PeerIdentity, domaintest.ID("peer-xyz"))
 	}
 }
 
@@ -438,7 +447,7 @@ func TestVersionPolicy_LockoutKeepsUpdateAvailableAfterTTLExpiry(t *testing.T) {
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     now.Add(-2 * time.Hour),
-			PeerIdentity: "peer-locked",
+			PeerIdentity: peerIDPtr("peer-locked"),
 		},
 	}
 	svc := &Service{
@@ -453,9 +462,9 @@ func TestVersionPolicy_LockoutKeepsUpdateAvailableAfterTTLExpiry(t *testing.T) {
 	// Record 3 stale observations (expired).
 	stale := now.Add(-25 * time.Hour)
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-bbb"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, stale)
 	// Recompute with current time — observations expire, but lockout persists.
 	svc.recomputeVersionPolicyLocked(now)
 	snap := svc.versionPolicy.snapshot
@@ -524,7 +533,7 @@ func TestVersionLockout_IdentityBoundDoesNotExpireByTTL(t *testing.T) {
 	snap := domain.VersionLockoutSnapshot{
 		Reason:       domain.VersionLockoutReasonIncompatible,
 		LockedAt:     lockTime,
-		PeerIdentity: "peer-aaa",
+		PeerIdentity: peerIDPtr("peer-aaa"),
 	}
 
 	if !snap.IsActiveAt(time.Now().UTC()) {
@@ -590,8 +599,8 @@ func TestVersionPolicy_DisconnectClearsBuildSignal(t *testing.T) {
 	// Two connected peers with higher builds => build signal active.
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
-			"5.6.7.8:200": "peer-bbb",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
+			"5.6.7.8:200": domaintest.ID("peer-bbb"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild + 1,
@@ -664,7 +673,7 @@ func TestAddPeer_ClearsVersionLockout(t *testing.T) {
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     now.Add(-time.Hour),
-			PeerIdentity: "peer-locked",
+			PeerIdentity: peerIDPtr("peer-locked"),
 		},
 	}
 
@@ -755,13 +764,13 @@ func TestVersionPolicy_DisconnectDoesNotAffectLockoutSignal(t *testing.T) {
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     now.Add(-time.Hour),
-			PeerIdentity: "peer-locked",
+			PeerIdentity: peerIDPtr("peer-locked"),
 		},
 	}
 
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr: "peer-locked",
+			addr: domaintest.ID("peer-locked"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			addr: config.ClientVersionBuild + 1,
@@ -899,7 +908,7 @@ func TestVersionPolicy_BuildSignalBelowThreshold(t *testing.T) {
 	// Only 1 peer with higher build — threshold is 2, so no signal.
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild + 5,
@@ -933,8 +942,8 @@ func TestVersionPolicy_BuildSignalIgnoresEqualBuild(t *testing.T) {
 	// Two peers with equal build — should not trigger signal.
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
-			"5.6.7.8:200": "peer-bbb",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
+			"5.6.7.8:200": domaintest.ID("peer-bbb"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild,
@@ -962,8 +971,8 @@ func TestVersionPolicy_ReasonTransition_BuildToBoth(t *testing.T) {
 	// Start with build signal only, then add incompatible observations.
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
-			"5.6.7.8:200": "peer-bbb",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
+			"5.6.7.8:200": domaintest.ID("peer-bbb"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild + 1,
@@ -986,9 +995,9 @@ func TestVersionPolicy_ReasonTransition_BuildToBoth(t *testing.T) {
 
 	// Add 3 incompatible-version reporters — transitions to "both".
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, now)
-	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ddd"), 10, 10, now)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-eee"), 10, 10, now)
 	snap = svc.versionPolicy.snapshot
 	svc.peerMu.Unlock()
 
@@ -1003,8 +1012,8 @@ func TestVersionPolicy_ReasonTransition_BothToBuildonlyAfterTTL(t *testing.T) {
 	// Both signals active, then incompatible observations expire.
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
-			"5.6.7.8:200": "peer-bbb",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
+			"5.6.7.8:200": domaintest.ID("peer-bbb"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild + 1,
@@ -1019,9 +1028,9 @@ func TestVersionPolicy_ReasonTransition_BothToBuildonlyAfterTTL(t *testing.T) {
 	svc.versionPolicy = newVersionPolicyState()
 	// Record stale observations — they'll appear active during recording
 	// but expire on the next recompute with a future timestamp.
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ddd"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-eee"), 10, 10, stale)
 	svc.peerMu.Unlock()
 
 	// Recompute with current time — observations expire, only build remains.
@@ -1047,8 +1056,8 @@ func TestVersionPolicy_BuildPlusLockout_ReasonIsBoth(t *testing.T) {
 	now := time.Now().UTC()
 	svc := &Service{
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			"1.2.3.4:100": "peer-aaa",
-			"5.6.7.8:200": "peer-bbb",
+			"1.2.3.4:100": domaintest.ID("peer-aaa"),
+			"5.6.7.8:200": domaintest.ID("peer-bbb"),
 		},
 		peerBuilds: map[domain.PeerAddress]int{
 			"1.2.3.4:100": config.ClientVersionBuild + 1,
@@ -1067,7 +1076,7 @@ func TestVersionPolicy_BuildPlusLockout_ReasonIsBoth(t *testing.T) {
 					},
 					Reason:       domain.VersionLockoutReasonIncompatible,
 					LockedAt:     now.Add(-time.Hour),
-					PeerIdentity: "peer-locked",
+					PeerIdentity: peerIDPtr("peer-locked"),
 				},
 			},
 		},
@@ -1167,7 +1176,7 @@ func TestVersionLockout_EvidenceConfirmed_LockoutSet(t *testing.T) {
 			addr: entry,
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr: "peer-confirmed",
+			addr: domaintest.ID("peer-confirmed"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -1189,9 +1198,9 @@ func TestVersionLockout_EvidenceConfirmed_LockoutSet(t *testing.T) {
 		t.Errorf("lockout reason = %q, want %q",
 			entry.VersionLockout.Reason, domain.VersionLockoutReasonIncompatible)
 	}
-	if entry.VersionLockout.PeerIdentity != "peer-confirmed" {
-		t.Errorf("lockout peer_identity = %q, want %q",
-			entry.VersionLockout.PeerIdentity, "peer-confirmed")
+	if entry.VersionLockout.PeerIdentity == nil || *entry.VersionLockout.PeerIdentity != domaintest.ID("peer-confirmed") {
+		t.Errorf("lockout peer_identity = %v, want %q",
+			entry.VersionLockout.PeerIdentity, domaintest.ID("peer-confirmed"))
 	}
 }
 
@@ -1224,7 +1233,7 @@ func TestInboundOldPeer_DoesNotFeedReporterSet(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:100", i+1))
-		identity := domain.PeerIdentity(fmt.Sprintf("old-peer-%d", i))
+		identity := domaintest.ID(fmt.Sprintf("old-peer-%d", i))
 		svc.persistedMeta[addr] = &peerEntry{Address: addr}
 		svc.peerIDs[addr] = identity
 		// Old peer: version=1, minimum=1 (well below our local version).
@@ -1260,7 +1269,7 @@ func TestInboundOldPeer_DoesNotFeedReporterSet(t *testing.T) {
 	// This IS the correct direction — verify it still works.
 	addr := domain.PeerAddress("10.0.0.99:100")
 	svc.persistedMeta[addr] = &peerEntry{Address: addr}
-	svc.peerIDs[addr] = "newer-peer"
+	svc.peerIDs[addr] = domaintest.ID("newer-peer")
 	svc.penalizeOldProtocolPeer(addr, localProto+2, localProto+1)
 
 	snap = svc.VersionPolicySnapshot()
@@ -1283,7 +1292,7 @@ func TestInboundOldPeer_ZeroMinimum_NoReporter(t *testing.T) {
 			addr: {Address: addr},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr: "known-peer",
+			addr: domaintest.ID("known-peer"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -1316,7 +1325,7 @@ func TestCompatibleObservation_ClearsReporterAndLockout(t *testing.T) {
 	higherMin := localProto + 1
 
 	addr := domain.PeerAddress("10.0.0.1:100")
-	identity := domain.PeerIdentity("peer-upgraded")
+	identity := domaintest.ID("peer-upgraded")
 	entry := &peerEntry{Address: addr}
 
 	svc := &Service{
@@ -1414,7 +1423,7 @@ func TestCompatibleObservation_OnlyAffectsConnectingPeer(t *testing.T) {
 	// Set up 3 incompatible peers.
 	for i := 0; i < 3; i++ {
 		addr := domain.PeerAddress(fmt.Sprintf("10.0.0.%d:100", i+1))
-		identity := domain.PeerIdentity(fmt.Sprintf("peer-%d", i))
+		identity := domaintest.ID(fmt.Sprintf("peer-%d", i))
 		svc.persistedMeta[addr] = &peerEntry{Address: addr}
 		svc.peerIDs[addr] = identity
 		svc.penalizeOldProtocolPeer(addr, higherMin, higherMin)
@@ -1457,7 +1466,7 @@ func TestVersionLockout_PropagatedByIdentity(t *testing.T) {
 	addr1 := domain.PeerAddress("10.0.0.1:100")
 	addr2 := domain.PeerAddress("10.0.0.1:200")
 	addr3 := domain.PeerAddress("10.0.0.2:100") // different peer
-	identity := domain.PeerIdentity("multi-addr-peer")
+	identity := domaintest.ID("multi-addr-peer")
 
 	svc := &Service{
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
@@ -1467,8 +1476,8 @@ func TestVersionLockout_PropagatedByIdentity(t *testing.T) {
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
 			addr1: identity,
-			addr2: identity,     // same identity, different address
-			addr3: "other-peer", // different identity
+			addr2: identity,                    // same identity, different address
+			addr3: domaintest.ID("other-peer"), // different identity
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -1502,8 +1511,8 @@ func TestVersionLockout_PropagatedByIdentity(t *testing.T) {
 		t.Errorf("addr2: propagated lockout minimum = %d, want %d",
 			entry2.VersionLockout.ObservedMinimumProtocolVersion, higherMin)
 	}
-	if entry2.VersionLockout.PeerIdentity != identity {
-		t.Errorf("addr2: propagated lockout identity = %q, want %q",
+	if entry2.VersionLockout.PeerIdentity == nil || *entry2.VersionLockout.PeerIdentity != identity {
+		t.Errorf("addr2: propagated lockout identity = %v, want %q",
 			entry2.VersionLockout.PeerIdentity, identity)
 	}
 }
@@ -1563,9 +1572,9 @@ func TestPeriodicRepair_ExpiresStaleReporters(t *testing.T) {
 	// Record 3 reporters (above threshold) 25 hours ago → stale.
 	stale := time.Now().UTC().Add(-25 * time.Hour)
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-bbb"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, stale)
 	snap := svc.versionPolicy.snapshot
 	svc.peerMu.Unlock()
 
@@ -1603,9 +1612,9 @@ func TestPeriodicRepair_ThrottledByInterval(t *testing.T) {
 	// Record 3 stale reporters.
 	stale := time.Now().UTC().Add(-25 * time.Hour)
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-aaa", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-bbb", 10, 10, stale)
-	svc.recordIncompatibleObservationLocked("peer-ccc", 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-aaa"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-bbb"), 10, 10, stale)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ccc"), 10, 10, stale)
 	svc.peerMu.Unlock()
 
 	// First periodic call at t0 — should recompute and expire reporters.
@@ -1621,9 +1630,9 @@ func TestPeriodicRepair_ThrottledByInterval(t *testing.T) {
 
 	// Re-inject 3 fresh reporters (simulating new events between repair ticks).
 	svc.peerMu.Lock()
-	svc.recordIncompatibleObservationLocked("peer-ddd", 10, 10, t0)
-	svc.recordIncompatibleObservationLocked("peer-eee", 10, 10, t0)
-	svc.recordIncompatibleObservationLocked("peer-fff", 10, 10, t0)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-ddd"), 10, 10, t0)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-eee"), 10, 10, t0)
+	svc.recordIncompatibleObservationLocked(domaintest.ID("peer-fff"), 10, 10, t0)
 	svc.peerMu.Unlock()
 
 	// Second call 10 seconds later — within throttle window, should be a no-op.
@@ -1710,7 +1719,7 @@ func TestCMDialFailed_PropagatesVersionEvidence(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr: {Address: addr},
 		},
-		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: "peer-cm-aaa"},
+		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: domaintest.ID("peer-cm-aaa")},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 		health:       make(map[domain.PeerAddress]*peerHealth),
@@ -1735,7 +1744,7 @@ func TestCMDialFailed_PropagatesVersionEvidence(t *testing.T) {
 	if svc.versionPolicy == nil {
 		t.Fatal("versionPolicy must be created by recordIncompatibleObservationLocked")
 	}
-	if _, ok := svc.versionPolicy.incompatibleReporters["peer-cm-aaa"]; !ok {
+	if _, ok := svc.versionPolicy.incompatibleReporters[domaintest.ID("peer-cm-aaa")]; !ok {
 		t.Error("peer identity must appear in incompatibleReporters")
 	}
 
@@ -1753,7 +1762,7 @@ func TestCMDialFailed_ZeroEvidence_NoReporterOrLockout(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr: {Address: addr},
 		},
-		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: "peer-cm-bbb"},
+		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: domaintest.ID("peer-cm-bbb")},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 		health:       make(map[domain.PeerAddress]*peerHealth),
@@ -1802,9 +1811,9 @@ func TestCompatibleObservation_ClearsLockoutAcrossIdentity(t *testing.T) {
 			addr3: {Address: addr3},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "shared-identity",
-			addr2: "shared-identity",
-			addr3: "other-identity",
+			addr1: domaintest.ID("shared-identity"),
+			addr2: domaintest.ID("shared-identity"),
+			addr3: domaintest.ID("other-identity"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -1863,7 +1872,7 @@ func TestPenalize_SnapshotIncludesLockoutSignal(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr: {Address: addr},
 		},
-		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: "peer-lockout-snap"},
+		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: domaintest.ID("peer-lockout-snap")},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 		health:       make(map[domain.PeerAddress]*peerHealth),
@@ -1910,7 +1919,7 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 				VersionLockout: domain.VersionLockoutSnapshot{
 					ObservedProtocolVersion: localProto + 1,
 					Reason:                  domain.VersionLockoutReasonIncompatible,
-					PeerIdentity:            "peer-aaa",
+					PeerIdentity:            peerIDPtr("peer-aaa"),
 					LockedAtLocalVersion: domain.LocalVersionFingerprint{
 						ProtocolVersion: localProto,
 						ClientBuild:     config.ClientVersionBuild,
@@ -1922,7 +1931,7 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 				VersionLockout: domain.VersionLockoutSnapshot{
 					ObservedProtocolVersion: localProto + 5, // highest
 					Reason:                  domain.VersionLockoutReasonIncompatible,
-					PeerIdentity:            "peer-bbb",
+					PeerIdentity:            peerIDPtr("peer-bbb"),
 					LockedAtLocalVersion: domain.LocalVersionFingerprint{
 						ProtocolVersion: localProto,
 						ClientBuild:     config.ClientVersionBuild,
@@ -1934,7 +1943,7 @@ func TestMaxObservedPeerVersion_ScansAllActiveLockouts(t *testing.T) {
 				VersionLockout: domain.VersionLockoutSnapshot{
 					ObservedProtocolVersion: localProto + 3,
 					Reason:                  domain.VersionLockoutReasonIncompatible,
-					PeerIdentity:            "peer-ccc",
+					PeerIdentity:            peerIDPtr("peer-ccc"),
 					LockedAtLocalVersion: domain.LocalVersionFingerprint{
 						ProtocolVersion: localProto,
 						ClientBuild:     config.ClientVersionBuild,
@@ -1979,7 +1988,7 @@ func TestCMDialFailed_PersistsObservedClientVersion(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr: {Address: addr},
 		},
-		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: "peer-cv-aaa"},
+		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: domaintest.ID("peer-cv-aaa")},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 		health:       make(map[domain.PeerAddress]*peerHealth),
@@ -2029,9 +2038,9 @@ func TestAddPeer_ClearsLockoutAcrossIdentity(t *testing.T) {
 			addr3: {Address: addr3},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "shared-id",
-			addr2: "shared-id",
-			addr3: "other-id",
+			addr1: domaintest.ID("shared-id"),
+			addr2: domaintest.ID("shared-id"),
+			addr3: domaintest.ID("other-id"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2063,7 +2072,7 @@ func TestAddPeer_ClearsLockoutAcrossIdentity(t *testing.T) {
 	if pm := svc.persistedMeta[addr1]; pm != nil && pm.VersionLockout.IsActive() {
 		pm.VersionLockout = domain.VersionLockoutSnapshot{}
 	}
-	if peerID != "" {
+	if !peerID.IsZero() {
 		if svc.versionPolicy != nil {
 			delete(svc.versionPolicy.incompatibleReporters, peerID)
 		}
@@ -2108,8 +2117,8 @@ func TestAddPeer_ClearsReporterForIdentity(t *testing.T) {
 			addr2: {Address: addr2},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "peer-aaa",
-			addr2: "peer-bbb",
+			addr1: domaintest.ID("peer-aaa"),
+			addr2: domaintest.ID("peer-bbb"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2134,7 +2143,7 @@ func TestAddPeer_ClearsReporterForIdentity(t *testing.T) {
 	if pm := svc.persistedMeta[addr1]; pm != nil && pm.VersionLockout.IsActive() {
 		pm.VersionLockout = domain.VersionLockoutSnapshot{}
 	}
-	if peerID != "" && svc.versionPolicy != nil {
+	if !peerID.IsZero() && svc.versionPolicy != nil {
 		delete(svc.versionPolicy.incompatibleReporters, peerID)
 	}
 	svc.recomputeVersionPolicyLocked(time.Now().UTC())
@@ -2166,8 +2175,8 @@ func TestVersionLockout_SiblingRefreshedWithStrongerEvidence(t *testing.T) {
 			addr2: {Address: addr2},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "shared-id",
-			addr2: "shared-id",
+			addr1: domaintest.ID("shared-id"),
+			addr2: domaintest.ID("shared-id"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2213,8 +2222,8 @@ func TestVersionLockout_SiblingRefreshedWithFresherTimestamp(t *testing.T) {
 			addr2: {Address: addr2},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "shared-id",
-			addr2: "shared-id",
+			addr1: domaintest.ID("shared-id"),
+			addr2: domaintest.ID("shared-id"),
 		},
 		peerBuilds: make(map[domain.PeerAddress]int),
 		peerVersions: map[domain.PeerAddress]string{
@@ -2273,9 +2282,9 @@ func TestCompatibleObservation_ClearsSiblingHealthDiagnostics(t *testing.T) {
 			addr3: {Address: addr3},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "shared-identity",
-			addr2: "shared-identity",
-			addr3: "other-identity",
+			addr1: domaintest.ID("shared-identity"),
+			addr2: domaintest.ID("shared-identity"),
+			addr3: domaintest.ID("other-identity"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2391,9 +2400,9 @@ func TestAddPeerFrame_ClearsLockoutAcrossIdentity(t *testing.T) {
 			addr3: {Address: addr3},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "peer-aaa",
-			addr2: "peer-aaa",
-			addr3: "peer-bbb",
+			addr1: domaintest.ID("peer-aaa"),
+			addr2: domaintest.ID("peer-aaa"),
+			addr3: domaintest.ID("peer-bbb"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2456,11 +2465,11 @@ func TestAddPeerFrame_ClearsLockoutAcrossIdentity(t *testing.T) {
 	}
 
 	// Reporter for "peer-aaa" must have been removed from the dedup set.
-	if _, found := svc.versionPolicy.incompatibleReporters["peer-aaa"]; found {
+	if _, found := svc.versionPolicy.incompatibleReporters[domaintest.ID("peer-aaa")]; found {
 		t.Error("reporter for peer-aaa must be removed after operator override")
 	}
 	// Reporter for "peer-bbb" must remain.
-	if _, found := svc.versionPolicy.incompatibleReporters["peer-bbb"]; !found {
+	if _, found := svc.versionPolicy.incompatibleReporters[domaintest.ID("peer-bbb")]; !found {
 		t.Error("reporter for peer-bbb must remain (different identity)")
 	}
 }
@@ -2488,10 +2497,10 @@ func TestCompatibleObservation_ClearsSiblingBansAndCooldowns(t *testing.T) {
 			addr4: {Address: addr4},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "shared-identity",
-			addr2: "shared-identity",
-			addr3: "shared-identity",
-			addr4: "other-identity",
+			addr1: domaintest.ID("shared-identity"),
+			addr2: domaintest.ID("shared-identity"),
+			addr3: domaintest.ID("shared-identity"),
+			addr4: domaintest.ID("other-identity"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2613,10 +2622,10 @@ func TestAddPeerFrame_ClearsSiblingBansAndCooldowns(t *testing.T) {
 			addr4: {Address: addr4},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "peer-aaa",
-			addr2: "peer-aaa",
-			addr3: "peer-aaa",
-			addr4: "peer-bbb",
+			addr1: domaintest.ID("peer-aaa"),
+			addr2: domaintest.ID("peer-aaa"),
+			addr3: domaintest.ID("peer-aaa"),
+			addr4: domaintest.ID("peer-bbb"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2745,9 +2754,9 @@ func TestCompatibleObservation_RepairsStaleScorePenalties(t *testing.T) {
 			addr3: {Address: addr3},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "shared-identity",
-			addr2: "shared-identity",
-			addr3: "other-identity",
+			addr1: domaintest.ID("shared-identity"),
+			addr2: domaintest.ID("shared-identity"),
+			addr3: domaintest.ID("other-identity"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2818,9 +2827,9 @@ func TestAddPeerFrame_RepairsStaleScorePenalties(t *testing.T) {
 			addr3: {Address: addr3},
 		},
 		peerIDs: map[domain.PeerAddress]domain.PeerIdentity{
-			addr1: "peer-aaa",
-			addr2: "peer-aaa",
-			addr3: "peer-bbb",
+			addr1: domaintest.ID("peer-aaa"),
+			addr2: domaintest.ID("peer-aaa"),
+			addr3: domaintest.ID("peer-bbb"),
 		},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
@@ -2965,7 +2974,7 @@ func TestOutboundIncompatibleReject_HealthSnapshotComplete(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr: {Address: addr},
 		},
-		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: "peer-snap-aaa"},
+		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: domaintest.ID("peer-snap-aaa")},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 		health:       make(map[domain.PeerAddress]*peerHealth),
@@ -3083,9 +3092,9 @@ func TestOutboundIncompatibleReject_HealthSnapshotComplete(t *testing.T) {
 
 	// --- Identity ---
 
-	if found.PeerID != "peer-snap-aaa" {
+	if found.PeerID != domaintest.ID("peer-snap-aaa").String() {
 		t.Errorf("PeerID = %q, want %q",
-			found.PeerID, "peer-snap-aaa")
+			found.PeerID, domaintest.ID("peer-snap-aaa").String())
 	}
 }
 
@@ -3119,7 +3128,7 @@ func TestVersionDiagnostics_PersistRoundTrip(t *testing.T) {
 			},
 			Reason:       domain.VersionLockoutReasonIncompatible,
 			LockedAt:     ts,
-			PeerIdentity: "peer-persist-aaa",
+			PeerIdentity: peerIDPtr("peer-persist-aaa"),
 		},
 	}
 
@@ -3201,7 +3210,7 @@ func TestVersionDiagnostics_BuildAndRestoreRoundTrip(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr: {Address: addr},
 		},
-		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: "peer-brt-aaa"},
+		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: domaintest.ID("peer-brt-aaa")},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 		health:       make(map[domain.PeerAddress]*peerHealth),
@@ -3326,7 +3335,7 @@ func TestClientVersion_SurvivesRestartViaLockout(t *testing.T) {
 		persistedMeta: map[domain.PeerAddress]*peerEntry{
 			addr: {Address: addr},
 		},
-		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: "peer-cv-bbb"},
+		peerIDs:      map[domain.PeerAddress]domain.PeerIdentity{addr: domaintest.ID("peer-cv-bbb")},
 		peerBuilds:   make(map[domain.PeerAddress]int),
 		peerVersions: make(map[domain.PeerAddress]string),
 		health:       make(map[domain.PeerAddress]*peerHealth),
@@ -3511,7 +3520,7 @@ func TestVersionDiagnostics_DiskRestartRoundTrip(t *testing.T) {
 	higherMin := localProto + 1
 
 	peerAddr := domain.PeerAddress("10.99.0.1:64646")
-	peerID := domain.PeerIdentity("peer-restart-round-trip")
+	peerID := domaintest.ID("peer-restart-round-trip")
 	clientVer := "corsa/3.0.0-test"
 
 	tmpDir := t.TempDir()

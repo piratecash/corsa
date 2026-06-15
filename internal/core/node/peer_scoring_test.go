@@ -12,6 +12,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -271,7 +272,7 @@ func TestFlushPeerStateWritesFile(t *testing.T) {
 
 	// Add a peer and mark it connected so it has health data.
 	peerAddr := domain.PeerAddress("10.0.0.2:64646")
-	svc.addPeerAddress(peerAddr, "full", "peer-test")
+	svc.addPeerAddress(peerAddr, "full", domaintest.ID("peer-test"))
 	svc.markPeerConnected(peerAddr, "outbound")
 
 	svc.flushPeerState()
@@ -657,7 +658,7 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	svc.rememberConnPeerAddr(spoofID, protocol.Frame{Address: string(peerAddr), Listen: string(peerAddr)}, "10.0.0.1:55002")
 
 	// Only the first connection completes auth and is promoted.
-	svc.trackInboundConnect(authID, peerAddr, "test-identity")
+	svc.trackInboundConnect(authID, peerAddr, domaintest.ID("test-identity"))
 
 	// The authenticated connection should return the address.
 	if got := svc.trackedInboundPeerAddress(authID); got != peerAddr {

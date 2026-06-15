@@ -165,7 +165,7 @@ func TestFailoverRelay_GossipFallbackOnNoAlternative(t *testing.T) {
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "msg-gossip-fallback",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		HopAckRemainingTicks: 0,
 		HopAckObserved:       true,
 		FrameLine:            line,
@@ -175,7 +175,7 @@ func TestFailoverRelay_GossipFallbackOnNoAlternative(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:      "msg-gossip-fallback",
 		ForwardedTo:    domain.PeerAddress("addr-A"),
-		Recipient:      domain.PeerIdentity(idTargetX),
+		Recipient:      idTargetX,
 		HopAckObserved: true,
 		FrameLine:      line,
 	}
@@ -213,7 +213,7 @@ func TestFailoverRelay_GossipFallbackOnMaxRetriesExhausted(t *testing.T) {
 	svc.relayStates.store(&relayForwardState{
 		MessageID:            "msg-maxed-gossip",
 		ForwardedTo:          domain.PeerAddress("addr-A"),
-		Recipient:            domain.PeerIdentity(idTargetX),
+		Recipient:            idTargetX,
 		RetryAttempt:         MaxFailoverRetries, // already exhausted
 		HopAckRemainingTicks: 0,
 		HopAckObserved:       true,
@@ -224,7 +224,7 @@ func TestFailoverRelay_GossipFallbackOnMaxRetriesExhausted(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:      "msg-maxed-gossip",
 		ForwardedTo:    domain.PeerAddress("addr-A"),
-		Recipient:      domain.PeerIdentity(idTargetX),
+		Recipient:      idTargetX,
 		RetryAttempt:   MaxFailoverRetries,
 		HopAckObserved: true,
 		FrameLine:      line,
@@ -261,7 +261,7 @@ func TestFailoverRelay_GossipFallbackSkippedOnEmptyFrameLine(t *testing.T) {
 	snap := relayForwardState{
 		MessageID:      "msg-no-frame",
 		ForwardedTo:    domain.PeerAddress("addr-A"),
-		Recipient:      domain.PeerIdentity(idTargetX),
+		Recipient:      idTargetX,
 		HopAckObserved: true,
 		FrameLine:      "",
 	}
@@ -287,8 +287,8 @@ func TestResolvePeerIdentity_HandlesInboundPrefixedKey(t *testing.T) {
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -326,8 +326,8 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 9090}}
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(7), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -340,8 +340,8 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 	// itself is observable on the relayForwardState fields.
 	msg := protocol.Envelope{
 		ID:        protocol.MessageID("msg-inbound-origin"),
-		Sender:    idNodeB,
-		Recipient: idPeerB,
+		Sender:    idNodeB.String(),
+		Recipient: idPeerB.String(),
 		Topic:     "dm",
 		Payload:   []byte("hello"),
 	}
@@ -355,7 +355,7 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 		Topic:       msg.Topic,
 		HopCount:    1,
 		MaxHops:     defaultMaxHops,
-		PreviousHop: idNodeB,
+		PreviousHop: idNodeB.String(),
 	}
 	originLine, marshalErr := protocol.MarshalFrameLine(frame)
 	if marshalErr != nil {
@@ -366,7 +366,7 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          domain.PeerAddress("inbound:10.0.0.5:9090"),
-		Recipient:            domain.PeerIdentity(msg.Recipient),
+		Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
 		HopCount:             1,
 		RemainingTTL:         relayStateTTLSeconds,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,

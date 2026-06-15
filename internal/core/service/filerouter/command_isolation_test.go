@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -31,10 +32,10 @@ import (
 func deliverLocalFrame(t *testing.T, payload string) (tr *testFileRouter, senderID domain.PeerIdentity) {
 	t.Helper()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID = domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID = domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -42,7 +43,7 @@ func deliverLocalFrame(t *testing.T, payload string) (tr *testFileRouter, sender
 
 	frame := makeSignedFrame(senderID, localID, 5, payload, priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	return tr, senderID
 }
@@ -95,11 +96,11 @@ func TestFileCommandNotInDMRouterPipeline(t *testing.T) {
 func TestFileCommandNoPendingQueue(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	unknownDST := domain.PeerIdentity("unknown-destination-identity12")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
+	unknownDST := domaintest.ID("unknown-destination-identity12")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	// No route to unknownDST.
 	snap := routing.Snapshot{TakenAt: time.Now()}
@@ -110,7 +111,7 @@ func TestFileCommandNoPendingQueue(t *testing.T) {
 	frame := makeSignedFrame(senderID, unknownDST, 5, "no-pending-queue-test", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// Frame should be silently dropped — no delivery, no forwarding, no queue.
 	if len(tr.localDeliveries()) != 0 {
@@ -131,14 +132,14 @@ func TestFileCommandNoPendingQueue(t *testing.T) {
 func TestFileCommandNoGossipFallback(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	remoteDST := domain.PeerIdentity("remote-destination-identity123")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
+	remoteDST := domaintest.ID("remote-destination-identity123")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	// One route to remoteDST via nextHop, but the send will fail.
-	nextHop := domain.PeerIdentity("next-hop-identity-123456789012")
+	nextHop := domaintest.ID("next-hop-identity-123456789012")
 	snap := routing.Snapshot{
 		TakenAt: time.Now(),
 		Routes: map[domain.PeerIdentity][]routing.RouteEntry{
@@ -156,7 +157,7 @@ func TestFileCommandNoGossipFallback(t *testing.T) {
 	frame := makeSignedFrame(senderID, remoteDST, 5, "no-gossip-test", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// No local delivery, no successful forward.
 	if len(tr.localDeliveries()) != 0 {

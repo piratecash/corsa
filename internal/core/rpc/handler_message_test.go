@@ -8,9 +8,23 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/rpc"
 	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 	"github.com/piratecash/corsa/internal/core/service"
 )
+
+// validTo is a well-formed 40-char lowercase-hex peer identity. The send_dm /
+// send_file_announce RPC boundary now parses the recipient with
+// domain.ParsePeerIdentity, so tests that expect to reach past that boundary
+// (success, 503, reply_to validation) must supply a parseable address.
+const validTo = "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44"
+
+// zeroIdentity is the all-zero 40-char lowercase-hex peer identity. It parses
+// with a NIL error through domain.ParsePeerIdentity (only the empty string is
+// the no-op case), so the identity-taking RPC boundaries must reject it with an
+// explicit IsZero gate rather than letting the "absent" sentinel through as a
+// required peer.
+const zeroIdentity = "0000000000000000000000000000000000000000"
 
 func TestMessageFetchMessagesValidTopic(t *testing.T) {
 	messages := []protocol.MessageFrame{
@@ -449,13 +463,61 @@ func TestMessageSendDMMissingTo(t *testing.T) {
 	expectFieldExists(t, result, "error")
 }
 
+// TestMessageSendDMRejectsMalformedTo pins the RPC boundary: a non-empty but
+// non-hex recipient must be rejected synchronously with 400 BEFORE the message
+// is enqueued. Previously such an address was coerced to the zero identity via
+// PeerIdentityFromWire and the RPC returned "pending" while the real error
+// surfaced asynchronously.
+func TestMessageSendDMRejectsMalformedTo(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":   "not-hex",
+		"body": "hello",
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "valid peer identity") {
+		t.Errorf("expected peer-identity validation error, got %q", errMsg)
+	}
+
+	// The malformed address must not be enqueued.
+	dmRouter.AssertNotCalled(t, "SendMessage")
+}
+
+// TestMessageSendDMRejectsZeroIdentityTo pins the second half of the boundary:
+// the all-zero 40-hex address parses with a nil error through
+// domain.ParsePeerIdentity, so without the explicit IsZero gate the absent
+// sentinel would slip through as a real recipient. It must be rejected with 400
+// BEFORE the message is enqueued.
+func TestMessageSendDMRejectsZeroIdentityTo(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":   zeroIdentity,
+		"body": "hello",
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "zero peer identity") {
+		t.Errorf("expected zero-identity validation error, got %q", errMsg)
+	}
+
+	// The zero identity must not be enqueued.
+	dmRouter.AssertNotCalled(t, "SendMessage")
+}
+
 func TestMessageSendDMMissingBody(t *testing.T) {
 	node := newDefaultNodeProvider(t)
 	dmRouter := newDefaultDMRouterProvider(t)
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to": "recipient-addr",
+		"to": validTo,
 	})
 
 	expectStatusCode(t, code, 400)
@@ -479,16 +541,16 @@ func TestMessageSendDMSuccess(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":   "peer-addr",
+		"to":   validTo,
 		"body": "hello world",
 	})
 
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "status", "pending")
-	expectField(t, result, "to", "peer-addr")
+	expectField(t, result, "to", validTo)
 
-	if capturedTo != "peer-addr" {
-		t.Errorf("expected capturedTo = %q, got %q", "peer-addr", capturedTo)
+	if capturedTo.String() != validTo {
+		t.Errorf("expected capturedTo = %q, got %q", validTo, capturedTo)
 	}
 	if string(capturedMsg.Body) != "hello world" {
 		t.Errorf("expected capturedMsg.Body = %q, got %q", "hello world", capturedMsg.Body)
@@ -513,7 +575,7 @@ func TestMessageSendDMReturns503WhenWipePending(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":   "peer-addr",
+		"to":   validTo,
 		"body": "hello",
 	})
 
@@ -528,7 +590,7 @@ func TestMessageSendDMRejectsNonStringReplyTo(t *testing.T) {
 
 	// reply_to as number — must be rejected, not silently dropped.
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":       "peer-addr",
+		"to":       validTo,
 		"body":     "hello",
 		"reply_to": 123,
 	})
@@ -540,7 +602,7 @@ func TestMessageSendDMRejectsNonStringReplyTo(t *testing.T) {
 
 	// reply_to as bool — same rejection.
 	code2, result2 := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":       "peer-addr",
+		"to":       validTo,
 		"body":     "hello",
 		"reply_to": true,
 	})
@@ -558,7 +620,7 @@ func TestMessageSendDMRejectsInvalidUUIDReplyTo(t *testing.T) {
 
 	// reply_to as string but not UUID v4 — must be rejected synchronously.
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":       "peer-addr",
+		"to":       validTo,
 		"body":     "hello",
 		"reply_to": "not-a-uuid",
 	})
@@ -588,7 +650,7 @@ func TestMessageSendDMAcceptsValidUUIDReplyTo(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":       "peer-addr",
+		"to":       validTo,
 		"body":     "hello",
 		"reply_to": "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
 	})
@@ -618,7 +680,7 @@ func TestMessageSendDMRejectsDanglingReplyToWithChatlog(t *testing.T) {
 
 	// Valid UUID format but does not exist in conversation — must be rejected.
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":       "peer-addr",
+		"to":       validTo,
 		"body":     "hello",
 		"reply_to": "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
 	})
@@ -643,7 +705,7 @@ func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
 	dmRouter.On("SendFileAnnounce", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	knownEntries := map[string]bool{
-		"peer-addr:a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5": true,
+		validTo + ":a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5": true,
 	}
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
 	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
@@ -657,7 +719,7 @@ func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
 	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":       "peer-addr",
+		"to":       validTo,
 		"body":     "hello",
 		"reply_to": "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
 	})
@@ -685,7 +747,7 @@ func TestMessageSendDMAcceptsEmptyReplyTo(t *testing.T) {
 
 	// Omitted reply_to — should succeed normally.
 	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
-		"to":   "peer-addr",
+		"to":   validTo,
 		"body": "hello",
 	})
 
@@ -694,6 +756,61 @@ func TestMessageSendDMAcceptsEmptyReplyTo(t *testing.T) {
 	if string(capturedMsg.ReplyTo) != "" {
 		t.Errorf("expected empty reply_to, got %q", capturedMsg.ReplyTo)
 	}
+}
+
+// validMessageID is a well-formed UUID v4 used by deleteDm tests that need to
+// reach past the message_id validation to assert peer-identity handling.
+const validMessageID = "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5"
+
+// TestMessageDeleteDMRejectsMalformedPeer pins the deleteDm boundary: a
+// non-empty but non-hex peer must be rejected synchronously with
+// ErrValidation BEFORE SendMessageDelete runs, instead of being coerced to the
+// zero identity.
+func TestMessageDeleteDMRejectsMalformedPeer(t *testing.T) {
+	dmRouter := newDefaultDMRouterProvider(t)
+	table := rpc.NewCommandTable()
+	rpc.RegisterMessageCommands(table, newDefaultNodeProvider(t), dmRouter, nil)
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "deleteDm",
+		Args: map[string]interface{}{
+			"peer":       "not-hex",
+			"message_id": validMessageID,
+		},
+	})
+	if resp.ErrorKind != rpc.ErrValidation {
+		t.Errorf("expected ErrValidation for malformed peer, got %v", resp.ErrorKind)
+	}
+	if resp.Error == nil || !strings.Contains(resp.Error.Error(), "valid peer identity") {
+		t.Errorf("expected peer-identity validation error, got %v", resp.Error)
+	}
+	dmRouter.AssertNotCalled(t, "SendMessageDelete")
+}
+
+// TestMessageDeleteDMRejectsZeroIdentityPeer pins the second half of the
+// deleteDm boundary: the all-zero 40-hex peer parses with a nil error through
+// domain.ParsePeerIdentity, so without the explicit IsZero gate the absent
+// sentinel would slip through. It must be rejected with ErrValidation BEFORE
+// SendMessageDelete runs.
+func TestMessageDeleteDMRejectsZeroIdentityPeer(t *testing.T) {
+	dmRouter := newDefaultDMRouterProvider(t)
+	table := rpc.NewCommandTable()
+	rpc.RegisterMessageCommands(table, newDefaultNodeProvider(t), dmRouter, nil)
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "deleteDm",
+		Args: map[string]interface{}{
+			"peer":       zeroIdentity,
+			"message_id": validMessageID,
+		},
+	})
+	if resp.ErrorKind != rpc.ErrValidation {
+		t.Errorf("expected ErrValidation for zero identity, got %v", resp.ErrorKind)
+	}
+	if resp.Error == nil || !strings.Contains(resp.Error.Error(), "zero peer identity") {
+		t.Errorf("expected zero-identity validation error, got %v", resp.Error)
+	}
+	dmRouter.AssertNotCalled(t, "SendMessageDelete")
 }
 
 func TestMessageCommandsHiddenWithoutDMRouter(t *testing.T) {

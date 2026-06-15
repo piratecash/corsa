@@ -195,7 +195,7 @@ func (r *probeRegistry) Resolve(probeID uint64) (target, uplink domain.PeerIdent
 	op, exists := r.pending[probeID]
 	if !exists {
 		r.mu.Unlock()
-		return "", "", 0, false
+		return domain.PeerIdentity{}, domain.PeerIdentity{}, 0, false
 	}
 	delete(r.pending, probeID)
 	target, uplink = op.Target, op.Uplink
@@ -222,14 +222,14 @@ func (r *probeRegistry) ResolveMatching(probeID uint64, expectedUplink domain.Pe
 	op, exists := r.pending[probeID]
 	if !exists {
 		r.mu.Unlock()
-		return "", 0, false
+		return domain.PeerIdentity{}, 0, false
 	}
 	if op.Uplink != expectedUplink {
 		// Mismatch: keep the entry, drop the ack. The real
 		// uplink will resolve on its own ack arrival or its
 		// timeout fire.
 		r.mu.Unlock()
-		return "", 0, false
+		return domain.PeerIdentity{}, 0, false
 	}
 	delete(r.pending, probeID)
 	target = op.Target
@@ -421,8 +421,8 @@ func (s *Service) sendProbe(target, uplink domain.PeerIdentity) bool {
 	s.peerMu.RUnlock()
 	if len(candidates) == 0 {
 		log.Debug().
-			Str("target_identity", string(target)).
-			Str("uplink", string(uplink)).
+			Str("target_identity", target.String()).
+			Str("uplink", uplink.String()).
 			Msg("route_probe_skipped_no_capability")
 		return false
 	}
@@ -439,8 +439,8 @@ func (s *Service) sendProbe(target, uplink domain.PeerIdentity) bool {
 		log.Warn().
 			Err(err).
 			Uint64("probe_id", probeID).
-			Str("target_identity", string(target)).
-			Str("uplink", string(uplink)).
+			Str("target_identity", target.String()).
+			Str("uplink", uplink.String()).
 			Msg("route_probe_marshal_failed")
 		// Marshal failed AFTER Register — cancel the pending
 		// entry so its timeout watcher does not later fire

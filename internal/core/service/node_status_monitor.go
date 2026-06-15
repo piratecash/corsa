@@ -469,7 +469,7 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		if m.status.Contacts == nil {
 			m.status.Contacts = make(map[string]Contact)
 		}
-		m.status.Contacts[string(c.Address)] = Contact{
+		m.status.Contacts[c.Address.String()] = Contact{
 			PubKey:       string(c.PubKey),
 			BoxKey:       string(c.BoxKey),
 			BoxSignature: string(c.BoxSig),
@@ -482,7 +482,7 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 	// Contact removed — delete from local map.
 	m.eventBus.Subscribe(ebus.TopicContactRemoved, func(identity domain.PeerIdentity) {
 		m.mu.Lock()
-		delete(m.status.Contacts, string(identity))
+		delete(m.status.Contacts, identity.String())
 		m.mu.Unlock()
 
 		m.onChanged()
@@ -490,7 +490,7 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 
 	// New identity discovered — append to local list.
 	m.eventBus.Subscribe(ebus.TopicIdentityAdded, func(identity domain.PeerIdentity) {
-		address := string(identity)
+		address := identity.String()
 		m.mu.Lock()
 		found := false
 		for _, id := range m.status.KnownIDs {
@@ -623,7 +623,7 @@ func (m *NodeStatusMonitor) applyPeerHealthDelta(delta ebus.PeerHealthDelta) {
 	if !outboundFound && (delta.ConnID != 0 || !delta.Connected || len(existingConnIDs) == 0) {
 		m.status.PeerHealth = append(m.status.PeerHealth, PeerHealth{
 			Address:             addr,
-			PeerID:              string(delta.PeerID),
+			PeerID:              delta.PeerID.String(),
 			Direction:           string(delta.Direction),
 			ClientVersion:       delta.ClientVersion,
 			ClientBuild:         delta.ClientBuild,
@@ -668,7 +668,7 @@ func (m *NodeStatusMonitor) applyPeerHealthDelta(delta ebus.PeerHealthDelta) {
 		if _, exists := existingConnIDs[cid]; !exists {
 			m.status.PeerHealth = append(m.status.PeerHealth, PeerHealth{
 				Address:             addr,
-				PeerID:              string(delta.PeerID),
+				PeerID:              delta.PeerID.String(),
 				ConnID:              cid,
 				Direction:           "inbound",
 				ClientVersion:       delta.ClientVersion,
@@ -787,8 +787,8 @@ func (m *NodeStatusMonitor) applyPeerHealthDelta(delta ebus.PeerHealthDelta) {
 // rows where the caller hasn't determined the correct connection context.
 func applyHealthDeltaToRow(p *PeerHealth, delta ebus.PeerHealthDelta, writeSession bool) {
 	// PeerID: persistent identity, always backfilled.
-	if p.PeerID == "" && delta.PeerID != "" {
-		p.PeerID = string(delta.PeerID)
+	if p.PeerID == "" && !delta.PeerID.IsZero() {
+		p.PeerID = delta.PeerID.String()
 	}
 
 	// Session-scoped metadata: on disconnect clear unconditionally

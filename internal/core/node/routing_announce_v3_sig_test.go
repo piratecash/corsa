@@ -21,8 +21,8 @@ func TestBuildRouteAnnounceV3Frame_EncodesAttestedSigAsBase64(t *testing.T) {
 	sig := []byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x7f}
 	entries := []routing.AnnounceEntry{
 		{
-			Identity:    domain.PeerIdentity(idTargetX),
-			Origin:      domain.PeerIdentity(idOriginC),
+			Identity:    idTargetX,
+			Origin:      idOriginC,
 			Hops:        1,
 			SeqNo:       1,
 			AttestedSig: sig,
@@ -50,7 +50,7 @@ func TestBuildRouteAnnounceV3Frame_EmptyAttestedSigOmitsWireField(t *testing.T) 
 	// unsigned-entry path off the wire so peers without
 	// mesh_attested_links_v1 see no superfluous JSON key.
 	entries := []routing.AnnounceEntry{
-		{Identity: domain.PeerIdentity(idTargetX), Origin: domain.PeerIdentity(idOriginC), Hops: 1, SeqNo: 1},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
 	}
 	frame, err := buildRouteAnnounceV3Frame(protocol.RouteAnnounceV3KindFull, 1, entries)
 	if err != nil {
@@ -64,10 +64,10 @@ func TestBuildRouteAnnounceV3Frame_EmptyAttestedSigOmitsWireField(t *testing.T) 
 func TestRouteAnnounceV3EntriesToWire_DecodesSigIntoParallelSlice(t *testing.T) {
 	sig := []byte{0x01, 0x02, 0x03}
 	v3Entries := []protocol.RouteAnnounceV3Entry{
-		{Identity: idTargetX, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sig)},
-		{Identity: idPeerB, Hops: 1, SeqNo: 1}, // unsigned
+		{Identity: idTargetX.String(), Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sig)},
+		{Identity: idPeerB.String(), Hops: 1, SeqNo: 1}, // unsigned
 	}
-	frames, sigs := routeAnnounceV3EntriesToWire(domain.PeerIdentity(idOriginC), v3Entries)
+	frames, sigs := routeAnnounceV3EntriesToWire(idOriginC, v3Entries)
 	if len(frames) != 2 || len(sigs) != 2 {
 		t.Fatalf("parallel slices: got frames=%d sigs=%d want both 2", len(frames), len(sigs))
 	}
@@ -78,7 +78,7 @@ func TestRouteAnnounceV3EntriesToWire_DecodesSigIntoParallelSlice(t *testing.T) 
 		t.Fatalf("unsigned entry must produce nil sig slot; got %x", sigs[1])
 	}
 	// Frames must mirror entries with synthesised Origin.
-	if frames[0].Identity != idTargetX || frames[0].Origin != idOriginC {
+	if frames[0].Identity != idTargetX.String() || frames[0].Origin != idOriginC.String() {
 		t.Fatalf("frames[0] header wrong: %+v", frames[0])
 	}
 }
@@ -89,9 +89,9 @@ func TestRouteAnnounceV3EntriesToWire_MalformedBase64ProducesNilSig(t *testing.T
 	// ingested — the verification path will surface the absent-sig
 	// case in 13.2-B via the trust-score penalty.
 	v3Entries := []protocol.RouteAnnounceV3Entry{
-		{Identity: idTargetX, Hops: 1, SeqNo: 1, Sig: "not-valid-base64!!!"},
+		{Identity: idTargetX.String(), Hops: 1, SeqNo: 1, Sig: "not-valid-base64!!!"},
 	}
-	frames, sigs := routeAnnounceV3EntriesToWire(domain.PeerIdentity(idOriginC), v3Entries)
+	frames, sigs := routeAnnounceV3EntriesToWire(idOriginC, v3Entries)
 	if len(frames) != 1 {
 		t.Fatalf("frames: got %d want 1", len(frames))
 	}
@@ -105,7 +105,7 @@ func TestHandleRouteAnnounceV3_StoresAttestedSigOnClaim(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 
 	sig := []byte{0xaa, 0xbb, 0xcc, 0xdd}
@@ -113,14 +113,14 @@ func TestHandleRouteAnnounceV3_StoresAttestedSigOnClaim(t *testing.T) {
 		Kind:  protocol.RouteAnnounceV3KindFull,
 		Epoch: 1,
 		Entries: []protocol.RouteAnnounceV3Entry{
-			{Identity: idTargetX, Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sig)},
+			{Identity: idTargetX.String(), Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sig)},
 		},
 	}
-	svc.handleRouteAnnounceV3(domain.PeerIdentity(idPeerB), domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(idPeerB, domain.PeerAddress("addr-peerB"), frame)
 
 	// Pull the stored route back through the boundary and assert the
 	// signature survived storage round-trip.
-	got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX))
+	got := svc.routingTable.Lookup(idTargetX)
 	if len(got) == 0 {
 		t.Fatalf("v3 entry not applied")
 	}

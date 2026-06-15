@@ -191,6 +191,9 @@ func (m *Manager) RegisterFileReceive(
 	if fileSize == 0 {
 		return fmt.Errorf("file %s: invalid announce metadata: file size is zero", fileID)
 	}
+	if sender.IsZero() {
+		return fmt.Errorf("file %s: invalid announce metadata: zero sender identity", fileID)
+	}
 
 	// Sanitize the file name at the network boundary to prevent path
 	// traversal attacks. The original name arrives from the remote peer
@@ -224,7 +227,7 @@ func (m *Manager) RegisterFileReceive(
 
 	log.Info().
 		Str("file_id", string(fileID)).
-		Str("sender", string(sender)).
+		Str("sender", sender.String()).
 		Str("file_name", safeFileName).
 		Msg("file_transfer: registered receiver mapping")
 
@@ -284,7 +287,7 @@ func (m *Manager) StartDownload(fileID domain.FileID) error {
 
 	log.Info().
 		Str("file_id", string(fileID)).
-		Str("sender", string(snap.sender)).
+		Str("sender", snap.sender.String()).
 		Uint64("offset", snap.startOffset).
 		Uint32("chunk_size", snap.chunkSize).
 		Msg("file_transfer: sending chunk_request")
@@ -527,7 +530,7 @@ func (m *Manager) HandleFileDownloadedAck(
 		m.mu.Unlock()
 		log.Warn().
 			Str("file_id", string(ack.FileID)).
-			Str("sender", string(senderIdentity)).
+			Str("sender", senderIdentity.String()).
 			Uint64("received_epoch", ack.Epoch).
 			Uint64("current_epoch", currentEpoch).
 			Msg("file_transfer: file_downloaded_ack epoch mismatch — dropping stale ack")
@@ -541,7 +544,7 @@ func (m *Manager) HandleFileDownloadedAck(
 
 	log.Info().
 		Str("file_id", string(ack.FileID)).
-		Str("sender", string(senderIdentity)).
+		Str("sender", senderIdentity.String()).
 		Msg("file_transfer: transfer completed (receiver)")
 }
 
@@ -1696,7 +1699,7 @@ func (m *Manager) tickReceiverMappings() {
 				changed = true
 				log.Info().
 					Str("file_id", string(rm.FileID)).
-					Str("sender", string(rm.Sender)).
+					Str("sender", rm.Sender.String()).
 					Msg("file_transfer: sender unreachable, pausing download")
 				continue
 			}
@@ -1750,7 +1753,7 @@ func (m *Manager) tickReceiverMappings() {
 				rm.CompletedAt = now
 				log.Info().
 					Str("file_id", string(rm.FileID)).
-					Str("sender", string(rm.Sender)).
+					Str("sender", rm.Sender.String()).
 					Msg("file_transfer: waiting_ack retries exhausted, completing locally")
 				continue
 			}
@@ -1788,7 +1791,7 @@ func (m *Manager) tickReceiverMappings() {
 
 			log.Info().
 				Str("file_id", string(rm.FileID)).
-				Str("sender", string(rm.Sender)).
+				Str("sender", rm.Sender.String()).
 				Uint64("offset", snap.startOffset).
 				Msg("file_transfer: sender reachable again, resuming download")
 

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/service"
 )
 
@@ -31,7 +32,7 @@ func TestMergeCapturesIntoPeers_OrphanCaptureSynthesized(t *testing.T) {
 		7: {
 			ConnID:    7,
 			Address:   domain.PeerAddress("10.0.0.1:9999"),
-			PeerID:    domain.PeerIdentity("abc123"),
+			PeerID:    domaintest.ID("abc123"),
 			Direction: domain.PeerDirectionOutbound,
 			Active:    true,
 		},
@@ -47,8 +48,8 @@ func TestMergeCapturesIntoPeers_OrphanCaptureSynthesized(t *testing.T) {
 	if got.Address != "10.0.0.1:9999" {
 		t.Errorf("Address: want %q, got %q", "10.0.0.1:9999", got.Address)
 	}
-	if got.PeerID != "abc123" {
-		t.Errorf("PeerID: want %q, got %q", "abc123", got.PeerID)
+	if got.PeerID != domaintest.ID("abc123").String() {
+		t.Errorf("PeerID: want %q, got %q", domaintest.ID("abc123").String(), got.PeerID)
 	}
 	if got.Direction != string(domain.PeerDirectionOutbound) {
 		t.Errorf("Direction: want %q, got %q", domain.PeerDirectionOutbound, got.Direction)
@@ -257,7 +258,7 @@ func TestCountConnectedPeers_IncludesOrphanCapture(t *testing.T) {
 			1: {
 				ConnID:  1,
 				Address: domain.PeerAddress("1.2.3.4:5555"),
-				PeerID:  domain.PeerIdentity("peer-x"),
+				PeerID:  domaintest.ID("peer-x"),
 				Active:  true,
 			},
 		},
@@ -274,10 +275,10 @@ func TestCountConnectedPeers_IncludesOrphanCapture(t *testing.T) {
 func TestCountConnectedPeers_NoDoubleCount(t *testing.T) {
 	status := service.NodeStatus{
 		PeerHealth: []service.PeerHealth{
-			{Address: "1.2.3.4:5555", PeerID: "peer-x", Connected: true},
+			{Address: "1.2.3.4:5555", PeerID: domaintest.ID("peer-x").String(), Connected: true},
 		},
 		CaptureSessions: map[domain.ConnID]service.CaptureSession{
-			42: {ConnID: 42, PeerID: "peer-x", Address: "1.2.3.4:5555", Active: true},
+			42: {ConnID: 42, PeerID: domaintest.ID("peer-x"), Address: "1.2.3.4:5555", Active: true},
 		},
 	}
 	if got := countConnectedPeers(status); got != 1 {
@@ -291,7 +292,7 @@ func TestCountConnectedPeers_NoDoubleCount(t *testing.T) {
 func TestCountConnectedPeers_IgnoresStoppedCapture(t *testing.T) {
 	status := service.NodeStatus{
 		CaptureSessions: map[domain.ConnID]service.CaptureSession{
-			1: {ConnID: 1, PeerID: "peer-x", Address: "x", Active: false, Error: "disk full"},
+			1: {ConnID: 1, PeerID: domaintest.ID("peer-x"), Address: "x", Active: false, Error: "disk full"},
 		},
 	}
 	if got := countConnectedPeers(status); got != 0 {
@@ -321,7 +322,7 @@ func TestCountUniquePeers_IncludesOrphanCapture(t *testing.T) {
 	status := service.NodeStatus{
 		PeerHealth: nil,
 		CaptureSessions: map[domain.ConnID]service.CaptureSession{
-			1: {ConnID: 1, Address: "1.2.3.4:5555", PeerID: "peer-x", Active: true},
+			1: {ConnID: 1, Address: "1.2.3.4:5555", PeerID: domaintest.ID("peer-x"), Active: true},
 		},
 	}
 	if got := countUniquePeers(status); got != 1 {
@@ -340,7 +341,7 @@ func TestCountUniquePeers_PreservesKnownButInactive(t *testing.T) {
 			{Address: "idle-2", SlotState: "retry_wait"},
 		},
 		CaptureSessions: map[domain.ConnID]service.CaptureSession{
-			1: {ConnID: 1, Address: "live", PeerID: "peer-x", Active: true},
+			1: {ConnID: 1, Address: "live", PeerID: domaintest.ID("peer-x"), Active: true},
 		},
 	}
 	if got := countUniquePeers(status); got != 3 {
@@ -355,10 +356,10 @@ func TestCountUniquePeers_PreservesKnownButInactive(t *testing.T) {
 func TestCountUniquePeers_NoDoubleCount(t *testing.T) {
 	status := service.NodeStatus{
 		PeerHealth: []service.PeerHealth{
-			{Address: "new", PeerID: "peer-x", Connected: true},
+			{Address: "new", PeerID: domaintest.ID("peer-x").String(), Connected: true},
 		},
 		CaptureSessions: map[domain.ConnID]service.CaptureSession{
-			1: {ConnID: 1, Address: "old", PeerID: "peer-x", Active: true},
+			1: {ConnID: 1, Address: "old", PeerID: domaintest.ID("peer-x"), Active: true},
 		},
 	}
 	if got := countUniquePeers(status); got != 1 {
@@ -544,7 +545,7 @@ func TestMergeCapturesIntoPeers_PromotesSlotPlaceholderForSameAddress(t *testing
 		7: {
 			ConnID:    7,
 			Address:   domain.PeerAddress("1.2.3.4:5555"),
-			PeerID:    domain.PeerIdentity("peer-x"),
+			PeerID:    domaintest.ID("peer-x"),
 			Direction: domain.PeerDirectionOutbound,
 			Active:    true,
 		},
@@ -563,7 +564,7 @@ func TestMergeCapturesIntoPeers_PromotesSlotPlaceholderForSameAddress(t *testing
 	if row.SlotState != "dialing" {
 		t.Errorf("SlotState must be preserved — CM-managed state is authoritative, got %q", row.SlotState)
 	}
-	if row.PeerID != "peer-x" {
+	if row.PeerID != domaintest.ID("peer-x").String() {
 		t.Errorf("PeerID must be filled from capture, got %q", row.PeerID)
 	}
 	if row.Direction != string(domain.PeerDirectionOutbound) {
@@ -611,7 +612,7 @@ func TestMergeCapturesIntoPeers_PromotionPreservesExistingPeerID(t *testing.T) {
 		7: {
 			ConnID:  7,
 			Address: "1.2.3.4:5555",
-			PeerID:  "different-id",
+			PeerID:  domaintest.ID("different-id"),
 			Active:  true,
 		},
 	}

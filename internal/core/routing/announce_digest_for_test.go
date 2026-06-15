@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // announce_digest_for_test.go covers the Phase 3 review P1 fix: the
@@ -25,14 +27,14 @@ func TestAnnounceDigestFor_MatchesReceiverViaSet_ACviaB(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
 	// Node B is directly connected to C.
-	tblB := NewTable(WithLocalOrigin("id-B"), WithClock(fixedClock(now)))
-	if _, err := tblB.AddDirectPeer("id-C"); err != nil {
+	tblB := NewTable(WithLocalOrigin(domaintest.ID("id-B")), WithClock(fixedClock(now)))
+	if _, err := tblB.AddDirectPeer(domaintest.ID("id-C")); err != nil {
 		t.Fatalf("B.AddDirectPeer(C): %v", err)
 	}
 
 	// B announces to A. AnnounceTo records B's per-peer wire SeqNos in
 	// outboundPeerMax — the basis AnnounceDigestFor reproduces.
-	entries := tblB.AnnounceTo("id-A")
+	entries := tblB.AnnounceTo(domaintest.ID("id-A"))
 	if len(entries) == 0 {
 		t.Fatal("B.AnnounceTo(A) produced no entries; expected a route to C")
 	}
@@ -40,12 +42,12 @@ func TestAnnounceDigestFor_MatchesReceiverViaSet_ACviaB(t *testing.T) {
 	// Node A ingests B's announce: each entry becomes a claim via B with
 	// the exact wire SeqNo B sent (receiver adds +1 hop, mirroring the
 	// real receive path).
-	tblA := NewTable(WithLocalOrigin("id-A"), WithClock(fixedClock(now)))
+	tblA := NewTable(WithLocalOrigin(domaintest.ID("id-A")), WithClock(fixedClock(now)))
 	for _, e := range entries {
 		if _, err := tblA.UpdateRoute(RouteEntry{
 			Identity:  e.Identity,
 			Origin:    e.Origin,
-			NextHop:   "id-B",
+			NextHop:   domaintest.ID("id-B"),
 			Hops:      e.Hops + 1,
 			SeqNo:     e.SeqNo,
 			Source:    RouteSourceAnnouncement,
@@ -55,8 +57,8 @@ func TestAnnounceDigestFor_MatchesReceiverViaSet_ACviaB(t *testing.T) {
 		}
 	}
 
-	bOutboundToA, bCount := tblB.AnnounceDigestFor("id-A")
-	aViaB, aCount := tblA.SyncDigestFor("id-B")
+	bOutboundToA, bCount := tblB.AnnounceDigestFor(domaintest.ID("id-A"))
+	aViaB, aCount := tblA.SyncDigestFor(domaintest.ID("id-B"))
 
 	if bCount == 0 {
 		t.Fatal("B.AnnounceDigestFor(A) is empty; expected the route to C")
@@ -71,7 +73,7 @@ func TestAnnounceDigestFor_MatchesReceiverViaSet_ACviaB(t *testing.T) {
 	// B learned nothing through A, so its via-A digest is the empty-input
 	// digest while A's via-B digest covers C — demonstrating exactly why
 	// the old comparison almost never matched.
-	bViaA, _ := tblB.SyncDigestFor("id-A")
+	bViaA, _ := tblB.SyncDigestFor(domaintest.ID("id-A"))
 	if bViaA == aViaB {
 		t.Fatal("pre-fix via-peer digest unexpectedly matched; the regression guard is ineffective")
 	}
@@ -83,14 +85,14 @@ func TestAnnounceDigestFor_MatchesReceiverViaSet_ACviaB(t *testing.T) {
 // than a spurious match.
 func TestAnnounceDigestFor_EmptyWhenNothingAnnounced(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tblB := NewTable(WithLocalOrigin("id-B"), WithClock(fixedClock(now)))
+	tblB := NewTable(WithLocalOrigin(domaintest.ID("id-B")), WithClock(fixedClock(now)))
 	// A route exists but was never announced to A (no AnnounceTo call), so
 	// outboundPeerMax has no (id-C, id-A) entry.
-	if _, err := tblB.AddDirectPeer("id-C"); err != nil {
+	if _, err := tblB.AddDirectPeer(domaintest.ID("id-C")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 
-	digest, count := tblB.AnnounceDigestFor("id-A")
+	digest, count := tblB.AnnounceDigestFor(domaintest.ID("id-A"))
 	if count != 0 {
 		t.Fatalf("AnnounceDigestFor count = %d, want 0 (never announced to A)", count)
 	}
@@ -105,14 +107,14 @@ func TestAnnounceDigestFor_EmptyWhenNothingAnnounced(t *testing.T) {
 // peer's stale view and the reconnect falls back to a full sync.
 func TestAnnounceDigestFor_DropsDeadTransitIdentity(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tblB := NewTable(WithLocalOrigin("id-B"), WithClock(fixedClock(now)))
+	tblB := NewTable(WithLocalOrigin(domaintest.ID("id-B")), WithClock(fixedClock(now)))
 
 	// Transit route to C via uplink U, announced to A.
-	upsertClaim(t, tblB, "id-C", "id-U", 2, RouteSourceAnnouncement)
-	if len(tblB.AnnounceTo("id-A")) == 0 {
+	upsertClaim(t, tblB, domaintest.ID("id-C"), domaintest.ID("id-U"), 2, RouteSourceAnnouncement)
+	if len(tblB.AnnounceTo(domaintest.ID("id-A"))) == 0 {
 		t.Fatal("expected an announce entry for C")
 	}
-	withDigest, withCount := tblB.AnnounceDigestFor("id-A")
+	withDigest, withCount := tblB.AnnounceDigestFor(domaintest.ID("id-A"))
 	if withCount == 0 {
 		t.Fatal("expected C in the outbound digest before it went Dead")
 	}
@@ -120,9 +122,9 @@ func TestAnnounceDigestFor_DropsDeadTransitIdentity(t *testing.T) {
 	// Mark the (C, U) transit pair Dead — a Dead transit claim is excluded
 	// from the announceable-winner check (Direct exemption does not apply
 	// to a transit claim), so C drops out of the outbound digest.
-	setNonShapingTierPair(t, tblB, "id-C", "id-U", HealthDead)
+	setNonShapingTierPair(t, tblB, domaintest.ID("id-C"), domaintest.ID("id-U"), HealthDead)
 
-	afterDigest, afterCount := tblB.AnnounceDigestFor("id-A")
+	afterDigest, afterCount := tblB.AnnounceDigestFor(domaintest.ID("id-A"))
 	if afterCount != 0 {
 		t.Fatalf("Dead transit identity still in digest: count = %d, want 0", afterCount)
 	}

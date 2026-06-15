@@ -3,6 +3,9 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // table_health_reputation_test.go covers Phase 3 PR 12.2 — the wire-up
@@ -36,10 +39,10 @@ import (
 // counter.
 func TestMarkHopAck_BumpsReputationAttemptsAndSuccesses(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
-	tbl.MarkHopAck("id-target", "id-uplink", 25*time.Millisecond)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 25*time.Millisecond)
 
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
@@ -61,11 +64,11 @@ func TestMarkHopAck_BumpsReputationAttemptsAndSuccesses(t *testing.T) {
 // reputation surface.
 func TestMarkHopAck_BumpsReputationClearsCooldown(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	}
 	// Sanity precondition: cooldown armed by the failure streak.
 	snap := tbl.HealthSnapshot()
@@ -73,7 +76,7 @@ func TestMarkHopAck_BumpsReputationClearsCooldown(t *testing.T) {
 		t.Fatalf("precondition: expected cooldown armed, got snap=%v", snap)
 	}
 
-	tbl.MarkHopAck("id-target", "id-uplink", 0)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
 
 	snap = tbl.HealthSnapshot()
 	if len(snap) != 1 {
@@ -94,14 +97,14 @@ func TestMarkHopAck_BumpsReputationClearsCooldown(t *testing.T) {
 // primitive without touching Phase 2 health / probe state.
 func TestMarkHopFailure_BumpsAttemptsAndConsecutiveFailures(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	// Seed reputation through a prior success so HopAckSuccesses is
 	// non-zero and the next-failure delta is observable.
-	tbl.MarkHopAck("id-target", "id-uplink", 25*time.Millisecond)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 25*time.Millisecond)
 
-	tbl.MarkHopFailure("id-target", "id-uplink")
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
@@ -131,16 +134,16 @@ func TestMarkHopFailure_BumpsAttemptsAndConsecutiveFailures(t *testing.T) {
 // BlackHoleThreshold-th call. Overview §9.5 names this scenario.
 func TestMarkHopFailure_ArmsCooldownOn5thConsecutiveFailure(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold-1; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	}
 	if snap := tbl.HealthSnapshot(); len(snap) == 1 && !snap[0].CooldownUntil.IsZero() {
 		t.Fatalf("CooldownUntil armed before threshold: %v", snap[0].CooldownUntil)
 	}
-	tbl.MarkHopFailure("id-target", "id-uplink")
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
 		t.Fatalf("HealthSnapshot len = %d, want 1", len(snap))
@@ -157,8 +160,8 @@ func TestMarkHopFailure_ArmsCooldownOn5thConsecutiveFailure(t *testing.T) {
 // AddDirectPeer) must not create any state. InspectTriple returns
 // nil and MarkHopFailure short-circuits before touching health.
 func TestMarkHopFailure_OnAbsentPairIsNoop(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
-	tbl.MarkHopFailure("id-never-seen", "id-never-uplink")
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
+	tbl.MarkHopFailure(domaintest.ID("id-never-seen"), domaintest.ID("id-never-uplink"))
 	if got := tbl.HealthSnapshot(); got != nil {
 		t.Fatalf("HealthSnapshot() = %v, want nil after MarkHopFailure on absent pair", got)
 	}
@@ -178,20 +181,20 @@ func TestMarkHopFailure_OnAbsentPairIsNoop(t *testing.T) {
 // guard fires for the eviction-then-late-timeout race specifically.
 func TestMarkHopFailure_OnAbsentHealthEntryIsNoop(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	// upsertClaim seeded a Questionable health entry via UpdateRoute.
 	// Simulate reconcile/eviction so storage stays but health goes
 	// away — the exact race the guard protects against.
 	tbl.mu.Lock()
-	tbl.health.evictUplinkLocked("id-target", "id-uplink")
+	tbl.health.evictUplinkLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	tbl.mu.Unlock()
 	if got := tbl.HealthSnapshot(); got != nil {
 		t.Fatalf("precondition: expected health snapshot empty after eviction, got %v", got)
 	}
 
-	tbl.MarkHopFailure("id-target", "id-uplink")
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 
 	if got := tbl.HealthSnapshot(); got != nil {
 		t.Fatalf("HealthSnapshot() = %v, want nil (failure must not resurrect evicted pair)", got)
@@ -206,19 +209,19 @@ func TestMarkHopFailure_OnAbsentHealthEntryIsNoop(t *testing.T) {
 // that reputation should follow, not contradict.
 func TestMarkHopFailure_OnWithdrawnClaimIsNoop(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	// Establish a real health entry so this test exercises the
 	// "withdrawn ⇒ no-op" branch, not the "absent ⇒ no-op" branch.
-	tbl.MarkHopAck("id-target", "id-uplink", 0)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
 	// upsertClaim seeds SeqNo=1; withdraw needs strictly newer SeqNo.
-	if !tbl.WithdrawRoute("id-target", "id-target", "id-uplink", 2) {
+	if !tbl.WithdrawRoute(domaintest.ID("id-target"), domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2) {
 		t.Fatal("WithdrawRoute returned false")
 	}
 
 	before := tbl.HealthSnapshot()
-	tbl.MarkHopFailure("id-target", "id-uplink")
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	after := tbl.HealthSnapshot()
 
 	if len(after) != len(before) {
@@ -235,13 +238,13 @@ func TestMarkHopFailure_OnWithdrawnClaimIsNoop(t *testing.T) {
 // selectable by Lookup; reputation must not paint it red retroactively.
 func TestMarkHopFailure_OnExpiredClaimIsNoop(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// Inject an entry whose ExpiresAt is in the past via UpdateRoute.
 	entry := RouteEntry{
-		Identity:  "id-target",
-		Origin:    "id-target",
-		NextHop:   "id-uplink",
+		Identity:  domaintest.ID("id-target"),
+		Origin:    domaintest.ID("id-target"),
+		NextHop:   domaintest.ID("id-uplink"),
 		Hops:      2,
 		SeqNo:     1,
 		Source:    RouteSourceAnnouncement,
@@ -251,11 +254,11 @@ func TestMarkHopFailure_OnExpiredClaimIsNoop(t *testing.T) {
 		t.Fatalf("UpdateRoute: %v", err)
 	}
 
-	tbl.MarkHopFailure("id-target", "id-uplink")
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 
 	snap := tbl.HealthSnapshot()
 	for _, s := range snap {
-		if s.Identity == "id-target" && s.Uplink == "id-uplink" && s.ConsecutiveFailures != 0 {
+		if s.Identity == domaintest.ID("id-target") && s.Uplink == domaintest.ID("id-uplink") && s.ConsecutiveFailures != 0 {
 			t.Fatalf("ConsecutiveFailures = %d on expired claim, want 0 (no-op)", s.ConsecutiveFailures)
 		}
 	}
@@ -265,9 +268,9 @@ func TestMarkHopFailure_OnExpiredClaimIsNoop(t *testing.T) {
 // MarkProbeFailure / MarkHopAck: empty identity or uplink does not
 // create or touch any health entry.
 func TestMarkHopFailure_EmptyIdentityIsNoop(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
-	tbl.MarkHopFailure("", "id-uplink")
-	tbl.MarkHopFailure("id-target", "")
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
+	tbl.MarkHopFailure(domain.PeerIdentity{}, domaintest.ID("id-uplink"))
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domain.PeerIdentity{})
 	if got := tbl.HealthSnapshot(); got != nil {
 		t.Fatalf("HealthSnapshot() = %v, want nil after MarkHopFailure with empty id/uplink", got)
 	}
@@ -278,23 +281,23 @@ func TestMarkHopFailure_EmptyIdentityIsNoop(t *testing.T) {
 // the MarkHopAck / MarkProbeFailure equivalents.
 func TestMarkHopFailure_ScopedToUplink_DoesNotAffectOtherUplink(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 2, RouteSourceAnnouncement)
-	tbl.MarkHopAck("id-target", "id-uplink-A", 0)
-	tbl.MarkHopAck("id-target", "id-uplink-B", 0)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 2, RouteSourceAnnouncement)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 0)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 0)
 
-	tbl.MarkHopFailure("id-target", "id-uplink-A")
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"))
 
 	snap := tbl.HealthSnapshot()
 	var gotA, gotB *RouteHealthState
 	for i := range snap {
 		s := &snap[i]
 		switch s.Uplink {
-		case "id-uplink-A":
+		case domaintest.ID("id-uplink-A"):
 			gotA = s
-		case "id-uplink-B":
+		case domaintest.ID("id-uplink-B"):
 			gotB = s
 		}
 	}
@@ -317,14 +320,14 @@ func TestMarkHopFailure_ScopedToUplink_DoesNotAffectOtherUplink(t *testing.T) {
 // writer.
 func TestMarkHopFailure_MarksDirty(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
-	tbl.MarkHopAck("id-target", "id-uplink", 0)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
 	// Drain dirty: ConsumeDirty CAS true→false.
 	tbl.ConsumeDirty()
 
-	tbl.MarkHopFailure("id-target", "id-uplink")
+	tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	if !tbl.ConsumeDirty() {
 		t.Fatalf("MarkHopFailure did not mark table dirty")
 	}
@@ -343,9 +346,9 @@ func TestMarkHopFailure_MarksDirty(t *testing.T) {
 // reputation primitives to wire-frame ingest the test breaks loud.
 func TestMarkHopAck_BumpsReputation_LocalPenaltiesOnly(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 
 	// Re-ingest the same claim multiple times — simulates wire-frame
 	// announce / routes_update traffic. Each call goes through
@@ -353,9 +356,9 @@ func TestMarkHopAck_BumpsReputation_LocalPenaltiesOnly(t *testing.T) {
 	// MarkHopAck. Reputation MUST stay untouched.
 	for i := 0; i < 10; i++ {
 		entry := RouteEntry{
-			Identity:  "id-target",
-			Origin:    "id-target",
-			NextHop:   "id-uplink",
+			Identity:  domaintest.ID("id-target"),
+			Origin:    domaintest.ID("id-target"),
+			NextHop:   domaintest.ID("id-uplink"),
 			Hops:      2,
 			SeqNo:     uint64(i + 2), // strictly newer each time
 			Source:    RouteSourceAnnouncement,
@@ -368,7 +371,7 @@ func TestMarkHopAck_BumpsReputation_LocalPenaltiesOnly(t *testing.T) {
 
 	snap := tbl.HealthSnapshot()
 	for _, s := range snap {
-		if s.Identity == "id-target" && s.Uplink == "id-uplink" {
+		if s.Identity == domaintest.ID("id-target") && s.Uplink == domaintest.ID("id-uplink") {
 			if s.HopAckAttempts != 0 || s.HopAckSuccesses != 0 {
 				t.Fatalf("UpdateRoute leaked into reputation: Attempts=%d, Successes=%d, want both 0", s.HopAckAttempts, s.HopAckSuccesses)
 			}

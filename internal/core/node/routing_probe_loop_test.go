@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -31,7 +32,7 @@ func TestProbeRegistry_RegisterResolveHappyPath(t *testing.T) {
 	clk := t0
 	reg := newProbeRegistry(5*time.Second, func() time.Time { return clk }, nil)
 
-	id := reg.Register("id-target", "id-uplink")
+	id := reg.Register(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	if id == 0 {
 		t.Fatal("Register returned probe ID 0; must be non-zero so wire frames with probe_id=0 are unambiguous")
 	}
@@ -44,7 +45,7 @@ func TestProbeRegistry_RegisterResolveHappyPath(t *testing.T) {
 	if !ok {
 		t.Fatal("Resolve returned ok=false for a freshly registered probe")
 	}
-	if target != "id-target" || uplink != "id-uplink" {
+	if target != domaintest.ID("id-target") || uplink != domaintest.ID("id-uplink") {
 		t.Fatalf("Resolve returned (%q, %q), want (id-target, id-uplink)", target, uplink)
 	}
 	if rtt != 30*time.Millisecond {
@@ -90,7 +91,7 @@ func TestProbeRegistry_TimeoutFiresOnTimeoutCallback(t *testing.T) {
 		}
 	}
 	reg := newProbeRegistry(20*time.Millisecond, nil, onTimeout)
-	reg.Register("id-target", "id-uplink")
+	reg.Register(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 
 	select {
 	case <-callback:
@@ -103,7 +104,7 @@ func TestProbeRegistry_TimeoutFiresOnTimeoutCallback(t *testing.T) {
 	if !fired {
 		t.Fatal("onTimeout was not invoked")
 	}
-	if target != "id-target" || uplink != "id-uplink" {
+	if target != domaintest.ID("id-target") || uplink != domaintest.ID("id-uplink") {
 		t.Fatalf("onTimeout received (%q, %q), want (id-target, id-uplink)", target, uplink)
 	}
 	if got := reg.Len(); got != 0 {
@@ -120,7 +121,7 @@ func TestProbeRegistry_ResolveBeforeTimeoutCancelsCallback(t *testing.T) {
 		fired.Store(true)
 	}
 	reg := newProbeRegistry(50*time.Millisecond, nil, onTimeout)
-	id := reg.Register("id-target", "id-uplink")
+	id := reg.Register(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 
 	// Resolve before the watcher deadline.
 	if _, _, _, ok := reg.Resolve(id); !ok {
@@ -140,20 +141,20 @@ func TestProbeRegistry_ResolveBeforeTimeoutCancelsCallback(t *testing.T) {
 func TestProbeRegistry_HasOutstanding(t *testing.T) {
 	reg := newProbeRegistry(time.Second, nil, nil)
 
-	if reg.HasOutstanding("id-target", "id-uplink") {
+	if reg.HasOutstanding(domaintest.ID("id-target"), domaintest.ID("id-uplink")) {
 		t.Fatal("HasOutstanding=true on a cold registry")
 	}
-	id := reg.Register("id-target", "id-uplink")
-	if !reg.HasOutstanding("id-target", "id-uplink") {
+	id := reg.Register(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
+	if !reg.HasOutstanding(domaintest.ID("id-target"), domaintest.ID("id-uplink")) {
 		t.Fatal("HasOutstanding=false after Register for the same pair")
 	}
-	if reg.HasOutstanding("id-target", "id-other-uplink") {
+	if reg.HasOutstanding(domaintest.ID("id-target"), domaintest.ID("id-other-uplink")) {
 		t.Fatal("HasOutstanding=true for a different uplink — must be per-pair")
 	}
 	if _, _, _, ok := reg.Resolve(id); !ok {
 		t.Fatal("Resolve failed unexpectedly")
 	}
-	if reg.HasOutstanding("id-target", "id-uplink") {
+	if reg.HasOutstanding(domaintest.ID("id-target"), domaintest.ID("id-uplink")) {
 		t.Fatal("HasOutstanding=true after Resolve")
 	}
 }
@@ -166,7 +167,7 @@ func TestProbeRegistry_IDsAreUniqueAndNonZero(t *testing.T) {
 	reg := newProbeRegistry(time.Second, nil, nil)
 	seen := make(map[uint64]struct{})
 	for i := 0; i < 100; i++ {
-		id := reg.Register("id-target", "id-uplink")
+		id := reg.Register(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 		if id == 0 {
 			t.Fatalf("Register returned 0 at iteration %d", i)
 		}
@@ -182,7 +183,7 @@ func TestProbeRegistry_IDsAreUniqueAndNonZero(t *testing.T) {
 // newTestServiceWithProbeRegistry builds a routing-equipped Service
 // with the probe registry attached. Used by tests that exercise
 // the full receive-side RTT-plumbing path.
-func newTestServiceWithProbeRegistry(t *testing.T, localIdentity string) *Service {
+func newTestServiceWithProbeRegistry(t *testing.T, localIdentity domain.PeerIdentity) *Service {
 	t.Helper()
 	svc := newTestServiceWithRouting(t, localIdentity)
 	svc.probeRegistry = newProbeRegistry(
@@ -216,7 +217,7 @@ func newTestServiceWithProbeRegistry(t *testing.T, localIdentity string) *Servic
 // addresses.
 func installCapableUplinkForTest(t *testing.T, svc *Service, identity domain.PeerIdentity, cap domain.Capability) {
 	t.Helper()
-	addr := domain.PeerAddress("addr-" + string(identity))
+	addr := domain.PeerAddress("addr-" + identity.String())
 	// net.Pipe is the cheapest way to get a non-nil net.Conn
 	// without spinning up a real listener. We close one half
 	// immediately because nothing reads from it; the other half

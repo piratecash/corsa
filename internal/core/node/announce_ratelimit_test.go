@@ -17,7 +17,7 @@ import (
 
 func TestAnnounceRateLimiter_AllowsUpToBurstThenThrottles(t *testing.T) {
 	rl := newAnnounceRateLimiter()
-	peer := domain.PeerIdentity("aa00000000000000000000000000000000000001")
+	peer := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	// Drain the bucket at unit cost — same shape a stream of
 	// request_resync / poison / empty announce frames would produce.
 	for i := 0; i < announceBurstRoutesPerPeer; i++ {
@@ -36,7 +36,7 @@ func TestAnnounceRateLimiter_EmptyIdentityAccepts(t *testing.T) {
 	// validation gate's malformed-input signal stays distinct.
 	rl := newAnnounceRateLimiter()
 	for i := 0; i < announceBurstRoutesPerPeer+5; i++ {
-		if !rl.allow("", 1) {
+		if !rl.allow(domain.PeerIdentity{}, 1) {
 			t.Fatalf("empty identity must always pass the limiter; failed at %d", i)
 		}
 	}
@@ -46,8 +46,8 @@ func TestAnnounceRateLimiter_PerPeerIsolation(t *testing.T) {
 	// Two peers consume independent buckets; exhausting one must
 	// NOT affect the other.
 	rl := newAnnounceRateLimiter()
-	a := domain.PeerIdentity("aa00000000000000000000000000000000000001")
-	b := domain.PeerIdentity("bb00000000000000000000000000000000000002")
+	a := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
+	b := domain.PeerIdentityFromWire("bb00000000000000000000000000000000000002")
 	for i := 0; i < announceBurstRoutesPerPeer; i++ {
 		rl.allow(a, 1)
 	}
@@ -61,7 +61,7 @@ func TestAnnounceRateLimiter_PerPeerIsolation(t *testing.T) {
 
 func TestAnnounceRateLimiter_CleanupRemovesStaleBuckets(t *testing.T) {
 	rl := newAnnounceRateLimiter()
-	peer := domain.PeerIdentity("aa00000000000000000000000000000000000001")
+	peer := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	rl.allow(peer, 1)
 	// Force the bucket's lastRefill into the past so cleanup considers
 	// it stale.
@@ -79,7 +79,7 @@ func TestAnnounceRateLimiter_CleanupRemovesStaleBuckets(t *testing.T) {
 
 func TestAnnounceRateLimiter_RefillRestoresCapacityOverTime(t *testing.T) {
 	rl := newAnnounceRateLimiter()
-	peer := domain.PeerIdentity("aa00000000000000000000000000000000000001")
+	peer := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	for i := 0; i < announceBurstRoutesPerPeer; i++ {
 		rl.allow(peer, 1)
 	}
@@ -107,7 +107,7 @@ func TestAnnounceRateLimiter_RefillRestoresCapacityOverTime(t *testing.T) {
 // of >3000 routes was silently truncated past frame 30.
 func TestAnnounceRateLimiter_LargeFrameDrainsByEntryCount(t *testing.T) {
 	rl := newAnnounceRateLimiter()
-	peer := domain.PeerIdentity("aa00000000000000000000000000000000000001")
+	peer := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	// A single 100-route frame must consume exactly 100 tokens.
 	if !rl.allow(peer, 100) {
 		t.Fatal("100-route frame against full burst must pass")
@@ -129,7 +129,7 @@ func TestAnnounceRateLimiter_LargeFrameDrainsByEntryCount(t *testing.T) {
 // sync past ~3000 routes silently.
 func TestAnnounceRateLimiter_FullSyncOfFullBurstFitsExactly(t *testing.T) {
 	rl := newAnnounceRateLimiter()
-	peer := domain.PeerIdentity("aa00000000000000000000000000000000000001")
+	peer := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	// Spend the whole burst in one allow call.
 	if !rl.allow(peer, announceBurstRoutesPerPeer) {
 		t.Fatalf("burst-sized single-frame full-sync must pass; budget %d", announceBurstRoutesPerPeer)
@@ -148,7 +148,7 @@ func TestAnnounceRateLimiter_FullSyncOfFullBurstFitsExactly(t *testing.T) {
 // without ever delivering a full frame.
 func TestAnnounceRateLimiter_OverBurstFrameRejectedWholesale(t *testing.T) {
 	rl := newAnnounceRateLimiter()
-	peer := domain.PeerIdentity("aa00000000000000000000000000000000000001")
+	peer := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	// Demand more than the burst — must reject without touching
 	// tokens. (Counting from a fresh bucket so tokens == burst.)
 	if rl.allow(peer, announceBurstRoutesPerPeer+1) {
@@ -167,7 +167,7 @@ func TestAnnounceRateLimiter_OverBurstFrameRejectedWholesale(t *testing.T) {
 // charges 1 token, so a buggy helper can never bypass the limiter.
 func TestAnnounceRateLimiter_NegativeCostClampedToOne(t *testing.T) {
 	rl := newAnnounceRateLimiter()
-	peer := domain.PeerIdentity("aa00000000000000000000000000000000000001")
+	peer := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	if !rl.allow(peer, 0) {
 		t.Fatal("cost=0 must be accepted (clamped to 1)")
 	}

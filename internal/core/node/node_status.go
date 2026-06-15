@@ -96,7 +96,7 @@ func (s *Service) connectedPeerCount() int {
 		if slotState != "" && slotState != domain.SlotStateActive && slotState != domain.SlotStateInitializing {
 			continue
 		}
-		seen[domain.PeerIdentity(f.PeerID)] = struct{}{}
+		seen[domain.PeerIdentityFromWire(f.PeerID)] = struct{}{}
 	}
 	return len(seen)
 }

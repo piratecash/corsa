@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // attested_winner_tiebreak_test.go pins the Round-25 fix: when two
@@ -37,15 +39,15 @@ func TestAnnounceProjection_VerifiedWinsOverLexLowerUnsigned(t *testing.T) {
 	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("local"),
+		WithLocalOrigin(domaintest.ID("local")),
 	)
 
-	const (
-		dest           PeerIdentity = "alice"
-		origin         PeerIdentity = "bob"
-		uplinkUnsigned PeerIdentity = "a-unsigned"
-		uplinkSigned   PeerIdentity = "z-signed"
-		other          PeerIdentity = "peer-Y"
+	var (
+		dest           = domaintest.ID("alice")
+		origin         = domaintest.ID("bob")
+		uplinkUnsigned = domaintest.ID("a-unsigned")
+		uplinkSigned   = domaintest.ID("z-signed")
+		other          = domaintest.ID("peer-Y")
 	)
 	sigBytes := []byte("verified-sig-bytes")
 
@@ -106,15 +108,15 @@ func TestAnnounceProjection_VerifiedBeatsUnsignedWithLexLargerExtra(t *testing.T
 	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("local"),
+		WithLocalOrigin(domaintest.ID("local")),
 	)
 
-	const (
-		dest         PeerIdentity = "alice"
-		origin       PeerIdentity = "bob"
-		uplinkU      PeerIdentity = "u-uplink"
-		uplinkV      PeerIdentity = "v-uplink"
-		other        PeerIdentity = "peer-Y"
+	var (
+		dest    = domaintest.ID("alice")
+		origin  = domaintest.ID("bob")
+		uplinkU = domaintest.ID("u-uplink")
+		uplinkV = domaintest.ID("v-uplink")
+		other   = domaintest.ID("peer-Y")
 	)
 	sigBytes := []byte("verified-sig-bytes")
 	smallExtra := json.RawMessage(`{"v":"aaa"}`)
@@ -169,15 +171,15 @@ func TestAnnounceProjection_SameVerifiedFallsBackToUplinkLex(t *testing.T) {
 	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("local"),
+		WithLocalOrigin(domaintest.ID("local")),
 	)
 
-	const (
-		dest    PeerIdentity = "alice"
-		origin  PeerIdentity = "bob"
-		uplinkA PeerIdentity = "a-uplink"
-		uplinkZ PeerIdentity = "z-uplink"
-		other   PeerIdentity = "peer-Y"
+	var (
+		dest    = domaintest.ID("alice")
+		origin  = domaintest.ID("bob")
+		uplinkA = domaintest.ID("a-uplink")
+		uplinkZ = domaintest.ID("z-uplink")
+		other   = domaintest.ID("peer-Y")
 	)
 
 	// Both unsigned, same content. Uplink lex picks "a-uplink".

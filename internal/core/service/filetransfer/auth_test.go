@@ -6,7 +6,20 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
+
+// mustID decodes a canonical 40-char hex fingerprint into a PeerIdentity,
+// failing the test on malformed input. Used where the literal is a real
+// fingerprint (exact decoded bytes matter); opaque labels use domaintest.ID.
+func mustID(t *testing.T, hexFingerprint string) domain.PeerIdentity {
+	t.Helper()
+	id, err := domain.ParsePeerIdentity(hexFingerprint)
+	if err != nil {
+		t.Fatalf("parse peer identity %q: %v", hexFingerprint, err)
+	}
+	return id
+}
 
 // TestUnauthorizedChunkRequestDropped verifies that a chunk_request from a
 // peer whose identity does not match the mapping's Recipient is silently
@@ -28,8 +41,8 @@ func TestUnauthorizedChunkRequestDropped(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	legitimateReceiver := domain.PeerIdentity("11ed04572e7d37cbfb36f297e3027c72ae14b385")
-	attacker := domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	legitimateReceiver := mustID(t, "11ed04572e7d37cbfb36f297e3027c72ae14b385")
+	attacker := mustID(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	fileID := domain.FileID("bf9e6c24-63ee-48b3-84fd-12cedb7f999a")
 
 	// Register a sender mapping: file announced to legitimateReceiver.
@@ -85,7 +98,7 @@ func TestUnknownFileIDChunkRequestDropped(t *testing.T) {
 	}
 
 	unknownFileID := domain.FileID("00000000-0000-0000-0000-000000000000")
-	attacker := domain.PeerIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	attacker := mustID(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 	m.HandleChunkRequest(attacker, domain.ChunkRequestPayload{
 		FileID: unknownFileID,
@@ -129,7 +142,7 @@ func TestLegitimateReceiverGetsChunk(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	legitimateReceiver := domain.PeerIdentity("11ed04572e7d37cbfb36f297e3027c72ae14b385")
+	legitimateReceiver := mustID(t, "11ed04572e7d37cbfb36f297e3027c72ae14b385")
 	fileID := domain.FileID("test-file-id")
 
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -175,7 +188,7 @@ func TestRegisterFileReceive_RejectsMalformedHash(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 
 	malformedHashes := []struct {
 		name string
@@ -212,7 +225,7 @@ func TestRegisterFileReceive_AcceptsValidHash(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("valid-hash-file")
 	validHash := "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2"
 
@@ -245,7 +258,7 @@ func TestRegisterFileReceive_RejectsZeroSize(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("zero-size-file")
 	validHash := "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2"
 
@@ -270,7 +283,7 @@ func TestRegisterFileReceive_RejectsEmptyFileName(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2"
 
 	emptyNames := []struct {
@@ -307,7 +320,7 @@ func TestRegisterFileReceive_AcceptsSanitizableFileName(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "e1e2e3e4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6e1e2"
 
 	// Path traversal attempt — SanitizeFileName extracts "evil.txt", which is valid.
@@ -332,7 +345,7 @@ func TestRegisterFileReceive_DuplicateReturnsNil(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("dup-file")
 	validHash := "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8"
 

@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // Phase 1 P2 — SeqNo flap cap regression suite.
@@ -34,11 +36,11 @@ func TestSeqNoFlap_HoldDownEngagesAfterThreshold(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		quiet   PeerIdentity = "quiet"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		quiet   = domaintest.ID("quiet")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -53,7 +55,7 @@ func TestSeqNoFlap_HoldDownEngagesAfterThreshold(t *testing.T) {
 	// assertion (other Identities keep flowing) has something to
 	// match against.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: quiet, Origin: "src-quiet", NextHop: "uplink-q",
+		Identity: quiet, Origin: domaintest.ID("src-quiet"), NextHop: domaintest.ID("uplink-q"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
@@ -64,10 +66,10 @@ func TestSeqNoFlap_HoldDownEngagesAfterThreshold(t *testing.T) {
 	// forcing a fresh outbound SeqNo allocation (cache miss). With
 	// threshold=3 and 4 advances, the 4th tips the velocity ring
 	// over the threshold and engages hold-down.
-	uplinks := []PeerIdentity{"u1", "u2", "u3", "u4"}
+	uplinks := []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3"), domaintest.ID("u4")}
 	for i, up := range uplinks {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		// Each AnnounceTo() triggers a fresh outbound SeqNo
@@ -122,11 +124,11 @@ func TestSeqNoFlap_AnnounceTargetFor_RespectsHoldDown(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		quiet   PeerIdentity = "quiet"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		quiet   = domaintest.ID("quiet")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -140,17 +142,17 @@ func TestSeqNoFlap_AnnounceTargetFor_RespectsHoldDown(t *testing.T) {
 	// Seed a stable quiet Identity so the per-Identity scope
 	// assertion has something to match.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: quiet, Origin: "src-quiet", NextHop: "uplink-q",
+		Identity: quiet, Origin: domaintest.ID("src-quiet"), NextHop: domaintest.ID("uplink-q"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	// Drive 4 distinct-content advances for `victim` via
 	// AnnounceTo cycles; the 4th tips velocity over threshold=3
 	// and engages hold-down.
-	uplinks := []PeerIdentity{"u1", "u2", "u3", "u4"}
+	uplinks := []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3"), domaintest.ID("u4")}
 	for i, up := range uplinks {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -181,10 +183,10 @@ func TestSeqNoFlap_AnnounceTargetFor_SuppressesArmingEmit(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -199,10 +201,10 @@ func TestSeqNoFlap_AnnounceTargetFor_SuppressesArmingEmit(t *testing.T) {
 	// 4th advance will tip over — but instead of issuing it via
 	// AnnounceTo, we issue it via AnnounceTargetFor. The arm
 	// happens INSIDE that call; the result must be suppressed.
-	uplinks := []PeerIdentity{"u1", "u2", "u3"}
+	uplinks := []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3")}
 	for i, up := range uplinks {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -217,7 +219,7 @@ func TestSeqNoFlap_AnnounceTargetFor_SuppressesArmingEmit(t *testing.T) {
 	// AnnounceTargetFor — this is the call that pushes velocity
 	// over the threshold.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: victim, Origin: "src-v", NextHop: "u4",
+		Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u4"),
 		Hops: 2, SeqNo: 14, Source: RouteSourceAnnouncement,
 	})
 	_, _, ok := tbl.AnnounceTargetFor(victim, viewer)
@@ -238,10 +240,10 @@ func TestSeqNoFlap_HoldDownReleasesAfterDuration(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -255,9 +257,9 @@ func TestSeqNoFlap_HoldDownReleasesAfterDuration(t *testing.T) {
 	// Cross the threshold (3 advances against threshold=2). Hops
 	// kept equal so the SeqNo tiebreaker rotates the winner across
 	// uplinks and every cycle's sig differs (cache miss → advance).
-	for i, up := range []PeerIdentity{"u1", "u2", "u3"} {
+	for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -310,10 +312,10 @@ func TestSeqNoFlap_IngestGuardRejectsRunawayDuringHoldDown(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -327,9 +329,9 @@ func TestSeqNoFlap_IngestGuardRejectsRunawayDuringHoldDown(t *testing.T) {
 	// Engage hold-down: 3 distinct fresh advances against threshold=2.
 	// Same Hops, climbing SeqNo, so each cycle's winner shifts to the
 	// newest uplink and produces a cache miss → advance.
-	for i, up := range []PeerIdentity{"u1", "u2", "u3"} {
+	for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -346,7 +348,7 @@ func TestSeqNoFlap_IngestGuardRejectsRunawayDuringHoldDown(t *testing.T) {
 	// Runaway: ingest a SeqNo far beyond outboundMax+1. Must be
 	// rejected by the ingest guard.
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: victim, Origin: "src-v", NextHop: "u-runaway",
+		Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u-runaway"),
 		Hops: 4, SeqNo: currentOutboundMax + 100, Source: RouteSourceAnnouncement,
 	})
 	if err != nil {
@@ -360,7 +362,7 @@ func TestSeqNoFlap_IngestGuardRejectsRunawayDuringHoldDown(t *testing.T) {
 	// still pass through (refreshes receive-side TTL). Use uplink
 	// u1's stored claim.
 	status, err = tbl.UpdateRoute(RouteEntry{
-		Identity: victim, Origin: "src-v", NextHop: "u1",
+		Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u1"),
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if err != nil {
@@ -393,10 +395,10 @@ func TestSeqNoFlap_IngestGuardFrontsFastInvalidation(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -409,9 +411,9 @@ func TestSeqNoFlap_IngestGuardFrontsFastInvalidation(t *testing.T) {
 	)
 
 	// Engage hold-down: 3 advances against threshold=2.
-	for i, up := range []PeerIdentity{"u1", "u2", "u3"} {
+	for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -431,7 +433,7 @@ func TestSeqNoFlap_IngestGuardFrontsFastInvalidation(t *testing.T) {
 	// runaway SeqNo gets appended for u-bad. Post-fix: P2 ingest
 	// guard rejects before P3 runs → no tombstone added.
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: victim, Origin: "src-v", NextHop: "u-bad",
+		Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u-bad"),
 		Hops: 12, SeqNo: runawaySeqNo, Source: RouteSourceAnnouncement,
 	})
 	if err != nil {
@@ -455,7 +457,7 @@ func TestSeqNoFlap_IngestGuardFrontsFastInvalidation(t *testing.T) {
 	bucket := tbl.store.buckets[victim]
 	tbl.mu.RUnlock()
 	for _, c := range bucket {
-		if c.Uplink == "u-bad" {
+		if c.Uplink == domaintest.ID("u-bad") {
 			t.Fatalf("P2 ingest guard must not let P3 store a poison tombstone for u-bad; got claim=%+v", c)
 		}
 	}
@@ -482,10 +484,10 @@ func TestSeqNoFlap_IngestGuardRejectsClampedHopsInfinityRunaway(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -498,9 +500,9 @@ func TestSeqNoFlap_IngestGuardRejectsClampedHopsInfinityRunaway(t *testing.T) {
 	)
 
 	// Engage hold-down: 3 advances against threshold=2.
-	for i, up := range []PeerIdentity{"u1", "u2", "u3"} {
+	for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -525,7 +527,7 @@ func TestSeqNoFlap_IngestGuardRejectsClampedHopsInfinityRunaway(t *testing.T) {
 	// upstream would have to advance past that runaway value.
 	// Post-fix the P2 guard rejects regardless of `Withdrawn`.
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: victim, Origin: "src-v", NextHop: "u-bad",
+		Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u-bad"),
 		Hops: HopsInfinity, SeqNo: runawaySeqNo, Source: RouteSourceAnnouncement,
 	})
 	if err != nil {
@@ -549,7 +551,7 @@ func TestSeqNoFlap_IngestGuardRejectsClampedHopsInfinityRunaway(t *testing.T) {
 	bucket := tbl.store.buckets[victim]
 	tbl.mu.RUnlock()
 	for _, c := range bucket {
-		if c.Uplink == "u-bad" {
+		if c.Uplink == domaintest.ID("u-bad") {
 			t.Fatalf("P2 ingest guard must not let P3 store a poison tombstone for u-bad on the clamped-Hops boundary; got claim=%+v", c)
 		}
 	}
@@ -569,11 +571,11 @@ func TestSeqNoFlap_HopAckPromotionDoesNotAdvanceCounter(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -586,7 +588,7 @@ func TestSeqNoFlap_HopAckPromotionDoesNotAdvanceCounter(t *testing.T) {
 
 	// Initial announcement → fresh advance.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src"), NextHop: uplink,
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	_ = tbl.AnnounceTo(viewer)
@@ -625,10 +627,10 @@ func TestSeqNoFlap_ThresholdCrossingCycleSuppressesEmit(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -651,9 +653,9 @@ func TestSeqNoFlap_ThresholdCrossingCycleSuppressesEmit(t *testing.T) {
 	// Cycles 1 and 2: below threshold (1, 2). Each crosses-into-cache
 	// for victim, so each records an advance, but threshold=2 means
 	// neither engages (1>2 false, 2>2 false).
-	for i, up := range []PeerIdentity{"u1", "u2"} {
+	for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		emits := tbl.AnnounceTo(viewer)
@@ -667,7 +669,7 @@ func TestSeqNoFlap_ThresholdCrossingCycleSuppressesEmit(t *testing.T) {
 	// AnnounceTo call. The contract demands suppression for THIS
 	// peer's emit too, not just subsequent peers.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: victim, Origin: "src-v", NextHop: "u3",
+		Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u3"),
 		Hops: 2, SeqNo: 12, Source: RouteSourceAnnouncement,
 	})
 	cycle3 := tbl.AnnounceTo(viewer)
@@ -694,10 +696,10 @@ func TestSeqNoFlap_HoldDownArmingMarksDirty(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -711,9 +713,9 @@ func TestSeqNoFlap_HoldDownArmingMarksDirty(t *testing.T) {
 	// Run two cycles below the threshold and drain the dirty flag —
 	// we want the engage cycle to be the only thing producing a
 	// dirty signal.
-	for i, up := range []PeerIdentity{"u1", "u2"} {
+	for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -729,7 +731,7 @@ func TestSeqNoFlap_HoldDownArmingMarksDirty(t *testing.T) {
 	// call ITSELF must mark dirty so a subsequent snapshot
 	// republish sees SeqNoFlapHoldowns=1.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: victim, Origin: "src-v", NextHop: "u3",
+		Identity: victim, Origin: domaintest.ID("src-v"), NextHop: domaintest.ID("u3"),
 		Hops: 2, SeqNo: 12, Source: RouteSourceAnnouncement,
 	})
 	// mustUpdate marks dirty for the storage mutation — drain again
@@ -758,10 +760,10 @@ func TestSeqNoFlap_WindowZeroDisablesCap(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -771,9 +773,9 @@ func TestSeqNoFlap_WindowZeroDisablesCap(t *testing.T) {
 		WithSeqAdvanceWindow(0),
 	)
 
-	for i, up := range []PeerIdentity{"u1", "u2", "u3", "u4", "u5"} {
+	for i, up := range []PeerIdentity{domaintest.ID("u1"), domaintest.ID("u2"), domaintest.ID("u3"), domaintest.ID("u4"), domaintest.ID("u5")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v", NextHop: up,
+			Identity: victim, Origin: domaintest.ID("src-v"), NextHop: up,
 			Hops: 2, SeqNo: uint64(10 + i), Source: RouteSourceAnnouncement,
 		})
 		_ = tbl.AnnounceTo(viewer)
@@ -795,10 +797,10 @@ func TestSeqNoFlap_DisabledCapShortCircuits(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		victim  PeerIdentity = "victim"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		victim  = domaintest.ID("victim")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	// No WithMaxSeqAdvancePerWindow → cap disabled at the bare
@@ -812,8 +814,8 @@ func TestSeqNoFlap_DisabledCapShortCircuits(t *testing.T) {
 
 	for i := 0; i < 50; i++ {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: victim, Origin: "src-v",
-			NextHop: PeerIdentity("u-" + string(rune('a'+i%26))),
+			Identity: victim, Origin: domaintest.ID("src-v"),
+			NextHop: domaintest.ID("u-" + string(rune('a'+i%26))),
 			Hops:    2 + (i % 10),
 			SeqNo:   uint64(100 + i),
 			Source:  RouteSourceAnnouncement,

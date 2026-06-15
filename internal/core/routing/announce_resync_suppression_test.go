@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -37,14 +38,14 @@ func runReconnectSuppressionCycle(t *testing.T, hardResync bool) int {
 	clock := func() time.Time { return now }
 	registry := routing.NewAnnounceStateRegistry(routing.WithRegistryClock(clock))
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 
 	sender, rec := newControllableMockPeerSender(t)
 	peers := func() []routing.AnnounceTarget {
-		return []routing.AnnounceTarget{{Address: "addr-C", Identity: "peer-C"}}
+		return []routing.AnnounceTarget{{Address: "addr-C", Identity: domaintest.ID("peer-C")}}
 	}
 
 	loop := routing.NewAnnounceLoop(table, sender, peers,
@@ -54,21 +55,21 @@ func runReconnectSuppressionCycle(t *testing.T, hardResync bool) int {
 
 	// Seed a baseline equal to the current projection so the delta is
 	// empty; the only thing that can produce a send is a forced full.
-	baseline := routing.BuildAnnounceSnapshot(table.AnnounceTo("peer-C"))
-	state := registry.GetOrCreate("peer-C")
+	baseline := routing.BuildAnnounceSnapshot(table.AnnounceTo(domaintest.ID("peer-C")))
+	state := registry.GetOrCreate(domaintest.ID("peer-C"))
 	state.RecordFullSyncSuccess(baseline, now)
 
 	if hardResync {
-		registry.MarkInvalid("peer-C") // request_resync / consistency loss
+		registry.MarkInvalid(domaintest.ID("peer-C")) // request_resync / consistency loss
 	} else {
-		registry.MarkReconnected("peer-C", nil) // session boundary
+		registry.MarkReconnected(domaintest.ID("peer-C"), nil) // session boundary
 	}
 
 	// Arm an active suppression window at the same clock the cycle
 	// reads, so isDigestSuppressionActive(peer, now) is true. The gate
 	// only consults the window's liveness, not its origin, so a pending
 	// window suffices to exercise it.
-	loop.MarkPeerDigestPending("peer-C", now, "dig")
+	loop.MarkPeerDigestPending(domaintest.ID("peer-C"), now, "dig")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -19,11 +20,11 @@ import (
 func TestFileRouterUndeliverableDSTDropped(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	unknownDST := domain.PeerIdentity("unknown-dst-identity-1234567890")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
+	unknownDST := domaintest.ID("unknown-dst-identity-1234567890")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	// Empty routing snapshot — no routes to anyone.
 	snap := routing.Snapshot{TakenAt: time.Now()}
@@ -34,7 +35,7 @@ func TestFileRouterUndeliverableDSTDropped(t *testing.T) {
 	frame := makeSignedFrame(senderID, unknownDST, 5, "unroutable-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// No local delivery — DST != localID.
 	if len(tr.localDeliveries()) != 0 {
@@ -53,12 +54,12 @@ func TestFileRouterUndeliverableDSTDropped(t *testing.T) {
 func TestFileRouterTTLZeroAtRouterDropped(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relay1 := domaintest.ID("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -97,7 +98,7 @@ func TestFileRouterTTLZeroAtRouterDropped(t *testing.T) {
 	}
 
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// No local delivery — frame dropped at step 3 (DecrementTTL fails).
 	if len(tr.localDeliveries()) != 0 {
@@ -115,10 +116,10 @@ func TestFileRouterTTLZeroAtRouterDropped(t *testing.T) {
 func TestFileRouterStaleFrameDropped(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -145,7 +146,7 @@ func TestFileRouterStaleFrameDropped(t *testing.T) {
 	}
 
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// Stale frame must be rejected — no local delivery.
 	if len(tr.localDeliveries()) != 0 {
@@ -158,11 +159,11 @@ func TestFileRouterStaleFrameDropped(t *testing.T) {
 func TestFileRouterInvalidSignatureDropped(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, _, _ := ed25519.GenerateKey(nil)
 	_, wrongPriv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -178,7 +179,7 @@ func TestFileRouterInvalidSignatureDropped(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "bad-sig-payload", wrongPriv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.localDeliveries()) != 0 {
 		t.Error("frame with invalid signature should not be delivered")
@@ -190,12 +191,12 @@ func TestFileRouterInvalidSignatureDropped(t *testing.T) {
 func TestFileRouterFullNodeRelays(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relay1 := domaintest.ID("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -215,7 +216,7 @@ func TestFileRouterFullNodeRelays(t *testing.T) {
 	frame := makeSignedFrame(senderID, dstID, 5, "relay-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	// Should be forwarded to relay1.
 	if len(tr.sentTo(relay1)) != 1 {
@@ -233,8 +234,8 @@ func TestFileRouterFullNodeRelays(t *testing.T) {
 func TestFileRouterUnknownSenderKeyDropped(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
-	senderID := domain.PeerIdentity("unknown-sender-identity-1234567")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
+	senderID := domaintest.ID("unknown-sender-identity-1234567")
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 
@@ -247,7 +248,7 @@ func TestFileRouterUnknownSenderKeyDropped(t *testing.T) {
 	frame := makeSignedFrame(senderID, localID, 5, "unknown-sender", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.localDeliveries()) != 0 {
 		t.Error("frame from unknown sender should not be delivered")
@@ -278,12 +279,12 @@ func TestFileRouterUnknownSenderKeyDropped(t *testing.T) {
 func TestFileRouterDropsRoutesExpiredByWallClockButLiveInSnapshot(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
-	relay1 := domain.PeerIdentity("relay1-node-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
+	relay1 := domaintest.ID("relay1-node-identity-1234567890a")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	staleTakenAt := now.Add(-30 * time.Second)  // snap was published 30s ago
@@ -319,7 +320,7 @@ func TestFileRouterDropsRoutesExpiredByWallClockButLiveInSnapshot(t *testing.T) 
 	frame := makeSignedFrame(senderID, dstID, 5, "expired-route-payload", priv)
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if got := tr.sentTo(relay1); len(got) != 0 {
 		t.Fatalf("file router forwarded a frame through a wall-clock-expired route; "+
@@ -382,15 +383,15 @@ func TestFileRouterDropsRoutesExpiredByWallClockButLiveInSnapshot(t *testing.T) 
 func TestFileRouterDoesNotCommitNonceWhenSplitHorizonErasesOnlyCandidate(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("relay-node-identity-1234567890ab")
-	dstID := domain.PeerIdentity("destination-identity-1234567890a")
+	localID := domaintest.ID("relay-node-identity-1234567890ab")
+	dstID := domaintest.ID("destination-identity-1234567890a")
 	// incomingPeer is BOTH the previous hop AND the only NextHop in our
 	// routing table for DST. Split-horizon must therefore drop the only
 	// candidate and the relay path must refuse to commit the nonce.
-	incomingPeer := domain.PeerIdentity("incoming-neighbor-identity-12345")
+	incomingPeer := domaintest.ID("incoming-neighbor-identity-12345")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	now := time.Now()
 	snap := routing.Snapshot{
@@ -451,10 +452,10 @@ func TestFileRouterDoesNotCommitNonceWhenSplitHorizonErasesOnlyCandidate(t *test
 func TestFileRouterRejectsTTLInflation(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -467,7 +468,7 @@ func TestFileRouterRejectsTTLInflation(t *testing.T) {
 	frame.TTL = frame.MaxTTL + 1
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.localDeliveries()) != 0 {
 		t.Error("frame with inflated TTL (MaxTTL+1) should be rejected, not delivered")
@@ -480,10 +481,10 @@ func TestFileRouterRejectsTTLInflation(t *testing.T) {
 func TestFileRouterAcceptsValidTTLBelowMaxTTL(t *testing.T) {
 	t.Parallel()
 
-	localID := domain.PeerIdentity("local-node-identity-1234567890ab")
+	localID := domaintest.ID("local-node-identity-1234567890ab")
 
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	senderID := domain.PeerIdentity(identity.Fingerprint(pub))
+	senderID := domain.PeerIdentityFromWire(identity.Fingerprint(pub))
 
 	snap := routing.Snapshot{TakenAt: time.Now()}
 	keys := map[domain.PeerIdentity]ed25519.PublicKey{senderID: pub}
@@ -495,7 +496,7 @@ func TestFileRouterAcceptsValidTTLBelowMaxTTL(t *testing.T) {
 	frame.TTL = 3 // 2 hops already consumed
 	raw, _ := protocol.MarshalFileCommandFrame(frame)
 
-	tr.router.HandleInbound(json.RawMessage(raw), "")
+	tr.router.HandleInbound(json.RawMessage(raw), domain.PeerIdentity{})
 
 	if len(tr.localDeliveries()) != 1 {
 		t.Errorf("valid frame with TTL < MaxTTL should be delivered, got %d deliveries", len(tr.localDeliveries()))

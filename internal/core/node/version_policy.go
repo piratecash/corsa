@@ -149,7 +149,7 @@ func (s *Service) recordIncompatibleObservationLocked(
 	}
 
 	// Only observations with identity count towards the reporter threshold.
-	if peerID != "" {
+	if !peerID.IsZero() {
 		s.versionPolicy.incompatibleReporters[peerID] = domain.VersionObservation{
 			PeerIdentity: peerID,
 			ObservedAt:   now,
@@ -209,7 +209,7 @@ func (s *Service) recomputeVersionPolicyLocked(now time.Time) {
 			maxBuild = build
 		}
 		peerID := s.peerIDs[addr]
-		if peerID == "" {
+		if peerID.IsZero() {
 			continue
 		}
 		buildSeen[peerID] = struct{}{}
@@ -392,16 +392,20 @@ func (s *Service) setVersionLockoutLocked(
 			ProtocolVersion: domain.ProtocolVersion(config.ProtocolVersion),
 			ClientBuild:     config.ClientVersionBuild,
 		},
-		Reason:       domain.VersionLockoutReasonIncompatible,
-		LockedAt:     now,
-		PeerIdentity: peerID,
+		Reason:   domain.VersionLockoutReasonIncompatible,
+		LockedAt: now,
+	}
+	if !peerID.IsZero() {
+		// Identity-bound lockout stores a pointer so an address-only
+		// (zero-identity) lockout serialises as an absent field, not "".
+		lockout.PeerIdentity = &peerID
 	}
 	entry.VersionLockout = lockout
 	s.persistedMeta[address] = entry
 
 	log.Info().
 		Str("peer", string(address)).
-		Str("peer_identity", string(peerID)).
+		Str("peer_identity", peerID.String()).
 		Int("observed_min", int(peerMinimum)).
 		Int("local_protocol", config.ProtocolVersion).
 		Msg("version_lockout_set")
@@ -416,7 +420,7 @@ func (s *Service) setVersionLockoutLocked(
 	// or fresher (newer timestamp). Without (b), already-active siblings
 	// would keep stale evidence forever, skewing diagnostics like
 	// ObservedClientVersion and MaxObservedPeerVersion.
-	if peerID != "" {
+	if !peerID.IsZero() {
 		for otherAddr, otherID := range s.peerIDs {
 			if otherAddr == address || otherID != peerID {
 				continue
@@ -433,7 +437,7 @@ func (s *Service) setVersionLockoutLocked(
 				otherEntry.VersionLockout = lockout
 				log.Info().
 					Str("peer", string(otherAddr)).
-					Str("peer_identity", string(peerID)).
+					Str("peer_identity", peerID.String()).
 					Str("source_address", string(address)).
 					Bool("was_active", existing.IsActive()).
 					Msg("version_lockout_propagated_by_identity")

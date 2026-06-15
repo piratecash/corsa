@@ -3,6 +3,9 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // announce_digest_suppression_test.go covers Phase 3 PR 12.5 —
@@ -25,15 +28,15 @@ func TestMarkPeerDigestPending_ArmsShortWindow(t *testing.T) {
 	// interval=10s → cadence=20s > DigestRoundTripGrace (5s) → grace unclamped.
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
 
-	if !a.isDigestSuppressionActive("id-peer", now) {
+	if !a.isDigestSuppressionActive(domaintest.ID("id-peer"), now) {
 		t.Fatal("pending suppression not active at arm time")
 	}
-	if !a.isDigestSuppressionActive("id-peer", now.Add(DigestRoundTripGrace-time.Millisecond)) {
+	if !a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(DigestRoundTripGrace-time.Millisecond)) {
 		t.Fatal("pending suppression not active just before grace deadline")
 	}
-	if a.isDigestSuppressionActive("id-peer", now.Add(DigestRoundTripGrace)) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(DigestRoundTripGrace)) {
 		t.Fatal("pending suppression still active at the grace deadline; gate must be exclusive")
 	}
 }
@@ -49,12 +52,12 @@ func TestMarkPeerDigestPending_ClampedToCadence(t *testing.T) {
 		t.Fatalf("precondition: cadence %v must be below grace %v", cadence, DigestRoundTripGrace)
 	}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
 
-	if !a.isDigestSuppressionActive("id-peer", now.Add(cadence-time.Millisecond)) {
+	if !a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(cadence-time.Millisecond)) {
 		t.Fatal("pending suppression not active just before clamped cadence deadline")
 	}
-	if a.isDigestSuppressionActive("id-peer", now.Add(cadence)) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(cadence)) {
 		t.Fatal("pending suppression active at/after clamped cadence; clamp not applied")
 	}
 }
@@ -65,8 +68,8 @@ func TestMarkPeerDigestPending_ClampedToCadence(t *testing.T) {
 func TestMarkPeerDigestPending_ZeroIntervalNoSuppression(t *testing.T) {
 	a := &AnnounceLoop{} // interval == 0 → cadence == 0 → window == 0
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
-	if a.isDigestSuppressionActive("id-peer", now) {
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now) {
 		t.Fatal("pending suppression active despite zero cadence")
 	}
 }
@@ -75,7 +78,7 @@ func TestMarkPeerDigestPending_ZeroIntervalNoSuppression(t *testing.T) {
 // nothing.
 func TestMarkPeerDigestPending_EmptyPeerIsNoop(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
-	a.MarkPeerDigestPending("", time.Now(), "dig")
+	a.MarkPeerDigestPending(domain.PeerIdentity{}, time.Now(), "dig")
 	if a.digestSuppression != nil {
 		t.Fatal("MarkPeerDigestPending allocated map for empty peer")
 	}
@@ -87,20 +90,20 @@ func TestMarkPeerDigestPending_EmptyPeerIsNoop(t *testing.T) {
 func TestConfirmPeerDigestMatch_ExtendsWindowOnCorrelatedEcho(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second} // cadence 20s, grace 5s
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
 
-	if !a.ConfirmPeerDigestMatch("id-peer", "dig", now) {
+	if !a.ConfirmPeerDigestMatch(domaintest.ID("id-peer"), "dig", now) {
 		t.Fatal("correlated echo was not confirmed")
 	}
 	cadence := EffectiveForcedFullSyncInterval(a.interval)
 	// Active well past the original short grace — proves the extension.
-	if !a.isDigestSuppressionActive("id-peer", now.Add(DigestRoundTripGrace+time.Second)) {
+	if !a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(DigestRoundTripGrace+time.Second)) {
 		t.Fatal("window not extended past the pending grace after a correlated match")
 	}
-	if !a.isDigestSuppressionActive("id-peer", now.Add(cadence-time.Millisecond)) {
+	if !a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(cadence-time.Millisecond)) {
 		t.Fatal("window not active just before the cadence deadline")
 	}
-	if a.isDigestSuppressionActive("id-peer", now.Add(cadence)) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(cadence)) {
 		t.Fatal("window still active at the cadence deadline")
 	}
 }
@@ -113,20 +116,20 @@ func TestConfirmPeerDigestMatch_SingleShot(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second} // cadence 20s
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	cadence := EffectiveForcedFullSyncInterval(a.interval)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
 
-	if !a.ConfirmPeerDigestMatch("id-peer", "dig", now) {
+	if !a.ConfirmPeerDigestMatch(domaintest.ID("id-peer"), "dig", now) {
 		t.Fatal("first correlated echo was not confirmed")
 	}
 	// First confirm extended the window to now+cadence. A second
 	// confirm later in the window must be rejected (already consumed)
 	// and must NOT push the deadline to later.Add(cadence).
 	later := now.Add(cadence / 2)
-	if a.ConfirmPeerDigestMatch("id-peer", "dig", later) {
+	if a.ConfirmPeerDigestMatch(domaintest.ID("id-peer"), "dig", later) {
 		t.Fatal("second confirm with same digest re-armed suppression; not single-shot")
 	}
 	// The window still ends at the ORIGINAL now+cadence, not extended.
-	if a.isDigestSuppressionActive("id-peer", now.Add(cadence)) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(cadence)) {
 		t.Fatal("window extended past the first cadence by a replayed summary")
 	}
 }
@@ -137,13 +140,13 @@ func TestConfirmPeerDigestMatch_SingleShot(t *testing.T) {
 func TestConfirmPeerDigestMatch_IgnoresWrongEcho(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
 
-	if a.ConfirmPeerDigestMatch("id-peer", "other-digest", now) {
+	if a.ConfirmPeerDigestMatch(domaintest.ID("id-peer"), "other-digest", now) {
 		t.Fatal("uncorrelated echo was confirmed; correlation broken")
 	}
 	// The pending grace is untouched, so it still elapses on schedule.
-	if a.isDigestSuppressionActive("id-peer", now.Add(DigestRoundTripGrace)) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now.Add(DigestRoundTripGrace)) {
 		t.Fatal("window unexpectedly active past the pending grace")
 	}
 }
@@ -153,8 +156,8 @@ func TestConfirmPeerDigestMatch_IgnoresWrongEcho(t *testing.T) {
 func TestConfirmPeerDigestMatch_IgnoresEmptyEcho(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
-	if a.ConfirmPeerDigestMatch("id-peer", "", now) {
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
+	if a.ConfirmPeerDigestMatch(domaintest.ID("id-peer"), "", now) {
 		t.Fatal("empty echo was confirmed")
 	}
 }
@@ -164,10 +167,10 @@ func TestConfirmPeerDigestMatch_IgnoresEmptyEcho(t *testing.T) {
 func TestConfirmPeerDigestMatch_IgnoresUnsolicited(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	if a.ConfirmPeerDigestMatch("id-peer", "dig", now) {
+	if a.ConfirmPeerDigestMatch(domaintest.ID("id-peer"), "dig", now) {
 		t.Fatal("unsolicited summary (no pending) was confirmed")
 	}
-	if a.isDigestSuppressionActive("id-peer", now) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now) {
 		t.Fatal("suppression armed for an unsolicited summary")
 	}
 }
@@ -178,9 +181,9 @@ func TestConfirmPeerDigestMatch_IgnoresUnsolicited(t *testing.T) {
 func TestConfirmPeerDigestMatch_IgnoresExpiredPending(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
 	late := now.Add(DigestRoundTripGrace) // exactly at/after the grace
-	if a.ConfirmPeerDigestMatch("id-peer", "dig", late) {
+	if a.ConfirmPeerDigestMatch(domaintest.ID("id-peer"), "dig", late) {
 		t.Fatal("echo confirmed against an elapsed pending window")
 	}
 }
@@ -188,7 +191,7 @@ func TestConfirmPeerDigestMatch_IgnoresExpiredPending(t *testing.T) {
 // TestConfirmPeerDigestMatch_EmptyPeerIsNoop — defensive guard.
 func TestConfirmPeerDigestMatch_EmptyPeerIsNoop(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
-	if a.ConfirmPeerDigestMatch("", "dig", time.Now()) {
+	if a.ConfirmPeerDigestMatch(domain.PeerIdentity{}, "dig", time.Now()) {
 		t.Fatal("empty peer was confirmed")
 	}
 }
@@ -198,12 +201,12 @@ func TestConfirmPeerDigestMatch_EmptyPeerIsNoop(t *testing.T) {
 func TestIsDigestSuppressionActive_PerPeerScoping(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer-A", now, "dig")
+	a.MarkPeerDigestPending(domaintest.ID("id-peer-A"), now, "dig")
 
-	if !a.isDigestSuppressionActive("id-peer-A", now) {
+	if !a.isDigestSuppressionActive(domaintest.ID("id-peer-A"), now) {
 		t.Fatal("peer-A suppression not registered")
 	}
-	if a.isDigestSuppressionActive("id-peer-B", now) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer-B"), now) {
 		t.Fatal("peer-B suppression leaked from peer-A")
 	}
 }
@@ -211,7 +214,7 @@ func TestIsDigestSuppressionActive_PerPeerScoping(t *testing.T) {
 // TestIsDigestSuppressionActive_AbsentPeerReportsFalse — cold-start.
 func TestIsDigestSuppressionActive_AbsentPeerReportsFalse(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
-	if a.isDigestSuppressionActive("id-anyone", time.Now()) {
+	if a.isDigestSuppressionActive(domaintest.ID("id-anyone"), time.Now()) {
 		t.Fatal("suppression active for never-marked peer")
 	}
 }
@@ -221,12 +224,12 @@ func TestIsDigestSuppressionActive_AbsentPeerReportsFalse(t *testing.T) {
 func TestClearPeerDigestSuppression_RemovesActiveWindow(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	a.MarkPeerDigestPending("id-peer", now, "dig")
-	if !a.isDigestSuppressionActive("id-peer", now) {
+	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
+	if !a.isDigestSuppressionActive(domaintest.ID("id-peer"), now) {
 		t.Fatal("precondition: pending suppression must be active")
 	}
-	a.ClearPeerDigestSuppression("id-peer")
-	if a.isDigestSuppressionActive("id-peer", now) {
+	a.ClearPeerDigestSuppression(domaintest.ID("id-peer"))
+	if a.isDigestSuppressionActive(domaintest.ID("id-peer"), now) {
 		t.Fatal("suppression still active after ClearPeerDigestSuppression")
 	}
 }
@@ -235,6 +238,6 @@ func TestClearPeerDigestSuppression_RemovesActiveWindow(t *testing.T) {
 // was never armed must not panic or allocate.
 func TestClearPeerDigestSuppression_AbsentPeerIsNoop(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
-	a.ClearPeerDigestSuppression("id-never-armed") // must not panic
-	a.ClearPeerDigestSuppression("")               // empty guard
+	a.ClearPeerDigestSuppression(domaintest.ID("id-never-armed")) // must not panic
+	a.ClearPeerDigestSuppression(domain.PeerIdentity{})           // empty guard
 }

@@ -38,7 +38,7 @@ func attachCapableRelayPeer(t *testing.T, svc *Service, addr string, peerIdentit
 		authOK:       true,
 	}
 	svc.health[domain.PeerAddress(addr)] = &peerHealth{Connected: true}
-	if peerIdentity != "" {
+	if !peerIdentity.IsZero() {
 		svc.peerIDs[domain.PeerAddress(addr)] = peerIdentity
 	}
 	svc.peerMu.Unlock()
@@ -73,7 +73,7 @@ func TestStoreIncomingMessage_OriginEchoNotRepropagated(t *testing.T) {
 	recipient, _ := identity.Generate()
 	body := sealDMBody(t, svc.identity, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey))
 
-	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-1:64646", "")
+	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-1:64646", domain.PeerIdentity{})
 
 	echo := incomingMessage{
 		ID:        "origin-echo-1",
@@ -115,11 +115,11 @@ func TestStoreIncomingMessage_FirstSendToReachableIsPropagated(t *testing.T) {
 	// Make the recipient reachable: a directly-connected capable peer that IS
 	// the recipient, plus a 1-hop route to it. router.Route then resolves a
 	// RelayNextHop, so the send is directed (not held).
-	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-2:64646", domain.PeerIdentity(recipient.Address))
+	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-2:64646", domain.PeerIdentityFromWire(recipient.Address))
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(recipient.Address),
-		Origin:   domain.PeerIdentity(recipient.Address),
-		NextHop:  domain.PeerIdentity(recipient.Address),
+		Identity: domain.PeerIdentityFromWire(recipient.Address),
+		Origin:   domain.PeerIdentityFromWire(recipient.Address),
+		NextHop:  domain.PeerIdentityFromWire(recipient.Address),
 		Hops:     1,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -162,7 +162,7 @@ func TestStoreIncomingMessage_FirstSendToUnreachableIsHeld(t *testing.T) {
 
 	// A capable relay peer exists, but it is NOT a route to the recipient and
 	// is not the recipient — so the recipient is unreachable.
-	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-3:64646", "")
+	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-3:64646", domain.PeerIdentity{})
 
 	fresh := incomingMessage{
 		ID:        "origin-held-1",
@@ -201,11 +201,11 @@ func TestKickDeliveryRetriesForReachable(t *testing.T) {
 
 	// The kick self-checks reachability, so make the recipient reachable:
 	// a directly-connected capable peer that IS the recipient + a 1-hop route.
-	attachCapableRelayPeer(t, svc, "kick-peer:64646", domain.PeerIdentity(recipient.Address))
+	attachCapableRelayPeer(t, svc, "kick-peer:64646", domain.PeerIdentityFromWire(recipient.Address))
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(recipient.Address),
-		Origin:   domain.PeerIdentity(recipient.Address),
-		NextHop:  domain.PeerIdentity(recipient.Address),
+		Identity: domain.PeerIdentityFromWire(recipient.Address),
+		Origin:   domain.PeerIdentityFromWire(recipient.Address),
+		NextHop:  domain.PeerIdentityFromWire(recipient.Address),
 		Hops:     1,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -224,7 +224,7 @@ func TestKickDeliveryRetriesForReachable(t *testing.T) {
 	svc.deliveryMu.Unlock()
 
 	svc.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{
-		domain.PeerIdentity(recipient.Address): {},
+		domain.PeerIdentityFromWire(recipient.Address): {},
 	})
 
 	svc.deliveryMu.RLock()
@@ -259,7 +259,7 @@ func TestKickDeliveryRetriesForUnreachableIsNoop(t *testing.T) {
 
 	// No route, no session — the recipient is unreachable; the kick is a no-op.
 	svc.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{
-		domain.PeerIdentity(recipient.Address): {},
+		domain.PeerIdentityFromWire(recipient.Address): {},
 	})
 
 	svc.deliveryMu.RLock()
@@ -282,11 +282,11 @@ func TestKickDeliveryRetriesSkipsAlreadyEmitted(t *testing.T) {
 	recipient, _ := identity.Generate()
 
 	// Recipient IS reachable, so only the Held gate can keep the kick away.
-	attachCapableRelayPeer(t, svc, "emit-peer:64646", domain.PeerIdentity(recipient.Address))
+	attachCapableRelayPeer(t, svc, "emit-peer:64646", domain.PeerIdentityFromWire(recipient.Address))
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(recipient.Address),
-		Origin:   domain.PeerIdentity(recipient.Address),
-		NextHop:  domain.PeerIdentity(recipient.Address),
+		Identity: domain.PeerIdentityFromWire(recipient.Address),
+		Origin:   domain.PeerIdentityFromWire(recipient.Address),
+		NextHop:  domain.PeerIdentityFromWire(recipient.Address),
 		Hops:     1, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("seed route: %v", err)
@@ -303,7 +303,7 @@ func TestKickDeliveryRetriesSkipsAlreadyEmitted(t *testing.T) {
 	svc.deliveryMu.Unlock()
 
 	svc.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{
-		domain.PeerIdentity(recipient.Address): {},
+		domain.PeerIdentityFromWire(recipient.Address): {},
 	})
 
 	svc.deliveryMu.RLock()

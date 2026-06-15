@@ -1651,7 +1651,7 @@ func synthesizePeerHealthFromCapture(s service.CaptureSession) service.PeerHealt
 	}
 	return service.PeerHealth{
 		Address:   string(s.Address),
-		PeerID:    string(s.PeerID),
+		PeerID:    s.PeerID.String(),
 		ConnID:    uint64(s.ConnID),
 		Direction: string(s.Direction),
 		SlotState: slotState,
@@ -1774,7 +1774,7 @@ func mergeCapturesIntoPeers(
 func promotePlaceholderFromCapture(p *service.PeerHealth, s service.CaptureSession) {
 	p.ConnID = uint64(s.ConnID)
 	if p.PeerID == "" {
-		p.PeerID = string(s.PeerID)
+		p.PeerID = s.PeerID.String()
 	}
 	if p.Direction == "" {
 		p.Direction = string(s.Direction)
@@ -1919,7 +1919,7 @@ func (c *ConsoleWindow) executeCommand(ctx context.Context, input string) (strin
 	if req.Name == "help" {
 		addr := ""
 		if c.parent.client != nil {
-			addr = string(c.parent.client.Address())
+			addr = c.parent.client.Address().String()
 		}
 		return consoleHelpText(c.parent.cmdTable, addr), nil
 	}
@@ -2063,7 +2063,7 @@ func peerIdentityKey(peerID, address string) string {
 // inflating known_peers / connected_peers by exactly one phantom entry
 // regardless of how many unlabeled captures are active.
 func captureHasIdentity(s service.CaptureSession) bool {
-	return s.PeerID != "" || s.Address != ""
+	return !s.PeerID.IsZero() || s.Address != ""
 }
 
 // countUniquePeers returns the number of distinct peers the node has any
@@ -2090,7 +2090,7 @@ func countUniquePeers(status service.NodeStatus) int {
 		if !captureHasIdentity(s) {
 			continue
 		}
-		seen[peerIdentityKey(string(s.PeerID), string(s.Address))] = struct{}{}
+		seen[peerIdentityKey(s.PeerID.String(), string(s.Address))] = struct{}{}
 	}
 	return len(seen)
 }
@@ -2128,7 +2128,7 @@ func countConnectedPeers(status service.NodeStatus) int {
 		if !captureHasIdentity(s) {
 			continue
 		}
-		seen[peerIdentityKey(string(s.PeerID), string(s.Address))] = struct{}{}
+		seen[peerIdentityKey(s.PeerID.String(), string(s.Address))] = struct{}{}
 	}
 	return len(seen)
 }

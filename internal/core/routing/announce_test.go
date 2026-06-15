@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 )
@@ -54,16 +55,16 @@ func newMockPeerSender(t *testing.T) (*routingmocks.MockPeerSender, *senderRecor
 }
 
 func TestAnnounceLoopPeriodicSend(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -96,16 +97,16 @@ func TestAnnounceLoopPeriodicSend(t *testing.T) {
 }
 
 func TestAnnounceLoopTriggeredUpdate(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -133,10 +134,10 @@ func TestAnnounceLoopTriggeredUpdate(t *testing.T) {
 }
 
 func TestAnnounceLoopSplitHorizon(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -144,7 +145,7 @@ func TestAnnounceLoopSplitHorizon(t *testing.T) {
 	// peer-B (NextHop == peer-B), so it should be excluded by split horizon.
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-B", Identity: "peer-B"},
+			{Address: "addr-B", Identity: domaintest.ID("peer-B")},
 		}
 	}
 
@@ -173,10 +174,10 @@ func TestAnnounceLoopSplitHorizon(t *testing.T) {
 }
 
 func TestAnnounceLoopNoPeersNoSend(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -205,16 +206,16 @@ func TestAnnounceLoopNoPeersNoSend(t *testing.T) {
 }
 
 func TestAnnounceLoopTriggerCoalesces(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newMockPeerSender(t)
 
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{
-			{Address: "addr-C", Identity: "peer-C"},
+			{Address: "addr-C", Identity: domaintest.ID("peer-C")},
 		}
 	}
 
@@ -248,7 +249,7 @@ func TestAnnounceLoopTriggerCoalesces(t *testing.T) {
 }
 
 func TestAnnounceLoopRunOnlyOnce(t *testing.T) {
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, _ := newMockPeerSender(t)
 	peers := func() []routing.AnnounceTarget { return nil }
 
@@ -308,8 +309,8 @@ func (g *fixedOverloadGate) IsOverloaded() bool { return g.overloaded }
 func TestAnnounceLoop_OverloadGate_SuppressesDeltasButForcedFullStillFires(t *testing.T) {
 	gate := &fixedOverloadGate{overloaded: true}
 
-	table := routing.NewTable(routing.WithLocalOrigin("self-node-identity"))
-	if _, err := table.AddDirectPeer("peer-a-identity-direct"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-a-identity-direct")); err != nil {
 		t.Fatalf("setup AddDirectPeer: %v", err)
 	}
 
@@ -318,7 +319,7 @@ func TestAnnounceLoop_OverloadGate_SuppressesDeltasButForcedFullStillFires(t *te
 		return []routing.AnnounceTarget{
 			{
 				Address:      "peer-a-addr",
-				Identity:     "peer-a-identity",
+				Identity:     domaintest.ID("peer-a-identity"),
 				Capabilities: []routing.PeerCapability{domain.CapMeshRoutingV1},
 			},
 		}
@@ -397,8 +398,8 @@ func TestAnnounceLoop_OverloadGate_SuppressesDeltasButForcedFullStillFires(t *te
 func TestAnnounceLoop_OverloadGate_DisengagedAllowsDeltas(t *testing.T) {
 	gate := &fixedOverloadGate{overloaded: false}
 
-	table := routing.NewTable(routing.WithLocalOrigin("self-node-identity"))
-	if _, err := table.AddDirectPeer("peer-a-identity-direct"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-a-identity-direct")); err != nil {
 		t.Fatalf("setup AddDirectPeer: %v", err)
 	}
 
@@ -407,7 +408,7 @@ func TestAnnounceLoop_OverloadGate_DisengagedAllowsDeltas(t *testing.T) {
 		return []routing.AnnounceTarget{
 			{
 				Address:      "peer-a-addr",
-				Identity:     "peer-a-identity",
+				Identity:     domaintest.ID("peer-a-identity"),
 				Capabilities: []routing.PeerCapability{domain.CapMeshRoutingV1},
 			},
 		}
@@ -495,7 +496,7 @@ func TestAnnounceLoop_TickInterval_DividesBothCadences(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			table := routing.NewTable(routing.WithLocalOrigin("self-node-identity"))
+			table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
 			sender, _ := newMockPeerSender(t)
 			peers := func() []routing.AnnounceTarget { return nil }
 
@@ -578,8 +579,8 @@ func TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap(t *testing.T) {
 	// not MinForcedFullSyncInterval (30s).
 	gate := &fixedOverloadGate{overloaded: false}
 
-	table := routing.NewTable(routing.WithLocalOrigin("self-node-identity"))
-	if _, err := table.AddDirectPeer("peer-a-identity-direct"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-a-identity-direct")); err != nil {
 		t.Fatalf("setup AddDirectPeer: %v", err)
 	}
 
@@ -588,7 +589,7 @@ func TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap(t *testing.T) {
 		return []routing.AnnounceTarget{
 			{
 				Address:      "peer-a-addr",
-				Identity:     "peer-a-identity",
+				Identity:     domaintest.ID("peer-a-identity"),
 				Capabilities: []routing.PeerCapability{domain.CapMeshRoutingV1},
 			},
 		}
@@ -621,7 +622,7 @@ func TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap(t *testing.T) {
 	// once 200ms has passed. Without the clamp, the window is 30s
 	// and the second attempt would never fire within the test
 	// timeout.
-	loop.StateRegistry().MarkInvalid("peer-a-identity")
+	loop.StateRegistry().MarkInvalid(domaintest.ID("peer-a-identity"))
 
 	// Wait for second forced full to fire. Budget: 500ms after first
 	// call (well within 30s rate-limit but well past 200ms clamp).
@@ -708,7 +709,7 @@ func TestAnnounceLoop_TickInterval_BusyLoopGuard(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			table := routing.NewTable(routing.WithLocalOrigin("self-node-identity"))
+			table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
 			sender, _ := newMockPeerSender(t)
 			peers := func() []routing.AnnounceTarget { return nil }
 
@@ -785,8 +786,8 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 		gapBudget = forcedCap + gapTolerance
 	)
 
-	table := routing.NewTable(routing.WithLocalOrigin("self-node-identity"))
-	if _, err := table.AddDirectPeer("peer-a-identity-direct"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-a-identity-direct")); err != nil {
 		t.Fatalf("setup AddDirectPeer: %v", err)
 	}
 
@@ -795,7 +796,7 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 		return []routing.AnnounceTarget{
 			{
 				Address:      "peer-a-addr",
-				Identity:     "peer-a-identity",
+				Identity:     domaintest.ID("peer-a-identity"),
 				Capabilities: []routing.PeerCapability{domain.CapMeshRoutingV1},
 			},
 		}

@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
@@ -21,7 +22,7 @@ func TestChatlogFetchEntriesValidRequest(t *testing.T) {
 
 	code, result := postJSON(t, server, "/rpc/v1/chatlog/entries", map[string]interface{}{
 		"topic":        "dm",
-		"peer_address": "peer-addr-123",
+		"peer_address": validTo,
 	})
 
 	expectStatusCode(t, code, 200)
@@ -53,7 +54,7 @@ func TestChatlogFetchEntriesDefaultsTopic(t *testing.T) {
 	server := setupTestServer(t, node, chatlog)
 
 	code, _ := postJSON(t, server, "/rpc/v1/chatlog/entries", map[string]interface{}{
-		"peer_address": "peer-addr-123",
+		"peer_address": validTo,
 	})
 
 	expectStatusCode(t, code, 200)
@@ -92,7 +93,7 @@ func TestChatlogFetchEntriesNilProvider(t *testing.T) {
 
 	code, result := postJSON(t, server, "/rpc/v1/chatlog/entries", map[string]interface{}{
 		"topic":        "dm",
-		"peer_address": "peer-addr-123",
+		"peer_address": validTo,
 	})
 
 	expectStatusCode(t, code, 503)
@@ -111,11 +112,53 @@ func TestChatlogFetchEntriesProviderError(t *testing.T) {
 
 	code, result := postJSON(t, server, "/rpc/v1/chatlog/entries", map[string]interface{}{
 		"topic":        "dm",
-		"peer_address": "peer-addr-123",
+		"peer_address": validTo,
 	})
 
 	expectStatusCode(t, code, 500)
 	expectFieldExists(t, result, "error")
+}
+
+// TestChatlogFetchEntriesRejectsMalformedPeerAddress pins the boundary fix: a
+// non-empty but malformed peer_address is a user error (400), not a provider
+// failure (500). It must be rejected at the command layer BEFORE FetchChatlog
+// is called.
+func TestChatlogFetchEntriesRejectsMalformedPeerAddress(t *testing.T) {
+	chatlog := newDefaultChatlogProvider(t)
+	node := newDefaultNodeProvider(t)
+	server := setupTestServer(t, node, chatlog)
+
+	code, result := postJSON(t, server, "/rpc/v1/chatlog/entries", map[string]interface{}{
+		"topic":        "dm",
+		"peer_address": "not-hex",
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "valid peer identity") {
+		t.Errorf("expected peer-identity validation error, got %q", errMsg)
+	}
+	chatlog.AssertNotCalled(t, "FetchChatlog")
+}
+
+// TestChatlogFetchEntriesRejectsZeroIdentityPeerAddress pins the second half:
+// the all-zero 40-hex peer_address parses with a nil error through
+// domain.ParsePeerIdentity, so without the explicit IsZero gate it would reach
+// the gateway. It must be rejected with 400 and FetchChatlog must not be called.
+func TestChatlogFetchEntriesRejectsZeroIdentityPeerAddress(t *testing.T) {
+	chatlog := newDefaultChatlogProvider(t)
+	node := newDefaultNodeProvider(t)
+	server := setupTestServer(t, node, chatlog)
+
+	code, result := postJSON(t, server, "/rpc/v1/chatlog/entries", map[string]interface{}{
+		"topic":        "dm",
+		"peer_address": zeroIdentity,
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "zero peer identity") {
+		t.Errorf("expected zero-identity validation error, got %q", errMsg)
+	}
+	chatlog.AssertNotCalled(t, "FetchChatlog")
 }
 
 func TestChatlogFetchPreviews(t *testing.T) {

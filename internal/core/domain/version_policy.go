@@ -107,10 +107,16 @@ type VersionLockoutSnapshot struct {
 	// suppressing addresses that may later belong to a different peer.
 	LockedAt time.Time `json:"locked_at,omitempty"`
 	// PeerIdentity is the cryptographic identity of the peer that was
-	// locked out. When non-empty the lockout is identity-bound and does
-	// not expire by TTL — only by local version change. When empty the
+	// locked out. When non-nil the lockout is identity-bound and does
+	// not expire by TTL — only by local version change. When nil the
 	// lockout is address-only and subject to VersionLockoutMaxTTL.
-	PeerIdentity PeerIdentity `json:"peer_identity,omitempty"`
+	//
+	// Pointer (not value) because PeerIdentity is now a fixed-size array,
+	// and encoding/json's omitempty does not treat a non-empty array as
+	// empty — only a nil pointer is omitted. Keeping the persisted
+	// peers.json shape (field absent for address-only lockouts) therefore
+	// requires the pointer form.
+	PeerIdentity *PeerIdentity `json:"peer_identity,omitempty"`
 }
 
 // VersionLockoutMaxTTL is the maximum lifetime of an address-only
@@ -121,7 +127,7 @@ const VersionLockoutMaxTTL = 7 * 24 * time.Hour // 7 days
 
 // IsActive reports whether the lockout carries a non-empty reason.
 // Identity-bound lockouts remain active until local version change.
-// Address-only lockouts (PeerIdentity == "") expire after VersionLockoutMaxTTL.
+// Address-only lockouts (PeerIdentity == nil) expire after VersionLockoutMaxTTL.
 func (v VersionLockoutSnapshot) IsActive() bool {
 	return v.Reason != VersionLockoutReasonNone
 }
@@ -134,7 +140,7 @@ func (v VersionLockoutSnapshot) IsActiveAt(now time.Time) bool {
 		return false
 	}
 	// Identity-bound lockout — no TTL, cleared only by version change.
-	if v.PeerIdentity != "" {
+	if v.PeerIdentity != nil {
 		return true
 	}
 	// Address-only lockout — bounded lifetime.

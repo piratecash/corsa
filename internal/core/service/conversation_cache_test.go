@@ -5,18 +5,19 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 func TestCacheLoadAndMessages(t *testing.T) {
 	cache := NewConversationCache()
 
 	msgs := []DirectMessage{
-		{ID: "m1", Sender: "alice", Recipient: "bob", Body: "hello", Timestamp: time.Now()},
-		{ID: "m2", Sender: "bob", Recipient: "alice", Body: "hi", Timestamp: time.Now()},
+		{ID: "m1", Sender: domaintest.ID("alice"), Recipient: domaintest.ID("bob"), Body: "hello", Timestamp: time.Now()},
+		{ID: "m2", Sender: domaintest.ID("bob"), Recipient: domaintest.ID("alice"), Body: "hi", Timestamp: time.Now()},
 	}
-	cache.Load("bob", msgs)
+	cache.Load(domaintest.ID("bob"), msgs)
 
-	if got := cache.PeerAddress(); got != "bob" {
+	if got := cache.PeerAddress(); got != domaintest.ID("bob") {
 		t.Fatalf("PeerAddress: got %q, want %q", got, "bob")
 	}
 	if got := cache.Len(); got != 2 {
@@ -35,14 +36,14 @@ func TestCacheLoadAndMessages(t *testing.T) {
 func TestCacheLoadReplacesOld(t *testing.T) {
 	cache := NewConversationCache()
 
-	cache.Load("alice", []DirectMessage{
-		{ID: "old-1", Sender: "alice", Body: "old"},
+	cache.Load(domaintest.ID("alice"), []DirectMessage{
+		{ID: "old-1", Sender: domaintest.ID("alice"), Body: "old"},
 	})
-	cache.Load("bob", []DirectMessage{
-		{ID: "new-1", Sender: "bob", Body: "new"},
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
+		{ID: "new-1", Sender: domaintest.ID("bob"), Body: "new"},
 	})
 
-	if got := cache.PeerAddress(); got != "bob" {
+	if got := cache.PeerAddress(); got != domaintest.ID("bob") {
 		t.Fatalf("PeerAddress after reload: got %q, want %q", got, "bob")
 	}
 	if got := cache.Len(); got != 1 {
@@ -58,9 +59,9 @@ func TestCacheLoadReplacesOld(t *testing.T) {
 
 func TestCacheAppendMessageIdempotent(t *testing.T) {
 	cache := NewConversationCache()
-	cache.Load("bob", nil)
+	cache.Load(domaintest.ID("bob"), nil)
 
-	msg := DirectMessage{ID: "m1", Sender: "alice", Recipient: "bob", Body: "hello"}
+	msg := DirectMessage{ID: "m1", Sender: domaintest.ID("alice"), Recipient: domaintest.ID("bob"), Body: "hello"}
 
 	if !cache.AppendMessage(msg) {
 		t.Fatal("first append should return true")
@@ -75,7 +76,7 @@ func TestCacheAppendMessageIdempotent(t *testing.T) {
 
 func TestCacheAppendPreservesOrder(t *testing.T) {
 	cache := NewConversationCache()
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", Body: "first"},
 	})
 
@@ -94,7 +95,7 @@ func TestCacheAppendPreservesOrder(t *testing.T) {
 func TestCacheUpdateStatusMonotonic(t *testing.T) {
 	cache := NewConversationCache()
 	now := time.Now()
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", ReceiptStatus: "sent"},
 	})
 
@@ -127,7 +128,7 @@ func TestCacheUpdateStatusMonotonic(t *testing.T) {
 
 func TestCacheUpdateStatusSameRankReplacesNilDeliveredAt(t *testing.T) {
 	cache := NewConversationCache()
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", ReceiptStatus: "delivered"},
 	})
 
@@ -145,7 +146,7 @@ func TestCacheUpdateStatusSameRankReplacesNilDeliveredAt(t *testing.T) {
 func TestCacheUpdateStatusSameRankReplacesZeroDeliveredAt(t *testing.T) {
 	cache := NewConversationCache()
 	zeroTime := time.Time{}
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: domain.TimeOf(zeroTime)},
 	})
 
@@ -162,7 +163,7 @@ func TestCacheUpdateStatusSameRankReplacesZeroDeliveredAt(t *testing.T) {
 
 func TestCacheUpdateStatusSameRankRejectsNilToNil(t *testing.T) {
 	cache := NewConversationCache()
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", ReceiptStatus: "delivered"},
 	})
 
@@ -175,7 +176,7 @@ func TestCacheUpdateStatusSameRankRejectsNilToNil(t *testing.T) {
 func TestCacheUpdateStatusSameRankReplacesRealWithReal(t *testing.T) {
 	cache := NewConversationCache()
 	existingTime := time.Now()
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", ReceiptStatus: "delivered", DeliveredAt: domain.TimeOf(existingTime)},
 	})
 
@@ -194,7 +195,7 @@ func TestCacheUpdateStatusSameRankReplacesRealWithReal(t *testing.T) {
 
 func TestCacheUpdateStatusNotFound(t *testing.T) {
 	cache := NewConversationCache()
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", ReceiptStatus: "sent"},
 	})
 
@@ -205,19 +206,19 @@ func TestCacheUpdateStatusNotFound(t *testing.T) {
 
 func TestCacheMatchesPeer(t *testing.T) {
 	cache := NewConversationCache()
-	cache.Load("bob", nil)
+	cache.Load(domaintest.ID("bob"), nil)
 
-	if !cache.MatchesPeer("bob") {
+	if !cache.MatchesPeer(domaintest.ID("bob")) {
 		t.Fatal("should match loaded peer")
 	}
-	if cache.MatchesPeer("alice") {
+	if cache.MatchesPeer(domaintest.ID("alice")) {
 		t.Fatal("should not match different peer")
 	}
 }
 
 func TestCacheMessagesReturnsCopy(t *testing.T) {
 	cache := NewConversationCache()
-	cache.Load("bob", []DirectMessage{
+	cache.Load(domaintest.ID("bob"), []DirectMessage{
 		{ID: "m1", Body: "original"},
 	})
 
@@ -235,7 +236,7 @@ func TestCacheMessagesReturnsCopy(t *testing.T) {
 func TestCacheEmptyState(t *testing.T) {
 	cache := NewConversationCache()
 
-	if got := cache.PeerAddress(); got != "" {
+	if got := cache.PeerAddress(); !got.IsZero() {
 		t.Fatalf("empty cache PeerAddress: got %q, want empty", got)
 	}
 	if got := cache.Len(); got != 0 {
@@ -247,7 +248,7 @@ func TestCacheEmptyState(t *testing.T) {
 	if cache.HasMessage("anything") {
 		t.Fatal("empty cache should not have any message")
 	}
-	if cache.MatchesPeer("anyone") {
+	if cache.MatchesPeer(domaintest.ID("anyone")) {
 		t.Fatal("empty cache should not match any peer")
 	}
 }

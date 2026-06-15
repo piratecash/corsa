@@ -20,7 +20,7 @@ import (
 // transit route is data-plane-usable; tests that exercise the
 // ingest happy path call this helper to satisfy the gate.
 func installTripletCapableUplinkForQueryTest(svc *Service, identity domain.PeerIdentity) {
-	addr := domain.PeerAddress("addr-" + string(identity))
+	addr := domain.PeerAddress("addr-" + identity.String())
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
 		peerIdentity: identity,
@@ -238,7 +238,7 @@ func TestHandleRouteQueryResponse_DropsTargetEqualsLocalIdentity(t *testing.T) {
 	resp := protocol.RouteQueryResponseFrame{
 		Type:           protocol.RouteQueryResponseFrameType,
 		QueryID:        101,
-		TargetIdentity: domain.PeerIdentity(idNodeA), // attacker claims to reach US
+		TargetIdentity: idNodeA, // attacker claims to reach US
 		Found:          true,
 		BestUplink:     idPeerD,
 		BestHops:       2,
@@ -246,7 +246,7 @@ func TestHandleRouteQueryResponse_DropsTargetEqualsLocalIdentity(t *testing.T) {
 	}
 	svc.handleRouteQueryResponse(idPeerB, resp)
 
-	if routes := svc.routingTable.Lookup(domain.PeerIdentity(idNodeA)); len(routes) != 0 {
+	if routes := svc.routingTable.Lookup(idNodeA); len(routes) != 0 {
 		// Lookup returns the synthetic self-route (RouteSourceLocal,
 		// hops=0) injected by Table.Lookup when the queried identity
 		// matches localOrigin. The attacker's claim must NOT be in
@@ -263,7 +263,7 @@ func TestHandleRouteQueryResponse_DropsTargetEqualsLocalIdentity(t *testing.T) {
 	// (idNodeA, idPeerB) — the ingest aborted before
 	// UpdateRoute's health bookkeeping ran.
 	for _, st := range svc.routingTable.HealthSnapshot() {
-		if st.Identity == domain.PeerIdentity(idNodeA) && st.Uplink == idPeerB {
+		if st.Identity == idNodeA && st.Uplink == idPeerB {
 			t.Fatalf("local-identity-as-target response created health entry: %+v", st)
 		}
 	}

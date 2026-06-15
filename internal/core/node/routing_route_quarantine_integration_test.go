@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -32,11 +33,11 @@ import (
 func TestQuarantine_TableRouterSkipsTransitViaQuarantinedNextHop(t *testing.T) {
 	t.Parallel()
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := table.AddDirectPeer("peer-C"); err != nil {
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-C")); err != nil {
 		t.Fatal(err)
 	}
 	// target-X via peer-B (rank 1) AND via peer-C (rank 2).
@@ -44,11 +45,11 @@ func TestQuarantine_TableRouterSkipsTransitViaQuarantinedNextHop(t *testing.T) {
 		next routing.PeerIdentity
 		seq  uint64
 	}{
-		{"peer-B", 1},
-		{"peer-C", 2},
+		{domaintest.ID("peer-B"), 1},
+		{domaintest.ID("peer-C"), 2},
 	} {
 		status, err := table.UpdateRoute(routing.RouteEntry{
-			Identity: "target-X",
+			Identity: domaintest.ID("target-X"),
 			Origin:   hop.next,
 			NextHop:  hop.next,
 			Hops:     2,
@@ -66,28 +67,28 @@ func TestQuarantine_TableRouterSkipsTransitViaQuarantinedNextHop(t *testing.T) {
 	}
 	// Put peer-B in quarantine.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
 		svc:   svc,
 		table: table,
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			return domain.PeerAddress("addr-" + string(peerIdentity))
+			return domain.PeerAddress("addr-" + peerIdentity.String())
 		},
 	}
 
 	decision := tr.Route(protocol.Envelope{
 		ID:        "msg-1",
 		Topic:     "dm",
-		Sender:    "node-A",
-		Recipient: "target-X",
+		Sender:    domaintest.ID("node-A").String(),
+		Recipient: domaintest.ID("target-X").String(),
 	})
 
 	if decision.RelayNextHop == nil {
 		t.Fatal("expected RelayNextHop to be set (peer-C alternative exists)")
 	}
-	if *decision.RelayNextHop != domain.PeerIdentity("peer-C") {
+	if *decision.RelayNextHop != domaintest.ID("peer-C") {
 		t.Fatalf("expected RelayNextHop=peer-C (peer-B is quarantined), got %s", *decision.RelayNextHop)
 	}
 }
@@ -99,8 +100,8 @@ func TestQuarantine_TableRouterSkipsTransitViaQuarantinedNextHop(t *testing.T) {
 func TestQuarantine_TableRouterDirectRouteToQuarantinedPeerStillReachable(t *testing.T) {
 	t.Parallel()
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
-	if _, err := table.AddDirectPeer("peer-Q"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-Q")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,28 +110,28 @@ func TestQuarantine_TableRouterDirectRouteToQuarantinedPeerStillReachable(t *tes
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
 	}
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-Q", quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(domaintest.ID("peer-Q"), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
 		svc:   svc,
 		table: table,
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			return domain.PeerAddress("addr-" + string(peerIdentity))
+			return domain.PeerAddress("addr-" + peerIdentity.String())
 		},
 	}
 
 	decision := tr.Route(protocol.Envelope{
 		ID:        "msg-direct",
 		Topic:     "dm",
-		Sender:    "node-A",
-		Recipient: "peer-Q",
+		Sender:    domaintest.ID("node-A").String(),
+		Recipient: domaintest.ID("peer-Q").String(),
 	})
 
 	if decision.RelayNextHop == nil {
 		t.Fatal("direct route to quarantined peer must still be reachable (quarantine suppresses transit only)")
 	}
-	if *decision.RelayNextHop != domain.PeerIdentity("peer-Q") {
+	if *decision.RelayNextHop != domaintest.ID("peer-Q") {
 		t.Fatalf("expected RelayNextHop=peer-Q (direct), got %s", *decision.RelayNextHop)
 	}
 }
@@ -142,14 +143,14 @@ func TestQuarantine_TableRouterDirectRouteToQuarantinedPeerStillReachable(t *tes
 func TestQuarantine_TableRouterFallsBackWhenOnlyTransitIsQuarantined(t *testing.T) {
 	t.Parallel()
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 	status, err := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-Y",
-		Origin:   "peer-B",
-		NextHop:  "peer-B",
+		Identity: domaintest.ID("target-Y"),
+		Origin:   domaintest.ID("peer-B"),
+		NextHop:  domaintest.ID("peer-B"),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -163,22 +164,22 @@ func TestQuarantine_TableRouterFallsBackWhenOnlyTransitIsQuarantined(t *testing.
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
 	}
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
 		svc:   svc,
 		table: table,
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			return domain.PeerAddress("addr-" + string(peerIdentity))
+			return domain.PeerAddress("addr-" + peerIdentity.String())
 		},
 	}
 
 	decision := tr.Route(protocol.Envelope{
 		ID:        "msg-only-via-quarantined",
 		Topic:     "dm",
-		Sender:    "node-A",
-		Recipient: "target-Y",
+		Sender:    domaintest.ID("node-A").String(),
+		Recipient: domaintest.ID("target-Y").String(),
 	})
 
 	if decision.RelayNextHop != nil {
@@ -198,7 +199,7 @@ func TestQuarantine_TableRouterFallsBackWhenOnlyTransitIsQuarantined(t *testing.
 func TestQuarantine_ApplyAnnounceEntriesDropsQuarantinedSender(t *testing.T) {
 	t.Parallel()
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 
 	svc := &Service{
 		routingTable:          table,
@@ -206,14 +207,14 @@ func TestQuarantine_ApplyAnnounceEntriesDropsQuarantinedSender(t *testing.T) {
 		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
 	}
-	sender := domain.PeerIdentity("bb00000000000000000000000000000000000099")
+	sender := domain.PeerIdentityFromWire("bb00000000000000000000000000000000000099")
 	target := "aa00000000000000000000000000000000000088"
 	svc.peerMu.Lock()
 	svc.armRouteQuarantineLocked(sender, "test", time.Now())
 	svc.peerMu.Unlock()
 
 	wireRoutes := []protocol.AnnounceRouteFrame{
-		{Identity: target, Origin: string(sender), Hops: 2, SeqNo: 1},
+		{Identity: target, Origin: sender.String(), Hops: 2, SeqNo: 1},
 	}
 
 	// Quarantine gate is at the very top of applyAnnounceEntries —
@@ -222,7 +223,7 @@ func TestQuarantine_ApplyAnnounceEntriesDropsQuarantinedSender(t *testing.T) {
 	svc.applyAnnounceEntries(sender, wireRoutes, nil, nil, announceReceiveLegacy)
 
 	// Verify nothing was added to the table.
-	got := table.Lookup(routing.PeerIdentity(target))
+	got := table.Lookup(domain.PeerIdentityFromWire(target))
 	if len(got) != 0 {
 		t.Fatalf("expected zero routes after quarantine-dropped announce; got %d entries", len(got))
 	}
@@ -253,10 +254,10 @@ func TestRouteIsBlockedByQuarantine_DirectPasses(t *testing.T) {
 
 	svc := &Service{
 		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			"peer-Q": {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
+			domaintest.ID("peer-Q"): {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
 		},
 	}
-	if svc.routeIsBlockedByQuarantine("peer-Q", 1) {
+	if svc.routeIsBlockedByQuarantine(domaintest.ID("peer-Q"), 1) {
 		t.Fatal("direct destination (hops=1) to quarantined peer must NOT be blocked — quarantine suppresses transit only")
 	}
 }
@@ -266,13 +267,13 @@ func TestRouteIsBlockedByQuarantine_TransitBlocked(t *testing.T) {
 
 	svc := &Service{
 		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			"peer-Q": {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
+			domaintest.ID("peer-Q"): {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
 		},
 	}
-	if !svc.routeIsBlockedByQuarantine("peer-Q", 2) {
+	if !svc.routeIsBlockedByQuarantine(domaintest.ID("peer-Q"), 2) {
 		t.Fatal("transit (hops>1) through quarantined peer must be blocked")
 	}
-	if !svc.routeIsBlockedByQuarantine("peer-Q", 5) {
+	if !svc.routeIsBlockedByQuarantine(domaintest.ID("peer-Q"), 5) {
 		t.Fatal("transit through quarantined peer must be blocked at any hops>1")
 	}
 }
@@ -283,10 +284,10 @@ func TestRouteIsBlockedByQuarantine_NonQuarantinedPasses(t *testing.T) {
 	svc := &Service{
 		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{},
 	}
-	if svc.routeIsBlockedByQuarantine("peer-clean", 1) {
+	if svc.routeIsBlockedByQuarantine(domaintest.ID("peer-clean"), 1) {
 		t.Fatal("non-quarantined peer (direct) must pass")
 	}
-	if svc.routeIsBlockedByQuarantine("peer-clean", 5) {
+	if svc.routeIsBlockedByQuarantine(domaintest.ID("peer-clean"), 5) {
 		t.Fatal("non-quarantined peer (transit) must pass")
 	}
 }
@@ -297,10 +298,10 @@ func TestRouteIsBlockedByQuarantine_ExpiredQuarantinePasses(t *testing.T) {
 	// Quarantine entry exists but Until is in the past.
 	svc := &Service{
 		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			"peer-was-bad": {Until: time.Now().Add(-time.Hour), Reason: "test", LastArmed: time.Now().Add(-2 * time.Hour), Strikes: 1},
+			domaintest.ID("peer-was-bad"): {Until: time.Now().Add(-time.Hour), Reason: "test", LastArmed: time.Now().Add(-2 * time.Hour), Strikes: 1},
 		},
 	}
-	if svc.routeIsBlockedByQuarantine("peer-was-bad", 2) {
+	if svc.routeIsBlockedByQuarantine(domaintest.ID("peer-was-bad"), 2) {
 		t.Fatal("expired quarantine must not block traffic")
 	}
 }
@@ -320,9 +321,9 @@ func TestRouteIsBlockedByQuarantine_ExpiredQuarantinePasses(t *testing.T) {
 func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T) {
 	t.Parallel()
 
-	quarantinedID := domain.PeerIdentity("aa00000000000000000000000000000000000011")
-	cleanID := domain.PeerIdentity("bb00000000000000000000000000000000000022")
-	recipientID := domain.PeerIdentity("cc00000000000000000000000000000000000033")
+	quarantinedID := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000011")
+	cleanID := domain.PeerIdentityFromWire("bb00000000000000000000000000000000000022")
+	recipientID := domain.PeerIdentityFromWire("cc00000000000000000000000000000000000033")
 	quarantinedAddr := domain.PeerAddress("addr-quarantined")
 	cleanAddr := domain.PeerAddress("addr-clean")
 
@@ -352,7 +353,7 @@ func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T
 
 	targets := svc.routingTargetsForMessage(protocol.Envelope{
 		Topic:     "dm",
-		Recipient: string(recipientID),
+		Recipient: recipientID.String(),
 	})
 
 	// Quarantined peer MUST NOT appear as transit.
@@ -381,7 +382,7 @@ func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T
 func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *testing.T) {
 	t.Parallel()
 
-	quarantinedID := domain.PeerIdentity("aa00000000000000000000000000000000000044")
+	quarantinedID := domain.PeerIdentityFromWire("aa00000000000000000000000000000000000044")
 	quarantinedAddr := domain.PeerAddress("addr-recipient-quarantined")
 
 	svc := &Service{
@@ -405,7 +406,7 @@ func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *
 	// Message recipient is the quarantined peer itself.
 	targets := svc.routingTargetsForMessage(protocol.Envelope{
 		Topic:     "dm",
-		Recipient: string(quarantinedID),
+		Recipient: quarantinedID.String(),
 	})
 
 	found := false
@@ -439,7 +440,7 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
 	}
 	addr := mustAddr("10.0.0.42:64646")
-	identity := domain.PeerIdentity("ee00000000000000000000000000000000000055")
+	identity := domain.PeerIdentityFromWire("ee00000000000000000000000000000000000055")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	svc.peerMu.Lock()
@@ -499,14 +500,14 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 	t.Parallel()
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 	status, err := table.UpdateRoute(routing.RouteEntry{
-		Identity: "target-Z",
-		Origin:   "peer-B",
-		NextHop:  "peer-B",
+		Identity: domaintest.ID("target-Z"),
+		Origin:   domaintest.ID("peer-B"),
+		NextHop:  domaintest.ID("peer-B"),
 		Hops:     2,
 		SeqNo:    1,
 		Source:   routing.RouteSourceAnnouncement,
@@ -526,18 +527,18 @@ func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 	// A chatty_routes arm deliberately leaves transit in place (covered
 	// by routing_route_quarantine_transit_test.go).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	// Transit claim via the quarantined peer must be gone from the
 	// live lookup — this is what guarantees it cannot resurface
 	// after the quarantine expires (Lookup does not consult
 	// quarantine state; the tombstone is the protection).
-	if got := table.Lookup("target-Z"); len(got) != 0 {
+	if got := table.Lookup(domaintest.ID("target-Z")); len(got) != 0 {
 		t.Fatalf("transit route via quarantined peer still live after arm: %d entries", len(got))
 	}
 	// Direct route to the peer itself must survive.
-	if got := table.Lookup("peer-B"); len(got) == 0 {
+	if got := table.Lookup(domaintest.ID("peer-B")); len(got) == 0 {
 		t.Fatal("direct route to quarantined peer was removed — arm must invalidate transit only")
 	}
 
@@ -546,9 +547,9 @@ func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 	// dropped during quarantine, so there is nothing new to
 	// invalidate.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked("peer-B", quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
-	if got := table.Lookup("peer-B"); len(got) == 0 {
+	if got := table.Lookup(domaintest.ID("peer-B")); len(got) == 0 {
 		t.Fatal("re-arm during active quarantine must not touch the direct route")
 	}
 

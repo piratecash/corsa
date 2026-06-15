@@ -214,7 +214,7 @@ func TestHasCapV2Triplet_PinsTriplet(t *testing.T) {
 
 func TestAnnouncePeerState_V3BaselineFlagLifecycle(t *testing.T) {
 	r := NewAnnounceStateRegistry()
-	pid := PeerIdentity(idV3EpochPeer)
+	pid := idV3EpochPeer
 	r.MarkReconnected(pid, nil)
 	s := r.Get(pid)
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -25,18 +26,23 @@ import (
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
-// Valid 40-char hex identity constants for tests.
-const (
-	idNodeA   = "aa00000000000000000000000000000000000001"
-	idNodeB   = "aa00000000000000000000000000000000000002"
-	idPeerA   = "bb00000000000000000000000000000000000001"
-	idPeerB   = "bb00000000000000000000000000000000000002"
-	idPeerC   = "bb00000000000000000000000000000000000003"
-	idPeerD   = "bb00000000000000000000000000000000000004"
-	idOriginC = "cc00000000000000000000000000000000000003"
-	idOriginD = "cc00000000000000000000000000000000000004"
-	idTargetX = "dd00000000000000000000000000000000000001"
-	idTargetY = "dd00000000000000000000000000000000000002"
+// Valid 40-char hex identity constants for tests. Kept as string
+// typed domain.PeerIdentity values (decoded from their canonical 40-char
+// hex). Most call sites consume them as PeerIdentity directly; the few
+// wire-string sites (protocol.Envelope/Frame/AnnounceRouteFrame fields,
+// PeerAddress) use the .String() hex form. They are vars rather than
+// consts because a fixed-size array cannot be a Go constant.
+var (
+	idNodeA   = domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
+	idNodeB   = domain.PeerIdentityFromWire("aa00000000000000000000000000000000000002")
+	idPeerA   = domain.PeerIdentityFromWire("bb00000000000000000000000000000000000001")
+	idPeerB   = domain.PeerIdentityFromWire("bb00000000000000000000000000000000000002")
+	idPeerC   = domain.PeerIdentityFromWire("bb00000000000000000000000000000000000003")
+	idPeerD   = domain.PeerIdentityFromWire("bb00000000000000000000000000000000000004")
+	idOriginC = domain.PeerIdentityFromWire("cc00000000000000000000000000000000000003")
+	idOriginD = domain.PeerIdentityFromWire("cc00000000000000000000000000000000000004")
+	idTargetX = domain.PeerIdentityFromWire("dd00000000000000000000000000000000000001")
+	idTargetY = domain.PeerIdentityFromWire("dd00000000000000000000000000000000000002")
 )
 
 func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
@@ -45,7 +51,7 @@ func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
@@ -74,7 +80,7 @@ func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, frame)
@@ -88,7 +94,7 @@ func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
 	withdrawal := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 16, SeqNo: 2},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 16, SeqNo: 2},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, withdrawal)
@@ -106,7 +112,7 @@ func TestHandleAnnounceRoutesSkipsSelf(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idNodeA, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idNodeA.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, frame)
@@ -204,14 +210,14 @@ func TestTrackInboundConnectSuppressesDirectRouteWithoutRelayCap(t *testing.T) {
 	// Register inbound peer info with NO capabilities (legacy peer).
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
 
 	connID, _ := svc.connIDFor(conn)
-	svc.trackInboundConnect(connID, idPeerB, idPeerB)
+	svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -236,15 +242,15 @@ func TestTrackInboundConnectCreatesDirectRouteWithRelayCap(t *testing.T) {
 	// Register inbound peer info WITH mesh_relay_v1.
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
 
 	connID, _ := svc.connIDFor(conn)
-	svc.trackInboundConnect(connID, idPeerB, idPeerB)
+	svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -511,7 +517,7 @@ func TestConfirmRouteViaHopAck(t *testing.T) {
 	}
 
 	// Confirm with the actual NextHop identity that carried the message.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -544,7 +550,7 @@ func TestConfirmRouteViaHopAck_PreservesExtra(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -582,7 +588,7 @@ func TestConfirmRouteViaHopAck_WrongNextHopNotConfirmed(t *testing.T) {
 
 	// hop_ack came for a message forwarded to peer-C (different route).
 	// Should NOT promote the peer-B route.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerC), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -610,7 +616,7 @@ func TestConfirmRouteViaHopAck_AlreadyHopAck(t *testing.T) {
 		t.Fatal("UpdateRoute should succeed")
 	}
 
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceHopAck {
@@ -624,7 +630,7 @@ func TestConfirmRouteViaHopAck_DirectNotDemoted(t *testing.T) {
 	// Direct route should not be touched by hop_ack confirmation.
 	svc.onPeerSessionEstablished(idTargetX, []domain.Capability{domain.CapMeshRelayV1})
 
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idTargetX), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idTargetX.String()), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -661,7 +667,7 @@ func TestConfirmRouteViaHopAck_ResolvesTransportAddress(t *testing.T) {
 
 	// hop_ack arrives from transport address — should resolve to peer-B
 	// and confirm the route.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress("tcp://1.2.3.4:9000"), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress("tcp://1.2.3.4:9000"), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -690,7 +696,7 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 	}
 
 	// Empty forwardedTo (stored locally, not forwarded) — should not confirm.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(""), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(""), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if routes[0].Source != routing.RouteSourceAnnouncement {
@@ -700,10 +706,10 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 
 // newTestServiceWithRouting creates a minimal Service with routing table
 // initialized, suitable for unit tests that don't need network I/O.
-func newTestServiceWithRouting(t *testing.T, localIdentity string) *Service {
+func newTestServiceWithRouting(t *testing.T, localIdentity domain.PeerIdentity) *Service {
 	t.Helper()
 	svc := &Service{
-		identity:              &identity.Identity{Address: localIdentity},
+		identity:              &identity.Identity{Address: localIdentity.String()},
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
@@ -716,7 +722,7 @@ func newTestServiceWithRouting(t *testing.T, localIdentity string) *Service {
 		// not dereference a nil interface in struct-literal fixtures.
 		runCtx: context.Background(),
 	}
-	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(routing.PeerIdentity(localIdentity)))
+	svc.routingTable = routing.NewTable(routing.WithLocalOrigin(localIdentity))
 	svc.announceLoop = routing.NewAnnounceLoop(
 		svc.routingTable,
 		newNoopMockPeerSender(t),
@@ -965,9 +971,9 @@ func TestHopAckScoping_IgnoresRouteOriginPostPhaseA(t *testing.T) {
 	// ignored and the (Identity=target-X, NextHop=peer-B) claim is
 	// promoted regardless).
 	svc.confirmRouteViaHopAck(
-		domain.PeerIdentity(idTargetX),
-		domain.PeerAddress(idPeerB),
-		domain.PeerIdentity("origin-mismatch-that-would-have-blocked-pre-A1"),
+		idTargetX,
+		domain.PeerAddress(idPeerB.String()),
+		domaintest.ID("origin-mismatch-that-would-have-blocked-pre-A1"),
 	)
 
 	routes := svc.routingTable.Lookup(idTargetX)
@@ -1011,7 +1017,7 @@ func TestHopAckScoping_DifferentIdentityNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack for target-X only.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
 
 	// target-X should be promoted.
 	routesX := svc.routingTable.Lookup(idTargetX)
@@ -1063,7 +1069,7 @@ func TestHopAckScoping_SameIdentityDifferentNextHopNotPromoted(t *testing.T) {
 	}
 
 	// hop_ack from peer-D should only promote the peer-D route.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerD), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerD.String()), domain.PeerIdentity{})
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) < 2 {
@@ -1090,8 +1096,8 @@ func TestResolveRelayAddress_InboundPeer(t *testing.T) {
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -1112,7 +1118,7 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address: domain.PeerAddress(idPeerB),
+		Address: domain.PeerAddress(idPeerB.String()),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1}, // only relay, no routing
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -1126,7 +1132,7 @@ func TestResolveRoutableAddress_InboundPeerNeedsBothCaps(t *testing.T) {
 
 	// Now add routing cap.
 	svc.peerMu.Lock()
-	pc.SetIdentity(domain.PeerIdentity(idPeerB))
+	pc.SetIdentity(idPeerB)
 	pc.SetCapabilities([]domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1})
 	svc.peerMu.Unlock()
 
@@ -1148,8 +1154,8 @@ func TestResolveRelayAddress_OutboundPreferredOverInbound(t *testing.T) {
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -1170,8 +1176,8 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -1183,8 +1189,8 @@ func TestResolvePeerIdentity_InboundByTransportAddress(t *testing.T) {
 	}
 
 	// Pass the identity — should NOT match (identity != transport address).
-	id = svc.resolvePeerIdentity(idPeerB)
-	if id != "" {
+	id = svc.resolvePeerIdentity(domain.PeerAddress(idPeerB.String()))
+	if !id.IsZero() {
 		t.Fatalf("identity-as-address should not match inbound conn, got %q", id)
 	}
 }
@@ -1210,7 +1216,7 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 		svc:   &Service{},
 		table: table,
 		sessionChecker: func(peerIdentity domain.PeerIdentity, hops int) domain.PeerAddress {
-			if peerIdentity == domain.PeerIdentity(idPeerB) {
+			if peerIdentity == idPeerB {
 				return domain.PeerAddress("validated-addr-B")
 			}
 			return ""
@@ -1220,8 +1226,8 @@ func TestTableRouterPopulatesRelayNextHopAddress(t *testing.T) {
 	msg := protocol.Envelope{
 		ID:        "msg-1",
 		Topic:     "dm",
-		Sender:    idNodeA,
-		Recipient: idTargetX,
+		Sender:    idNodeA.String(),
+		Recipient: idTargetX.String(),
 	}
 
 	decision := tr.Route(msg)
@@ -1247,7 +1253,7 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOrigin(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idNodeA, Hops: 1, SeqNo: 100},
+			{Identity: idTargetX.String(), Origin: idNodeA.String(), Hops: 1, SeqNo: 100},
 		},
 	}
 
@@ -1280,7 +1286,7 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idNodeA, Hops: 16, SeqNo: 999},
+			{Identity: idTargetX.String(), Origin: idNodeA.String(), Hops: 16, SeqNo: 999},
 		},
 	}
 
@@ -1303,7 +1309,7 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 2, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 2, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, frame)
@@ -1319,7 +1325,7 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 	withdrawal := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 16, SeqNo: 2},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 16, SeqNo: 2},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, withdrawal)
@@ -1341,7 +1347,7 @@ func TestHandleAnnounceRoutesAcceptsOriginWithdrawal(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idOriginC, frame)
@@ -1355,7 +1361,7 @@ func TestHandleAnnounceRoutesAcceptsOriginWithdrawal(t *testing.T) {
 	withdrawal := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 16, SeqNo: 2},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 16, SeqNo: 2},
 		},
 	}
 	svc.handleAnnounceRoutes(idOriginC, withdrawal)
@@ -1385,7 +1391,7 @@ func newNoopMockPeerSender(t *testing.T) *routingmocks.MockPeerSender {
 
 // newTestServiceWithRoutingAndHealth extends newTestServiceWithRouting with
 // the maps required for trackInboundConnect (health tracking, ref counting).
-func newTestServiceWithRoutingAndHealth(t *testing.T, localIdentity string) *Service {
+func newTestServiceWithRoutingAndHealth(t *testing.T, localIdentity domain.PeerIdentity) *Service {
 	t.Helper()
 	svc := newTestServiceWithRouting(t, localIdentity)
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
@@ -1450,7 +1456,7 @@ func TestSendFullTableSyncToInbound(t *testing.T) {
 		if len(line) == 0 {
 			t.Fatal("expected announce_routes frame, got empty data")
 		}
-		if !strings.Contains(line, idPeerC) {
+		if !strings.Contains(line, idPeerC.String()) {
 			t.Fatalf("full-sync frame should contain route for peer-C, got: %s", line)
 		}
 		if !strings.Contains(line, "announce_routes") {
@@ -1629,8 +1635,8 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	// Register inbound peer info WITHOUT mesh_routing_v1 (relay-only).
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
@@ -1643,7 +1649,7 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	}
 
 	// trackInboundConnect should NOT send anything because the gate blocks it.
-	svc.trackInboundConnect(connID, idPeerB, idPeerB)
+	svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1681,8 +1687,8 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 
 	// Register a NetCore so enqueueFrameSync routes through the writer.
 	pc := netcore.New(2, conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	})
 	defer pc.Close()
@@ -1708,7 +1714,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 	}()
 
 	// trackInboundConnect should call sendFullTableSyncToInbound.
-	svc.trackInboundConnect(connID, idPeerB, idPeerB)
+	svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
 
 	select {
 	case data := <-received:
@@ -1716,7 +1722,7 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 		if len(line) == 0 {
 			t.Fatal("expected announce_routes frame, got empty data")
 		}
-		if !strings.Contains(line, idPeerC) {
+		if !strings.Contains(line, idPeerC.String()) {
 			t.Fatalf("full-sync frame should contain route for peer-C, got: %s", line)
 		}
 		if !strings.Contains(line, "announce_routes") {
@@ -1784,8 +1790,8 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 	// Register inbound peer info with routing cap but WITHOUT relay cap.
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
@@ -1799,7 +1805,7 @@ func TestInboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 		t.Fatal("inbound peer should NOT have mesh_relay_v1")
 	}
 
-	svc.trackInboundConnect(connID, idPeerB, idPeerB)
+	svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
 
 	readDone := make(chan int, 1)
 	go func() {
@@ -1857,8 +1863,8 @@ func TestRoutingCapablePeersExcludesRoutingOnlyInbound(t *testing.T) {
 
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerB),
-		Identity: domain.PeerIdentity(idPeerB),
+		Address:  domain.PeerAddress(idPeerB.String()),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRoutingV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -1912,8 +1918,8 @@ func TestRoutingCapablePeers_IncludesCapabilitiesSnapshot(t *testing.T) {
 	}
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(idPeerC),
-		Identity: domain.PeerIdentity(idPeerC),
+		Address:  domain.PeerAddress(idPeerC.String()),
+		Identity: idPeerC,
 		Caps:     inboundCaps,
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -2063,7 +2069,7 @@ func TestTableRouterPopulatesRelayNextHopHops(t *testing.T) {
 
 	router := NewTableRouter(svc, svc.routingTable)
 	decision := router.Route(protocol.Envelope{
-		Recipient: idTargetX,
+		Recipient: idTargetX.String(),
 		Topic:     "dm",
 	})
 
@@ -2118,7 +2124,7 @@ func TestTryForwardViaRoutingTablePlumbsRouteOrigin(t *testing.T) {
 	frame := protocol.Frame{
 		Type:      "relay_message",
 		ID:        "msg-1",
-		Recipient: idTargetX,
+		Recipient: idTargetX.String(),
 	}
 
 	result := svc.tryForwardViaRoutingTable(context.Background(), idTargetX, frame, idPeerA)
@@ -2156,7 +2162,7 @@ func TestTryForwardViaRoutingTableExcludesSender(t *testing.T) {
 	frame := protocol.Frame{
 		Type:      "relay_message",
 		ID:        "msg-2",
-		Recipient: idTargetX,
+		Recipient: idTargetX.String(),
 	}
 
 	result := svc.tryForwardViaRoutingTable(context.Background(), idTargetX, frame, idPeerA)
@@ -2176,12 +2182,12 @@ func TestTryForwardViaRoutingTableNoRoute(t *testing.T) {
 		Recipient: "unknown",
 	}
 
-	result := svc.tryForwardViaRoutingTable(context.Background(), "unknown", frame, idPeerA)
+	result := svc.tryForwardViaRoutingTable(context.Background(), domaintest.ID("unknown"), frame, idPeerA)
 
 	if result.Address != "" {
 		t.Fatalf("expected empty address for unknown recipient, got %s", result.Address)
 	}
-	if result.RouteOrigin != "" {
+	if !result.RouteOrigin.IsZero() {
 		t.Fatalf("expected empty RouteOrigin, got %s", result.RouteOrigin)
 	}
 }
@@ -2196,7 +2202,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 	customTTL := 45 * time.Second
 
 	svc := &Service{
-		identity:              &identity.Identity{Address: idNodeA},
+		identity:              &identity.Identity{Address: idNodeA.String()},
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
@@ -2217,7 +2223,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
@@ -2244,7 +2250,7 @@ func TestHandleAnnounceRoutesDefaultTTLWithoutConfig(t *testing.T) {
 	frame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 
@@ -2298,7 +2304,7 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 	natListenAddr := domain.PeerAddress("127.0.0.1:64646")
 	pc := netcore.New(3, conn, netcore.Inbound, netcore.Options{
 		Address:  natListenAddr,
-		Identity: domain.PeerIdentity(idPeerB),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	})
 	defer pc.Close()
@@ -2326,11 +2332,11 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 	case data := <-received:
 		line := string(data)
 		// Split horizon: route learned FROM peer-B should be excluded.
-		if strings.Contains(line, idPeerB) && strings.Contains(line, idTargetX) {
+		if strings.Contains(line, idPeerB.String()) && strings.Contains(line, idTargetX.String()) {
 			t.Fatalf("full-sync should not include route learned from peer-B (split horizon broken), got: %s", line)
 		}
 		// Route for peer-C should be present.
-		if !strings.Contains(line, idPeerC) {
+		if !strings.Contains(line, idPeerC.String()) {
 			t.Fatalf("full-sync should include route for peer-C, got: %s", line)
 		}
 	case <-time.After(2 * time.Second):
@@ -2356,7 +2362,7 @@ func TestRoutingCapablePeersUsesIdentityForInbound(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"),
-		Identity: domain.PeerIdentity(idPeerB),
+		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -2380,7 +2386,7 @@ func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
-		Identity: domain.PeerIdentity(idPeerB),          // real identity
+		Identity: idPeerB,                               // real identity
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -2393,7 +2399,7 @@ func TestResolveRelayAddressUsesIdentityForInbound(t *testing.T) {
 	}
 
 	// Resolve by listen address — should NOT match (identity ≠ address).
-	addr = svc.resolveRelayAddress("127.0.0.1:64646")
+	addr = svc.resolveRelayAddress(domaintest.ID("127.0.0.1:64646"))
 	if addr != "" {
 		t.Fatalf("resolveRelayAddress should not match by listen address, got %s", addr)
 	}
@@ -2408,7 +2414,7 @@ func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen
-		Identity: domain.PeerIdentity(idPeerB),          // fingerprint
+		Identity: idPeerB,                               // fingerprint
 	})
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
@@ -2424,7 +2430,7 @@ func TestResolvePeerIdentityReturnsIdentityNotAddress(t *testing.T) {
 // newTestServiceWithPendingDrain creates a Service with all fields required
 // by drainPendingForIdentities: pending queue, routing table, relay states,
 // and a TableRouter that performs real route lookups.
-func newTestServiceWithPendingDrain(t *testing.T, localIdentity string) *Service {
+func newTestServiceWithPendingDrain(t *testing.T, localIdentity domain.PeerIdentity) *Service {
 	t.Helper()
 	svc := newTestServiceWithRouting(t, localIdentity)
 	svc.pending = make(map[domain.PeerAddress][]pendingFrame)
@@ -2478,8 +2484,8 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-001",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "hello",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -2513,7 +2519,7 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 		if relayed.Type != "relay_message" {
 			t.Fatalf("expected relay_message, got %s", relayed.Type)
 		}
-		if relayed.Recipient != idTargetX {
+		if relayed.Recipient != idTargetX.String() {
 			t.Fatalf("expected recipient %s, got %s", idTargetX, relayed.Recipient)
 		}
 	default:
@@ -2541,12 +2547,12 @@ func TestDrainPendingForIdentities_MixedAddressKeepsNonMatching(t *testing.T) {
 	// the test about compaction we drain for an identity with no route
 	// and assert the OTHER two survive untouched).
 	matching := protocol.Frame{
-		Type: "send_message", ID: "m-1", Address: idNodeA, Recipient: idTargetX,
+		Type: "send_message", ID: "m-1", Address: idNodeA.String(), Recipient: idTargetX.String(),
 		Topic: "dm", Body: "x", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300,
 	}
 	// Frame 3: different recipient (idTargetY — survives).
 	otherRecipient := protocol.Frame{
-		Type: "send_message", ID: "o-1", Address: idNodeA, Recipient: idTargetY,
+		Type: "send_message", ID: "o-1", Address: idNodeA.String(), Recipient: idTargetY.String(),
 		Topic: "dm", Body: "y", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300,
 	}
 
@@ -2610,8 +2616,8 @@ func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 	relayFrame := protocol.Frame{
 		Type:      "relay_message",
 		ID:        "msg-relay-001",
-		Address:   idPeerC,
-		Recipient: idTargetX,
+		Address:   idPeerC.String(),
+		Recipient: idTargetX.String(),
 		Topic:     "dm",
 		Body:      "relayed",
 		CreatedAt: now.Format(time.RFC3339),
@@ -2641,8 +2647,8 @@ func TestDrainPendingForIdentities_SkipsNonMatchingRecipient(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-002",
-		Address:    idNodeA,
-		Recipient:  idTargetY, // different identity
+		Address:    idNodeA.String(),
+		Recipient:  idTargetY.String(), // different identity
 		Topic:      "dm",
 		Body:       "hello",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -2673,8 +2679,8 @@ func TestDrainPendingForIdentities_EmptyIdentitiesNoop(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-003",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "hello",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -2730,8 +2736,8 @@ func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-expired",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "old",
 		CreatedAt:  expired.Format(time.RFC3339),
@@ -2763,8 +2769,8 @@ func TestDrainPendingForIdentities_NoRouteFrameStays(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-noroute",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "hello",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -2808,8 +2814,8 @@ func TestDrainPendingForIdentities_NoRoutePreservesOutboundState(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-outbound-state",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "hello",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -2876,8 +2882,8 @@ func TestDrainPendingForIdentities_SendFailureReturnsFrame(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-fail",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "hello",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -2927,8 +2933,8 @@ func TestDrainPendingForIdentities_NoRouteDrainDoesNotExhaustRetries(t *testing.
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-noroute-budget",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "hello",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -2979,9 +2985,9 @@ func TestDrainPendingForIdentities_FailedFramesPreserveOrder(t *testing.T) {
 
 	// Queue: [msg-1(X), msg-2(Y), msg-3(X)] — two recipients, interleaved.
 	frames := []pendingFrame{
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "first", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Address: idNodeA, Recipient: "other-recipient", Topic: "dm", Body: "second", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "third", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Address: idNodeA.String(), Recipient: idTargetX.String(), Topic: "dm", Body: "first", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Address: idNodeA.String(), Recipient: "other-recipient", Topic: "dm", Body: "second", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Address: idNodeA.String(), Recipient: idTargetX.String(), Topic: "dm", Body: "third", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
 	}
 
 	svc.deliveryMu.Lock()
@@ -3053,11 +3059,11 @@ func TestDrainPendingForIdentities_PartialDeliveryPreservesOrder(t *testing.T) {
 	// Drain for X extracts msg-1 and msg-4. Both fail (send failure).
 	// Result must be [msg-1, msg-2, msg-3, msg-4, msg-5].
 	frames := []pendingFrame{
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "a", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Address: idNodeA, Recipient: "other-Y", Topic: "dm", Body: "b", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Address: idNodeA, Recipient: "other-Z", Topic: "dm", Body: "c", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-4", Address: idNodeA, Recipient: idTargetX, Topic: "dm", Body: "d", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
-		{Frame: protocol.Frame{Type: "send_message", ID: "msg-5", Address: idNodeA, Recipient: "other-Y", Topic: "dm", Body: "e", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-1", Address: idNodeA.String(), Recipient: idTargetX.String(), Topic: "dm", Body: "a", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-2", Address: idNodeA.String(), Recipient: "other-Y", Topic: "dm", Body: "b", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-3", Address: idNodeA.String(), Recipient: "other-Z", Topic: "dm", Body: "c", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-4", Address: idNodeA.String(), Recipient: idTargetX.String(), Topic: "dm", Body: "d", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
+		{Frame: protocol.Frame{Type: "send_message", ID: "msg-5", Address: idNodeA.String(), Recipient: "other-Y", Topic: "dm", Body: "e", CreatedAt: now.Format(time.RFC3339), TTLSeconds: 300}, QueuedAt: now},
 	}
 
 	svc.deliveryMu.Lock()
@@ -3122,8 +3128,8 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-concurrent",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "once",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -3166,8 +3172,8 @@ func TestDrainPendingForIdentities_SkipsReceipt(t *testing.T) {
 	frame := protocol.Frame{
 		Type:        "relay_delivery_receipt",
 		ID:          "msg-receipt-skip",
-		Address:     idNodeA,
-		Recipient:   idTargetX,
+		Address:     idNodeA.String(),
+		Recipient:   idTargetX.String(),
 		Status:      "delivered",
 		DeliveredAt: now.Format(time.RFC3339),
 	}
@@ -3210,8 +3216,8 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-announce",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "waiting",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -3226,7 +3232,7 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 	announceFrame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	// Install drainDone hook to synchronize with the async goroutine
@@ -3282,7 +3288,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	primaryAnnounce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idOriginC, primaryAnnounce)
@@ -3290,7 +3296,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	backupAnnounce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
@@ -3307,8 +3313,8 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-withdraw-backup",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "waiting for backup route",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -3324,7 +3330,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	withdrawalFrame := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 16, SeqNo: 2},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 16, SeqNo: 2},
 		},
 	}
 
@@ -3365,7 +3371,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 
 	// Build service with a routing table whose clock we control.
 	svc := &Service{
-		identity:              &identity.Identity{Address: idNodeA},
+		identity:              &identity.Identity{Address: idNodeA.String()},
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
@@ -3385,7 +3391,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		relayStates:           newRelayStateStore(),
 	}
 	svc.routingTable = routing.NewTable(
-		routing.WithLocalOrigin(routing.PeerIdentity(idNodeA)),
+		routing.WithLocalOrigin(idNodeA),
 		routing.WithClock(func() time.Time { return current }),
 	)
 	svc.announceLoop = routing.NewAnnounceLoop(
@@ -3415,7 +3421,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	primaryAnnounce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idOriginC, primaryAnnounce)
@@ -3423,7 +3429,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	backupAnnounce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerC, Hops: 2, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerC.String(), Hops: 2, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
@@ -3444,8 +3450,8 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	// short ExpiresAt via UpdateRoute.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
-		Origin:    routing.PeerIdentity(idOriginC),
-		NextHop:   routing.PeerIdentity(idOriginC),
+		Origin:    idOriginC,
+		NextHop:   idOriginC,
 		Hops:      1,
 		SeqNo:     2,
 		Source:    routing.RouteSourceAnnouncement,
@@ -3462,8 +3468,8 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-ttl-backup",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "waiting for TTL expiry",
 		CreatedAt:  realNow.Format(time.RFC3339),
@@ -3482,13 +3488,13 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 	//   2. Build identities map
 	//   3. Trigger drain
 	result := svc.routingTable.TickTTL()
-	if len(result.Exposed) != 1 || string(result.Exposed[0]) != idTargetX {
+	if len(result.Exposed) != 1 || result.Exposed[0] != idTargetX {
 		t.Fatalf("expected TickTTL to expose [%s], got %v", idTargetX, result.Exposed)
 	}
 
 	identities := make(map[domain.PeerIdentity]struct{}, len(result.Exposed))
 	for _, id := range result.Exposed {
-		identities[domain.PeerIdentity(id)] = struct{}{}
+		identities[id] = struct{}{}
 	}
 
 	var wg sync.WaitGroup
@@ -3526,7 +3532,7 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 	current := now
 
 	svc := &Service{
-		identity:              &identity.Identity{Address: idNodeA},
+		identity:              &identity.Identity{Address: idNodeA.String()},
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),
 		sessions:              make(map[domain.PeerAddress]*peerSession),
@@ -3538,15 +3544,15 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 		outbound:              make(map[string]outboundDelivery),
 	}
 	svc.routingTable = routing.NewTable(
-		routing.WithLocalOrigin(routing.PeerIdentity(idNodeA)),
+		routing.WithLocalOrigin(idNodeA),
 		routing.WithClock(func() time.Time { return current }),
 	)
 
 	// Single route — will expire.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity:  idTargetX,
-		Origin:    routing.PeerIdentity(idOriginC),
-		NextHop:   routing.PeerIdentity(idOriginC),
+		Origin:    idOriginC,
+		NextHop:   idOriginC,
 		Hops:      1,
 		SeqNo:     1,
 		Source:    routing.RouteSourceAnnouncement,
@@ -3561,7 +3567,7 @@ func TestTTLExpiryNoBackup_NoDrain(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-ttl-no-backup",
-		Recipient:  idTargetX,
+		Recipient:  idTargetX.String(),
 		TTLSeconds: 300,
 	}
 	svc.deliveryMu.Lock()
@@ -3624,7 +3630,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	primaryAnnounce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, primaryAnnounce)
@@ -3633,7 +3639,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	backupAnnounce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerC, Hops: 2, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerC.String(), Hops: 2, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
@@ -3650,8 +3656,8 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-disconnect-backup",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "waiting for disconnect drain",
 		CreatedAt:  realNow.Format(time.RFC3339),
@@ -3719,7 +3725,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 	announce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, announce)
@@ -3730,8 +3736,8 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-disconnect-no-backup",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "no backup available",
 		CreatedAt:  realNow.Format(time.RFC3339),
@@ -3781,7 +3787,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 	firstAnnounce := protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	svc.handleAnnounceRoutes(idPeerB, firstAnnounce)
@@ -3793,8 +3799,8 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-unchanged-drain",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "waiting-for-resync",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -3861,7 +3867,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	svc.handleAnnounceRoutes(idPeerB, protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 5},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 5},
 		},
 	})
 
@@ -3871,8 +3877,8 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	frame := protocol.Frame{
 		Type:       "send_message",
 		ID:         "msg-stale-reject",
-		Address:    idNodeA,
-		Recipient:  idTargetX,
+		Address:    idNodeA.String(),
+		Recipient:  idTargetX.String(),
 		Topic:      "dm",
 		Body:       "should-not-drain",
 		CreatedAt:  now.Format(time.RFC3339),
@@ -3896,7 +3902,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	svc.handleAnnounceRoutes(idPeerB, protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
-			{Identity: idTargetX, Origin: idPeerB, Hops: 1, SeqNo: 3},
+			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 3},
 		},
 	})
 
@@ -3928,7 +3934,7 @@ func TestRoutingTargetsDeduplicatesFallbackPort(t *testing.T) {
 	fallback := domain.PeerAddress("1.2.3.4:64646")
 
 	svc := &Service{
-		identity: &identity.Identity{Address: idNodeA},
+		identity: &identity.Identity{Address: idNodeA.String()},
 		cfg:      config.Node{ListenAddress: "0.0.0.0:9999"},
 	}
 	svc.initMaps()
@@ -3936,7 +3942,7 @@ func TestRoutingTargetsDeduplicatesFallbackPort(t *testing.T) {
 	// Active session under fallback address, with dialOrigin mapping back.
 	svc.sessions[fallback] = &peerSession{
 		address:      fallback,
-		peerIdentity: "peer-identity-A",
+		peerIdentity: domaintest.ID("peer-identity-A"),
 		authOK:       true,
 	}
 	svc.dialOrigin[fallback] = canonical
@@ -3946,7 +3952,7 @@ func TestRoutingTargetsDeduplicatesFallbackPort(t *testing.T) {
 		LastConnectedAt: time.Now().UTC(),
 	}
 	svc.peerTypes[canonical] = domain.NodeTypeFull
-	svc.peerIDs[canonical] = "peer-identity-A"
+	svc.peerIDs[canonical] = domaintest.ID("peer-identity-A")
 
 	// Canonical peer in peer list (no session under this key).
 	svc.peers = []transport.Peer{
@@ -4078,9 +4084,9 @@ func TestSendNoticeToPeer_BootstrapRecordsOutboundSuccess(t *testing.T) {
 		t.Fatalf("trusted_advertise_source: got %q want %q",
 			pm.TrustedAdvertiseSource, trustedAdvertiseSourceOutbound)
 	}
-	if pm.TrustedAdvertiseIP != "127.0.0.1" {
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "127.0.0.1" {
 		t.Fatalf("trusted_advertise_ip: got %q want %q (must be canonical IP from RemoteAddr)",
-			pm.TrustedAdvertiseIP, "127.0.0.1")
+			peerIPPtrString(pm.TrustedAdvertiseIP), "127.0.0.1")
 	}
 	_, wantPort, ok := splitHostPort(string(peerAddr))
 	if !ok {

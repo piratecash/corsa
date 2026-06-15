@@ -3,6 +3,9 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // sync_digest_test.go covers Phase 3 PR 12.5 — the
@@ -19,14 +22,14 @@ import (
 // affect the result; the helper sorts internally.
 func TestComputeSyncDigest_DeterministicForIdenticalView(t *testing.T) {
 	a := []DigestEntry{
-		{Identity: "id-x", MaxSeqNo: 7},
-		{Identity: "id-y", MaxSeqNo: 3},
-		{Identity: "id-z", MaxSeqNo: 12},
+		{Identity: domaintest.ID("id-x"), MaxSeqNo: 7},
+		{Identity: domaintest.ID("id-y"), MaxSeqNo: 3},
+		{Identity: domaintest.ID("id-z"), MaxSeqNo: 12},
 	}
 	b := []DigestEntry{
-		{Identity: "id-z", MaxSeqNo: 12},
-		{Identity: "id-x", MaxSeqNo: 7},
-		{Identity: "id-y", MaxSeqNo: 3},
+		{Identity: domaintest.ID("id-z"), MaxSeqNo: 12},
+		{Identity: domaintest.ID("id-x"), MaxSeqNo: 7},
+		{Identity: domaintest.ID("id-y"), MaxSeqNo: 3},
 	}
 	if ComputeSyncDigest(a) != ComputeSyncDigest(b) {
 		t.Fatal("digest is order-sensitive; sort must canonicalise")
@@ -37,10 +40,10 @@ func TestComputeSyncDigest_DeterministicForIdenticalView(t *testing.T) {
 // (Identity, SeqNo) pair must change the hash. Pins the
 // "small change → visible churn" contract.
 func TestComputeSyncDigest_DiffersOnExtraIdentity(t *testing.T) {
-	base := []DigestEntry{{Identity: "id-x", MaxSeqNo: 1}}
+	base := []DigestEntry{{Identity: domaintest.ID("id-x"), MaxSeqNo: 1}}
 	extra := []DigestEntry{
-		{Identity: "id-x", MaxSeqNo: 1},
-		{Identity: "id-y", MaxSeqNo: 1},
+		{Identity: domaintest.ID("id-x"), MaxSeqNo: 1},
+		{Identity: domaintest.ID("id-y"), MaxSeqNo: 1},
 	}
 	if ComputeSyncDigest(base) == ComputeSyncDigest(extra) {
 		t.Fatal("digest unchanged when an identity was added")
@@ -52,8 +55,8 @@ func TestComputeSyncDigest_DiffersOnExtraIdentity(t *testing.T) {
 // invariant a stale-but-same-set view would falsely match the
 // fresh view.
 func TestComputeSyncDigest_DiffersOnDifferentSeqNo(t *testing.T) {
-	low := []DigestEntry{{Identity: "id-x", MaxSeqNo: 1}}
-	high := []DigestEntry{{Identity: "id-x", MaxSeqNo: 2}}
+	low := []DigestEntry{{Identity: domaintest.ID("id-x"), MaxSeqNo: 1}}
+	high := []DigestEntry{{Identity: domaintest.ID("id-x"), MaxSeqNo: 2}}
 	if ComputeSyncDigest(low) == ComputeSyncDigest(high) {
 		t.Fatal("digest unchanged when SeqNo advanced")
 	}
@@ -81,15 +84,15 @@ func TestComputeSyncDigest_EmptyReturnsStableConstant(t *testing.T) {
 // mismatch and the optimisation would never fire.
 func TestSyncDigestFor_OnlyIncludesClaimsThroughPeer(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-via-a", "id-peer-a", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-via-b", "id-peer-b", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-via-a"), domaintest.ID("id-peer-a"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-via-b"), domaintest.ID("id-peer-b"), 2, RouteSourceAnnouncement)
 
 	// Digest for peer-a includes only id-via-a; digest for peer-b
 	// includes only id-via-b. The two must differ.
-	digA, countA := tbl.SyncDigestFor("id-peer-a")
-	digB, countB := tbl.SyncDigestFor("id-peer-b")
+	digA, countA := tbl.SyncDigestFor(domaintest.ID("id-peer-a"))
+	digB, countB := tbl.SyncDigestFor(domaintest.ID("id-peer-b"))
 	if countA != 1 {
 		t.Fatalf("SyncDigestFor(peer-a) count = %d, want 1", countA)
 	}
@@ -109,12 +112,12 @@ func TestSyncDigestFor_OnlyIncludesClaimsThroughPeer(t *testing.T) {
 // rule one layer down.
 func TestSyncDigestFor_ExcludesPeerSelfIdentity(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-peer", "id-peer", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-other", "id-peer", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-peer"), domaintest.ID("id-peer"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-other"), domaintest.ID("id-peer"), 2, RouteSourceAnnouncement)
 
-	_, count := tbl.SyncDigestFor("id-peer")
+	_, count := tbl.SyncDigestFor(domaintest.ID("id-peer"))
 	if count != 1 {
 		t.Fatalf("SyncDigestFor(peer) count = %d, want 1 (self-identity must be excluded)", count)
 	}
@@ -127,16 +130,16 @@ func TestSyncDigestFor_ExcludesPeerSelfIdentity(t *testing.T) {
 // have nothing to do with the peer view.
 func TestSyncDigestFor_IgnoresWithdrawnAndExpired(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// One live claim, one withdrawn.
-	upsertClaim(t, tbl, "id-live", "id-peer", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-dead", "id-peer", 2, RouteSourceAnnouncement)
-	if !tbl.WithdrawRoute("id-dead", "id-dead", "id-peer", 2) {
+	upsertClaim(t, tbl, domaintest.ID("id-live"), domaintest.ID("id-peer"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-dead"), domaintest.ID("id-peer"), 2, RouteSourceAnnouncement)
+	if !tbl.WithdrawRoute(domaintest.ID("id-dead"), domaintest.ID("id-dead"), domaintest.ID("id-peer"), 2) {
 		t.Fatal("WithdrawRoute returned false")
 	}
 
-	_, count := tbl.SyncDigestFor("id-peer")
+	_, count := tbl.SyncDigestFor(domaintest.ID("id-peer"))
 	if count != 1 {
 		t.Fatalf("SyncDigestFor count = %d, want 1 (withdrawn must be excluded)", count)
 	}
@@ -147,8 +150,8 @@ func TestSyncDigestFor_IgnoresWithdrawnAndExpired(t *testing.T) {
 // Pins the same canonicalisation as the unit test above; a node
 // with no learned routes still produces a deterministic digest.
 func TestSyncDigestFor_EmptyTableReturnsEmptyDigestConstant(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
-	got, count := tbl.SyncDigestFor("id-unknown")
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
+	got, count := tbl.SyncDigestFor(domaintest.ID("id-unknown"))
 	if count != 0 {
 		t.Fatalf("count = %d, want 0", count)
 	}
@@ -162,12 +165,12 @@ func TestSyncDigestFor_EmptyTableReturnsEmptyDigestConstant(t *testing.T) {
 // consume returns the same fields. After consume the cache no
 // longer contains the entry (single-shot semantic).
 func TestRecordAndConsumeDigestSnapshot_RoundTrip(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	tbl.RecordPeerDigestSnapshot("id-peer", "digest-abc", 7, now)
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "digest-abc", 7, now)
 
-	gotDigest, gotCount, gotGen, ok := tbl.ConsumePeerDigestSnapshot("id-peer", now.Add(1*time.Second))
+	gotDigest, gotCount, gotGen, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now.Add(1*time.Second))
 	if !ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=false for fresh entry")
 	}
@@ -183,7 +186,7 @@ func TestRecordAndConsumeDigestSnapshot_RoundTrip(t *testing.T) {
 
 	// Second consume must return ok=false — the entry was
 	// removed on the first read.
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot("id-peer", now.Add(2*time.Second)); ok {
+	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now.Add(2*time.Second)); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true on second call; single-shot contract broken")
 	}
 }
@@ -192,13 +195,13 @@ func TestRecordAndConsumeDigestSnapshot_RoundTrip(t *testing.T) {
 // SessionDigestCacheTTL are silently evicted and reported as
 // not-found.
 func TestConsumeDigestSnapshot_TTLExpired(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl.RecordPeerDigestSnapshot("id-peer", "stale", 3, now)
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "stale", 3, now)
 
 	// Walk past the TTL window.
 	after := now.Add(SessionDigestCacheTTL + time.Second)
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot("id-peer", after); ok {
+	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), after); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true past TTL window")
 	}
 
@@ -215,8 +218,8 @@ func TestConsumeDigestSnapshot_TTLExpired(t *testing.T) {
 // TestConsumeDigestSnapshot_AbsentReturnsFalse — peer with no
 // recorded snapshot returns ok=false without touching anything.
 func TestConsumeDigestSnapshot_AbsentReturnsFalse(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot("id-never", time.Now()); ok {
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
+	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-never"), time.Now()); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true for absent peer")
 	}
 }
@@ -225,13 +228,13 @@ func TestConsumeDigestSnapshot_AbsentReturnsFalse(t *testing.T) {
 // Used by lifecycle hooks that know the cached digest is no
 // longer trustworthy (e.g. a permanent peer eviction).
 func TestPurgeDigestSnapshot_RemovesEntry(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	tbl.RecordPeerDigestSnapshot("id-peer", "digest-x", 1, now)
-	tbl.PurgeDigestSnapshot("id-peer")
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "digest-x", 1, now)
+	tbl.PurgeDigestSnapshot(domaintest.ID("id-peer"))
 
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot("id-peer", now); ok {
+	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true after Purge")
 	}
 }
@@ -241,11 +244,11 @@ func TestPurgeDigestSnapshot_RemovesEntry(t *testing.T) {
 // alone. The walk is bounded by cache size so the test asserts
 // "we kept the fresh one" rather than measuring cost.
 func TestPruneExpiredDigestSnapshots_EvictsStaleOnly(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	tbl.RecordPeerDigestSnapshot("id-fresh", "fresh-digest", 1, now)
-	tbl.RecordPeerDigestSnapshot("id-stale", "stale-digest", 1, now.Add(-2*SessionDigestCacheTTL))
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-fresh"), "fresh-digest", 1, now)
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-stale"), "stale-digest", 1, now.Add(-2*SessionDigestCacheTTL))
 
 	tbl.mu.Lock()
 	evicted := tbl.pruneExpiredDigestSnapshotsLocked(now)
@@ -260,7 +263,7 @@ func TestPruneExpiredDigestSnapshots_EvictsStaleOnly(t *testing.T) {
 	}
 
 	// And the fresh one is still consumable.
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot("id-fresh", now); !ok {
+	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-fresh"), now); !ok {
 		t.Fatal("fresh entry consumed as ok=false after prune")
 	}
 }
@@ -269,8 +272,8 @@ func TestPruneExpiredDigestSnapshots_EvictsStaleOnly(t *testing.T) {
 // mirrors the rest of the routing API (MarkHopAck, MarkProbeAck
 // etc.). An empty peer identity must not create stray entries.
 func TestRecordDigestSnapshot_EmptyPeerIsNoop(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("self"))
-	tbl.RecordPeerDigestSnapshot("", "x", 1, time.Now())
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
+	tbl.RecordPeerDigestSnapshot(domain.PeerIdentity{}, "x", 1, time.Now())
 
 	tbl.mu.RLock()
 	cacheLen := tbl.digestCacheLenLocked()

@@ -218,14 +218,14 @@ type PendingMessage struct {
 // NodeStatus is the composite snapshot ProbeNode returns every poll
 // interval. Consumers treat the struct as immutable between polls.
 type NodeStatus struct {
-	Address          string
-	Connected        bool
-	Welcome          string
-	NodeID           string
-	NodeType         string
-	ListenerEnabled  bool
-	ListenerAddress  string
-	ClientVersion    string
+	Address         string
+	Connected       bool
+	Welcome         string
+	NodeID          string
+	NodeType        string
+	ListenerEnabled bool
+	ListenerAddress string
+	ClientVersion   string
 	// ProtocolVersion mirrors welcome.Version — the wire protocol version
 	// the local node emits in hello/welcome (see config.ProtocolVersion).
 	// Surfaced here so the desktop console info tab can render it without
@@ -312,13 +312,12 @@ type ResourceUsage struct {
 	SampledAt string
 }
 
-
 // NewDesktopClient wires the composition root: opens (or attaches to) the
 // chatlog, builds every sub-service, and registers the MessageStoreAdapter
 // with the embedded node so the node delegates message persistence to the
 // desktop layer instead of managing its own chatlog.
 func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service) *DesktopClient {
-	store := chatlog.NewStore(nodeCfg.EffectiveChatLogDir(), domain.PeerIdentity(id.Address), domain.ListenAddress(nodeCfg.ListenAddress))
+	store := chatlog.NewStore(nodeCfg.EffectiveChatLogDir(), domain.PeerIdentityFromWire(id.Address), domain.ListenAddress(nodeCfg.ListenAddress))
 	c := &DesktopClient{
 		id:        id,
 		appCfg:    appCfg,

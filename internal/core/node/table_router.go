@@ -80,9 +80,9 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 	// because there is no hint source available.
 	var routes []routing.RouteEntry
 	if r.svc != nil {
-		routes = r.table.LookupForRelay(routing.PeerIdentity(msg.Recipient), r.svc.nextRelayShapingHint())
+		routes = r.table.LookupForRelay(domain.PeerIdentityFromWire(msg.Recipient), r.svc.nextRelayShapingHint())
 	} else {
-		routes = r.table.Lookup(routing.PeerIdentity(msg.Recipient))
+		routes = r.table.Lookup(domain.PeerIdentityFromWire(msg.Recipient))
 	}
 	if len(routes) == 0 {
 		log.Debug().
@@ -93,7 +93,7 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		// Per-target rate limit inside SendRouteQuery prevents
 		// query storms; the goroutine spawn is bounded to one per
 		// rate-limit cycle.
-		r.svc.triggerRouteQueryAsync(domain.PeerIdentity(msg.Recipient))
+		r.svc.triggerRouteQueryAsync(domain.PeerIdentityFromWire(msg.Recipient))
 		return decision
 	}
 
@@ -119,7 +119,7 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		decision.RelayNextHopHops = route.Hops
 		log.Debug().
 			Str("recipient", msg.Recipient).
-			Str("next_hop", string(route.NextHop)).
+			Str("next_hop", route.NextHop.String()).
 			Str("address", string(address)).
 			Int("hops", route.Hops).
 			Str("source", route.Source.String()).
@@ -139,8 +139,8 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 		// limited per target (3 emissions per 30 s) and
 		// spawn-throttled, so firing on every Bad-route send is
 		// safe under sustained traffic.
-		if health, tracked := r.table.HealthFor(routing.PeerIdentity(msg.Recipient), route.NextHop); tracked && health == routing.HealthBad {
-			r.svc.triggerRouteQueryAsync(domain.PeerIdentity(msg.Recipient))
+		if health, tracked := r.table.HealthFor(domain.PeerIdentityFromWire(msg.Recipient), route.NextHop); tracked && health == routing.HealthBad {
+			r.svc.triggerRouteQueryAsync(domain.PeerIdentityFromWire(msg.Recipient))
 		}
 		return decision
 	}
@@ -153,6 +153,6 @@ func (r *TableRouter) Route(msg protocol.Envelope) RoutingDecision {
 	// Phase 2 on-demand recovery: routes existed in the table but
 	// none had a usable connection. Nudge route discovery so the
 	// next message has fresher uplink data; rate-limit applies.
-	r.svc.triggerRouteQueryAsync(domain.PeerIdentity(msg.Recipient))
+	r.svc.triggerRouteQueryAsync(domain.PeerIdentityFromWire(msg.Recipient))
 	return decision
 }

@@ -56,7 +56,7 @@ func (r *NodeRuntime) ProtocolVersion() int {
 }
 
 func (r *NodeRuntime) Address() string {
-	return string(r.service.Address())
+	return r.service.Address()
 }
 
 func (r *NodeRuntime) Running() bool {

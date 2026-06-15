@@ -11,6 +11,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 
@@ -27,11 +28,11 @@ func TestEnsurePeerLocked(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
 	r.mu.Unlock()
 
 	r.mu.RLock()
-	ps, ok := r.peers["peer-1"]
+	ps, ok := r.peers[domaintest.ID("peer-1")]
 	r.mu.RUnlock()
 
 	if !ok {
@@ -40,8 +41,8 @@ func TestEnsurePeerLocked(t *testing.T) {
 
 	// Modify and ensure again — should not overwrite.
 	r.mu.Lock()
-	r.peers["peer-1"].Unread = 5
-	r.ensurePeerLocked("peer-1")
+	r.peers[domaintest.ID("peer-1")].Unread = 5
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
 	r.mu.Unlock()
 
 	if ps.Unread != 5 {
@@ -53,13 +54,13 @@ func TestEnsurePeerLocked(t *testing.T) {
 // the front of peerOrder, deduplicating any prior occurrences.
 func TestPromotePeerLocked(t *testing.T) {
 	r := newTestRouter()
-	r.peerOrder = []domain.PeerIdentity{"a", "b", "c"}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b"), domaintest.ID("c")}
 
 	r.mu.Lock()
-	r.promotePeerLocked("c")
+	r.promotePeerLocked(domaintest.ID("c"))
 	r.mu.Unlock()
 
-	if r.peerOrder[0] != "c" {
+	if r.peerOrder[0] != domaintest.ID("c") {
 		t.Fatalf("expected c at front, got %v", r.peerOrder)
 	}
 	if len(r.peerOrder) != 3 {
@@ -67,9 +68,9 @@ func TestPromotePeerLocked(t *testing.T) {
 	}
 
 	r.mu.Lock()
-	r.promotePeerLocked("a")
+	r.promotePeerLocked(domaintest.ID("a"))
 	r.mu.Unlock()
-	expected := []domain.PeerIdentity{"a", "c", "b"}
+	expected := []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("c"), domaintest.ID("b")}
 	for i, v := range expected {
 		if r.peerOrder[i] != v {
 			t.Fatalf("index %d: expected %q, got %q", i, v, r.peerOrder[i])
@@ -78,7 +79,7 @@ func TestPromotePeerLocked(t *testing.T) {
 
 	// Promote empty string → no-op.
 	r.mu.Lock()
-	r.promotePeerLocked("")
+	r.promotePeerLocked(domain.PeerIdentity{})
 	r.mu.Unlock()
 	if len(r.peerOrder) != 3 {
 		t.Fatalf("empty promote changed slice: %v", r.peerOrder)
@@ -86,9 +87,9 @@ func TestPromotePeerLocked(t *testing.T) {
 
 	// Promote new peer → added at front.
 	r.mu.Lock()
-	r.promotePeerLocked("new-peer")
+	r.promotePeerLocked(domaintest.ID("new-peer"))
 	r.mu.Unlock()
-	if r.peerOrder[0] != "new-peer" {
+	if r.peerOrder[0] != domaintest.ID("new-peer") {
 		t.Fatalf("new peer should be at front, got %v", r.peerOrder)
 	}
 }
@@ -97,13 +98,13 @@ func TestPromotePeerLocked(t *testing.T) {
 // a peer out of peerOrder (including duplicates).
 func TestRemovePeerLocked(t *testing.T) {
 	r := newTestRouter()
-	r.peerOrder = []domain.PeerIdentity{"a", "b", "c", "b", "d"}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b"), domaintest.ID("c"), domaintest.ID("b"), domaintest.ID("d")}
 
 	r.mu.Lock()
-	r.removePeerLocked("b")
+	r.removePeerLocked(domaintest.ID("b"))
 	r.mu.Unlock()
 
-	expected := []domain.PeerIdentity{"a", "c", "d"}
+	expected := []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("c"), domaintest.ID("d")}
 	if len(r.peerOrder) != len(expected) {
 		t.Fatalf("expected %v, got %v", expected, r.peerOrder)
 	}
@@ -115,7 +116,7 @@ func TestRemovePeerLocked(t *testing.T) {
 
 	// Removing non-existent peer should be a no-op.
 	r.mu.Lock()
-	r.removePeerLocked("z")
+	r.removePeerLocked(domaintest.ID("z"))
 	r.mu.Unlock()
 	if len(r.peerOrder) != 3 {
 		t.Fatalf("no-op removal changed slice: %v", r.peerOrder)
@@ -128,31 +129,38 @@ func TestRemovePeerLocked(t *testing.T) {
 func TestNormalizePeerAtIngress(t *testing.T) {
 	r := newTestRouter()
 
-	// peerForMessage normalizes padded Sender/Recipient.
+	// peerForMessage parses the wire Sender/Recipient. A whitespace-padded
+	// value is not a valid 40-char hex fingerprint, so PeerIdentityFromWire
+	// yields the zero identity (the "absent" sentinel) — the byte-typed
+	// equivalent of the old trimmed-empty result.
 	ev := protocol.LocalChangeEvent{
 		Sender:    " peer-1 ",
 		Recipient: "me",
 	}
 	got := r.peerForMessage(ev)
-	if got != "peer-1" {
-		t.Fatalf("peerForMessage did not normalize: got %q", got)
+	if !got.IsZero() {
+		t.Fatalf("peerForMessage should yield zero identity for malformed wire input: got %q", got)
 	}
 
-	// SelectPeer normalizes.
-	r.SelectPeer(" peer-2 ")
+	// SelectPeer normalizes via normalizePeer, which trims the hex String()
+	// form. For an already-valid identity this is a no-op, so activePeer
+	// equals the selected identity unchanged.
+	sel := domaintest.ID("peer-2")
+	r.SelectPeer(sel)
 	r.mu.RLock()
 	active := r.activePeer
 	r.mu.RUnlock()
-	if active != "peer-2" {
+	if active != sel {
 		t.Fatalf("SelectPeer did not normalize: activePeer = %q", active)
 	}
 
-	// AutoSelectPeer normalizes.
-	r.AutoSelectPeer("  peer-3  ")
+	// AutoSelectPeer normalizes the same way.
+	auto := domaintest.ID("peer-3")
+	r.AutoSelectPeer(auto)
 	r.mu.RLock()
 	active = r.activePeer
 	r.mu.RUnlock()
-	if active != "peer-3" {
+	if active != auto {
 		t.Fatalf("AutoSelectPeer did not normalize: activePeer = %q", active)
 	}
 }
@@ -163,13 +171,13 @@ func TestClearPeerUnread(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.peers["peer-1"] = &RouterPeerState{Unread: 7}
+	r.peers[domaintest.ID("peer-1")] = &RouterPeerState{Unread: 7}
 	r.mu.Unlock()
 
-	r.clearPeerUnread("peer-1")
+	r.clearPeerUnread(domaintest.ID("peer-1"))
 
 	r.mu.RLock()
-	u := r.peers["peer-1"].Unread
+	u := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 
 	if u != 0 {
@@ -177,7 +185,7 @@ func TestClearPeerUnread(t *testing.T) {
 	}
 
 	// Clearing non-existent peer should not panic.
-	r.clearPeerUnread("nonexistent")
+	r.clearPeerUnread(domaintest.ID("nonexistent"))
 }
 
 // TestPeerStateUnreadIntegrity verifies that unread counts are
@@ -185,15 +193,15 @@ func TestClearPeerUnread(t *testing.T) {
 func TestPeerStateUnreadIntegrity(t *testing.T) {
 	r := newTestRouter()
 	r.mu.Lock()
-	r.peers["peer-a"] = &RouterPeerState{Unread: 3}
-	r.peers["peer-b"] = &RouterPeerState{Unread: 5}
+	r.peers[domaintest.ID("peer-a")] = &RouterPeerState{Unread: 3}
+	r.peers[domaintest.ID("peer-b")] = &RouterPeerState{Unread: 5}
 	r.mu.Unlock()
 
-	r.clearPeerUnread("peer-a")
+	r.clearPeerUnread(domaintest.ID("peer-a"))
 
 	r.mu.RLock()
-	ua := r.peers["peer-a"].Unread
-	ub := r.peers["peer-b"].Unread
+	ua := r.peers[domaintest.ID("peer-a")].Unread
+	ub := r.peers[domaintest.ID("peer-b")].Unread
 	r.mu.RUnlock()
 
 	if ua != 0 {
@@ -210,9 +218,9 @@ func TestSeedPreviews(t *testing.T) {
 	r := newTestRouter()
 
 	previews := []ConversationPreview{
-		{PeerAddress: "peer-with-unread", UnreadCount: 3},
-		{PeerAddress: "peer-all-read", UnreadCount: 0},
-		{PeerAddress: "peer-also-unread", UnreadCount: 1},
+		{PeerAddress: domaintest.ID("peer-with-unread"), UnreadCount: 3},
+		{PeerAddress: domaintest.ID("peer-all-read"), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("peer-also-unread"), UnreadCount: 1},
 	}
 
 	// Inline the seedPreviews logic (needs client.Address() which we
@@ -220,7 +228,7 @@ func TestSeedPreviews(t *testing.T) {
 	// match any preview address, so all pass through).
 	r.mu.Lock()
 	for _, p := range previews {
-		if p.PeerAddress == "" {
+		if p.PeerAddress.IsZero() {
 			continue
 		}
 		r.ensurePeerLocked(p.PeerAddress)
@@ -233,7 +241,7 @@ func TestSeedPreviews(t *testing.T) {
 	r.mu.Unlock()
 
 	// All peers should be in the peers map.
-	for _, addr := range []domain.PeerIdentity{"peer-with-unread", "peer-all-read", "peer-also-unread"} {
+	for _, addr := range []domain.PeerIdentity{domaintest.ID("peer-with-unread"), domaintest.ID("peer-all-read"), domaintest.ID("peer-also-unread")} {
 		r.mu.RLock()
 		_, ok := r.peers[addr]
 		r.mu.RUnlock()
@@ -245,14 +253,14 @@ func TestSeedPreviews(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if r.peers["peer-with-unread"].Unread != 3 {
-		t.Fatalf("expected unread=3, got %d", r.peers["peer-with-unread"].Unread)
+	if r.peers[domaintest.ID("peer-with-unread")].Unread != 3 {
+		t.Fatalf("expected unread=3, got %d", r.peers[domaintest.ID("peer-with-unread")].Unread)
 	}
-	if r.peers["peer-also-unread"].Unread != 1 {
-		t.Fatalf("expected unread=1, got %d", r.peers["peer-also-unread"].Unread)
+	if r.peers[domaintest.ID("peer-also-unread")].Unread != 1 {
+		t.Fatalf("expected unread=1, got %d", r.peers[domaintest.ID("peer-also-unread")].Unread)
 	}
-	if r.peers["peer-all-read"].Unread != 0 {
-		t.Fatalf("expected unread=0, got %d", r.peers["peer-all-read"].Unread)
+	if r.peers[domaintest.ID("peer-all-read")].Unread != 0 {
+		t.Fatalf("expected unread=0, got %d", r.peers[domaintest.ID("peer-all-read")].Unread)
 	}
 
 	// Unread peers should be promoted to front of peerOrder.
@@ -260,7 +268,7 @@ func TestSeedPreviews(t *testing.T) {
 	if len(r.peerOrder) < 2 {
 		t.Fatalf("expected at least 2 entries in peerOrder, got %d: %v", len(r.peerOrder), r.peerOrder)
 	}
-	if r.peerOrder[0] != "peer-also-unread" {
+	if r.peerOrder[0] != domaintest.ID("peer-also-unread") {
 		t.Fatalf("expected peer-also-unread at front, got %s", r.peerOrder[0])
 	}
 }
@@ -273,17 +281,17 @@ func TestResetIdentityState(t *testing.T) {
 
 	// Populate state.
 	r.mu.Lock()
-	r.peers["old-peer-1"] = &RouterPeerState{Unread: 3, Preview: ConversationPreview{Body: "old msg"}}
-	r.peers["old-peer-2"] = &RouterPeerState{}
-	r.peerOrder = []domain.PeerIdentity{"old-peer-1", "old-peer-2"}
-	r.activePeer = "old-peer-1"
+	r.peers[domaintest.ID("old-peer-1")] = &RouterPeerState{Unread: 3, Preview: ConversationPreview{Body: "old msg"}}
+	r.peers[domaintest.ID("old-peer-2")] = &RouterPeerState{}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("old-peer-1"), domaintest.ID("old-peer-2")}
+	r.activePeer = domaintest.ID("old-peer-1")
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "m1"}}
 	r.seenMessageIDs = map[string]struct{}{"old-msg-1": {}}
 	r.initialSynced = true
 	r.mu.Unlock()
 
-	r.cache.Load("old-peer-1", []DirectMessage{
+	r.cache.Load(domaintest.ID("old-peer-1"), []DirectMessage{
 		{ID: "old-msg-1", Body: "old"},
 	})
 
@@ -298,7 +306,7 @@ func TestResetIdentityState(t *testing.T) {
 	if len(r.peerOrder) != 0 {
 		t.Fatalf("peerOrder not cleared: %v", r.peerOrder)
 	}
-	if r.activePeer != "" {
+	if !r.activePeer.IsZero() {
 		t.Fatalf("activePeer not cleared: %q", r.activePeer)
 	}
 	if r.peerClicked {
@@ -344,24 +352,28 @@ func TestOnReceiptUpdateActiveConversation(t *testing.T) {
 	r := newTestRouter()
 
 	now := time.Now()
-	r.cache.Load("peer-1", []DirectMessage{
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{
-			ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1",
+			ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1"),
 			ReceiptStatus: "sent", Timestamp: now,
 		},
 	})
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
 	r.mu.Unlock()
 
 	deliveredAt := now.Add(2 * time.Second)
+	// LocalChangeEvent carries identities as wire strings (40-hex), not
+	// short labels: peerForMessage decodes them via PeerIdentityFromWire.
+	// Use the hex form of the same identities the cache was seeded with so
+	// the receipt resolves to peer-1 and matches the active conversation.
 	event := protocol.LocalChangeEvent{
 		Type:        protocol.LocalChangeReceiptUpdate,
 		MessageID:   "msg-1",
-		Sender:      "me",
-		Recipient:   "peer-1",
+		Sender:      domaintest.ID("me").String(),
+		Recipient:   domaintest.ID("peer-1").String(),
 		Status:      "delivered",
 		DeliveredAt: deliveredAt,
 	}
@@ -389,8 +401,8 @@ func TestOnReceiptUpdateActiveConversation(t *testing.T) {
 func TestOnReceiptUpdateIgnoresInactiveConversation(t *testing.T) {
 	r := newTestRouter()
 
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1", ReceiptStatus: "sent"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1"), ReceiptStatus: "sent"},
 	})
 
 	event := protocol.LocalChangeEvent{
@@ -417,7 +429,7 @@ func TestConsumePendingActions(t *testing.T) {
 	r.mu.Lock()
 	r.pendingScrollToEnd = true
 	r.pendingClearEditor = true
-	r.pendingRecipientText = "test-peer"
+	r.pendingRecipientText = domaintest.ID("test-peer")
 	r.mu.Unlock()
 
 	pa := r.ConsumePendingActions()
@@ -428,7 +440,7 @@ func TestConsumePendingActions(t *testing.T) {
 	if !pa.ClearEditor {
 		t.Fatal("ClearEditor should be true")
 	}
-	if pa.RecipientText != "test-peer" {
+	if pa.RecipientText != domaintest.ID("test-peer") {
 		t.Fatalf("RecipientText should be 'test-peer', got %q", pa.RecipientText)
 	}
 
@@ -440,7 +452,7 @@ func TestConsumePendingActions(t *testing.T) {
 	if r.pendingClearEditor {
 		t.Fatal("pendingClearEditor should be cleared")
 	}
-	if r.pendingRecipientText != "" {
+	if !r.pendingRecipientText.IsZero() {
 		t.Fatalf("pendingRecipientText should be cleared, got %q", r.pendingRecipientText)
 	}
 	r.mu.RUnlock()
@@ -452,10 +464,10 @@ func TestSnapshotIsConsistent(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
-	r.peers["peer-1"] = &RouterPeerState{Unread: 3}
-	r.peerOrder = []domain.PeerIdentity{"peer-1"}
+	r.peers[domaintest.ID("peer-1")] = &RouterPeerState{Unread: 3}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("peer-1")}
 	r.activeMessages = []DirectMessage{{ID: "m1", Body: "hello"}}
 	r.statusMonitor.(*testStatusProvider).Status = NodeStatus{Peers: []string{"a"}}
 	r.sendStatus = "ok"
@@ -470,16 +482,16 @@ func TestSnapshotIsConsistent(t *testing.T) {
 
 	snap := r.Snapshot()
 
-	if snap.ActivePeer != "peer-1" {
+	if snap.ActivePeer != domaintest.ID("peer-1") {
 		t.Fatalf("expected ActivePeer=peer-1, got %q", snap.ActivePeer)
 	}
 	if !snap.PeerClicked {
 		t.Fatal("expected PeerClicked=true")
 	}
-	if snap.Peers["peer-1"].Unread != 3 {
-		t.Fatalf("expected Unread=3, got %d", snap.Peers["peer-1"].Unread)
+	if snap.Peers[domaintest.ID("peer-1")].Unread != 3 {
+		t.Fatalf("expected Unread=3, got %d", snap.Peers[domaintest.ID("peer-1")].Unread)
 	}
-	if len(snap.PeerOrder) != 1 || snap.PeerOrder[0] != "peer-1" {
+	if len(snap.PeerOrder) != 1 || snap.PeerOrder[0] != domaintest.ID("peer-1") {
 		t.Fatalf("unexpected PeerOrder: %v", snap.PeerOrder)
 	}
 	if len(snap.ActiveMessages) != 1 || snap.ActiveMessages[0].ID != "m1" {
@@ -490,14 +502,14 @@ func TestSnapshotIsConsistent(t *testing.T) {
 	}
 
 	// Mutate the snapshot — should not affect router state.
-	snap.Peers["peer-1"].Unread = 99
-	snap.PeerOrder[0] = "mutated"
+	snap.Peers[domaintest.ID("peer-1")].Unread = 99
+	snap.PeerOrder[0] = domaintest.ID("mutated")
 
 	r.mu.RLock()
-	if r.peers["peer-1"].Unread != 3 {
+	if r.peers[domaintest.ID("peer-1")].Unread != 3 {
 		t.Fatal("snapshot mutation leaked to router state")
 	}
-	if r.peerOrder[0] != "peer-1" {
+	if r.peerOrder[0] != domaintest.ID("peer-1") {
 		t.Fatal("snapshot mutation leaked to peerOrder")
 	}
 	r.mu.RUnlock()
@@ -547,23 +559,23 @@ func TestNotifyNonBlocking(t *testing.T) {
 func TestConversationCacheMatchesPeerIntegration(t *testing.T) {
 	cache := NewConversationCache()
 
-	if cache.MatchesPeer("anyone") {
+	if cache.MatchesPeer(domaintest.ID("anyone")) {
 		t.Fatal("empty cache should not match any peer")
 	}
 
-	cache.Load("peer-1", nil)
-	if !cache.MatchesPeer("peer-1") {
+	cache.Load(domaintest.ID("peer-1"), nil)
+	if !cache.MatchesPeer(domaintest.ID("peer-1")) {
 		t.Fatal("cache should match peer-1 after Load")
 	}
-	if cache.MatchesPeer("peer-2") {
+	if cache.MatchesPeer(domaintest.ID("peer-2")) {
 		t.Fatal("cache should not match peer-2")
 	}
 
-	cache.Load("peer-2", []DirectMessage{{ID: "m1"}})
-	if cache.MatchesPeer("peer-1") {
+	cache.Load(domaintest.ID("peer-2"), []DirectMessage{{ID: "m1"}})
+	if cache.MatchesPeer(domaintest.ID("peer-1")) {
 		t.Fatal("cache should no longer match peer-1")
 	}
-	if !cache.MatchesPeer("peer-2") {
+	if !cache.MatchesPeer(domaintest.ID("peer-2")) {
 		t.Fatal("cache should match peer-2")
 	}
 }
@@ -574,16 +586,16 @@ func TestDoMarkSeenSkipsWhenNoMessages(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
-	r.peers["peer-1"] = &RouterPeerState{Unread: 5}
-	r.peerOrder = []domain.PeerIdentity{"peer-1"}
+	r.activePeer = domaintest.ID("peer-1")
+	r.peers[domaintest.ID("peer-1")] = &RouterPeerState{Unread: 5}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("peer-1")}
 	// activeMessages is intentionally empty — simulates load not completed.
 	r.mu.Unlock()
 
-	r.doMarkSeen("peer-1")
+	r.doMarkSeen(domaintest.ID("peer-1"))
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 
 	if unread != 5 {
@@ -596,13 +608,13 @@ func TestIsActivePeer(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
 
-	if !r.isActivePeer("peer-1") {
+	if !r.isActivePeer(domaintest.ID("peer-1")) {
 		t.Fatal("peer-1 should be active")
 	}
-	if r.isActivePeer("peer-2") {
+	if r.isActivePeer(domaintest.ID("peer-2")) {
 		t.Fatal("peer-2 should not be active")
 	}
 }
@@ -614,11 +626,11 @@ func TestOnReceiptUpdateActivePeerCacheMismatch(t *testing.T) {
 	r := newTestRouter()
 
 	// Cache is for "old-peer", but activePeer is "peer-1".
-	r.cache.Load("old-peer", []DirectMessage{
-		{ID: "msg-old", Body: "old", Sender: "me", Recipient: "old-peer"},
+	r.cache.Load(domaintest.ID("old-peer"), []DirectMessage{
+		{ID: "msg-old", Body: "old", Sender: domaintest.ID("me"), Recipient: domaintest.ID("old-peer")},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
 
 	event := protocol.LocalChangeEvent{
@@ -643,16 +655,16 @@ func TestOnReceiptUpdateActivePeerCacheMismatch(t *testing.T) {
 func TestOnNewMessageNonActivePeerUpdatesOnlySidebar(t *testing.T) {
 	r := newTestRouter()
 
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
 	r.mu.Unlock()
 
-	// isActivePeer("peer-2") must return false → sidebar-only path.
-	if r.isActivePeer("peer-2") {
+	// isActivePeer(domaintest.ID("peer-2")) must return false → sidebar-only path.
+	if r.isActivePeer(domaintest.ID("peer-2")) {
 		t.Fatal("peer-2 should not be active")
 	}
 
@@ -670,17 +682,17 @@ func TestActivePeerCacheMismatchDetection(t *testing.T) {
 	r := newTestRouter()
 
 	// Cache is for "old-peer", activePeer is "peer-1".
-	r.cache.Load("old-peer", nil)
+	r.cache.Load(domaintest.ID("old-peer"), nil)
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
 
 	// isActivePeer reports peer-1 as active...
-	if !r.isActivePeer("peer-1") {
+	if !r.isActivePeer(domaintest.ID("peer-1")) {
 		t.Fatal("peer-1 should be the active peer")
 	}
 	// ...but cache doesn't match yet (still on old-peer).
-	if r.cache.MatchesPeer("peer-1") {
+	if r.cache.MatchesPeer(domaintest.ID("peer-1")) {
 		t.Fatal("cache should NOT match peer-1 during mid-switch")
 	}
 	// This is the exact condition that triggers the reload path in
@@ -693,11 +705,11 @@ func TestSelectPeerClearsActiveMessages(t *testing.T) {
 	r := newTestRouter()
 
 	// Set up peer-1 as active with messages.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
 	r.mu.Unlock()
 
@@ -710,7 +722,7 @@ func TestSelectPeerClearsActiveMessages(t *testing.T) {
 
 	// Switch to peer-2. The goroutine will fail (no real client) but
 	// the synchronous part should clear activeMessages immediately.
-	r.SelectPeer("peer-2")
+	r.SelectPeer(domaintest.ID("peer-2"))
 
 	// Check immediately — activeMessages should be nil (cleared synchronously).
 	r.mu.RLock()
@@ -719,7 +731,7 @@ func TestSelectPeerClearsActiveMessages(t *testing.T) {
 	clicked := r.peerClicked
 	r.mu.RUnlock()
 
-	if activePeer != "peer-2" {
+	if activePeer != domaintest.ID("peer-2") {
 		t.Fatalf("expected activePeer=peer-2, got %q", activePeer)
 	}
 	if msgs != nil {
@@ -735,14 +747,14 @@ func TestSelectPeerClearsActiveMessages(t *testing.T) {
 func TestAutoSelectPeerSetsClicked(t *testing.T) {
 	r := newTestRouter()
 
-	r.AutoSelectPeer("peer-1")
+	r.AutoSelectPeer(domaintest.ID("peer-1"))
 
 	r.mu.RLock()
 	activePeer := r.activePeer
 	clicked := r.peerClicked
 	r.mu.RUnlock()
 
-	if activePeer != "peer-1" {
+	if activePeer != domaintest.ID("peer-1") {
 		t.Fatalf("expected activePeer=peer-1, got %q", activePeer)
 	}
 	if !clicked {
@@ -757,12 +769,12 @@ func TestAutoSelectPeerKeepsClickedOnSwitch(t *testing.T) {
 
 	// Simulate a previous user click.
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.mu.Unlock()
 
 	// Auto-select a different peer — must keep clicked true.
-	r.AutoSelectPeer("peer-2")
+	r.AutoSelectPeer(domaintest.ID("peer-2"))
 
 	r.mu.RLock()
 	clicked := r.peerClicked
@@ -779,11 +791,11 @@ func TestAutoSelectPeerClearsActiveMessages(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = []DirectMessage{{ID: "msg-old", Body: "old"}}
 	r.mu.Unlock()
 
-	r.AutoSelectPeer("peer-2")
+	r.AutoSelectPeer(domaintest.ID("peer-2"))
 
 	r.mu.RLock()
 	msgs := r.activeMessages
@@ -801,10 +813,10 @@ func TestSeedPreviewsSortOrder(t *testing.T) {
 
 	now := time.Now()
 	previews := []ConversationPreview{
-		{PeerAddress: "old-read", Timestamp: now.Add(-10 * time.Hour), UnreadCount: 0},
-		{PeerAddress: "new-read", Timestamp: now.Add(-1 * time.Hour), UnreadCount: 0},
-		{PeerAddress: "unread-low", Timestamp: now.Add(-2 * time.Hour), UnreadCount: 1},
-		{PeerAddress: "unread-high", Timestamp: now.Add(-5 * time.Hour), UnreadCount: 10},
+		{PeerAddress: domaintest.ID("old-read"), Timestamp: now.Add(-10 * time.Hour), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("new-read"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("unread-low"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 1},
+		{PeerAddress: domaintest.ID("unread-high"), Timestamp: now.Add(-5 * time.Hour), UnreadCount: 10},
 	}
 
 	r.seedPreviews(previews)
@@ -815,7 +827,7 @@ func TestSeedPreviewsSortOrder(t *testing.T) {
 
 	// Expected: unread first sorted by unread count descending (10 > 1),
 	// then read sorted by timestamp descending (new > old).
-	expected := []domain.PeerIdentity{"unread-high", "unread-low", "new-read", "old-read"}
+	expected := []domain.PeerIdentity{domaintest.ID("unread-high"), domaintest.ID("unread-low"), domaintest.ID("new-read"), domaintest.ID("old-read")}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -833,9 +845,9 @@ func TestSeedPreviewsSortOrderSameUnreadByTimestamp(t *testing.T) {
 
 	now := time.Now()
 	previews := []ConversationPreview{
-		{PeerAddress: "unread-old", Timestamp: now.Add(-5 * time.Hour), UnreadCount: 3},
-		{PeerAddress: "unread-new", Timestamp: now.Add(-1 * time.Hour), UnreadCount: 3},
-		{PeerAddress: "read-only", Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("unread-old"), Timestamp: now.Add(-5 * time.Hour), UnreadCount: 3},
+		{PeerAddress: domaintest.ID("unread-new"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 3},
+		{PeerAddress: domaintest.ID("read-only"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0},
 	}
 
 	r.seedPreviews(previews)
@@ -845,7 +857,7 @@ func TestSeedPreviewsSortOrderSameUnreadByTimestamp(t *testing.T) {
 	r.mu.RUnlock()
 
 	// Same unread count → timestamp decides; read peers come last.
-	expected := []domain.PeerIdentity{"unread-new", "unread-old", "read-only"}
+	expected := []domain.PeerIdentity{domaintest.ID("unread-new"), domaintest.ID("unread-old"), domaintest.ID("read-only")}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -869,15 +881,15 @@ func TestSeedPreviewsReordersEventPathPeers(t *testing.T) {
 	// stale timestamps (older than what SQL will provide). Event-path
 	// order: peer-C first, then peer-A — neither matches SQL sort.
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-C") // arrives first via event
-	r.peers["peer-C"].Preview = ConversationPreview{
-		PeerAddress: "peer-C",
+	r.ensurePeerLocked(domaintest.ID("peer-C")) // arrives first via event
+	r.peers[domaintest.ID("peer-C")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("peer-C"),
 		Body:        "event msg",
 		Timestamp:   now.Add(-3 * time.Hour), // older than SQL
 	}
-	r.ensurePeerLocked("peer-A") // arrives second via event
-	r.peers["peer-A"].Preview = ConversationPreview{
-		PeerAddress: "peer-A",
+	r.ensurePeerLocked(domaintest.ID("peer-A")) // arrives second via event
+	r.peers[domaintest.ID("peer-A")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("peer-A"),
 		Body:        "event msg",
 		Timestamp:   now.Add(-2 * time.Hour), // older than SQL
 	}
@@ -888,9 +900,9 @@ func TestSeedPreviewsReordersEventPathPeers(t *testing.T) {
 	// peer-B has unread (should be first), peer-A is recent, peer-C is old.
 	// All SQL timestamps are newer than event-path timestamps.
 	previews := []ConversationPreview{
-		{PeerAddress: "peer-A", Timestamp: now.Add(-10 * time.Minute), UnreadCount: 0},
-		{PeerAddress: "peer-B", Timestamp: now.Add(-1 * time.Hour), UnreadCount: 5},
-		{PeerAddress: "peer-C", Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("peer-A"), Timestamp: now.Add(-10 * time.Minute), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("peer-B"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 5},
+		{PeerAddress: domaintest.ID("peer-C"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0},
 	}
 
 	r.seedPreviews(previews)
@@ -902,7 +914,7 @@ func TestSeedPreviewsReordersEventPathPeers(t *testing.T) {
 	// All peers are SQL-applied (event-path data was older). The SQL sort
 	// places them: unread first (peer-B), then by timestamp desc (peer-A,
 	// peer-C). The two event-path slots are filled by sqlSorted in order.
-	expected := []domain.PeerIdentity{"peer-B", "peer-A", "peer-C"}
+	expected := []domain.PeerIdentity{domaintest.ID("peer-B"), domaintest.ID("peer-A"), domaintest.ID("peer-C")}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -924,16 +936,16 @@ func TestSeedPreviewsDoesNotRepositionFresherPeers(t *testing.T) {
 	// Event-path creates peer-F at position 0 with very fresh data,
 	// then peer-Old at position 1 with stale data (older than SQL).
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-F")
-	r.peers["peer-F"].Preview = ConversationPreview{
-		PeerAddress: "peer-F",
+	r.ensurePeerLocked(domaintest.ID("peer-F"))
+	r.peers[domaintest.ID("peer-F")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("peer-F"),
 		Body:        "fresh event",
 		Timestamp:   now, // fresher than SQL snapshot below
 	}
-	r.peers["peer-F"].Unread = 1
-	r.ensurePeerLocked("peer-Old")
-	r.peers["peer-Old"].Preview = ConversationPreview{
-		PeerAddress: "peer-Old",
+	r.peers[domaintest.ID("peer-F")].Unread = 1
+	r.ensurePeerLocked(domaintest.ID("peer-Old"))
+	r.peers[domaintest.ID("peer-Old")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("peer-Old"),
 		Body:        "old event",
 		Timestamp:   now.Add(-3 * time.Hour), // older than SQL
 	}
@@ -944,23 +956,23 @@ func TestSeedPreviewsDoesNotRepositionFresherPeers(t *testing.T) {
 	// peer-S has unread, peer-Old and peer-F have none.
 	// The stale SQL snapshot tries to place peer-F last (old ts in SQL).
 	previews := []ConversationPreview{
-		{PeerAddress: "peer-S", Timestamp: now.Add(-30 * time.Minute), UnreadCount: 3},
-		{PeerAddress: "peer-Old", Timestamp: now.Add(-1 * time.Hour), UnreadCount: 0},
-		{PeerAddress: "peer-F", Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0}, // stale for peer-F
+		{PeerAddress: domaintest.ID("peer-S"), Timestamp: now.Add(-30 * time.Minute), UnreadCount: 3},
+		{PeerAddress: domaintest.ID("peer-Old"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("peer-F"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0}, // stale for peer-F
 	}
 
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
 	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
-	unreadF := r.peers["peer-F"].Unread
-	bodyF := r.peers["peer-F"].Preview.Body
+	unreadF := r.peers[domaintest.ID("peer-F")].Unread
+	bodyF := r.peers[domaintest.ID("peer-F")].Preview.Body
 	r.mu.RUnlock()
 
 	// peer-F keeps position 0 (fresher event-path data — not repositioned).
 	// peer-Old's slot is filled by the SQL sort: peer-S takes that slot
 	// (first in sqlSorted), peer-Old is appended (second in sqlSorted).
-	expected := []domain.PeerIdentity{"peer-F", "peer-S", "peer-Old"}
+	expected := []domain.PeerIdentity{domaintest.ID("peer-F"), domaintest.ID("peer-S"), domaintest.ID("peer-Old")}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -989,9 +1001,9 @@ func TestSeedPreviewsPreservesEventOnlyPeers(t *testing.T) {
 
 	// Event-path creates a peer that has no SQL preview (message just arrived).
 	r.mu.Lock()
-	r.ensurePeerLocked("event-only-peer")
-	r.peers["event-only-peer"].Preview = ConversationPreview{
-		PeerAddress: "event-only-peer",
+	r.ensurePeerLocked(domaintest.ID("event-only-peer"))
+	r.peers[domaintest.ID("event-only-peer")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("event-only-peer"),
 		Body:        "fresh event",
 		Timestamp:   now,
 	}
@@ -999,7 +1011,7 @@ func TestSeedPreviewsPreservesEventOnlyPeers(t *testing.T) {
 
 	// seedPreviews only contains a different peer.
 	previews := []ConversationPreview{
-		{PeerAddress: "sql-peer", Timestamp: now.Add(-1 * time.Hour), UnreadCount: 2},
+		{PeerAddress: domaintest.ID("sql-peer"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 2},
 	}
 
 	r.seedPreviews(previews)
@@ -1010,7 +1022,7 @@ func TestSeedPreviewsPreservesEventOnlyPeers(t *testing.T) {
 
 	// event-only-peer keeps its original position (not in previews, not
 	// repositioned); sql-peer fills the SQL-applied slot after it.
-	expected := []domain.PeerIdentity{"event-only-peer", "sql-peer"}
+	expected := []domain.PeerIdentity{domaintest.ID("event-only-peer"), domaintest.ID("sql-peer")}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
 	}
@@ -1032,10 +1044,10 @@ func TestSeedPreviewsResetsStaleUnreadToZero(t *testing.T) {
 
 	// Simulate event-path setting Unread=3 for peer-1 before seedPreviews.
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 3
-	r.peers["peer-1"].Preview = ConversationPreview{
-		PeerAddress: "peer-1",
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 3
+	r.peers[domaintest.ID("peer-1")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("peer-1"),
 		Body:        "stale event",
 		Timestamp:   now.Add(-5 * time.Minute), // older than SQL
 	}
@@ -1043,14 +1055,14 @@ func TestSeedPreviewsResetsStaleUnreadToZero(t *testing.T) {
 
 	// SQL snapshot says this peer has 0 unread (already seen).
 	previews := []ConversationPreview{
-		{PeerAddress: "peer-1", Timestamp: now, UnreadCount: 0, Body: "latest"},
+		{PeerAddress: domaintest.ID("peer-1"), Timestamp: now, UnreadCount: 0, Body: "latest"},
 	}
 
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
-	body := r.peers["peer-1"].Preview.Body
+	unread := r.peers[domaintest.ID("peer-1")].Unread
+	body := r.peers[domaintest.ID("peer-1")].Preview.Body
 	r.mu.RUnlock()
 
 	if unread != 0 {
@@ -1075,9 +1087,9 @@ func TestSnapshotCacheReady(t *testing.T) {
 	// Load cache for peer-1, set as active.
 	// CacheReady depends on ConversationCache state (independent of r.mu),
 	// so it is recomputed on every Snapshot() call even from cache.
-	r.cache.Load("peer-1", nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil)
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
 	// Simulate what production code (selectPeerCore) does after mutation.
 	r.notify(UIEventSidebarUpdated)
@@ -1090,7 +1102,7 @@ func TestSnapshotCacheReady(t *testing.T) {
 
 	// Switch active peer but don't load cache — simulates mid-switch.
 	r.mu.Lock()
-	r.activePeer = "peer-2"
+	r.activePeer = domaintest.ID("peer-2")
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 	<-r.uiEvents
@@ -1108,11 +1120,11 @@ func TestSelectPeerNotifiesSynchronouslyOnSwitch(t *testing.T) {
 	r := newTestRouter()
 
 	// Set up peer-1 as active with cached messages.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
 	r.mu.Unlock()
 
@@ -1123,7 +1135,7 @@ func TestSelectPeerNotifiesSynchronouslyOnSwitch(t *testing.T) {
 
 	// Switch to peer-2. The goroutine will fail (no real FetchConversation)
 	// but the synchronous notify should fire immediately.
-	r.SelectPeer("peer-2")
+	r.SelectPeer(domaintest.ID("peer-2"))
 
 	// The synchronous notify should already be in the channel.
 	select {
@@ -1156,14 +1168,14 @@ func TestSelectPeerSamePeerRetriesFailedLoad(t *testing.T) {
 	// Set peer-1 as active with unread=3 but do NOT load cache —
 	// simulates a failed load with pending unread messages.
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = false
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 3
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 3
 	r.mu.Unlock()
 
 	// Verify cache doesn't match.
-	if r.cache.MatchesPeer("peer-1") {
+	if r.cache.MatchesPeer(domaintest.ID("peer-1")) {
 		t.Fatal("cache should not match peer-1 before load")
 	}
 
@@ -1174,7 +1186,7 @@ func TestSelectPeerSamePeerRetriesFailedLoad(t *testing.T) {
 
 	// Click the same peer. Since changed=false, the old code would skip
 	// loadConversation. The fix should detect cache mismatch and set needLoad.
-	r.SelectPeer("peer-1")
+	r.SelectPeer(domaintest.ID("peer-1"))
 
 	// Verify peerClicked is set.
 	r.mu.RLock()
@@ -1193,13 +1205,13 @@ func TestSelectPeerSamePeerRetriesFailedLoad(t *testing.T) {
 	ok := pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		ps, exists := r.peers["peer-1"]
+		ps, exists := r.peers[domaintest.ID("peer-1")]
 		return exists && ps.Unread == 3
 	})
 	if !ok {
 		r.mu.RLock()
 		unread := 0
-		if ps, exists := r.peers["peer-1"]; exists {
+		if ps, exists := r.peers[domaintest.ID("peer-1")]; exists {
 			unread = ps.Unread
 		}
 		r.mu.RUnlock()
@@ -1216,11 +1228,11 @@ func TestSelectPeerSamePeerNoRetryWhenCacheReady(t *testing.T) {
 	r := newTestRouter()
 
 	// Set peer-1 as active WITH valid cache.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
 	r.peerClicked = true
 	r.mu.Unlock()
@@ -1232,7 +1244,7 @@ func TestSelectPeerSamePeerNoRetryWhenCacheReady(t *testing.T) {
 
 	// Click the same peer again — cache is valid, no re-load needed.
 	// This should be a true no-op: no events emitted.
-	r.SelectPeer("peer-1")
+	r.SelectPeer(domaintest.ID("peer-1"))
 
 	// No events at all — true no-op.
 	select {
@@ -1270,16 +1282,16 @@ func TestSelectPeerSamePeerRetriesDoMarkSeenWhenUnreadRestored(t *testing.T) {
 	r := newTestRouter()
 
 	// Set up peer-1 as active with valid cache and messages loaded.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "me", Recipient: "peer-1"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
 	r.peerClicked = true
 	// Simulate restorePeerUnread outcome: badge restored while chat is open.
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 3
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 3
 	r.mu.Unlock()
 
 	// Drain any setup events.
@@ -1288,11 +1300,11 @@ func TestSelectPeerSamePeerRetriesDoMarkSeenWhenUnreadRestored(t *testing.T) {
 	}
 
 	// User re-clicks the same peer — expects recovery.
-	r.SelectPeer("peer-1")
+	r.SelectPeer(domaintest.ID("peer-1"))
 
 	// Unread must be cleared optimistically (synchronous).
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 	if unread != 0 {
 		t.Fatalf("expected Unread=0 after same-peer re-click recovery, got %d", unread)
@@ -1312,7 +1324,7 @@ func TestSelectPeerSamePeerRetriesDoMarkSeenWhenUnreadRestored(t *testing.T) {
 	// This proves doMarkSeen succeeded: if doMarkSeen had returned false
 	// (or been skipped), restorePeerUnread would have restored Unread to 3.
 	r.mu.RLock()
-	unreadAfter := r.peers["peer-1"].Unread
+	unreadAfter := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 	if unreadAfter != 0 {
 		t.Fatalf("Unread should remain 0 after doMarkSeen retry (proves doMarkSeen "+
@@ -1366,19 +1378,19 @@ func TestSeedPreviewsDoesNotOverwriteFresherData(t *testing.T) {
 	// Simulate event-path delivering a fresh update for "peer-1" BEFORE
 	// seedPreviews runs (the startup race scenario).
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Preview = ConversationPreview{
-		PeerAddress: "peer-1",
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("peer-1"),
 		Body:        "fresh event message",
 		Timestamp:   now, // newer
 	}
-	r.peers["peer-1"].Unread = 3
+	r.peers[domaintest.ID("peer-1")].Unread = 3
 	r.mu.Unlock()
 
 	// Now seedPreviews arrives with stale data for peer-1 and new data for peer-2.
 	stalePreview := []ConversationPreview{
-		{PeerAddress: "peer-1", Body: "stale startup message", Timestamp: now.Add(-5 * time.Minute), UnreadCount: 1},
-		{PeerAddress: "peer-2", Body: "peer-2 message", Timestamp: now.Add(-1 * time.Minute), UnreadCount: 2},
+		{PeerAddress: domaintest.ID("peer-1"), Body: "stale startup message", Timestamp: now.Add(-5 * time.Minute), UnreadCount: 1},
+		{PeerAddress: domaintest.ID("peer-2"), Body: "peer-2 message", Timestamp: now.Add(-1 * time.Minute), UnreadCount: 2},
 	}
 	r.seedPreviews(stalePreview)
 
@@ -1386,19 +1398,19 @@ func TestSeedPreviewsDoesNotOverwriteFresherData(t *testing.T) {
 	defer r.mu.RUnlock()
 
 	// peer-1 should retain the fresher event-path data.
-	if r.peers["peer-1"].Preview.Body != "fresh event message" {
-		t.Fatalf("seedPreviews overwrote fresher data: got %q", r.peers["peer-1"].Preview.Body)
+	if r.peers[domaintest.ID("peer-1")].Preview.Body != "fresh event message" {
+		t.Fatalf("seedPreviews overwrote fresher data: got %q", r.peers[domaintest.ID("peer-1")].Preview.Body)
 	}
-	if r.peers["peer-1"].Unread != 3 {
-		t.Fatalf("seedPreviews overwrote fresher unread: got %d", r.peers["peer-1"].Unread)
+	if r.peers[domaintest.ID("peer-1")].Unread != 3 {
+		t.Fatalf("seedPreviews overwrote fresher unread: got %d", r.peers[domaintest.ID("peer-1")].Unread)
 	}
 
 	// peer-2 should be seeded normally (no prior data).
-	if r.peers["peer-2"].Preview.Body != "peer-2 message" {
-		t.Fatalf("peer-2 should be seeded: got %q", r.peers["peer-2"].Preview.Body)
+	if r.peers[domaintest.ID("peer-2")].Preview.Body != "peer-2 message" {
+		t.Fatalf("peer-2 should be seeded: got %q", r.peers[domaintest.ID("peer-2")].Preview.Body)
 	}
-	if r.peers["peer-2"].Unread != 2 {
-		t.Fatalf("peer-2 unread should be 2: got %d", r.peers["peer-2"].Unread)
+	if r.peers[domaintest.ID("peer-2")].Unread != 2 {
+		t.Fatalf("peer-2 unread should be 2: got %d", r.peers[domaintest.ID("peer-2")].Unread)
 	}
 }
 
@@ -1411,29 +1423,29 @@ func TestSeedPreviewsOverwritesOlderData(t *testing.T) {
 
 	// Simulate very old event-path data.
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Preview = ConversationPreview{
-		PeerAddress: "peer-1",
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Preview = ConversationPreview{
+		PeerAddress: domaintest.ID("peer-1"),
 		Body:        "very old message",
 		Timestamp:   now.Add(-1 * time.Hour),
 	}
-	r.peers["peer-1"].Unread = 0
+	r.peers[domaintest.ID("peer-1")].Unread = 0
 	r.mu.Unlock()
 
 	// seedPreviews with newer data.
 	previews := []ConversationPreview{
-		{PeerAddress: "peer-1", Body: "newer startup message", Timestamp: now, UnreadCount: 5},
+		{PeerAddress: domaintest.ID("peer-1"), Body: "newer startup message", Timestamp: now, UnreadCount: 5},
 	}
 	r.seedPreviews(previews)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if r.peers["peer-1"].Preview.Body != "newer startup message" {
-		t.Fatalf("seedPreviews should have updated: got %q", r.peers["peer-1"].Preview.Body)
+	if r.peers[domaintest.ID("peer-1")].Preview.Body != "newer startup message" {
+		t.Fatalf("seedPreviews should have updated: got %q", r.peers[domaintest.ID("peer-1")].Preview.Body)
 	}
-	if r.peers["peer-1"].Unread != 5 {
-		t.Fatalf("unread should be 5: got %d", r.peers["peer-1"].Unread)
+	if r.peers[domaintest.ID("peer-1")].Unread != 5 {
+		t.Fatalf("unread should be 5: got %d", r.peers[domaintest.ID("peer-1")].Unread)
 	}
 }
 
@@ -1450,15 +1462,15 @@ func TestRepairUnreadCountsNormallyWhenSeedPreviewsNeverRan(t *testing.T) {
 	// initialSynced stays false (first poll).
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "msg-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
-			{ID: "msg-2", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
+			{ID: "msg-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
+			{ID: "msg-2", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 		},
 	}
 
 	r.repairUnreadFromHeaders(status)
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 
 	// previewsSeeded=false → skipUnreadCount=false → Unread counted: 2.
@@ -1477,21 +1489,21 @@ func TestRepairUnreadSkipsCountOnFirstSyncAfterSeedPreviews(t *testing.T) {
 	r.mu.Lock()
 	r.initialSynced = false // first poll hasn't happened yet
 	r.previewsSeeded = true // seedPreviews ran
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 2 // set by seedPreviews from SQL
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 2 // set by seedPreviews from SQL
 	r.mu.Unlock()
 
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "msg-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
-			{ID: "msg-2", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
+			{ID: "msg-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
+			{ID: "msg-2", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 		},
 	}
 
 	r.repairUnreadFromHeaders(status)
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	synced := r.initialSynced
 	r.mu.RUnlock()
 
@@ -1511,9 +1523,9 @@ func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 	r := newTestRouter()
 
 	// Set peer-1 as active with empty cache matching.
-	r.cache.Load("peer-1", nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil)
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
 
 	event := protocol.LocalChangeEvent{
@@ -1544,7 +1556,7 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 	r.client.setChatLogForTest(cl)
 
 	r.mu.Lock()
-	r.activePeer = "peer-2" // different from sender
+	r.activePeer = domaintest.ID("peer-2") // different from sender
 	r.mu.Unlock()
 
 	event := protocol.LocalChangeEvent{
@@ -1580,25 +1592,25 @@ func TestRepairUnreadFirstSyncDoesNotDoubleCount(t *testing.T) {
 
 	// Simulate seedPreviews having set Unread=2 for peer-1.
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 2
-	r.activePeer = "peer-2" // different from peer-1
-	r.initialSynced = false // first sync
-	r.previewsSeeded = true // seedPreviews ran and loaded SQL counts
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 2
+	r.activePeer = domaintest.ID("peer-2") // different from peer-1
+	r.initialSynced = false                // first sync
+	r.previewsSeeded = true                // seedPreviews ran and loaded SQL counts
 	r.mu.Unlock()
 
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "msg-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
-			{ID: "msg-2", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
-			{ID: "msg-3", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
+			{ID: "msg-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
+			{ID: "msg-2", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
+			{ID: "msg-3", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 		},
 	}
 
 	r.repairUnreadFromHeaders(status)
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	_, seen1 := r.seenMessageIDs["msg-1"]
 	_, seen2 := r.seenMessageIDs["msg-2"]
 	_, seen3 := r.seenMessageIDs["msg-3"]
@@ -1624,9 +1636,9 @@ func TestRepairUnreadSubsequentSyncIncrements(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 2
-	r.activePeer = "peer-2"
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 2
+	r.activePeer = domaintest.ID("peer-2")
 	r.initialSynced = true // already synced
 	// Pre-register some old messages.
 	r.seenMessageIDs["msg-old-1"] = struct{}{}
@@ -1635,15 +1647,15 @@ func TestRepairUnreadSubsequentSyncIncrements(t *testing.T) {
 
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "msg-old-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")}, // already seen
-			{ID: "msg-new-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")}, // new
+			{ID: "msg-old-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")}, // already seen
+			{ID: "msg-new-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")}, // new
 		},
 	}
 
 	r.repairUnreadFromHeaders(status)
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 
 	// Should be 2 + 1 (only the new message increments).
@@ -1808,7 +1820,7 @@ func TestOnNewMessageNonActivePeerEmitsBeep(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-2" // different from the incoming message sender
+	r.activePeer = domaintest.ID("peer-2") // different from the incoming message sender
 	r.mu.Unlock()
 
 	event := protocol.LocalChangeEvent{
@@ -1833,15 +1845,15 @@ func TestOnNewMessageOutgoingDoesNotBeep(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-2"
+	r.activePeer = domaintest.ID("peer-2")
 	r.mu.Unlock()
 
 	event := protocol.LocalChangeEvent{
 		Type:      protocol.LocalChangeNewMessage,
 		Topic:     "dm",
 		MessageID: "msg-out-1",
-		Sender:    "me", // outgoing — we are the sender
-		Recipient: "peer-1",
+		Sender:    domaintest.ID("me").String(), // outgoing — we are the sender
+		Recipient: domaintest.ID("peer-1").String(),
 	}
 
 	r.onNewMessage(event)
@@ -1862,7 +1874,7 @@ func TestOnNewMessageActivePeerEmitsBeep(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-1" // same as the incoming message sender
+	r.activePeer = domaintest.ID("peer-1") // same as the incoming message sender
 	r.mu.Unlock()
 	// cache is empty → MatchesPeer("peer-1") == false → mid-switch path
 
@@ -1889,15 +1901,15 @@ func TestOnNewMessageActivePeerOutgoingNoBeep(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
 
 	event := protocol.LocalChangeEvent{
 		Type:      protocol.LocalChangeNewMessage,
 		Topic:     "dm",
 		MessageID: "msg-active-out-1",
-		Sender:    "me", // outgoing
-		Recipient: "peer-1",
+		Sender:    domaintest.ID("me").String(), // outgoing
+		Recipient: domaintest.ID("peer-1").String(),
 	}
 
 	r.onNewMessage(event)
@@ -1926,11 +1938,11 @@ func TestOnNewMessageActivePeerCacheReadyDecryptFailEmitsBeep(t *testing.T) {
 	r := newTestRouter()
 
 	// Cache loaded for peer-1 → MatchesPeer returns true → cache-ready path.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "existing-1", Sender: "peer-1", Body: "hello"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "existing-1", Sender: domaintest.ID("peer-1"), Body: "hello"},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.activeMessages = r.cache.Messages()
 	r.mu.Unlock()
@@ -2009,17 +2021,17 @@ func TestSelectPeerClearsUnreadImmediately(t *testing.T) {
 
 	// Seed a peer with unread messages.
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-x")
-	r.peers["peer-x"].Unread = 7
+	r.ensurePeerLocked(domaintest.ID("peer-x"))
+	r.peers[domaintest.ID("peer-x")].Unread = 7
 	r.mu.Unlock()
 
 	// SelectPeer spawns a goroutine for loadConversation + doMarkSeen,
 	// but the unread badge must be zeroed *before* that goroutine runs.
-	r.SelectPeer("peer-x")
+	r.SelectPeer(domaintest.ID("peer-x"))
 
 	// Check immediately — no sleep or channel wait.
 	r.mu.RLock()
-	unread := r.peers["peer-x"].Unread
+	unread := r.peers[domaintest.ID("peer-x")].Unread
 	r.mu.RUnlock()
 
 	if unread != 0 {
@@ -2052,17 +2064,17 @@ func TestSelectPeerRestoresUnreadOnFailure(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-fail")
-	r.peers["peer-fail"].Unread = 4
+	r.ensurePeerLocked(domaintest.ID("peer-fail"))
+	r.peers[domaintest.ID("peer-fail")].Unread = 4
 	r.mu.Unlock()
 
 	// SelectPeer spawns a goroutine. loadConversation will fail because
 	// the test router has no real chatlog client.
-	r.SelectPeer("peer-fail")
+	r.SelectPeer(domaintest.ID("peer-fail"))
 
 	// Immediately after SelectPeer, unread is 0 (optimistic clear).
 	r.mu.RLock()
-	immediate := r.peers["peer-fail"].Unread
+	immediate := r.peers[domaintest.ID("peer-fail")].Unread
 	r.mu.RUnlock()
 	if immediate != 0 {
 		t.Fatalf("expected Unread=0 immediately after SelectPeer, got %d", immediate)
@@ -2080,7 +2092,7 @@ func TestSelectPeerRestoresUnreadOnFailure(t *testing.T) {
 	}
 
 	r.mu.RLock()
-	restored := r.peers["peer-fail"].Unread
+	restored := r.peers[domaintest.ID("peer-fail")].Unread
 	r.mu.RUnlock()
 	if restored != 4 {
 		t.Fatalf("expected Unread=4 after failed loadConversation, got %d", restored)
@@ -2094,16 +2106,16 @@ func TestAutoSelectPeerNewPeerClearsUnread(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 5
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 5
 	r.mu.Unlock()
 
-	r.AutoSelectPeer("peer-1")
+	r.AutoSelectPeer(domaintest.ID("peer-1"))
 
 	// Immediately after AutoSelectPeer, the badge should be cleared
 	// (optimistic clear happens synchronously in selectPeerCore).
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	clicked := r.peerClicked
 	r.mu.RUnlock()
 
@@ -2122,16 +2134,16 @@ func TestSelectPeerClearsUnreadOptimistically(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 5
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 5
 	r.mu.Unlock()
 
-	r.SelectPeer("peer-1")
+	r.SelectPeer(domaintest.ID("peer-1"))
 
 	// Immediately after SelectPeer (before background goroutine),
 	// the badge should already be cleared.
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	clicked := r.peerClicked
 	r.mu.RUnlock()
 
@@ -2153,23 +2165,23 @@ func TestSelectPeerAndAutoSelectPeerShareCoreLogic(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 3
-	r.ensurePeerLocked("peer-2")
-	r.peers["peer-2"].Unread = 5
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 3
+	r.ensurePeerLocked(domaintest.ID("peer-2"))
+	r.peers[domaintest.ID("peer-2")].Unread = 5
 	r.mu.Unlock()
 
 	// --- SelectPeer: changed=true path ---
-	r.SelectPeer("peer-1")
+	r.SelectPeer(domaintest.ID("peer-1"))
 	r.mu.RLock()
-	if r.activePeer != "peer-1" {
+	if r.activePeer != domaintest.ID("peer-1") {
 		t.Fatalf("SelectPeer must set activePeer, got %q", r.activePeer)
 	}
 	if !r.peerClicked {
 		t.Fatal("SelectPeer must set peerClicked = true")
 	}
-	if r.peers["peer-1"].Unread != 0 {
-		t.Fatalf("SelectPeer must optimistically clear Unread, got %d", r.peers["peer-1"].Unread)
+	if r.peers[domaintest.ID("peer-1")].Unread != 0 {
+		t.Fatalf("SelectPeer must optimistically clear Unread, got %d", r.peers[domaintest.ID("peer-1")].Unread)
 	}
 	r.mu.RUnlock()
 
@@ -2179,16 +2191,16 @@ func TestSelectPeerAndAutoSelectPeerShareCoreLogic(t *testing.T) {
 	}
 
 	// --- AutoSelectPeer: changed=true path (different peer) ---
-	r.AutoSelectPeer("peer-2")
+	r.AutoSelectPeer(domaintest.ID("peer-2"))
 	r.mu.RLock()
-	if r.activePeer != "peer-2" {
+	if r.activePeer != domaintest.ID("peer-2") {
 		t.Fatalf("AutoSelectPeer must switch activePeer, got %q", r.activePeer)
 	}
 	if !r.peerClicked {
 		t.Fatal("AutoSelectPeer must set peerClicked = true")
 	}
-	if r.peers["peer-2"].Unread != 0 {
-		t.Fatalf("AutoSelectPeer must optimistically clear Unread, got %d", r.peers["peer-2"].Unread)
+	if r.peers[domaintest.ID("peer-2")].Unread != 0 {
+		t.Fatalf("AutoSelectPeer must optimistically clear Unread, got %d", r.peers[domaintest.ID("peer-2")].Unread)
 	}
 	if r.activeMessages != nil {
 		t.Fatal("AutoSelectPeer on changed=true must clear activeMessages (stale-message protection)")
@@ -2218,15 +2230,15 @@ func TestAutoSelectPeerSamePeerIsNoOp(t *testing.T) {
 
 	// Set up peer-1 as active with valid cache and non-zero unread.
 	// A true no-op must not touch unread.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "peer-1", Recipient: "me"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.activeMessages = r.cache.Messages()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 5
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 5
 	r.mu.Unlock()
 
 	// Drain any setup events.
@@ -2235,7 +2247,7 @@ func TestAutoSelectPeerSamePeerIsNoOp(t *testing.T) {
 	}
 
 	// Programmatic re-select of the same peer — must be true no-op.
-	r.AutoSelectPeer("peer-1")
+	r.AutoSelectPeer(domaintest.ID("peer-1"))
 
 	// No events emitted.
 	select {
@@ -2247,7 +2259,7 @@ func TestAutoSelectPeerSamePeerIsNoOp(t *testing.T) {
 
 	// State unchanged.
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	active := r.activePeer
 	clicked := r.peerClicked
 	msgs := len(r.activeMessages)
@@ -2256,7 +2268,7 @@ func TestAutoSelectPeerSamePeerIsNoOp(t *testing.T) {
 	if unread != 5 {
 		t.Fatalf("Unread changed from 5 to %d — same-peer AutoSelectPeer must not clear unread", unread)
 	}
-	if active != "peer-1" {
+	if active != domaintest.ID("peer-1") {
 		t.Fatalf("activePeer changed to %q", active)
 	}
 	if !clicked {
@@ -2277,9 +2289,9 @@ func TestReplayStartupBufferDoesNotDoubleCountUnread(t *testing.T) {
 	// Reset startupComplete so events get buffered by onEbusLocalChange.
 	r.mu.Lock()
 	r.startupComplete = false
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 3
-	r.activePeer = "peer-2" // different from peer-1 → non-active path
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 3
+	r.activePeer = domaintest.ID("peer-2") // different from peer-1 → non-active path
 	r.mu.Unlock()
 
 	// Buffer an event via onEbusLocalChange.
@@ -2309,7 +2321,7 @@ func TestReplayStartupBufferDoesNotDoubleCountUnread(t *testing.T) {
 	r.mu.Unlock()
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	replaying := r.replayingStartup
 	r.mu.RUnlock()
 
@@ -2338,14 +2350,14 @@ func TestEbusLiveEventsAfterReplayTriggerBeep(t *testing.T) {
 
 	r.mu.Lock()
 	r.startupComplete = false
-	r.activePeer = "someone-else"
+	r.activePeer = domaintest.ID("someone-else")
 	r.mu.Unlock()
 
 	// Buffer 3 events via onEbusLocalChange (startup not complete).
 	for i := 1; i <= 3; i++ {
 		r.onEbusLocalChange(protocol.LocalChangeEvent{
 			Type: protocol.LocalChangeNewMessage, Topic: "dm",
-			MessageID: fmt.Sprintf("buf-%d", i), Sender: "peer-1", Recipient: "me",
+			MessageID: fmt.Sprintf("buf-%d", i), Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String(),
 		})
 	}
 
@@ -2369,7 +2381,7 @@ func TestEbusLiveEventsAfterReplayTriggerBeep(t *testing.T) {
 	for i := 1; i <= 2; i++ {
 		r.onEbusLocalChange(protocol.LocalChangeEvent{
 			Type: protocol.LocalChangeNewMessage, Topic: "dm",
-			MessageID: fmt.Sprintf("live-%d", i), Sender: "peer-2", Recipient: "me",
+			MessageID: fmt.Sprintf("live-%d", i), Sender: domaintest.ID("peer-2").String(), Recipient: domaintest.ID("me").String(),
 		})
 	}
 
@@ -2402,14 +2414,14 @@ func TestEbusEventsDuringReplayBufferedThenLive(t *testing.T) {
 
 	r.mu.Lock()
 	r.startupComplete = false
-	r.activePeer = "someone-else"
-	r.ensurePeerLocked("peer-1")
+	r.activePeer = domaintest.ID("someone-else")
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
 	r.mu.Unlock()
 
 	// Buffer one event (pre-startup).
 	r.onEbusLocalChange(protocol.LocalChangeEvent{
 		Type: protocol.LocalChangeNewMessage, Topic: "dm",
-		MessageID: "replay-msg", Sender: "peer-1", Recipient: "me",
+		MessageID: "replay-msg", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String(),
 	})
 
 	// Phase 1: replay under replayingStartup=true.
@@ -2426,7 +2438,7 @@ func TestEbusEventsDuringReplayBufferedThenLive(t *testing.T) {
 	// Simulate an event arriving during Phase 1 (still !startupComplete).
 	r.onEbusLocalChange(protocol.LocalChangeEvent{
 		Type: protocol.LocalChangeNewMessage, Topic: "dm",
-		MessageID: "live-msg", Sender: "peer-1", Recipient: "me",
+		MessageID: "live-msg", Sender: domaintest.ID("peer-1").String(), Recipient: domaintest.ID("me").String(),
 	})
 
 	// Phase 2: switch to live mode and drain remaining.
@@ -2470,7 +2482,7 @@ func TestEbusStartupBufferCapped(t *testing.T) {
 
 	r.mu.Lock()
 	r.startupComplete = false
-	r.activePeer = "someone-else"
+	r.activePeer = domaintest.ID("someone-else")
 	r.mu.Unlock()
 
 	// Send 260 events — 256 should be buffered, 4 dropped.
@@ -2507,35 +2519,35 @@ func TestDoMarkSeenRejectsStalePeer(t *testing.T) {
 
 	// Set up peer-1 with unread=5 and make it active.
 	r.mu.Lock()
-	r.activePeer = "peer-1"
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 5
+	r.activePeer = domaintest.ID("peer-1")
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 5
 	// Simulate loaded messages for the active peer.
 	r.activeMessages = []DirectMessage{
-		{ID: "msg-1", Sender: "peer-1", Recipient: "me"},
+		{ID: "msg-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 	}
 	r.mu.Unlock()
 
 	// Now simulate a fast switch: user clicks peer-2 before doMarkSeen
 	// goroutine for peer-1 has a chance to run.
 	r.mu.Lock()
-	r.activePeer = "peer-2"
-	r.ensurePeerLocked("peer-2")
+	r.activePeer = domaintest.ID("peer-2")
+	r.ensurePeerLocked(domaintest.ID("peer-2"))
 	r.activeMessages = []DirectMessage{
-		{ID: "msg-2", Sender: "peer-2", Recipient: "me"},
+		{ID: "msg-2", Sender: domaintest.ID("peer-2"), Recipient: domaintest.ID("me")},
 	}
 	r.mu.Unlock()
 
 	// doMarkSeen for the OLD peer should detect the stale state and
 	// return false, so the caller can restore unread.
-	result := r.doMarkSeen("peer-1")
+	result := r.doMarkSeen(domaintest.ID("peer-1"))
 	if result {
 		t.Fatal("doMarkSeen should return false when activePeer != peerAddress (stale peer)")
 	}
 
 	// Verify peer-1's unread was NOT cleared.
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 	if unread != 5 {
 		t.Fatalf("expected peer-1 Unread=5 (preserved), got %d", unread)
@@ -2556,24 +2568,24 @@ func TestRepairUnreadNotClearedOnFailedReload(t *testing.T) {
 
 	// Pre-load an old message so doMarkSeen has something to send if the
 	// bug is present (activeMessages non-empty → MarkConversationSeen fires).
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "old-msg", Sender: "peer-1", Body: "hi"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "old-msg", Sender: domaintest.ID("peer-1"), Body: "hi"},
 	})
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.initialSynced = true
 	r.activeMessages = r.cache.Messages()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 0
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 0
 	r.mu.Unlock()
 
 	// Trigger repair with a header whose ID is NOT in the cache.
 	// loadConversation will fail because newTestRouter has no chatlog.
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "new-msg-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
+			{ID: "new-msg-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 		},
 	}
 
@@ -2592,7 +2604,7 @@ func TestRepairUnreadNotClearedOnFailedReload(t *testing.T) {
 	}
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 
 	// Verify that a *second* repair with the same header can now retry
@@ -2626,11 +2638,11 @@ func TestOnNewMessageEventPathRollsBackSeenOnFailedReload(t *testing.T) {
 	r := newTestRouter()
 
 	// Cache loaded for peer-1 → cache-ready path.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "existing-1", Sender: "peer-1", Body: "hello"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "existing-1", Sender: domaintest.ID("peer-1"), Body: "hello"},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.activeMessages = r.cache.Messages()
 	r.mu.Unlock()
@@ -2672,7 +2684,7 @@ func TestOnNewMessageNonActiveFallbackRollsBackSeenOnPreviewFailure(t *testing.T
 
 	// Peer "peer-2" is NOT the active peer — forces the non-active path.
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.mu.Unlock()
 
@@ -2721,7 +2733,7 @@ func TestRefreshPreviewForPeerRollsBackSeenOnFailure(t *testing.T) {
 
 	// newTestRouter has no chatlog → updatePreviewFromStore returns false →
 	// refreshPreviewForPeer must evict the message IDs.
-	r.refreshPreviewForPeer("peer-1", []string{"repair-msg-1", "repair-msg-2"})
+	r.refreshPreviewForPeer(domaintest.ID("peer-1"), []string{"repair-msg-1", "repair-msg-2"})
 
 	r.mu.RLock()
 	_, seen1 := r.seenMessageIDs["repair-msg-1"]
@@ -2756,17 +2768,17 @@ func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 	// Simulate what repairUnreadFromHeaders does: create peer, set Unread,
 	// register seen message ID.
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-header-only")
-	r.peers["peer-header-only"].Unread = 1
+	r.ensurePeerLocked(domaintest.ID("peer-header-only"))
+	r.peers[domaintest.ID("peer-header-only")].Unread = 1
 	r.seenMessageIDs["header-msg-1"] = struct{}{}
 	r.mu.Unlock()
 
 	// refreshPreviewForPeer calls updatePreviewFromStore which gets nil preview
 	// (no chatlog entries for this peer). The peer must NOT be deleted.
-	r.refreshPreviewForPeer("peer-header-only", []string{"header-msg-1"})
+	r.refreshPreviewForPeer(domaintest.ID("peer-header-only"), []string{"header-msg-1"})
 
 	r.mu.RLock()
-	ps, exists := r.peers["peer-header-only"]
+	ps, exists := r.peers[domaintest.ID("peer-header-only")]
 	var unread int
 	if ps != nil {
 		unread = ps.Unread
@@ -2808,7 +2820,7 @@ func TestRepairPathHeaderOnlyMessagePreservedAfterNilPreview(t *testing.T) {
 
 	// No active peer — all headers are for non-active peers.
 	r.mu.Lock()
-	r.activePeer = "someone-else"
+	r.activePeer = domaintest.ID("someone-else")
 	r.peerClicked = true
 	r.initialSynced = true // skip first-sync suppression
 	r.mu.Unlock()
@@ -2819,8 +2831,8 @@ func TestRepairPathHeaderOnlyMessagePreservedAfterNilPreview(t *testing.T) {
 		DMHeaders: []DMHeader{
 			{
 				ID:        "store-failed-msg-1",
-				Sender:    domain.PeerIdentity("peer-headonly"),
-				Recipient: domain.PeerIdentity("me"),
+				Sender:    domaintest.ID("peer-headonly"),
+				Recipient: domaintest.ID("me"),
 			},
 		},
 	}
@@ -2839,7 +2851,7 @@ func TestRepairPathHeaderOnlyMessagePreservedAfterNilPreview(t *testing.T) {
 	awaitEvent(t, r.uiEvents, UIEventSidebarUpdated, 500*time.Millisecond)
 
 	r.mu.RLock()
-	ps, exists := r.peers["peer-headonly"]
+	ps, exists := r.peers[domaintest.ID("peer-headonly")]
 	var unread int
 	if ps != nil {
 		unread = ps.Unread
@@ -2871,16 +2883,16 @@ func TestRepairPathActivePeerNotDuplicateRefreshed(t *testing.T) {
 	r := newTestRouter()
 
 	// Active peer = "peer-1", cache loaded but message not in cache.
-	r.cache.Load("peer-1", nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil)
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.initialSynced = true
 	r.mu.Unlock()
 
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "repair-active-1", Sender: "peer-1", Recipient: "me"},
+			{ID: "repair-active-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 		},
 	}
 
@@ -2910,16 +2922,16 @@ func TestRepairPathActivePeerNotDuplicateRefreshed(t *testing.T) {
 func TestRepairPathActivePeerDoesNotBeep(t *testing.T) {
 	r := newTestRouter()
 
-	r.cache.Load("peer-1", nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil)
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.initialSynced = true
 	r.mu.Unlock()
 
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "active-msg-1", Sender: "peer-1", Recipient: "me"},
+			{ID: "active-msg-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
 		},
 	}
 
@@ -2957,20 +2969,20 @@ func TestAutoSelectPeerNewPeerClearsUnreadOptimistically(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 7
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 7
 	r.mu.Unlock()
 
-	r.AutoSelectPeer("peer-1")
+	r.AutoSelectPeer(domaintest.ID("peer-1"))
 
 	// Read state immediately — before any background goroutine finishes.
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	clicked := r.peerClicked
 	active := r.activePeer
 	r.mu.RUnlock()
 
-	if active != "peer-1" {
+	if active != domaintest.ID("peer-1") {
 		t.Fatalf("expected activePeer=peer-1, got %q", active)
 	}
 	if unread != 0 {
@@ -2996,14 +3008,14 @@ func TestOnNewMessageActiveChatDoesNotIncrementUnread(t *testing.T) {
 
 	// Simulate a fully loaded auto-selected peer:
 	// activePeer set, peerClicked=true, cache loaded, Unread=0.
-	r.cache.Load("peer-1", []DirectMessage{
-		{ID: "existing-1", Sender: "peer-1", Body: "hello"},
+	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
+		{ID: "existing-1", Sender: domaintest.ID("peer-1"), Body: "hello"},
 	})
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 0
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 0
 	r.activeMessages = r.cache.Messages()
 	r.mu.Unlock()
 
@@ -3030,7 +3042,7 @@ func TestOnNewMessageActiveChatDoesNotIncrementUnread(t *testing.T) {
 	}
 
 	r.mu.RLock()
-	post := r.peers["peer-1"].Unread
+	post := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 
 	if post != 0 {
@@ -3053,14 +3065,14 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 
 	// Active peer is different from the incoming message sender.
 	r.mu.Lock()
-	r.activePeer = "peer-2"
+	r.activePeer = domaintest.ID("peer-2")
 	r.peerClicked = true
-	r.ensurePeerLocked("peer-1")
-	r.peers["peer-1"].Unread = 0
+	r.ensurePeerLocked(domaintest.ID("peer-1"))
+	r.peers[domaintest.ID("peer-1")].Unread = 0
 	r.mu.Unlock()
 
-	// Load cache for peer-2 so cache.MatchesPeer("peer-1") == false.
-	r.cache.Load("peer-2", []DirectMessage{{ID: "m1", Body: "hi"}})
+	// Load cache for peer-2 so cache.MatchesPeer(domaintest.ID("peer-1")) == false.
+	r.cache.Load(domaintest.ID("peer-2"), []DirectMessage{{ID: "m1", Body: "hi"}})
 
 	event := protocol.LocalChangeEvent{
 		Type:      protocol.LocalChangeNewMessage,
@@ -3089,7 +3101,7 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 	}
 
 	r.mu.RLock()
-	unread := r.peers["peer-1"].Unread
+	unread := r.peers[domaintest.ID("peer-1")].Unread
 	r.mu.RUnlock()
 
 	// Unread stays 0 because updatePreviewFromStore failed — the message ID
@@ -3123,14 +3135,14 @@ func TestAutoSelectAndSelectPeerBothClearUnread(t *testing.T) {
 			r := newTestRouter()
 
 			r.mu.Lock()
-			r.ensurePeerLocked("peer-1")
-			r.peers["peer-1"].Unread = 10
+			r.ensurePeerLocked(domaintest.ID("peer-1"))
+			r.peers[domaintest.ID("peer-1")].Unread = 10
 			r.mu.Unlock()
 
-			tc.selectFn(r, "peer-1")
+			tc.selectFn(r, domaintest.ID("peer-1"))
 
 			r.mu.RLock()
-			unread := r.peers["peer-1"].Unread
+			unread := r.peers[domaintest.ID("peer-1")].Unread
 			clicked := r.peerClicked
 			r.mu.RUnlock()
 
@@ -3150,7 +3162,7 @@ func TestAutoSelectAndSelectPeerBothClearUnread(t *testing.T) {
 func TestPeerClickedTrueAfterAutoSelectThenNewPeerAutoSelect(t *testing.T) {
 	r := newTestRouter()
 
-	peers := []domain.PeerIdentity{"peer-1", "peer-2", "peer-3"}
+	peers := []domain.PeerIdentity{domaintest.ID("peer-1"), domaintest.ID("peer-2"), domaintest.ID("peer-3")}
 	for _, p := range peers {
 		r.AutoSelectPeer(p)
 
@@ -3173,15 +3185,15 @@ func TestPeerClickedTrueAfterAutoSelectThenNewPeerAutoSelect(t *testing.T) {
 // Auto-selection of the next neighbor is a UI-layer concern and not tested here.
 func TestRemovePeer(t *testing.T) {
 	r := newTestRouter()
-	r.peers["a"] = &RouterPeerState{Unread: 3}
-	r.peers["b"] = &RouterPeerState{Unread: 1}
-	r.peerOrder = []domain.PeerIdentity{"a", "b"}
-	r.activePeer = "a"
+	r.peers[domaintest.ID("a")] = &RouterPeerState{Unread: 3}
+	r.peers[domaintest.ID("b")] = &RouterPeerState{Unread: 1}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b")}
+	r.activePeer = domaintest.ID("a")
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
-	r.cache.Load("a", []DirectMessage{{ID: "msg-1"}})
+	r.cache.Load(domaintest.ID("a"), []DirectMessage{{ID: "msg-1"}})
 
-	wasActive, err := r.RemovePeer(domain.PeerIdentity("a"))
+	wasActive, err := r.RemovePeer(domaintest.ID("a"))
 	if err != nil {
 		t.Fatalf("RemovePeer returned unexpected error: %v", err)
 	}
@@ -3198,23 +3210,23 @@ func TestRemovePeer(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if _, ok := r.peers["a"]; ok {
+	if _, ok := r.peers[domaintest.ID("a")]; ok {
 		t.Fatal("peer 'a' should be removed from peers map")
 	}
 	for _, p := range r.peerOrder {
-		if p == "a" {
+		if p == domaintest.ID("a") {
 			t.Fatal("peer 'a' should be removed from peerOrder")
 		}
 	}
-	if r.cache.MatchesPeer("a") {
+	if r.cache.MatchesPeer(domaintest.ID("a")) {
 		t.Fatal("cache should be evicted for peer 'a'")
 	}
 
 	// RemovePeer clears activePeer; auto-selection is the UI layer's job.
-	if r.activePeer != "" {
+	if !r.activePeer.IsZero() {
 		t.Fatalf("activePeer should be empty after RemovePeer, got %q", r.activePeer)
 	}
-	if _, ok := r.peers["b"]; !ok {
+	if _, ok := r.peers[domaintest.ID("b")]; !ok {
 		t.Fatal("peer 'b' should still exist")
 	}
 }
@@ -3223,13 +3235,13 @@ func TestRemovePeer(t *testing.T) {
 // identity in the list clears activePeer. The UI layer handles auto-selection.
 func TestRemovePeerClearsActiveWhenTailRemoved(t *testing.T) {
 	r := newTestRouter()
-	r.peers["a"] = &RouterPeerState{}
-	r.peers["b"] = &RouterPeerState{}
-	r.peers["c"] = &RouterPeerState{}
-	r.peerOrder = []domain.PeerIdentity{"a", "b", "c"}
-	r.activePeer = "c"
+	r.peers[domaintest.ID("a")] = &RouterPeerState{}
+	r.peers[domaintest.ID("b")] = &RouterPeerState{}
+	r.peers[domaintest.ID("c")] = &RouterPeerState{}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b"), domaintest.ID("c")}
+	r.activePeer = domaintest.ID("c")
 
-	wasActive, err := r.RemovePeer(domain.PeerIdentity("c"))
+	wasActive, err := r.RemovePeer(domaintest.ID("c"))
 	if err != nil {
 		t.Fatalf("RemovePeer returned unexpected error: %v", err)
 	}
@@ -3245,7 +3257,7 @@ func TestRemovePeerClearsActiveWhenTailRemoved(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if r.activePeer != "" {
+	if !r.activePeer.IsZero() {
 		t.Fatalf("activePeer should be empty after RemovePeer, got %q", r.activePeer)
 	}
 }
@@ -3254,11 +3266,11 @@ func TestRemovePeerClearsActiveWhenTailRemoved(t *testing.T) {
 // activePeer empty.
 func TestRemovePeerEmptyList(t *testing.T) {
 	r := newTestRouter()
-	r.peers["a"] = &RouterPeerState{}
-	r.peerOrder = []domain.PeerIdentity{"a"}
-	r.activePeer = "a"
+	r.peers[domaintest.ID("a")] = &RouterPeerState{}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("a")}
+	r.activePeer = domaintest.ID("a")
 
-	wasActive, err := r.RemovePeer(domain.PeerIdentity("a"))
+	wasActive, err := r.RemovePeer(domaintest.ID("a"))
 	if err != nil {
 		t.Fatalf("RemovePeer returned unexpected error: %v", err)
 	}
@@ -3274,7 +3286,7 @@ func TestRemovePeerEmptyList(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if r.activePeer != "" {
+	if !r.activePeer.IsZero() {
 		t.Fatalf("activePeer should be empty when no peers remain, got %q", r.activePeer)
 	}
 }
@@ -3283,13 +3295,13 @@ func TestRemovePeerEmptyList(t *testing.T) {
 // disturb the current conversation.
 func TestRemovePeerNonActive(t *testing.T) {
 	r := newTestRouter()
-	r.peers["a"] = &RouterPeerState{}
-	r.peers["b"] = &RouterPeerState{}
-	r.peerOrder = []domain.PeerIdentity{"a", "b"}
-	r.activePeer = "a"
+	r.peers[domaintest.ID("a")] = &RouterPeerState{}
+	r.peers[domaintest.ID("b")] = &RouterPeerState{}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b")}
+	r.activePeer = domaintest.ID("a")
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
 
-	wasActive, err := r.RemovePeer(domain.PeerIdentity("b"))
+	wasActive, err := r.RemovePeer(domaintest.ID("b"))
 	if err != nil {
 		t.Fatalf("RemovePeer returned unexpected error: %v", err)
 	}
@@ -3306,13 +3318,13 @@ func TestRemovePeerNonActive(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if r.activePeer != "a" {
+	if r.activePeer != domaintest.ID("a") {
 		t.Fatalf("activePeer should remain 'a', got %q", r.activePeer)
 	}
 	if len(r.activeMessages) != 1 {
 		t.Fatalf("activeMessages should be untouched, got %d", len(r.activeMessages))
 	}
-	if _, ok := r.peers["b"]; ok {
+	if _, ok := r.peers[domaintest.ID("b")]; ok {
 		t.Fatal("peer 'b' should be removed")
 	}
 }
@@ -3331,17 +3343,17 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 	_ = db.Close()
 
 	r := newTestRouter()
-	r.client.setChatLogForTest(chatlog.NewStoreFromDB(db, domain.PeerIdentity("me")))
+	r.client.setChatLogForTest(chatlog.NewStoreFromDB(db, domaintest.ID("me")))
 
-	r.peers["a"] = &RouterPeerState{Unread: 2}
-	r.peers["b"] = &RouterPeerState{Unread: 1}
-	r.peerOrder = []domain.PeerIdentity{"a", "b"}
-	r.activePeer = "a"
+	r.peers[domaintest.ID("a")] = &RouterPeerState{Unread: 2}
+	r.peers[domaintest.ID("b")] = &RouterPeerState{Unread: 1}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b")}
+	r.activePeer = domaintest.ID("a")
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
-	r.cache.Load("a", []DirectMessage{{ID: "msg-1"}})
+	r.cache.Load(domaintest.ID("a"), []DirectMessage{{ID: "msg-1"}})
 
-	wasActive, rmErr := r.RemovePeer(domain.PeerIdentity("a"))
+	wasActive, rmErr := r.RemovePeer(domaintest.ID("a"))
 	if rmErr == nil {
 		t.Fatal("RemovePeer should return an error when DeletePeerHistory fails")
 	}
@@ -3357,13 +3369,13 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if _, ok := r.peers["a"]; !ok {
+	if _, ok := r.peers[domaintest.ID("a")]; !ok {
 		t.Fatal("peer 'a' should still exist after failed deletion")
 	}
-	if r.peers["a"].Unread != 2 {
-		t.Fatalf("peer 'a' unread count should be preserved, got %d", r.peers["a"].Unread)
+	if r.peers[domaintest.ID("a")].Unread != 2 {
+		t.Fatalf("peer 'a' unread count should be preserved, got %d", r.peers[domaintest.ID("a")].Unread)
 	}
-	if r.activePeer != "a" {
+	if r.activePeer != domaintest.ID("a") {
 		t.Fatalf("activePeer should remain 'a' after failed deletion, got %q", r.activePeer)
 	}
 	if !r.peerClicked {
@@ -3372,7 +3384,7 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 	if len(r.activeMessages) != 1 {
 		t.Fatalf("activeMessages should be preserved, got %d", len(r.activeMessages))
 	}
-	if !r.cache.MatchesPeer("a") {
+	if !r.cache.MatchesPeer(domaintest.ID("a")) {
 		t.Fatal("cache for peer 'a' should be preserved after failed deletion")
 	}
 	if len(r.peerOrder) != 2 {
@@ -3387,19 +3399,19 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 // the sidebar.
 func TestRemovePeerBumpsPeerGen(t *testing.T) {
 	r := newTestRouter()
-	r.peers["alice"] = &RouterPeerState{Unread: 0}
-	r.peerOrder = []domain.PeerIdentity{"alice"}
-	r.activePeer = "alice"
+	r.peers[domaintest.ID("alice")] = &RouterPeerState{Unread: 0}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("alice")}
+	r.activePeer = domaintest.ID("alice")
 	r.peerClicked = true
 
 	// Capture generation before removal — this is what the goroutine would
 	// read before the async send starts.
 	r.mu.RLock()
-	genBefore := r.peerGen["alice"]
+	genBefore := r.peerGen[domaintest.ID("alice")]
 	r.mu.RUnlock()
 
 	// Remove the peer (simulates user deleting the conversation).
-	_, err := r.RemovePeer("alice")
+	_, err := r.RemovePeer(domaintest.ID("alice"))
 	if err != nil {
 		t.Fatalf("RemovePeer: %v", err)
 	}
@@ -3411,7 +3423,7 @@ func TestRemovePeerBumpsPeerGen(t *testing.T) {
 
 	// Verify generation was bumped.
 	r.mu.RLock()
-	genAfter := r.peerGen["alice"]
+	genAfter := r.peerGen[domaintest.ID("alice")]
 	r.mu.RUnlock()
 
 	if genAfter <= genBefore {
@@ -3421,11 +3433,11 @@ func TestRemovePeerBumpsPeerGen(t *testing.T) {
 	// Simulate what the goroutine does after the async send completes:
 	// it checks the generation under lock and must NOT re-add the peer.
 	r.mu.Lock()
-	stale := r.peerGen["alice"] != genBefore
+	stale := r.peerGen[domaintest.ID("alice")] != genBefore
 	if !stale {
 		// This branch must NOT execute — the generation must differ.
-		r.ensurePeerLocked("alice")
-		r.promotePeerLocked("alice")
+		r.ensurePeerLocked(domaintest.ID("alice"))
+		r.promotePeerLocked(domaintest.ID("alice"))
 	}
 	r.mu.Unlock()
 
@@ -3437,11 +3449,11 @@ func TestRemovePeerBumpsPeerGen(t *testing.T) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if _, ok := r.peers["alice"]; ok {
+	if _, ok := r.peers[domaintest.ID("alice")]; ok {
 		t.Fatal("peer 'alice' must not exist after RemovePeer + stale goroutine guard")
 	}
 	for _, p := range r.peerOrder {
-		if p == "alice" {
+		if p == domaintest.ID("alice") {
 			t.Fatal("peer 'alice' must not be in peerOrder")
 		}
 	}
@@ -3452,11 +3464,11 @@ func TestRemovePeerBumpsPeerGen(t *testing.T) {
 // still insert the peer because it captured the new generation.
 func TestRemovePeerGenDoesNotBlockFreshSend(t *testing.T) {
 	r := newTestRouter()
-	r.peers["bob"] = &RouterPeerState{Unread: 1}
-	r.peerOrder = []domain.PeerIdentity{"bob"}
+	r.peers[domaintest.ID("bob")] = &RouterPeerState{Unread: 1}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("bob")}
 
 	// Remove.
-	_, err := r.RemovePeer("bob")
+	_, err := r.RemovePeer(domaintest.ID("bob"))
 	if err != nil {
 		t.Fatalf("RemovePeer: %v", err)
 	}
@@ -3466,28 +3478,28 @@ func TestRemovePeerGenDoesNotBlockFreshSend(t *testing.T) {
 
 	// Capture the CURRENT generation — a new send starts here.
 	r.mu.RLock()
-	freshGen := r.peerGen["bob"]
+	freshGen := r.peerGen[domaintest.ID("bob")]
 	r.mu.RUnlock()
 
 	// Simulate the goroutine completing: generation matches, so it proceeds.
 	r.mu.Lock()
-	if r.peerGen["bob"] != freshGen {
+	if r.peerGen[domaintest.ID("bob")] != freshGen {
 		r.mu.Unlock()
 		t.Fatal("fresh generation should match — no intervening RemovePeer")
 	}
-	r.ensurePeerLocked("bob")
-	r.peers["bob"].Preview = ConversationPreview{PeerAddress: "bob", Body: "new message"}
-	r.promotePeerLocked("bob")
+	r.ensurePeerLocked(domaintest.ID("bob"))
+	r.peers[domaintest.ID("bob")].Preview = ConversationPreview{PeerAddress: domaintest.ID("bob"), Body: "new message"}
+	r.promotePeerLocked(domaintest.ID("bob"))
 	r.mu.Unlock()
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if _, ok := r.peers["bob"]; !ok {
+	if _, ok := r.peers[domaintest.ID("bob")]; !ok {
 		t.Fatal("fresh send should re-create peer after removal")
 	}
-	if r.peers["bob"].Preview.Body != "new message" {
-		t.Fatalf("unexpected preview: %q", r.peers["bob"].Preview.Body)
+	if r.peers[domaintest.ID("bob")].Preview.Body != "new message" {
+		t.Fatalf("unexpected preview: %q", r.peers[domaintest.ID("bob")].Preview.Body)
 	}
 }
 
@@ -3520,13 +3532,13 @@ func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 		}},
 	})
 
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Encrypt an incoming message from the peer.
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "reply from peer"},
@@ -3550,7 +3562,7 @@ func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 
 	// Load cache for the peer so MatchesPeer returns true → inline path.
 	r.cache.Load(peerID, []DirectMessage{
-		{ID: "my-msg", Sender: domain.PeerIdentity(id.Address), Recipient: domain.PeerIdentity(peer.Address), Body: "my message"},
+		{ID: "my-msg", Sender: domain.PeerIdentityFromWire(id.Address), Recipient: domain.PeerIdentityFromWire(peer.Address), Body: "my message"},
 	})
 	r.mu.Lock()
 	r.activePeer = peerID
@@ -3558,7 +3570,7 @@ func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 	r.ensurePeerLocked(peerID)
 	r.peers[peerID].Preview = ConversationPreview{
 		PeerAddress: peerID,
-		Sender:      domain.PeerIdentity(id.Address),
+		Sender:      domain.PeerIdentityFromWire(id.Address),
 		Body:        "my message",
 		Timestamp:   time.Now().Add(-1 * time.Minute),
 	}
@@ -3596,7 +3608,7 @@ func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 	preview := r.peers[peerID].Preview
 	r.mu.RUnlock()
 
-	if preview.Sender != domain.PeerIdentity(peer.Address) {
+	if preview.Sender != domain.PeerIdentityFromWire(peer.Address) {
 		t.Fatalf("preview sender = %q, want peer %q", preview.Sender, peer.Address)
 	}
 	if preview.Body != "reply from peer" {
@@ -3618,7 +3630,7 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 		t.Fatalf("generate peer: %v", err)
 	}
 
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Do NOT register peer as trusted contact — DecryptIncomingMessage will
 	// fail because the sender's public key is unknown to the trust store.
@@ -3627,7 +3639,7 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello from peer"},
@@ -3639,7 +3651,7 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-populate chatlog so FetchSinglePreview can read the message.
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "incoming-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -3666,11 +3678,11 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 
 	// Set active peer to someone else so peerID takes the non-active path.
 	r.mu.Lock()
-	r.activePeer = domain.PeerIdentity("other-peer")
+	r.activePeer = domaintest.ID("other-peer")
 	r.ensurePeerLocked(peerID)
 	r.peers[peerID].Preview = ConversationPreview{
 		PeerAddress: peerID,
-		Sender:      domain.PeerIdentity(id.Address),
+		Sender:      domain.PeerIdentityFromWire(id.Address),
 		Body:        "my old message",
 	}
 	r.mu.Unlock()
@@ -3708,7 +3720,7 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 
 	// The preview sender must change from "us" to the peer — proving the
 	// fallback replaced the stale preview.
-	if preview.Sender != domain.PeerIdentity(peer.Address) {
+	if preview.Sender != domain.PeerIdentityFromWire(peer.Address) {
 		t.Fatalf("preview sender = %q, want peer %q", preview.Sender, peer.Address)
 	}
 
@@ -3737,14 +3749,14 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 		t.Fatalf("generate peer: %v", err)
 	}
 
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Do NOT register peer as trusted contact — DecryptIncomingMessage will
 	// fail, exercising the fallback path.
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "mid-switch message"},
@@ -3756,7 +3768,7 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-populate chatlog so updatePreviewFromStore can read it.
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "mid-switch-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -3782,14 +3794,14 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 
 	// Active peer = the message peer, but cache loaded for a DIFFERENT peer
 	// → MatchesPeer returns false → mid-switch path.
-	r.cache.Load(domain.PeerIdentity("some-other-peer"), nil)
+	r.cache.Load(domaintest.ID("some-other-peer"), nil)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
 	r.ensurePeerLocked(peerID)
 	r.peers[peerID].Preview = ConversationPreview{
 		PeerAddress: peerID,
-		Sender:      domain.PeerIdentity(id.Address),
+		Sender:      domain.PeerIdentityFromWire(id.Address),
 		Body:        "stale outgoing",
 	}
 	r.mu.Unlock()
@@ -3823,7 +3835,7 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 	r.mu.RUnlock()
 
 	// Preview sender must now be the peer, not us.
-	if preview.Sender != domain.PeerIdentity(peer.Address) {
+	if preview.Sender != domain.PeerIdentityFromWire(peer.Address) {
 		t.Fatalf("preview sender = %q, want peer %q", preview.Sender, peer.Address)
 	}
 	if preview.PeerAddress != peerID {
@@ -3846,7 +3858,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 		t.Fatalf("generate peer: %v", err)
 	}
 
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Register peer as trusted contact so DecryptIncomingMessage succeeds.
 	boxSig := identity.SignBoxKeyBinding(peer)
@@ -3863,7 +3875,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "mid-switch visible message"},
@@ -3875,7 +3887,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-populate chatlog so the background reload succeeds.
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "mid-switch-unread-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -3901,7 +3913,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 
 	// Active peer = the message peer, cache loaded for a DIFFERENT peer
 	// → MatchesPeer returns false → mid-switch path.
-	r.cache.Load(domain.PeerIdentity("some-other-peer"), nil)
+	r.cache.Load(domaintest.ID("some-other-peer"), nil)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
@@ -3975,7 +3987,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 		t.Fatalf("generate peer: %v", err)
 	}
 
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Register peer as trusted contact so DecryptIncomingMessage succeeds.
 	boxSig := identity.SignBoxKeyBinding(peer)
@@ -3992,7 +4004,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "mid-switch reload-fail message"},
@@ -4024,7 +4036,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 	// Active peer = the message peer, cache loaded for a DIFFERENT peer
 	// → MatchesPeer returns false → mid-switch path.
 	// Set Unread=1 so we can verify doMarkSeen clears it after fallback.
-	r.cache.Load(domain.PeerIdentity("some-other-peer"), nil)
+	r.cache.Load(domaintest.ID("some-other-peer"), nil)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
@@ -4109,7 +4121,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate peer: %v", err)
 	}
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Register peer as trusted contact so DecryptIncomingMessage succeeds.
 	boxSig := identity.SignBoxKeyBinding(peer)
@@ -4126,7 +4138,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "stale-peer fallback message"},
@@ -4153,9 +4165,9 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	}
 
 	// Active peer = message peer, cache loaded for a different peer → mid-switch.
-	otherPeer := domain.PeerIdentity("other-peer")
+	otherPeer := domaintest.ID("other-peer")
 	r.cache.Load(otherPeer, []DirectMessage{
-		{ID: "other-1", Body: "other message", Sender: otherPeer, Recipient: domain.PeerIdentity(id.Address)},
+		{ID: "other-1", Body: "other message", Sender: otherPeer, Recipient: domain.PeerIdentityFromWire(id.Address)},
 	})
 	r.mu.Lock()
 	r.activePeer = peerID
@@ -4259,13 +4271,13 @@ func TestReloadAndRefreshPreviewRollsBackOnLoadFailure(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-1"
+	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
 	r.seenMessageIDs["msg-reload-fail"] = struct{}{}
 	r.mu.Unlock()
 
 	// newTestRouter has no chatlog → loadConversation fails → must evict.
-	ok := r.reloadAndRefreshPreview("peer-1", "msg-reload-fail")
+	ok := r.reloadAndRefreshPreview(domaintest.ID("peer-1"), "msg-reload-fail")
 	if ok {
 		t.Fatal("reloadAndRefreshPreview must return false when loadConversation fails")
 	}
@@ -4295,7 +4307,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate peer: %v", err)
 	}
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Register peer as trusted so FetchConversation can decrypt.
 	boxSig := identity.SignBoxKeyBinding(peer)
@@ -4314,7 +4326,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "partial success message"},
@@ -4323,7 +4335,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "partial-success-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -4389,12 +4401,12 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 func TestUpdatePreviewFromCacheFallback(t *testing.T) {
 	r := newTestRouter()
 
-	peerID := domain.PeerIdentity("peer-1")
+	peerID := domaintest.ID("peer-1")
 
 	// Pre-load cache with messages as loadConversation would.
 	r.cache.Load(peerID, []DirectMessage{
-		{ID: "old-msg", Sender: domain.PeerIdentity("me"), Recipient: peerID, Body: "my old message", Timestamp: time.Now().Add(-5 * time.Minute)},
-		{ID: "new-msg", Sender: peerID, Recipient: domain.PeerIdentity("me"), Body: "latest from peer", Timestamp: time.Now()},
+		{ID: "old-msg", Sender: domaintest.ID("me"), Recipient: peerID, Body: "my old message", Timestamp: time.Now().Add(-5 * time.Minute)},
+		{ID: "new-msg", Sender: peerID, Recipient: domaintest.ID("me"), Body: "latest from peer", Timestamp: time.Now()},
 	})
 
 	r.mu.Lock()
@@ -4405,7 +4417,7 @@ func TestUpdatePreviewFromCacheFallback(t *testing.T) {
 	// Set a stale preview to verify it gets updated.
 	r.peers[peerID].Preview = ConversationPreview{
 		PeerAddress: peerID,
-		Sender:      domain.PeerIdentity("me"),
+		Sender:      domaintest.ID("me"),
 		Body:        "stale outgoing preview",
 	}
 	r.mu.Unlock()
@@ -4435,14 +4447,14 @@ func TestUpdatePreviewFromCacheFallback(t *testing.T) {
 func TestUpdatePreviewFromCacheStalePeerGuard(t *testing.T) {
 	r := newTestRouter()
 
-	peerA := domain.PeerIdentity("peer-A")
-	peerB := domain.PeerIdentity("peer-B")
+	peerA := domaintest.ID("peer-A")
+	peerB := domaintest.ID("peer-B")
 
 	// Set up: peer A has a stale preview. activeMessages belong to peer B
 	// (simulating a fast switch after loadConversation for peer A but before
 	// updatePreviewFromCache runs).
 	r.cache.Load(peerB, []DirectMessage{
-		{ID: "b-msg", Sender: peerB, Recipient: domain.PeerIdentity("me"), Body: "message from B"},
+		{ID: "b-msg", Sender: peerB, Recipient: domaintest.ID("me"), Body: "message from B"},
 	})
 
 	r.mu.Lock()
@@ -4496,7 +4508,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate peer: %v", err)
 	}
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	// Register peer as trusted contact so FetchConversation can decrypt.
 	boxSig := identity.SignBoxKeyBinding(peer)
@@ -4513,7 +4525,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "partial-success message"},
@@ -4524,7 +4536,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "partial-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -4554,7 +4566,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	r.ensurePeerLocked(peerID)
 	r.peers[peerID].Preview = ConversationPreview{
 		PeerAddress: peerID,
-		Sender:      domain.PeerIdentity(id.Address),
+		Sender:      domain.PeerIdentityFromWire(id.Address),
 		Body:        "stale outgoing",
 	}
 	r.seenMessageIDs["partial-1"] = struct{}{}
@@ -4592,7 +4604,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	preview := r.peers[peerID].Preview
 	r.mu.RUnlock()
 
-	if preview.Sender == domain.PeerIdentity(id.Address) {
+	if preview.Sender == domain.PeerIdentityFromWire(id.Address) {
 		t.Fatalf("preview still shows stale outgoing message — updatePreviewFromCache fallback did not update preview")
 	}
 	if preview.Body == "stale outgoing" {
@@ -4612,12 +4624,12 @@ func TestUpdatePreviewFromStoreReturnsFalseOnClosedChatlog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate peer: %v", err)
 	}
-	peerID := domain.PeerIdentity(peer.Address)
+	peerID := domain.PeerIdentityFromWire(peer.Address)
 
 	ciphertext, err := directmsg.EncryptForParticipants(
 		peer,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(id.Address),
+			Address:      domain.PeerIdentityFromWire(id.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "preview-fail message"},
@@ -4628,7 +4640,7 @@ func TestUpdatePreviewFromStoreReturnsFalseOnClosedChatlog(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
-	err = c.chatLog.Append("dm", domain.PeerIdentity(id.Address), chatlog.Entry{
+	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "preview-fail-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -4783,7 +4795,13 @@ func (p *testStatusProvider) Reset() {
 func newTestRouter() *DMRouter {
 	done := make(chan struct{})
 	close(done) // pre-closed so tests don't block on startupDone
-	client := &DesktopClient{id: &identity.Identity{Address: "me"}}
+	// Address must be the canonical 40-hex fingerprint so that
+	// AppInfo.Address() (PeerIdentityFromWire) round-trips to the same
+	// identity the fixtures use as the local node — domaintest.ID("me").
+	// A short literal like "me" fails to decode and yields the zero
+	// identity, so typed-identity paths (repairUnreadFromHeaders,
+	// peerForMessage) would never match the seeded "me" recipient.
+	client := &DesktopClient{id: &identity.Identity{Address: domaintest.ID("me").String()}}
 	client.wireSubServices()
 	provider := &testStatusProvider{}
 	return &DMRouter{
@@ -4832,7 +4850,7 @@ func newTestChatLog(t *testing.T) (*sql.DB, *chatlog.Store) {
 		_ = db.Close()
 		t.Fatalf("init chatlog schema: %v", err)
 	}
-	return db, chatlog.NewStoreFromDB(db, domain.PeerIdentity("me"))
+	return db, chatlog.NewStoreFromDB(db, domaintest.ID("me"))
 }
 
 // pollCondition polls fn every 5ms until it returns true or timeout expires.
@@ -4872,7 +4890,7 @@ func TestPostCommitPeerGenRaceRemovesOrphanedMapping(t *testing.T) {
 	t.Parallel()
 
 	r := newTestRouter()
-	peer := domain.PeerIdentity("alice")
+	peer := domaintest.ID("alice")
 
 	r.peers[peer] = &RouterPeerState{Unread: 0}
 	r.peerOrder = []domain.PeerIdentity{peer}
@@ -4939,7 +4957,7 @@ func TestSendFileAnnounceAsyncFailureCallsOnFailure(t *testing.T) {
 	t.Parallel()
 
 	r := newTestRouter()
-	peer := domain.PeerIdentity("bob")
+	peer := domaintest.ID("bob")
 
 	r.mu.Lock()
 	r.peers[peer] = &RouterPeerState{Unread: 0}
@@ -4990,20 +5008,20 @@ func TestSnapshotCacheReturnsStaleWhenUnchanged(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-A"
-	r.ensurePeerLocked("peer-A")
-	r.peers["peer-A"].Unread = 3
+	r.activePeer = domaintest.ID("peer-A")
+	r.ensurePeerLocked(domaintest.ID("peer-A"))
+	r.peers[domaintest.ID("peer-A")].Unread = 3
 	r.mu.Unlock()
 	// notify() builds and caches the snapshot under Lock.
 	r.notify(UIEventSidebarUpdated)
 	<-r.uiEvents
 
 	snap1 := r.Snapshot()
-	if snap1.ActivePeer != "peer-A" {
+	if snap1.ActivePeer != domaintest.ID("peer-A") {
 		t.Fatalf("snap1.ActivePeer = %q, want peer-A", snap1.ActivePeer)
 	}
-	if snap1.Peers["peer-A"].Unread != 3 {
-		t.Fatalf("snap1 Unread = %d, want 3", snap1.Peers["peer-A"].Unread)
+	if snap1.Peers[domaintest.ID("peer-A")].Unread != 3 {
+		t.Fatalf("snap1 Unread = %d, want 3", snap1.Peers[domaintest.ID("peer-A")].Unread)
 	}
 
 	// Second call without mutation — must return cached snapshot.
@@ -5011,8 +5029,8 @@ func TestSnapshotCacheReturnsStaleWhenUnchanged(t *testing.T) {
 	if snap2.ActivePeer != snap1.ActivePeer {
 		t.Fatalf("snap2.ActivePeer = %q, expected cached %q", snap2.ActivePeer, snap1.ActivePeer)
 	}
-	if snap2.Peers["peer-A"].Unread != 3 {
-		t.Fatalf("snap2 Unread = %d, want 3 (cached)", snap2.Peers["peer-A"].Unread)
+	if snap2.Peers[domaintest.ID("peer-A")].Unread != 3 {
+		t.Fatalf("snap2 Unread = %d, want 3 (cached)", snap2.Peers[domaintest.ID("peer-A")].Unread)
 	}
 }
 
@@ -5024,25 +5042,25 @@ func TestSnapshotCacheInvalidatedByNotify(t *testing.T) {
 	r := newTestRouter()
 
 	r.mu.Lock()
-	r.activePeer = "peer-A"
+	r.activePeer = domaintest.ID("peer-A")
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 	<-r.uiEvents
 
 	snap1 := r.Snapshot()
-	if snap1.ActivePeer != "peer-A" {
+	if snap1.ActivePeer != domaintest.ID("peer-A") {
 		t.Fatalf("snap1.ActivePeer = %q, want peer-A", snap1.ActivePeer)
 	}
 
 	// Mutate under lock, then notify (as real code does).
 	r.mu.Lock()
-	r.activePeer = "peer-B"
+	r.activePeer = domaintest.ID("peer-B")
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 	<-r.uiEvents
 
 	snap2 := r.Snapshot()
-	if snap2.ActivePeer != "peer-B" {
+	if snap2.ActivePeer != domaintest.ID("peer-B") {
 		t.Fatalf("snap2.ActivePeer = %q, want peer-B after notify", snap2.ActivePeer)
 	}
 }
@@ -5062,9 +5080,9 @@ func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
 
 	status := NodeStatus{
 		DMHeaders: []DMHeader{
-			{ID: "old-msg", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
-			{ID: "new-msg-1", Sender: domain.PeerIdentity("peer-1"), Recipient: domain.PeerIdentity("me")},
-			{ID: "new-msg-2", Sender: domain.PeerIdentity("peer-2"), Recipient: domain.PeerIdentity("me")},
+			{ID: "old-msg", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
+			{ID: "new-msg-1", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
+			{ID: "new-msg-2", Sender: domaintest.ID("peer-2"), Recipient: domaintest.ID("me")},
 		},
 	}
 
@@ -5081,11 +5099,11 @@ func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
 		t.Fatal("new-msg-2 should be in seenMessageIDs")
 	}
 	// peer-1 gets 1 new unread (new-msg-1), peer-2 gets 1 (new-msg-2).
-	if r.peers["peer-1"] == nil || r.peers["peer-1"].Unread != 1 {
-		t.Fatalf("peer-1 Unread = %v, want 1", r.peers["peer-1"])
+	if r.peers[domaintest.ID("peer-1")] == nil || r.peers[domaintest.ID("peer-1")].Unread != 1 {
+		t.Fatalf("peer-1 Unread = %v, want 1", r.peers[domaintest.ID("peer-1")])
 	}
-	if r.peers["peer-2"] == nil || r.peers["peer-2"].Unread != 1 {
-		t.Fatalf("peer-2 Unread = %v, want 1", r.peers["peer-2"])
+	if r.peers[domaintest.ID("peer-2")] == nil || r.peers[domaintest.ID("peer-2")].Unread != 1 {
+		t.Fatalf("peer-2 Unread = %v, want 1", r.peers[domaintest.ID("peer-2")])
 	}
 }
 
@@ -5105,7 +5123,7 @@ func TestSnapshotCacheConcurrentSafety(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < iterations; i++ {
-			peer := domain.PeerIdentity(fmt.Sprintf("peer-%d", i%5))
+			peer := domaintest.ID(fmt.Sprintf("peer-%d", i%5))
 			r.mu.Lock()
 			r.ensurePeerLocked(peer)
 			r.peers[peer].Unread++

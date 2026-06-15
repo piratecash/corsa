@@ -289,18 +289,18 @@ func TestValidateAdvertisedAddress_WorldObservedProducesCandidate(t *testing.T) 
 	if !result.AllowAnnounce {
 		t.Fatalf("AllowAnnounce must be true for world-routable observed match")
 	}
-	if result.NormalizedObservedIP != domain.PeerIP(observedHost) {
-		t.Fatalf("NormalizedObservedIP: got %q want %q", result.NormalizedObservedIP, observedHost)
+	if result.NormalizedObservedIP.String() != observedHost {
+		t.Fatalf("NormalizedObservedIP: got %q want %q", result.NormalizedObservedIP.String(), observedHost)
 	}
 	// The trusted advertised IP mirrors the observed IP, not the
 	// hello.listen host. This is the assertion that pins "observed IP
 	// is the sole truth source".
-	if result.NormalizedAdvertisedIP != domain.PeerIP(observedHost) {
+	if result.NormalizedAdvertisedIP.String() != observedHost {
 		t.Fatalf("NormalizedAdvertisedIP: got %q want %q (must mirror observed IP, NOT hello.listen host)",
-			result.NormalizedAdvertisedIP, observedHost)
+			result.NormalizedAdvertisedIP.String(), observedHost)
 	}
-	if result.ObservedIPHint != domain.PeerIP(observedHost) {
-		t.Fatalf("ObservedIPHint: got %q want %q", result.ObservedIPHint, observedHost)
+	if result.ObservedIPHint.String() != observedHost {
+		t.Fatalf("ObservedIPHint: got %q want %q", result.ObservedIPHint.String(), observedHost)
 	}
 	if result.AdvertisePort != advPort {
 		t.Fatalf("AdvertisePort propagation: got %d want %d", result.AdvertisePort, advPort)
@@ -355,7 +355,7 @@ func TestValidateAdvertisedAddress_LocalObservedNoAnnounce(t *testing.T) {
 			// ObservedIPHint must carry the canonical observed IP so
 			// the runtime observed-IP history still records the private
 			// observation (diagnostics / later-session reconciliation).
-			if result.ObservedIPHint == "" {
+			if !result.ObservedIPHint.IsValid() {
 				t.Fatalf("ObservedIPHint must expose the canonical observed IP even on non-routable observations")
 			}
 		})
@@ -389,9 +389,9 @@ func TestWelcomeFrame_AdvertiseAndObservedFields(t *testing.T) {
 	svc := &Service{
 		identity: id,
 		cfg: config.Node{
-			Type:             config.NodeTypeFull,
-			ListenerEnabled:  true,
-			ListenerSet:      true,
+			Type:            config.NodeTypeFull,
+			ListenerEnabled: true,
+			ListenerSet:     true,
 		},
 	}
 	frame := svc.welcomeFrame("challenge-xyz", "203.0.113.99")

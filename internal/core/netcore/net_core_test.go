@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/testutil/netmocks"
 )
@@ -226,12 +227,12 @@ func TestNetCoreIdentityLifecycle(t *testing.T) {
 	pc := New(7, conn, Inbound, Options{})
 	defer pc.Close()
 
-	if pc.Identity() != "" {
+	if !pc.Identity().IsZero() {
 		t.Fatal("identity should be empty before handshake")
 	}
 
-	pc.SetIdentity("abc123fingerprint")
-	if pc.Identity() != "abc123fingerprint" {
+	pc.SetIdentity(domaintest.ID("abc123fingerprint"))
+	if pc.Identity() != domaintest.ID("abc123fingerprint") {
 		t.Fatalf("expected abc123fingerprint, got %s", pc.Identity())
 	}
 }

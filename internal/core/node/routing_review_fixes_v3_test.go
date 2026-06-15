@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -247,7 +248,7 @@ func TestReview_v3_P2_3_PeerHasCapabilities_TripletCheck(t *testing.T) {
 	if svc.peerHasCapabilities(idPeerC, domain.CapMeshRelayV1, domain.CapMeshRoutingV1) {
 		t.Fatal("peerHasCapabilities returned true for query-only peer; want false (missing relay+routing)")
 	}
-	if svc.peerHasCapabilities("unknown-fp", domain.CapMeshRelayV1) {
+	if svc.peerHasCapabilities(domaintest.ID("unknown-fp"), domain.CapMeshRelayV1) {
 		t.Fatal("peerHasCapabilities returned true for unknown peer; want false")
 	}
 }

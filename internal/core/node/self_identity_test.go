@@ -12,6 +12,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/netcore/netcoretest"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -229,7 +230,7 @@ func TestOnCMDialFailed_SelfIdentityError_AppliesCooldown(t *testing.T) {
 	selfErr := &selfIdentityError{
 		Address:       addr,
 		PeerListen:    addr,
-		LocalIdentity: domain.PeerIdentity(svc.identity.Address),
+		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 
 	// Sanity on error discrimination: both errors.As(structured) and
@@ -356,13 +357,13 @@ func TestIsSelfIdentity_EdgeCases(t *testing.T) {
 	}, testIdentityForNetworkConsumerTest(t), backend)
 	t.Cleanup(svc.WaitBackground)
 
-	if svc.isSelfIdentity("") {
+	if svc.isSelfIdentity(domain.PeerIdentity{}) {
 		t.Error("isSelfIdentity(\"\") returned true; expected false so upstream guards stay monotone")
 	}
-	if !svc.isSelfIdentity(domain.PeerIdentity(svc.identity.Address)) {
+	if !svc.isSelfIdentity(domain.PeerIdentityFromWire(svc.identity.Address)) {
 		t.Error("isSelfIdentity(local identity) returned false; expected true")
 	}
-	if svc.isSelfIdentity(domain.PeerIdentity("CoRsAsome0therAddress1111111111111111")) {
+	if svc.isSelfIdentity(domaintest.ID("CoRsAsome0therAddress1111111111111111")) {
 		t.Error("isSelfIdentity(foreign address) returned true")
 	}
 }
@@ -392,6 +393,13 @@ func TestSyncPeer_SelfIdentityWelcome_AppliesCooldown(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 
 	svc := newSyncPeerTestService(domain.NetworkStatusHealthy)
+	// newSyncPeerTestService seeds a non-hex placeholder address. Under
+	// byte-identity semantics the self-identity guard parses welcome.Address
+	// via PeerIdentityFromWire, which only round-trips a canonical 40-char
+	// hex fingerprint — a non-hex address would decode to the zero identity
+	// and never match. Pin a valid hex local identity so the NAT-reflection
+	// self-match (and thus the cooldown branch) is actually exercised.
+	svc.identity.Address = domaintest.ID("self-node-aaa").String()
 	peerAddr := domain.PeerAddress(ln.Addr().String())
 
 	// Mock peer: read hello, answer with a welcome whose Address matches
@@ -471,7 +479,7 @@ func TestTryApplySelfIdentityCooldown_StructuredError_Hit(t *testing.T) {
 	selfErr := &selfIdentityError{
 		Address:       addr,
 		PeerListen:    addr,
-		LocalIdentity: domain.PeerIdentity(svc.identity.Address),
+		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 	// Wrap with fmt.Errorf("%w: ...") to prove the helper uses errors.As
 	// (which unwraps), not a concrete type-assertion. openPeerSession
@@ -769,7 +777,7 @@ func TestApplySelfIdentityCooldown_NoAccumulation_WithinBanWindow(t *testing.T) 
 	selfErr := &selfIdentityError{
 		Address:       addr,
 		PeerListen:    addr,
-		LocalIdentity: domain.PeerIdentity(svc.identity.Address),
+		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 
 	svc.applySelfIdentityCooldown(addr, selfErr)
@@ -847,7 +855,7 @@ func TestApplySelfIdentityCooldown_ReAppliesAfterBanExpired(t *testing.T) {
 	selfErr := &selfIdentityError{
 		Address:       addr,
 		PeerListen:    addr,
-		LocalIdentity: domain.PeerIdentity(svc.identity.Address),
+		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	}
 
 	// Seed: pretend we applied a self-identity cooldown ages ago and

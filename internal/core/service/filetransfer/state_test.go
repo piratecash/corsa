@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ func TestSenderStateAnnouncedToServingToCompleted(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-1234567890ab")
+	receiver := domaintest.ID("receiver-identity-1234567890ab")
 	fileID := domain.FileID("lifecycle-file-id")
 
 	// Start in Announced.
@@ -112,7 +113,7 @@ func TestSenderCompletedReservesChunkRequest(t *testing.T) {
 		t.Fatalf("NewFileStore: %v", err)
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-1234567890ab")
+	receiver := domaintest.ID("receiver-identity-1234567890ab")
 	fileID := domain.FileID("completed-redownload")
 	fileHash := sha256Hex([]byte("redownload-content"))
 
@@ -180,7 +181,7 @@ func TestSenderTombstoneResurrectedAtServeTime(t *testing.T) {
 		t.Fatalf("NewFileStore: %v", err)
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-1234567890ab")
+	receiver := domaintest.ID("receiver-identity-1234567890ab")
 	fileID := domain.FileID("tombstone-resurrect-runtime")
 	fileHash := sha256Hex([]byte("runtime-resurrect-content"))
 
@@ -250,7 +251,7 @@ func TestSenderTombstoneNoBlobStillRejected(t *testing.T) {
 		t.Fatalf("NewFileStore: %v", err)
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-1234567890ab")
+	receiver := domaintest.ID("receiver-identity-1234567890ab")
 	fileID := domain.FileID("tombstone-no-blob")
 
 	var sentPayloads []domain.FileCommandPayload
@@ -304,7 +305,7 @@ func TestSenderIdempotentFileDownloaded(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-1234567890ab")
+	receiver := domaintest.ID("receiver-identity-1234567890ab")
 	fileID := domain.FileID("idempotent-file")
 	completedAt := time.Now().Add(-time.Hour)
 
@@ -352,7 +353,7 @@ func TestSenderTombstonedFileIDIgnoresChunkRequest(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-1234567890ab")
+	receiver := domaintest.ID("receiver-identity-1234567890ab")
 	fileID := domain.FileID("tombstoned-file")
 
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -391,8 +392,8 @@ func TestSenderFileDownloadedFromNonRecipientIgnored(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	legitimateReceiver := domain.PeerIdentity("legitimate-receiver-1234567890")
-	attacker := domain.PeerIdentity("attacker-identity-123456789012")
+	legitimateReceiver := domaintest.ID("legitimate-receiver-1234567890")
+	attacker := domaintest.ID("attacker-identity-123456789012")
 	fileID := domain.FileID("auth-check-file")
 
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -440,7 +441,7 @@ func TestSenderFileDownloadedRejectedOutsideServingRun(t *testing.T) {
 				stopCh: make(chan struct{}),
 			}
 
-			receiver := domain.PeerIdentity("receiver-state-guard-01234")
+			receiver := domaintest.ID("receiver-state-guard-01234")
 			fileID := domain.FileID("state-guard-file")
 
 			m.senderMaps[fileID] = &senderFileMapping{
@@ -478,7 +479,7 @@ func TestReceiverFileDownloadedAckTransitionsToCompleted(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("waiting-ack-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -511,7 +512,7 @@ func TestReceiverFileDownloadedAckIgnoredInOtherStates(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("wrong-state-file")
 
 	states := []receiverState{
@@ -549,8 +550,8 @@ func TestReceiverFileDownloadedAckFromWrongSenderIgnored(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	realSender := domain.PeerIdentity("real-sender-identity-1234567890")
-	fakeSender := domain.PeerIdentity("fake-sender-identity-1234567890")
+	realSender := domaintest.ID("real-sender-identity-1234567890")
+	fakeSender := domaintest.ID("fake-sender-identity-1234567890")
 	fileID := domain.FileID("wrong-sender-ack")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -584,7 +585,7 @@ func TestReceiverWaitingRouteResumesOnPeerReachable(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-who-went-offline-1234567")
+	sender := domaintest.ID("sender-who-went-offline-1234567")
 	fileID := domain.FileID("waiting-route-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -626,7 +627,7 @@ func TestReceiverWaitingRouteStaysWhenPeerOffline(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("offline-sender-identity-1234567")
+	sender := domaintest.ID("offline-sender-identity-1234567")
 	fileID := domain.FileID("stays-waiting-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -660,7 +661,7 @@ func TestReceiverWaitingAckTimeoutTransitionsToCompleted(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("ack-timeout-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -699,7 +700,7 @@ func TestReceiverWaitingAckRetryFileDownloaded(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("retry-file-downloaded")
 
 	// Backoff expired — should trigger retry.
@@ -742,8 +743,8 @@ func TestReceiverChunkResponseFromWrongSenderIgnored(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	realSender := domain.PeerIdentity("real-sender-identity-1234567890")
-	fakeSender := domain.PeerIdentity("fake-sender-identity-1234567890")
+	realSender := domaintest.ID("real-sender-identity-1234567890")
+	fakeSender := domaintest.ID("fake-sender-identity-1234567890")
 	fileID := domain.FileID("wrong-sender-chunk")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -796,7 +797,7 @@ func TestStartDownload_ResumeRollbackPreservesProgress(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8"
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -848,7 +849,7 @@ func TestStartDownload_FreshStartRollbackResetsToZero(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("fresh-rollback")
 	validHash := "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8"
 
@@ -905,7 +906,7 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileMissing(t *testing.T) {
 		stopCh:        make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("missing-partial")
 	validHash := "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8"
 
@@ -973,7 +974,7 @@ func TestStartDownload_ResumeFallsBackWhenPartialFileTruncated(t *testing.T) {
 		stopCh:        make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	// Use a file ID that produces the same partial path as our truncated file.
 	fileID := domain.FileID("truncated-partial")
 	validHash := "b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8"
@@ -1049,7 +1050,7 @@ func TestStartDownload_RestartFromZeroTruncatesStalePartial(t *testing.T) {
 		stopCh:        make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:    fileID,
 		FileHash:  validHash,
@@ -1105,7 +1106,7 @@ func TestStartDownload_ResumeSucceedsWhenPartialFileValid(t *testing.T) {
 		stopCh:        make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8e1e2e3e4e5e6e7e8f1f2f3f4f5f6f7f8"
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -1176,7 +1177,7 @@ func TestStartDownload_OversizedPartialFileResetsOffset(t *testing.T) {
 		stopCh:        make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	validHash := "f1f2f3f4f5f6f7f8a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8"
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -1244,7 +1245,7 @@ func TestRetryPendingDownloads_RollsBackOnSendFailure(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:        fileID,
@@ -1303,7 +1304,7 @@ func TestRetryPendingDownloads_SuccessfulResumeStaysDownloading(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:        fileID,
@@ -1359,7 +1360,7 @@ func TestDeferredResumeSkippedAfterCancel(t *testing.T) {
 		stopCh:        make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:        fileID,
 		FileHash:      "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8",
@@ -1425,7 +1426,7 @@ func TestDeferredActionStateGuard_SkipsOnMismatch(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-guard-test")
+	sender := domaintest.ID("sender-guard-test")
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:    fileID,
 		FileHash:  "aaaa",
@@ -1481,7 +1482,7 @@ func TestDeferredActionStateGuard_ExecutesOnMatch(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-guard-match")
+	sender := domaintest.ID("sender-guard-match")
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:        fileID,
 		FileHash:      "bbbb",
@@ -1534,7 +1535,7 @@ func TestDeferredCleanupSkippedAfterReRegister(t *testing.T) {
 		stopCh:        make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-cleanup-regen")
+	sender := domaintest.ID("sender-cleanup-regen")
 
 	// Phase 1: create a failed mapping (generation 0) and capture a
 	// deferred cleanup action from the tick snapshot.
@@ -1605,7 +1606,7 @@ func TestVerifyCleanupSkippedAfterCancelAndRestart(t *testing.T) {
 
 	downloadDir := createPartialDir(t)
 	fileID := domain.FileID("verify-cancel-restart")
-	sender := domain.PeerIdentity("sender-verify-cancel")
+	sender := domaintest.ID("sender-verify-cancel")
 
 	m := &Manager{
 		senderMaps:   make(map[domain.FileID]*senderFileMapping),
@@ -1706,7 +1707,7 @@ func TestMarkReceiverFailedRejectsStaleGeneration(t *testing.T) {
 		FileHash:   "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
 		FileName:   "test.bin",
 		FileSize:   2048,
-		Sender:     domain.PeerIdentity("sender-gen-race-1234567890abcd"),
+		Sender:     domaintest.ID("sender-gen-race-1234567890abcd"),
 		State:      receiverVerifying,
 		CreatedAt:  time.Now(),
 		Generation: currentGeneration,
@@ -1761,7 +1762,7 @@ func TestRetryPendingDownloads_RollbackRestoresAllWaitingRouteOnSendFailure(t *t
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 
 	// Two waitingRoute transfers — both are picked up in the same tick
 	// (no concurrency cap). The send fails for each, and the rollback
@@ -1832,7 +1833,7 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileMissing(t *testing.T) 
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("partial-missing")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -1894,7 +1895,7 @@ func TestRetryPendingDownloads_ResetsOffsetWhenPartialFileTruncated(t *testing.T
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:        fileID,
@@ -1952,7 +1953,7 @@ func TestRetryPendingDownloads_PreservesOffsetWhenPartialFileValid(t *testing.T)
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
 		FileID:        fileID,
@@ -2000,7 +2001,7 @@ func TestRetryPendingDownloads_ZeroOffsetSkipsPartialCheck(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("zero-offset-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -2048,7 +2049,7 @@ func TestCancelDownloadRejectsWaitingAck(t *testing.T) {
 		FileHash:      "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 		FileName:      "report.pdf",
 		FileSize:      1024,
-		Sender:        domain.PeerIdentity("sender-identity-1234567890abcd"),
+		Sender:        domaintest.ID("sender-identity-1234567890abcd"),
 		State:         receiverWaitingAck,
 		CompletedPath: filepath.Join(dir, "report.pdf"),
 		CreatedAt:     time.Now(),
@@ -2090,7 +2091,7 @@ func TestCancelDownloadAllowedStates(t *testing.T) {
 				FileHash:  "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 				FileName:  "test.bin",
 				FileSize:  1024,
-				Sender:    domain.PeerIdentity("sender-identity-1234567890abcd"),
+				Sender:    domaintest.ID("sender-identity-1234567890abcd"),
 				State:     state,
 				CreatedAt: time.Now(),
 			}
@@ -2117,7 +2118,7 @@ func TestRestartDownloadFromFailed(t *testing.T) {
 	m := newTestTransferManager(t, downloadDir, nil)
 
 	fileID := domain.FileID("restart-test-file")
-	sender := domain.PeerIdentity("restart-sender-identity-1234")
+	sender := domaintest.ID("restart-sender-identity-1234")
 
 	// Set the manager's generation counter to match the mapping so the
 	// bump assertion is meaningful.
@@ -2168,7 +2169,7 @@ func TestRestartDownloadRejectsNonFailed(t *testing.T) {
 	downloadDir := testDownloadDir(t)
 	m := newTestTransferManager(t, downloadDir, nil)
 
-	sender := domain.PeerIdentity("restart-reject-sender-1234")
+	sender := domaintest.ID("restart-reject-sender-1234")
 
 	nonFailedStates := []receiverState{
 		receiverAvailable, receiverDownloading, receiverVerifying,
@@ -2235,7 +2236,7 @@ func TestReclaimStalledServingSlots(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	recipient := domain.PeerIdentity("receiver-identity-1234567890ab")
+	recipient := domaintest.ID("receiver-identity-1234567890ab")
 
 	// Stale entry: LastServedAt well past the timeout.
 	staleID := domain.FileID("stale-serving")
@@ -2331,7 +2332,7 @@ func TestReclaimStalledServingSlotsPersistence(t *testing.T) {
 		FileHash:     validHash,
 		FileName:     "persist.bin",
 		FileSize:     512,
-		Recipient:    domain.PeerIdentity("receiver-identity-1234567890ab"),
+		Recipient:    domaintest.ID("receiver-identity-1234567890ab"),
 		State:        senderServing,
 		CreatedAt:    time.Now().Add(-20 * time.Minute),
 		LastServedAt: lastServed,
@@ -2391,7 +2392,7 @@ func TestWaitingAckAdvancesRetryCounterWhenSenderOffline(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("offline-ack-retry")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -2444,7 +2445,7 @@ func TestWaitingAckCompletesLocallyAfterMaxRetriesWithOfflineSender(t *testing.T
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-1234567890abcd")
+	sender := domaintest.ID("sender-identity-1234567890abcd")
 	fileID := domain.FileID("offline-ack-exhaust")
 
 	// Set retries to 20 — next tick should push it to 21 and trigger completion.
@@ -2508,7 +2509,7 @@ func TestSenderValidateChunkRequestBumpsServingEpochOnTransition(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-epoch-bump-1")
+	receiver := domaintest.ID("receiver-identity-epoch-bump-1")
 	fileID := domain.FileID("epoch-bump-file")
 
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -2580,7 +2581,7 @@ func TestSenderChunkResponseCarriesCurrentEpoch(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-chunk-wire-1")
+	receiver := domaintest.ID("receiver-identity-chunk-wire-1")
 	fileID := domain.FileID("chunk-wire-file")
 
 	// Pre-set epoch to 7; the sender bumps on announced→serving so final
@@ -2624,7 +2625,7 @@ func TestSenderHandleFileDownloadedRejectsStaleEpochReplay(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-stale-replay")
+	receiver := domaintest.ID("receiver-identity-stale-replay")
 	fileID := domain.FileID("stale-epoch-file")
 
 	// Active re-download: state=serving, ServingEpoch=5, origin=completed.
@@ -2693,7 +2694,7 @@ func TestSenderHandleFileDownloadedLegacyZeroEpochAccepted(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity-legacy-wire1")
+	receiver := domaintest.ID("receiver-identity-legacy-wire1")
 	fileID := domain.FileID("legacy-zero-epoch-file")
 
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -2734,7 +2735,7 @@ func TestReceiverChunkResponseStashesServingEpoch(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-epoch-stash-1")
+	sender := domaintest.ID("sender-identity-epoch-stash-1")
 	fileID := domain.FileID("epoch-stash-file")
 	payload := []byte("epoch-stash-payload-some-bytes")
 
@@ -2781,7 +2782,7 @@ func TestReceiverChunkResponseEpochMonotonic(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-epoch-mono-01")
+	sender := domaintest.ID("sender-epoch-mono-01")
 	fileID := domain.FileID("epoch-monotonic")
 
 	// Build a payload large enough for multiple chunks.
@@ -2849,7 +2850,7 @@ func TestReceiverSendFileDownloadedEchoesEpoch(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-echo-epoch-01")
+	sender := domaintest.ID("sender-identity-echo-epoch-01")
 	fileID := domain.FileID("echo-epoch-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -2888,7 +2889,7 @@ func TestReceiverHandleFileDownloadedAckRejectsStaleEpoch(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-stale-ack-01")
+	sender := domaintest.ID("sender-identity-stale-ack-01")
 	fileID := domain.FileID("stale-ack-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -2929,7 +2930,7 @@ func TestReceiverCancelDownloadResetsServingEpoch(t *testing.T) {
 		stopCh:       make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-cancel-reset-1")
+	sender := domaintest.ID("sender-identity-cancel-reset-1")
 	fileID := domain.FileID("cancel-reset-file")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
@@ -2981,7 +2982,7 @@ func TestSendFileDownloadedSuppressedAfterStateChange(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	sender := domain.PeerIdentity("sender-identity-cancel-guard-01")
+	sender := domaintest.ID("sender-identity-cancel-guard-01")
 	fileID := domain.FileID("cancel-guard-file")
 
 	// Start in receiverWaitingAck — the state that triggers ack retries.
@@ -3038,7 +3039,7 @@ func TestSendFileDownloadedSuppressedWhenMappingMissing(t *testing.T) {
 	}
 
 	// No mapping exists — sendFileDownloaded must not panic or send.
-	m.sendFileDownloaded("nonexistent", "sender")
+	m.sendFileDownloaded("nonexistent", domaintest.ID("sender"))
 	if sent != 0 {
 		t.Errorf("expected 0 sends for missing mapping, got %d", sent)
 	}
@@ -3067,19 +3068,19 @@ func TestDeferredChunkRetrySuppressedAfterCancel(t *testing.T) {
 		nextGeneration: 1, // must match mapping Generation so CancelDownload bumps to 2
 	}
 
-	sender := domain.PeerIdentity("sender-deferred-chunk-guard-01")
+	sender := domaintest.ID("sender-deferred-chunk-guard-01")
 	fileID := domain.FileID("deferred-chunk-guard")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "deadbeef",
-		FileName:  "doc.bin",
-		FileSize:  100,
-		Sender:    sender,
-		State:     receiverDownloading,
-		ChunkSize: domain.DefaultChunkSize,
+		FileID:     fileID,
+		FileHash:   "deadbeef",
+		FileName:   "doc.bin",
+		FileSize:   100,
+		Sender:     sender,
+		State:      receiverDownloading,
+		ChunkSize:  domain.DefaultChunkSize,
 		Generation: 1,
-		CreatedAt: time.Now(),
+		CreatedAt:  time.Now(),
 	}
 
 	// Build a deferred action that the tick loop would have created.
@@ -3128,19 +3129,19 @@ func TestDeferredResumeSuppressedAfterCancel(t *testing.T) {
 		nextGeneration: 1, // must match mapping Generation so CancelDownload bumps to 2
 	}
 
-	sender := domain.PeerIdentity("sender-deferred-resume-guard-01")
+	sender := domaintest.ID("sender-deferred-resume-guard-01")
 	fileID := domain.FileID("deferred-resume-guard")
 
 	m.receiverMaps[fileID] = &receiverFileMapping{
-		FileID:    fileID,
-		FileHash:  "deadbeef",
-		FileName:  "doc.bin",
-		FileSize:  100,
-		Sender:    sender,
-		State:     receiverWaitingRoute,
-		ChunkSize: domain.DefaultChunkSize,
+		FileID:     fileID,
+		FileHash:   "deadbeef",
+		FileName:   "doc.bin",
+		FileSize:   100,
+		Sender:     sender,
+		State:      receiverWaitingRoute,
+		ChunkSize:  domain.DefaultChunkSize,
 		Generation: 1,
-		CreatedAt: time.Now(),
+		CreatedAt:  time.Now(),
 	}
 
 	action := receiverTickAction{
@@ -3191,7 +3192,7 @@ func TestRollbackSkippedAfterGenerationBump(t *testing.T) {
 		nextGeneration: 1, // must match the mapping's Generation so CancelDownload bumps to 2
 	}
 
-	sender := domain.PeerIdentity("sender-rollback-gen-01")
+	sender := domaintest.ID("sender-rollback-gen-01")
 	fileID := domain.FileID("rollback-gen-guard")
 
 	// Set up a mapping at generation 1 in receiverDownloading.
@@ -3273,7 +3274,7 @@ func TestGuardedResumeRollbackSkippedAfterGenerationBump(t *testing.T) {
 		nextGeneration: 1,
 	}
 
-	sender := domain.PeerIdentity("sender-guarded-resume-gen-01")
+	sender := domaintest.ID("sender-guarded-resume-gen-01")
 	fileID := domain.FileID("guarded-resume-gen-guard")
 
 	// Mapping at generation 1, state receiverDownloading (resume already

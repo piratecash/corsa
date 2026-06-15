@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ func TestQuarantine_NoTriggerBelowThreshold(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	peer := domain.PeerIdentity("test-peer-quiet")
+	peer := domaintest.ID("test-peer-quiet")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	svc.peerMu.Lock()
@@ -61,7 +62,7 @@ func TestQuarantine_TriggersOnDisconnectRate(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	peer := domain.PeerIdentity("test-peer-flapping")
+	peer := domaintest.ID("test-peer-flapping")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	svc.peerMu.Lock()
@@ -95,7 +96,7 @@ func TestQuarantine_EventsOutsideWindowDoNotCount(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	peer := domain.PeerIdentity("test-peer-history")
+	peer := domaintest.ID("test-peer-history")
 	t0 := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// Three old events (outside the window).
@@ -123,7 +124,7 @@ func TestQuarantine_ExpiryRestoresNormalProcessing(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	peer := domain.PeerIdentity("test-peer-expiring")
+	peer := domaintest.ID("test-peer-expiring")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	svc.peerMu.Lock()
@@ -149,7 +150,7 @@ func TestQuarantine_RecidivismDoubles(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	peer := domain.PeerIdentity("test-peer-recidivist")
+	peer := domaintest.ID("test-peer-recidivist")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	armCycle := func(at time.Time) routeQuarantineEntry {
@@ -186,7 +187,7 @@ func TestQuarantine_RecidivismResetsAfterQuietPeriod(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	peer := domain.PeerIdentity("test-peer-reformed")
+	peer := domaintest.ID("test-peer-reformed")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	svc.peerMu.Lock()
@@ -227,7 +228,7 @@ func TestQuarantine_IsPeerInRouteQuarantineEmptyIdentity(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	if svc.IsPeerInRouteQuarantine("") {
+	if svc.IsPeerInRouteQuarantine(domain.PeerIdentity{}) {
 		t.Fatal("empty identity should not be reported as quarantined")
 	}
 }
@@ -241,8 +242,8 @@ func TestQuarantine_PurgeRemovesStaleEntries(t *testing.T) {
 	svc := newQuarantineFixture()
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
-	old := domain.PeerIdentity("very-old-peer")
-	recent := domain.PeerIdentity("recent-peer")
+	old := domaintest.ID("very-old-peer")
+	recent := domaintest.ID("recent-peer")
 
 	svc.peerMu.Lock()
 	// "Old": LastArmed long ago, Until long elapsed.
@@ -327,7 +328,7 @@ func TestChattyRoutes_NoTriggerBelowThreshold(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("quiet-peer")
+	peer := domaintest.ID("quiet-peer")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	svc.peerMu.Lock()
@@ -353,7 +354,7 @@ func TestChattyRoutes_TriggersAtThreshold(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("chatty-peer")
+	peer := domaintest.ID("chatty-peer")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// Drive recordInboundAnnounceAndMaybeArm through the public
@@ -386,7 +387,7 @@ func TestChattyRoutes_EventsOutsideWindowDoNotCount(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("paced-peer")
+	peer := domaintest.ID("paced-peer")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// (threshold-1) ancient frames + 1 fresh frame would superficially
@@ -417,7 +418,7 @@ func TestChattyRoutes_ReArmsOngoingQuarantineAfterDebounce(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("persistent-chatty-peer")
+	peer := domaintest.ID("persistent-chatty-peer")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// First flood — arms quarantine. Spread events tightly so the
@@ -470,7 +471,7 @@ func TestChattyRoutes_SustainedFloodDoesNotBumpStrikesPerFrame(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("flood-without-pause-peer")
+	peer := domaintest.ID("flood-without-pause-peer")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	const floodFrames = 2 * chattyAnnounceThreshold
@@ -524,7 +525,7 @@ func TestChattyRoutes_HistoryBoundedAtThreshold(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("bounded-history-peer")
+	peer := domaintest.ID("bounded-history-peer")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// Drive past the cap tightly inside the window. Without the cap,
@@ -584,7 +585,7 @@ func TestChattyThreshold_ScalesWithRelayDegree(t *testing.T) {
 
 	// Hub: 4 relay peers → effective == base + 4*perPeer.
 	svc.peerMu.Lock()
-	for _, id := range []domain.PeerIdentity{"relay-0", "relay-1", "relay-2", "relay-3"} {
+	for _, id := range []domain.PeerIdentity{domaintest.ID("relay-0"), domaintest.ID("relay-1"), domaintest.ID("relay-2"), domaintest.ID("relay-3")} {
 		svc.identityRelaySessions[id] = 1
 	}
 	wantEff := chattyAnnounceThreshold + 4*chattyAnnounceThresholdPerRelayPeer
@@ -594,7 +595,7 @@ func TestChattyThreshold_ScalesWithRelayDegree(t *testing.T) {
 		t.Fatalf("hub threshold = %d, want %d", hub, wantEff)
 	}
 
-	peer := domain.PeerIdentity("busy-neighbour")
+	peer := domaintest.ID("busy-neighbour")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// A burst sized to the BASE must NOT arm on the hub (below the
@@ -630,7 +631,7 @@ func TestChattyRoutes_AgeoutFrontTrimsSlice(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("ageout-peer")
+	peer := domaintest.ID("ageout-peer")
 	base := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// Phase 1: fill the window with threshold events.
@@ -670,7 +671,7 @@ func TestChattyRoutes_ShouldArmDebouncesUnderActiveQuarantine(t *testing.T) {
 	t.Parallel()
 
 	svc := newChattyFixture()
-	peer := domain.PeerIdentity("debounce-gate-peer")
+	peer := domaintest.ID("debounce-gate-peer")
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
 	// Pre-seed: peer is over threshold AND already quarantined
@@ -717,8 +718,8 @@ func TestChattyRoutes_PurgeRemovesStaleHistory(t *testing.T) {
 	svc := newChattyFixture()
 	now := time.Date(2026, 6, 3, 10, 0, 0, 0, time.UTC)
 
-	silent := domain.PeerIdentity("went-silent")
-	live := domain.PeerIdentity("still-chatty")
+	silent := domaintest.ID("went-silent")
+	live := domaintest.ID("still-chatty")
 
 	svc.peerMu.Lock()
 	svc.peerAnnounceHistory[silent] = []time.Time{

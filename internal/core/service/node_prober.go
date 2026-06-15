@@ -275,7 +275,7 @@ func (p *NodeProber) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, 
 func (p *NodeProber) DeleteContact(identity domain.PeerIdentity) error {
 	_, err := p.rpc.LocalRequestFrame(protocol.Frame{
 		Type:    "delete_trusted_contact",
-		Address: string(identity),
+		Address: identity.String(),
 	})
 	return err
 }
@@ -297,7 +297,14 @@ func (p *NodeProber) BuildReachableIDs() map[domain.PeerIdentity]bool {
 	}
 	reachable := make(map[domain.PeerIdentity]bool, len(reply.Identities))
 	for _, id := range reply.Identities {
-		reachable[domain.PeerIdentity(id)] = true
+		// Parse strictly and skip malformed / all-zero entries so a bad
+		// fetch_reachable_ids reply can't insert the zero (absent) identity
+		// as "reachable" — mirrors the RPC command-boundary contract.
+		parsed, err := domain.ParsePeerIdentity(id)
+		if err != nil || parsed.IsZero() {
+			continue
+		}
+		reachable[parsed] = true
 	}
 	return reachable
 }

@@ -72,7 +72,7 @@ type peerEntry struct {
 
 	// TrustedAdvertiseIP is the canonical IP form (IPv4-mapped IPv6 already
 	// collapsed) recorded when the advertised endpoint was confirmed.
-	TrustedAdvertiseIP domain.PeerIP `json:"trusted_advertise_ip,omitempty"`
+	TrustedAdvertiseIP *domain.PeerIP `json:"trusted_advertise_ip,omitempty"`
 
 	// TrustedAdvertiseSource marks how the advertise was confirmed:
 	// "inbound_confirmed", "outbound_confirmed", or the reserved
@@ -90,8 +90,8 @@ type peerEntry struct {
 	// hint applied through applyAdvertiseValidationResultLocked for this
 	// peer. These are a single-value snapshot — the runtime history of
 	// size observedIPHistoryMaxSize does not fold into this field.
-	LastObservedIP domain.PeerIP `json:"last_observed_ip,omitempty"`
-	LastObservedAt *time.Time    `json:"last_observed_at,omitempty"`
+	LastObservedIP *domain.PeerIP `json:"last_observed_ip,omitempty"`
+	LastObservedAt *time.Time     `json:"last_observed_at,omitempty"`
 }
 
 // bannedIPEntry is the on-disk representation of an IP-wide ban.

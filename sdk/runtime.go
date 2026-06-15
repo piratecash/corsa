@@ -154,7 +154,7 @@ func (r *Runtime) Config() Config {
 
 // Address returns the local identity address.
 func (r *Runtime) Address() string {
-	return string(r.client.Address())
+	return r.client.Address().String()
 }
 
 // ListenAddress returns the configured local listener address.

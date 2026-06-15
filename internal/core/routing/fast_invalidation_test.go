@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // Phase 1 P3 — fast invalidation regression suite.
@@ -31,10 +33,10 @@ func TestFastInvalidation_NewClaimAcceptedAsTombstone(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
 	)
 
 	tbl := NewTable(
@@ -44,7 +46,7 @@ func TestFastInvalidation_NewClaimAcceptedAsTombstone(t *testing.T) {
 	)
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 10, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
@@ -63,7 +65,7 @@ func TestFastInvalidation_NewClaimAcceptedAsTombstone(t *testing.T) {
 
 	// InspectTriple must still see the row as a withdrawn entry —
 	// the SeqNo-resurrection guard depends on it being present.
-	entry := tbl.InspectTriple(RouteTriple{Identity: dest, Origin: "src-x", NextHop: uplink})
+	entry := tbl.InspectTriple(RouteTriple{Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink})
 	if entry == nil {
 		t.Fatalf("InspectTriple must return the tombstone")
 	}
@@ -83,10 +85,10 @@ func TestFastInvalidation_ReplacesLiveClaimWithStrictlyNewerSeqNo(t *testing.T) 
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
 	)
 
 	tbl := NewTable(
@@ -97,14 +99,14 @@ func TestFastInvalidation_ReplacesLiveClaimWithStrictlyNewerSeqNo(t *testing.T) 
 
 	// Live claim at hops=3, SeqNo=10.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
 	// Bad-hops update at strictly newer SeqNo — must invalidate
 	// the stored live row.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 12, SeqNo: 11, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
@@ -129,10 +131,10 @@ func TestFastInvalidation_StaleBadHopsClaimRejected(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
 	)
 
 	tbl := NewTable(
@@ -142,13 +144,13 @@ func TestFastInvalidation_StaleBadHopsClaimRejected(t *testing.T) {
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 3, SeqNo: 20, Source: RouteSourceAnnouncement,
 	})
 
 	// Stale bad-hops sample at SeqNo=15 < stored 20.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 12, SeqNo: 15, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteRejected {
@@ -174,10 +176,10 @@ func TestFastInvalidation_RecoveryByNewerValidAnnounce(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
 	)
 
 	tbl := NewTable(
@@ -189,7 +191,7 @@ func TestFastInvalidation_RecoveryByNewerValidAnnounce(t *testing.T) {
 
 	// Invalidate (lands as tombstone at SeqNo=10).
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 12, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if routes := tbl.Lookup(dest); len(routes) != 0 {
@@ -198,7 +200,7 @@ func TestFastInvalidation_RecoveryByNewerValidAnnounce(t *testing.T) {
 
 	// Resurrect with a valid announce at strictly newer SeqNo.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 3, SeqNo: 11, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
@@ -222,11 +224,11 @@ func TestFastInvalidation_NotEmittedOnWire(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
-		viewer  PeerIdentity = "peer-Z"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
+		viewer  = domaintest.ID("peer-Z")
 	)
 
 	tbl := NewTable(
@@ -236,7 +238,7 @@ func TestFastInvalidation_NotEmittedOnWire(t *testing.T) {
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 12, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -275,10 +277,10 @@ func TestFastInvalidation_WireHopsBoundaryClampedToHopsInfinity(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
 	)
 
 	tbl := NewTable(
@@ -291,7 +293,7 @@ func TestFastInvalidation_WireHopsBoundaryClampedToHopsInfinity(t *testing.T) {
 	// reaches UpdateRoute with Hops=16 (HopsInfinity, clamped).
 	// toUplinkClaim then sets Withdrawn=true from the sentinel.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: HopsInfinity, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
@@ -307,7 +309,7 @@ func TestFastInvalidation_WireHopsBoundaryClampedToHopsInfinity(t *testing.T) {
 
 	// Stored claim must be the tombstone at the observed SeqNo for
 	// the SeqNo-resurrection guard.
-	entry := tbl.InspectTriple(RouteTriple{Identity: dest, Origin: "src-x", NextHop: uplink})
+	entry := tbl.InspectTriple(RouteTriple{Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink})
 	if entry == nil {
 		t.Fatalf("InspectTriple must return the tombstone")
 	}
@@ -343,12 +345,12 @@ func TestFastInvalidation_CrossOriginStaleReplayRejected(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
-		originA PeerIdentity = "origin-A"
-		originB PeerIdentity = "origin-B"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
+		originA = domaintest.ID("origin-A")
+		originB = domaintest.ID("origin-B")
 	)
 
 	tbl := NewTable(
@@ -412,10 +414,10 @@ func TestFastInvalidation_DisabledCapShortCircuits(t *testing.T) {
 	now := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 
-	const (
-		localID PeerIdentity = "node-A"
-		dest    PeerIdentity = "dest"
-		uplink  PeerIdentity = "u-1"
+	var (
+		localID = domaintest.ID("node-A")
+		dest    = domaintest.ID("dest")
+		uplink  = domaintest.ID("u-1")
 	)
 
 	// No WithMaxSaneHops → cap disabled (default 0).
@@ -425,7 +427,7 @@ func TestFastInvalidation_DisabledCapShortCircuits(t *testing.T) {
 	)
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 14, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {

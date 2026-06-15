@@ -9,6 +9,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
@@ -89,10 +90,10 @@ func addOutboundPeer(svc *Service, addr string, identity string, connID domain.C
 	}
 	svc.sessions[pa] = &peerSession{
 		address:      pa,
-		peerIdentity: domain.PeerIdentity(identity),
+		peerIdentity: domaintest.ID(identity),
 		connID:       connID,
 	}
-	svc.peerIDs[pa] = domain.PeerIdentity(identity)
+	svc.peerIDs[pa] = domaintest.ID(identity)
 	primeActiveConnSnapshots(svc)
 }
 
@@ -111,9 +112,9 @@ func addInboundPeer(t *testing.T, svc *Service, addr string, identity string, co
 		LastConnectedAt:     now,
 		LastUsefulReceiveAt: now,
 	}
-	svc.peerIDs[pa] = domain.PeerIdentity(identity)
+	svc.peerIDs[pa] = domaintest.ID(identity)
 
-	core, cleanup := testInboundCore(t, pa, domain.PeerIdentity(identity), connID)
+	core, cleanup := testInboundCore(t, pa, domaintest.ID(identity), connID)
 	svc.conns[connID] = &connEntry{core: core}
 	primeActiveConnSnapshots(svc)
 	return cleanup
@@ -205,8 +206,8 @@ func TestActiveConnectionsJSON_InboundOnlyAppears(t *testing.T) {
 	if c.PeerAddress != "10.0.0.1:9000" {
 		t.Errorf("expected peer_address=10.0.0.1:9000, got %s", c.PeerAddress)
 	}
-	if c.Identity != "aaa111" {
-		t.Errorf("expected identity=aaa111, got %s", c.Identity)
+	if c.Identity != domaintest.ID("aaa111").String() {
+		t.Errorf("expected identity=%s, got %s", domaintest.ID("aaa111").String(), c.Identity)
 	}
 	if c.ConnID != 100 {
 		t.Errorf("expected conn_id=100, got %d", c.ConnID)
@@ -247,10 +248,10 @@ func TestActiveConnectionsJSON_OutboundWithSlotState(t *testing.T) {
 	}
 	svc.sessions[pa] = &peerSession{
 		address:      pa,
-		peerIdentity: "id-1.2.3.4:9000",
+		peerIdentity: domaintest.ID("id-1.2.3.4:9000"),
 		connID:       domain.ConnID(1),
 	}
-	svc.peerIDs[pa] = "id-1.2.3.4:9000"
+	svc.peerIDs[pa] = domaintest.ID("id-1.2.3.4:9000")
 	svc.peerMu.Unlock()
 
 	// Post-mutation prime: the snapshots are loaded atomically by the hot
@@ -576,7 +577,7 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 			LastConnectedAt:     now,
 			LastUsefulReceiveAt: now,
 		}
-		id := domain.PeerIdentity("id-" + a)
+		id := domaintest.ID("id-" + a)
 		svc.sessions[pa] = &peerSession{
 			address:      pa,
 			peerIdentity: id,
@@ -595,11 +596,11 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 		LastConnectedAt:     now,
 		LastUsefulReceiveAt: now,
 	}
-	svc.peerIDs[inAddr] = domain.PeerIdentity("inbound_identity")
+	svc.peerIDs[inAddr] = domaintest.ID("inbound_identity")
 	svc.peerMu.Unlock()
 
 	// Register the inbound core in the conn registry.
-	core, coreCleanup := testInboundCore(t, inAddr, domain.PeerIdentity("inbound_identity"), domain.ConnID(999))
+	core, coreCleanup := testInboundCore(t, inAddr, domaintest.ID("inbound_identity"), domain.ConnID(999))
 	defer coreCleanup()
 	func() {
 		svc.peerMu.Lock()
@@ -664,7 +665,7 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 	b := testCMConfig(canonical)
 	b.Cfg.MaxSlotsFn = func() int { return 1 }
 	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
-		session := fakePeerSession(domain.PeerAddress(fallback), "id-fallback")
+		session := fakePeerSession(domain.PeerAddress(fallback), domaintest.ID("id-fallback"))
 		return DialResult{
 			Session:          session,
 			ConnectedAddress: domain.PeerAddress(fallback),
@@ -701,10 +702,10 @@ func TestActiveConnectionsJSON_PeerAddressDiffersFromRemote(t *testing.T) {
 	}
 	svc.sessions[pa] = &peerSession{
 		address:      pa,
-		peerIdentity: "id-fallback",
+		peerIdentity: domaintest.ID("id-fallback"),
 		connID:       domain.ConnID(1),
 	}
-	svc.peerIDs[pa] = "id-fallback"
+	svc.peerIDs[pa] = domaintest.ID("id-fallback")
 	svc.peerMu.Unlock()
 
 	// Post-mutation prime so peerHealthFrames observes the seeded state —
@@ -765,11 +766,11 @@ func TestInboundConnIDLookups_LightweightScan(t *testing.T) {
 	addrA := domain.PeerAddress("10.0.0.1:64646")
 	addrB := domain.PeerAddress("10.0.0.2:64646")
 
-	c1, cl1 := testInboundCore(t, addrA, "idA1", domain.ConnID(1))
+	c1, cl1 := testInboundCore(t, addrA, domaintest.ID("idA1"), domain.ConnID(1))
 	defer cl1()
-	c2, cl2 := testInboundCore(t, addrA, "idA2", domain.ConnID(2))
+	c2, cl2 := testInboundCore(t, addrA, domaintest.ID("idA2"), domain.ConnID(2))
 	defer cl2()
-	c3, cl3 := testInboundCore(t, addrB, "idB", domain.ConnID(3))
+	c3, cl3 := testInboundCore(t, addrB, domaintest.ID("idB"), domain.ConnID(3))
 	defer cl3()
 	// Outbound conn for addrA — must be invisible to inbound lookups.
 	oserver, oclient := net.Pipe()

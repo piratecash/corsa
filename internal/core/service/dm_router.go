@@ -269,7 +269,7 @@ func (r *DMRouter) Snapshot() RouterSnapshot {
 		return RouterSnapshot{}
 	}
 	snap := cached.snap
-	snap.CacheReady = snap.ActivePeer != "" && r.cache.MatchesPeer(snap.ActivePeer)
+	snap.CacheReady = !snap.ActivePeer.IsZero() && r.cache.MatchesPeer(snap.ActivePeer)
 	return snap
 }
 
@@ -284,7 +284,7 @@ func (r *DMRouter) ConsumePendingActions() PendingActions {
 	r.pendingScrollToEnd = false
 	r.pendingClearEditor = false
 	r.pendingClearReply = false
-	r.pendingRecipientText = ""
+	r.pendingRecipientText = domain.PeerIdentity{}
 	r.mu.Unlock()
 	return pa
 }
@@ -432,7 +432,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 			// recreate the sidebar entry from stale async work.
 			r.mu.Unlock()
 			log.Info().
-				Str("peer", string(to)).
+				Str("peer", to.String()).
 				Msg("dm_router: peer removed during in-flight send, discarding result")
 			return
 		}
@@ -556,7 +556,7 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 				onAsyncFailure()
 			}
 			log.Info().
-				Str("peer", string(to)).
+				Str("peer", to.String()).
 				Str("file_id", string(result.FileID)).
 				Msg("dm_router: peer removed after file commit, removed orphaned sender mapping")
 			return
@@ -691,7 +691,7 @@ func (r *DMRouter) NotifyStatusChanged() {
 // one (so the caller can decide what to select next).
 func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	identity = normalizePeer(identity)
-	id := string(identity)
+	id := identity.String()
 
 	// Delete chat history from the local database. This is the gate
 	// operation: if it fails, the peer is NOT removed and peerGen stays
@@ -731,7 +731,7 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 
 	wasActive := r.activePeer == identity
 	if wasActive {
-		r.activePeer = ""
+		r.activePeer = domain.PeerIdentity{}
 		r.peerClicked = false
 		r.activeMessages = nil
 	}
@@ -921,14 +921,14 @@ func (r *DMRouter) handleEvent(event protocol.LocalChangeEvent) {
 // normalizePeer trims whitespace so that raw strings from events or headers
 // never create duplicate keys in peers map or peerOrder.
 func normalizePeer(p domain.PeerIdentity) domain.PeerIdentity {
-	return domain.PeerIdentity(strings.TrimSpace(string(p)))
+	return domain.PeerIdentityFromWire(strings.TrimSpace(p.String()))
 }
 
 func (r *DMRouter) peerForMessage(event protocol.LocalChangeEvent) domain.PeerIdentity {
-	if event.Sender == string(r.client.Address()) {
-		return normalizePeer(domain.PeerIdentity(event.Recipient))
+	if event.Sender == r.client.Address().String() {
+		return normalizePeer(domain.PeerIdentityFromWire(event.Recipient))
 	}
-	return normalizePeer(domain.PeerIdentity(event.Sender))
+	return normalizePeer(domain.PeerIdentityFromWire(event.Sender))
 }
 
 func (r *DMRouter) isActivePeer(peer domain.PeerIdentity) bool {
@@ -960,7 +960,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		if !r.updateSidebarFromEvent(event, peerID) {
 			// Inline decrypt failed (missing contact keys, etc.) —
 			// fall back to reading the latest preview from SQLite.
-			isIncoming := event.Sender != string(r.client.Address())
+			isIncoming := event.Sender != r.client.Address().String()
 			go func() {
 				defer recoverLog("onNewMessage.nonActive.decryptFail")
 				if !r.updatePreviewFromStore(peerID) {
@@ -984,7 +984,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 			r.notify(UIEventSidebarUpdated)
 		}
 		// Sound notification for incoming messages (sender is not us).
-		if event.Sender != string(r.client.Address()) && !replaying {
+		if event.Sender != r.client.Address().String() && !replaying {
 			r.notify(UIEventBeep)
 		}
 		return
@@ -1013,7 +1013,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 			r.mu.Unlock()
 			r.notify(UIEventSidebarUpdated)
 		}
-		if event.Sender != string(r.client.Address()) && !replaying {
+		if event.Sender != r.client.Address().String() && !replaying {
 			r.notify(UIEventBeep)
 		}
 		go func() {
@@ -1061,7 +1061,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 
 	msg := r.client.DecryptIncomingMessage(event)
 	if msg == nil {
-		isIncoming := event.Sender != string(r.client.Address())
+		isIncoming := event.Sender != r.client.Address().String()
 		if isIncoming && !replaying {
 			r.notify(UIEventBeep)
 		}
@@ -1182,21 +1182,21 @@ func (r *DMRouter) initializeFromDB() {
 	}
 	r.mu.RUnlock()
 
-	if firstPeer == "" {
+	if firstPeer.IsZero() {
 		for _, p := range previews {
-			if p.PeerAddress != me && p.PeerAddress != "" {
+			if p.PeerAddress != me && !p.PeerAddress.IsZero() {
 				firstPeer = p.PeerAddress
 				break
 			}
 		}
 	}
-	if firstPeer == "" {
+	if firstPeer.IsZero() {
 		return
 	}
 
 	r.mu.Lock()
 	var selectedPeer domain.PeerIdentity
-	if strings.TrimSpace(string(r.activePeer)) != "" {
+	if strings.TrimSpace(r.activePeer.String()) != "" {
 		selectedPeer = r.activePeer
 	} else {
 		selectedPeer = firstPeer
@@ -1206,7 +1206,7 @@ func (r *DMRouter) initializeFromDB() {
 	// and triggers a full load. Without this, a reconnect (activePeer
 	// already set) would skip loadConversation because selectPeerCore
 	// treats same-peer + programmatic selection as a no-op.
-	r.activePeer = ""
+	r.activePeer = domain.PeerIdentity{}
 	r.mu.Unlock()
 
 	// Delegate to AutoSelectPeer which handles the full lifecycle:
@@ -1220,7 +1220,7 @@ func (r *DMRouter) resetIdentityState() {
 	r.mu.Lock()
 	r.peers = make(map[domain.PeerIdentity]*RouterPeerState)
 	r.peerOrder = nil
-	r.activePeer = ""
+	r.activePeer = domain.PeerIdentity{}
 	r.peerClicked = false
 	r.activeMessages = nil
 	r.seenMessageIDs = make(map[string]struct{})
@@ -1230,7 +1230,7 @@ func (r *DMRouter) resetIdentityState() {
 	r.pendingScrollToEnd = false
 	r.pendingClearEditor = false
 	r.pendingClearReply = false
-	r.pendingRecipientText = ""
+	r.pendingRecipientText = domain.PeerIdentity{}
 	r.mu.Unlock()
 
 	// Clear the monitor so the next FetchAndSeed seeds fresh data from
@@ -1239,7 +1239,7 @@ func (r *DMRouter) resetIdentityState() {
 		r.statusMonitor.Reset()
 	}
 
-	r.cache.Load("", nil)
+	r.cache.Load(domain.PeerIdentity{}, nil)
 }
 
 // pollHealth seeds the NodeStatusMonitor from a ProbeNode RPC and
@@ -1269,7 +1269,7 @@ func (r *DMRouter) pollHealth() {
 	activePeer := r.activePeer
 	r.mu.RUnlock()
 
-	if activePeer != "" {
+	if !activePeer.IsZero() {
 		r.applyReceiptRepair(activePeer, status.DeliveryReceipts)
 	}
 
@@ -1282,7 +1282,7 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity) bool {
 	cancel()
 
 	if err != nil {
-		log.Warn().Err(err).Str("peer", string(peerAddress)).Msg("conversation load failed")
+		log.Warn().Err(err).Str("peer", peerAddress.String()).Msg("conversation load failed")
 		return false
 	}
 
@@ -1345,7 +1345,7 @@ func (r *DMRouter) doMarkSeen(peerAddress domain.PeerIdentity) bool {
 	seenCancel()
 
 	if err != nil {
-		log.Warn().Err(err).Str("peer", string(peerAddress)).Msg("MarkConversationSeen failed")
+		log.Warn().Err(err).Str("peer", peerAddress.String()).Msg("MarkConversationSeen failed")
 		return false
 	}
 	r.clearPeerUnread(peerAddress)
@@ -1354,7 +1354,7 @@ func (r *DMRouter) doMarkSeen(peerAddress domain.PeerIdentity) bool {
 }
 
 func (r *DMRouter) applyReceiptRepair(activePeer domain.PeerIdentity, receipts []DeliveryReceipt) {
-	if activePeer == "" || !r.cache.MatchesPeer(activePeer) {
+	if activePeer.IsZero() || !r.cache.MatchesPeer(activePeer) {
 		return
 	}
 
@@ -1411,7 +1411,7 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 	// repositioned by the stale startup sort.
 	fresherPeers := make(map[domain.PeerIdentity]struct{})
 	for _, p := range previews {
-		if p.PeerAddress == me || p.PeerAddress == "" {
+		if p.PeerAddress == me || p.PeerAddress.IsZero() {
 			continue
 		}
 		r.ensurePeerLocked(p.PeerAddress)
@@ -1442,7 +1442,7 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 	sqlSorted := make([]domain.PeerIdentity, 0, len(previews))
 	seen := make(map[domain.PeerIdentity]struct{}, len(previews))
 	for _, p := range previews {
-		if p.PeerAddress == me || p.PeerAddress == "" {
+		if p.PeerAddress == me || p.PeerAddress.IsZero() {
 			continue
 		}
 		if _, dup := seen[p.PeerAddress]; dup {
@@ -1720,8 +1720,8 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 		}
 
 		incrementUnread := isIncoming && peer != selected && !skipUnreadCount
-		triggerReload := peer == selected && selected != "" && !r.cache.HasMessage(header.ID)
-		refreshSidebar := peer != "" && peer != selected
+		triggerReload := peer == selected && !selected.IsZero() && !r.cache.HasMessage(header.ID)
+		refreshSidebar := !peer.IsZero() && peer != selected
 
 		actions = append(actions, headerAction{
 			peer:            peer,
@@ -1787,7 +1787,7 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 		r.notify(UIEventBeep)
 	}
 
-	if needReload && selected != "" {
+	if needReload && !selected.IsZero() {
 		if r.loadConversation(selected) {
 			if !r.updatePreviewFromStore(selected) {
 				// chatlog query failed, but messages are in cache.
@@ -1841,7 +1841,7 @@ func (r *DMRouter) ensurePeerLocked(peer domain.PeerIdentity) {
 }
 
 func (r *DMRouter) promotePeerLocked(peer domain.PeerIdentity) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	filtered := r.peerOrder[:0]
@@ -1941,7 +1941,7 @@ func (r *DMRouter) composeSnapshotLocked(gen uint64) RouterSnapshot {
 		Peers:          dm.Peers,
 		PeerOrder:      dm.PeerOrder,
 		ActiveMessages: dm.ActiveMessages,
-		CacheReady:     r.activePeer != "" && r.cache.MatchesPeer(r.activePeer),
+		CacheReady:     !r.activePeer.IsZero() && r.cache.MatchesPeer(r.activePeer),
 		// Monitor-owned half, refreshed only on status notifies.
 		NodeStatus: r.cachedNS,
 	}

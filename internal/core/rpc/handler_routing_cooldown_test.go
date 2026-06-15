@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/rpc"
 )
@@ -25,14 +27,14 @@ func futureCooldown(base time.Time) time.Time { return base.Add(time.Minute) }
 // alternative.
 func TestFetchRouteLookupFiltersCooledDownTransit(t *testing.T) {
 	now := time.Now()
-	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	targetID := domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 			targetID: {
 				{
 					Identity:  targetID,
-					Origin:    "good",
-					NextHop:   "uplink-good",
+					Origin:    domaintest.ID("good"),
+					NextHop:   domaintest.ID("uplink-good"),
 					Hops:      3,
 					SeqNo:     1,
 					Source:    routing.RouteSourceAnnouncement,
@@ -40,8 +42,8 @@ func TestFetchRouteLookupFiltersCooledDownTransit(t *testing.T) {
 				},
 				{
 					Identity:  targetID,
-					Origin:    "cooled",
-					NextHop:   "uplink-cooled",
+					Origin:    domaintest.ID("cooled"),
+					NextHop:   domaintest.ID("uplink-cooled"),
 					Hops:      2, // would win on hops alone
 					SeqNo:     2,
 					Source:    routing.RouteSourceAnnouncement,
@@ -53,7 +55,7 @@ func TestFetchRouteLookupFiltersCooledDownTransit(t *testing.T) {
 		Health: []routing.RouteHealthState{
 			// Health tier is Good — only the cooldown arm should drop it,
 			// proving the filter keys on CooldownUntil, not the tier.
-			{Identity: targetID, Uplink: "uplink-cooled", Health: routing.HealthGood, CooldownUntil: futureCooldown(now)},
+			{Identity: targetID, Uplink: domaintest.ID("uplink-cooled"), Health: routing.HealthGood, CooldownUntil: futureCooldown(now)},
 		},
 	}, nil)
 
@@ -62,7 +64,7 @@ func TestFetchRouteLookupFiltersCooledDownTransit(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetchRouteLookup",
-		Args: map[string]interface{}{"identity": string(targetID)},
+		Args: map[string]interface{}{"identity": targetID.String()},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -76,7 +78,7 @@ func TestFetchRouteLookupFiltersCooledDownTransit(t *testing.T) {
 		t.Fatalf("expected 1 route after cooldown filter, got %d: %v", len(routes), routes)
 	}
 	first, _ := routes[0].(map[string]interface{})
-	if nh, _ := first["next_hop"].(string); nh != "uplink-good" {
+	if nh, _ := first["next_hop"].(string); nh != domaintest.ID("uplink-good").String() {
 		t.Fatalf("cooled-down transit leaked into response: NextHop = %q, want uplink-good", nh)
 	}
 }
@@ -87,13 +89,13 @@ func TestFetchRouteLookupFiltersCooledDownTransit(t *testing.T) {
 // TestFetchRouteLookupExemptsDirectFromDeadFilter).
 func TestFetchRouteLookupCooldownHasNoDirectExemption(t *testing.T) {
 	now := time.Now()
-	targetID := routing.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
+	targetID := domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 			targetID: {
 				{
 					Identity:  targetID,
-					Origin:    "self",
+					Origin:    domaintest.ID("self"),
 					NextHop:   targetID,
 					Hops:      1,
 					SeqNo:     1,
@@ -113,7 +115,7 @@ func TestFetchRouteLookupCooldownHasNoDirectExemption(t *testing.T) {
 
 	resp := table.Execute(rpc.CommandRequest{
 		Name: "fetchRouteLookup",
-		Args: map[string]interface{}{"identity": string(targetID)},
+		Args: map[string]interface{}{"identity": targetID.String()},
 	})
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error)
@@ -133,15 +135,15 @@ func TestFetchRouteLookupCooldownHasNoDirectExemption(t *testing.T) {
 // matching the relay path which would not select it.
 func TestFetchRouteSummaryExcludesCooledDownFromReachable(t *testing.T) {
 	now := time.Now()
-	cooledTarget := routing.PeerIdentity("bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55")
-	reachableTarget := routing.PeerIdentity("cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66")
+	cooledTarget := domain.PeerIdentityFromWire("bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55")
+	reachableTarget := domain.PeerIdentityFromWire("cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66")
 	provider := newMockRoutingProvider(t, routing.Snapshot{
 		Routes: map[routing.PeerIdentity][]routing.RouteEntry{
 			cooledTarget: {
 				{
 					Identity:  cooledTarget,
-					Origin:    "cooled",
-					NextHop:   "uplink-cooled",
+					Origin:    domaintest.ID("cooled"),
+					NextHop:   domaintest.ID("uplink-cooled"),
 					Hops:      2,
 					SeqNo:     1,
 					Source:    routing.RouteSourceAnnouncement,
@@ -151,8 +153,8 @@ func TestFetchRouteSummaryExcludesCooledDownFromReachable(t *testing.T) {
 			reachableTarget: {
 				{
 					Identity:  reachableTarget,
-					Origin:    "good",
-					NextHop:   "uplink-good",
+					Origin:    domaintest.ID("good"),
+					NextHop:   domaintest.ID("uplink-good"),
 					Hops:      2,
 					SeqNo:     1,
 					Source:    routing.RouteSourceAnnouncement,
@@ -162,7 +164,7 @@ func TestFetchRouteSummaryExcludesCooledDownFromReachable(t *testing.T) {
 		},
 		TakenAt: now,
 		Health: []routing.RouteHealthState{
-			{Identity: cooledTarget, Uplink: "uplink-cooled", Health: routing.HealthGood, CooldownUntil: futureCooldown(now)},
+			{Identity: cooledTarget, Uplink: domaintest.ID("uplink-cooled"), Health: routing.HealthGood, CooldownUntil: futureCooldown(now)},
 		},
 	}, nil)
 

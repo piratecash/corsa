@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -116,7 +116,7 @@ func TestRebuildRoutingSnapshotSeesRecentMutation(t *testing.T) {
 
 	// Mutate the table — any accepted UpdateRoute marks dirty.
 	_, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	})
 	if err != nil {
@@ -154,7 +154,7 @@ func TestRebuildRoutingSnapshotCoalescesWithinInterval(t *testing.T) {
 	}
 
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute: %v", err)
@@ -207,7 +207,7 @@ func TestServiceRoutingSnapshotReturnsCachedNotFresh(t *testing.T) {
 	// 1 entry; Service.RoutingSnapshot must still return 0 because the
 	// cached pointer was published BEFORE the mutation.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	}); err != nil {
 		t.Fatalf("UpdateRoute: %v", err)
@@ -255,7 +255,7 @@ func TestRebuildRoutingSnapshotRacePostConsume(t *testing.T) {
 
 	// Writer #1 — dirty=true.
 	_, _ = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	})
 	// Refresher consumes and rebuilds — second pointer with 1 entry.
@@ -270,7 +270,7 @@ func TestRebuildRoutingSnapshotRacePostConsume(t *testing.T) {
 
 	// Writer #2 lands AFTER the rebuild — flag is true again.
 	_, _ = svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "delta",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("delta"),
 		Hops: 3, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 	})
 	if !svc.routingTable.IsDirty() {
@@ -332,7 +332,7 @@ func TestServiceRoutingSnapshotReflectsHoldDownExpiry(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	clockNow := now
 	clock := func() time.Time { return clockNow }
-	const localID = domain.PeerIdentity("self")
+	localID := domaintest.ID("self")
 	svc.routingTable = routing.NewTable(
 		routing.WithClock(clock),
 		routing.WithLocalOrigin(localID),
@@ -342,16 +342,16 @@ func TestServiceRoutingSnapshotReflectsHoldDownExpiry(t *testing.T) {
 	)
 
 	// Force a flap burst to arm hold-down.
-	if _, err := svc.routingTable.AddDirectPeer("peerA"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(domaintest.ID("peerA")); err != nil {
 		t.Fatalf("AddDirectPeer #1: %v", err)
 	}
-	if _, err := svc.routingTable.RemoveDirectPeer("peerA"); err != nil {
+	if _, err := svc.routingTable.RemoveDirectPeer(domaintest.ID("peerA")); err != nil {
 		t.Fatalf("RemoveDirectPeer #1: %v", err)
 	}
-	if _, err := svc.routingTable.AddDirectPeer("peerA"); err != nil {
+	if _, err := svc.routingTable.AddDirectPeer(domaintest.ID("peerA")); err != nil {
 		t.Fatalf("AddDirectPeer #2: %v", err)
 	}
-	if _, err := svc.routingTable.RemoveDirectPeer("peerA"); err != nil {
+	if _, err := svc.routingTable.RemoveDirectPeer(domaintest.ID("peerA")); err != nil {
 		t.Fatalf("RemoveDirectPeer #2: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestServiceRoutingSnapshotReflectsHoldDownExpiry(t *testing.T) {
 	cached := svc.RoutingSnapshot()
 	var primed *routing.FlapEntry
 	for i := range cached.FlapState {
-		if cached.FlapState[i].PeerIdentity == "peerA" {
+		if cached.FlapState[i].PeerIdentity == domaintest.ID("peerA") {
 			primed = &cached.FlapState[i]
 			break
 		}
@@ -387,7 +387,7 @@ func TestServiceRoutingSnapshotReflectsHoldDownExpiry(t *testing.T) {
 	cached = svc.RoutingSnapshot()
 	var refreshed *routing.FlapEntry
 	for i := range cached.FlapState {
-		if cached.FlapState[i].PeerIdentity == "peerA" {
+		if cached.FlapState[i].PeerIdentity == domaintest.ID("peerA") {
 			refreshed = &cached.FlapState[i]
 			break
 		}
@@ -430,7 +430,7 @@ func TestRebuildRoutingSnapshotPeriodicFullSelfHeal(t *testing.T) {
 	mutate := func(nextHop routing.PeerIdentity) {
 		t.Helper()
 		if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: nextHop,
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: nextHop,
 			Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
 		}); err != nil {
 			t.Fatalf("UpdateRoute: %v", err)
@@ -451,7 +451,7 @@ func TestRebuildRoutingSnapshotPeriodicFullSelfHeal(t *testing.T) {
 	// stays incremental (lastFull unchanged).
 	svc.lastRoutingFullSnapAtNanos.Store(time.Now().UnixNano())
 	freshFull := svc.lastRoutingFullSnapAtNanos.Load()
-	mutate("charlie")
+	mutate(domaintest.ID("charlie"))
 	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	second := svc.routingSnap.Load()
@@ -466,7 +466,7 @@ func TestRebuildRoutingSnapshotPeriodicFullSelfHeal(t *testing.T) {
 	// re-copy, which restamps lastRoutingFullSnapAtNanos.
 	aged := time.Now().Add(-routingSnapshotFullInterval - time.Second).UnixNano()
 	svc.lastRoutingFullSnapAtNanos.Store(aged)
-	mutate("delta")
+	mutate(domaintest.ID("delta"))
 	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	if svc.routingSnap.Load() == second {

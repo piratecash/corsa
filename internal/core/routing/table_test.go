@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // fixedClock returns a clock function that always returns the given time.
@@ -47,7 +50,7 @@ func TestUpdateRouteInsertsNew(t *testing.T) {
 	tbl := NewTable()
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
@@ -63,7 +66,7 @@ func TestUpdateRouteDedupByTriple(t *testing.T) {
 	tbl := NewTable()
 
 	entry := RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	}
 	mustUpdate(t, tbl, entry)
@@ -92,11 +95,11 @@ func TestUpdateRouteDifferentUplinksCoexist(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "alice", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("alice"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "alice", NextHop: "dave",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("alice"), NextHop: domaintest.ID("dave"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
@@ -110,7 +113,7 @@ func TestUpdateRouteDifferentUplinksCoexist(t *testing.T) {
 func TestUpdateRouteRejectsEmptyIdentity(t *testing.T) {
 	tbl := NewTable()
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "", Origin: "bob", NextHop: "bob",
+		Identity: domain.PeerIdentity{}, Origin: domaintest.ID("bob"), NextHop: domaintest.ID("bob"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if err != ErrEmptyIdentity {
@@ -121,7 +124,7 @@ func TestUpdateRouteRejectsEmptyIdentity(t *testing.T) {
 func TestUpdateRouteRejectsEmptyOrigin(t *testing.T) {
 	tbl := NewTable()
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domain.PeerIdentity{}, NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if err != ErrEmptyOrigin {
@@ -132,7 +135,7 @@ func TestUpdateRouteRejectsEmptyOrigin(t *testing.T) {
 func TestUpdateRouteRejectsEmptyNextHop(t *testing.T) {
 	tbl := NewTable()
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domain.PeerIdentity{},
 		Hops: 1, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	if err != ErrEmptyNextHop {
@@ -143,7 +146,7 @@ func TestUpdateRouteRejectsEmptyNextHop(t *testing.T) {
 func TestUpdateRouteRejectsZeroHops(t *testing.T) {
 	tbl := NewTable()
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 0, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	if err != ErrInvalidHops {
@@ -154,7 +157,7 @@ func TestUpdateRouteRejectsZeroHops(t *testing.T) {
 func TestUpdateRouteRejectsHopsAboveInfinity(t *testing.T) {
 	tbl := NewTable()
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 17, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	if err != ErrInvalidHops {
@@ -165,7 +168,7 @@ func TestUpdateRouteRejectsHopsAboveInfinity(t *testing.T) {
 func TestUpdateRouteAcceptsHopsInfinity(t *testing.T) {
 	tbl := NewTable()
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: HopsInfinity, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
@@ -177,19 +180,19 @@ func TestMalformedEntryDoesNotPollute(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 0, SeqNo: 99, Source: RouteSourceAnnouncement,
 	})
 	if err == nil {
 		t.Fatal("expected validation error for hops=0")
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].SeqNo != 1 {
 		t.Fatal("malformed entry with higher SeqNo should not replace valid entry")
 	}
@@ -200,7 +203,7 @@ func TestMalformedEntryDoesNotPollute(t *testing.T) {
 func TestDirectRouteRequiresHops1(t *testing.T) {
 	tbl := NewTable()
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if err != ErrDirectHopsMust1 {
@@ -211,7 +214,7 @@ func TestDirectRouteRequiresHops1(t *testing.T) {
 func TestDirectRouteRequiresNextHopEqualsIdentity(t *testing.T) {
 	tbl := NewTable()
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "bob",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("bob"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if err != ErrDirectNextHop {
@@ -222,7 +225,7 @@ func TestDirectRouteRequiresNextHopEqualsIdentity(t *testing.T) {
 func TestDirectRouteValidForm(t *testing.T) {
 	tbl := NewTable()
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if status != RouteAccepted {
@@ -236,12 +239,12 @@ func TestOriginAwareSeqNoHigherWins(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
@@ -249,7 +252,7 @@ func TestOriginAwareSeqNoHigherWins(t *testing.T) {
 		t.Fatal("higher SeqNo should be accepted even with worse hops")
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].SeqNo != 10 {
 		t.Fatalf("expected SeqNo=10, got %+v", routes)
 	}
@@ -259,12 +262,12 @@ func TestOriginAwareSeqNoLowerRejected(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 1, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -272,7 +275,7 @@ func TestOriginAwareSeqNoLowerRejected(t *testing.T) {
 		t.Fatal("lower SeqNo should be rejected")
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].SeqNo != 10 {
 		t.Fatalf("original route should remain: %+v", routes)
 	}
@@ -292,7 +295,7 @@ func TestUpdateRoute_CrossOriginLineageShiftBetterHops(t *testing.T) {
 
 	// Cycle 1 (pre-A1 sender's winner via Origin=A, hops=3, seq=10).
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
@@ -301,7 +304,7 @@ func TestUpdateRoute_CrossOriginLineageShiftBetterHops(t *testing.T) {
 	// counter. Without the cross-Origin rule this would be rejected
 	// as stale (SeqNo=5 < 10).
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -309,7 +312,7 @@ func TestUpdateRoute_CrossOriginLineageShiftBetterHops(t *testing.T) {
 		t.Fatalf("cross-Origin lineage shift with better hops must be accepted, got status=%v", status)
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected single stored claim post-replace, got %d", len(routes))
 	}
@@ -330,12 +333,12 @@ func TestUpdateRoute_CrossOriginLineageShiftSameHopsRejected(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -343,7 +346,7 @@ func TestUpdateRoute_CrossOriginLineageShiftSameHopsRejected(t *testing.T) {
 		t.Fatal("cross-Origin with same hops + same trust should be rejected (anti-flap)")
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].SeqNo != 10 {
 		t.Fatalf("original lineage should remain: %+v", routes)
 	}
@@ -362,12 +365,12 @@ func TestUpdateRoute_CrossOriginResurrectsAfterTombstone(t *testing.T) {
 
 	// Live Origin=A claim.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
 	// Pre-A1 sender withdraws Origin=A (SeqNo bump on same lineage).
-	if !tbl.WithdrawRoute("alice", "origA", "preA1-sender", 11) {
+	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("origA"), domaintest.ID("preA1-sender"), 11) {
 		t.Fatal("WithdrawRoute(Origin=A) should have applied")
 	}
 
@@ -375,7 +378,7 @@ func TestUpdateRoute_CrossOriginResurrectsAfterTombstone(t *testing.T) {
 	// the cross-Origin rule the tombstone (SeqNo=11) would reject
 	// this (incoming SeqNo=5 < 11).
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 4, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -383,7 +386,7 @@ func TestUpdateRoute_CrossOriginResurrectsAfterTombstone(t *testing.T) {
 		t.Fatalf("cross-Origin live update against tombstone must be accepted, got status=%v", status)
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected the live Origin=B claim to replace the tombstone, got %d routes", len(routes))
 	}
@@ -407,7 +410,7 @@ func TestUpdateRoute_SameSeqNoCrossOriginAdvancesLineageMarker(t *testing.T) {
 
 	// Cycle 1: pre-A1 sender's winner via Origin=A.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
@@ -418,7 +421,7 @@ func TestUpdateRoute_SameSeqNoCrossOriginAdvancesLineageMarker(t *testing.T) {
 	// replay from origB is not misclassified as a fresh cross-
 	// Origin shift.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if status == RouteRejected {
@@ -432,14 +435,14 @@ func TestUpdateRoute_SameSeqNoCrossOriginAdvancesLineageMarker(t *testing.T) {
 	// With the advance, LastIngressOrigin=origB so cross-Origin
 	// does not fire and the stale frame is rejected.
 	status = mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 1, SeqNo: 8, Source: RouteSourceAnnouncement,
 	})
 	if status == RouteAccepted {
 		t.Fatalf("stale-SeqNo replay from already-observed origB must be rejected, got %v", status)
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected one stored claim, got %d", len(routes))
 	}
@@ -466,7 +469,7 @@ func TestUpdateRoute_PerOriginHighWaterRejectsCrossOriginStaleReplay(t *testing.
 
 	// Cycle 1: A's lineage at SeqNo=10, Hops=3.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
@@ -474,7 +477,7 @@ func TestUpdateRoute_PerOriginHighWaterRejectsCrossOriginStaleReplay(t *testing.
 	// accepted because of strictly better hops via cross-Origin
 	// lineage branch.
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); status != RouteAccepted {
 		t.Fatalf("B5 cross-Origin lineage shift with better hops must be accepted, got %v", status)
@@ -484,14 +487,14 @@ func TestUpdateRoute_PerOriginHighWaterRejectsCrossOriginStaleReplay(t *testing.
 	// A's high-water on this uplink is 10 (recorded in cycle 1);
 	// SeqNo=9 is stale on A's own timeline. Must be rejected.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 1, SeqNo: 9, Source: RouteSourceAnnouncement,
 	})
 	if status == RouteAccepted {
 		t.Fatalf("A9 must be rejected as stale replay on A's high-water (10), got %v", status)
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected one stored claim, got %d", len(routes))
 	}
@@ -520,7 +523,7 @@ func TestUpdateRoute_CrossOriginLivePromotesTombstoneAtEqualSeqNo(t *testing.T) 
 
 	// Withdraw Origin=A at SeqNo=10 to create a tombstone on
 	// (alice, preA1-sender).
-	if !tbl.WithdrawRoute("alice", "origA", "preA1-sender", 10) {
+	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("origA"), domaintest.ID("preA1-sender"), 10) {
 		t.Fatal("WithdrawRoute(Origin=A, SeqNo=10) must apply")
 	}
 
@@ -529,14 +532,14 @@ func TestUpdateRoute_CrossOriginLivePromotesTombstoneAtEqualSeqNo(t *testing.T) 
 	// promotion branch this would land in the same-SeqNo
 	// tombstone guard and reject.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
 		t.Fatalf("cross-Origin live at equal-SeqNo against tombstone must be accepted, got %v", status)
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected one live claim post-promotion, got %d", len(routes))
 	}
@@ -553,21 +556,21 @@ func TestUpdateRoute_CrossOriginLivePromotesTombstoneAtEqualSeqNo(t *testing.T) 
 func TestUpdateRoute_SameOriginEqualSeqNoTombstoneStillRejected(t *testing.T) {
 	tbl := NewTable()
 
-	if !tbl.WithdrawRoute("alice", "origA", "preA1-sender", 10) {
+	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("origA"), domaintest.ID("preA1-sender"), 10) {
 		t.Fatal("WithdrawRoute(Origin=A, SeqNo=10) must apply")
 	}
 
 	// Same Origin, same SeqNo, live shape — must be rejected by
 	// the tombstone-resurrection guard.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if status == RouteAccepted {
 		t.Fatalf("same-Origin live at equal-SeqNo against tombstone must be rejected, got %v", status)
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	// The lookup filters withdrawn claims out — the tombstone is in
 	// the bucket but not visible via Lookup. Asserting the lookup
 	// shape (no live claims) verifies the tombstone has not been
@@ -606,11 +609,11 @@ func TestUpdateRoute_SameOriginEqualSeqNoTombstoneStillRejected(t *testing.T) {
 //   - Expectation: re-announce is NOT rejected by the cross-Origin
 //     guard; the same-SeqNo reconfirmation path refreshes TTL.
 func TestUpdateRoute_HopAckPromotionPreservesWireLineage(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("local-node"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("local-node")))
 
 	// 1. Initial wire announce from peer-B claiming Origin=foo.
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "foo", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	}); status != RouteAccepted {
 		t.Fatalf("initial announce: expected RouteAccepted, got %v", status)
@@ -620,7 +623,7 @@ func TestUpdateRoute_HopAckPromotionPreservesWireLineage(t *testing.T) {
 	//    existing route via Lookup (which synthesises Origin=
 	//    localOrigin) and submits with Source=HopAck.
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "local-node", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("local-node"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceHopAck,
 	}); status != RouteAccepted {
 		t.Fatalf("hop_ack promotion: expected RouteAccepted, got %v", status)
@@ -630,7 +633,7 @@ func TestUpdateRoute_HopAckPromotionPreservesWireLineage(t *testing.T) {
 	//    refresh). Without the lineage-override fix this is
 	//    rejected by the cross-Origin high-water guard.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "foo", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if status == RouteRejected {
@@ -638,7 +641,7 @@ func TestUpdateRoute_HopAckPromotionPreservesWireLineage(t *testing.T) {
 	}
 
 	// The route is still reachable and unchanged.
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected one live claim post-cycle, got %d", len(routes))
 	}
@@ -665,24 +668,24 @@ func TestUpdateRoute_HopAckPromotedRouteRefreshesTTL(t *testing.T) {
 	start := time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC)
 	now := start
 	tbl := NewTable(
-		WithLocalOrigin("local-node"),
+		WithLocalOrigin(domaintest.ID("local-node")),
 		WithClock(func() time.Time { return now }),
 		WithDefaultTTL(120*time.Second),
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "foo", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
 	// Promote to HopAck.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "local-node", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("local-node"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceHopAck,
 	})
 
 	// Capture the post-promotion ExpiresAt.
-	preRoutes := tbl.Lookup("alice")
+	preRoutes := tbl.Lookup(domaintest.ID("alice"))
 	if len(preRoutes) != 1 {
 		t.Fatalf("expected one claim post-promotion, got %d", len(preRoutes))
 	}
@@ -692,11 +695,11 @@ func TestUpdateRoute_HopAckPromotedRouteRefreshesTTL(t *testing.T) {
 	// reconfirmation cycle).
 	now = start.Add(60 * time.Second)
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "foo", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foo"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	postRoutes := tbl.Lookup("alice")
+	postRoutes := tbl.Lookup(domaintest.ID("alice"))
 	if len(postRoutes) != 1 {
 		t.Fatalf("expected one claim post-refresh, got %d", len(postRoutes))
 	}
@@ -719,11 +722,11 @@ func TestUpdateRoute_PerOriginHighWaterAllowsForwardShift(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 3, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origB", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origB"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	}); status != RouteAccepted {
 		t.Fatalf("B5 setup: expected RouteAccepted, got %v", status)
@@ -731,14 +734,14 @@ func TestUpdateRoute_PerOriginHighWaterAllowsForwardShift(t *testing.T) {
 
 	// A11 strictly exceeds A's recorded high-water (10).
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origA", NextHop: "preA1-sender",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origA"), NextHop: domaintest.ID("preA1-sender"),
 		Hops: 4, SeqNo: 11, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
 		t.Fatalf("A11 forward-shift past A's high-water must be accepted, got %v", status)
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected one stored claim, got %d", len(routes))
 	}
@@ -761,7 +764,7 @@ func TestSeqNoComparisonScopedToUplink(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "alice", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("alice"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
@@ -769,7 +772,7 @@ func TestSeqNoComparisonScopedToUplink(t *testing.T) {
 	// Same NextHop with SeqNo=1 would be rejected as stale; from a
 	// fresh uplink, SeqNo=1 is the first observation and accepted.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "alice", NextHop: "dave",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("alice"), NextHop: domaintest.ID("dave"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
@@ -785,12 +788,12 @@ func TestSameSeqNoHigherTrustWins(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceHopAck,
 	})
 
@@ -798,7 +801,7 @@ func TestSameSeqNoHigherTrustWins(t *testing.T) {
 		t.Fatal("same SeqNo but higher trust should be accepted")
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if routes[0].Source != RouteSourceHopAck {
 		t.Fatal("hop_ack should replace announcement at same SeqNo")
 	}
@@ -809,12 +812,12 @@ func TestSameSeqNoLowerTrustRejected(t *testing.T) {
 
 	// Use a well-formed direct route: NextHop must equal Identity
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 5, Source: RouteSourceDirect,
 	})
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -827,12 +830,12 @@ func TestSameSeqNoSameTrustFewerHopsWins(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -849,7 +852,7 @@ func TestUpdateRouteUnchangedForAliveReconfirmation(t *testing.T) {
 
 	// Insert initial route.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
@@ -858,7 +861,7 @@ func TestUpdateRouteUnchangedForAliveReconfirmation(t *testing.T) {
 
 	// Re-announce the same route (same SeqNo, same trust, same hops).
 	status = mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteUnchanged {
@@ -872,7 +875,7 @@ func TestUpdateRouteUnchangedNotReturnedForExpired(t *testing.T) {
 
 	// Insert route with short TTL.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
@@ -886,7 +889,7 @@ func TestUpdateRouteUnchangedNotReturnedForExpired(t *testing.T) {
 	// The origin has not changed the route, it is simply re-confirming it.
 	// An expired entry should not block same-SeqNo refreshes.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
@@ -910,7 +913,7 @@ func TestUpdateRouteRefreshesTTLOnUnchangedLiveRoute(t *testing.T) {
 		WithDefaultTTL(120*time.Second),
 	)
 
-	key := RouteTriple{Identity: "alice", Origin: "bob", NextHop: "charlie"}
+	key := RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")}
 	if status := mustUpdate(t, tbl, RouteEntry{
 		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
@@ -962,18 +965,18 @@ func TestUpdateRouteDirectInsertPreservesZeroExpiry(t *testing.T) {
 	current := now
 	tbl := NewTable(
 		WithClock(func() time.Time { return current }),
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 	)
 
 	// Caller supplies the canonical zero ExpiresAt. Normalization must
 	// leave it zero — anything else lets TickTTL evict an alive direct.
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	}); status != RouteAccepted {
 		t.Fatalf("initial direct insert: expected RouteAccepted, got %d", status)
 	}
-	zeroIn := tbl.InspectTriple(RouteTriple{Identity: "alice", Origin: "me", NextHop: "alice"})
+	zeroIn := tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice")})
 	if zeroIn == nil {
 		t.Fatalf("direct route not found after insert")
 	}
@@ -986,13 +989,13 @@ func TestUpdateRouteDirectInsertPreservesZeroExpiry(t *testing.T) {
 	// back to zero rather than honour whatever the caller passed.
 	current = current.Add(time.Hour)
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "me", NextHop: "bob",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("bob"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 		ExpiresAt: current.Add(time.Hour),
 	}); status != RouteAccepted {
 		t.Fatalf("direct insert with non-zero ExpiresAt: expected RouteAccepted, got %d", status)
 	}
-	nonZeroIn := tbl.InspectTriple(RouteTriple{Identity: "bob", Origin: "me", NextHop: "bob"})
+	nonZeroIn := tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("bob"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("bob")})
 	if nonZeroIn == nil {
 		t.Fatalf("direct route 'bob' not found after insert")
 	}
@@ -1005,7 +1008,7 @@ func TestUpdateRouteDirectInsertPreservesZeroExpiry(t *testing.T) {
 	// clock has advanced — that is the whole point of ExpiresAt=zero.
 	current = current.Add(10 * time.Hour)
 	tbl.TickTTL()
-	if got := tbl.InspectTriple(RouteTriple{Identity: "alice", Origin: "me", NextHop: "alice"}); got == nil {
+	if got := tbl.InspectTriple(RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice")}); got == nil {
 		t.Fatalf("TickTTL evicted active direct route — invariant ExpiresAt=zero failed")
 	}
 }
@@ -1024,10 +1027,10 @@ func TestUpdateRouteUnchangedDirectRoutePreservesZeroExpiry(t *testing.T) {
 	current := now
 	tbl := NewTable(
 		WithClock(func() time.Time { return current }),
-		WithLocalOrigin("hub"),
+		WithLocalOrigin(domaintest.ID("hub")),
 	)
 
-	direct := mustAddDirect(t, tbl, "peer-A")
+	direct := mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 	if !direct.ExpiresAt.IsZero() {
 		t.Fatalf("AddDirectPeer must seed ExpiresAt=zero, got %s", direct.ExpiresAt)
 	}
@@ -1038,14 +1041,14 @@ func TestUpdateRouteUnchangedDirectRoutePreservesZeroExpiry(t *testing.T) {
 	// unchanged so the call lands on the RouteUnchanged branch.
 	current = current.Add(60 * time.Second)
 	if status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "peer-A", Origin: "hub", NextHop: "peer-A",
+		Identity: domaintest.ID("peer-A"), Origin: domaintest.ID("hub"), NextHop: domaintest.ID("peer-A"),
 		Hops: 1, SeqNo: direct.SeqNo, Source: RouteSourceDirect,
 	}); status != RouteUnchanged {
 		t.Fatalf("re-apply of alive direct route: expected RouteUnchanged, got %d", status)
 	}
 
 	after := tbl.InspectTriple(RouteTriple{
-		Identity: "peer-A", Origin: "hub", NextHop: "peer-A",
+		Identity: domaintest.ID("peer-A"), Origin: domaintest.ID("hub"), NextHop: domaintest.ID("peer-A"),
 	})
 	if after == nil {
 		t.Fatalf("direct route disappeared after RouteUnchanged refresh")
@@ -1074,7 +1077,7 @@ func TestUpdateRouteUnchangedWorseHopsDoesNotRefreshTTL(t *testing.T) {
 		WithDefaultTTL(120*time.Second),
 	)
 
-	key := RouteTriple{Identity: "alice", Origin: "bob", NextHop: "charlie"}
+	key := RouteTriple{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")}
 	if status := mustUpdate(t, tbl, RouteEntry{
 		Identity: key.Identity, Origin: key.Origin, NextHop: key.NextHop,
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
@@ -1124,22 +1127,22 @@ func TestSplitHorizonOmitsRoutesFromPeer(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "me", NextHop: "bob",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("bob"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 
-	announceable := tbl.Announceable("peer-A")
+	announceable := tbl.Announceable(domaintest.ID("peer-A"))
 
 	for _, r := range announceable {
-		if r.NextHop == "peer-A" {
+		if r.NextHop == domaintest.ID("peer-A") {
 			t.Fatal("split horizon: routes from peer-A must be excluded when announcing to peer-A")
 		}
 	}
-	if len(announceable) != 1 || announceable[0].Identity != "bob" {
+	if len(announceable) != 1 || announceable[0].Identity != domaintest.ID("bob") {
 		t.Fatalf("expected only bob's route, got %+v", announceable)
 	}
 }
@@ -1149,14 +1152,14 @@ func TestSplitHorizonDoesNotSendFakeWithdrawal(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	announceable := tbl.Announceable("peer-A")
+	announceable := tbl.Announceable(domaintest.ID("peer-A"))
 
 	for _, r := range announceable {
-		if r.Identity == "alice" && r.Hops == HopsInfinity {
+		if r.Identity == domaintest.ID("alice") && r.Hops == HopsInfinity {
 			t.Fatal("split horizon must omit, not send fake withdrawal")
 		}
 	}
@@ -1167,11 +1170,11 @@ func TestAnnouncableExcludesWithdrawn(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-B"),
 		Hops: HopsInfinity, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	announceable := tbl.Announceable("peer-A")
+	announceable := tbl.Announceable(domaintest.ID("peer-A"))
 	if len(announceable) != 0 {
 		t.Fatal("withdrawn routes should not be announceable")
 	}
@@ -1184,11 +1187,11 @@ func TestAnnounceToPreservesHops(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	entries := tbl.AnnounceTo("peer-A")
+	entries := tbl.AnnounceTo(domaintest.ID("peer-A"))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -1202,16 +1205,16 @@ func TestAnnounceToAppliesSplitHorizon(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "y", NextHop: "peer-B",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("y"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	entries := tbl.AnnounceTo("peer-A")
-	if len(entries) != 1 || entries[0].Identity != "bob" {
+	entries := tbl.AnnounceTo(domaintest.ID("peer-A"))
+	if len(entries) != 1 || entries[0].Identity != domaintest.ID("bob") {
 		t.Fatalf("split horizon should exclude alice's route: got %+v", entries)
 	}
 }
@@ -1240,21 +1243,21 @@ func TestAnnounceableOmitsRoutesToSelfDestination(t *testing.T) {
 	// peer-A's anti-spoof rejects as forged own-origin. Filter it
 	// out at send time.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "peer-A", Origin: "peer-A", NextHop: "peer-C",
+		Identity: domaintest.ID("peer-A"), Origin: domaintest.ID("peer-A"), NextHop: domaintest.ID("peer-C"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "bob", NextHop: "peer-C",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("peer-C"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	announceable := tbl.Announceable("peer-A")
+	announceable := tbl.Announceable(domaintest.ID("peer-A"))
 	for _, r := range announceable {
-		if r.Identity == "peer-A" {
+		if r.Identity == domaintest.ID("peer-A") {
 			t.Fatal("identity filter: routes TO peer-A must be excluded when announcing to peer-A")
 		}
 	}
-	if len(announceable) != 1 || announceable[0].Identity != "bob" {
+	if len(announceable) != 1 || announceable[0].Identity != domaintest.ID("bob") {
 		t.Fatalf("expected only bob's route, got %+v", announceable)
 	}
 }
@@ -1264,16 +1267,16 @@ func TestAnnounceToOmitsRoutesToSelfDestination(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "peer-A", Origin: "peer-A", NextHop: "peer-C",
+		Identity: domaintest.ID("peer-A"), Origin: domaintest.ID("peer-A"), NextHop: domaintest.ID("peer-C"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "bob", NextHop: "peer-C",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("peer-C"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	entries := tbl.AnnounceTo("peer-A")
-	if len(entries) != 1 || entries[0].Identity != "bob" {
+	entries := tbl.AnnounceTo(domaintest.ID("peer-A"))
+	if len(entries) != 1 || entries[0].Identity != domaintest.ID("bob") {
 		t.Fatalf("identity filter should exclude peer-A's own route: got %+v", entries)
 	}
 }
@@ -1304,19 +1307,19 @@ func TestAnnounceToStripsInternalFields(t *testing.T) {
 		// Origin = its own localOrigin, regardless of what transit
 		// Origin the ingress entry had ("x" below — that value is
 		// consumed for anti-spoof and dropped by storage).
-		tbl := NewTable(WithClock(fixedClock(now)), WithLocalOrigin("node-A"))
+		tbl := NewTable(WithClock(fixedClock(now)), WithLocalOrigin(domaintest.ID("node-A")))
 
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "x", NextHop: "peer-B",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-B"),
 			Hops: 2, SeqNo: 7, Source: RouteSourceHopAck,
 		})
 
-		entries := tbl.AnnounceTo("peer-C")
+		entries := tbl.AnnounceTo(domaintest.ID("peer-C"))
 		if len(entries) != 1 {
 			t.Fatal("expected 1 entry")
 		}
 		e := entries[0]
-		if e.Identity != "alice" || e.Origin != "node-A" || e.SeqNo != 7 {
+		if e.Identity != domaintest.ID("alice") || e.Origin != domaintest.ID("node-A") || e.SeqNo != 7 {
 			t.Fatalf("wire fields: expected Identity=alice, Origin=node-A (localOrigin), SeqNo=7, got %+v", e)
 		}
 		if e.Hops != 2 {
@@ -1333,16 +1336,16 @@ func TestAnnounceToStripsInternalFields(t *testing.T) {
 		tbl := NewTable(WithClock(fixedClock(now)))
 
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "x", NextHop: "peer-B",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-B"),
 			Hops: 2, SeqNo: 7, Source: RouteSourceHopAck,
 		})
 
-		entries := tbl.AnnounceTo("peer-A")
+		entries := tbl.AnnounceTo(domaintest.ID("peer-A"))
 		if len(entries) != 1 {
 			t.Fatal("expected 1 entry")
 		}
 		e := entries[0]
-		if e.Identity != "alice" || e.Origin != "alice" || e.SeqNo != 7 {
+		if e.Identity != domaintest.ID("alice") || e.Origin != domaintest.ID("alice") || e.SeqNo != 7 {
 			t.Fatalf("wire fields: expected Identity=alice, Origin=alice (fallback), SeqNo=7, got %+v", e)
 		}
 	})
@@ -1356,11 +1359,11 @@ func TestAnnounceToHops15SentAsIs(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-B"),
 		Hops: 15, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	entries := tbl.AnnounceTo("peer-A")
+	entries := tbl.AnnounceTo(domaintest.ID("peer-A"))
 	if len(entries) != 1 || entries[0].Hops != 15 {
 		t.Fatalf("wire should carry 15 as-is (receiver does +1 to get infinity), got %d", entries[0].Hops)
 	}
@@ -1370,16 +1373,16 @@ func TestAnnounceToIncludesOwnOriginTombstones(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("node-A"),
+		WithLocalOrigin(domaintest.ID("node-A")),
 		WithDefaultTTL(120*time.Second),
 	)
 
 	// Add a direct peer, then remove it to create an own-origin tombstone.
-	if _, err := tbl.AddDirectPeer("peer-B"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := tbl.RemoveDirectPeer("peer-B")
+	result, err := tbl.RemoveDirectPeer(domaintest.ID("peer-B"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1388,10 +1391,10 @@ func TestAnnounceToIncludesOwnOriginTombstones(t *testing.T) {
 	}
 
 	// AnnounceTo should include the own-origin tombstone (hops=16).
-	entries := tbl.AnnounceTo("peer-C")
+	entries := tbl.AnnounceTo(domaintest.ID("peer-C"))
 	found := false
 	for _, e := range entries {
-		if e.Identity == "peer-B" && e.Hops == HopsInfinity {
+		if e.Identity == domaintest.ID("peer-B") && e.Hops == HopsInfinity {
 			found = true
 		}
 	}
@@ -1404,22 +1407,22 @@ func TestAnnounceToExcludesTransitTombstones(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("node-A"),
+		WithLocalOrigin(domaintest.ID("node-A")),
 		WithDefaultTTL(120*time.Second),
 	)
 
 	// Insert a transit route (origin != localOrigin), then withdraw it.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "peer-X", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("peer-X"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	// Withdraw with higher SeqNo.
-	tbl.WithdrawRoute("alice", "peer-X", "peer-B", 2)
+	tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("peer-X"), domaintest.ID("peer-B"), 2)
 
 	// AnnounceTo should NOT include the transit tombstone.
-	entries := tbl.AnnounceTo("peer-C")
+	entries := tbl.AnnounceTo(domaintest.ID("peer-C"))
 	for _, e := range entries {
-		if e.Identity == "alice" && e.Hops >= HopsInfinity {
+		if e.Identity == domaintest.ID("alice") && e.Hops >= HopsInfinity {
 			t.Fatal("transit tombstone should NOT appear in AnnounceTo")
 		}
 	}
@@ -1430,22 +1433,22 @@ func TestAnnounceToOwnOriginTombstoneExpiresNaturally(t *testing.T) {
 	clock := func() time.Time { return now }
 	tbl := NewTable(
 		WithClock(clock),
-		WithLocalOrigin("node-A"),
+		WithLocalOrigin(domaintest.ID("node-A")),
 		WithDefaultTTL(120*time.Second),
 	)
 
-	if _, err := tbl.AddDirectPeer("peer-B"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tbl.RemoveDirectPeer("peer-B"); err != nil {
+	if _, err := tbl.RemoveDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatal(err)
 	}
 
 	// Tombstone visible immediately.
-	entries := tbl.AnnounceTo("peer-C")
+	entries := tbl.AnnounceTo(domaintest.ID("peer-C"))
 	hasTombstone := false
 	for _, e := range entries {
-		if e.Identity == "peer-B" && e.Hops == HopsInfinity {
+		if e.Identity == domaintest.ID("peer-B") && e.Hops == HopsInfinity {
 			hasTombstone = true
 		}
 	}
@@ -1455,9 +1458,9 @@ func TestAnnounceToOwnOriginTombstoneExpiresNaturally(t *testing.T) {
 
 	// Advance clock past TTL — tombstone should disappear.
 	now = now.Add(121 * time.Second)
-	entries = tbl.AnnounceTo("peer-C")
+	entries = tbl.AnnounceTo(domaintest.ID("peer-C"))
 	for _, e := range entries {
-		if e.Identity == "peer-B" {
+		if e.Identity == domaintest.ID("peer-B") {
 			t.Fatalf("tombstone should have expired, still present: %+v", e)
 		}
 	}
@@ -1469,17 +1472,17 @@ func TestWithdrawRouteSetHopsInfinity(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
-	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 6)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 6)
 	if !ok {
 		t.Fatal("withdrawal with higher SeqNo should succeed")
 	}
 
 	snap := tbl.Snapshot()
-	routes := snap.Routes["alice"]
+	routes := snap.Routes[domaintest.ID("alice")]
 	if len(routes) != 1 || routes[0].Hops != HopsInfinity {
 		t.Fatal("withdrawn route should have hops=16")
 	}
@@ -1492,16 +1495,16 @@ func TestWithdrawRouteEqualSeqNoRejected(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 10)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 10)
 	if ok {
 		t.Fatal("withdrawal with equal SeqNo should be rejected — origin must increment")
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].Hops != 2 {
 		t.Fatal("route should remain alive after rejected equal-seq withdrawal")
 	}
@@ -1511,11 +1514,11 @@ func TestWithdrawRouteStaleSeqNoRejected(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 
-	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 5)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5)
 	if ok {
 		t.Fatal("withdrawal with lower SeqNo should be rejected")
 	}
@@ -1525,14 +1528,14 @@ func TestWithdrawRouteNonexistentCreatesTombstone(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(WithClock(fixedClock(now)))
 
-	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 5)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5)
 	if !ok {
 		t.Fatal("withdrawal of unseen route should succeed (tombstone created)")
 	}
 
 	// Tombstone should exist: withdrawn entry with HopsInfinity and SeqNo=5.
 	snap := tbl.Snapshot()
-	routes := snap.Routes["alice"]
+	routes := snap.Routes[domaintest.ID("alice")]
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 tombstone entry, got %d", len(routes))
 	}
@@ -1544,7 +1547,7 @@ func TestWithdrawRouteNonexistentCreatesTombstone(t *testing.T) {
 	}
 
 	// Verify Lookup returns nothing (withdrawn routes are filtered).
-	active := tbl.Lookup("alice")
+	active := tbl.Lookup(domaintest.ID("alice"))
 	if len(active) != 0 {
 		t.Fatal("tombstone should not appear in Lookup")
 	}
@@ -1555,7 +1558,7 @@ func TestWithdrawTombstoneBlocksStaleAnnouncement(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	// Withdrawal arrives first with SeqNo=10 — creates tombstone.
-	ok := tbl.WithdrawRoute("alice", "bob", "charlie", 10)
+	ok := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 10)
 	if !ok {
 		t.Fatal("tombstone creation should succeed")
 	}
@@ -1563,7 +1566,7 @@ func TestWithdrawTombstoneBlocksStaleAnnouncement(t *testing.T) {
 	// Delayed stale announcement with SeqNo=8 arrives — must be rejected
 	// because the tombstone's SeqNo (10) is higher.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 8, Source: RouteSourceAnnouncement,
 	})
 	if status == RouteAccepted {
@@ -1571,7 +1574,7 @@ func TestWithdrawTombstoneBlocksStaleAnnouncement(t *testing.T) {
 	}
 
 	// Route should still be withdrawn in the table.
-	active := tbl.Lookup("alice")
+	active := tbl.Lookup(domaintest.ID("alice"))
 	if len(active) != 0 {
 		t.Fatal("no active route should exist after tombstone blocks stale announcement")
 	}
@@ -1582,18 +1585,18 @@ func TestWithdrawTombstoneSupersededByNewerAnnouncement(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	// Tombstone at SeqNo=5.
-	tbl.WithdrawRoute("alice", "bob", "charlie", 5)
+	tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 5)
 
 	// Newer announcement with SeqNo=7 — should be accepted.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
 		t.Fatal("newer announcement (SeqNo=7) should supersede tombstone (SeqNo=5)")
 	}
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].Hops != 2 {
 		t.Fatal("route should be active after tombstone superseded")
 	}
@@ -1605,19 +1608,19 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 
 	// Active announcement route at SeqNo=5.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
 	// Withdraw at SeqNo=6 (strictly greater than active SeqNo=5) — sets Hops=HopsInfinity.
-	if !tbl.WithdrawRoute("alice", "bob", "charlie", 6) {
+	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("charlie"), 6) {
 		t.Fatal("withdraw should succeed")
 	}
 
 	// Same-SeqNo hop_ack (higher trust rank) must NOT resurrect the
 	// withdrawn entry. Only a strictly newer SeqNo may do that.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 1, SeqNo: 6, Source: RouteSourceHopAck,
 	})
 	if status == RouteAccepted {
@@ -1625,20 +1628,20 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 	}
 
 	// Verify the route is still withdrawn.
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 0 {
 		t.Fatal("withdrawn route should not appear in Lookup")
 	}
 
 	// A strictly newer SeqNo should succeed.
 	status = mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteAccepted {
 		t.Fatal("newer SeqNo=7 should supersede withdrawn SeqNo=6")
 	}
-	routes = tbl.Lookup("alice")
+	routes = tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].Hops != 2 {
 		t.Fatal("route should be active after superseding withdrawal")
 	}
@@ -1647,10 +1650,10 @@ func TestWithdrawnRouteRejectsSameSeqNoHigherTrustUpdate(t *testing.T) {
 // --- UpdateRoute: direct route origin guard ---
 
 func TestUpdateRouteRejectsDirectWithForeignOrigin(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "foreign-node", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foreign-node"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if err != ErrDirectForeignOrigin {
@@ -1664,10 +1667,10 @@ func TestUpdateRouteRejectsDirectWithForeignOrigin(t *testing.T) {
 }
 
 func TestUpdateRouteAcceptsDirectWithOwnOrigin(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if status != RouteAccepted {
@@ -1681,7 +1684,7 @@ func TestUpdateRouteDirectSkipsCheckWithoutLocalOrigin(t *testing.T) {
 	tbl := NewTable()
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "any-origin", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("any-origin"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	if status != RouteAccepted {
@@ -1690,17 +1693,17 @@ func TestUpdateRouteDirectSkipsCheckWithoutLocalOrigin(t *testing.T) {
 }
 
 func TestForeignDirectRouteCannotOutrankAnnouncement(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	// Legitimate announcement route.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "foreign-node", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foreign-node"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	// Attempt to inject a foreign-origin direct route that would outrank it.
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "foreign-node", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("foreign-node"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 2, Source: RouteSourceDirect,
 	})
 	if err != ErrDirectForeignOrigin {
@@ -1708,7 +1711,7 @@ func TestForeignDirectRouteCannotOutrankAnnouncement(t *testing.T) {
 	}
 
 	// Only the announcement should remain.
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 || routes[0].Source != RouteSourceAnnouncement {
 		t.Fatal("announcement should be the only route after rejecting foreign direct")
 	}
@@ -1717,9 +1720,9 @@ func TestForeignDirectRouteCannotOutrankAnnouncement(t *testing.T) {
 // --- AddDirectPeer ---
 
 func TestAddDirectPeerCreatesRoute(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
-	result, err := tbl.AddDirectPeer("peer-A")
+	result, err := tbl.AddDirectPeer(domaintest.ID("peer-A"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1732,7 +1735,7 @@ func TestAddDirectPeerCreatesRoute(t *testing.T) {
 	// consistent value for live + withdrawal anti-spoof. Storage
 	// internally no longer keeps Origin — see route_store_lookup.go
 	// for the synthesis contract.
-	if entry.Identity != "peer-A" || entry.Origin != "me" || entry.NextHop != "peer-A" {
+	if entry.Identity != domaintest.ID("peer-A") || entry.Origin != domaintest.ID("me") || entry.NextHop != domaintest.ID("peer-A") {
 		t.Fatalf("unexpected entry fields: %+v", entry)
 	}
 	if entry.Hops != 1 || entry.Source != RouteSourceDirect {
@@ -1750,12 +1753,12 @@ func TestAddDirectPeerCreatesRoute(t *testing.T) {
 }
 
 func TestAddDirectPeerIncrementsSeqNo(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
-	e1 := mustAddDirect(t, tbl, "peer-A")
+	e1 := mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 	// Simulate disconnect + reconnect by removing then re-adding
-	mustRemoveDirect(t, tbl, "peer-A")
-	e2 := mustAddDirect(t, tbl, "peer-A")
+	mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
+	e2 := mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 
 	if e2.SeqNo <= e1.SeqNo {
 		t.Fatalf("reconnected peer should get higher SeqNo: first=%d, second=%d", e1.SeqNo, e2.SeqNo)
@@ -1765,26 +1768,26 @@ func TestAddDirectPeerIncrementsSeqNo(t *testing.T) {
 func TestAddDirectPeerRequiresLocalOrigin(t *testing.T) {
 	tbl := NewTable()
 
-	_, err := tbl.AddDirectPeer("peer-A")
+	_, err := tbl.AddDirectPeer(domaintest.ID("peer-A"))
 	if err != ErrNoLocalOrigin {
 		t.Fatalf("expected ErrNoLocalOrigin, got %v", err)
 	}
 }
 
 func TestAddDirectPeerRejectsEmptyPeerID(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
-	_, err := tbl.AddDirectPeer("")
+	_, err := tbl.AddDirectPeer(domain.PeerIdentity{})
 	if err != ErrEmptyPeerID {
 		t.Fatalf("expected ErrEmptyPeerID, got %v", err)
 	}
 }
 
 func TestAddDirectPeerIdempotentWhenAlreadyActive(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
-	e1 := mustAddDirect(t, tbl, "peer-A")
-	e2 := mustAddDirect(t, tbl, "peer-A")
+	e1 := mustAddDirect(t, tbl, domaintest.ID("peer-A"))
+	e2 := mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 
 	if e2.SeqNo != e1.SeqNo {
 		t.Fatalf("repeat AddDirectPeer should not bump SeqNo: first=%d, second=%d",
@@ -1796,11 +1799,11 @@ func TestAddDirectPeerIdempotentWhenAlreadyActive(t *testing.T) {
 }
 
 func TestAddDirectPeerBumpsSeqNoAfterWithdrawal(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
-	e1 := mustAddDirect(t, tbl, "peer-A")
-	mustRemoveDirect(t, tbl, "peer-A")
-	e2 := mustAddDirect(t, tbl, "peer-A")
+	e1 := mustAddDirect(t, tbl, domaintest.ID("peer-A"))
+	mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
+	e2 := mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 
 	if e2.SeqNo <= e1.SeqNo {
 		t.Fatalf("reconnect after withdrawal must bump SeqNo: first=%d, second=%d",
@@ -1813,17 +1816,17 @@ func TestAddDirectPeerIdempotentOnRepeat(t *testing.T) {
 	t2 := t1.Add(30 * time.Second)
 	current := t1
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithDefaultTTL(60*time.Second),
 	)
 
-	res1, err := tbl.AddDirectPeer("peer-A")
+	res1, err := tbl.AddDirectPeer(domaintest.ID("peer-A"))
 	if err != nil {
 		t.Fatalf("first AddDirectPeer failed: %v", err)
 	}
 	current = t2
-	res2, err := tbl.AddDirectPeer("peer-A")
+	res2, err := tbl.AddDirectPeer(domaintest.ID("peer-A"))
 	if err != nil {
 		t.Fatalf("repeat AddDirectPeer failed: %v", err)
 	}
@@ -1842,31 +1845,31 @@ func TestAddDirectPeerIdempotentOnRepeat(t *testing.T) {
 // --- RemoveDirectPeer ---
 
 func TestRemoveDirectPeerSeparatesDirectFromTransit(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	// Direct route via AddDirectPeer
-	mustAddDirect(t, tbl, "peer-A")
+	mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 
 	// Transit route: learned from peer-A via announcement
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	// Transit route: confirmed via hop_ack
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "carol", Origin: "y", NextHop: "peer-A",
+		Identity: domaintest.ID("carol"), Origin: domaintest.ID("y"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	// Unrelated route via different peer
-	mustAddDirect(t, tbl, "dave")
+	mustAddDirect(t, tbl, domaintest.ID("dave"))
 
-	result := mustRemoveDirect(t, tbl, "peer-A")
+	result := mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
 
 	if len(result.Withdrawals) != 1 {
 		t.Fatalf("expected 1 wire withdrawal, got %d", len(result.Withdrawals))
 	}
 	w := result.Withdrawals[0]
-	if w.Identity != "peer-A" || w.Origin != "me" || w.Hops != HopsInfinity {
+	if w.Identity != domaintest.ID("peer-A") || w.Origin != domaintest.ID("me") || w.Hops != HopsInfinity {
 		t.Fatalf("withdrawal should be wire-ready: %+v", w)
 	}
 	if w.SeqNo <= 1 {
@@ -1881,14 +1884,14 @@ func TestRemoveDirectPeerSeparatesDirectFromTransit(t *testing.T) {
 }
 
 func TestRemoveDirectPeerSkipsAlreadyWithdrawn(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: HopsInfinity, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	result := mustRemoveDirect(t, tbl, "peer-A")
+	result := mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
 
 	if len(result.Withdrawals) != 0 {
 		t.Fatal("already-withdrawn routes should not appear in Withdrawals")
@@ -1899,15 +1902,15 @@ func TestRemoveDirectPeerSkipsAlreadyWithdrawn(t *testing.T) {
 }
 
 func TestRemoveDirectPeerIdempotent(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	mustRemoveDirect(t, tbl, "peer-A")
-	result := mustRemoveDirect(t, tbl, "peer-A")
+	mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
+	result := mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
 
 	if result.TransitInvalidated != 0 {
 		t.Fatal("second disconnect should not re-invalidate")
@@ -1917,19 +1920,19 @@ func TestRemoveDirectPeerIdempotent(t *testing.T) {
 func TestRemoveDirectPeerRequiresLocalOrigin(t *testing.T) {
 	tbl := NewTable()
 
-	_, err := tbl.RemoveDirectPeer("peer-A")
+	_, err := tbl.RemoveDirectPeer(domaintest.ID("peer-A"))
 	if err != ErrNoLocalOrigin {
 		t.Fatalf("expected ErrNoLocalOrigin, got %v", err)
 	}
 }
 
 func TestRemoveDirectPeerWireReadyWithdrawals(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
-	mustAddDirect(t, tbl, "peer-A")
-	mustAddDirect(t, tbl, "peer-B")
+	mustAddDirect(t, tbl, domaintest.ID("peer-A"))
+	mustAddDirect(t, tbl, domaintest.ID("peer-B"))
 
-	result := mustRemoveDirect(t, tbl, "peer-A")
+	result := mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
 
 	if len(result.Withdrawals) != 1 {
 		t.Fatalf("expected 1 withdrawal, got %d", len(result.Withdrawals))
@@ -1940,12 +1943,12 @@ func TestRemoveDirectPeerWireReadyWithdrawals(t *testing.T) {
 	if w.Hops != HopsInfinity {
 		t.Fatalf("withdrawal must have hops=%d, got %d", HopsInfinity, w.Hops)
 	}
-	if w.Origin != "me" {
+	if w.Origin != domaintest.ID("me") {
 		t.Fatalf("withdrawal origin must be localOrigin, got %q", w.Origin)
 	}
 
 	// Verify peer-B is unaffected
-	routes := tbl.Lookup("peer-B")
+	routes := tbl.Lookup(domaintest.ID("peer-B"))
 	if len(routes) != 1 || routes[0].Hops != 1 {
 		t.Fatal("unrelated peer should be unaffected")
 	}
@@ -1954,14 +1957,14 @@ func TestRemoveDirectPeerWireReadyWithdrawals(t *testing.T) {
 // --- InvalidateTransitRoutes ---
 
 func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	// Direct route for peer-A (source=direct, origin=me).
-	mustAddDirect(t, tbl, "peer-A")
+	mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 
 	// Transit route learned through peer-A (source=announcement).
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "target-X", Origin: "target-X", NextHop: "peer-A",
+		Identity: domaintest.ID("target-X"), Origin: domaintest.ID("target-X"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(DefaultTTL),
 	})
@@ -1969,7 +1972,7 @@ func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
 		t.Fatalf("UpdateRoute failed: %v", err)
 	}
 
-	invalidated, exposed := tbl.InvalidateTransitRoutes("peer-A")
+	invalidated, exposed := tbl.InvalidateTransitRoutes(domaintest.ID("peer-A"))
 	if invalidated != 1 {
 		t.Fatalf("expected 1 transit route invalidated, got %d", invalidated)
 	}
@@ -1980,7 +1983,7 @@ func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
 	}
 
 	// Direct route should be untouched — Lookup returns active routes.
-	routes := tbl.Lookup("peer-A")
+	routes := tbl.Lookup(domaintest.ID("peer-A"))
 	if len(routes) != 1 || routes[0].IsWithdrawn() {
 		t.Fatal("direct route should not be invalidated")
 	}
@@ -1988,7 +1991,7 @@ func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
 	// Transit route should be withdrawn. Lookup() filters withdrawn entries,
 	// so use Snapshot() to inspect raw table state.
 	snap := tbl.Snapshot()
-	snapRoutes := snap.Routes["target-X"]
+	snapRoutes := snap.Routes[domaintest.ID("target-X")]
 	if len(snapRoutes) != 1 {
 		t.Fatalf("expected 1 route in snapshot for target-X, got %d", len(snapRoutes))
 	}
@@ -1997,16 +2000,16 @@ func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
 	}
 
 	// Lookup must return empty for withdrawn routes.
-	if len(tbl.Lookup("target-X")) != 0 {
+	if len(tbl.Lookup(domaintest.ID("target-X"))) != 0 {
 		t.Fatal("Lookup should return empty for withdrawn transit route")
 	}
 }
 
 func TestInvalidateTransitRoutesNoMatch(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	_, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "target-X", Origin: "target-X", NextHop: "peer-B",
+		Identity: domaintest.ID("target-X"), Origin: domaintest.ID("target-X"), NextHop: domaintest.ID("peer-B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(DefaultTTL),
 	})
@@ -2015,7 +2018,7 @@ func TestInvalidateTransitRoutesNoMatch(t *testing.T) {
 	}
 
 	// Invalidate for peer-A — should not touch peer-B's route.
-	invalidated, exposed := tbl.InvalidateTransitRoutes("peer-A")
+	invalidated, exposed := tbl.InvalidateTransitRoutes(domaintest.ID("peer-A"))
 	if invalidated != 0 {
 		t.Fatalf("expected 0 invalidated, got %d", invalidated)
 	}
@@ -2027,49 +2030,49 @@ func TestInvalidateTransitRoutesNoMatch(t *testing.T) {
 // --- Disconnect exposed backups ---
 
 func TestRemoveDirectPeerExposesBackupRoute(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	// Direct route to peer-A (will be withdrawn on disconnect).
-	mustAddDirect(t, tbl, "peer-A")
+	mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 
 	// peer-A also serves as next-hop for a transit route to target-X.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "target-X", Origin: "target-X", NextHop: "peer-A",
+		Identity: domaintest.ID("target-X"), Origin: domaintest.ID("target-X"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(2 * time.Hour),
 	})
 
 	// Backup route to target-X via peer-B (survives disconnect).
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "target-X", Origin: "peer-B", NextHop: "peer-B",
+		Identity: domaintest.ID("target-X"), Origin: domaintest.ID("peer-B"), NextHop: domaintest.ID("peer-B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(2 * time.Hour),
 	})
 
-	result, err := tbl.RemoveDirectPeer("peer-A")
+	result, err := tbl.RemoveDirectPeer(domaintest.ID("peer-A"))
 	if err != nil {
 		t.Fatalf("RemoveDirectPeer failed: %v", err)
 	}
 
 	// target-X should be exposed because the backup via peer-B survives.
-	if len(result.ExposedBackups) != 1 || result.ExposedBackups[0] != "target-X" {
+	if len(result.ExposedBackups) != 1 || result.ExposedBackups[0] != domaintest.ID("target-X") {
 		t.Fatalf("expected [target-X] exposed, got %v", result.ExposedBackups)
 	}
 }
 
 func TestRemoveDirectPeerNoBackupNoExposed(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
-	mustAddDirect(t, tbl, "peer-A")
+	mustAddDirect(t, tbl, domaintest.ID("peer-A"))
 
 	// Only route to target-X goes through peer-A — no backup.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "target-X", Origin: "target-X", NextHop: "peer-A",
+		Identity: domaintest.ID("target-X"), Origin: domaintest.ID("target-X"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(2 * time.Hour),
 	})
 
-	result, err := tbl.RemoveDirectPeer("peer-A")
+	result, err := tbl.RemoveDirectPeer(domaintest.ID("peer-A"))
 	if err != nil {
 		t.Fatalf("RemoveDirectPeer failed: %v", err)
 	}
@@ -2081,33 +2084,33 @@ func TestRemoveDirectPeerNoBackupNoExposed(t *testing.T) {
 }
 
 func TestInvalidateTransitRoutesExposesBackupRoute(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	// Transit route to target-X via peer-A (will be invalidated).
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "target-X", Origin: "origin-A", NextHop: "peer-A",
+		Identity: domaintest.ID("target-X"), Origin: domaintest.ID("origin-A"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(2 * time.Hour),
 	})
 
 	// Backup route to target-X via peer-B (survives invalidation).
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "target-X", Origin: "origin-B", NextHop: "peer-B",
+		Identity: domaintest.ID("target-X"), Origin: domaintest.ID("origin-B"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: time.Now().Add(2 * time.Hour),
 	})
 
-	invalidated, exposed := tbl.InvalidateTransitRoutes("peer-A")
+	invalidated, exposed := tbl.InvalidateTransitRoutes(domaintest.ID("peer-A"))
 	if invalidated != 1 {
 		t.Fatalf("expected 1 invalidated, got %d", invalidated)
 	}
-	if len(exposed) != 1 || exposed[0] != "target-X" {
+	if len(exposed) != 1 || exposed[0] != domaintest.ID("target-X") {
 		t.Fatalf("expected [target-X] exposed, got %v", exposed)
 	}
 
 	// Backup via peer-B should still be reachable.
-	routes := tbl.Lookup("target-X")
-	if len(routes) != 1 || routes[0].NextHop != "peer-B" {
+	routes := tbl.Lookup(domaintest.ID("target-X"))
+	if len(routes) != 1 || routes[0].NextHop != domaintest.ID("peer-B") {
 		t.Fatalf("expected backup via peer-B, got %v", routes)
 	}
 }
@@ -2119,12 +2122,12 @@ func TestTickTTLRemovesExpired(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(-time.Second),
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "me", NextHop: "bob",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("bob"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 		ExpiresAt: now.Add(time.Hour),
 	})
@@ -2141,7 +2144,7 @@ func TestTickTTLCleansUpEmptyIdentities(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "peer-A",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(-time.Second),
 	})
@@ -2149,7 +2152,7 @@ func TestTickTTLCleansUpEmptyIdentities(t *testing.T) {
 	tbl.TickTTL()
 
 	snap := tbl.Snapshot()
-	if _, exists := snap.Routes["alice"]; exists {
+	if _, exists := snap.Routes[domaintest.ID("alice")]; exists {
 		t.Fatal("identity with no routes should be removed from map")
 	}
 }
@@ -2159,24 +2162,24 @@ func TestTickTTLRemovesWithdrawnRoutes(t *testing.T) {
 	now := start
 	tbl := NewTable(
 		WithClock(func() time.Time { return now }),
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithDefaultTTL(120*time.Second),
 	)
 
-	// Add a direct route and a transit route through "alice", plus
-	// a healthy announcement through "carol".
+	// Add a direct route and a transit route through domaintest.ID("alice"), plus
+	// a healthy announcement through domaintest.ID("carol").
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 		ExpiresAt: start.Add(2 * time.Hour),
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "alice", NextHop: "alice",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("alice"), NextHop: domaintest.ID("alice"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: start.Add(2 * time.Hour),
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "carol", Origin: "x", NextHop: "carol",
+		Identity: domaintest.ID("carol"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("carol"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: start.Add(2 * time.Hour),
 	})
@@ -2185,10 +2188,10 @@ func TestTickTTLRemovesWithdrawnRoutes(t *testing.T) {
 		t.Fatalf("expected 3 routes before withdraw, got %d", tbl.Size())
 	}
 
-	// Simulate peer "alice" disconnecting. RemoveDirectPeer sets
+	// Simulate peer domaintest.ID("alice") disconnecting. RemoveDirectPeer sets
 	// Hops=HopsInfinity and ExpiresAt=now+defaultTTL on both the
 	// direct and transit routes.
-	result, err := tbl.RemoveDirectPeer("alice")
+	result, err := tbl.RemoveDirectPeer(domaintest.ID("alice"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2215,13 +2218,13 @@ func TestTickTTLRemovesWithdrawnRoutes(t *testing.T) {
 		t.Fatalf("expected 1 route after TTL expiry (withdrawn cleaned), got %d", tbl.Size())
 	}
 	snap := tbl.Snapshot()
-	if _, exists := snap.Routes["carol"]; !exists {
+	if _, exists := snap.Routes[domaintest.ID("carol")]; !exists {
 		t.Fatal("carol's route should survive tick")
 	}
-	if _, exists := snap.Routes["alice"]; exists {
+	if _, exists := snap.Routes[domaintest.ID("alice")]; exists {
 		t.Fatal("alice's withdrawn direct route should be removed after TTL")
 	}
-	if _, exists := snap.Routes["bob"]; exists {
+	if _, exists := snap.Routes[domaintest.ID("bob")]; exists {
 		t.Fatal("bob's invalidated transit route should be removed after TTL")
 	}
 }
@@ -2239,12 +2242,12 @@ func TestDefaultTTLAppliedOnInsert(t *testing.T) {
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	snap := tbl.Snapshot()
-	r := snap.Routes["alice"][0]
+	r := snap.Routes[domaintest.ID("alice")][0]
 	expectedExpiry := now.Add(60 * time.Second)
 	if !r.ExpiresAt.Equal(expectedExpiry) {
 		t.Fatalf("expected ExpiresAt=%v, got %v", expectedExpiry, r.ExpiresAt)
@@ -2261,13 +2264,13 @@ func TestExplicitExpiresAtPreserved(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: custom,
 	})
 
 	snap := tbl.Snapshot()
-	if !snap.Routes["alice"][0].ExpiresAt.Equal(custom) {
+	if !snap.Routes[domaintest.ID("alice")][0].ExpiresAt.Equal(custom) {
 		t.Fatal("explicitly set ExpiresAt should be preserved")
 	}
 }
@@ -2275,17 +2278,17 @@ func TestExplicitExpiresAtPreserved(t *testing.T) {
 // --- SeqNo counter sync ---
 
 func TestSeqCounterSyncsWithExternalOwnOrigin(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	// Simulate table restored from snapshot with own-origin route at SeqNo=50.
 	// This bypasses AddDirectPeer, so seqCounters starts at 0.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 50, Source: RouteSourceDirect,
 	})
 
 	// Now RemoveDirectPeer must produce SeqNo > 50, not SeqNo=1.
-	result, err := tbl.RemoveDirectPeer("alice")
+	result, err := tbl.RemoveDirectPeer(domaintest.ID("alice"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2299,16 +2302,16 @@ func TestSeqCounterSyncsWithExternalOwnOrigin(t *testing.T) {
 }
 
 func TestSeqCounterSyncsOnlyOwnOrigin(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("me"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
 	// Foreign-origin route with high SeqNo — must NOT affect our counter.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "other-node", NextHop: "bob",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("other-node"), NextHop: domaintest.ID("bob"),
 		Hops: 2, SeqNo: 999, Source: RouteSourceAnnouncement,
 	})
 
 	// AddDirectPeer for alice should start from 1, not 999+1.
-	entry := mustAddDirect(t, tbl, "alice")
+	entry := mustAddDirect(t, tbl, domaintest.ID("alice"))
 	if entry.SeqNo != 1 {
 		t.Fatalf("foreign-origin SeqNo should not affect own counter: expected 1, got %d",
 			entry.SeqNo)
@@ -2331,21 +2334,21 @@ func TestLookupSortsBySourceThenHops(t *testing.T) {
 
 	// announcement with 1 hop — lowest trust bonus (+0)
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "n1",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("n1"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	// direct with 1 hop — highest trust bonus (+20)
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 	// hop_ack with 1 hop — middle trust bonus (+10)
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "z", NextHop: "n3",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("z"), NextHop: domaintest.ID("n3"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 3 {
 		t.Fatalf("expected 3 routes, got %d", len(routes))
 	}
@@ -2366,15 +2369,15 @@ func TestLookupTiebreaksByHopsWithinSameSource(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "n1",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("n1"),
 		Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "y", NextHop: "n2",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("y"), NextHop: domaintest.ID("n2"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
@@ -2389,7 +2392,7 @@ func TestLookupExcludesWithdrawnAndExpired(t *testing.T) {
 
 	// Withdrawn announcement (hops=infinity) — Lookup must exclude.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "n1",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("n1"),
 		Hops: HopsInfinity, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	// Already-expired learned route (caller-supplied ExpiresAt in the past) —
@@ -2401,21 +2404,21 @@ func TestLookupExcludesWithdrawnAndExpired(t *testing.T) {
 	// test here — Lookup excludes expired entries — is independent of the
 	// source enum, the announcement entry exercises it just as faithfully.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "y", NextHop: "n2",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("y"), NextHop: domaintest.ID("n2"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(-time.Second),
 	})
 	// Alive hop_ack route — Lookup must include.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "z", NextHop: "n3",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("z"), NextHop: domaintest.ID("n3"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 
-	routes := tbl.Lookup("alice")
+	routes := tbl.Lookup(domaintest.ID("alice"))
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 active route, got %d", len(routes))
 	}
-	if routes[0].NextHop != "n3" {
+	if routes[0].NextHop != domaintest.ID("n3") {
 		t.Fatal("only the non-withdrawn, non-expired route should remain")
 	}
 }
@@ -2426,18 +2429,18 @@ func TestSnapshotIsImmutable(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "n1",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("n1"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	snap := tbl.Snapshot()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 2, Source: RouteSourceDirect,
 	})
 
-	if snap.Routes["alice"][0].Hops != 2 {
+	if snap.Routes[domaintest.ID("alice")][0].Hops != 2 {
 		t.Fatal("snapshot should not be affected by later table mutations")
 	}
 }
@@ -2448,7 +2451,7 @@ func TestNextHopIsPeerIdentity(t *testing.T) {
 	tbl := NewTable()
 
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "ed25519:abc123", Origin: "me", NextHop: "ed25519:abc123",
+		Identity: domaintest.ID("ed25519:abc123"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("ed25519:abc123"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 
@@ -2456,8 +2459,8 @@ func TestNextHopIsPeerIdentity(t *testing.T) {
 		t.Fatal("route with identity-style NextHop should be accepted")
 	}
 
-	routes := tbl.Lookup("ed25519:abc123")
-	if routes[0].NextHop != "ed25519:abc123" {
+	routes := tbl.Lookup(domaintest.ID("ed25519:abc123"))
+	if routes[0].NextHop != domaintest.ID("ed25519:abc123") {
 		t.Fatal("NextHop should be preserved as peer identity")
 	}
 }
@@ -2468,12 +2471,12 @@ func TestTrustHierarchyPerTripleNotPerNextHop(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "C", NextHop: "B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("C"), NextHop: domaintest.ID("B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "D", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("D"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	})
 
@@ -2482,8 +2485,8 @@ func TestTrustHierarchyPerTripleNotPerNextHop(t *testing.T) {
 	}
 
 	snap := tbl.Snapshot()
-	for _, r := range snap.Routes["alice"] {
-		if r.Origin == "C" && r.Source != RouteSourceAnnouncement {
+	for _, r := range snap.Routes[domaintest.ID("alice")] {
+		if r.Origin == domaintest.ID("C") && r.Source != RouteSourceAnnouncement {
 			t.Fatal("upgrading one triple's trust should not affect another triple")
 		}
 	}
@@ -2495,25 +2498,25 @@ func TestHopAckScopedToTriple(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "C", NextHop: "B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("C"), NextHop: domaintest.ID("B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "D", NextHop: "B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("D"), NextHop: domaintest.ID("B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "C", NextHop: "B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("C"), NextHop: domaintest.ID("B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 
 	snap := tbl.Snapshot()
-	for _, r := range snap.Routes["alice"] {
-		if r.Origin == "D" && r.Source != RouteSourceAnnouncement {
+	for _, r := range snap.Routes[domaintest.ID("alice")] {
+		if r.Origin == domaintest.ID("D") && r.Source != RouteSourceAnnouncement {
 			t.Fatal("hop_ack for (alice,C,B) should not upgrade (alice,D,B)")
 		}
-		if r.Origin == "C" && r.Source != RouteSourceHopAck {
+		if r.Origin == domaintest.ID("C") && r.Source != RouteSourceHopAck {
 			t.Fatal("hop_ack for (alice,C,B) should upgrade it")
 		}
 	}
@@ -2523,7 +2526,7 @@ func TestHopAckScopedToTriple(t *testing.T) {
 
 func TestLookupUnknownIdentity(t *testing.T) {
 	tbl := NewTable()
-	routes := tbl.Lookup("nonexistent")
+	routes := tbl.Lookup(domaintest.ID("nonexistent"))
 	if routes != nil {
 		t.Fatal("unknown identity should return nil")
 	}
@@ -2541,11 +2544,11 @@ func TestSizeCountsAllEntries(t *testing.T) {
 	tbl := NewTable()
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "x", NextHop: "n1",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("n1"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "y", NextHop: "n2",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("y"), NextHop: domaintest.ID("n2"),
 		Hops: HopsInfinity, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
@@ -2563,7 +2566,7 @@ func TestFlapDetectionTriggersHoldDown(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithDefaultTTL(120*time.Second),
 		WithFlapWindow(60*time.Second),
@@ -2574,13 +2577,13 @@ func TestFlapDetectionTriggersHoldDown(t *testing.T) {
 
 	// Three rapid connect/disconnect cycles within the flap window.
 	for i := 0; i < 3; i++ {
-		mustAddDirect(t, tbl, "flappy")
-		mustRemoveDirect(t, tbl, "flappy")
+		mustAddDirect(t, tbl, domaintest.ID("flappy"))
+		mustRemoveDirect(t, tbl, domaintest.ID("flappy"))
 		current = current.Add(5 * time.Second)
 	}
 
 	// Fourth reconnect should be penalized — hold-down is active.
-	result, err := tbl.AddDirectPeer("flappy")
+	result, err := tbl.AddDirectPeer(domaintest.ID("flappy"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2600,7 +2603,7 @@ func TestBelowFlapThresholdNoPenalty(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapThreshold(3),
 		WithFlapWindow(60*time.Second),
@@ -2609,12 +2612,12 @@ func TestBelowFlapThresholdNoPenalty(t *testing.T) {
 
 	// Two disconnects — below threshold of 3.
 	for i := 0; i < 2; i++ {
-		mustAddDirect(t, tbl, "stable")
-		mustRemoveDirect(t, tbl, "stable")
+		mustAddDirect(t, tbl, domaintest.ID("stable"))
+		mustRemoveDirect(t, tbl, domaintest.ID("stable"))
 		current = current.Add(5 * time.Second)
 	}
 
-	result, err := tbl.AddDirectPeer("stable")
+	result, err := tbl.AddDirectPeer(domaintest.ID("stable"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2627,7 +2630,7 @@ func TestHoldDownExpiresAllowsNormalReconnect(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapWindow(60*time.Second),
 		WithFlapThreshold(3),
@@ -2637,8 +2640,8 @@ func TestHoldDownExpiresAllowsNormalReconnect(t *testing.T) {
 
 	// Trigger hold-down.
 	for i := 0; i < 3; i++ {
-		mustAddDirect(t, tbl, "flappy")
-		mustRemoveDirect(t, tbl, "flappy")
+		mustAddDirect(t, tbl, domaintest.ID("flappy"))
+		mustRemoveDirect(t, tbl, domaintest.ID("flappy"))
 		current = current.Add(2 * time.Second)
 	}
 
@@ -2646,7 +2649,7 @@ func TestHoldDownExpiresAllowsNormalReconnect(t *testing.T) {
 	// so previous withdrawal events are stale.
 	current = current.Add(90 * time.Second)
 
-	result, err := tbl.AddDirectPeer("flappy")
+	result, err := tbl.AddDirectPeer(domaintest.ID("flappy"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2659,7 +2662,7 @@ func TestFlapWindowSlidingExpiry(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapWindow(30*time.Second),
 		WithFlapThreshold(3),
@@ -2669,8 +2672,8 @@ func TestFlapWindowSlidingExpiry(t *testing.T) {
 
 	// Two disconnects early.
 	for i := 0; i < 2; i++ {
-		mustAddDirect(t, tbl, "peer")
-		mustRemoveDirect(t, tbl, "peer")
+		mustAddDirect(t, tbl, domaintest.ID("peer"))
+		mustRemoveDirect(t, tbl, domaintest.ID("peer"))
 		current = current.Add(2 * time.Second)
 	}
 
@@ -2678,10 +2681,10 @@ func TestFlapWindowSlidingExpiry(t *testing.T) {
 	current = current.Add(35 * time.Second)
 
 	// One more disconnect — only 1 in window, below threshold.
-	mustAddDirect(t, tbl, "peer")
-	mustRemoveDirect(t, tbl, "peer")
+	mustAddDirect(t, tbl, domaintest.ID("peer"))
+	mustRemoveDirect(t, tbl, domaintest.ID("peer"))
 
-	result, err := tbl.AddDirectPeer("peer")
+	result, err := tbl.AddDirectPeer(domaintest.ID("peer"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2694,7 +2697,7 @@ func TestTickTTLCleansFlapState(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapWindow(30*time.Second),
 		WithFlapThreshold(3),
@@ -2704,8 +2707,8 @@ func TestTickTTLCleansFlapState(t *testing.T) {
 
 	// Trigger hold-down.
 	for i := 0; i < 3; i++ {
-		mustAddDirect(t, tbl, "peer")
-		mustRemoveDirect(t, tbl, "peer")
+		mustAddDirect(t, tbl, domaintest.ID("peer"))
+		mustRemoveDirect(t, tbl, domaintest.ID("peer"))
 		current = current.Add(1 * time.Second)
 	}
 
@@ -2715,7 +2718,7 @@ func TestTickTTLCleansFlapState(t *testing.T) {
 
 	// Internal flap state should be cleaned — verify by reconnecting
 	// and checking that it's not penalized (no stale state lingering).
-	result, err := tbl.AddDirectPeer("peer")
+	result, err := tbl.AddDirectPeer(domaintest.ID("peer"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2728,7 +2731,7 @@ func TestFlapDetectionPerPeerIsolation(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapThreshold(3),
 		WithFlapWindow(60*time.Second),
@@ -2736,13 +2739,13 @@ func TestFlapDetectionPerPeerIsolation(t *testing.T) {
 
 	// Flap peer-A three times.
 	for i := 0; i < 3; i++ {
-		mustAddDirect(t, tbl, "peer-A")
-		mustRemoveDirect(t, tbl, "peer-A")
+		mustAddDirect(t, tbl, domaintest.ID("peer-A"))
+		mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
 		current = current.Add(1 * time.Second)
 	}
 
 	// peer-B connects for the first time — should not be penalized.
-	result, err := tbl.AddDirectPeer("peer-B")
+	result, err := tbl.AddDirectPeer(domaintest.ID("peer-B"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2755,7 +2758,7 @@ func TestFlapSnapshotFiltersStaleEntries(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithClock(func() time.Time { return current }),
 		WithFlapThreshold(3),
 		WithFlapWindow(60*time.Second),
@@ -2764,8 +2767,8 @@ func TestFlapSnapshotFiltersStaleEntries(t *testing.T) {
 
 	// Flap peer-A three times to trigger hold-down.
 	for i := 0; i < 3; i++ {
-		mustAddDirect(t, tbl, "peer-A")
-		mustRemoveDirect(t, tbl, "peer-A")
+		mustAddDirect(t, tbl, domaintest.ID("peer-A"))
+		mustRemoveDirect(t, tbl, domaintest.ID("peer-A"))
 		current = current.Add(5 * time.Second)
 	}
 
@@ -2774,7 +2777,7 @@ func TestFlapSnapshotFiltersStaleEntries(t *testing.T) {
 	if len(snap) != 1 {
 		t.Fatalf("expected 1 flap entry, got %d", len(snap))
 	}
-	if snap[0].PeerIdentity != "peer-A" {
+	if snap[0].PeerIdentity != domaintest.ID("peer-A") {
 		t.Errorf("expected peer-A, got %s", snap[0].PeerIdentity)
 	}
 	if snap[0].RecentWithdrawals != 3 {
@@ -2814,15 +2817,15 @@ func TestDirectRouteNeverExpiresByTime(t *testing.T) {
 	current := now
 
 	tbl := NewTable(
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithClock(func() time.Time { return current }),
 		WithDefaultTTL(120*time.Second),
 	)
 
-	mustAddDirect(t, tbl, "peer1")
+	mustAddDirect(t, tbl, domaintest.ID("peer1"))
 
 	// Verify ExpiresAt is zero — direct routes are event-driven.
-	routes := tbl.Lookup("peer1")
+	routes := tbl.Lookup(domaintest.ID("peer1"))
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
@@ -2833,14 +2836,14 @@ func TestDirectRouteNeverExpiresByTime(t *testing.T) {
 	// Advance far beyond any TTL — route must still be alive.
 	current = now.Add(24 * time.Hour)
 
-	routes = tbl.Lookup("peer1")
+	routes = tbl.Lookup(domaintest.ID("peer1"))
 	if len(routes) != 1 {
 		t.Fatalf("direct route must survive indefinitely, got %d routes", len(routes))
 	}
 
 	// TickTTL must not remove it.
 	tbl.TickTTL()
-	routes = tbl.Lookup("peer1")
+	routes = tbl.Lookup(domaintest.ID("peer1"))
 	if len(routes) != 1 {
 		t.Fatalf("TickTTL must not remove live direct route, got %d routes", len(routes))
 	}
@@ -2851,17 +2854,17 @@ func TestDirectRouteRemovedOnlyBySocketEvent(t *testing.T) {
 	current := now
 
 	tbl := NewTable(
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithClock(func() time.Time { return current }),
 		WithDefaultTTL(120*time.Second),
 	)
 
-	mustAddDirect(t, tbl, "peer1")
+	mustAddDirect(t, tbl, domaintest.ID("peer1"))
 
 	// RemoveDirectPeer (socket close) withdraws and sets tombstone TTL.
-	mustRemoveDirect(t, tbl, "peer1")
+	mustRemoveDirect(t, tbl, domaintest.ID("peer1"))
 
-	routes := tbl.Lookup("peer1")
+	routes := tbl.Lookup(domaintest.ID("peer1"))
 	if len(routes) != 0 {
 		t.Fatalf("withdrawn direct route should not appear in Lookup, got %d", len(routes))
 	}
@@ -2879,19 +2882,19 @@ func TestDirectRouteReconnectAfterWithdrawal(t *testing.T) {
 	current := now
 
 	tbl := NewTable(
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithClock(func() time.Time { return current }),
 		WithDefaultTTL(120*time.Second),
 	)
 
-	mustAddDirect(t, tbl, "peer1")
-	mustRemoveDirect(t, tbl, "peer1")
+	mustAddDirect(t, tbl, domaintest.ID("peer1"))
+	mustRemoveDirect(t, tbl, domaintest.ID("peer1"))
 
 	// Peer reconnects — new direct route replaces tombstone.
 	current = current.Add(5 * time.Second)
-	mustAddDirect(t, tbl, "peer1")
+	mustAddDirect(t, tbl, domaintest.ID("peer1"))
 
-	routes := tbl.Lookup("peer1")
+	routes := tbl.Lookup(domaintest.ID("peer1"))
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route after reconnect, got %d", len(routes))
 	}
@@ -2906,22 +2909,22 @@ func TestDirectRouteReconnectAfterWithdrawal(t *testing.T) {
 // --- TickTTL exposed identities ---
 
 func TestTickTTLReturnsExposedIdentities(t *testing.T) {
-	// Scenario: identity "alice" has two routes — a primary (expires soon) and
+	// Scenario: identity domaintest.ID("alice") has two routes — a primary (expires soon) and
 	// a backup (long TTL, non-withdrawn). When the primary expires, TickTTL
-	// should return "alice" because a usable backup route was exposed.
+	// should return domaintest.ID("alice") because a usable backup route was exposed.
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	current := now
 	tbl := NewTable(WithClock(func() time.Time { return current }))
 
 	// Primary route — about to expire.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origin-A", NextHop: "peer-A",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origin-A"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(10 * time.Second),
 	})
 	// Backup route — lives much longer.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "origin-B", NextHop: "peer-B",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("origin-B"), NextHop: domaintest.ID("peer-B"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(2 * time.Hour),
 	})
@@ -2936,7 +2939,7 @@ func TestTickTTLReturnsExposedIdentities(t *testing.T) {
 	current = now.Add(11 * time.Second)
 	result = tbl.TickTTL()
 
-	if len(result.Exposed) != 1 || result.Exposed[0] != "alice" {
+	if len(result.Exposed) != 1 || result.Exposed[0] != domaintest.ID("alice") {
 		t.Fatalf("expected [alice] exposed, got %v", result.Exposed)
 	}
 	// Backup route still alive.
@@ -2952,19 +2955,19 @@ func TestTickTTLNoExposedWhenAllSurvivorsWithdrawn(t *testing.T) {
 	current := now
 	tbl := NewTable(
 		WithClock(func() time.Time { return current }),
-		WithLocalOrigin("me"),
+		WithLocalOrigin(domaintest.ID("me")),
 		WithDefaultTTL(120*time.Second),
 	)
 
 	// Non-withdrawn route — will expire.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "origin-A", NextHop: "peer-A",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("origin-A"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(10 * time.Second),
 	})
 	// Withdrawn tombstone — survives longer but is not usable.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "bob", Origin: "origin-B", NextHop: "peer-B",
+		Identity: domaintest.ID("bob"), Origin: domaintest.ID("origin-B"), NextHop: domaintest.ID("peer-B"),
 		Hops: HopsInfinity, SeqNo: 5, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(2 * time.Hour),
 	})
@@ -2983,7 +2986,7 @@ func TestTickTTLNoExposedWhenNothingRemoved(t *testing.T) {
 	tbl := NewTable(WithClock(fixedClock(now)))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "carol", Origin: "x", NextHop: "peer-C",
+		Identity: domaintest.ID("carol"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("peer-C"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(time.Hour),
 	})
@@ -3002,7 +3005,7 @@ func TestTickTTLNoExposedWhenAllRoutesExpire(t *testing.T) {
 	tbl := NewTable(WithClock(func() time.Time { return current }))
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "dave", Origin: "origin-A", NextHop: "peer-A",
+		Identity: domaintest.ID("dave"), Origin: domaintest.ID("origin-A"), NextHop: domaintest.ID("peer-A"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		ExpiresAt: now.Add(10 * time.Second),
 	})
@@ -3025,10 +3028,10 @@ func TestTickTTLNoExposedWhenAllRoutesExpire(t *testing.T) {
 // Phase A storage swap preserved this by adding UplinkClaim.Extra
 // and threading it through toUplinkClaim / toRouteEntry.
 func TestUpdateRoutePreservesExtra(t *testing.T) {
-	tbl := NewTable(WithLocalOrigin("local"))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("local")))
 	extra := json.RawMessage(`{"onion_box":"deadbeef"}`)
 	entry := RouteEntry{
-		Identity: "X", Origin: "A", NextHop: "B",
+		Identity: domaintest.ID("X"), Origin: domaintest.ID("A"), NextHop: domaintest.ID("B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		Extra: extra,
 	}
@@ -3037,7 +3040,7 @@ func TestUpdateRoutePreservesExtra(t *testing.T) {
 		t.Fatalf("expected accepted, got %v", status)
 	}
 
-	routes := tbl.Lookup("X")
+	routes := tbl.Lookup(domaintest.ID("X"))
 	if len(routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
@@ -3050,7 +3053,7 @@ func TestUpdateRoutePreservesExtra(t *testing.T) {
 func TestToAnnounceEntryPreservesExtra(t *testing.T) {
 	extra := json.RawMessage(`{"onion_box":"deadbeef","future":true}`)
 	entry := RouteEntry{
-		Identity: "X", Origin: "A", NextHop: "B",
+		Identity: domaintest.ID("X"), Origin: domaintest.ID("A"), NextHop: domaintest.ID("B"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		Extra: extra,
 	}
@@ -3062,7 +3065,7 @@ func TestToAnnounceEntryPreservesExtra(t *testing.T) {
 
 func TestToAnnounceEntryNilExtraForLocalRoute(t *testing.T) {
 	entry := RouteEntry{
-		Identity: "X", Origin: "A", NextHop: "A",
+		Identity: domaintest.ID("X"), Origin: domaintest.ID("A"), NextHop: domaintest.ID("A"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	}
 	ae := entry.ToAnnounceEntry()
@@ -3075,23 +3078,23 @@ func TestToAnnounceEntryNilExtraForLocalRoute(t *testing.T) {
 
 func TestLookupOwnIdentityReturnsSelfRoute(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
-	routes := tbl.Lookup("nodeA")
+	routes := tbl.Lookup(domaintest.ID("nodeA"))
 	if len(routes) == 0 {
 		t.Fatal("Lookup for own identity must return at least one route")
 	}
 
 	self := routes[0]
-	if self.Identity != "nodeA" {
+	if self.Identity != domaintest.ID("nodeA") {
 		t.Fatalf("expected Identity=nodeA, got %s", self.Identity)
 	}
-	if self.Origin != "nodeA" {
+	if self.Origin != domaintest.ID("nodeA") {
 		t.Fatalf("expected Origin=nodeA, got %s", self.Origin)
 	}
-	if self.NextHop != "nodeA" {
+	if self.NextHop != domaintest.ID("nodeA") {
 		t.Fatalf("expected NextHop=nodeA, got %s", self.NextHop)
 	}
 	if self.Hops != 0 {
@@ -3104,12 +3107,12 @@ func TestLookupOwnIdentityReturnsSelfRoute(t *testing.T) {
 
 func TestLookupOwnIdentityEmptyTable(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
 	// Even with a completely empty table, self-route must be present.
-	routes := tbl.Lookup("nodeA")
+	routes := tbl.Lookup(domaintest.ID("nodeA"))
 	if len(routes) != 1 {
 		t.Fatalf("expected exactly 1 route (self), got %d", len(routes))
 	}
@@ -3120,17 +3123,17 @@ func TestLookupOwnIdentityEmptyTable(t *testing.T) {
 
 func TestLookupOwnIdentitySelfRouteHasHighestPriority(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
 	// Add an announcement route for the same identity via a remote peer.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "nodeA", Origin: "peerB", NextHop: "peerB",
+		Identity: domaintest.ID("nodeA"), Origin: domaintest.ID("peerB"), NextHop: domaintest.ID("peerB"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
-	routes := tbl.Lookup("nodeA")
+	routes := tbl.Lookup(domaintest.ID("nodeA"))
 	if len(routes) < 2 {
 		t.Fatalf("expected at least 2 routes, got %d", len(routes))
 	}
@@ -3143,11 +3146,11 @@ func TestLookupOwnIdentitySelfRouteHasHighestPriority(t *testing.T) {
 
 func TestLookupOtherIdentityDoesNotInjectSelfRoute(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
-	routes := tbl.Lookup("nodeB")
+	routes := tbl.Lookup(domaintest.ID("nodeB"))
 	if len(routes) != 0 {
 		t.Fatalf("expected 0 routes for unknown identity, got %d", len(routes))
 	}
@@ -3155,13 +3158,13 @@ func TestLookupOtherIdentityDoesNotInjectSelfRoute(t *testing.T) {
 
 func TestSnapshotContainsSelfRoute(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
 	snap := tbl.Snapshot()
 
-	selfRoutes, ok := snap.Routes["nodeA"]
+	selfRoutes, ok := snap.Routes[domaintest.ID("nodeA")]
 	if !ok || len(selfRoutes) == 0 {
 		t.Fatal("snapshot must contain self-route for own identity")
 	}
@@ -3189,12 +3192,12 @@ func TestSnapshotContainsSelfRoute(t *testing.T) {
 
 func TestSnapshotBestRouteReturnsSelfForOwnIdentity(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
 	snap := tbl.Snapshot()
-	best := snap.BestRoute("nodeA")
+	best := snap.BestRoute(domaintest.ID("nodeA"))
 	if best == nil {
 		t.Fatal("BestRoute must return non-nil for own identity")
 	}
@@ -3206,7 +3209,7 @@ func TestSnapshotBestRouteReturnsSelfForOwnIdentity(t *testing.T) {
 func TestSelfRouteNeverExpires(t *testing.T) {
 	now := time.Now()
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(now)),
 	)
 
@@ -3221,16 +3224,16 @@ func TestSelfRouteNeverExpires(t *testing.T) {
 
 func TestAnnounceToDoesNotIncludeSelfRoute(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
 	// Add a direct peer so there's at least one real route.
-	mustAddDirect(t, tbl, "peerB")
+	mustAddDirect(t, tbl, domaintest.ID("peerB"))
 
-	entries := tbl.AnnounceTo("peerB")
+	entries := tbl.AnnounceTo(domaintest.ID("peerB"))
 	for _, e := range entries {
-		if e.Identity == "nodeA" && e.Hops == 0 {
+		if e.Identity == domaintest.ID("nodeA") && e.Hops == 0 {
 			t.Fatal("self-route (Hops=0) must not be included in announcements")
 		}
 	}
@@ -3239,7 +3242,7 @@ func TestAnnounceToDoesNotIncludeSelfRoute(t *testing.T) {
 func TestLookupWithoutLocalOriginNoSelfRoute(t *testing.T) {
 	tbl := NewTable()
 
-	routes := tbl.Lookup("someNode")
+	routes := tbl.Lookup(domaintest.ID("someNode"))
 	if len(routes) != 0 {
 		t.Fatalf("without localOrigin, no self-route should be injected, got %d", len(routes))
 	}
@@ -3248,7 +3251,7 @@ func TestLookupWithoutLocalOriginNoSelfRoute(t *testing.T) {
 func TestSnapshotCountersMatchActiveSize(t *testing.T) {
 	now := time.Now()
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(now)),
 	)
 
@@ -3260,7 +3263,7 @@ func TestSnapshotCountersMatchActiveSize(t *testing.T) {
 	}
 
 	// Add a real direct peer.
-	mustAddDirect(t, tbl, "peerB")
+	mustAddDirect(t, tbl, domaintest.ID("peerB"))
 
 	snap = tbl.Snapshot()
 	if snap.ActiveEntries != tbl.ActiveSize() {
@@ -3272,7 +3275,7 @@ func TestSnapshotCountersMatchActiveSize(t *testing.T) {
 	}
 
 	// Self-route must be visible in Routes map but not in counters.
-	selfRoutes := snap.Routes["nodeA"]
+	selfRoutes := snap.Routes[domaintest.ID("nodeA")]
 	hasSelfRoute := false
 	for _, r := range selfRoutes {
 		if r.Source == RouteSourceLocal {
@@ -3286,15 +3289,15 @@ func TestSnapshotCountersMatchActiveSize(t *testing.T) {
 
 func TestUpdateRouteRejectsRouteSourceLocal(t *testing.T) {
 	tbl := NewTable(
-		WithLocalOrigin("nodeA"),
+		WithLocalOrigin(domaintest.ID("nodeA")),
 		WithClock(fixedClock(time.Now())),
 	)
 
 	// Attempt to persist a RouteSourceLocal entry for a remote identity.
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "remoteNode",
-		Origin:   "remoteNode",
-		NextHop:  "remoteNode",
+		Identity: domaintest.ID("remoteNode"),
+		Origin:   domaintest.ID("remoteNode"),
+		NextHop:  domaintest.ID("remoteNode"),
 		Hops:     0,
 		SeqNo:    1,
 		Source:   RouteSourceLocal,
@@ -3308,9 +3311,9 @@ func TestUpdateRouteRejectsRouteSourceLocal(t *testing.T) {
 
 	// Also reject for own identity — local source must stay synthetic.
 	status, err = tbl.UpdateRoute(RouteEntry{
-		Identity: "nodeA",
-		Origin:   "nodeA",
-		NextHop:  "nodeA",
+		Identity: domaintest.ID("nodeA"),
+		Origin:   domaintest.ID("nodeA"),
+		NextHop:  domaintest.ID("nodeA"),
 		Hops:     0,
 		SeqNo:    1,
 		Source:   RouteSourceLocal,

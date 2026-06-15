@@ -1,6 +1,7 @@
 package node
 
 import (
+	"net/netip"
 	"testing"
 	"time"
 
@@ -38,10 +39,10 @@ func newMetadataFixture() *Service {
 
 func seedMetadata(svc *Service, addr domain.PeerAddress) {
 	svc.peerTypes[addr] = domain.NodeTypeUnknown
-	svc.peerIDs[addr] = "aa00000000000000000000000000000000000001"
+	svc.peerIDs[addr] = domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001")
 	svc.peerVersions[addr] = "1.0.47"
 	svc.peerBuilds[addr] = 1860000
-	svc.observedIPHistoryByPeer[addr] = []domain.PeerIP{"203.0.113.7"}
+	svc.observedIPHistoryByPeer[addr] = []domain.PeerIP{domain.PeerIPFromAddr(netip.MustParseAddr("203.0.113.7"))}
 }
 
 // sweepNow resets the once-a-minute sweep throttle and runs one

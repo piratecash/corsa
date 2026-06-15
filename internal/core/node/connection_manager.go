@@ -846,7 +846,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 
 	log.Info().
 		Str("address", string(ev.Address)).
-		Str("identity", string(ev.Identity)).
+		Str("identity", ev.Identity.String()).
 		Err(ev.Error).
 		Msg("cm: active session lost, reconnecting")
 
@@ -1157,7 +1157,7 @@ func (cm *ConnectionManager) beginInitSlotLocked(s *slot, ev DialSucceeded) Sess
 	log.Info().
 		Str("address", string(s.Address)).
 		Str("connected_via", string(ev.ConnectedAddress)).
-		Str("identity", string(ev.Session.peerIdentity)).
+		Str("identity", ev.Session.peerIdentity.String()).
 		Msg("cm: slot initializing")
 
 	return SessionInfo{

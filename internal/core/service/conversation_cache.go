@@ -151,7 +151,7 @@ func (c *ConversationCache) Evict(identity domain.PeerIdentity) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.peerAddress == identity {
-		c.peerAddress = ""
+		c.peerAddress = domain.PeerIdentity{}
 		c.messages = nil
 		c.index = make(map[string]int)
 	}

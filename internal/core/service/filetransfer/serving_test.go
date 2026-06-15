@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestHandleChunkRequest_ServesBatchLargerThanFormerServingLimit verifies
@@ -60,7 +61,7 @@ func TestHandleChunkRequest_ServesBatchLargerThanFormerServingLimit(t *testing.T
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 
 	for i := 0; i < batchSize; i++ {
 		fid := domain.FileID(fmt.Sprintf("batch-file-%d", i))
@@ -132,7 +133,7 @@ func TestHandleChunkRequest_RevivalGatedByMappingQuota(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 
 	// Saturate the active quota with senderAnnounced mappings — these
 	// count toward activeSenderCountLocked and represent in-flight
@@ -225,7 +226,7 @@ func TestHandleChunkRequest_TombstoneRevivalGatedBeforeAcquire(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 
 	// Saturate the active quota.
 	for i := 0; i < maxFileMappings; i++ {
@@ -301,7 +302,7 @@ func TestHandleChunkRequest_RepeatedOffsetDoesNotAdvanceSenderProgress(t *testin
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-progress")
+	receiver := domaintest.ID("receiver-progress")
 	fileID := domain.FileID("repeated-offset-progress")
 	chunkSize := uint32(8)
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -387,7 +388,7 @@ func TestHandleChunkRequest_AnnouncedTransitionsToServing(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 
 	fileID := domain.FileID("new-file")
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -439,7 +440,7 @@ func TestHandleChunkRequest_ReadChunkFailureRollsBackState(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 	fileID := domain.FileID("readfail-file")
 	fileHash := "a1a2a3a4a5a6a7a8b1b2b3b4b5b6b7b8c1c2c3c4c5c6c7c8d1d2d3d4d5d6d7d8"
 
@@ -497,7 +498,7 @@ func TestHandleChunkRequest_SendFailureRollsBackState(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 	fileID := domain.FileID("sendfail-file")
 
 	m.senderMaps[fileID] = &senderFileMapping{
@@ -564,7 +565,7 @@ func TestHandleChunkRequest_SendFailureDoesNotPoisonOtherTransfers(t *testing.T)
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 
 	failID := domain.FileID("will-fail")
 	m.senderMaps[failID] = &senderFileMapping{
@@ -650,7 +651,7 @@ func TestHandleChunkRequest_RejectsOffsetBeyondFileSize(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 	fileID := domain.FileID("offset-beyond-eof")
 	m.senderMaps[fileID] = &senderFileMapping{
 		FileID:    fileID,
@@ -719,7 +720,7 @@ func TestHandleChunkRequest_ClampsChunkSizeToRemainingBytes(t *testing.T) {
 		stopCh: make(chan struct{}),
 	}
 
-	receiver := domain.PeerIdentity("receiver-identity")
+	receiver := domaintest.ID("receiver-identity")
 	fileID := domain.FileID("clamp-chunk-size")
 	m.senderMaps[fileID] = &senderFileMapping{
 		FileID:    fileID,

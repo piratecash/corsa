@@ -461,8 +461,8 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 		// Diagnostic: Extra should be identical per (Identity, Origin, SeqNo).
 		if !normalizedExtraEqual(existing.Extra, e.Extra) {
 			log.Warn().
-				Str("identity", string(e.Identity)).
-				Str("origin", string(e.Origin)).
+				Str("identity", e.Identity.String()).
+				Str("origin", e.Origin.String()).
 				Uint64("seq", e.SeqNo).
 				Str("extra_existing", string(existing.Extra)).
 				Str("extra_incoming", string(e.Extra)).
@@ -601,12 +601,12 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Identity != result[j].Identity {
-			return result[i].Identity < result[j].Identity
+			return result[i].Identity.Compare(result[j].Identity) < 0
 		}
 		if result[i].Hops != result[j].Hops {
 			return result[i].Hops < result[j].Hops
 		}
-		return result[i].Origin < result[j].Origin
+		return result[i].Origin.Compare(result[j].Origin) < 0
 	})
 
 	return &AnnounceSnapshot{Entries: result}
@@ -662,7 +662,7 @@ func isBetterAnnounceEntry(candidate, incumbent AnnounceEntry) bool {
 	// every entry carries Origin = localOrigin, so this tie-break is
 	// degenerate in practice — kept for forward-compat with any future
 	// re-introduction of multi-Origin emit shapes.
-	return candidate.Origin < incumbent.Origin
+	return candidate.Origin.Compare(incumbent.Origin) < 0
 }
 
 // announceTrackKey is the per-Identity tracking key for ComputeDelta

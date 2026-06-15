@@ -273,12 +273,12 @@ func (s *Service) SendRouteQuery(target domain.PeerIdentity) int {
 	// guard belongs here too so a caller passing "*", whitespace,
 	// or a non-hex string does not consume the per-target rate
 	// budget for a query no responder will accept.
-	if !identity.IsValidAddress(string(target)) {
+	if !identity.IsValidAddress(target.String()) {
 		return 0
 	}
 	if s.queryRateLimit == nil {
 		log.Warn().
-			Str("target_identity", string(target)).
+			Str("target_identity", target.String()).
 			Msg("route_query_skipped_no_rate_limit")
 		return 0
 	}
@@ -324,8 +324,8 @@ func (s *Service) SendRouteQuery(target domain.PeerIdentity) int {
 		if err != nil {
 			log.Warn().Err(err).
 				Uint64("query_id", queryID).
-				Str("target_identity", string(target)).
-				Str("uplink", string(uplink)).
+				Str("target_identity", target.String()).
+				Str("uplink", uplink.String()).
 				Msg("route_query_marshal_failed")
 			continue
 		}
@@ -396,7 +396,7 @@ func (s *Service) peersWithRouteQueryCap() []domain.PeerIdentity {
 	// connections that AnnounceLoop prefers; route_query_v1 is
 	// best answered by peers we keep open.
 	for _, session := range s.sessions {
-		if session == nil || session.peerIdentity == "" {
+		if session == nil || session.peerIdentity.IsZero() {
 			continue
 		}
 		if !sessionHasAllCapabilities(session.capabilities, requiredCaps) {
@@ -420,7 +420,7 @@ func (s *Service) peersWithRouteQueryCap() []domain.PeerIdentity {
 	// false to stop iteration: keep iterating while we still have
 	// room under queryFanOutLimit.
 	s.forEachInboundConnLocked(func(info connInfo) bool {
-		if info.identity == "" {
+		if info.identity.IsZero() {
 			return true
 		}
 		if !sessionHasAllCapabilities(info.capabilities, requiredCaps) {
@@ -514,7 +514,7 @@ func (s *Service) hasAnyPeerWithRouteQueryCap() bool {
 	now := time.Now().UTC()
 
 	for _, session := range s.sessions {
-		if session == nil || session.peerIdentity == "" {
+		if session == nil || session.peerIdentity.IsZero() {
 			continue
 		}
 		if !sessionHasAllCapabilities(session.capabilities, requiredCaps) {
@@ -528,7 +528,7 @@ func (s *Service) hasAnyPeerWithRouteQueryCap() bool {
 
 	found := false
 	s.forEachInboundConnLocked(func(info connInfo) bool {
-		if info.identity == "" {
+		if info.identity.IsZero() {
 			return true
 		}
 		if !sessionHasAllCapabilities(info.capabilities, requiredCaps) {
@@ -566,7 +566,7 @@ func sessionHasAllCapabilities(caps []domain.Capability, required []domain.Capab
 // Snapshot under peerMu.RLock; caller MUST NOT hold any other
 // service-domain mutex.
 func (s *Service) peerHasCapabilities(peer domain.PeerIdentity, required ...domain.Capability) bool {
-	if peer == "" || len(required) == 0 {
+	if peer.IsZero() || len(required) == 0 {
 		return false
 	}
 	s.peerMu.RLock()
@@ -685,7 +685,7 @@ func (s *Service) triggerRouteQueryAsync(target domain.PeerIdentity) {
 	// "no spawn for invalid input" invariant explicit and
 	// avoids the goroutine-creation overhead on the relay hot
 	// path.
-	if !identity.IsValidAddress(string(target)) {
+	if !identity.IsValidAddress(target.String()) {
 		return
 	}
 	if s.queryRateLimit == nil {

@@ -128,7 +128,7 @@ func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdenti
 		// Keep the original timer running — restarting it would
 		// indefinitely defer withdrawal under a chatty close pattern.
 		s.peerMu.Unlock()
-		log.Trace().Str("peer", string(peerIdentity)).
+		log.Trace().Str("peer", peerIdentity.String()).
 			Msg("routing_withdrawal_grace_already_pending")
 		return
 	}
@@ -144,7 +144,7 @@ func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdenti
 	s.peerMu.Unlock()
 
 	log.Info().
-		Str("peer", string(peerIdentity)).
+		Str("peer", peerIdentity.String()).
 		Dur("grace", grace).
 		Msg("routing_direct_peer_withdrawal_deferred")
 }
@@ -176,7 +176,7 @@ func (s *Service) firePendingWithdrawal(peerIdentity domain.PeerIdentity, caps [
 	if _, ok := s.pendingWithdrawals[peerIdentity]; !ok {
 		s.peerMu.Unlock()
 		log.Debug().
-			Str("peer", string(peerIdentity)).
+			Str("peer", peerIdentity.String()).
 			Msg("routing_withdrawal_grace_callback_no_entry — cancelled by shutdown/tryCancel race; nothing to do")
 		return
 	}
@@ -184,7 +184,7 @@ func (s *Service) firePendingWithdrawal(peerIdentity domain.PeerIdentity, caps [
 	s.peerMu.Unlock()
 
 	log.Info().
-		Str("peer", string(peerIdentity)).
+		Str("peer", peerIdentity.String()).
 		Msg("routing_direct_peer_withdrawal_grace_elapsed")
 	s.executeDeferredWithdrawal(peerIdentity, caps)
 }
@@ -239,7 +239,7 @@ func (s *Service) tryCancelPendingWithdrawal(peerIdentity domain.PeerIdentity) b
 	// fall through to AddDirectPeer for a still-present route.
 	stopped := entry.timer.Stop()
 	log.Info().
-		Str("peer", string(peerIdentity)).
+		Str("peer", peerIdentity.String()).
 		Bool("timer_stopped", stopped).
 		Msg("routing_direct_peer_reconnect_within_grace — withdrawal cancelled, route stays")
 	return true
@@ -315,7 +315,7 @@ func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, ca
 	if s.identityRelaySessions[peerIdentity] > 0 {
 		s.peerMu.Unlock()
 		log.Info().
-			Str("peer", string(peerIdentity)).
+			Str("peer", peerIdentity.String()).
 			Msg("routing_withdrawal_aborted_peer_reconnected")
 		return
 	}
@@ -338,7 +338,7 @@ func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, ca
 	s.peerMu.Unlock()
 
 	if err != nil {
-		log.Error().Err(err).Str("peer", string(peerIdentity)).Msg("routing_remove_direct_peer_failed")
+		log.Error().Err(err).Str("peer", peerIdentity.String()).Msg("routing_remove_direct_peer_failed")
 		return
 	}
 
@@ -352,7 +352,7 @@ func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, ca
 	}
 
 	log.Info().
-		Str("peer", string(peerIdentity)).
+		Str("peer", peerIdentity.String()).
 		Int("withdrawals", len(result.Withdrawals)).
 		Int("transit_invalidated", result.TransitInvalidated).
 		Int("fanout_sent", sent).

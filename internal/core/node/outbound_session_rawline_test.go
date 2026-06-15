@@ -119,7 +119,7 @@ func TestOutboundSessionReader_PopulatesRawLineForV3(t *testing.T) {
 		Kind:  protocol.RouteAnnounceV3KindFull,
 		Epoch: 1,
 		Entries: []protocol.RouteAnnounceV3Entry{
-			{Identity: idTargetX, Hops: 1, SeqNo: 1},
+			{Identity: idTargetX.String(), Hops: 1, SeqNo: 1},
 		},
 	}
 	raw, err := protocol.MarshalRouteAnnounceV3Frame(v3)
@@ -156,7 +156,7 @@ func TestOutboundSessionReader_PopulatesRawLineForV3(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 		authOK:       true,
@@ -166,7 +166,7 @@ func TestOutboundSessionReader_PopulatesRawLineForV3(t *testing.T) {
 
 	svc.dispatchPeerSessionFrame(senderAddr, svc.sessions[senderAddr], frame)
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) == 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) == 0 {
 		t.Fatalf("v3 frame must reach the routing table via the outbound session reader → dispatch path; got 0 entries")
 	}
 }
@@ -184,7 +184,7 @@ func TestOutboundSessionReader_DropsV3WhenRawLineEmpty(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 		authOK:       true,
@@ -200,7 +200,7 @@ func TestOutboundSessionReader_DropsV3WhenRawLineEmpty(t *testing.T) {
 		Type: protocol.RouteAnnounceV3FrameType,
 	})
 
-	if got := svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)); len(got) > 0 {
+	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
 		t.Fatalf("v3 dispatch must drop a frame with empty RawLine; got %d entries", len(got))
 	}
 }
@@ -215,15 +215,15 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 	// something to invalidate.
 	svc, _ := newTestServiceWithIdentity(t)
 	svc.eventBus = newStormBus(t)
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(idPeerB))
+	addDirectViaIdentity(t, svc, idPeerB)
 	// Seed a transit claim keyed on (idTargetX, uplink=idPeerB) — the
 	// poison handler invalidates ONLY the (identity, sender) slot, so
 	// the uplink must equal the poison-sending peer for the invalidation
 	// to bite.
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(idPeerB),
-		NextHop:  domain.PeerIdentity(idPeerB),
+		Identity: idTargetX,
+		Origin:   idPeerB,
+		NextHop:  idPeerB,
 		Hops:     2,
 		SeqNo:    5,
 		Source:   routing.RouteSourceAnnouncement,
@@ -236,7 +236,7 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1},
 		sendCh:       sendCh,
 		authOK:       true,
@@ -246,7 +246,7 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 
 	poison := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	}
@@ -272,8 +272,8 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 
 	// Lookup filters withdrawn entries — the poisoned claim must
 	// disappear from the result.
-	for _, r := range svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)) {
-		if r.NextHop == domain.PeerIdentity(idPeerB) {
+	for _, r := range svc.routingTable.Lookup(idTargetX) {
+		if r.NextHop == idPeerB {
 			t.Fatalf("poison via outbound session reader path must invalidate the (idTargetX, idPeerB) slot; live entry %+v survived", r)
 		}
 	}
@@ -394,7 +394,7 @@ func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(idPeerB),
+		peerIdentity: idPeerB,
 		connID:       connID,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
 		sendCh:       make(chan protocol.Frame, 4),
@@ -404,9 +404,9 @@ func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	registry := svc.announceLoop.StateRegistry()
-	registry.MarkReconnected(domain.PeerIdentity(idPeerB),
+	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
-	state := registry.Get(domain.PeerIdentity(idPeerB))
+	state := registry.Get(idPeerB)
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
 	if state.View().NeedsFullResync {
 		t.Fatalf("precondition: NeedsFullResync must be cleared")
@@ -448,12 +448,12 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	registerKnownPubKey(t, svc, peer.Address, peer.PublicKey)
-	addDirectViaIdentity(t, svc, domain.PeerIdentity(peer.Address))
+	addDirectViaIdentity(t, svc, domain.PeerIdentityFromWire(peer.Address))
 
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
-		Identity: domain.PeerIdentity(idTargetX),
-		Origin:   domain.PeerIdentity(peer.Address),
-		NextHop:  domain.PeerIdentity(peer.Address),
+		Identity: idTargetX,
+		Origin:   domain.PeerIdentityFromWire(peer.Address),
+		NextHop:  domain.PeerIdentityFromWire(peer.Address),
 		Hops:     2,
 		SeqNo:    5,
 		Source:   routing.RouteSourceAnnouncement,
@@ -466,7 +466,7 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
-		peerIdentity: domain.PeerIdentity(peer.Address),
+		peerIdentity: domain.PeerIdentityFromWire(peer.Address),
 		connID:       connID,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1},
 		sendCh:       make(chan protocol.Frame, 4),
@@ -482,7 +482,7 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 	// otherwise accept — we are testing the gate, not sig checks.
 	poison := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
-		Identity: idTargetX,
+		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonHealthDead,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	}
@@ -508,8 +508,8 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 	// The claim must still be live — gate fired before
 	// InvalidateUplinkClaim ran.
 	stillLive := false
-	for _, r := range svc.routingTable.Lookup(domain.PeerIdentity(idTargetX)) {
-		if r.NextHop == domain.PeerIdentity(peer.Address) {
+	for _, r := range svc.routingTable.Lookup(idTargetX) {
+		if r.NextHop == domain.PeerIdentityFromWire(peer.Address) {
 			stillLive = true
 			break
 		}

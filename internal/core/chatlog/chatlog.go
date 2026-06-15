@@ -84,7 +84,7 @@ func NewStoreFromDB(db *sql.DB, identity domain.PeerIdentity) *Store {
 // database is created so the node can keep running.
 func NewStore(dir string, identity domain.PeerIdentity, listenAddress domain.ListenAddress) *Store {
 	identityAddr := identity
-	short := string(identityAddr)
+	short := identityAddr.String()
 	if len(short) > 8 {
 		short = short[:8]
 	}
@@ -395,7 +395,7 @@ func (s *Store) UnconfirmedSeen(self domain.PeerIdentity, since time.Time) ([]En
 		   AND updated_at >= ?
 		   AND id NOT IN (SELECT id FROM seen_ack)
 		 ORDER BY updated_at ASC`,
-		string(self), StatusSeen, since.UTC().Format(time.RFC3339Nano))
+		self.String(), StatusSeen, since.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: unconfirmed seen: %w", err)
 	}
@@ -449,7 +449,7 @@ func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity, since time.Time) (
 		   AND created_at >= ?
 		   AND id NOT IN (SELECT id FROM delivery_failed)
 		 ORDER BY created_at ASC`,
-		string(self), StatusSent, since.UTC().Format(time.RFC3339Nano))
+		self.String(), StatusSent, since.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: undelivered outgoing: %w", err)
 	}
@@ -598,7 +598,7 @@ func (s *Store) ReadLastEntryPerPeerCtx(ctx context.Context) (map[string]Entry, 
 			continue
 		}
 		peer := e.Recipient
-		if e.Recipient == string(selfAddr) {
+		if e.Recipient == selfAddr.String() {
 			peer = e.Sender
 		}
 		result[peer] = e
@@ -632,7 +632,7 @@ func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
 	if s.db == nil {
 		return 0, fmt.Errorf("chatlog: database not available")
 	}
-	id := string(identity)
+	id := identity.String()
 	if strings.TrimSpace(id) == "" {
 		return 0, fmt.Errorf("chatlog: empty identity")
 	}
@@ -662,7 +662,7 @@ func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
 // of the surrounding chatlog Read* helpers (transient unavailability
 // is not an error).
 func (s *Store) UnreadCountFor(peerAddress domain.PeerIdentity) (int, error) {
-	if s.db == nil || peerAddress == "" {
+	if s.db == nil || peerAddress.IsZero() {
 		return 0, nil
 	}
 	selfAddr := s.identityAddr
@@ -674,7 +674,7 @@ func (s *Store) UnreadCountFor(peerAddress domain.PeerIdentity) (int, error) {
 		  AND sender = ?
 		  AND recipient = ?
 		  AND delivery_status != 'seen'`,
-		string(peerAddress), selfAddr,
+		peerAddress.String(), selfAddr,
 	).Scan(&n)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -746,7 +746,7 @@ func (s *Store) HasEntryID(topic string, peerAddress domain.PeerIdentity, id dom
 // within a specific DM conversation. Used to validate reply_to references
 // before encrypting — prevents dangling or cross-conversation reply links.
 func (s *Store) HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool {
-	if s.db == nil || peerAddress == "" || id == "" {
+	if s.db == nil || peerAddress.IsZero() || id == "" {
 		return false
 	}
 	query, params := s.peerQuery("dm", peerAddress,
@@ -761,7 +761,7 @@ func (s *Store) HasEntryInConversation(peerAddress domain.PeerIdentity, id domai
 // For DMs it filters by (sender=self AND recipient=peer) OR (sender=peer AND recipient=self).
 // For global it filters by topic='global'.
 func (s *Store) peerQuery(topic string, peerAddress domain.PeerIdentity, prefix string, suffix string) (string, []interface{}) {
-	if topic == "dm" && peerAddress != "" {
+	if topic == "dm" && !peerAddress.IsZero() {
 		return prefix +
 			`topic = 'dm' AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))` +
 			suffix, []interface{}{s.identityAddr, peerAddress, peerAddress, s.identityAddr}

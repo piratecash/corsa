@@ -100,7 +100,7 @@ func TestReview_P1_1_FilterSplitHorizon_LeavesUnrelatedRoutesIntact(t *testing.T
 // fast-path no-op: empty excludeVia returns the input slice.
 func TestReview_P1_1_FilterSplitHorizon_EmptyExcludeReturnsInput(t *testing.T) {
 	routes := []routing.RouteEntry{{Identity: idTargetX, NextHop: idPeerB, Hops: 2}}
-	got := filterSplitHorizon(routes, "")
+	got := filterSplitHorizon(routes, domain.PeerIdentity{})
 	if len(got) != 1 {
 		t.Fatalf("filtered len = %d, want 1 (empty excludeVia is a no-op)", len(got))
 	}
@@ -188,8 +188,8 @@ func TestReview_P1_3_TableRouter_TriggersQueryOnEmptyLookup(t *testing.T) {
 	router.Route(protocol.Envelope{
 		ID:        "msg-1",
 		Topic:     "dm",
-		Sender:    idNodeA,
-		Recipient: string(idTargetX),
+		Sender:    idNodeA.String(),
+		Recipient: idTargetX.String(),
 	})
 
 	// triggerRouteQueryAsync spawns a goroutine; allow it to run.
@@ -258,8 +258,8 @@ func TestReview_v35_P2_TableRouter_TriggersQueryOnBadRouteSelected(t *testing.T)
 	router.Route(protocol.Envelope{
 		ID:        "msg-1",
 		Topic:     "dm",
-		Sender:    idNodeA,
-		Recipient: string(idTargetX),
+		Sender:    idNodeA.String(),
+		Recipient: idTargetX.String(),
 	})
 
 	// Wait for the spawned trigger goroutine to record its budget.

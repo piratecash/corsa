@@ -55,7 +55,7 @@ func (a AppInfo) DesktopVersion() string { return a.appCfg.Version }
 func (a AppInfo) ListenAddress() string { return a.nodeCfg.ListenAddress }
 
 // Address returns the local node identity as a typed domain value.
-func (a AppInfo) Address() domain.PeerIdentity { return domain.PeerIdentity(a.id.Address) }
+func (a AppInfo) Address() domain.PeerIdentity { return domain.PeerIdentityFromWire(a.id.Address) }
 
 // Identity returns the raw identity pointer. Use sparingly — prefer Address()
 // for read-only consumers.

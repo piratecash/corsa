@@ -111,7 +111,7 @@ func seedTrackedInboundPeer(t *testing.T, svc *Service, id domain.ConnID, peerId
 	}
 
 	pc := netcore.New(id, conn, netcore.Inbound, netcore.Options{
-		Address:  domain.PeerAddress(peerIdentity),
+		Address:  domain.PeerAddress(peerIdentity.String()),
 		Identity: peerIdentity,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	})

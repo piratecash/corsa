@@ -26,8 +26,8 @@ func buildSmallEntries(n int) []routing.AnnounceEntry {
 			// 40-hex fingerprint shape so identity.IsValidAddress
 			// passes upstream; varying the last few bytes keeps
 			// entries distinct.
-			Identity: domain.PeerIdentity(fmt.Sprintf("aa%038x", i)),
-			Origin:   domain.PeerIdentity(fmt.Sprintf("bb%038x", i)),
+			Identity: domain.PeerIdentityFromWire(fmt.Sprintf("aa%038x", i)),
+			Origin:   domain.PeerIdentityFromWire(fmt.Sprintf("bb%038x", i)),
 			Hops:     2,
 			SeqNo:    uint64(i + 1),
 		}

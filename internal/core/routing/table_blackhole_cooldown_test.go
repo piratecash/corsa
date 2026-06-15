@@ -3,6 +3,9 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // table_blackhole_cooldown_test.go covers Phase 3 PR 12.4 — the
@@ -30,21 +33,21 @@ import (
 // pivots to the Lookup-filter contract.
 func TestBlackHole_DetectionAfter5ConsecutiveFailures(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 3, RouteSourceAnnouncement)
 
 	// Bring A through the failure streak — the 5th call arms cooldown.
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink-A")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"))
 	}
 
-	got := tbl.Lookup("id-target")
+	got := tbl.Lookup(domaintest.ID("id-target"))
 	if len(got) != 1 {
 		t.Fatalf("Lookup returned %d entries, want 1 (A must be filtered)", len(got))
 	}
-	if got[0].NextHop != "id-uplink-B" {
+	if got[0].NextHop != domaintest.ID("id-uplink-B") {
 		t.Fatalf("Lookup[0].NextHop = %q, want id-uplink-B (A is in cooldown)", got[0].NextHop)
 	}
 }
@@ -58,13 +61,13 @@ func TestBlackHole_DetectionAfter5ConsecutiveFailures(t *testing.T) {
 func TestBlackHole_TickHealthClearsExpiredCooldowns(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	clockMu := &mutableClock{now: now}
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(clockMu.nowFunc))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(clockMu.nowFunc))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	}
-	if got := tbl.Lookup("id-target"); len(got) != 0 {
+	if got := tbl.Lookup(domaintest.ID("id-target")); len(got) != 0 {
 		t.Fatalf("Lookup returned %d entries while cooled down, want 0", len(got))
 	}
 
@@ -74,11 +77,11 @@ func TestBlackHole_TickHealthClearsExpiredCooldowns(t *testing.T) {
 	clockMu.advance(BlackHoleCooldown + time.Second)
 	tbl.TickHealth()
 
-	got := tbl.Lookup("id-target")
+	got := tbl.Lookup(domaintest.ID("id-target"))
 	if len(got) != 1 {
 		t.Fatalf("post-expiry Lookup returned %d entries, want 1", len(got))
 	}
-	if got[0].NextHop != "id-uplink" {
+	if got[0].NextHop != domaintest.ID("id-uplink") {
 		t.Fatalf("post-expiry Lookup[0].NextHop = %q, want id-uplink", got[0].NextHop)
 	}
 }
@@ -94,20 +97,20 @@ func TestBlackHole_TickHealthClearsExpiredCooldowns(t *testing.T) {
 // the Direct exemption.
 func TestBlackHole_DirectClaimNotExempt(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// AddDirectPeer creates a Direct claim with (Identity == Uplink).
-	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-direct")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 	// Drive the cooldown arm via MarkHopFailure. AddDirectPeer
 	// seeded HealthGood, so the reputation primitive has an entry
 	// to mutate.
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-direct", "id-direct")
+		tbl.MarkHopFailure(domaintest.ID("id-direct"), domaintest.ID("id-direct"))
 	}
 
-	got := tbl.Lookup("id-direct")
+	got := tbl.Lookup(domaintest.ID("id-direct"))
 	if len(got) != 0 {
 		t.Fatalf("Direct cooldown not respected: Lookup returned %d entries, want 0 (no Direct exemption for black-hole)", len(got))
 	}
@@ -122,19 +125,19 @@ func TestBlackHole_DirectClaimNotExempt(t *testing.T) {
 // same invariant for HealthDead).
 func TestBlackHole_AnnounceProjectionForRespectsCooldown(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 3, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink-A")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"))
 	}
 
 	// AnnounceTo to some unrelated peer — the per-Identity live
 	// winner picker should choose B (A is cooled down).
-	entries := tbl.AnnounceTo("id-some-other-peer")
+	entries := tbl.AnnounceTo(domaintest.ID("id-some-other-peer"))
 	for _, e := range entries {
-		if e.Identity == "id-target" {
+		if e.Identity == domaintest.ID("id-target") {
 			// The winner for id-target should reflect B's path
 			// (3 hops) since A is suppressed. The AnnounceEntry
 			// carries the SENDER's hops (= claim.Hops here),
@@ -154,22 +157,22 @@ func TestBlackHole_AnnounceProjectionForRespectsCooldown(t *testing.T) {
 // would surface a route the relay path is intentionally avoiding.
 func TestBlackHole_AnnounceableForRespectsCooldown(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 3, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink-A")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"))
 	}
 
-	got := tbl.Announceable("id-some-peer")
+	got := tbl.Announceable(domaintest.ID("id-some-peer"))
 	var sawA, sawB bool
 	for _, r := range got {
-		if r.Identity == "id-target" {
+		if r.Identity == domaintest.ID("id-target") {
 			switch r.NextHop {
-			case "id-uplink-A":
+			case domaintest.ID("id-uplink-A"):
 				sawA = true
-			case "id-uplink-B":
+			case domaintest.ID("id-uplink-B"):
 				sawB = true
 			}
 		}
@@ -191,22 +194,22 @@ func TestBlackHole_AnnounceableForRespectsCooldown(t *testing.T) {
 // exists to provide.
 func TestBlackHole_AnnounceTargetForRespectsCooldown(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 3, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink-A")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"))
 	}
 
-	entry, uplink, found := tbl.AnnounceTargetFor("id-target", "id-requester")
+	entry, uplink, found := tbl.AnnounceTargetFor(domaintest.ID("id-target"), domaintest.ID("id-requester"))
 	if !found {
 		t.Fatal("AnnounceTargetFor returned found=false, want B as live winner")
 	}
-	if uplink != "id-uplink-B" {
+	if uplink != domaintest.ID("id-uplink-B") {
 		t.Fatalf("AnnounceTargetFor uplink = %q, want id-uplink-B (A is cooled down)", uplink)
 	}
-	if entry.Identity != "id-target" {
+	if entry.Identity != domaintest.ID("id-target") {
 		t.Fatalf("AnnounceTargetFor entry.Identity = %q, want id-target", entry.Identity)
 	}
 }
@@ -218,16 +221,16 @@ func TestBlackHole_AnnounceTargetForRespectsCooldown(t *testing.T) {
 // the black-hole signal is designed to surface.
 func TestBlackHole_AllUplinksCooledDown_LookupReturnsNil(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 3, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink-A")
-		tbl.MarkHopFailure("id-target", "id-uplink-B")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"))
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink-B"))
 	}
 
-	if got := tbl.Lookup("id-target"); len(got) != 0 {
+	if got := tbl.Lookup(domaintest.ID("id-target")); len(got) != 0 {
 		t.Fatalf("Lookup returned %d entries when all uplinks cooled, want 0", len(got))
 	}
 }
@@ -239,24 +242,24 @@ func TestBlackHole_AllUplinksCooledDown_LookupReturnsNil(t *testing.T) {
 // selectable in Lookup without waiting for the 2-minute window.
 func TestBlackHole_SuccessClearsCooldownImmediately_LookupRestores(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-target", "id-uplink")
+		tbl.MarkHopFailure(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	}
-	if got := tbl.Lookup("id-target"); len(got) != 0 {
+	if got := tbl.Lookup(domaintest.ID("id-target")); len(got) != 0 {
 		t.Fatalf("precondition: Lookup must be empty during cooldown, got %d entries", len(got))
 	}
 
 	// Late hop_ack lands inside the cooldown window.
-	tbl.MarkHopAck("id-target", "id-uplink", 0)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
 
-	got := tbl.Lookup("id-target")
+	got := tbl.Lookup(domaintest.ID("id-target"))
 	if len(got) != 1 {
 		t.Fatalf("Lookup post-success returned %d entries, want 1", len(got))
 	}
-	if got[0].NextHop != "id-uplink" {
+	if got[0].NextHop != domaintest.ID("id-uplink") {
 		t.Fatalf("Lookup[0].NextHop = %q, want id-uplink", got[0].NextHop)
 	}
 }
@@ -272,22 +275,22 @@ func TestBlackHole_SuccessClearsCooldownImmediately_LookupRestores(t *testing.T)
 func TestBlackHole_TickHealthClearsExpiredCooldownForDirectPair(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	clockMu := &mutableClock{now: now}
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(clockMu.nowFunc))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(clockMu.nowFunc))
 
-	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-direct")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-direct", "id-direct")
+		tbl.MarkHopFailure(domaintest.ID("id-direct"), domaintest.ID("id-direct"))
 	}
-	if got := tbl.Lookup("id-direct"); len(got) != 0 {
+	if got := tbl.Lookup(domaintest.ID("id-direct")); len(got) != 0 {
 		t.Fatalf("precondition: Direct pair cooldown not applied; Lookup returned %d", len(got))
 	}
 
 	clockMu.advance(BlackHoleCooldown + time.Second)
 	tbl.TickHealth()
 
-	got := tbl.Lookup("id-direct")
+	got := tbl.Lookup(domaintest.ID("id-direct"))
 	if len(got) != 1 {
 		t.Fatalf("Direct pair cooldown did not clear via TickHealth: Lookup returned %d entries, want 1", len(got))
 	}
@@ -304,30 +307,30 @@ func TestBlackHole_TickHealthClearsExpiredCooldownForDirectPair(t *testing.T) {
 // count=0" field bug this clear exists to fix.
 func TestBlackHole_AddDirectPeerClearsCooldownOnReconnect(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-direct")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-direct", "id-direct")
+		tbl.MarkHopFailure(domaintest.ID("id-direct"), domaintest.ID("id-direct"))
 	}
-	if got := tbl.Lookup("id-direct"); len(got) != 0 {
+	if got := tbl.Lookup(domaintest.ID("id-direct")); len(got) != 0 {
 		t.Fatalf("precondition: Direct pair cooldown not applied; Lookup returned %d", len(got))
 	}
 
 	// Reconnect: storage-idempotent re-add, but the cooldown must lift.
-	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-direct")); err != nil {
 		t.Fatalf("AddDirectPeer (reconnect): %v", err)
 	}
 
-	got := tbl.Lookup("id-direct")
+	got := tbl.Lookup(domaintest.ID("id-direct"))
 	if len(got) != 1 {
 		t.Fatalf("post-reconnect Lookup returned %d entries, want 1 (cooldown must be cleared by AddDirectPeer)", len(got))
 	}
 	var found bool
 	for _, st := range tbl.HealthSnapshot() {
-		if st.Identity != "id-direct" || st.Uplink != "id-direct" {
+		if st.Identity != domaintest.ID("id-direct") || st.Uplink != domaintest.ID("id-direct") {
 			continue
 		}
 		found = true
@@ -360,34 +363,34 @@ func TestBlackHole_AddDirectPeerClearsCooldownOnReconnect(t *testing.T) {
 // pairs and empty identities are no-ops returning false.
 func TestBlackHole_ClearDirectPairCooldown(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	if _, err := tbl.AddDirectPeer("id-direct"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-direct")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 	for i := 0; i < BlackHoleThreshold; i++ {
-		tbl.MarkHopFailure("id-direct", "id-direct")
+		tbl.MarkHopFailure(domaintest.ID("id-direct"), domaintest.ID("id-direct"))
 	}
-	if got := tbl.Lookup("id-direct"); len(got) != 0 {
+	if got := tbl.Lookup(domaintest.ID("id-direct")); len(got) != 0 {
 		t.Fatalf("precondition: Direct pair cooldown not applied; Lookup returned %d", len(got))
 	}
 
-	if !tbl.ClearDirectPairCooldown("id-direct") {
+	if !tbl.ClearDirectPairCooldown(domaintest.ID("id-direct")) {
 		t.Fatal("ClearDirectPairCooldown returned false on an armed cooldown, want true")
 	}
-	got := tbl.Lookup("id-direct")
+	got := tbl.Lookup(domaintest.ID("id-direct"))
 	if len(got) != 1 {
 		t.Fatalf("post-clear Lookup returned %d entries, want 1", len(got))
 	}
 
 	// Idempotency / guard branches.
-	if tbl.ClearDirectPairCooldown("id-direct") {
+	if tbl.ClearDirectPairCooldown(domaintest.ID("id-direct")) {
 		t.Fatal("second ClearDirectPairCooldown returned true, want false (nothing left to clear)")
 	}
-	if tbl.ClearDirectPairCooldown("") {
+	if tbl.ClearDirectPairCooldown(domain.PeerIdentity{}) {
 		t.Fatal("ClearDirectPairCooldown(\"\") returned true, want false")
 	}
-	if tbl.ClearDirectPairCooldown("id-untracked") {
+	if tbl.ClearDirectPairCooldown(domaintest.ID("id-untracked")) {
 		t.Fatal("ClearDirectPairCooldown on untracked pair returned true, want false")
 	}
 }

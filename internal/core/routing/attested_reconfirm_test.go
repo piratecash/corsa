@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // attested_reconfirm_test.go pins the Round-11 contract on the
@@ -28,10 +30,10 @@ import (
 //      are forwarded through storage so a downstream peer that DOES
 //      have the cap can verify on its side.
 
-const (
-	reconfirmIdent  PeerIdentity = "alice"
-	reconfirmOrigin PeerIdentity = "bob"
-	reconfirmUplink PeerIdentity = "charlie"
+var (
+	reconfirmIdent  = domaintest.ID("alice")
+	reconfirmOrigin = domaintest.ID("bob")
+	reconfirmUplink = domaintest.ID("charlie")
 )
 
 func reconfirmKey() RouteTriple {

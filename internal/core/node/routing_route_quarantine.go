@@ -256,7 +256,7 @@ type routeQuarantineEntry struct {
 //   - tryForwardViaRoutingTable (skip quarantined peers as next-hop)
 //   - applyRoutesUpdate / similar receive-path entry points
 func (s *Service) IsPeerInRouteQuarantine(peer domain.PeerIdentity) bool {
-	if peer == "" {
+	if peer.IsZero() {
 		return false
 	}
 	s.peerMu.RLock()
@@ -295,7 +295,7 @@ func (s *Service) isPeerInRouteQuarantineLocked(peer domain.PeerIdentity, now ti
 // multi-hop delivery mesh-wide; this split is the fix. Safe for
 // concurrent readers — takes the peer-domain read lock.
 func (s *Service) IsPeerTransitQuarantined(peer domain.PeerIdentity) bool {
-	if peer == "" {
+	if peer.IsZero() {
 		return false
 	}
 	s.peerMu.RLock()
@@ -349,7 +349,7 @@ func (s *Service) routeIsBlockedByQuarantine(nextHop domain.PeerIdentity, hops i
 //
 // Lazy-allocates the history map and per-peer slice on first use.
 func (s *Service) recordPeerDisconnectLocked(peer domain.PeerIdentity, now time.Time) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	if s.peerDisconnectHistory == nil {
@@ -371,7 +371,7 @@ func (s *Service) recordPeerDisconnectLocked(peer domain.PeerIdentity, now time.
 // sliding window contains at least quarantineDisconnectThreshold
 // events. Caller must hold s.peerMu.
 func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time.Time) bool {
-	if peer == "" {
+	if peer.IsZero() {
 		return false
 	}
 	hist := s.peerDisconnectHistory[peer]
@@ -426,7 +426,7 @@ func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time
 // re-arm of a disconnect_storm peer would silently un-block transit
 // through a still-flapping next-hop.
 func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason string, now time.Time) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	if s.peerQuarantine == nil {
@@ -460,7 +460,7 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 	s.peerQuarantine[peer] = entry
 
 	log.Warn().
-		Str("peer", string(peer)).
+		Str("peer", peer.String()).
 		Str("reason", effectiveReason).
 		Dur("duration", dur).
 		Int("strikes", entry.Strikes).
@@ -511,7 +511,7 @@ func (s *Service) invalidateTransitOnQuarantineLocked(peer domain.PeerIdentity) 
 		return
 	}
 	log.Info().
-		Str("peer", string(peer)).
+		Str("peer", peer.String()).
 		Int("transit_invalidated", invalidated).
 		Msg("route_quarantine_transit_invalidated")
 
@@ -640,7 +640,7 @@ func (s *Service) chattyThresholdLocked() int {
 // upper bound — disconnect events are naturally rate-limited by
 // session lifecycle so the same bound was not required there.
 func (s *Service) recordPeerAnnounceLocked(peer domain.PeerIdentity, now time.Time) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	if s.peerAnnounceHistory == nil {
@@ -683,7 +683,7 @@ func (s *Service) recordPeerAnnounceLocked(peer domain.PeerIdentity, now time.Ti
 // (chattyThresholdLocked) of in-window events. Caller must hold
 // s.peerMu.
 func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.Time) bool {
-	if peer == "" {
+	if peer.IsZero() {
 		return false
 	}
 	threshold := s.chattyThresholdLocked()
@@ -744,7 +744,7 @@ func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.T
 // continues to escalate Strikes, just paced to once per debounce
 // window.
 func (s *Service) recordInboundAnnounceAndMaybeArm(peer domain.PeerIdentity, now time.Time) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	s.peerMu.Lock()

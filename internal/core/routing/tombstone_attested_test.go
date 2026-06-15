@@ -2,6 +2,8 @@ package routing
 
 import (
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // tombstone_attested_test.go pins the Round-13 fix on
@@ -24,10 +26,10 @@ import (
 // peer (the per-peer tombstone retry path) must emit the tombstone
 // with the sig still attached.
 func TestTombstoneProjection_ForwardsAttestedSig(t *testing.T) {
-	const (
-		local  PeerIdentity = "node-A"
-		direct PeerIdentity = "peer-X"
-		other  PeerIdentity = "peer-Y"
+	var (
+		local  = domaintest.ID("node-A")
+		direct = domaintest.ID("peer-X")
+		other  = domaintest.ID("peer-Y")
 	)
 
 	tbl := NewTable(WithLocalOrigin(local))
@@ -102,10 +104,10 @@ func TestTombstoneProjection_ForwardsAttestedSig(t *testing.T) {
 // whatever bytes are on the claim" without surfacing as a test
 // failure when those bytes happen to be empty.
 func TestTombstoneProjection_UnsignedClaimStaysUnsigned(t *testing.T) {
-	const (
-		local  PeerIdentity = "node-A"
-		direct PeerIdentity = "peer-X"
-		other  PeerIdentity = "peer-Y"
+	var (
+		local  = domaintest.ID("node-A")
+		direct = domaintest.ID("peer-X")
+		other  = domaintest.ID("peer-Y")
 	)
 
 	tbl := NewTable(WithLocalOrigin(local))

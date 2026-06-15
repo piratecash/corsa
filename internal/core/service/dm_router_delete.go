@@ -231,7 +231,7 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 		return fmt.Errorf("DMRouter has no client")
 	}
 	peer = normalizePeer(peer)
-	if peer == "" {
+	if peer.IsZero() {
 		return fmt.Errorf("peer is required")
 	}
 	if !target.IsValid() {
@@ -261,8 +261,8 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 		// !found (recovery), where there is no row to derive from.
 		// A caller that passes a wrong peer for a found row would
 		// otherwise leak the deletion to the wrong conversation.
-		entrySender := domain.PeerIdentity(entry.Sender)
-		entryRecipient := domain.PeerIdentity(entry.Recipient)
+		entrySender := domain.PeerIdentityFromWire(entry.Sender)
+		entryRecipient := domain.PeerIdentityFromWire(entry.Recipient)
 		isIncoming := entrySender != myAddr
 		var derivedPeer domain.PeerIdentity
 		if isIncoming {
@@ -273,8 +273,8 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 		if derivedPeer != peer {
 			log.Warn().
 				Str("target", string(target)).
-				Str("caller_peer", string(peer)).
-				Str("derived_peer", string(derivedPeer)).
+				Str("caller_peer", peer.String()).
+				Str("derived_peer", derivedPeer.String()).
 				Msg("dm_router: SendMessageDelete: caller peer did not match the row; using derived peer")
 		}
 		peer = derivedPeer
@@ -297,7 +297,7 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 
 			log.Info().
 				Str("target", string(target)).
-				Str("peer", string(peer)).
+				Str("peer", peer.String()).
 				Msg("dm_router: message_delete handled locally (incoming message)")
 
 			r.publishMessageDeleteOutcome(ebus.MessageDeleteOutcome{
@@ -316,7 +316,7 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 		// !found: keep caller-supplied peer for the recovery path.
 		log.Debug().
 			Str("target", string(target)).
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: SendMessageDelete: target already absent locally; running recovery wire path")
 	}
 
@@ -341,14 +341,14 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 		// Abandoned=true) once the budget is exhausted.
 		log.Warn().Err(err).
 			Str("target", string(target)).
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: SendMessageDelete: initial wire send failed; retry pending")
 		return nil
 	}
 
 	log.Info().
 		Str("target", string(target)).
-		Str("peer", string(peer)).
+		Str("peer", peer.String()).
 		Msg("dm_router: message_delete dispatched; awaiting peer ack before local DELETE")
 	return nil
 }
@@ -542,7 +542,7 @@ func (r *DMRouter) onControlMessage(event protocol.LocalChangeEvent) {
 	default:
 		log.Debug().
 			Str("command", string(cmd)).
-			Str("sender", string(sender)).
+			Str("sender", sender.String()).
 			Msg("dm_router: control DM with unknown inner command")
 	}
 }
@@ -565,13 +565,13 @@ func (r *DMRouter) handleInboundMessageDelete(envelopeSender domain.PeerIdentity
 	var payload domain.MessageDeletePayload
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		log.Debug().Err(err).
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: message_delete payload malformed; dropping")
 		return
 	}
 	if !payload.Valid() {
 		log.Debug().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("target_id", string(payload.TargetID)).
 			Msg("dm_router: message_delete payload invalid; dropping")
 		return
@@ -611,15 +611,15 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 	if flag == protocol.MessageFlagImmutable {
 		log.Warn().
 			Str("target", string(target)).
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: applyInboundDelete: target is immutable")
 		return domain.MessageDeleteStatusImmutable
 	}
 
-	if !authorizedToDelete(flag, envelopeSender, domain.PeerIdentity(entry.Sender), domain.PeerIdentity(entry.Recipient)) {
+	if !authorizedToDelete(flag, envelopeSender, domain.PeerIdentityFromWire(entry.Sender), domain.PeerIdentityFromWire(entry.Recipient)) {
 		log.Warn().
 			Str("target", string(target)).
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("target_sender", entry.Sender).
 			Str("flag", string(flag)).
 			Msg("dm_router: applyInboundDelete: envelope sender not authorized for this flag")
@@ -649,15 +649,15 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 	// resilient to either direction (in practice on this side the
 	// deleted message is incoming, so peer == entry.Sender).
 	myAddr := r.client.Address()
-	threadPeer := domain.PeerIdentity(entry.Sender)
+	threadPeer := domain.PeerIdentityFromWire(entry.Sender)
 	if threadPeer == myAddr {
-		threadPeer = domain.PeerIdentity(entry.Recipient)
+		threadPeer = domain.PeerIdentityFromWire(entry.Recipient)
 	}
 	r.evictDeletedMessageFromUI(threadPeer, target)
 
 	log.Info().
 		Str("target", string(target)).
-		Str("envelope_sender", string(envelopeSender)).
+		Str("envelope_sender", envelopeSender.String()).
 		Msg("dm_router: applied inbound message_delete")
 
 	return domain.MessageDeleteStatusDeleted
@@ -706,7 +706,7 @@ func (r *DMRouter) replyMessageDeleteAck(peer domain.PeerIdentity, target domain
 	if _, err := r.client.SendControlMessage(ctx, peer, domain.DMCommandMessageDeleteAck, payload); err != nil {
 		log.Warn().Err(err).
 			Str("target", string(target)).
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: send message_delete_ack failed; requester will retry")
 	}
 }
@@ -721,13 +721,13 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	var ack domain.MessageDeleteAckPayload
 	if err := json.Unmarshal([]byte(payloadJSON), &ack); err != nil {
 		log.Debug().Err(err).
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: message_delete_ack payload malformed; dropping")
 		return
 	}
 	if !ack.Valid() {
 		log.Debug().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("target_id", string(ack.TargetID)).
 			Str("status", string(ack.Status)).
 			Msg("dm_router: message_delete_ack payload invalid; dropping")
@@ -747,8 +747,8 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	if pending.peer != envelopeSender {
 		log.Warn().
 			Str("target", string(ack.TargetID)).
-			Str("expected_peer", string(pending.peer)).
-			Str("actual_envelope_sender", string(envelopeSender)).
+			Str("expected_peer", pending.peer.String()).
+			Str("actual_envelope_sender", envelopeSender.String()).
 			Msg("dm_router: message_delete_ack from unexpected peer; pending entry restored")
 		// Restore the entry so the retry loop continues — the real
 		// peer's ack may still arrive.
@@ -787,7 +787,7 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 
 	log.Info().
 		Str("target", string(ack.TargetID)).
-		Str("peer", string(envelopeSender)).
+		Str("peer", envelopeSender.String()).
 		Str("status", string(ack.Status)).
 		Int("attempts", pending.attempt).
 		Bool("local_row_removed", ack.Status.IsTerminalSuccess()).
@@ -870,7 +870,7 @@ func (r *DMRouter) processDeleteRetryDue(ctx context.Context, now time.Time) {
 		if err := r.dispatchMessageDelete(ctx, entry.peer, entry.target); err != nil {
 			log.Debug().Err(err).
 				Str("target", string(entry.target)).
-				Str("peer", string(entry.peer)).
+				Str("peer", entry.peer.String()).
 				Int("attempt", entry.attempt+1).
 				Msg("dm_router: message_delete retry send failed; will count toward retry budget")
 		}
@@ -879,7 +879,7 @@ func (r *DMRouter) processDeleteRetryDue(ctx context.Context, now time.Time) {
 		if terminal {
 			log.Warn().
 				Str("target", string(updated.target)).
-				Str("peer", string(updated.peer)).
+				Str("peer", updated.peer.String()).
 				Int("attempts", updated.attempt).
 				Msg("dm_router: message_delete retry budget exhausted after final dispatch; giving up")
 			r.publishMessageDeleteOutcome(ebus.MessageDeleteOutcome{

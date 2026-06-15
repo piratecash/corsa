@@ -165,7 +165,9 @@ func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) adv
 	}
 
 	observedHost := remoteIPFromString(observedTCPAddr)
-	result.NormalizedObservedIP = domain.PeerIP(canonicalIPFromHost(observedHost))
+	// canonicalIPFromHost returns an already-canonical IP string (or "" for
+	// none), so ParsePeerIP cannot fail on it; the error is discarded.
+	result.NormalizedObservedIP, _ = domain.ParsePeerIP(canonicalIPFromHost(observedHost))
 
 	// Branch 1: peer explicitly declared itself non-listener. Accept,
 	// record as direct_only, never learn a candidate.
@@ -199,7 +201,9 @@ func validateAdvertisedAddress(observedTCPAddr string, frame protocol.Frame) adv
 	// only as a diagnostic — NormalizedAdvertisedIP still surfaces in
 	// logs / tests, but no branch below decides on it.
 	if host, _, listenOK := usableListen(frame.Listen); listenOK && isIPHost(host) {
-		result.NormalizedAdvertisedIP = domain.PeerIP(canonicalIPFromHost(host))
+		// canonicalIPFromHost returns an already-canonical IP string here
+		// (host passed isIPHost), so ParsePeerIP cannot fail; error discarded.
+		result.NormalizedAdvertisedIP, _ = domain.ParsePeerIP(canonicalIPFromHost(host))
 	}
 
 	// Branch 3: observed side is not a parseable IP (e.g. non-IP
@@ -287,7 +291,7 @@ func (s *Service) applyAdvertiseValidationResultLocked(peerAddress domain.PeerAd
 		if result.PersistWriteMode == persistWriteModeUpdateExisting {
 			// Downgrade-only branch: do not create a new row just
 			// because we saw a misbehaving peer for the first time.
-			if result.ObservedIPHint != "" {
+			if result.ObservedIPHint.IsValid() {
 				// Keep a transient observation hint in runtime memory
 				// so the outbound convergence loop can still use it.
 				// observedIPHistoryByPeer is ipState-domain; nest
@@ -321,7 +325,13 @@ func (s *Service) applyAdvertiseValidationResultLocked(peerAddress domain.PeerAd
 		// validateAdvertisedAddress branch 5). TrustedAdvertisePort is the
 		// self-reported hello.advertise_port, validated and collapsed to
 		// DefaultPeerPort on absent/invalid wire value by extractAdvertisePort.
-		pm.TrustedAdvertiseIP = result.NormalizedAdvertisedIP
+		// Persisted optional: assign a pointer only for a valid IP, else
+		// nil, so json omitempty keeps the field absent in peers.json.
+		if v := result.NormalizedAdvertisedIP; v.IsValid() {
+			pm.TrustedAdvertiseIP = &v
+		} else {
+			pm.TrustedAdvertiseIP = nil
+		}
 		pm.TrustedAdvertiseSource = trustedAdvertiseSourceInbound
 		// Defensive: synthesised results from legacy tests may leave
 		// AdvertisePort at the zero PeerPort sentinel. Collapse to
@@ -348,9 +358,12 @@ func (s *Service) applyAdvertiseValidationResultLocked(peerAddress domain.PeerAd
 		pm.AnnounceState = announceStateDirectOnly
 	}
 
-	if result.ObservedIPHint != "" {
+	if result.ObservedIPHint.IsValid() {
 		now := time.Now().UTC()
-		pm.LastObservedIP = result.ObservedIPHint
+		// Persisted optional: take the address of a local copy so json
+		// omitempty keeps the field absent when there is no hint.
+		hint := result.ObservedIPHint
+		pm.LastObservedIP = &hint
 		pm.LastObservedAt = &now
 		// observedIPHistoryByPeer is ipState-domain; nest ipStateMu
 		// inside the already-held s.peerMu per the canonical peerMu →
@@ -432,17 +445,12 @@ func peerAddressFromInbound(tcpAddr string, advertisePort domain.PeerPort) strin
 // keeps the port as string; the domain→string conversion happens here
 // at the single writer boundary.
 func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialedIP domain.PeerIP, dialedPort domain.PeerPort) {
-	if peerAddress == "" || dialedIP == "" || !dialedPort.IsValid() {
+	if peerAddress == "" || !dialedIP.IsValid() || !dialedPort.IsValid() {
 		return
 	}
-	canonIP := domain.PeerIP(canonicalIPFromHost(string(dialedIP)))
-	if canonIP == "" {
-		// Caller violated the contract: dialedIP is not a canonical
-		// IP (e.g. hostname, .onion, malformed). Refuse the write —
-		// the advertise-convergence layer must never persist a
-		// non-IP value in TrustedAdvertiseIP.
-		return
-	}
+	// dialedIP is already a netip-based, canonical domain.PeerIP — no
+	// string round-trip or re-canonicalisation needed.
+	canonIP := dialedIP
 	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "recordOutboundConfirmed").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
@@ -461,7 +469,9 @@ func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialed
 		s.persistedMeta[peerAddress] = pm
 	}
 	pm.AnnounceState = announceStateAnnounceable
-	pm.TrustedAdvertiseIP = canonIP
+	// Persisted optional pointer: canonIP is guaranteed IsValid here
+	// (dialedIP validity is checked above), so take its address directly.
+	pm.TrustedAdvertiseIP = &canonIP
 	pm.TrustedAdvertiseSource = trustedAdvertiseSourceOutbound
 	pm.TrustedAdvertisePort = strconv.Itoa(int(dialedPort))
 }
@@ -476,7 +486,7 @@ func (s *Service) recordOutboundConfirmed(peerAddress domain.PeerAddress, dialed
 // ipStateMu nested inside s.peerMu per the canonical peerMu → ipStateMu
 // lock order.
 func (s *Service) recordObservedIPHintLocked(peerAddress domain.PeerAddress, observedIP domain.PeerIP) {
-	if peerAddress == "" || observedIP == "" {
+	if peerAddress == "" || !observedIP.IsValid() {
 		return
 	}
 	history := s.observedIPHistoryByPeer[peerAddress]

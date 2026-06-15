@@ -71,8 +71,8 @@ type FileCommandFrame struct {
 // original hop budget without invalidating the nonce → signature chain.
 func ComputeNonce(src, dst domain.PeerIdentity, maxTTL uint8, unixTime int64, payload string) string {
 	h := sha256.New()
-	h.Write([]byte(src))
-	h.Write([]byte(dst))
+	h.Write([]byte(src.String()))
+	h.Write([]byte(dst.String()))
 	h.Write([]byte{maxTTL})
 	h.Write([]byte(strconv.FormatInt(unixTime, 10)))
 	h.Write([]byte(payload))
@@ -115,10 +115,10 @@ func ValidateFileCommandFrame(f FileCommandFrame, now time.Time) error {
 		return fmt.Errorf("unexpected frame type %q, expected %q", f.Type, FileCommandFrameType)
 	}
 
-	if f.SRC == "" {
+	if f.SRC.IsZero() {
 		return fmt.Errorf("file command: empty SRC")
 	}
-	if f.DST == "" {
+	if f.DST.IsZero() {
 		return fmt.Errorf("file command: empty DST")
 	}
 

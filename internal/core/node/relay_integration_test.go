@@ -99,7 +99,7 @@ func TestRelayChain4NodesDMDelivery(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello-through-relay-chain"},
@@ -144,7 +144,7 @@ func TestRelayDedupeFromTwoNeighbors(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(svc.Address()),
+			Address:      domain.PeerIdentityFromWire(svc.Address()),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "dedupe-test-body"},
@@ -433,7 +433,7 @@ func TestRelayFloodPerPeerLimitProtectsOtherPeers(t *testing.T) {
 	ciphertext, _ := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(svc.Address()),
+			Address:      domain.PeerIdentityFromWire(svc.Address()),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "not-blocked"},
@@ -550,7 +550,7 @@ func TestRelayChainWithLiveInboxRoute(t *testing.T) {
 	ciphertext, err := directmsg.EncryptForParticipants(
 		senderID,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientID.Address),
+			Address:      domain.PeerIdentityFromWire(recipientID.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipientID.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello-via-live-route"},

@@ -15,6 +15,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/capture"
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
@@ -265,8 +266,8 @@ func TestTrafficCaptureBridgeStartedPayloadCarriesOverlayIdentity(t *testing.T) 
 	const (
 		connID         = domain.ConnID(5150)
 		overlayAddress = domain.PeerAddress("peer-alpha.overlay:8123")
-		peerIdentity   = domain.PeerIdentity("fingerprint-alpha-ed25519")
 	)
+	peerIdentity := domaintest.ID("fingerprint-alpha-ed25519")
 	remoteIP := netip.MustParseAddr("10.0.1.42")
 
 	// Real NetCore so entry.core.Address()/Identity()/Dir() return the
@@ -398,7 +399,7 @@ func TestTrafficCaptureBridgeStartedPayloadEmptyWhenConnUnregistered(t *testing.
 	if ev.Address != "" {
 		t.Fatalf("Address should be empty when connection is unregistered, got %q", ev.Address)
 	}
-	if ev.PeerID != "" {
+	if !ev.PeerID.IsZero() {
 		t.Fatalf("PeerID should be empty when connection is unregistered, got %q", ev.PeerID)
 	}
 	if ev.Direction != "" {

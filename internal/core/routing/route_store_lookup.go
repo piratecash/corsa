@@ -378,7 +378,7 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 		// identity matches toRouteEntry, keeping test fixtures
 		// without WithLocalOrigin from emitting Origin == "".
 		emitOrigin := origin
-		if emitOrigin == "" {
+		if emitOrigin.IsZero() {
 			emitOrigin = identity
 		}
 
@@ -620,5 +620,5 @@ func isBetterLiveClaim(cand, incumbent *UplinkClaim) bool {
 	if cmp := compareExtra(cand.Extra, incumbent.Extra); cmp != 0 {
 		return cmp > 0
 	}
-	return cand.Uplink < incumbent.Uplink
+	return cand.Uplink.Compare(incumbent.Uplink) < 0
 }

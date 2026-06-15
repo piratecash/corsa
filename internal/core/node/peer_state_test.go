@@ -192,8 +192,8 @@ func TestLoadPeerStateDropsLegacyV12CleanupFields(t *testing.T) {
 	if pm.AnnounceState != announceStateAnnounceable {
 		t.Fatalf("announce_state: got %q want %q", pm.AnnounceState, announceStateAnnounceable)
 	}
-	if pm.TrustedAdvertiseIP != "203.0.113.50" {
-		t.Fatalf("trusted_advertise_ip: got %q want %q", pm.TrustedAdvertiseIP, "203.0.113.50")
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "203.0.113.50" {
+		t.Fatalf("trusted_advertise_ip: got %q want %q", peerIPPtrString(pm.TrustedAdvertiseIP), "203.0.113.50")
 	}
 	if pm.TrustedAdvertiseSource != trustedAdvertiseSourceInbound {
 		t.Fatalf("trusted_advertise_source: got %q want %q", pm.TrustedAdvertiseSource, trustedAdvertiseSourceInbound)

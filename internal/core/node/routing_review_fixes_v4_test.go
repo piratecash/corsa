@@ -38,7 +38,7 @@ import (
 func TestReview_v4_P2_1_SendProbe_CancelsOnSendFail(t *testing.T) {
 	svc := newTestServiceWithProbeRegistry(t, idNodeA)
 
-	addr := domain.PeerAddress("addr-" + string(idPeerB))
+	addr := domain.PeerAddress("addr-" + idPeerB.String())
 	// net.Pipe gives us a non-nil net.Conn without spinning up a
 	// real listener; both halves are closed by the test cleanup.
 	clientConn, serverConn := net.Pipe()
@@ -430,7 +430,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_RevivesDeadRoute(t *testing.T) {
 	// would not see it past this point.
 	svc.routingTable.ForceHealthForTest(idTargetX, idPeerB, routing.HealthDead)
 
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
 
 	snap := svc.routingTable.HealthSnapshot()
 	if len(snap) != 1 {
@@ -513,7 +513,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_NoOrphanHealthOnUnmatchedAck(t *te
 	// claim in storage. The pre-fix code would have called
 	// MarkHopAck(idTargetX, idPeerC, 0) before realising the loop
 	// has no match, leaving an orphan Good entry for that pair.
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerC), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerC.String()), domain.PeerIdentity{})
 
 	after := svc.routingTable.HealthSnapshot()
 	if len(after) != 1 {
@@ -591,7 +591,7 @@ func TestReview_v4_P2_2_ConfirmRouteViaHopAck_SkipsWithdrawnRoute(t *testing.T) 
 	}
 	baselineHealth := baseline[0].Health
 
-	svc.confirmRouteViaHopAck(domain.PeerIdentity(idTargetX), domain.PeerAddress(idPeerB), "")
+	svc.confirmRouteViaHopAck(idTargetX, domain.PeerAddress(idPeerB.String()), domain.PeerIdentity{})
 
 	after := svc.routingTable.HealthSnapshot()
 	if len(after) != 1 {

@@ -16,8 +16,8 @@ func TestInvalidSignatureDropped(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(nil)
 	_, otherPriv, _ := ed25519.GenerateKey(nil)
 
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 	payload := "test-payload"
 
 	frame := NewFileCommandFrame(src, dst, 10, payload, otherPriv)
@@ -37,8 +37,8 @@ func TestInvalidSignatureDropped(t *testing.T) {
 func TestStaleFrameDropped(t *testing.T) {
 	t.Parallel()
 
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 	payload := "test-payload"
 	maxTTL := uint8(10)
 
@@ -68,13 +68,13 @@ func TestTamperedSRCDropped(t *testing.T) {
 	t.Parallel()
 
 	_, priv, _ := ed25519.GenerateKey(nil)
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 
 	frame := NewFileCommandFrame(src, dst, 10, "payload", priv)
 
 	// Tamper with SRC — nonce was computed with original SRC.
-	frame.SRC = domain.PeerIdentity("cccc111122223333444455556666777788889999")
+	frame.SRC = mustID(t, "cccc111122223333444455556666777788889999")
 
 	if err := ValidateFileCommandFrame(frame, time.Now()); err == nil {
 		t.Error("tampered SRC should fail nonce binding check")
@@ -86,8 +86,8 @@ func TestTamperedPayloadDropped(t *testing.T) {
 	t.Parallel()
 
 	_, priv, _ := ed25519.GenerateKey(nil)
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 
 	frame := NewFileCommandFrame(src, dst, 10, "original-payload", priv)
 

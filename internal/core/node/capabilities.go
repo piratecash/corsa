@@ -291,11 +291,11 @@ func (s *Service) peerSupportsAttestedLinks(address domain.PeerAddress) bool {
 // Threading: takes knowledgeMu.RLock for the map read; the base64 decode
 // runs outside the lock since the stored string is immutable.
 func (s *Service) publicKeyForIdentity(identity domain.PeerIdentity) (ed25519.PublicKey, bool) {
-	if identity == "" {
+	if identity.IsZero() {
 		return nil, false
 	}
 	s.knowledgeMu.RLock()
-	encoded := s.pubKeys[string(identity)]
+	encoded := s.pubKeys[identity.String()]
 	s.knowledgeMu.RUnlock()
 	if encoded == "" {
 		return nil, false

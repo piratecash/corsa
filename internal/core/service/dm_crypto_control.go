@@ -46,15 +46,15 @@ func (d *DMCrypto) SendControlMessage(
 	cmd domain.DMCommand,
 	payload string,
 ) (domain.MessageID, error) {
-	to = domain.PeerIdentity(strings.TrimSpace(string(to)))
-	if to == "" {
+	to = domain.PeerIdentityFromWire(strings.TrimSpace(to.String()))
+	if to.IsZero() {
 		return "", fmt.Errorf("recipient is required")
 	}
 	if !cmd.IsControl() {
 		return "", fmt.Errorf("SendControlMessage requires a control command (got %q)", cmd)
 	}
 
-	contact, err := d.ensureRecipientContact(ctx, string(to))
+	contact, err := d.ensureRecipientContact(ctx, to.String())
 	if err != nil {
 		return "", err
 	}
@@ -83,7 +83,7 @@ func (d *DMCrypto) SendControlMessage(
 		return "", err
 	}
 
-	frame := buildControlMessageFrame(d.id.Address, string(to), string(messageID), ciphertext, time.Now().UTC())
+	frame := buildControlMessageFrame(d.id.Address, to.String(), string(messageID), ciphertext, time.Now().UTC())
 
 	reply, err := d.rpc.LocalRequestFrameCtx(ctx, frame)
 	if err != nil {
@@ -145,20 +145,20 @@ func buildControlMessageFrame(senderAddress, recipient, messageID, ciphertext st
 // defined in domain (MessageDeletePayload, MessageDeleteAckPayload).
 func (d *DMCrypto) DecryptIncomingControlMessage(event protocol.LocalChangeEvent) (cmd domain.DMCommand, commandData string, sender domain.PeerIdentity, ok bool) {
 	if event.Type != protocol.LocalChangeNewControlMessage {
-		return "", "", "", false
+		return "", "", domain.PeerIdentity{}, false
 	}
 	if event.Topic != protocol.TopicControlDM {
-		return "", "", "", false
+		return "", "", domain.PeerIdentity{}, false
 	}
 
 	senderPubKey, ok := d.resolveSenderPubKey(event.Sender)
 	if !ok {
-		return "", "", "", false
+		return "", "", domain.PeerIdentity{}, false
 	}
 
 	msg, err := directmsg.DecryptForIdentity(d.id, event.Sender, senderPubKey, event.Recipient, event.Body)
 	if err != nil {
-		return "", "", "", false
+		return "", "", domain.PeerIdentity{}, false
 	}
 
 	parsed := domain.DMCommand(msg.Command)
@@ -169,10 +169,10 @@ func (d *DMCrypto) DecryptIncomingControlMessage(event protocol.LocalChangeEvent
 		// drop quietly. A peer that wants to inject a data command
 		// through the control wire would also land here; the same drop
 		// closes that hole.
-		return "", "", "", false
+		return "", "", domain.PeerIdentity{}, false
 	}
 
-	return parsed, msg.CommandData, domain.PeerIdentity(event.Sender), true
+	return parsed, msg.CommandData, domain.PeerIdentityFromWire(event.Sender), true
 }
 
 // resolveSenderPubKey returns the base64-encoded ed25519 public key for

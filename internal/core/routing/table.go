@@ -500,7 +500,7 @@ func (t *Table) CapStats() RouteCapStats {
 // entry never expires and has the highest trust rank (RouteSourceLocal).
 // Returns zero-value RouteEntry if localOrigin is not configured.
 func (t *Table) localRouteEntry() RouteEntry {
-	if t.localOrigin == "" {
+	if t.localOrigin.IsZero() {
 		return RouteEntry{}
 	}
 	return RouteEntry{

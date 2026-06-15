@@ -5,12 +5,13 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/service"
 )
 
 func TestMergeRecipientOrder(t *testing.T) {
-	recipients := []domain.PeerIdentity{"a", "b", "c", "d"}
-	order := []domain.PeerIdentity{"c", "a"}
+	recipients := []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b"), domaintest.ID("c"), domaintest.ID("d")}
+	order := []domain.PeerIdentity{domaintest.ID("c"), domaintest.ID("a")}
 
 	merged := mergeRecipientOrder(recipients, order)
 
@@ -18,37 +19,46 @@ func TestMergeRecipientOrder(t *testing.T) {
 	if len(merged) != 4 {
 		t.Fatalf("expected 4, got %d: %v", len(merged), merged)
 	}
-	if merged[0] != "c" || merged[1] != "a" {
+	if merged[0] != domaintest.ID("c") || merged[1] != domaintest.ID("a") {
 		t.Fatalf("expected [c, a, ...], got %v", merged)
 	}
 }
 
 func TestMergeRecipientOrderEmpty(t *testing.T) {
-	merged := mergeRecipientOrder(nil, []domain.PeerIdentity{"a"})
+	merged := mergeRecipientOrder(nil, []domain.PeerIdentity{domaintest.ID("a")})
 	if merged != nil {
 		t.Fatalf("expected nil for empty recipients, got %v", merged)
 	}
 }
 
 func TestSearchKnownIdentities(t *testing.T) {
-	knownIDs := []string{"abc-def-ghi", "xyz-abc-123", "zzz-yyy-xxx"}
-	recipients := []domain.PeerIdentity{"abc-def-ghi"} // already listed
-	self := domain.PeerIdentity("self-addr")
+	// knownIDs must be valid 40-char hex so searchKnownIdentities can
+	// decode them via PeerIdentityFromWire. The query "abc" is matched
+	// against the raw hex text, so each ID embeds (or omits) that substring.
+	const (
+		listedHex  = "abc0000000000000000000000000000000000000" // already listed, contains "abc"
+		matchHex   = "00abc00000000000000000000000000000000000" // contains "abc" → included
+		noMatchHex = "ffffffffffffffffffffffffffffffffffffffff" // no "abc"
+		selfHex    = "1111111111111111111111111111111111111111"
+	)
+	knownIDs := []string{listedHex, matchHex, noMatchHex}
+	recipients := []domain.PeerIdentity{domain.PeerIdentityFromWire(listedHex)} // already listed
+	self := domain.PeerIdentityFromWire(selfHex)
 
 	results := searchKnownIdentities(knownIDs, recipients, self, "abc")
 
-	// "abc-def-ghi" is already listed → excluded.
-	// "xyz-abc-123" matches query → included.
+	// listedHex is already listed → excluded.
+	// matchHex matches query → included.
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d: %v", len(results), results)
 	}
-	if results[0] != "xyz-abc-123" {
-		t.Fatalf("expected xyz-abc-123, got %s", results[0])
+	if results[0] != domain.PeerIdentityFromWire(matchHex) {
+		t.Fatalf("expected %s, got %s", domain.PeerIdentityFromWire(matchHex), results[0])
 	}
 }
 
 func TestSearchKnownIdentitiesEmptyQuery(t *testing.T) {
-	results := searchKnownIdentities([]string{"a", "b"}, nil, domain.PeerIdentity("self"), "")
+	results := searchKnownIdentities([]string{"a", "b"}, nil, domaintest.ID("self"), "")
 	if results != nil {
 		t.Fatalf("expected nil for empty query, got %v", results)
 	}
@@ -399,8 +409,8 @@ func TestFindCachedMsg(t *testing.T) {
 	w := &Window{
 		snap: service.RouterSnapshot{
 			ActiveMessages: []service.DirectMessage{
-				{ID: "aaa", Body: "hello", Sender: "alice", Timestamp: ts},
-				{ID: "bbb", Body: "world", Sender: "bob", Timestamp: ts.Add(time.Minute)},
+				{ID: "aaa", Body: "hello", Sender: domaintest.ID("alice"), Timestamp: ts},
+				{ID: "bbb", Body: "world", Sender: domaintest.ID("bob"), Timestamp: ts.Add(time.Minute)},
 			},
 		},
 	}
@@ -410,7 +420,7 @@ func TestFindCachedMsg(t *testing.T) {
 	if !ok {
 		t.Fatal("findCachedMsg(aaa) not found")
 	}
-	if cm.Sender != "alice" {
+	if cm.Sender != domaintest.ID("alice") {
 		t.Errorf("Sender = %q, want %q", cm.Sender, "alice")
 	}
 	if cm.Index != 0 {
@@ -467,9 +477,9 @@ func TestResetReplyOnPeerChange(t *testing.T) {
 	w := &Window{
 		replyToMsg: &service.DirectMessage{ID: "msg-1", Body: "hello"},
 		snap: service.RouterSnapshot{
-			ActivePeer: "peer-b",
+			ActivePeer: domaintest.ID("peer-b"),
 		},
-		lastChatPeer: "peer-a",
+		lastChatPeer: domaintest.ID("peer-a"),
 	}
 
 	w.resetReplyOnPeerChange()
@@ -489,9 +499,9 @@ func TestResetReplyOnPeerChangeSamePeer(t *testing.T) {
 	w := &Window{
 		replyToMsg: replyMsg,
 		snap: service.RouterSnapshot{
-			ActivePeer: "peer-a",
+			ActivePeer: domaintest.ID("peer-a"),
 		},
-		lastChatPeer: "peer-a",
+		lastChatPeer: domaintest.ID("peer-a"),
 	}
 
 	w.resetReplyOnPeerChange()
@@ -510,8 +520,8 @@ func TestRebuildMsgCacheSkipsWhenUnchanged(t *testing.T) {
 	w := &Window{}
 	w.snap.Generation = 1
 	w.snap.ActiveMessages = []service.DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "alice", Timestamp: now},
-		{ID: "msg-2", Body: "world", Sender: "bob", Timestamp: now.Add(time.Second)},
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("alice"), Timestamp: now},
+		{ID: "msg-2", Body: "world", Sender: domaintest.ID("bob"), Timestamp: now.Add(time.Second)},
 	}
 
 	// First call — builds cache.
@@ -535,7 +545,7 @@ func TestRebuildMsgCacheSkipsWhenUnchanged(t *testing.T) {
 	// Bump generation and append a message — cache must rebuild.
 	w.snap.Generation = 2
 	w.snap.ActiveMessages = append(w.snap.ActiveMessages, service.DirectMessage{
-		ID: "msg-3", Body: "new", Sender: "carol", Timestamp: now.Add(2 * time.Second),
+		ID: "msg-3", Body: "new", Sender: domaintest.ID("carol"), Timestamp: now.Add(2 * time.Second),
 	})
 	w.rebuildMsgCache()
 	if len(w.msgCacheByID) != 3 {
@@ -557,7 +567,7 @@ func TestRebuildMsgCacheDetectsGenerationChange(t *testing.T) {
 	w := &Window{}
 	w.snap.Generation = 10
 	w.snap.ActiveMessages = []service.DirectMessage{
-		{ID: "msg-1", Body: "hello", Sender: "alice", Timestamp: now, ReceiptStatus: ""},
+		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("alice"), Timestamp: now, ReceiptStatus: ""},
 	}
 
 	w.rebuildMsgCache()

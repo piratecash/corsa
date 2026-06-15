@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -56,7 +57,7 @@ func TestCM_SetupFailureCooldown_ShortCircuitsRetry(t *testing.T) {
 		mu.Lock()
 		dialAttempts[string(addrs[0])]++
 		mu.Unlock()
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -87,7 +88,7 @@ func TestCM_SetupFailureCooldown_ShortCircuitsRetry(t *testing.T) {
 	// backoff cycle against the banned address.
 	cm.EmitSlot(ActiveSessionLost{
 		Address:        mustAddr(bannedAddr),
-		Identity:       "id-banned",
+		Identity:       domaintest.ID("id-banned"),
 		Error:          errors.New("sync: EOF"),
 		WasHealthy:     false,
 		SlotGeneration: gen,
@@ -135,7 +136,7 @@ func TestCM_SetupFailureCooldown_NilCallbackKeepsLegacyRetry(t *testing.T) {
 	var dialCount int32
 	b.Cfg.DialFn = func(_ context.Context, addrs []domain.PeerAddress) (DialResult, error) {
 		atomic.AddInt32(&dialCount, 1)
-		session := fakePeerSession(addrs[0], "id-"+domain.PeerIdentity(addrs[0]))
+		session := fakePeerSession(addrs[0], domaintest.ID("id-"+string(addrs[0])))
 		return DialResult{Session: session, ConnectedAddress: addrs[0]}, nil
 	}
 
@@ -157,7 +158,7 @@ func TestCM_SetupFailureCooldown_NilCallbackKeepsLegacyRetry(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		cm.EmitSlot(ActiveSessionLost{
 			Address:        mustAddr(peerAddr),
-			Identity:       "id-peer",
+			Identity:       domaintest.ID("id-peer"),
 			Error:          errors.New("sync: EOF"),
 			WasHealthy:     false,
 			SlotGeneration: gen,

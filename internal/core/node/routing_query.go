@@ -116,7 +116,7 @@ func (s *Service) handleRouteQuery(connID domain.ConnID, senderIdentity domain.P
 		log.Warn().
 			Err(err).
 			Uint64("query_id", query.QueryID).
-			Str("target_identity", string(query.TargetIdentity)).
+			Str("target_identity", query.TargetIdentity.String()).
 			Msg("route_query_response_marshal_failed")
 		return
 	}
@@ -174,8 +174,8 @@ func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, r
 	if !resp.Found {
 		log.Debug().
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
-			Str("sender_identity", string(senderIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_query_response_found_false")
 		return
 	}
@@ -187,19 +187,19 @@ func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, r
 	// the query-response ingest path so an authenticated
 	// mesh_route_query_v1 peer cannot inject routes to junk
 	// identities ("*", whitespace, non-hex, wrong length).
-	if !identity.IsValidAddress(string(resp.TargetIdentity)) {
+	if !identity.IsValidAddress(resp.TargetIdentity.String()) {
 		log.Warn().
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
-			Str("sender_identity", string(senderIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_query_response_dropped_invalid_target_identity")
 		return
 	}
 	if resp.BestHops == 0 {
 		log.Warn().
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
-			Str("sender_identity", string(senderIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_query_response_dropped_zero_hops")
 		return
 	}
@@ -210,7 +210,7 @@ func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, r
 		// no peer-attested transit claim is going to fix that.
 		log.Warn().
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
 			Msg("route_query_response_dropped_self_target")
 		return
 	}
@@ -229,11 +229,11 @@ func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, r
 	// senderIdentity == excludeVia, NOT by Origin == localOrigin,
 	// so an attacker-injected self-claim with NextHop=otherPeer
 	// would be projectable to every other peer).
-	if s.identity != nil && resp.TargetIdentity == domain.PeerIdentity(s.identity.Address) {
+	if s.identity != nil && resp.TargetIdentity == domain.PeerIdentityFromWire(s.identity.Address) {
 		log.Warn().
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
-			Str("sender_identity", string(senderIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_query_response_dropped_target_is_local_identity")
 		return
 	}
@@ -249,8 +249,8 @@ func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, r
 	if !s.peerHasCapabilities(senderIdentity, domain.CapMeshRelayV1, domain.CapMeshRoutingV1) {
 		log.Warn().
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
-			Str("sender_identity", string(senderIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_query_response_dropped_responder_missing_relay_or_routing_cap")
 		return
 	}
@@ -283,16 +283,16 @@ func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, r
 	if err != nil {
 		log.Warn().Err(err).
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
-			Str("next_hop", string(senderIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
+			Str("next_hop", senderIdentity.String()).
 			Msg("route_query_response_update_failed")
 		return
 	}
 	if status == routing.RouteAccepted {
 		log.Debug().
 			Uint64("query_id", resp.QueryID).
-			Str("target_identity", string(resp.TargetIdentity)).
-			Str("next_hop", string(senderIdentity)).
+			Str("target_identity", resp.TargetIdentity.String()).
+			Str("next_hop", senderIdentity.String()).
 			Int("hops", entry.Hops).
 			Msg("route_query_response_ingested")
 	}

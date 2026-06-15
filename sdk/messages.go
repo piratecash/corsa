@@ -2,6 +2,8 @@ package sdk
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -25,8 +27,8 @@ type DirectMessage struct {
 func fromInternalMessage(msg *service.DirectMessage) DirectMessage {
 	return DirectMessage{
 		ID:            msg.ID,
-		Sender:        string(msg.Sender),
-		Recipient:     string(msg.Recipient),
+		Sender:        msg.Sender.String(),
+		Recipient:     msg.Recipient.String(),
 		Body:          msg.Body,
 		ReplyTo:       string(msg.ReplyTo),
 		Command:       string(msg.Command),
@@ -55,7 +57,7 @@ func (r *Runtime) SubscribeDirectMessages(ctx context.Context) <-chan DirectMess
 					return
 				}
 				msg := r.client.DecryptIncomingMessage(event)
-				if msg == nil || string(msg.Sender) == r.Address() {
+				if msg == nil || msg.Sender.String() == r.Address() {
 					continue
 				}
 
@@ -73,7 +75,18 @@ func (r *Runtime) SubscribeDirectMessages(ctx context.Context) <-chan DirectMess
 
 // SendDirectMessage sends a direct message using the same delivery stack as the desktop client.
 func (r *Runtime) SendDirectMessage(ctx context.Context, to, body string) (*DirectMessage, error) {
-	msg, err := r.client.SendDirectMessage(ctx, domain.PeerIdentity(to), domain.OutgoingDM{
+	// Validate the recipient at the public SDK boundary (mirrors the RPC
+	// layer): a malformed/uppercase/non-40-hex address must surface a clear
+	// address error rather than silently decoding to the zero identity and
+	// failing later with a generic "recipient required" message.
+	recipient, err := domain.ParsePeerIdentity(strings.TrimSpace(to))
+	if err != nil {
+		return nil, fmt.Errorf("invalid recipient address %q: %w", to, err)
+	}
+	if recipient.IsZero() {
+		return nil, fmt.Errorf("invalid recipient address: must not be empty or the zero identity")
+	}
+	msg, err := r.client.SendDirectMessage(ctx, recipient, domain.OutgoingDM{
 		Body: body,
 	})
 	if err != nil {

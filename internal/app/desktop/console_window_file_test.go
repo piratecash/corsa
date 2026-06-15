@@ -165,21 +165,20 @@ func TestTransferProgressFraction(t *testing.T) {
 }
 
 // TestTruncatePeerIdentity pins the row-header peer label width. The
-// short-input case (≤24 chars) returns the input unchanged so test
-// fixtures with mock peer IDs read naturally; the long-input case
-// uses a fixed prefix+ellipsis+suffix shape so the layout never
-// reflows due to peer-id length.
+// zero identity renders as the empty string (pass-through of ""); any
+// real identity is exactly 40 hex chars (>24) and is shaped as
+// first 12 + … + last 8 so the layout never reflows due to peer-id length.
 func TestTruncatePeerIdentity(t *testing.T) {
 	t.Parallel()
+
+	const fullHex = "abcdefabcdefabcdefabcdefabcdefabcdefabcd" // 40 hex chars
 
 	cases := []struct {
 		in   domain.PeerIdentity
 		want string
 	}{
-		{"", ""},
-		{"short-id-12345", "short-id-12345"}, // 14 chars — pass through
-		{"exactly-24-characters!!!", "exactly-24-characters!!!"},    // 24 chars — boundary, pass through
-		{"abcdefghijklmnopqrstuvwxyz0123", "abcdefghijkl…wxyz0123"}, // 30 chars — first 12 + … + last 8
+		{domain.PeerIdentity{}, ""}, // zero identity → empty string
+		{domain.PeerIdentityFromWire(fullHex), fullHex[:12] + "…" + fullHex[len(fullHex)-8:]},
 	}
 	for _, tc := range cases {
 		got := truncatePeerIdentity(tc.in)

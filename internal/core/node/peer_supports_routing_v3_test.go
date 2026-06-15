@@ -59,7 +59,7 @@ func TestPeerSupportsRoutingV3_OutboundTripletRequired(t *testing.T) {
 			svc.peerMu.Lock()
 			svc.sessions[addr] = &peerSession{
 				address:      addr,
-				peerIdentity: domain.PeerIdentity(idPeerB),
+				peerIdentity: idPeerB,
 				capabilities: tc.caps,
 			}
 			svc.peerMu.Unlock()

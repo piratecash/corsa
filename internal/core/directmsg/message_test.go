@@ -25,7 +25,7 @@ func TestEncryptDecryptForSenderAndRecipient(t *testing.T) {
 	ciphertext, err := EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "hello encrypted world"},
@@ -84,7 +84,7 @@ func TestDecryptFailsForThirdParty(t *testing.T) {
 	ciphertext, err := EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "classified"},
@@ -120,7 +120,7 @@ func TestDecryptFailsWhenSignatureIsTampered(t *testing.T) {
 	ciphertext, err := EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "tamper check"},
@@ -174,7 +174,7 @@ func TestEncryptDecryptWithReplyTo(t *testing.T) {
 	ciphertext, err := EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipient.Address),
+			Address:      domain.PeerIdentityFromWire(recipient.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(recipient.BoxPublicKey),
 		},
 		domain.OutgoingDM{

@@ -3,6 +3,9 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // table_lookup_phase2_test.go covers the Phase 2 changes to
@@ -41,17 +44,17 @@ func upsertClaim(t *testing.T, tbl *Table, identity, uplink PeerIdentity, hops i
 // tie-break. This is the explicit backward-compatibility contract.
 func TestLookup_BackwardCompat_NilHealthFallsBackToByHops(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-far", 3, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-near", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-mid", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-far"), 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-near"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-mid"), 2, RouteSourceAnnouncement)
 
-	got := tbl.Lookup("id-target")
+	got := tbl.Lookup(domaintest.ID("id-target"))
 	if len(got) != 3 {
 		t.Fatalf("Lookup returned %d entries, want 3", len(got))
 	}
-	wantOrder := []PeerIdentity{"id-uplink-near", "id-uplink-mid", "id-uplink-far"}
+	wantOrder := []PeerIdentity{domaintest.ID("id-uplink-near"), domaintest.ID("id-uplink-mid"), domaintest.ID("id-uplink-far")}
 	for i, want := range wantOrder {
 		if got[i].NextHop != want {
 			t.Fatalf("Lookup[%d].NextHop = %q, want %q (full=%v)", i, got[i].NextHop, want, got)
@@ -64,19 +67,19 @@ func TestLookup_BackwardCompat_NilHealthFallsBackToByHops(t *testing.T) {
 // same-hop uplinks with different RTT EWMA's must rank by RTT.
 func TestLookup_CompositeScoreRanking_LowRTTBeatsHighRTTSameHops(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-fast", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-slow", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-slow"), 2, RouteSourceAnnouncement)
 
-	tbl.MarkHopAck("id-target", "id-uplink-fast", 10*time.Millisecond)
-	tbl.MarkHopAck("id-target", "id-uplink-slow", 200*time.Millisecond)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink-fast"), 10*time.Millisecond)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink-slow"), 200*time.Millisecond)
 
-	got := tbl.Lookup("id-target")
+	got := tbl.Lookup(domaintest.ID("id-target"))
 	if len(got) != 2 {
 		t.Fatalf("Lookup returned %d entries, want 2", len(got))
 	}
-	if got[0].NextHop != "id-uplink-fast" {
+	if got[0].NextHop != domaintest.ID("id-uplink-fast") {
 		t.Fatalf("Lookup[0].NextHop = %q, want id-uplink-fast (low-RTT path must rank first)", got[0].NextHop)
 	}
 }
@@ -88,17 +91,17 @@ func TestLookup_CompositeScoreRanking_LowRTTBeatsHighRTTSameHops(t *testing.T) {
 // "RTT-weighted route selection".
 func TestLookup_CompositeScoreRanking_LocalRTTBeatsHigherHops(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-local-3h", 3, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-distant-2h", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-local-3h"), 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-distant-2h"), 2, RouteSourceAnnouncement)
 
 	// local-3h: RTT 5ms → +30 RTT bonus → base 70 + 30 = 100
 	// distant-2h: no RTT data → base 80 + 0 = 80
-	tbl.MarkHopAck("id-target", "id-uplink-local-3h", 5*time.Millisecond)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink-local-3h"), 5*time.Millisecond)
 
-	got := tbl.Lookup("id-target")
-	if got[0].NextHop != "id-uplink-local-3h" {
+	got := tbl.Lookup(domaintest.ID("id-target"))
+	if got[0].NextHop != domaintest.ID("id-uplink-local-3h") {
 		t.Fatalf("Lookup[0].NextHop = %q, want id-uplink-local-3h (low-RTT 3-hop must beat 2-hop unconfirmed)", got[0].NextHop)
 	}
 }
@@ -108,27 +111,27 @@ func TestLookup_CompositeScoreRanking_LocalRTTBeatsHigherHops(t *testing.T) {
 // even if they would otherwise have the lowest hop count.
 func TestLookup_DeadExcludedFromResult(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-dead", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-good", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-dead"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-good"), 3, RouteSourceAnnouncement)
 
 	// Drive the (id-target, id-uplink-dead) pair into HealthDead by
 	// reaching deep into the health store under t.mu — production
 	// callers use the wire path, but the test fast-forwards the
 	// state machine.
 	tbl.mu.Lock()
-	state := tbl.health.ensureLocked("id-target", "id-uplink-dead", now)
+	state := tbl.health.ensureLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-dead"), now)
 	state.Health = HealthDead
 	tbl.mu.Unlock()
 
-	got := tbl.Lookup("id-target")
+	got := tbl.Lookup(domaintest.ID("id-target"))
 	for _, entry := range got {
-		if entry.NextHop == "id-uplink-dead" {
+		if entry.NextHop == domaintest.ID("id-uplink-dead") {
 			t.Fatalf("Lookup returned the Dead claim: %v", entry)
 		}
 	}
-	if len(got) != 1 || got[0].NextHop != "id-uplink-good" {
+	if len(got) != 1 || got[0].NextHop != domaintest.ID("id-uplink-good") {
 		t.Fatalf("Lookup returned %v, want exactly [id-uplink-good]", got)
 	}
 }
@@ -146,19 +149,19 @@ func TestLookup_DeadExcludedFromResult(t *testing.T) {
 // semantics must stay consistent.
 func TestLookup_DirectClaimExemptFromDeadFilter(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// AddDirectPeer is the production path for own-origin direct
 	// claims (Hops=1, NextHop==Identity, ExpiresAt=zero, Source=Direct).
-	if _, err := tbl.AddDirectPeer("id-peer-direct"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-peer-direct")); err != nil {
 		t.Fatalf("setup: AddDirectPeer failed: %v", err)
 	}
-	tbl.ForceHealthForTest("id-peer-direct", "id-peer-direct", HealthDead)
+	tbl.ForceHealthForTest(domaintest.ID("id-peer-direct"), domaintest.ID("id-peer-direct"), HealthDead)
 
-	got := tbl.Lookup("id-peer-direct")
+	got := tbl.Lookup(domaintest.ID("id-peer-direct"))
 	foundDirect := false
 	for _, entry := range got {
-		if entry.Source == RouteSourceDirect && entry.NextHop == "id-peer-direct" {
+		if entry.Source == RouteSourceDirect && entry.NextHop == domaintest.ID("id-peer-direct") {
 			foundDirect = true
 			break
 		}
@@ -173,24 +176,24 @@ func TestLookup_DirectClaimExemptFromDeadFilter(t *testing.T) {
 // fallback"), but it ranks behind any Good alternative.
 func TestLookup_BadDeprioritizedButNotExcluded(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-bad", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-good", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-bad"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-good"), 2, RouteSourceAnnouncement)
 
 	tbl.mu.Lock()
-	bad := tbl.health.ensureLocked("id-target", "id-uplink-bad", now)
+	bad := tbl.health.ensureLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-bad"), now)
 	bad.Health = HealthBad
 	tbl.mu.Unlock()
 
-	got := tbl.Lookup("id-target")
+	got := tbl.Lookup(domaintest.ID("id-target"))
 	if len(got) != 2 {
 		t.Fatalf("Lookup returned %d entries, want 2 (Bad must still be selectable as last resort)", len(got))
 	}
-	if got[0].NextHop != "id-uplink-good" {
+	if got[0].NextHop != domaintest.ID("id-uplink-good") {
 		t.Fatalf("Lookup[0].NextHop = %q, want id-uplink-good (Good must outrank Bad)", got[0].NextHop)
 	}
-	if got[1].NextHop != "id-uplink-bad" {
+	if got[1].NextHop != domaintest.ID("id-uplink-bad") {
 		t.Fatalf("Lookup[1].NextHop = %q, want id-uplink-bad", got[1].NextHop)
 	}
 }
@@ -201,15 +204,15 @@ func TestLookup_BadDeprioritizedButNotExcluded(t *testing.T) {
 // land at index 0 regardless of any other claims for that identity.
 func TestLookup_SelfRouteAlwaysFirst(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// Inject a transit announcement claim to our own identity. Even
 	// though no rational peer would advertise this, we want to
 	// confirm that the self-route ranking invariant survives an
 	// adversarial claim that has the same Identity as localOrigin.
-	upsertClaim(t, tbl, "self", "id-other", 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("self"), domaintest.ID("id-other"), 1, RouteSourceAnnouncement)
 
-	got := tbl.Lookup("self")
+	got := tbl.Lookup(domaintest.ID("self"))
 	if len(got) == 0 {
 		t.Fatal("Lookup for self returned nothing — synthetic self-route missing")
 	}
@@ -226,13 +229,13 @@ func TestLookup_SelfRouteAlwaysFirst(t *testing.T) {
 // folds rtt>0 into the EWMA estimate.
 func TestMarkHopAck_UpdatesHealthAndRTT(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// Use an announcement claim — Direct requires NextHop == Identity
 	// per UplinkClaim.Validate, but the health entry is keyed by the
 	// (Identity, NextHop) pair regardless of source.
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
-	tbl.MarkHopAck("id-target", "id-uplink", 30*time.Millisecond)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 30*time.Millisecond)
 
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
@@ -254,22 +257,22 @@ func TestMarkHopAck_UpdatesHealthAndRTT(t *testing.T) {
 // touch the state of (X, uplink-B).
 func TestMarkHopAck_ScopedToUplink_DoesNotAffectOtherUplink(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 2, RouteSourceAnnouncement)
 
 	// Drive B into Questionable so we can detect any unintended touch.
 	tbl.mu.Lock()
-	stateB := tbl.health.ensureLocked("id-target", "id-uplink-B", now)
+	stateB := tbl.health.ensureLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), now)
 	stateB.Health = HealthQuestionable
 	tbl.mu.Unlock()
 
-	tbl.MarkHopAck("id-target", "id-uplink-A", 25*time.Millisecond)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 25*time.Millisecond)
 
 	tbl.mu.RLock()
-	gotA := tbl.health.getLocked("id-target", "id-uplink-A")
-	gotB := tbl.health.getLocked("id-target", "id-uplink-B")
+	gotA := tbl.health.getLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"))
+	gotB := tbl.health.getLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink-B"))
 	tbl.mu.RUnlock()
 
 	if gotA == nil || gotA.Health != HealthGood {
@@ -287,14 +290,14 @@ func TestMarkHopAck_ScopedToUplink_DoesNotAffectOtherUplink(t *testing.T) {
 // health bump still applies without corrupting RTT.
 func TestMarkHopAck_ZeroRTTPreservesEWMA(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
-	tbl.MarkHopAck("id-target", "id-uplink", 50*time.Millisecond)
-	tbl.MarkHopAck("id-target", "id-uplink", 0) // simulate hop_ack without rtt sample
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 50*time.Millisecond)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0) // simulate hop_ack without rtt sample
 
 	tbl.mu.RLock()
-	state := tbl.health.getLocked("id-target", "id-uplink")
+	state := tbl.health.getLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	tbl.mu.RUnlock()
 	if state.RTT != 50*time.Millisecond {
 		t.Fatalf("RTT after rtt=0 mark: %v, want 50ms (zero must not overwrite EWMA)", state.RTT)
@@ -306,20 +309,20 @@ func TestMarkHopAck_ZeroRTTPreservesEWMA(t *testing.T) {
 // Good and ProbeFailures is zeroed.
 func TestMarkHopAck_RecoversFromBadAndDead(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 
 	tbl.mu.Lock()
-	state := tbl.health.ensureLocked("id-target", "id-uplink", now)
+	state := tbl.health.ensureLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink"), now)
 	state.Health = HealthBad
 	state.ProbeFailures = 7
 	tbl.mu.Unlock()
 
-	tbl.MarkHopAck("id-target", "id-uplink", 0)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
 
 	tbl.mu.RLock()
-	state = tbl.health.getLocked("id-target", "id-uplink")
+	state = tbl.health.getLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	tbl.mu.RUnlock()
 	if state.Health != HealthGood {
 		t.Fatalf("Health = %s, want good", state.Health)
@@ -335,10 +338,10 @@ func TestMarkHopAck_RecoversFromBadAndDead(t *testing.T) {
 // so the guard avoids creating garbage entries.
 func TestMarkHopAck_EmptyIdentityIsNoop(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	tbl.MarkHopAck("", "id-uplink", 10*time.Millisecond)
-	tbl.MarkHopAck("id-target", "", 10*time.Millisecond)
+	tbl.MarkHopAck(domain.PeerIdentity{}, domaintest.ID("id-uplink"), 10*time.Millisecond)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domain.PeerIdentity{}, 10*time.Millisecond)
 
 	if got := tbl.HealthSnapshot(); got != nil {
 		t.Fatalf("HealthSnapshot() = %v, want nil (empty identity/uplink must not create state)", got)
@@ -358,12 +361,12 @@ func TestMarkHopAck_EmptyIdentityIsNoop(t *testing.T) {
 // though the internal field is non-zero.
 func TestUpdateRoute_FreshAnnouncement_LeavesConfirmedFalse(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity:  "id-target",
-		Origin:    "id-target",
-		NextHop:   "id-uplink",
+		Identity:  domaintest.ID("id-target"),
+		Origin:    domaintest.ID("id-target"),
+		NextHop:   domaintest.ID("id-uplink"),
 		Hops:      2,
 		SeqNo:     1,
 		Source:    RouteSourceAnnouncement,
@@ -408,15 +411,15 @@ func TestUpdateRoute_FreshAnnouncement_LeavesConfirmedFalse(t *testing.T) {
 func TestAddDirectPeerReset_PreservesLastHopAckOnConfirmedPair(t *testing.T) {
 	t0 := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	clk := t0
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(func() time.Time { return clk }))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(func() time.Time { return clk }))
 
 	// Bring the peer up and mark it confirmed via an organic
 	// hop_ack at t0. This stamps Confirmed=true and LastHopAck=t0
 	// on the (peer-X, peer-X) direct pair.
-	if _, err := tbl.AddDirectPeer("peer-X"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("peer-X")); err != nil {
 		t.Fatalf("setup: AddDirectPeer initial: %v", err)
 	}
-	tbl.MarkHopAck("peer-X", "peer-X", 0)
+	tbl.MarkHopAck(domaintest.ID("peer-X"), domaintest.ID("peer-X"), 0)
 	originalLastHopAck := t0
 
 	snap := tbl.HealthSnapshot()
@@ -427,9 +430,9 @@ func TestAddDirectPeerReset_PreservesLastHopAckOnConfirmedPair(t *testing.T) {
 	// Force-degrade the pair, advance the clock, then re-add to
 	// simulate a session bounce. The reset path runs because
 	// Health != Good.
-	tbl.ForceHealthForTest("peer-X", "peer-X", HealthBad)
+	tbl.ForceHealthForTest(domaintest.ID("peer-X"), domaintest.ID("peer-X"), HealthBad)
 	clk = t0.Add(45 * time.Second)
-	if _, err := tbl.AddDirectPeer("peer-X"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("peer-X")); err != nil {
 		t.Fatalf("re-add: AddDirectPeer: %v", err)
 	}
 
@@ -456,15 +459,15 @@ func TestAddDirectPeerReset_PreservesLastHopAckOnConfirmedPair(t *testing.T) {
 // even on a fresh placeholder.
 func TestApplyHopAck_FlipsConfirmed(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 	// Fresh placeholder is Confirmed=false.
 	if snap := tbl.HealthSnapshot(); len(snap) != 1 || snap[0].Confirmed {
 		t.Fatalf("setup: HealthSnapshot Confirmed should start false: %+v", snap)
 	}
 
-	tbl.MarkHopAck("id-target", "id-uplink", 0)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
 
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
@@ -480,10 +483,10 @@ func TestApplyHopAck_FlipsConfirmed(t *testing.T) {
 // positive-evidence path and must also flip Confirmed.
 func TestApplyProbeAck_ReachableFlipsConfirmed(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
-	tbl.MarkProbeAck("id-target", "id-uplink", true, 25*time.Millisecond)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
+	tbl.MarkProbeAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), true, 25*time.Millisecond)
 
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
@@ -502,15 +505,15 @@ func TestApplyProbeAck_ReachableFlipsConfirmed(t *testing.T) {
 // Confirmed doc-comment).
 func TestApplyProbeAck_UnreachableDoesNotFlipConfirmed(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
 
 	// Negative ack on a never-confirmed pair: Confirmed stays
 	// false. (Production semantics: the responder answered with
 	// "I can't reach the target", which is evidence about the
 	// route but NOT about Uplink → us reachability.)
-	tbl.MarkProbeAck("id-target", "id-uplink", false, 0)
+	tbl.MarkProbeAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), false, 0)
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
 		t.Fatalf("HealthSnapshot len = %d, want 1", len(snap))
@@ -521,8 +524,8 @@ func TestApplyProbeAck_UnreachableDoesNotFlipConfirmed(t *testing.T) {
 
 	// Flip Confirmed via positive evidence, then send another
 	// negative ack: Confirmed must stay true (sticky).
-	tbl.MarkHopAck("id-target", "id-uplink", 0)
-	tbl.MarkProbeAck("id-target", "id-uplink", false, 0)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 0)
+	tbl.MarkProbeAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), false, 0)
 	snap = tbl.HealthSnapshot()
 	if !snap[0].Confirmed {
 		t.Fatal("Confirmed reverted to false after negative ack — flag must be monotonic-up (sticky)")
@@ -549,30 +552,30 @@ func TestApplyProbeAck_UnreachableDoesNotFlipConfirmed(t *testing.T) {
 // Bad one. AnnounceTargetFor must return the long Good Uplink.
 func TestAnnounceTargetFor_AgreesWithLookupOnCompositeScore(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-short", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-long", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-short"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-long"), 3, RouteSourceAnnouncement)
 
 	// Drive the short pair into HealthBad so CompositeScore
 	// deprioritises it below the long Good pair.
-	tbl.ForceHealthForTest("id-target", "id-uplink-short", HealthBad)
+	tbl.ForceHealthForTest(domaintest.ID("id-target"), domaintest.ID("id-uplink-short"), HealthBad)
 
 	// Sanity: Lookup's winner is the long Good pair.
-	lookupResult := tbl.Lookup("id-target")
+	lookupResult := tbl.Lookup(domaintest.ID("id-target"))
 	if len(lookupResult) == 0 {
 		t.Fatal("setup: Lookup returned no results")
 	}
-	if lookupResult[0].NextHop != "id-uplink-long" {
+	if lookupResult[0].NextHop != domaintest.ID("id-uplink-long") {
 		t.Fatalf("setup: Lookup winner = %q, want id-uplink-long (CompositeScore should rank Good above Bad)", lookupResult[0].NextHop)
 	}
 
 	// AnnounceTargetFor must agree.
-	entry, uplink, ok := tbl.AnnounceTargetFor("id-target", "id-requester")
+	entry, uplink, ok := tbl.AnnounceTargetFor(domaintest.ID("id-target"), domaintest.ID("id-requester"))
 	if !ok {
 		t.Fatal("AnnounceTargetFor returned ok=false; want a live winner")
 	}
-	if uplink != "id-uplink-long" {
+	if uplink != domaintest.ID("id-uplink-long") {
 		t.Fatalf("AnnounceTargetFor winner uplink = %q, want id-uplink-long (must agree with Lookup's CompositeScore winner — PR 11.34 P2)", uplink)
 	}
 	if entry.Hops != 3 {
@@ -588,25 +591,25 @@ func TestAnnounceTargetFor_AgreesWithLookupOnCompositeScore(t *testing.T) {
 // already gave up on.
 func TestAnnounceable_FiltersDeadPair(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// Two live claims for the same target via different uplinks.
-	upsertClaim(t, tbl, "id-target", "id-uplink-good", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-dead", 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-good"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-dead"), 2, RouteSourceAnnouncement)
 
 	// Drive one pair into Dead.
-	tbl.ForceHealthForTest("id-target", "id-uplink-dead", HealthDead)
+	tbl.ForceHealthForTest(domaintest.ID("id-target"), domaintest.ID("id-uplink-dead"), HealthDead)
 
-	got := tbl.Announceable("peer-X")
+	got := tbl.Announceable(domaintest.ID("peer-X"))
 	for _, entry := range got {
-		if entry.NextHop == "id-uplink-dead" {
+		if entry.NextHop == domaintest.ID("id-uplink-dead") {
 			t.Fatalf("Announceable returned the Dead claim: %+v (PR 11.23 P2: Dead pairs must be suppressed on the announce plane)", entry)
 		}
 	}
 	// The non-Dead claim must still be present.
 	foundGood := false
 	for _, entry := range got {
-		if entry.NextHop == "id-uplink-good" {
+		if entry.NextHop == domaintest.ID("id-uplink-good") {
 			foundGood = true
 			break
 		}
@@ -630,17 +633,17 @@ func TestAnnounceable_FiltersDeadPair(t *testing.T) {
 // claim won the live-winner pick.
 func TestAnnounceTo_FiltersDeadFromLiveWinner(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-dead", 1, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-alt", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-dead"), 1, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-alt"), 3, RouteSourceAnnouncement)
 
-	tbl.ForceHealthForTest("id-target", "id-uplink-dead", HealthDead)
+	tbl.ForceHealthForTest(domaintest.ID("id-target"), domaintest.ID("id-uplink-dead"), HealthDead)
 
-	got := tbl.AnnounceTo("peer-X")
+	got := tbl.AnnounceTo(domaintest.ID("peer-X"))
 	var targetEntries int
 	for _, entry := range got {
-		if entry.Identity != "id-target" {
+		if entry.Identity != domaintest.ID("id-target") {
 			continue
 		}
 		targetEntries++
@@ -667,22 +670,22 @@ func TestAnnounceTo_FiltersDeadFromLiveWinner(t *testing.T) {
 // traffic", not "route is gone".
 func TestAnnounceTo_DirectClaimExemptFromDeadFilter(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
 	// AddDirectPeer is the production path for own-origin direct
 	// claims (Hops=1, NextHop==Identity, ExpiresAt=zero).
-	if _, err := tbl.AddDirectPeer("id-peer-direct"); err != nil {
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-peer-direct")); err != nil {
 		t.Fatalf("setup: AddDirectPeer failed: %v", err)
 	}
 	// Force the Direct pair to Dead in the health store. Pure
 	// pathological state — production direct peers shouldn't age
 	// to Dead because session-disconnect drives RemoveDirectPeer.
-	tbl.ForceHealthForTest("id-peer-direct", "id-peer-direct", HealthDead)
+	tbl.ForceHealthForTest(domaintest.ID("id-peer-direct"), domaintest.ID("id-peer-direct"), HealthDead)
 
-	got := tbl.AnnounceTo("peer-X")
+	got := tbl.AnnounceTo(domaintest.ID("peer-X"))
 	foundDirect := false
 	for _, entry := range got {
-		if entry.Identity == "id-peer-direct" && entry.Hops == 1 {
+		if entry.Identity == domaintest.ID("id-peer-direct") && entry.Hops == 1 {
 			foundDirect = true
 			break
 		}
@@ -702,17 +705,17 @@ func TestAnnounceTo_DirectClaimExemptFromDeadFilter(t *testing.T) {
 // hit the wire.
 func TestAnnounceTo_AllDeadEmitsNothing(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink-A", 2, RouteSourceAnnouncement)
-	upsertClaim(t, tbl, "id-target", "id-uplink-B", 3, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), 2, RouteSourceAnnouncement)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), 3, RouteSourceAnnouncement)
 
-	tbl.ForceHealthForTest("id-target", "id-uplink-A", HealthDead)
-	tbl.ForceHealthForTest("id-target", "id-uplink-B", HealthDead)
+	tbl.ForceHealthForTest(domaintest.ID("id-target"), domaintest.ID("id-uplink-A"), HealthDead)
+	tbl.ForceHealthForTest(domaintest.ID("id-target"), domaintest.ID("id-uplink-B"), HealthDead)
 
-	got := tbl.AnnounceTo("peer-X")
+	got := tbl.AnnounceTo(domaintest.ID("peer-X"))
 	for _, entry := range got {
-		if entry.Identity == "id-target" {
+		if entry.Identity == domaintest.ID("id-target") {
 			t.Fatalf("all-Dead target produced wire entry: %+v (transit-tombstone fall-through should not emit)", entry)
 		}
 	}
@@ -722,10 +725,10 @@ func TestAnnounceTo_AllDeadEmitsNothing(t *testing.T) {
 // mutations do not leak into the live store.
 func TestHealthSnapshot_DeepCopy(t *testing.T) {
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl := NewTable(WithLocalOrigin("self"), WithClock(fixedClock(now)))
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(fixedClock(now)))
 
-	upsertClaim(t, tbl, "id-target", "id-uplink", 2, RouteSourceAnnouncement)
-	tbl.MarkHopAck("id-target", "id-uplink", 40*time.Millisecond)
+	upsertClaim(t, tbl, domaintest.ID("id-target"), domaintest.ID("id-uplink"), 2, RouteSourceAnnouncement)
+	tbl.MarkHopAck(domaintest.ID("id-target"), domaintest.ID("id-uplink"), 40*time.Millisecond)
 
 	snap := tbl.HealthSnapshot()
 	if len(snap) != 1 {
@@ -734,7 +737,7 @@ func TestHealthSnapshot_DeepCopy(t *testing.T) {
 	snap[0].RTT = 999 * time.Millisecond
 
 	tbl.mu.RLock()
-	live := tbl.health.getLocked("id-target", "id-uplink")
+	live := tbl.health.getLocked(domaintest.ID("id-target"), domaintest.ID("id-uplink"))
 	tbl.mu.RUnlock()
 	if live.RTT != 40*time.Millisecond {
 		t.Fatalf("snapshot mutation leaked into live store: RTT = %v, want 40ms", live.RTT)

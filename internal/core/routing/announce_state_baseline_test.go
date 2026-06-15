@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -25,7 +26,7 @@ import (
 func TestAnnouncePeerState_Baseline_DefaultFalse(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
 
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 	if state.HasReceivedBaseline() {
 		t.Fatalf("fresh AnnouncePeerState must have HasReceivedBaseline()==false")
 	}
@@ -41,7 +42,7 @@ func TestAnnouncePeerState_Baseline_DefaultFalse(t *testing.T) {
 // snapshot reflects the change atomically.
 func TestAnnouncePeerState_MarkBaselineReceived_FlipsFlag(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 
 	state.MarkBaselineReceived()
 
@@ -66,13 +67,13 @@ func TestAnnouncePeerState_MarkBaselineReceived_FlipsFlag(t *testing.T) {
 // become indistinguishable from a fresh session at the v2 receive gate.
 func TestAnnounceStateRegistry_MarkDisconnected_ResetsBaseline(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 	state.MarkBaselineReceived()
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("precondition: flag must be true before disconnect")
 	}
 
-	registry.MarkDisconnected("peer-A")
+	registry.MarkDisconnected(domaintest.ID("peer-A"))
 
 	if state.HasReceivedBaseline() {
 		t.Fatalf("MarkDisconnected must reset HasReceivedBaseline() to false")
@@ -87,7 +88,7 @@ func TestAnnounceStateRegistry_MarkDisconnected_ResetsBaseline(t *testing.T) {
 // pass the gate with no baseline ever delivered in this session.
 func TestAnnounceStateRegistry_MarkReconnected_ResetsBaseline_OnExistingState(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 	state.MarkBaselineReceived()
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("precondition: flag must be true before MarkReconnected")
@@ -95,7 +96,7 @@ func TestAnnounceStateRegistry_MarkReconnected_ResetsBaseline_OnExistingState(t 
 
 	// Reconnect without a prior MarkDisconnected — simulating a teardown
 	// path that lost the disconnect hook.
-	registry.MarkReconnected("peer-A", []routing.PeerCapability{domain.CapMeshRoutingV1})
+	registry.MarkReconnected(domaintest.ID("peer-A"), []routing.PeerCapability{domain.CapMeshRoutingV1})
 
 	if state.HasReceivedBaseline() {
 		t.Fatalf("MarkReconnected must reset HasReceivedBaseline() to false on existing state")
@@ -108,12 +109,12 @@ func TestAnnounceStateRegistry_MarkReconnected_ResetsBaseline_OnExistingState(t 
 func TestAnnounceStateRegistry_MarkReconnected_FreshState_NoBaseline(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
 
-	registry.MarkReconnected("peer-A", []routing.PeerCapability{
+	registry.MarkReconnected(domaintest.ID("peer-A"), []routing.PeerCapability{
 		domain.CapMeshRoutingV1,
 		domain.CapMeshRoutingV2,
 	})
 
-	state := registry.Get("peer-A")
+	state := registry.Get(domaintest.ID("peer-A"))
 	if state == nil {
 		t.Fatalf("MarkReconnected must materialise the per-peer state")
 	}
@@ -153,7 +154,7 @@ func TestAnnounceStateRegistry_MarkReconnected_FreshState_NoBaseline(t *testing.
 func TestAnnouncePeerState_Baseline_SurvivesRecordCalls(t *testing.T) {
 	now := time.Now()
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Baseline starts false; Record* calls must keep it that way.
 	state.RecordFullSyncAttempt(now)
@@ -204,7 +205,7 @@ func TestAnnouncePeerState_Baseline_SurvivesRecordCalls(t *testing.T) {
 func TestAnnouncePeerState_WireBaselineSent_DefaultFalse(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
 
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 	if state.HasSentWireBaseline() {
 		t.Fatalf("fresh AnnouncePeerState must have HasSentWireBaseline()==false")
 	}
@@ -219,7 +220,7 @@ func TestAnnouncePeerState_WireBaselineSent_DefaultFalse(t *testing.T) {
 // subsequent calls.
 func TestAnnouncePeerState_MarkWireBaselineSent_FlipsFlag(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 
 	state.MarkWireBaselineSent()
 
@@ -245,13 +246,13 @@ func TestAnnouncePeerState_MarkWireBaselineSent_FlipsFlag(t *testing.T) {
 // peer would drop the v2 frame and emit request_resync.
 func TestAnnounceStateRegistry_MarkDisconnected_ResetsWireBaseline(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 	state.MarkWireBaselineSent()
 	if !state.HasSentWireBaseline() {
 		t.Fatalf("precondition: flag must be true before disconnect")
 	}
 
-	registry.MarkDisconnected("peer-A")
+	registry.MarkDisconnected(domaintest.ID("peer-A"))
 
 	if state.HasSentWireBaseline() {
 		t.Fatalf("MarkDisconnected must reset HasSentWireBaseline() to false")
@@ -267,13 +268,13 @@ func TestAnnounceStateRegistry_MarkDisconnected_ResetsWireBaseline(t *testing.T)
 // not received any baseline frame in the new session.
 func TestAnnounceStateRegistry_MarkReconnected_ResetsWireBaseline_OnExistingState(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 	state.MarkWireBaselineSent()
 	if !state.HasSentWireBaseline() {
 		t.Fatalf("precondition: flag must be true before MarkReconnected")
 	}
 
-	registry.MarkReconnected("peer-A", []routing.PeerCapability{domain.CapMeshRoutingV1})
+	registry.MarkReconnected(domaintest.ID("peer-A"), []routing.PeerCapability{domain.CapMeshRoutingV1})
 
 	if state.HasSentWireBaseline() {
 		t.Fatalf("MarkReconnected must reset HasSentWireBaseline() to false on existing state")
@@ -288,12 +289,12 @@ func TestAnnounceStateRegistry_MarkReconnected_ResetsWireBaseline_OnExistingStat
 func TestAnnounceStateRegistry_MarkReconnected_FreshState_NoWireBaseline(t *testing.T) {
 	registry := routing.NewAnnounceStateRegistry()
 
-	registry.MarkReconnected("peer-A", []routing.PeerCapability{
+	registry.MarkReconnected(domaintest.ID("peer-A"), []routing.PeerCapability{
 		domain.CapMeshRoutingV1,
 		domain.CapMeshRoutingV2,
 	})
 
-	state := registry.Get("peer-A")
+	state := registry.Get(domaintest.ID("peer-A"))
 	if state == nil {
 		t.Fatalf("MarkReconnected must materialise the per-peer state")
 	}
@@ -321,7 +322,7 @@ func TestAnnounceStateRegistry_MarkReconnected_FreshState_NoWireBaseline(t *test
 func TestAnnouncePeerState_WireBaseline_SurvivesRecordCalls(t *testing.T) {
 	now := time.Now()
 	registry := routing.NewAnnounceStateRegistry()
-	state := registry.GetOrCreate("peer-A")
+	state := registry.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Default false; Record* calls must keep it that way.
 	state.RecordFullSyncAttempt(now)

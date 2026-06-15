@@ -139,7 +139,7 @@ func TestDisableDMKeepsTransitDM(t *testing.T) {
 	sealed, err := directmsg.EncryptForParticipants(
 		from,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(to.Address),
+			Address:      domain.PeerIdentityFromWire(to.Address),
 			BoxKeyBase64: identity.BoxPublicKeyBase64(to.BoxPublicKey),
 		},
 		domain.OutgoingDM{Body: "transit"},

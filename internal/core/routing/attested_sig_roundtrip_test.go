@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // attested_sig_roundtrip_test.go pins the Phase 4 13.2-A storage
@@ -16,9 +18,9 @@ import (
 func TestToUplinkClaim_PreservesAttestedSig(t *testing.T) {
 	sig := []byte{0x01, 0x02, 0x03, 0x04}
 	entry := RouteEntry{
-		Identity:    PeerIdentity("aa00000000000000000000000000000000000001"),
-		Origin:      PeerIdentity("bb00000000000000000000000000000000000002"),
-		NextHop:     PeerIdentity("bb00000000000000000000000000000000000002"),
+		Identity:    domaintest.ID("aa00000000000000000000000000000000000001"),
+		Origin:      domaintest.ID("bb00000000000000000000000000000000000002"),
+		NextHop:     domaintest.ID("bb00000000000000000000000000000000000002"),
 		Hops:        2,
 		SeqNo:       7,
 		Source:      RouteSourceAnnouncement,
@@ -33,15 +35,15 @@ func TestToUplinkClaim_PreservesAttestedSig(t *testing.T) {
 func TestToRouteEntry_PreservesAttestedSig(t *testing.T) {
 	sig := []byte{0x05, 0x06, 0x07}
 	claim := UplinkClaim{
-		Uplink:      PeerIdentity("bb00000000000000000000000000000000000002"),
+		Uplink:      domaintest.ID("bb00000000000000000000000000000000000002"),
 		Hops:        2,
 		SeqNo:       7,
 		Source:      RouteSourceAnnouncement,
 		AttestedSig: sig,
 	}
 	got := toRouteEntry(
-		PeerIdentity("aa00000000000000000000000000000000000001"),
-		PeerIdentity("cc00000000000000000000000000000000000003"),
+		domaintest.ID("aa00000000000000000000000000000000000001"),
+		domaintest.ID("cc00000000000000000000000000000000000003"),
 		claim,
 	)
 	if !bytes.Equal(got.AttestedSig, sig) {
@@ -52,9 +54,9 @@ func TestToRouteEntry_PreservesAttestedSig(t *testing.T) {
 func TestRouteEntry_ToAnnounceEntry_PreservesAttestedSig(t *testing.T) {
 	sig := []byte{0xde, 0xad, 0xbe, 0xef}
 	e := RouteEntry{
-		Identity:    PeerIdentity("aa00000000000000000000000000000000000001"),
-		Origin:      PeerIdentity("bb00000000000000000000000000000000000002"),
-		NextHop:     PeerIdentity("bb00000000000000000000000000000000000002"),
+		Identity:    domaintest.ID("aa00000000000000000000000000000000000001"),
+		Origin:      domaintest.ID("bb00000000000000000000000000000000000002"),
+		NextHop:     domaintest.ID("bb00000000000000000000000000000000000002"),
 		Hops:        1,
 		SeqNo:       3,
 		Source:      RouteSourceAnnouncement,
@@ -70,9 +72,9 @@ func TestToUplinkClaim_NilAttestedSigStaysNil(t *testing.T) {
 	// Legacy v1/v2 ingest paths produce RouteEntry with no AttestedSig.
 	// Storage must not synthesise a non-nil slice (allocation waste).
 	entry := RouteEntry{
-		Identity: PeerIdentity("aa00000000000000000000000000000000000001"),
-		Origin:   PeerIdentity("bb00000000000000000000000000000000000002"),
-		NextHop:  PeerIdentity("bb00000000000000000000000000000000000002"),
+		Identity: domaintest.ID("aa00000000000000000000000000000000000001"),
+		Origin:   domaintest.ID("bb00000000000000000000000000000000000002"),
+		NextHop:  domaintest.ID("bb00000000000000000000000000000000000002"),
 		Hops:     1,
 		SeqNo:    1,
 		Source:   RouteSourceAnnouncement,

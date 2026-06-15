@@ -3,6 +3,8 @@ package protocol
 import (
 	"strings"
 	"testing"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // TestRouteProbeFrame_MarshalUnmarshalRoundTrip — Marshal+Unmarshal
@@ -12,7 +14,7 @@ func TestRouteProbeFrame_MarshalUnmarshalRoundTrip(t *testing.T) {
 	orig := RouteProbeFrame{
 		Type:           RouteProbeFrameType,
 		ProbeID:        12345678,
-		TargetIdentity: "alice-fp",
+		TargetIdentity: domaintest.ID("alice-fp"),
 	}
 	data, err := MarshalRouteProbeFrame(orig)
 	if err != nil {
@@ -31,7 +33,7 @@ func TestRouteProbeFrame_MarshalUnmarshalRoundTrip(t *testing.T) {
 // forgets to set Type explicitly must still produce a valid frame
 // because Marshal auto-fills the canonical type string.
 func TestRouteProbeFrame_MarshalSetsTypeWhenEmpty(t *testing.T) {
-	orig := RouteProbeFrame{ProbeID: 1, TargetIdentity: "x"}
+	orig := RouteProbeFrame{ProbeID: 1, TargetIdentity: domaintest.ID("x")}
 	data, err := MarshalRouteProbeFrame(orig)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -148,7 +150,7 @@ func TestRouteProbeFrame_ZeroProbeIDAllowed(t *testing.T) {
 	orig := RouteProbeFrame{
 		Type:           RouteProbeFrameType,
 		ProbeID:        0,
-		TargetIdentity: "x",
+		TargetIdentity: domaintest.ID("x"),
 	}
 	data, err := MarshalRouteProbeFrame(orig)
 	if err != nil {

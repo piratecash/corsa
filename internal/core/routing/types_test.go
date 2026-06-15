@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 func TestRouteSourceString(t *testing.T) {
@@ -63,9 +65,9 @@ func TestRouteEntryIsExpired(t *testing.T) {
 }
 
 func TestDedupKey(t *testing.T) {
-	r := RouteEntry{Identity: "alice", Origin: "bob", NextHop: "charlie"}
+	r := RouteEntry{Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie")}
 	key := r.DedupKey()
-	if key.Identity != "alice" || key.Origin != "bob" || key.NextHop != "charlie" {
+	if key.Identity != domaintest.ID("alice") || key.Origin != domaintest.ID("bob") || key.NextHop != domaintest.ID("charlie") {
 		t.Fatalf("unexpected dedup key: %+v", key)
 	}
 }
@@ -76,19 +78,19 @@ func TestSnapshotBestRoute(t *testing.T) {
 	snap := Snapshot{
 		TakenAt: now,
 		Routes: map[PeerIdentity][]RouteEntry{
-			"alice": {
-				{Identity: "alice", Origin: "x", NextHop: "n1", Hops: 3, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)},
-				{Identity: "alice", Origin: "y", NextHop: "n2", Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
-				{Identity: "alice", Origin: "z", NextHop: "n3", Hops: HopsInfinity, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
+			domaintest.ID("alice"): {
+				{Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("n1"), Hops: 3, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)},
+				{Identity: domaintest.ID("alice"), Origin: domaintest.ID("y"), NextHop: domaintest.ID("n2"), Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
+				{Identity: domaintest.ID("alice"), Origin: domaintest.ID("z"), NextHop: domaintest.ID("n3"), Hops: HopsInfinity, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
 			},
 		},
 	}
 
-	best := snap.BestRoute("alice")
+	best := snap.BestRoute(domaintest.ID("alice"))
 	if best == nil {
 		t.Fatal("expected a best route")
 	}
-	if best.Hops != 1 || best.NextHop != "n2" {
+	if best.Hops != 1 || best.NextHop != domaintest.ID("n2") {
 		t.Fatalf("expected 1-hop route via n2, got hops=%d via %s", best.Hops, best.NextHop)
 	}
 }
@@ -99,14 +101,14 @@ func TestSnapshotBestRoutePrefersTrustOverHops(t *testing.T) {
 	snap := Snapshot{
 		TakenAt: now,
 		Routes: map[PeerIdentity][]RouteEntry{
-			"alice": {
-				{Identity: "alice", Origin: "x", NextHop: "n1", Hops: 1, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)},
-				{Identity: "alice", Origin: "y", NextHop: "alice", Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
+			domaintest.ID("alice"): {
+				{Identity: domaintest.ID("alice"), Origin: domaintest.ID("x"), NextHop: domaintest.ID("n1"), Hops: 1, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)},
+				{Identity: domaintest.ID("alice"), Origin: domaintest.ID("y"), NextHop: domaintest.ID("alice"), Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
 			},
 		},
 	}
 
-	best := snap.BestRoute("alice")
+	best := snap.BestRoute(domaintest.ID("alice"))
 	if best == nil {
 		t.Fatal("expected a best route")
 	}
@@ -121,13 +123,13 @@ func TestSnapshotBestRouteSkipsExpired(t *testing.T) {
 	snap := Snapshot{
 		TakenAt: now,
 		Routes: map[PeerIdentity][]RouteEntry{
-			"bob": {
-				{Identity: "bob", Hops: 1, ExpiresAt: now.Add(-time.Second)},
+			domaintest.ID("bob"): {
+				{Identity: domaintest.ID("bob"), Hops: 1, ExpiresAt: now.Add(-time.Second)},
 			},
 		},
 	}
 
-	if snap.BestRoute("bob") != nil {
+	if snap.BestRoute(domaintest.ID("bob")) != nil {
 		t.Fatal("expired route should not be returned as best")
 	}
 }
@@ -137,7 +139,7 @@ func TestSnapshotBestRouteNone(t *testing.T) {
 		TakenAt: time.Now(),
 		Routes:  map[PeerIdentity][]RouteEntry{},
 	}
-	if snap.BestRoute("unknown") != nil {
+	if snap.BestRoute(domaintest.ID("unknown")) != nil {
 		t.Fatal("unknown identity should return nil")
 	}
 }
@@ -146,7 +148,7 @@ func TestSnapshotBestRouteNone(t *testing.T) {
 
 func TestValidateRejectsDirectWithWrongHops(t *testing.T) {
 	e := RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 3, Source: RouteSourceDirect,
 	}
 	if err := e.Validate(); err != ErrDirectHopsMust1 {
@@ -156,7 +158,7 @@ func TestValidateRejectsDirectWithWrongHops(t *testing.T) {
 
 func TestValidateRejectsDirectWithWrongNextHop(t *testing.T) {
 	e := RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "bob",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("bob"),
 		Hops: 1, Source: RouteSourceDirect,
 	}
 	if err := e.Validate(); err != ErrDirectNextHop {
@@ -166,7 +168,7 @@ func TestValidateRejectsDirectWithWrongNextHop(t *testing.T) {
 
 func TestValidateAcceptsWellFormedDirect(t *testing.T) {
 	e := RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, Source: RouteSourceDirect,
 	}
 	if err := e.Validate(); err != nil {
@@ -176,7 +178,7 @@ func TestValidateAcceptsWellFormedDirect(t *testing.T) {
 
 func TestValidateAcceptsAnnouncement(t *testing.T) {
 	e := RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 3, Source: RouteSourceAnnouncement,
 	}
 	if err := e.Validate(); err != nil {
@@ -188,21 +190,21 @@ func TestValidateAcceptsAnnouncement(t *testing.T) {
 
 func TestToAnnounceEntryPreservesHops(t *testing.T) {
 	e := RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
 	}
 	a := e.ToAnnounceEntry()
 	if a.Hops != 2 {
 		t.Fatalf("wire should carry sender's local hops as-is: expected 2, got %d", a.Hops)
 	}
-	if a.Identity != "alice" || a.Origin != "bob" || a.SeqNo != 7 {
+	if a.Identity != domaintest.ID("alice") || a.Origin != domaintest.ID("bob") || a.SeqNo != 7 {
 		t.Fatal("wire fields should be preserved")
 	}
 }
 
 func TestToAnnounceEntryWithdrawalPassthrough(t *testing.T) {
 	e := RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "charlie",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
 		Hops: HopsInfinity, SeqNo: 10, Source: RouteSourceAnnouncement,
 	}
 	a := e.ToAnnounceEntry()
@@ -213,7 +215,7 @@ func TestToAnnounceEntryWithdrawalPassthrough(t *testing.T) {
 
 func TestToAnnounceEntryDirectRouteHops1OnWire(t *testing.T) {
 	e := RouteEntry{
-		Identity: "alice", Origin: "me", NextHop: "alice",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("me"), NextHop: domaintest.ID("alice"),
 		Hops: 1, SeqNo: 1, Source: RouteSourceDirect,
 	}
 	a := e.ToAnnounceEntry()

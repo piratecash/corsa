@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -47,13 +48,13 @@ func TestQuarantineReasonInvalidatesTransit(t *testing.T) {
 // survived.
 func seedTransitClaim(t *testing.T, peer routing.PeerIdentity) *routing.Table {
 	t.Helper()
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	if _, err := table.AddDirectPeer(peer); err != nil {
 		t.Fatalf("AddDirectPeer(%q): %v", peer, err)
 	}
 	status, err := table.UpdateRoute(routing.RouteEntry{
-		Identity:  "target-X",
-		Origin:    "target-X",
+		Identity:  domaintest.ID("target-X"),
+		Origin:    domaintest.ID("target-X"),
 		NextHop:   peer,
 		Hops:      2,
 		SeqNo:     1,
@@ -64,9 +65,9 @@ func seedTransitClaim(t *testing.T, peer routing.PeerIdentity) *routing.Table {
 		t.Fatalf("seed transit claim: status=%v err=%v", status, err)
 	}
 	// Sanity: the transit claim is live before any quarantine.
-	if len(table.Lookup("target-X")) != 1 {
+	if len(table.Lookup(domaintest.ID("target-X"))) != 1 {
 		t.Fatalf("precondition: seeded transit claim must be live, got %d routes",
-			len(table.Lookup("target-X")))
+			len(table.Lookup(domaintest.ID("target-X"))))
 	}
 	return table
 }
@@ -74,7 +75,7 @@ func seedTransitClaim(t *testing.T, peer routing.PeerIdentity) *routing.Table {
 // transitLive reports whether target-X still resolves to a usable
 // (non-withdrawn) transit route via peer.
 func transitLive(table *routing.Table, peer routing.PeerIdentity) bool {
-	for _, r := range table.Lookup("target-X") {
+	for _, r := range table.Lookup(domaintest.ID("target-X")) {
 		if r.NextHop == peer {
 			return true
 		}
@@ -90,7 +91,7 @@ func transitLive(table *routing.Table, peer routing.PeerIdentity) bool {
 func TestChattyQuarantineDoesNotInvalidateTransit(t *testing.T) {
 	t.Parallel()
 
-	peer := routing.PeerIdentity("peer-B")
+	peer := domaintest.ID("peer-B")
 	table := seedTransitClaim(t, peer)
 
 	svc := &Service{
@@ -100,10 +101,10 @@ func TestChattyQuarantineDoesNotInvalidateTransit(t *testing.T) {
 	}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer), quarantineReasonChattyRoutes, time.Now())
+	svc.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, time.Now())
 	svc.peerMu.Unlock()
 
-	if !svc.isPeerInRouteQuarantineLocked(domain.PeerIdentity(peer), time.Now().Add(time.Second)) {
+	if !svc.isPeerInRouteQuarantineLocked(peer, time.Now().Add(time.Second)) {
 		t.Fatal("peer should be quarantined after chatty arm")
 	}
 	if !transitLive(table, peer) {
@@ -118,7 +119,7 @@ func TestChattyQuarantineDoesNotInvalidateTransit(t *testing.T) {
 func TestDisconnectStormQuarantineInvalidatesTransit(t *testing.T) {
 	t.Parallel()
 
-	peer := routing.PeerIdentity("peer-B")
+	peer := domaintest.ID("peer-B")
 	table := seedTransitClaim(t, peer)
 
 	svc := &Service{
@@ -128,7 +129,7 @@ func TestDisconnectStormQuarantineInvalidatesTransit(t *testing.T) {
 	}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer), quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	if transitLive(table, peer) {
@@ -146,7 +147,7 @@ func TestDisconnectStormQuarantineInvalidatesTransit(t *testing.T) {
 func TestChattyQuarantineKeepsPeerUsableAsTransit(t *testing.T) {
 	t.Parallel()
 
-	peer := domain.PeerIdentity("peer-B")
+	peer := domaintest.ID("peer-B")
 	svc := &Service{
 		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
@@ -176,7 +177,7 @@ func TestChattyQuarantineKeepsPeerUsableAsTransit(t *testing.T) {
 func TestDisconnectStormQuarantineBlocksTransitSelection(t *testing.T) {
 	t.Parallel()
 
-	peer := domain.PeerIdentity("peer-B")
+	peer := domaintest.ID("peer-B")
 	svc := &Service{
 		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
@@ -206,7 +207,7 @@ func TestDisconnectStormQuarantineBlocksTransitSelection(t *testing.T) {
 func TestChattyToInstabilityEscalationInvalidatesTransit(t *testing.T) {
 	t.Parallel()
 
-	peer := routing.PeerIdentity("peer-B")
+	peer := domaintest.ID("peer-B")
 	table := seedTransitClaim(t, peer)
 
 	svc := &Service{
@@ -217,7 +218,7 @@ func TestChattyToInstabilityEscalationInvalidatesTransit(t *testing.T) {
 
 	// 1) chatty arm: transit must survive.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer), quarantineReasonChattyRoutes, time.Now())
+	svc.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, time.Now())
 	svc.peerMu.Unlock()
 	if !transitLive(table, peer) {
 		t.Fatal("precondition: chatty arm must leave transit live")
@@ -225,7 +226,7 @@ func TestChattyToInstabilityEscalationInvalidatesTransit(t *testing.T) {
 
 	// 2) escalate to disconnect_storm: transit must now be invalidated.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentity(peer), quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 	if transitLive(table, peer) {
 		t.Fatal("escalation chatty_routes→disconnect_storm must tombstone stale transit")
@@ -241,7 +242,7 @@ func TestChattyToInstabilityEscalationInvalidatesTransit(t *testing.T) {
 func TestInstabilityReasonNotDowngradedByChattyRearm(t *testing.T) {
 	t.Parallel()
 
-	peer := domain.PeerIdentity("peer-B")
+	peer := domaintest.ID("peer-B")
 	svc := &Service{
 		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
 		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},

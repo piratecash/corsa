@@ -821,7 +821,7 @@ func (r *DMRouter) BeginConversationDelete(peer domain.PeerIdentity) (domain.Con
 		return "", fmt.Errorf("DMRouter has no client")
 	}
 	peer = normalizePeer(peer)
-	if peer == "" {
+	if peer.IsZero() {
 		return "", fmt.Errorf("peer is required")
 	}
 	if r.client.chatlog.Store() == nil {
@@ -835,7 +835,7 @@ func (r *DMRouter) BeginConversationDelete(peer domain.PeerIdentity) (domain.Con
 	// throw away on a duplicate click.
 	if r.convDeleteRetry.has(peer) {
 		log.Debug().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: BeginConversationDelete: wipe already in-flight (cheap pre-check); ignoring duplicate request")
 		return "", nil
 	}
@@ -877,7 +877,7 @@ func (r *DMRouter) BeginConversationDelete(peer domain.PeerIdentity) (domain.Con
 	})
 	if !added {
 		log.Debug().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: BeginConversationDelete: wipe already in-flight for this peer; ignoring duplicate request")
 		return "", nil
 	}
@@ -961,7 +961,7 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 		return fmt.Errorf("DMRouter has no client")
 	}
 	peer = normalizePeer(peer)
-	if peer == "" {
+	if peer.IsZero() {
 		return fmt.Errorf("peer is required")
 	}
 	if requestID == "" {
@@ -986,7 +986,7 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 	// nothing was sent under this requestID.
 	if !r.convDeleteRetry.claimForCompletion(peer, requestID, time.Now().UTC()) {
 		log.Warn().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Str("request_id", string(requestID)).
 			Msg("dm_router: CompleteConversationDelete: reservation gone at claim (TTL reaper raced the goroutine startup); abandoning dispatch")
 		return ErrConversationDeleteReservationLost
@@ -1033,7 +1033,7 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 	case <-drainCtx.Done():
 		cancelDrain()
 		log.Warn().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Str("request_id", string(requestID)).
 			Err(drainCtx.Err()).
 			Msg("dm_router: CompleteConversationDelete: inflight send drain timed out; dropping reservation to avoid snapshot inconsistency")
@@ -1098,7 +1098,7 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 	// no wire command has gone out under this requestID.
 	if !r.convDeleteRetry.attachLocalKnownIDs(peer, requestID, localKnownIDs, time.Now().UTC()) {
 		log.Warn().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Str("request_id", string(requestID)).
 			Msg("dm_router: CompleteConversationDelete: reservation gone before snapshot attach; abandoning dispatch")
 		return ErrConversationDeleteReservationLost
@@ -1112,13 +1112,13 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 		// status applied) or an abandonment once the budget is
 		// exhausted.
 		log.Warn().Err(err).
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: CompleteConversationDelete: initial wire send failed; retry pending")
 		return nil
 	}
 
 	log.Info().
-		Str("peer", string(peer)).
+		Str("peer", peer.String()).
 		Msg("dm_router: conversation_delete dispatched; awaiting peer ack before local wipe")
 	return nil
 }
@@ -1189,7 +1189,7 @@ func (r *DMRouter) applyLocalConversationWipe(peer domain.PeerIdentity, localKno
 	store := r.client.chatlog.Store()
 	if store == nil {
 		log.Warn().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: applyLocalConversationWipe: chatlog store unavailable; cannot mirror peer wipe locally")
 		return 0, false
 	}
@@ -1207,7 +1207,7 @@ func (r *DMRouter) applyLocalConversationWipe(peer domain.PeerIdentity, localKno
 	entries, err := store.ReadCtx(ctx, "dm", peer)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Msg("dm_router: applyLocalConversationWipe: chatlog read failed; cannot mirror peer wipe locally")
 		return 0, false
 	}
@@ -1253,7 +1253,7 @@ func (r *DMRouter) applyLocalConversationWipe(peer domain.PeerIdentity, localKno
 			failures++
 			log.Warn().Err(err).
 				Str("target", string(id)).
-				Str("peer", string(peer)).
+				Str("peer", peer.String()).
 				Msg("dm_router: applyLocalConversationWipe: chatlog DeleteByID failed for row; continuing but will report local cleanup failure")
 			continue
 		}
@@ -1277,7 +1277,7 @@ func (r *DMRouter) applyLocalConversationWipe(peer domain.PeerIdentity, localKno
 
 	if failures > 0 {
 		log.Warn().
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Int("deleted", deleted).
 			Int("failures", failures).
 			Msg("dm_router: local conversation wipe partial failure after peer ack; outcome will carry LocalCleanupFailed=true")
@@ -1285,7 +1285,7 @@ func (r *DMRouter) applyLocalConversationWipe(peer domain.PeerIdentity, localKno
 	}
 
 	log.Info().
-		Str("peer", string(peer)).
+		Str("peer", peer.String()).
 		Int("deleted", deleted).
 		Msg("dm_router: local conversation wipe mirrored after peer ack")
 
@@ -1462,13 +1462,13 @@ func (r *DMRouter) handleInboundConversationDelete(envelopeSender domain.PeerIde
 	var payload domain.ConversationDeletePayload
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		log.Debug().Err(err).
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: conversation_delete payload malformed; dropping")
 		return
 	}
 	if !payload.Valid() {
 		log.Debug().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(payload.RequestID)).
 			Msg("dm_router: conversation_delete payload invalid; dropping")
 		return
@@ -1509,7 +1509,7 @@ func (r *DMRouter) handleInboundConversationDelete(envelopeSender domain.PeerIde
 		// same shared survivors map (a Go data race) and
 		// overwrite each other's cumulative-progress on commit.
 		log.Warn().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(payload.RequestID)).
 			Msg("dm_router: inbound conversation_delete — concurrent processor contention; replying Error/0 conservatively, sender will retry")
 		r.replyConversationDeleteAck(envelopeSender, payload.RequestID, domain.ConversationDeleteStatusError, 0)
@@ -1555,7 +1555,7 @@ func (r *DMRouter) handleInboundConversationDelete(envelopeSender domain.PeerIde
 		// resolves to Abandoned on its side, and the user can
 		// re-issue with a FRESH requestID for a real wipe.
 		ev := log.Warn().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(payload.RequestID))
 		if !seen.seenAt.IsZero() {
 			ev = ev.Dur("entry_age", now.Sub(seen.seenAt))
@@ -1594,7 +1594,7 @@ func (r *DMRouter) replyInboundConversationDeleteFromSeen(envelopeSender domain.
 	}
 	r.inboundConvDeleteSeen.record(envelopeSender, requestID, seen.status, seen.cumulativeDeleted, seen.gatheredScope, now)
 	log.Debug().
-		Str("envelope_sender", string(envelopeSender)).
+		Str("envelope_sender", envelopeSender.String()).
 		Str("request_id", string(requestID)).
 		Str("seen_status", string(seen.status)).
 		Int("seen_cumulative", seen.cumulativeDeleted).
@@ -1631,7 +1631,7 @@ func (r *DMRouter) replyInboundConversationDeleteFromSeen(envelopeSender domain.
 func (r *DMRouter) processInboundConversationDeleteReplay(envelopeSender domain.PeerIdentity, requestID domain.ConversationDeleteRequestID, entry inboundConversationDeleteCacheEntry, now time.Time) {
 	if !entry.gatheredScope {
 		log.Debug().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(requestID)).
 			Msg("dm_router: inbound conversation_delete retry — gather-failed tombstone hit; replying Error/0 without re-attempting gather")
 		// Refresh the seen-set anchor so the tombstone keeps
@@ -1644,7 +1644,7 @@ func (r *DMRouter) processInboundConversationDeleteReplay(envelopeSender domain.
 	}
 	if len(entry.survivors) == 0 {
 		log.Debug().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(requestID)).
 			Str("cached_status", string(entry.lastStatus)).
 			Int("cumulative_deleted", entry.cumulativeDeleted).
@@ -1689,7 +1689,7 @@ func (r *DMRouter) processInboundConversationDeleteReplay(envelopeSender domain.
 	deletedThisAttempt, newSurvivors := r.sweepInboundDeleteScope(envelopeSender, requestID, entry.survivors)
 	status, finalCumulative := r.inboundConvDeleteCache.commitReplayResult(envelopeSender, requestID, newSurvivors, r.inboundConvDeleteSeen, now)
 	log.Info().
-		Str("envelope_sender", string(envelopeSender)).
+		Str("envelope_sender", envelopeSender.String()).
 		Str("request_id", string(requestID)).
 		Str("status", string(status)).
 		Int("deleted_this_attempt", deletedThisAttempt).
@@ -1731,7 +1731,7 @@ func (r *DMRouter) processInboundConversationDeleteFreshGather(envelopeSender do
 		r.inboundConvDeleteCache.put(envelopeSender, requestID, nil, nil, domain.ConversationDeleteStatusError, 0, false, now)
 		r.inboundConvDeleteSeen.record(envelopeSender, requestID, domain.ConversationDeleteStatusError, 0, false, now)
 		log.Warn().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(requestID)).
 			Msg("dm_router: inbound conversation_delete first apply — chatlog gather failed; planting gather-failed tombstone (gatheredScope=false)")
 		r.replyConversationDeleteAck(envelopeSender, requestID, domain.ConversationDeleteStatusError, 0)
@@ -1752,7 +1752,7 @@ func (r *DMRouter) processInboundConversationDeleteFreshGather(envelopeSender do
 		r.inboundConvDeleteCache.put(envelopeSender, requestID, candidates, nil, domain.ConversationDeleteStatusApplied, 0, true, now)
 		r.inboundConvDeleteSeen.record(envelopeSender, requestID, domain.ConversationDeleteStatusApplied, 0, true, now)
 		log.Info().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(requestID)).
 			Msg("dm_router: applied inbound conversation_delete (empty conversation); cached for retry replay")
 		r.replyConversationDeleteAck(envelopeSender, requestID, domain.ConversationDeleteStatusApplied, 0)
@@ -1793,7 +1793,7 @@ func (r *DMRouter) processInboundConversationDeleteFreshGather(envelopeSender do
 	// not computed from deletedThisAttempt.
 	status, finalCumulative := r.inboundConvDeleteCache.commitReplayResult(envelopeSender, requestID, survivors, r.inboundConvDeleteSeen, now)
 	log.Info().
-		Str("envelope_sender", string(envelopeSender)).
+		Str("envelope_sender", envelopeSender.String()).
 		Str("request_id", string(requestID)).
 		Str("status", string(status)).
 		Int("candidates", len(candidates)).
@@ -2952,7 +2952,7 @@ func (r *DMRouter) snapshotLocalKnownConversationIDs(ctx context.Context, peer d
 		// inclusion. An outbound row whose DeliveryStatus is
 		// empty is treated as "sent" (legacy rows that
 		// pre-date the receipt mechanism — safer to exclude).
-		if domain.PeerIdentity(e.Sender) == myAddr {
+		if domain.PeerIdentityFromWire(e.Sender) == myAddr {
 			if e.DeliveryStatus != chatlog.StatusDelivered && e.DeliveryStatus != chatlog.StatusSeen {
 				continue
 			}
@@ -2987,7 +2987,7 @@ func (r *DMRouter) gatherInboundDeleteCandidates(envelopeSender domain.PeerIdent
 	store := r.client.chatlog.Store()
 	if store == nil {
 		log.Warn().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: gatherInboundDeleteCandidates: chatlog store unavailable")
 		return nil, false
 	}
@@ -2996,7 +2996,7 @@ func (r *DMRouter) gatherInboundDeleteCandidates(envelopeSender domain.PeerIdent
 	entries, err := store.ReadCtx(ctx, "dm", envelopeSender)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: gatherInboundDeleteCandidates: chatlog read failed")
 		return nil, false
 	}
@@ -3059,7 +3059,7 @@ func (r *DMRouter) sweepInboundDeleteScope(envelopeSender domain.PeerIdentity, r
 	store := r.client.chatlog.Store()
 	if store == nil {
 		log.Warn().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: sweepInboundDeleteScope: chatlog store unavailable; every candidate becomes a survivor for retry")
 		for id := range scope {
 			survivors[id] = struct{}{}
@@ -3082,7 +3082,7 @@ func (r *DMRouter) sweepInboundDeleteScope(envelopeSender domain.PeerIdentity, r
 			survivors[id] = struct{}{}
 			log.Warn().Err(err).
 				Str("target", string(id)).
-				Str("envelope_sender", string(envelopeSender)).
+				Str("envelope_sender", envelopeSender.String()).
 				Msg("dm_router: sweepInboundDeleteScope: chatlog DeleteByID failed for row; staying in survivors for next retry")
 			continue
 		}
@@ -3147,7 +3147,7 @@ func (r *DMRouter) replyConversationDeleteAck(peer domain.PeerIdentity, requestI
 	})
 	if err != nil {
 		log.Warn().Err(err).
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Str("request_id", string(requestID)).
 			Msg("dm_router: marshal conversation_delete_ack failed")
 		return
@@ -3156,7 +3156,7 @@ func (r *DMRouter) replyConversationDeleteAck(peer domain.PeerIdentity, requestI
 	defer cancel()
 	if _, err := r.client.SendControlMessage(ctx, peer, domain.DMCommandConversationDeleteAck, payload); err != nil {
 		log.Warn().Err(err).
-			Str("peer", string(peer)).
+			Str("peer", peer.String()).
 			Str("request_id", string(requestID)).
 			Msg("dm_router: send conversation_delete_ack failed; requester will retry")
 	}
@@ -3193,13 +3193,13 @@ func (r *DMRouter) handleInboundConversationDeleteAck(envelopeSender domain.Peer
 	var ack domain.ConversationDeleteAckPayload
 	if err := json.Unmarshal([]byte(payloadJSON), &ack); err != nil {
 		log.Debug().Err(err).
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Msg("dm_router: conversation_delete_ack payload malformed; dropping")
 		return
 	}
 	if !ack.Valid() {
 		log.Debug().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("request_id", string(ack.RequestID)).
 			Str("status", string(ack.Status)).
 			Int("deleted", ack.Deleted).
@@ -3227,14 +3227,14 @@ func (r *DMRouter) handleInboundConversationDeleteAck(envelopeSender domain.Peer
 		pending, ok := r.convDeleteRetry.noteErrorIfMatch(envelopeSender, ack.RequestID)
 		if !ok {
 			log.Debug().
-				Str("envelope_sender", string(envelopeSender)).
+				Str("envelope_sender", envelopeSender.String()).
 				Str("ack_request_id", string(ack.RequestID)).
 				Str("status", string(ack.Status)).
 				Msg("dm_router: conversation_delete_ack dropped (error path) — no matching pending entry (unknown peer or requestID mismatch from an abandoned earlier wipe)")
 			return
 		}
 		log.Info().
-			Str("peer", string(envelopeSender)).
+			Str("peer", envelopeSender.String()).
 			Str("request_id", string(ack.RequestID)).
 			Str("status", string(ack.Status)).
 			Int("attempts", pending.attempt).
@@ -3248,7 +3248,7 @@ func (r *DMRouter) handleInboundConversationDeleteAck(envelopeSender domain.Peer
 	pending, ok := r.convDeleteRetry.removeIfMatch(envelopeSender, ack.RequestID)
 	if !ok {
 		log.Debug().
-			Str("envelope_sender", string(envelopeSender)).
+			Str("envelope_sender", envelopeSender.String()).
 			Str("ack_request_id", string(ack.RequestID)).
 			Str("status", string(ack.Status)).
 			Msg("dm_router: conversation_delete_ack dropped (success path) — no matching pending entry (unknown peer or requestID mismatch from an abandoned earlier wipe)")
@@ -3292,7 +3292,7 @@ func (r *DMRouter) handleInboundConversationDeleteAck(envelopeSender domain.Peer
 	deletedLocal, localOK := r.applyLocalConversationWipe(envelopeSender, pending.localKnownIDs)
 
 	log.Info().
-		Str("peer", string(envelopeSender)).
+		Str("peer", envelopeSender.String()).
 		Str("status", string(ack.Status)).
 		Int("deleted_remote", ack.Deleted).
 		Int("deleted_local", deletedLocal).
@@ -3407,7 +3407,7 @@ func (r *DMRouter) conversationDeleteRetryLoop(ctx context.Context) {
 func (r *DMRouter) processConversationDeleteRetryDue(ctx context.Context, now time.Time) {
 	for _, stranded := range r.convDeleteRetry.pruneStaleReservations(now, convDeleteReservationTTL) {
 		log.Warn().
-			Str("peer", string(stranded.peer)).
+			Str("peer", stranded.peer.String()).
 			Str("request_id", string(stranded.requestID)).
 			Dur("age", now.Sub(stranded.reservedAt)).
 			Msg("dm_router: conversation_delete reservation stranded past TTL (CompleteConversationDelete never ran); dropping to lift the outgoing barrier")
@@ -3431,7 +3431,7 @@ func (r *DMRouter) processConversationDeleteRetryDue(ctx context.Context, now ti
 	// went out would discard a successful round-trip.
 	for _, abandoned := range r.convDeleteRetry.pruneTerminalAckExpired(now, convDeleteTerminalAckGrace) {
 		log.Warn().
-			Str("peer", string(abandoned.peer)).
+			Str("peer", abandoned.peer.String()).
 			Str("request_id", string(abandoned.requestID)).
 			Int("attempts", abandoned.attempt).
 			Dur("ack_grace", now.Sub(abandoned.terminalAt)).
@@ -3452,7 +3452,7 @@ func (r *DMRouter) processConversationDeleteRetryDue(ctx context.Context, now ti
 		// intent-only; no scope to repeat.
 		if err := r.dispatchConversationDelete(ctx, entry.peer, entry.requestID); err != nil {
 			log.Debug().Err(err).
-				Str("peer", string(entry.peer)).
+				Str("peer", entry.peer.String()).
 				Str("request_id", string(entry.requestID)).
 				Int("attempt", entry.attempt+1).
 				Msg("dm_router: conversation_delete retry send failed; will count toward retry budget")
@@ -3475,14 +3475,14 @@ func (r *DMRouter) processConversationDeleteRetryDue(ctx context.Context, now ti
 		updated, terminal, matched := r.convDeleteRetry.recordAttemptIfMatch(entry.peer, entry.requestID, now)
 		if !matched {
 			log.Debug().
-				Str("peer", string(entry.peer)).
+				Str("peer", entry.peer.String()).
 				Str("request_id", string(entry.requestID)).
 				Msg("dm_router: conversation_delete retry bookkeeping skipped — pending entry was replaced or removed by a concurrent operation")
 			continue
 		}
 		if terminal {
 			log.Warn().
-				Str("peer", string(updated.peer)).
+				Str("peer", updated.peer.String()).
 				Str("request_id", string(updated.requestID)).
 				Int("attempts", updated.attempt).
 				Dur("ack_grace", convDeleteTerminalAckGrace).

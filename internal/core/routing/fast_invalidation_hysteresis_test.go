@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // Bad-hops hysteresis regression suite (fast-invalidation recidivism
@@ -23,7 +25,7 @@ func hysteresisFixture(opts ...TableOption) (*Table, *time.Time) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 	base := []TableOption{
 		WithClock(func() time.Time { return now }),
-		WithLocalOrigin("node-A"),
+		WithLocalOrigin(domaintest.ID("node-A")),
 		WithMaxSaneHops(8),
 	}
 	return NewTable(append(base, opts...)...), &now
@@ -34,7 +36,7 @@ func hysteresisFixture(opts ...TableOption) (*Table, *time.Time) {
 func ingestBadHops(t *testing.T, tbl *Table, dest, uplink PeerIdentity, seq uint64) RouteUpdateStatus {
 	t.Helper()
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 10, SeqNo: seq, Source: RouteSourceAnnouncement,
 	})
 	if err != nil {
@@ -51,7 +53,7 @@ func ingestBadHops(t *testing.T, tbl *Table, dest, uplink PeerIdentity, seq uint
 // counter (no storage mutation happened).
 func TestBadHopsHysteresis_ArmsAndDropsAfterBudget(t *testing.T) {
 	tbl, _ := hysteresisFixture()
-	const dest, uplink PeerIdentity = "dest", "u-1"
+	dest, uplink := domaintest.ID("dest"), domaintest.ID("u-1")
 
 	// Budget is DefaultMaxBadHopsPerWindow (3): events 1-3 stay
 	// under the arm condition (count > budget), event 4 arms.
@@ -72,7 +74,7 @@ func TestBadHopsHysteresis_ArmsAndDropsAfterBudget(t *testing.T) {
 	if got := ingestBadHops(t, tbl, dest, uplink, 5); got != RouteRejected {
 		t.Fatalf("bad-hops claim during hold-down must be rejected, got %v", got)
 	}
-	if got := ingestBadHops(t, tbl, dest, "u-2", 6); got != RouteRejected {
+	if got := ingestBadHops(t, tbl, dest, domaintest.ID("u-2"), 6); got != RouteRejected {
 		t.Fatalf("bad-hops claim via OTHER uplink during hold-down must be rejected too, got %v", got)
 	}
 	stats = tbl.CapStats()
@@ -92,7 +94,7 @@ func TestBadHopsHysteresis_ArmsAndDropsAfterBudget(t *testing.T) {
 // selectable immediately.
 func TestBadHopsHysteresis_SaneRecoveryPassesDuringHoldDown(t *testing.T) {
 	tbl, _ := hysteresisFixture()
-	const dest, uplink PeerIdentity = "dest", "u-1"
+	dest, uplink := domaintest.ID("dest"), domaintest.ID("u-1")
 
 	for seq := uint64(1); seq <= 4; seq++ {
 		ingestBadHops(t, tbl, dest, uplink, seq)
@@ -102,7 +104,7 @@ func TestBadHopsHysteresis_SaneRecoveryPassesDuringHoldDown(t *testing.T) {
 	}
 
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: dest, Origin: "src-x", NextHop: uplink,
+		Identity: dest, Origin: domaintest.ID("src-x"), NextHop: uplink,
 		Hops: 2, SeqNo: 10, Source: RouteSourceAnnouncement,
 	})
 	if err != nil || status != RouteAccepted {
@@ -126,7 +128,7 @@ func TestBadHopsHysteresis_EscalatesForRecidivists(t *testing.T) {
 		WithBadHopsWindow(10*time.Second),
 		WithBadHopsHoldDown(holdBase),
 	)
-	const dest, uplink PeerIdentity = "dest", "u-1"
+	dest, uplink := domaintest.ID("dest"), domaintest.ID("u-1")
 
 	// Strike 1.
 	for seq := uint64(1); seq <= 4; seq++ {
@@ -187,7 +189,7 @@ func TestBadHopsHysteresis_StrikesResetAfterQuietPeriod(t *testing.T) {
 		WithBadHopsWindow(10*time.Second),
 		WithBadHopsHoldDown(holdBase),
 	)
-	const dest, uplink PeerIdentity = "dest", "u-1"
+	dest, uplink := domaintest.ID("dest"), domaintest.ID("u-1")
 
 	for seq := uint64(1); seq <= 4; seq++ {
 		ingestBadHops(t, tbl, dest, uplink, seq)
@@ -225,7 +227,7 @@ func TestBadHopsHysteresis_StrikesResetAfterQuietPeriod(t *testing.T) {
 // guard (tombstone + counter), no matter the volume.
 func TestBadHopsHysteresis_DisabledKeepsPerEventBehaviour(t *testing.T) {
 	tbl, _ := hysteresisFixture(WithMaxBadHopsPerWindow(0))
-	const dest, uplink PeerIdentity = "dest", "u-1"
+	dest, uplink := domaintest.ID("dest"), domaintest.ID("u-1")
 
 	for seq := uint64(1); seq <= 10; seq++ {
 		if got := ingestBadHops(t, tbl, dest, uplink, seq); got != RouteAccepted {

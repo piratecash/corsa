@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 )
@@ -143,12 +144,12 @@ func TestAnnounceLoop_ForcedFullSync_RefreshesLearnedRouteBeforeExpiry(t *testin
 		current = current.Add(d)
 	}
 
-	const (
-		hubIdentity      routing.PeerIdentity = "1111111111111111111111111111111111111111"
-		targetIdentity   routing.PeerIdentity = "2222222222222222222222222222222222222222"
-		receiverIdentity routing.PeerIdentity = "3333333333333333333333333333333333333333"
-		receiverAddress  routing.PeerAddress  = "addr-receiver"
+	var (
+		hubIdentity      = domaintest.ID("1111111111111111111111111111111111111111")
+		targetIdentity   = domaintest.ID("2222222222222222222222222222222222222222")
+		receiverIdentity = domaintest.ID("3333333333333333333333333333333333333333")
 	)
+	const receiverAddress routing.PeerAddress = "addr-receiver"
 
 	hubTable := routing.NewTable(
 		routing.WithClock(nowFn),

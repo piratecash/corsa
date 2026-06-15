@@ -462,7 +462,7 @@ func (a *AnnounceLoop) NoopSuppressedTotal() uint64 {
 // `now` is injected so tests drive a deterministic clock; production
 // passes time.Now().UTC(). Safe to call from any goroutine.
 func (a *AnnounceLoop) ConfirmPeerDigestMatch(peer PeerIdentity, echo string, now time.Time) bool {
-	if peer == "" || echo == "" {
+	if peer.IsZero() || echo == "" {
 		return false
 	}
 	a.digestSuppressionMu.Lock()
@@ -504,7 +504,7 @@ func (a *AnnounceLoop) ConfirmPeerDigestMatch(peer PeerIdentity, echo string, no
 // empty or the derived window is non-positive (loop without a configured
 // interval).
 func (a *AnnounceLoop) MarkPeerDigestPending(peer PeerIdentity, now time.Time, sentDigest string) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	grace := DigestRoundTripGrace
@@ -531,7 +531,7 @@ func (a *AnnounceLoop) MarkPeerDigestPending(peer PeerIdentity, now time.Time, s
 // diverged, so a pending grace armed on reconnect must not keep deferring
 // the resync. Safe to call from any goroutine; no-op for absent entries.
 func (a *AnnounceLoop) ClearPeerDigestSuppression(peer PeerIdentity) {
-	if peer == "" {
+	if peer.IsZero() {
 		return
 	}
 	a.digestSuppressionMu.Lock()
@@ -1295,7 +1295,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				v3DowngradedNoBaseline.Add(1)
 				log.Debug().
 					Uint64("announce_cycle_id", cycleID).
-					Str("peer_identity", string(peer.Identity)).
+					Str("peer_identity", peer.Identity.String()).
 					Str("peer_address", string(peer.Address)).
 					Msg("announce_v3_downgraded_no_wire_baseline")
 				// Fall back to the highest gen the peer can accept whose
@@ -1308,7 +1308,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				v2DowngradedNoBaseline.Add(1)
 				log.Debug().
 					Uint64("announce_cycle_id", cycleID).
-					Str("peer_identity", string(peer.Identity)).
+					Str("peer_identity", peer.Identity.String()).
 					Str("peer_address", string(peer.Address)).
 					Msg("announce_v2_downgraded_no_wire_baseline")
 				mode = deltaModeV1
@@ -1328,7 +1328,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				a.stateRegistry.MarkInvalid(peer.Identity)
 				log.Warn().
 					Uint64("announce_cycle_id", cycleID).
-					Str("peer_identity", string(peer.Identity)).
+					Str("peer_identity", peer.Identity.String()).
 					Str("peer_address", string(peer.Address)).
 					Msg("announce_mode_divergence_fallback_to_legacy_delta")
 				a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
@@ -1592,7 +1592,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 		if !a.sendV3Full(ctx, peer, snapshot) {
 			log.Debug().
 				Uint64("announce_cycle_id", cycleID).
-				Str("peer_identity", string(peer.Identity)).
+				Str("peer_identity", peer.Identity.String()).
 				Str("peer_address", string(peer.Address)).
 				Int("routes", len(snapshot.Entries)).
 				Msg("announce_v3_full_send_failed")
@@ -1610,7 +1610,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	if !a.sendLegacyFull(ctx, peer, snapshot) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
-			Str("peer_identity", string(peer.Identity)).
+			Str("peer_identity", peer.Identity.String()).
 			Str("peer_address", string(peer.Address)).
 			Int("routes", len(snapshot.Entries)).
 			Msg("announce_full_send_failed")
@@ -1690,7 +1690,7 @@ func (a *AnnounceLoop) sendIncrementalAnnounce(
 	if !a.sender.SendAnnounceRoutes(ctx, peer.Address, delta) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
-			Str("peer_identity", string(peer.Identity)).
+			Str("peer_identity", peer.Identity.String()).
 			Str("peer_address", string(peer.Address)).
 			Int("delta_routes", len(delta)).
 			Msg("announce_delta_send_failed_v1")
@@ -1732,7 +1732,7 @@ func (a *AnnounceLoop) sendIncrementalAnnounceV2(
 	if !a.sender.SendRoutesUpdate(ctx, peer.Address, delta) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
-			Str("peer_identity", string(peer.Identity)).
+			Str("peer_identity", peer.Identity.String()).
 			Str("peer_address", string(peer.Address)).
 			Int("delta_routes", len(delta)).
 			Msg("announce_delta_send_failed_v2")
@@ -1767,7 +1767,7 @@ func (a *AnnounceLoop) sendIncrementalAnnounceV3(
 	if !a.sender.SendRouteAnnounceV3(ctx, peer.Address, routeAnnounceV3KindDelta, a.table.Epoch(), delta) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
-			Str("peer_identity", string(peer.Identity)).
+			Str("peer_identity", peer.Identity.String()).
 			Str("peer_address", string(peer.Address)).
 			Int("delta_routes", len(delta)).
 			Msg("announce_delta_send_failed_v3")

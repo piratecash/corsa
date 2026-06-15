@@ -105,7 +105,7 @@ func newAnnounceRateLimiter() *announceRateLimiter {
 // avoids a slow attacker draining the bucket without ever fitting a
 // full frame).
 func (rl *announceRateLimiter) allow(identity domain.PeerIdentity, cost int) bool {
-	if identity == "" {
+	if identity.IsZero() {
 		// No identity to key the bucket on (sentinel — receive
 		// handlers reject empty senders anyway, but the rate limit
 		// is defence-in-depth). Accept rather than block, so a

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -145,9 +146,9 @@ func TestHandleRouteSyncSummary_EmptySenderIsNoop(t *testing.T) {
 		Digest: "abcd",
 		Match:  true,
 	}
-	svc.handleRouteSyncSummary("", summary)
+	svc.handleRouteSyncSummary(domain.PeerIdentity{}, summary)
 
-	if svc.announceLoop.IsDigestSuppressionActiveForTest("", time.Now().UTC()) {
+	if svc.announceLoop.IsDigestSuppressionActiveForTest(domain.PeerIdentity{}, time.Now().UTC()) {
 		t.Fatal("empty sender armed suppression for empty key")
 	}
 }

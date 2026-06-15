@@ -123,7 +123,7 @@ func (s *trustStore) remember(contact trustedContact) error {
 // forget removes a contact from the trust store and persists the change.
 // Returns true if the contact existed and was removed.
 func (s *trustStore) forget(identity domain.PeerIdentity) (bool, error) {
-	address := string(identity)
+	address := identity.String()
 
 	s.mu.Lock()
 	if _, ok := s.contacts[address]; !ok {

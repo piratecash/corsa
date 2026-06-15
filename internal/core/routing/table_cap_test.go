@@ -3,6 +3,8 @@ package routing
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // --- §9.1 admission rules ---
@@ -26,9 +28,9 @@ func TestRIBCap_AcceptsUpToK_PerOriginPair(t *testing.T) {
 	// Three distinct uplinks for the same Identity (Origin is
 	// dropped from the dedup key post-Phase-A; the bucket is now
 	// keyed per-Identity with per-(Identity, Uplink) dedup).
-	for i, nh := range []PeerIdentity{"hop-a", "hop-b", "hop-c"} {
+	for i, nh := range []PeerIdentity{domaintest.ID("hop-a"), domaintest.ID("hop-b"), domaintest.ID("hop-c")} {
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: nh,
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: nh,
 			Hops: 2 + i, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteAccepted {
@@ -37,7 +39,7 @@ func TestRIBCap_AcceptsUpToK_PerOriginPair(t *testing.T) {
 	}
 
 	snap := tbl.Snapshot()
-	got := len(snap.Routes["alice"])
+	got := len(snap.Routes[domaintest.ID("alice")])
 	if got != 3 {
 		t.Fatalf("bucket should hold 3 entries up to cap; got %d", got)
 	}
@@ -56,17 +58,17 @@ func TestRIBCap_RejectsExcessAnnouncement_WhenWorseThanWorst(t *testing.T) {
 
 	// Saturate the bucket with two well-ranked announcements.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-b",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	// New candidate is strictly worse (more hops than the worst, same trust).
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-c",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 		Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	if status != RouteRejected {
@@ -74,12 +76,12 @@ func TestRIBCap_RejectsExcessAnnouncement_WhenWorseThanWorst(t *testing.T) {
 	}
 
 	snap := tbl.Snapshot()
-	if got := len(snap.Routes["alice"]); got != 2 {
+	if got := len(snap.Routes[domaintest.ID("alice")]); got != 2 {
 		t.Fatalf("bucket size after rejection should remain at cap=2, got %d", got)
 	}
 	// hop-c must NOT have ended up in the bucket.
-	for _, r := range snap.Routes["alice"] {
-		if r.NextHop == "hop-c" {
+	for _, r := range snap.Routes[domaintest.ID("alice")] {
+		if r.NextHop == domaintest.ID("hop-c") {
 			t.Fatal("hop-c should have been dropped by the cap, but it is in the table")
 		}
 	}
@@ -115,16 +117,16 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 			WithMaxNextHopsPerOrigin(2),
 		)
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-ann",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-ann"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-ack",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-ack"),
 			Hops: 5, SeqNo: 1, Source: RouteSourceHopAck,
 		})
 
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-new",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-new"),
 			Hops: 4, SeqNo: 1, Source: RouteSourceHopAck,
 		})
 		if status != RouteAccepted {
@@ -132,14 +134,14 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 		}
 
 		snap := tbl.Snapshot()
-		nextHops := nextHopsByOrigin(t, snap, "alice", "bob")
-		if _, ok := nextHops["hop-ann"]; ok {
+		nextHops := nextHopsByOrigin(t, snap, domaintest.ID("alice"), domaintest.ID("bob"))
+		if _, ok := nextHops[domaintest.ID("hop-ann")]; ok {
 			t.Fatal("announcement should have been evicted as the lowest-trust candidate")
 		}
-		if _, ok := nextHops["hop-ack"]; !ok {
+		if _, ok := nextHops[domaintest.ID("hop-ack")]; !ok {
 			t.Fatal("existing hop_ack must survive the eviction of the announcement")
 		}
-		if _, ok := nextHops["hop-new"]; !ok {
+		if _, ok := nextHops[domaintest.ID("hop-new")]; !ok {
 			t.Fatal("incoming hop_ack must occupy the freed slot")
 		}
 	})
@@ -153,30 +155,30 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 			WithMaxNextHopsPerOrigin(2),
 		)
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-low",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-low"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-high",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-high"),
 			Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-mid",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-mid"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteAccepted {
 			t.Fatalf("expected RouteAccepted (evicts highest-hops), got %v", status)
 		}
 
-		nextHops := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
-		if _, ok := nextHops["hop-high"]; ok {
+		nextHops := nextHopsByOrigin(t, tbl.Snapshot(), domaintest.ID("alice"), domaintest.ID("bob"))
+		if _, ok := nextHops[domaintest.ID("hop-high")]; ok {
 			t.Fatal("highest-hops candidate should have been evicted")
 		}
-		if _, ok := nextHops["hop-low"]; !ok {
+		if _, ok := nextHops[domaintest.ID("hop-low")]; !ok {
 			t.Fatal("lowest-hops candidate must survive")
 		}
-		if _, ok := nextHops["hop-mid"]; !ok {
+		if _, ok := nextHops[domaintest.ID("hop-mid")]; !ok {
 			t.Fatal("incoming candidate must occupy the freed slot")
 		}
 	})
@@ -199,14 +201,14 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 			WithMaxNextHopsPerOrigin(2),
 		)
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-soon",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-soon"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 			// Explicit ExpiresAt to bypass UpdateRoute's defaultTTL
 			// fill-in and pin the comparison.
 			ExpiresAt: now.Add(30 * time.Second),
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-late",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-late"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 			ExpiresAt: now.Add(120 * time.Second),
 		})
@@ -216,7 +218,7 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 		// among the equal-trust + equal-hops bucket members by
 		// ExpiresAt.
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-new",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-new"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 			ExpiresAt: now.Add(180 * time.Second),
 		})
@@ -224,14 +226,14 @@ func TestRIBCap_EvictsWorstAnnouncement_ByTrust_ThenHops_ThenFreshness(t *testin
 			t.Fatalf("expected RouteAccepted (Hops=2 strictly better than incumbents' Hops=3), got %v", status)
 		}
 
-		nextHops := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
-		if _, ok := nextHops["hop-soon"]; ok {
+		nextHops := nextHopsByOrigin(t, tbl.Snapshot(), domaintest.ID("alice"), domaintest.ID("bob"))
+		if _, ok := nextHops[domaintest.ID("hop-soon")]; ok {
 			t.Fatal("earliest-expiring incumbent should have been evicted (eviction key uses ExpiresAt as final tie-break)")
 		}
-		if _, ok := nextHops["hop-late"]; !ok {
+		if _, ok := nextHops[domaintest.ID("hop-late")]; !ok {
 			t.Fatal("longer-lived incumbent must survive")
 		}
-		if _, ok := nextHops["hop-new"]; !ok {
+		if _, ok := nextHops[domaintest.ID("hop-new")]; !ok {
 			t.Fatal("incoming candidate (lower hops) must occupy the freed slot")
 		}
 	})
@@ -246,13 +248,13 @@ func TestRIBCap_DirectAndLocalNeverEvicted(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithMaxNextHopsPerOrigin(1),
 	)
 
 	// Lay down a direct route via "neighbor" — Origin must be the
 	// local identity, NextHop must equal Identity (direct neighbour).
-	mustAddDirect(t, tbl, "neighbor")
+	mustAddDirect(t, tbl, domaintest.ID("neighbor"))
 
 	// Incoming: a strictly higher-trust candidate (impossible without
 	// RouteSourceLocal which is reserved, so use hop_ack) on the same
@@ -261,7 +263,7 @@ func TestRIBCap_DirectAndLocalNeverEvicted(t *testing.T) {
 	// the new candidate is rejected because no evictable victim
 	// exists.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "neighbor", Origin: "self", NextHop: "transit",
+		Identity: domaintest.ID("neighbor"), Origin: domaintest.ID("self"), NextHop: domaintest.ID("transit"),
 		Hops: 1, SeqNo: 99, Source: RouteSourceHopAck,
 	})
 	if status != RouteRejected {
@@ -271,8 +273,8 @@ func TestRIBCap_DirectAndLocalNeverEvicted(t *testing.T) {
 
 	// Direct entry must still be present after the rejected admission.
 	snap := tbl.Snapshot()
-	nextHops := nextHopsByOrigin(t, snap, "neighbor", "self")
-	if _, ok := nextHops["neighbor"]; !ok {
+	nextHops := nextHopsByOrigin(t, snap, domaintest.ID("neighbor"), domaintest.ID("self"))
+	if _, ok := nextHops[domaintest.ID("neighbor")]; !ok {
 		t.Fatal("direct route was retired by cap admission — protection invariant broken")
 	}
 }
@@ -292,32 +294,32 @@ func TestRIBCap_HopAckPromotionEvictsAnnouncement_EvenIfMoreHops(t *testing.T) {
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-low",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-low"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-mid",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-mid"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 
 	// Incoming hop_ack with WORSE hop count than either announcement.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-promo",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-promo"),
 		Hops: 7, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	if status != RouteAccepted {
 		t.Fatalf("hop_ack promotion against announcements: expected RouteAccepted, got %v", status)
 	}
 
-	nextHops := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
-	if _, ok := nextHops["hop-promo"]; !ok {
+	nextHops := nextHopsByOrigin(t, tbl.Snapshot(), domaintest.ID("alice"), domaintest.ID("bob"))
+	if _, ok := nextHops[domaintest.ID("hop-promo")]; !ok {
 		t.Fatal("hop_ack candidate must be admitted regardless of hop count")
 	}
 	// One announcement must have been displaced (the higher-hops one).
-	if _, ok := nextHops["hop-mid"]; ok {
+	if _, ok := nextHops[domaintest.ID("hop-mid")]; ok {
 		t.Fatal("highest-hops announcement should be the eviction victim")
 	}
-	if _, ok := nextHops["hop-low"]; !ok {
+	if _, ok := nextHops[domaintest.ID("hop-low")]; !ok {
 		t.Fatal("lowest-hops announcement must survive")
 	}
 }
@@ -339,17 +341,17 @@ func TestRIBCap_HopAckPromotionRejected_IfAllKAreHopAckOrDirect_AndNotStrictlyBe
 	)
 
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-a"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-b",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-b"),
 		Hops: 4, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 
 	// Worse-hops hop_ack — must be rejected.
 	statusWorse := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-c",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-c"),
 		Hops: 6, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	if statusWorse != RouteRejected {
@@ -362,7 +364,7 @@ func TestRIBCap_HopAckPromotionRejected_IfAllKAreHopAckOrDirect_AndNotStrictlyBe
 	// equal-hops candidate is ever "strictly better" regardless of
 	// when it arrived.
 	statusEqual := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-d",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-d"),
 		Hops: 4, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	if statusEqual != RouteRejected {
@@ -371,21 +373,21 @@ func TestRIBCap_HopAckPromotionRejected_IfAllKAreHopAckOrDirect_AndNotStrictlyBe
 
 	// Strictly-better hop_ack (fewer hops) — must be accepted.
 	statusBetter := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-e",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-e"),
 		Hops: 2, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	if statusBetter != RouteAccepted {
 		t.Fatalf("hop_ack strictly better than worst: expected RouteAccepted, got %v", statusBetter)
 	}
 
-	nextHops := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
-	if _, ok := nextHops["ack-c"]; ok {
+	nextHops := nextHopsByOrigin(t, tbl.Snapshot(), domaintest.ID("alice"), domaintest.ID("bob"))
+	if _, ok := nextHops[domaintest.ID("ack-c")]; ok {
 		t.Fatal("worse-hops hop_ack must not be present after rejection")
 	}
-	if _, ok := nextHops["ack-d"]; ok {
+	if _, ok := nextHops[domaintest.ID("ack-d")]; ok {
 		t.Fatal("equal hop_ack must not be present after rejection")
 	}
-	if _, ok := nextHops["ack-e"]; !ok {
+	if _, ok := nextHops[domaintest.ID("ack-e")]; !ok {
 		t.Fatal("strictly-better hop_ack must be present after acceptance")
 	}
 }
@@ -430,14 +432,14 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 	// so the new announcement loses on trust alone if the liveness
 	// tier is missing).
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-a"),
 		Hops:      3,
 		SeqNo:     1,
 		Source:    RouteSourceHopAck,
 		ExpiresAt: now.Add(60 * time.Second),
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-b",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-b"),
 		Hops:      4,
 		SeqNo:     1,
 		Source:    RouteSourceHopAck,
@@ -448,7 +450,7 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 	// now full of expired rows. Lookup would return zero results
 	// (it filters expired/withdrawn).
 	clock.advance(120 * time.Second)
-	if got := len(tbl.Lookup("alice")); got != 0 {
+	if got := len(tbl.Lookup(domaintest.ID("alice"))); got != 0 {
 		t.Fatalf("test setup invariant: Lookup should return 0 usable routes when both hop_acks are expired, got %d", got)
 	}
 
@@ -457,7 +459,7 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 	// with the fix the cap evicts one expired hop_ack to admit the
 	// live announcement.
 	status := mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "fresh",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("fresh"),
 		Hops:      5,
 		SeqNo:     1,
 		Source:    RouteSourceAnnouncement,
@@ -470,13 +472,13 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 
 	// Lookup must now return the live announcement — the bucket is
 	// usable again without waiting for TickTTL.
-	live := tbl.Lookup("alice")
+	live := tbl.Lookup(domaintest.ID("alice"))
 	if len(live) == 0 {
 		t.Fatal("after admitting the live announcement, Lookup should return at least one usable route")
 	}
 	foundFresh := false
 	for _, r := range live {
-		if r.NextHop == "fresh" {
+		if r.NextHop == domaintest.ID("fresh") {
 			foundFresh = true
 			break
 		}
@@ -497,25 +499,25 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 	)
 	// Two live hop_acks, then withdraw both.
 	mustUpdate(t, tbl2, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-a"),
 		Hops: 3, SeqNo: 1, Source: RouteSourceHopAck,
 	})
 	mustUpdate(t, tbl2, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "ack-b",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("ack-b"),
 		Hops: 4, SeqNo: 1, Source: RouteSourceHopAck,
 	})
-	if !tbl2.WithdrawRoute("alice", "bob", "ack-a", 2) {
+	if !tbl2.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("ack-a"), 2) {
 		t.Fatal("WithdrawRoute(ack-a) returned false")
 	}
-	if !tbl2.WithdrawRoute("alice", "bob", "ack-b", 2) {
+	if !tbl2.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("ack-b"), 2) {
 		t.Fatal("WithdrawRoute(ack-b) returned false")
 	}
-	if got := len(tbl2.Lookup("alice")); got != 0 {
+	if got := len(tbl2.Lookup(domaintest.ID("alice"))); got != 0 {
 		t.Fatalf("test setup invariant: Lookup should return 0 usable routes when both hop_acks are withdrawn, got %d", got)
 	}
 
 	statusW := mustUpdate(t, tbl2, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "fresh",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("fresh"),
 		Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 	})
 	if statusW != RouteAccepted {
@@ -525,7 +527,7 @@ func TestRIBCap_ExpiredAndWithdrawnAcceptLiveAnnouncement(t *testing.T) {
 
 	// Both withdrawn hop_acks must still be in the slice — they are
 	// resurrection guards, not cap-counted competitors.
-	bucket := tbl2.Snapshot().Routes["alice"]
+	bucket := tbl2.Snapshot().Routes[domaintest.ID("alice")]
 	withdrawnCount := 0
 	for _, r := range bucket {
 		if r.IsWithdrawn() {
@@ -563,11 +565,11 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 
 		// Saturate the bucket with two live announcements.
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		statsBefore := tbl.CapStats()
@@ -575,13 +577,13 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 		// Wire withdrawal arrives for a NextHop the bucket has never
 		// seen. The tombstone bypasses the cap and lands as an
 		// extra row alongside the two live entries.
-		applied := tbl.WithdrawRoute("alice", "bob", "hop-c", 5)
+		applied := tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5)
 		if !applied {
 			t.Fatal("WithdrawRoute should return true — tombstones bypass the cap and always land")
 		}
 
 		// Total slice size = K live + 1 tombstone.
-		bucket := tbl.Snapshot().Routes["alice"]
+		bucket := tbl.Snapshot().Routes[domaintest.ID("alice")]
 		if got := len(bucket); got != 3 {
 			t.Fatalf("expected K=2 live + 1 tombstone = 3 rows, got %d", got)
 		}
@@ -612,21 +614,21 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 			WithMaxNextHopsPerOrigin(2),
 		)
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		// Two tombstones via WithdrawRoute idx<0.
-		if !tbl.WithdrawRoute("alice", "bob", "hop-x", 1) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-x"), 1) {
 			t.Fatal("setup: tombstone hop-x not appended")
 		}
-		if !tbl.WithdrawRoute("alice", "bob", "hop-y", 1) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-y"), 1) {
 			t.Fatal("setup: tombstone hop-y not appended")
 		}
 
 		// Bucket: 1 live + 2 tombstones = 3 rows, but cap-counted
 		// (live) = 1, so the cap admits one more live route.
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 4, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteAccepted {
@@ -636,7 +638,7 @@ func TestRIBCap_WithdrawalTombstonesBypassCap(t *testing.T) {
 		// A THIRD live announcement must be rejected — cap is
 		// counted by live entries.
 		status = mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteRejected {
@@ -672,11 +674,11 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 
 		// Saturate the bucket with K=2 live announcements.
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		statsBefore := tbl.CapStats()
@@ -685,7 +687,7 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 		// The idx<0 short-circuit must accept it without consulting
 		// the cap.
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: HopsInfinity, SeqNo: 10, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteAccepted {
@@ -693,7 +695,7 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 		}
 
 		// Total slice = K live + 1 tombstone.
-		bucket := tbl.Snapshot().Routes["alice"]
+		bucket := tbl.Snapshot().Routes[domaintest.ID("alice")]
 		if got := len(bucket); got != 3 {
 			t.Fatalf("expected K=2 live + 1 tombstone = 3 rows, got %d", got)
 		}
@@ -745,11 +747,11 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 			WithMaxNextHopsPerOrigin(2),
 		)
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 
@@ -758,7 +760,7 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 		// under test), not WithdrawRoute. The tombstone short-circuit
 		// must accept it despite the saturated live bucket.
 		if status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: HopsInfinity, SeqNo: 10, Source: RouteSourceAnnouncement,
 		}); status != RouteAccepted {
 			t.Fatalf("setup: tombstone should be accepted via UpdateRoute idx<0 short-circuit, got %v", status)
@@ -768,7 +770,7 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 		// SeqNo. UpdateRoute now finds the tombstone via idx>=0
 		// (DedupKey match), and the stale-SeqNo branch rejects it.
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 2, SeqNo: 4, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteRejected {
@@ -777,10 +779,10 @@ func TestRIBCap_UpdateRouteWithdrawalBypassesCapForNewTriple(t *testing.T) {
 
 		// Bucket unchanged: 2 live + 1 tombstone; NextHop=hop-c is
 		// still a tombstone (no resurrection).
-		bucket := tbl.Snapshot().Routes["alice"]
+		bucket := tbl.Snapshot().Routes[domaintest.ID("alice")]
 		var hopCEntry *RouteEntry
 		for i := range bucket {
-			if bucket[i].NextHop == "hop-c" {
+			if bucket[i].NextHop == domaintest.ID("hop-c") {
 				hopCEntry = &bucket[i]
 				break
 			}
@@ -821,16 +823,16 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		// One live route + one tombstone (different NextHop). Live
 		// count = 1, K = 2 — there's room for one more live.
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
-		if !tbl.WithdrawRoute("alice", "bob", "hop-c", 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5) {
 			t.Fatal("setup: tombstone hop-c not appended")
 		}
 
 		// Newer-SeqNo live announcement for hop-c — promotion path.
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 4, SeqNo: 7, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteAccepted {
@@ -842,7 +844,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		// promotion).
 		liveCount := 0
 		tombstoneCount := 0
-		for _, r := range tbl.Snapshot().Routes["alice"] {
+		for _, r := range tbl.Snapshot().Routes[domaintest.ID("alice")] {
 			if r.IsWithdrawn() {
 				tombstoneCount++
 			} else {
@@ -865,14 +867,14 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 
 		// K=2 live + 1 tombstone (different NextHop).
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 2, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 3, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
-		if !tbl.WithdrawRoute("alice", "bob", "hop-c", 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5) {
 			t.Fatal("setup: tombstone hop-c not appended")
 		}
 
@@ -880,7 +882,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		// live (hop-b, Hops=3), so routeStore.AdmitNew rejects with
 		// AdmissionRejectedFull.
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 10, SeqNo: 7, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteRejected {
@@ -892,9 +894,9 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		liveCount := 0
 		var tombstoneSeq uint64
 		var foundTombstone bool
-		for _, r := range tbl.Snapshot().Routes["alice"] {
+		for _, r := range tbl.Snapshot().Routes[domaintest.ID("alice")] {
 			if r.IsWithdrawn() {
-				if r.NextHop == "hop-c" {
+				if r.NextHop == domaintest.ID("hop-c") {
 					foundTombstone = true
 					tombstoneSeq = r.SeqNo
 				}
@@ -923,14 +925,14 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 
 		// K=2 live with WORSE hops than the upcoming promotion + 1 tombstone.
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 5, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 6, SeqNo: 5, Source: RouteSourceAnnouncement,
 		})
-		if !tbl.WithdrawRoute("alice", "bob", "hop-c", 5) {
+		if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 5) {
 			t.Fatal("setup: tombstone hop-c not appended")
 		}
 
@@ -938,7 +940,7 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		// (hop-b, Hops=6). routeStore.AdmitNew evicts hop-b and admits
 		// hop-c as live.
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 2, SeqNo: 7, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteAccepted {
@@ -948,19 +950,19 @@ func TestRIBCap_TombstoneToLivePromotionRespectsKLiveCap(t *testing.T) {
 		// Live count still K=2 — promotion ate the worst live slot
 		// AND consumed the tombstone slot. hop-a survives, hop-c is
 		// the new live, hop-b is gone.
-		next := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
-		if _, ok := next["hop-a"]; !ok {
+		next := nextHopsByOrigin(t, tbl.Snapshot(), domaintest.ID("alice"), domaintest.ID("bob"))
+		if _, ok := next[domaintest.ID("hop-a")]; !ok {
 			t.Fatal("hop-a (best live) should survive promotion-eviction")
 		}
-		if _, ok := next["hop-b"]; ok {
+		if _, ok := next[domaintest.ID("hop-b")]; ok {
 			t.Fatal("hop-b (worst live) should have been evicted by the promotion")
 		}
-		if r, ok := next["hop-c"]; !ok || r.IsWithdrawn() {
+		if r, ok := next[domaintest.ID("hop-c")]; !ok || r.IsWithdrawn() {
 			t.Fatalf("hop-c should now be live (promoted), got %+v / present=%v", r, ok)
 		}
 		// Live count is K=2.
 		liveCount := 0
-		for _, r := range tbl.Snapshot().Routes["alice"] {
+		for _, r := range tbl.Snapshot().Routes[domaintest.ID("alice")] {
 			if !r.IsWithdrawn() {
 				liveCount++
 			}
@@ -996,18 +998,18 @@ func TestRIBCap_TombstoneSurvivesCapPressure_BlocksResurrection(t *testing.T) {
 	// without the resurrection guard the cap would happily evict
 	// one of them in favour of the lower-SeqNo announcement.
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-a",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 		Hops: 5, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 	mustUpdate(t, tbl, RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-b",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 		Hops: 6, SeqNo: 5, Source: RouteSourceAnnouncement,
 	})
 
 	// Origin issues a withdrawal for a NextHop the bucket has
 	// never seen. Tombstone bypasses the cap and lands as a third
 	// row in the slice. SeqNo=10 — this is the guard.
-	if !tbl.WithdrawRoute("alice", "bob", "hop-c", 10) {
+	if !tbl.WithdrawRoute(domaintest.ID("alice"), domaintest.ID("bob"), domaintest.ID("hop-c"), 10) {
 		t.Fatal("setup: WithdrawRoute(hop-c, seq=10) returned false")
 	}
 
@@ -1019,7 +1021,7 @@ func TestRIBCap_TombstoneSurvivesCapPressure_BlocksResurrection(t *testing.T) {
 	// SeqNo-based stale-vs-tombstone check kicks in: incoming
 	// SeqNo=4 < tombstone SeqNo=10 → RouteRejected.
 	status, err := tbl.UpdateRoute(RouteEntry{
-		Identity: "alice", Origin: "bob", NextHop: "hop-c",
+		Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 		Hops: 2, SeqNo: 4, Source: RouteSourceAnnouncement,
 	})
 	if err != nil {
@@ -1032,8 +1034,8 @@ func TestRIBCap_TombstoneSurvivesCapPressure_BlocksResurrection(t *testing.T) {
 	}
 
 	// And the stale announcement must NOT be in the live set.
-	for _, r := range tbl.Lookup("alice") {
-		if r.NextHop == "hop-c" {
+	for _, r := range tbl.Lookup(domaintest.ID("alice")) {
+		if r.NextHop == domaintest.ID("hop-c") {
 			t.Fatalf("stale announcement leaked through; Lookup returned %+v", r)
 		}
 	}
@@ -1061,15 +1063,15 @@ func TestRIBCap_LookupReturnsAtMostK_SortedByTrustHopsFreshness(t *testing.T) {
 		nh   PeerIdentity
 		hops int
 	}{
-		{"hop-a", 7},
-		{"hop-b", 2},
-		{"hop-c", 5},
-		{"hop-d", 3},
-		{"hop-e", 9},
+		{domaintest.ID("hop-a"), 7},
+		{domaintest.ID("hop-b"), 2},
+		{domaintest.ID("hop-c"), 5},
+		{domaintest.ID("hop-d"), 3},
+		{domaintest.ID("hop-e"), 9},
 	} {
 		_ = i
 		_, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: hop.nh,
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: hop.nh,
 			Hops: hop.hops, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		if err != nil {
@@ -1077,7 +1079,7 @@ func TestRIBCap_LookupReturnsAtMostK_SortedByTrustHopsFreshness(t *testing.T) {
 		}
 	}
 
-	got := tbl.Lookup("alice")
+	got := tbl.Lookup(domaintest.ID("alice"))
 	if len(got) > 3 {
 		t.Fatalf("Lookup returned %d entries; cap=3 must clamp the slice to at most 3", len(got))
 	}
@@ -1105,24 +1107,24 @@ func TestRIBCap_RemoveDirectPeer_ExposesBackupsFromK(t *testing.T) {
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
 	tbl := NewTable(
 		WithClock(fixedClock(now)),
-		WithLocalOrigin("self"),
+		WithLocalOrigin(domaintest.ID("self")),
 		WithMaxNextHopsPerOrigin(4),
 	)
 
-	// Direct route via "alice" (Origin must be local for direct).
-	mustAddDirect(t, tbl, "alice")
+	// Direct route via domaintest.ID("alice") (Origin must be local for direct).
+	mustAddDirect(t, tbl, domaintest.ID("alice"))
 
-	// Three transit routes to "alice" via different next-hops, learned
+	// Three transit routes to domaintest.ID("alice") via different next-hops, learned
 	// through transit announcements with a different Origin so they
 	// share neither bucket nor protected status with the direct entry.
-	for i, nh := range []PeerIdentity{"hop-x", "hop-y", "hop-z"} {
+	for i, nh := range []PeerIdentity{domaintest.ID("hop-x"), domaintest.ID("hop-y"), domaintest.ID("hop-z")} {
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "transit-origin", NextHop: nh,
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("transit-origin"), NextHop: nh,
 			Hops: 2 + i, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 	}
 
-	result := mustRemoveDirect(t, tbl, "alice")
+	result := mustRemoveDirect(t, tbl, domaintest.ID("alice"))
 
 	// The direct route was withdrawn (own-origin → wire withdrawal).
 	if len(result.Withdrawals) == 0 {
@@ -1133,7 +1135,7 @@ func TestRIBCap_RemoveDirectPeer_ExposesBackupsFromK(t *testing.T) {
 	// reported as exposed.
 	exposedFound := false
 	for _, id := range result.ExposedBackups {
-		if id == "alice" {
+		if id == domaintest.ID("alice") {
 			exposedFound = true
 			break
 		}
@@ -1176,9 +1178,9 @@ func TestRIBCap_AnnounceWireSchemaUnchanged_ContentReflectsBestK(t *testing.T) {
 			WithClock(fixedClock(now)),
 			WithMaxNextHopsPerOrigin(cap),
 		)
-		for i, nh := range []PeerIdentity{"hop-a", "hop-b", "hop-c", "hop-d"} {
+		for i, nh := range []PeerIdentity{domaintest.ID("hop-a"), domaintest.ID("hop-b"), domaintest.ID("hop-c"), domaintest.ID("hop-d")} {
 			_, err := tbl.UpdateRoute(RouteEntry{
-				Identity: "alice", Origin: "bob", NextHop: nh,
+				Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: nh,
 				Hops: 2 + i, SeqNo: 1, Source: RouteSourceAnnouncement,
 			})
 			if err != nil {
@@ -1188,8 +1190,8 @@ func TestRIBCap_AnnounceWireSchemaUnchanged_ContentReflectsBestK(t *testing.T) {
 		return tbl
 	}
 
-	withCap := makeTable(2).AnnounceTo("excluded")
-	withoutCap := makeTable(0).AnnounceTo("excluded")
+	withCap := makeTable(2).AnnounceTo(domaintest.ID("excluded"))
+	withoutCap := makeTable(0).AnnounceTo(domaintest.ID("excluded"))
 
 	// Post-A1 round-4 contract: AnnounceTo itself returns the
 	// per-Identity-collapsed wire projection (live winner +
@@ -1270,13 +1272,13 @@ func TestRIBCap_AnnounceContentDiffersWhenCapDropsLowerHopsWireWinner(t *testing
 		// differ in NextHop / Source / Hops. This is the case the
 		// wire pipeline aggregates with min Hops.
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-ack",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-ack"),
 			Hops:   7,
 			SeqNo:  1,
 			Source: RouteSourceHopAck,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-announce",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-announce"),
 			Hops:   2,
 			SeqNo:  1,
 			Source: RouteSourceAnnouncement,
@@ -1287,10 +1289,10 @@ func TestRIBCap_AnnounceContentDiffersWhenCapDropsLowerHopsWireWinner(t *testing
 	// Cap=1: cap-rank prefers hop_ack (higher trust) → bucket holds
 	// only the hop_ack with Hops=7.
 	withCap := makeTable(1)
-	if got := len(withCap.Snapshot().Routes["alice"]); got != 1 {
+	if got := len(withCap.Snapshot().Routes[domaintest.ID("alice")]); got != 1 {
 		t.Fatalf("cap=1 bucket should hold exactly one entry after admission ranking, got %d", got)
 	}
-	withCapWire := BuildAnnounceSnapshot(withCap.AnnounceTo("excluded"))
+	withCapWire := BuildAnnounceSnapshot(withCap.AnnounceTo(domaintest.ID("excluded")))
 	if got := len(withCapWire.Entries); got != 1 {
 		t.Fatalf("cap=1 wire snapshot should have 1 entry, got %d", got)
 	}
@@ -1302,10 +1304,10 @@ func TestRIBCap_AnnounceContentDiffersWhenCapDropsLowerHopsWireWinner(t *testing
 	// min Hops (the announcement) for the wire because Source is not
 	// on the wire and tier-1 of the wire-rank is min Hops.
 	withoutCap := makeTable(0)
-	if got := len(withoutCap.Snapshot().Routes["alice"]); got != 2 {
+	if got := len(withoutCap.Snapshot().Routes[domaintest.ID("alice")]); got != 2 {
 		t.Fatalf("cap=0 bucket should hold both rows, got %d", got)
 	}
-	withoutCapWire := BuildAnnounceSnapshot(withoutCap.AnnounceTo("excluded"))
+	withoutCapWire := BuildAnnounceSnapshot(withoutCap.AnnounceTo(domaintest.ID("excluded")))
 	if got := len(withoutCapWire.Entries); got != 1 {
 		t.Fatalf("cap=0 wire snapshot should have 1 entry, got %d", got)
 	}
@@ -1357,12 +1359,12 @@ func TestRIBCap_MixedVersionMesh_WorksWithUnboundedPeers(t *testing.T) {
 	for i := 0; i < burst; i++ {
 		hops := 3 + i // 3..15 — all valid (RouteEntry rejects Hops > HopsInfinity=16).
 		_, err := tbl.UpdateRoute(RouteEntry{
-			Identity: "alice", Origin: "bob",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"),
 			// Construct a fresh next-hop identity per iteration; the
 			// exact bytes don't matter, only that the (Identity,
 			// Uplink=NextHop) dedup pair changes each call so we
 			// exercise the new-claim admission path.
-			NextHop: PeerIdentity("hop-" + string(rune('a'+i%26)) + string(rune('a'+i/26))),
+			NextHop: domaintest.ID("hop-" + string(rune('a'+i%26)) + string(rune('a'+i/26))),
 			Hops:    hops,
 			SeqNo:   1,
 			Source:  RouteSourceAnnouncement,
@@ -1372,7 +1374,7 @@ func TestRIBCap_MixedVersionMesh_WorksWithUnboundedPeers(t *testing.T) {
 		}
 	}
 
-	got := len(tbl.Snapshot().Routes["alice"])
+	got := len(tbl.Snapshot().Routes[domaintest.ID("alice")])
 	if got != 2 {
 		t.Fatalf("after a %d-entry burst the bucket must equal cap=2, got %d", burst, got)
 	}
@@ -1381,7 +1383,7 @@ func TestRIBCap_MixedVersionMesh_WorksWithUnboundedPeers(t *testing.T) {
 	// monotonically ascending hops mean the first two admitted were
 	// the best, and the cap floor protects them from later worse
 	// candidates.
-	for _, r := range tbl.Snapshot().Routes["alice"] {
+	for _, r := range tbl.Snapshot().Routes[domaintest.ID("alice")] {
 		if r.Hops > 4 {
 			t.Fatalf("survivor has Hops=%d but the two best candidates had Hops=3 and Hops=4 — cap floor leaked",
 				r.Hops)
@@ -1424,11 +1426,11 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 
 		// Saturate K=2 with announcements at Hops=3, equal trust.
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 
@@ -1437,8 +1439,8 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 		// advanced re-announce that produced the production
 		// thrashing in dense meshes.
 		var incumbentExpires time.Time
-		for _, r := range tbl.Snapshot().Routes["alice"] {
-			if r.NextHop == "hop-a" {
+		for _, r := range tbl.Snapshot().Routes[domaintest.ID("alice")] {
+			if r.NextHop == domaintest.ID("hop-a") {
 				incumbentExpires = r.ExpiresAt
 				break
 			}
@@ -1450,7 +1452,7 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 		statsBefore := tbl.CapStats()
 
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 			ExpiresAt: incumbentExpires.Add(time.Second),
 		})
@@ -1468,14 +1470,14 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 				statsBefore.RejectedFull, statsAfter.RejectedFull)
 		}
 
-		bucket := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
-		if _, hasA := bucket["hop-a"]; !hasA {
+		bucket := nextHopsByOrigin(t, tbl.Snapshot(), domaintest.ID("alice"), domaintest.ID("bob"))
+		if _, hasA := bucket[domaintest.ID("hop-a")]; !hasA {
 			t.Fatal("hop-a (incumbent) should still be in bucket")
 		}
-		if _, hasB := bucket["hop-b"]; !hasB {
+		if _, hasB := bucket[domaintest.ID("hop-b")]; !hasB {
 			t.Fatal("hop-b (incumbent) should still be in bucket")
 		}
-		if _, hasC := bucket["hop-c"]; hasC {
+		if _, hasC := bucket[domaintest.ID("hop-c")]; hasC {
 			t.Fatal("hop-c should NOT have been admitted on ExpiresAt-only 'betterness'")
 		}
 		if got := len(bucket); got != 2 {
@@ -1492,24 +1494,24 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 			WithMaxNextHopsPerOrigin(2),
 		)
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 5, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		if status != RouteAccepted {
 			t.Fatalf("expected RouteAccepted — Hops=2 strictly better than incumbents' Hops=5, got %v", status)
 		}
 
-		bucket := nextHopsByOrigin(t, tbl.Snapshot(), "alice", "bob")
-		if _, hasC := bucket["hop-c"]; !hasC {
+		bucket := nextHopsByOrigin(t, tbl.Snapshot(), domaintest.ID("alice"), domaintest.ID("bob"))
+		if _, hasC := bucket[domaintest.ID("hop-c")]; !hasC {
 			t.Fatal("hop-c should have been admitted via strict-better-by-hops")
 		}
 		liveCount := 0
@@ -1532,16 +1534,16 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 			WithMaxNextHopsPerOrigin(2),
 		)
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-a",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-a"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 		mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-b",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-b"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement,
 		})
 
 		status := mustUpdate(t, tbl, RouteEntry{
-			Identity: "alice", Origin: "bob", NextHop: "hop-c",
+			Identity: domaintest.ID("alice"), Origin: domaintest.ID("bob"), NextHop: domaintest.ID("hop-c"),
 			Hops: 3, SeqNo: 1, Source: RouteSourceHopAck,
 		})
 		if status != RouteAccepted {
@@ -1575,9 +1577,9 @@ func TestRIBCap_StrictBetterFloor_EqualHopsEqualTrust_KeepsIncumbent(t *testing.
 // saturated. The cap counter `acceptedReplaced` is incremented on
 // the displacement path so operators see the cap actually fired.
 func TestRIBCap_AddDirectPeerRespectsCap(t *testing.T) {
-	const localOrigin PeerIdentity = "self-node-identity"
-	const peerID PeerIdentity = "peer-node-identity"
-	const otherHop PeerIdentity = "other-hop-identity"
+	localOrigin := domaintest.ID("self-node-identity")
+	peerID := domaintest.ID("peer-node-identity")
+	otherHop := domaintest.ID("other-hop-identity")
 
 	t.Run("new_direct_evicts_worst_evictable_when_bucket_saturated", func(t *testing.T) {
 		now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)

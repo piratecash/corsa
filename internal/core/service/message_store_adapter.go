@@ -51,7 +51,7 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		DeliveryStatus: status,
 		TTLSeconds:     envelope.TTLSeconds,
 	}
-	inserted, err := a.chatlog.AppendReportNew(envelope.Topic, domain.PeerIdentity(a.id.Address), entry)
+	inserted, err := a.chatlog.AppendReportNew(envelope.Topic, domain.PeerIdentityFromWire(a.id.Address), entry)
 	if err != nil {
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
 		return node.StoreFailed
@@ -72,11 +72,11 @@ func (a *MessageStoreAdapter) UpdateDeliveryStatus(receipt protocol.DeliveryRece
 	}
 	var chatlogPeer domain.PeerIdentity
 	if receipt.Sender == a.id.Address {
-		chatlogPeer = domain.PeerIdentity(receipt.Recipient)
+		chatlogPeer = domain.PeerIdentityFromWire(receipt.Recipient)
 	} else if receipt.Recipient == a.id.Address {
-		chatlogPeer = domain.PeerIdentity(receipt.Sender)
+		chatlogPeer = domain.PeerIdentityFromWire(receipt.Sender)
 	}
-	if chatlogPeer == "" {
+	if chatlogPeer.IsZero() {
 		return true // not our message, nothing to update
 	}
 	if _, err := a.chatlog.UpdateStatus("dm", chatlogPeer, domain.MessageID(receipt.MessageID), receipt.Status); err != nil {

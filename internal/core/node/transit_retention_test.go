@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -280,28 +281,30 @@ func TestIsIngressNextHop_InboundOnlyRouteKey(t *testing.T) {
 
 	svc := transitTestService()
 	msg := protocol.Envelope{
-		Topic:       "dm",
-		Via:         "10.0.0.5:7777", // sanitized overlay address
-		ViaIdentity: "identity-B",
+		Topic: "dm",
+		Via:   "10.0.0.5:7777", // sanitized overlay address
+		// ViaIdentity is the canonical 40-char hex fingerprint on the wire;
+		// it must equal nextHopIdentity.String() for the identity match.
+		ViaIdentity: domaintest.ID("identity-B").String(),
 	}
 
 	// Table next-hop resolved to B's inbound-keyed session: addresses
 	// differ in form AND port, identity matches → suppress.
-	if !svc.isIngressNextHop(msg, "identity-B", "inbound:10.0.0.5:54321") {
+	if !svc.isIngressNextHop(msg, domaintest.ID("identity-B"), "inbound:10.0.0.5:54321") {
 		t.Error("inbound-only ingress next-hop not suppressed by identity")
 	}
 	// Different peer's identity → no suppression.
-	if svc.isIngressNextHop(msg, "identity-C", "inbound:10.0.0.9:1234") {
+	if svc.isIngressNextHop(msg, domaintest.ID("identity-C"), "inbound:10.0.0.9:1234") {
 		t.Error("suppressed a next-hop that is not the ingress peer")
 	}
 
 	// Identity unknown at admission (ViaIdentity empty): falls back to
 	// canonical-address comparison.
 	noID := protocol.Envelope{Topic: "dm", Via: "peer-b:7777"}
-	if !svc.isIngressNextHop(noID, "identity-B", "peer-b:7777") {
+	if !svc.isIngressNextHop(noID, domaintest.ID("identity-B"), "peer-b:7777") {
 		t.Error("address fallback missed an exact ingress match")
 	}
-	if svc.isIngressNextHop(noID, "identity-B", "inbound:10.0.0.5:54321") {
+	if svc.isIngressNextHop(noID, domaintest.ID("identity-B"), "inbound:10.0.0.5:54321") {
 		t.Error("address fallback false-positived on an unrelated inbound key")
 	}
 }
@@ -381,12 +384,12 @@ func TestRelayChainGossipBudget(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct{ hopCount, maxHops, want int }{
-		{0, 0, defaultMaxHops + 1},  // legacy: absent MaxHops normalizes like handleRelayMessage
-		{1, 10, 10},                 // fresh chain
-		{9, 10, 2},                  // one hop left on the chain
-		{10, 10, 1},                 // chain exhausted
-		{12, 10, 1},                 // malformed: HopCount past MaxHops
-		{-5, 10, 11},                // malformed: negative HopCount
+		{0, 0, defaultMaxHops + 1}, // legacy: absent MaxHops normalizes like handleRelayMessage
+		{1, 10, 10},                // fresh chain
+		{9, 10, 2},                 // one hop left on the chain
+		{10, 10, 1},                // chain exhausted
+		{12, 10, 1},                // malformed: HopCount past MaxHops
+		{-5, 10, 11},               // malformed: negative HopCount
 	}
 	for _, c := range cases {
 		if got := relayChainGossipBudget(c.hopCount, c.maxHops); got != c.want {

@@ -640,9 +640,9 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 		t.Fatalf("trusted_advertise_source: got %q want %q",
 			pm.TrustedAdvertiseSource, trustedAdvertiseSourceOutbound)
 	}
-	if pm.TrustedAdvertiseIP != "127.0.0.1" {
+	if peerIPPtrString(pm.TrustedAdvertiseIP) != "127.0.0.1" {
 		t.Fatalf("trusted_advertise_ip: got %q want %q (must be canonical IP from RemoteAddr)",
-			pm.TrustedAdvertiseIP, "127.0.0.1")
+			peerIPPtrString(pm.TrustedAdvertiseIP), "127.0.0.1")
 	}
 	_, wantPort, ok := splitHostPort(string(peerAddr))
 	if !ok {

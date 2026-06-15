@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
 )
 
@@ -24,7 +25,7 @@ func TestApplyPeerHealthDeltaCreatesNewEntry(t *testing.T) {
 	now := time.Now()
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:         "1.2.3.4:9999",
-		PeerID:          "peer-abc",
+		PeerID:          domaintest.ID("peer-abc"),
 		Direction:       "outbound",
 		Connected:       true,
 		State:           "active",
@@ -42,7 +43,7 @@ func TestApplyPeerHealthDeltaCreatesNewEntry(t *testing.T) {
 	if ph.Address != "1.2.3.4:9999" {
 		t.Fatalf("address = %q", ph.Address)
 	}
-	if ph.PeerID != "peer-abc" {
+	if ph.PeerID != domaintest.ID("peer-abc").String() {
 		t.Fatalf("PeerID = %q", ph.PeerID)
 	}
 	if ph.Direction != "outbound" {
@@ -62,7 +63,7 @@ func TestApplyPeerHealthDeltaDisconnectClearsSessionMetadata(t *testing.T) {
 	// Seed a connected peer.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:         "1.2.3.4:9999",
-		PeerID:          "peer-abc",
+		PeerID:          domaintest.ID("peer-abc"),
 		Direction:       "outbound",
 		Connected:       true,
 		ClientVersion:   "v0.35",
@@ -74,7 +75,7 @@ func TestApplyPeerHealthDeltaDisconnectClearsSessionMetadata(t *testing.T) {
 	// Disconnect: session-scoped fields are overwritten unconditionally.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:         "1.2.3.4:9999",
-		PeerID:          "peer-abc",
+		PeerID:          domaintest.ID("peer-abc"),
 		Direction:       "",
 		Connected:       false,
 		ClientVersion:   "",
@@ -118,7 +119,7 @@ func TestApplyPeerHealthDeltaConnectBackfillsSessionMetadata(t *testing.T) {
 	// Connect delta with new version — backfills non-empty fields only.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:         "1.2.3.4:9999",
-		PeerID:          "peer-abc",
+		PeerID:          domaintest.ID("peer-abc"),
 		Direction:       "inbound",
 		Connected:       true,
 		ClientVersion:   "v0.35",
@@ -179,21 +180,21 @@ func TestApplyPeerHealthDeltaBackfillsPeerID(t *testing.T) {
 	// Initial entry without PeerID (placeholder).
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:   "1.2.3.4:9999",
-		PeerID:    "",
+		PeerID:    domain.PeerIdentity{},
 		Connected: true,
 	})
 
 	// Second delta resolves identity.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:   "1.2.3.4:9999",
-		PeerID:    "peer-resolved",
+		PeerID:    domaintest.ID("peer-resolved"),
 		Connected: true,
 	})
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if m.status.PeerHealth[0].PeerID != "peer-resolved" {
+	if m.status.PeerHealth[0].PeerID != domaintest.ID("peer-resolved").String() {
 		t.Fatalf("PeerID should be backfilled, got %q", m.status.PeerHealth[0].PeerID)
 	}
 }
@@ -800,7 +801,7 @@ func TestSeedFromProbeDoesNotResurrectDisconnectedPeer(t *testing.T) {
 	// Ebus: peer connects then disconnects — state and session fields cleared.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:         "1.2.3.4:9999",
-		PeerID:          "peer-abc",
+		PeerID:          domaintest.ID("peer-abc"),
 		Direction:       "outbound",
 		Connected:       true,
 		Score:           80,
@@ -812,7 +813,7 @@ func TestSeedFromProbeDoesNotResurrectDisconnectedPeer(t *testing.T) {
 	})
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:   "1.2.3.4:9999",
-		PeerID:    "peer-abc",
+		PeerID:    domaintest.ID("peer-abc"),
 		Connected: false,
 		Score:     0,
 		State:     "",
@@ -871,7 +872,7 @@ func TestSeedFromProbeDoesNotResurrectDisconnectedPeer(t *testing.T) {
 		t.Fatalf("probe should not resurrect ProtocolVersion, got %d", ph.ProtocolVersion)
 	}
 	// PeerID is persistent — stays from ebus.
-	if ph.PeerID != "peer-abc" {
+	if ph.PeerID != domaintest.ID("peer-abc").String() {
 		t.Fatalf("PeerID should remain from ebus, got %q", ph.PeerID)
 	}
 }
@@ -1043,14 +1044,14 @@ func TestIsReachable(t *testing.T) {
 
 	m.mu.Lock()
 	m.status.ReachableIDs = map[domain.PeerIdentity]bool{
-		"peer-a": true,
+		domaintest.ID("peer-a"): true,
 	}
 	m.mu.Unlock()
 
-	if !m.IsReachable("peer-a") {
+	if !m.IsReachable(domaintest.ID("peer-a")) {
 		t.Fatal("peer-a should be reachable")
 	}
-	if m.IsReachable("peer-b") {
+	if m.IsReachable(domaintest.ID("peer-b")) {
 		t.Fatal("peer-b should not be reachable")
 	}
 }
@@ -1063,14 +1064,14 @@ func TestReachabilityProbeSeeded(t *testing.T) {
 	// Seed from probe — identity is reachable via routing table snapshot.
 	m.SeedFromProbe(NodeStatus{
 		ReachableIDs: map[domain.PeerIdentity]bool{
-			"peer-probe": true,
+			domaintest.ID("peer-probe"): true,
 		},
 	})
 
-	if !m.IsReachable("peer-probe") {
+	if !m.IsReachable(domaintest.ID("peer-probe")) {
 		t.Fatal("peer-probe should be reachable after probe seed")
 	}
-	if m.IsReachable("peer-unknown") {
+	if m.IsReachable(domaintest.ID("peer-unknown")) {
 		t.Fatal("peer-unknown should not be reachable")
 	}
 }
@@ -1313,7 +1314,7 @@ func TestApplyPeerHealthDeltaInboundDeltaPrunesStalePlaceholder(t *testing.T) {
 	// instead. Delta: no outbound (ConnID=0), one inbound, connected.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:        "10.0.0.1:9999",
-		PeerID:         "peer-abc",
+		PeerID:         domaintest.ID("peer-abc"),
 		ConnID:         0,
 		InboundConnIDs: []uint64{42},
 		Connected:      true,
@@ -1512,7 +1513,7 @@ func TestApplyPeerHealthDeltaCreatesInboundRowsFromDelta(t *testing.T) {
 	// one outbound (ConnID=42) and two inbound (ConnID=100, ConnID=200).
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:        "10.0.0.1:9999",
-		PeerID:         "peer-abc",
+		PeerID:         domaintest.ID("peer-abc"),
 		ConnID:         42,
 		InboundConnIDs: []uint64{100, 200},
 		Direction:      "outbound",
@@ -1542,7 +1543,7 @@ func TestApplyPeerHealthDeltaCreatesInboundRowsFromDelta(t *testing.T) {
 	if m.status.PeerHealth[1].Direction != "inbound" {
 		t.Fatalf("row[1] Direction = %q, want inbound", m.status.PeerHealth[1].Direction)
 	}
-	if m.status.PeerHealth[1].PeerID != "peer-abc" {
+	if m.status.PeerHealth[1].PeerID != domaintest.ID("peer-abc").String() {
 		t.Fatalf("row[1] PeerID = %q, want peer-abc", m.status.PeerHealth[1].PeerID)
 	}
 	// Row 2: inbound ConnID=200.
@@ -1574,7 +1575,7 @@ func TestApplyPeerHealthDeltaNewInboundRowsCarryVersionFields(t *testing.T) {
 
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:         "10.0.0.1:9999",
-		PeerID:          "peer-abc",
+		PeerID:          domaintest.ID("peer-abc"),
 		ConnID:          42,
 		InboundConnIDs:  []uint64{100, 200},
 		Direction:       "outbound",
@@ -1716,7 +1717,7 @@ func TestApplyPeerHealthDeltaOutboundDisconnectPreservesInbound(t *testing.T) {
 	// Seed: outbound + 1 inbound connection.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:        "10.0.0.1:9999",
-		PeerID:         "peer-abc",
+		PeerID:         domaintest.ID("peer-abc"),
 		ConnID:         42,
 		InboundConnIDs: []uint64{100},
 		Connected:      true,
@@ -1734,7 +1735,7 @@ func TestApplyPeerHealthDeltaOutboundDisconnectPreservesInbound(t *testing.T) {
 	// (no outbound session) and InboundConnIDs=[100] (still alive).
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:        "10.0.0.1:9999",
-		PeerID:         "peer-abc",
+		PeerID:         domaintest.ID("peer-abc"),
 		ConnID:         0,
 		InboundConnIDs: []uint64{100},
 		Connected:      true,
@@ -1773,7 +1774,7 @@ func TestApplyPeerHealthDeltaMixedOutboundInboundCoexistence(t *testing.T) {
 	// First delta: outbound only.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:   "10.0.0.1:9999",
-		PeerID:    "peer-abc",
+		PeerID:    domaintest.ID("peer-abc"),
 		ConnID:    42,
 		Direction: "outbound",
 		Connected: true,
@@ -1789,7 +1790,7 @@ func TestApplyPeerHealthDeltaMixedOutboundInboundCoexistence(t *testing.T) {
 	// Second delta: new inbound connection appears.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:        "10.0.0.1:9999",
-		PeerID:         "peer-abc",
+		PeerID:         domaintest.ID("peer-abc"),
 		ConnID:         42,
 		InboundConnIDs: []uint64{100},
 		Direction:      "outbound",
@@ -1807,7 +1808,7 @@ func TestApplyPeerHealthDeltaMixedOutboundInboundCoexistence(t *testing.T) {
 	// Third delta: another inbound appears, first stays.
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:        "10.0.0.1:9999",
-		PeerID:         "peer-abc",
+		PeerID:         domaintest.ID("peer-abc"),
 		ConnID:         42,
 		InboundConnIDs: []uint64{100, 200},
 		Direction:      "outbound",
@@ -1954,7 +1955,7 @@ func TestApplyCaptureStartedCreatesActiveEntry(t *testing.T) {
 	m.applyCaptureStarted(ebus.CaptureSessionStarted{
 		ConnID:    domain.ConnID(42),
 		Address:   domain.PeerAddress("10.0.0.1:9999"),
-		PeerID:    domain.PeerIdentity("peer-a"),
+		PeerID:    domaintest.ID("peer-a"),
 		Direction: domain.PeerDirectionOutbound,
 		FilePath:  "/tmp/captures/42.jsonl",
 		StartedAt: &startedAt,
@@ -2464,7 +2465,7 @@ func TestApplyPeerHealthDeltaInboundRowCarriesDiagnostics(t *testing.T) {
 	lastIncompat := time.Now().UTC()
 	m.applyPeerHealthDelta(ebus.PeerHealthDelta{
 		Address:                     "1.2.3.4:9999",
-		PeerID:                      "peer-abc",
+		PeerID:                      domaintest.ID("peer-abc"),
 		Direction:                   domain.PeerDirectionInbound,
 		ConnID:                      0, // inbound-only peer: no outbound session
 		InboundConnIDs:              []uint64{77, 78},

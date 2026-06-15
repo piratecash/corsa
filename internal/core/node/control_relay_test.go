@@ -21,7 +21,7 @@ func sealControlDMBody(t *testing.T, sender *identity.Identity, recipientAddress
 	sealed, err := directmsg.EncryptForParticipants(
 		sender,
 		domain.DMRecipient{
-			Address:      domain.PeerIdentity(recipientAddress),
+			Address:      domain.PeerIdentityFromWire(recipientAddress),
 			BoxKeyBase64: recipientBoxKeyBase64,
 		},
 		domain.OutgoingDM{

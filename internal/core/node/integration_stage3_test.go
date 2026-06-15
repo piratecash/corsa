@@ -8,6 +8,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -697,7 +698,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByCanonicalKey(t *testing.T) {
 	b := testCMConfig(canonical)
 	b.Cfg.MaxSlotsFn = func() int { return 1 }
 	b.Cfg.DialFn = func(_ context.Context, _ []domain.PeerAddress) (DialResult, error) {
-		session := fakePeerSession(domain.PeerAddress(fallback), "id-fallback")
+		session := fakePeerSession(domain.PeerAddress(fallback), domaintest.ID("id-fallback"))
 		return DialResult{
 			Session:          session,
 			ConnectedAddress: domain.PeerAddress(fallback),
@@ -749,7 +750,7 @@ func TestBuildPeerExchange_ExcludesDirectOnlySlotByFallbackKey(t *testing.T) {
 	b := testCMConfig(canonical)
 	b.Cfg.MaxSlotsFn = func() int { return 1 }
 	b.Cfg.DialFn = func(_ context.Context, _ []domain.PeerAddress) (DialResult, error) {
-		session := fakePeerSession(domain.PeerAddress(fallback), "id-fallback")
+		session := fakePeerSession(domain.PeerAddress(fallback), domaintest.ID("id-fallback"))
 		return DialResult{
 			Session:          session,
 			ConnectedAddress: domain.PeerAddress(fallback),

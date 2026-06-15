@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 	routingmocks "github.com/piratecash/corsa/internal/core/routing/mocks"
 )
@@ -50,8 +51,8 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 
 	registry := routing.NewAnnounceStateRegistry(routing.WithRegistryClock(clock))
 
-	table := routing.NewTable(routing.WithLocalOrigin("node-A"))
-	if _, err := table.AddDirectPeer("peer-B"); err != nil {
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
+	if _, err := table.AddDirectPeer(domaintest.ID("peer-B")); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
 
@@ -88,7 +89,7 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 		return []routing.AnnounceTarget{
 			{
 				Address:  "addr-C",
-				Identity: "peer-C",
+				Identity: domaintest.ID("peer-C"),
 				// mesh_routing_v2 alone (no v1, no relay) on the target
 				// MUST NOT change the wire-frame choice for forced-full:
 				// the first-sync invariant (docs/routing.md) requires a
@@ -115,7 +116,7 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 	// announceToAllPeers (needsFull = NeedsFullResync || LastSentSnapshot == nil).
 	// The rate-limit timer must be zero so the cycle is not coalesced
 	// under "too soon since last forced full sync attempt".
-	state := registry.GetOrCreate("peer-C")
+	state := registry.GetOrCreate(domaintest.ID("peer-C"))
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now.Add(-1*time.Minute))
 	state.SetNeedsFullResyncForTest()
 
@@ -141,7 +142,7 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 	// represented in the forced-full snapshot the peer receives.
 	foundB := false
 	for _, e := range lastRoutes {
-		if e.Identity == "peer-B" {
+		if e.Identity == domaintest.ID("peer-B") {
 			foundB = true
 			break
 		}

@@ -1420,7 +1420,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// from the env-var readers in internal/core/config and fall back
 	// to the package-level constants documented on routing.Default*.
 	svc.routingTable = routing.NewTable(
-		routing.WithLocalOrigin(routing.PeerIdentity(id.Address)),
+		routing.WithLocalOrigin(domain.PeerIdentityFromWire(id.Address)),
 		routing.WithMaxNextHopsPerOrigin(cfg.MaxNextHopsPerOrigin),
 		routing.WithMaxSeqAdvancePerWindow(cfg.MaxSeqAdvancePerWindow),
 		routing.WithSeqAdvanceWindow(cfg.SeqAdvanceWindow),
@@ -2259,7 +2259,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			// empty by contract, so the listener flag is the only
 			// remaining signal that distinguishes a peer from a local
 			// subscriber.
-			if strings.TrimSpace(frame.Listener) == "1" && s.isSelfIdentity(domain.PeerIdentity(frame.Address)) {
+			if strings.TrimSpace(frame.Listener) == "1" && s.isSelfIdentity(domain.PeerIdentityFromWire(frame.Address)) {
 				accepted = false
 				log.Warn().
 					Str("local_identity", s.identity.Address).
@@ -2891,7 +2891,7 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	case "fetch_trusted_contacts":
 		return s.trustedContactsFrame()
 	case "delete_trusted_contact":
-		return s.deleteTrustedContactFrame(domain.PeerIdentity(frame.Address))
+		return s.deleteTrustedContactFrame(domain.PeerIdentityFromWire(frame.Address))
 	case "fetch_peer_health":
 		return s.peerHealthFrame()
 	case "fetch_network_stats":
@@ -3311,7 +3311,7 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 	line, err := protocol.MarshalFrameLine(frame)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("peer", string(dst)).
+			Str("peer", dst.String()).
 			Str("frame_type", frame.Type).
 			Msg("sendFrameToIdentity: marshal failed")
 		return false
@@ -3690,9 +3690,9 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 		if s.hasOutboundSessionForInbound(addr) {
 			log.Info().Str("peer", string(addr)).Msg("duplicate_inbound_auth_session_allowed")
 		}
-		s.addPeerID(addr, domain.PeerIdentity(verified.Hello.Address))
+		s.addPeerID(addr, domain.PeerIdentityFromWire(verified.Hello.Address))
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_begin")
-		s.trackInboundConnect(id, addr, domain.PeerIdentity(verified.Hello.Address))
+		s.trackInboundConnect(id, addr, domain.PeerIdentityFromWire(verified.Hello.Address))
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_end")
 		s.addPeerVersion(addr, verified.Hello.ClientVersion)
 		s.addPeerBuild(addr, verified.Hello.ClientBuild)
@@ -3711,7 +3711,7 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 		// between auth completion and this mirror — fail silently, the
 		// disconnect path will reconcile.
 		if core := s.netCoreForID(id); core != nil {
-			core.SetIdentity(domain.PeerIdentity(verified.Hello.Address))
+			core.SetIdentity(domain.PeerIdentityFromWire(verified.Hello.Address))
 			core.SetAddress(addr)
 		}
 	} else {
@@ -3838,7 +3838,7 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, t
 	}
 	pc.ApplyOpts(netcore.Options{
 		Address:         domain.PeerAddress(addr),
-		Identity:        domain.PeerIdentity(strings.TrimSpace(hello.Address)),
+		Identity:        domain.PeerIdentityFromWire(strings.TrimSpace(hello.Address)),
 		LastActivity:    time.Now().UTC(),
 		Networks:        domain.ParseNetGroups(hello.Networks),
 		Caps:            intersectCapabilities(localCapabilities(s.cfg.EnableMeshRoutingV3), hello.Capabilities),
@@ -3879,7 +3879,7 @@ func (s *Service) trackedInboundPeerAddress(id domain.ConnID) domain.PeerAddress
 // from the hello/auth frame — used for routing table registration instead
 // of the transport address.
 func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddress, peerIdentity domain.PeerIdentity) {
-	log.Trace().Uint64("conn_id", uint64(id)).Str("address", string(address)).Str("peer_identity", string(peerIdentity)).Msg("track_inbound_connect_begin")
+	log.Trace().Uint64("conn_id", uint64(id)).Str("address", string(address)).Str("peer_identity", peerIdentity.String()).Msg("track_inbound_connect_begin")
 
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_before_lock")
 	log.Trace().Str("site", "trackInboundConnect").Str("phase", "lock_wait").Uint64("conn_id", uint64(id)).Str("address", string(address)).Msg("peer_mu_writer")
@@ -3894,7 +3894,7 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	log.Trace().Str("site", "trackInboundConnect").Str("phase", "lock_released").Uint64("conn_id", uint64(id)).Str("address", string(address)).Msg("peer_mu_writer")
 	log.Trace().Uint64("conn_id", uint64(id)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect_lock_released")
 
-	log.Info().Str("node", s.identity.Address).Str("peer_identity", string(peerIdentity)).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
+	log.Info().Str("node", s.identity.Address).Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Str("resolved", string(resolved)).Bool("first", first).Msg("track_inbound_connect")
 
 	if first {
 		log.Trace().Uint64("conn_id", uint64(id)).Str("resolved", string(resolved)).Msg("track_inbound_connect_before_mark_connected")
@@ -3918,7 +3918,7 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	// decision internally and forwards the full list to AnnouncePeerState
 	// so routing-announce v2 can record what the peer actually supports
 	// without a second s.peerMu RLock round-trip.
-	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", string(peerIdentity)).Msg("track_inbound_connect_before_on_peer_session")
+	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", peerIdentity.String()).Msg("track_inbound_connect_before_on_peer_session")
 	s.onPeerSessionEstablished(peerIdentity, s.connCapabilitiesForID(id))
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_after_on_peer_session")
 	// The inbound peer's identity may now be directly reachable (a direct
@@ -4006,7 +4006,7 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 		peerIdentity = s.connIdentityByIDLocked(id)
 	}
 	resolved := s.resolveHealthAddress(address)
-	if peerIdentity == "" {
+	if peerIdentity.IsZero() {
 		peerIdentity = s.peerIDs[resolved]
 	}
 	var last bool
@@ -4141,7 +4141,7 @@ const observedAddrConsensusThreshold = 2
 // removed together with the wire-host emit, so observed_address is
 // kept on the wire purely as a diagnostic signal for operators.
 func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP string) {
-	if peerID == "" || observedIP == "" {
+	if peerID.IsZero() || observedIP == "" {
 		return
 	}
 	ip := net.ParseIP(observedIP)
@@ -4158,12 +4158,12 @@ func (s *Service) recordObservedAddress(peerID domain.PeerIdentity, observedIP s
 	}
 
 	// ipStateMu, not s.peerMu: observedAddrs lives in the IP/advertise domain.
-	log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_wait").Str("peer_id", string(peerID)).Msg("ip_state_mu_writer")
+	log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_wait").Str("peer_id", peerID.String()).Msg("ip_state_mu_writer")
 	s.ipStateMu.Lock()
-	log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_held").Str("peer_id", string(peerID)).Msg("ip_state_mu_writer")
+	log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_held").Str("peer_id", peerID.String()).Msg("ip_state_mu_writer")
 	defer func() {
 		s.ipStateMu.Unlock()
-		log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_released").Str("peer_id", string(peerID)).Msg("ip_state_mu_writer")
+		log.Trace().Str("site", "recordObservedAddress").Str("phase", "lock_released").Str("peer_id", peerID.String()).Msg("ip_state_mu_writer")
 	}()
 
 	s.observedAddrs[peerID] = observedIP
@@ -4466,8 +4466,8 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 }
 
 func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protocol.Frame {
-	identity = domain.PeerIdentity(strings.TrimSpace(string(identity)))
-	if identity == "" {
+	identity = domain.PeerIdentityFromWire(strings.TrimSpace(identity.String()))
+	if identity.IsZero() {
 		return protocol.Frame{Type: "error", Error: "address is required"}
 	}
 
@@ -4479,13 +4479,13 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 	// Drop pending outbound messages destined for the deleted contact.
 	// The user explicitly removed this identity, so queued messages
 	// should not be delivered.
-	s.dropPendingForRecipient(string(identity))
+	s.dropPendingForRecipient(identity.String())
 
 	// If the contact was not in the trust store, that is not an error —
 	// it may have originated from network discovery rather than the
 	// trusted contacts list.
 	ebus.PublishContactRemoved(s.eventBus, identity)
-	return protocol.Frame{Type: "ok", Address: string(identity)}
+	return protocol.Frame{Type: "ok", Address: identity.String()}
 }
 
 // dropPendingForRecipient removes all pending send_message frames addressed
@@ -5097,7 +5097,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		CreatedAt:   msg.CreatedAt,
 		Hops:        hopBudget,
 		Via:         string(msg.Via),
-		ViaIdentity: string(msg.ViaIdentity),
+		ViaIdentity: msg.ViaIdentity.String(),
 		StoredAt:    time.Now().UTC(),
 	}
 
@@ -6323,7 +6323,7 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress dom
 	// Call sites that also need to abort their broader pipeline
 	// (auth_session) consult isSelfIdentity
 	// independently; this guard is a defence-in-depth boundary.
-	if s.isSelfIdentity(domain.PeerIdentity(frame.Address)) {
+	if s.isSelfIdentity(domain.PeerIdentityFromWire(frame.Address)) {
 		log.Warn().
 			Str("local_identity", s.identity.Address).
 			Str("welcome_listen", frame.Listen).
@@ -6342,13 +6342,13 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress dom
 		if normalizedAddr, ok := s.normalizePeerAddress(dialAddress, dialAddress); ok {
 			s.promotePeerAddress(normalizedAddr)
 			s.rememberPeerType(normalizedAddr, frame.NodeType)
-			s.addPeerID(normalizedAddr, domain.PeerIdentity(frame.Address))
+			s.addPeerID(normalizedAddr, domain.PeerIdentityFromWire(frame.Address))
 			s.addPeerVersion(normalizedAddr, frame.ClientVersion)
 			s.addPeerBuild(normalizedAddr, frame.ClientBuild)
 		}
 	}
 	if frame.Address != "" {
-		s.addKnownIdentity(domain.PeerIdentity(frame.Address))
+		s.addKnownIdentity(domain.PeerIdentityFromWire(frame.Address))
 	}
 	// When all key fields are present, verify the box key binding before storing.
 	if frame.Address != "" && frame.PubKey != "" && frame.BoxKey != "" && frame.BoxSig != "" {
@@ -6402,11 +6402,11 @@ func isKnownNodeType(raw string) bool {
 }
 
 func (s *Service) addKnownIdentity(identity domain.PeerIdentity) {
-	if identity == "" {
+	if identity.IsZero() {
 		return
 	}
 
-	address := string(identity)
+	address := identity.String()
 	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
 	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
@@ -6536,7 +6536,7 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		return
 	}
 
-	identityFingerprint := domain.PeerIdentity(address)
+	identityFingerprint := domain.PeerIdentityFromWire(address)
 	s.addKnownIdentity(identityFingerprint)
 	s.addKnownBoxKey(address, boxKey)
 	s.addKnownPubKey(address, pubKey)
@@ -6568,7 +6568,7 @@ func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerI
 	if sender == s.identity.Address {
 		return true
 	}
-	if relayPeerIdentity != "" && sender == string(relayPeerIdentity) {
+	if !relayPeerIdentity.IsZero() && sender == relayPeerIdentity.String() {
 		return true
 	}
 	s.knowledgeMu.RLock()
@@ -6629,7 +6629,7 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 		log.Warn().
 			Str("node", s.identity.Address).
 			Str("peer", string(peerAddr)).
-			Str("relay_identity", string(peerIdentity)).
+			Str("relay_identity", peerIdentity.String()).
 			Str("id", string(msg.ID)).
 			Str("sender", msg.Sender).
 			Str("topic", msg.Topic).
@@ -6686,9 +6686,9 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 			log.Debug().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("id", string(msg.ID)).Msg("push_message_dedup_acked")
 		}
 	} else if !stored {
-		log.Warn().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", string(peerIdentity)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed")
+		log.Warn().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", peerIdentity.String()).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("err_code", errCode).Msg("push_message_store_failed")
 	}
-	log.Info().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", string(peerIdentity)).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("topic", msg.Topic).Bool("stored", stored).Msg("received pushed message (inbound)")
+	log.Info().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("relay_identity", peerIdentity.String()).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Str("topic", msg.Topic).Bool("stored", stored).Msg("received pushed message (inbound)")
 }
 
 // handleInboundPushDeliveryReceipt processes a push_delivery_receipt frame

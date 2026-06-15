@@ -8,11 +8,23 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
+// mustID decodes a canonical 40-char hex fingerprint into a PeerIdentity,
+// failing the test on malformed input. Used where the exact fingerprint
+// bytes matter (nonce/signature binding, wire round-trip).
+func mustID(t *testing.T, hexFingerprint string) domain.PeerIdentity {
+	t.Helper()
+	id, err := domain.ParsePeerIdentity(hexFingerprint)
+	if err != nil {
+		t.Fatalf("parse peer identity %q: %v", hexFingerprint, err)
+	}
+	return id
+}
+
 func TestComputeNonce(t *testing.T) {
 	t.Parallel()
 
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 	now := int64(1712345678)
 	payload := "encrypted-data-base64"
 	maxTTL := uint8(10)
@@ -78,8 +90,8 @@ func TestSignAndVerifyFileCommand(t *testing.T) {
 func TestValidateFileCommandFrame(t *testing.T) {
 	t.Parallel()
 
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 	now := time.Now()
 	payload := "test-payload"
 	maxTTL := uint8(10)
@@ -110,14 +122,14 @@ func TestValidateFileCommandFrame(t *testing.T) {
 
 	// Empty SRC.
 	emptySRC := valid
-	emptySRC.SRC = ""
+	emptySRC.SRC = domain.PeerIdentity{}
 	if err := ValidateFileCommandFrame(emptySRC, now); err == nil {
 		t.Error("empty SRC should fail")
 	}
 
 	// Empty DST.
 	emptyDST := valid
-	emptyDST.DST = ""
+	emptyDST.DST = domain.PeerIdentity{}
 	if err := ValidateFileCommandFrame(emptyDST, now); err == nil {
 		t.Error("empty DST should fail")
 	}
@@ -173,8 +185,8 @@ func TestNewFileCommandFrame(t *testing.T) {
 	t.Parallel()
 
 	_, priv, _ := ed25519.GenerateKey(nil)
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 
 	frame := NewFileCommandFrame(src, dst, 10, "payload-data", priv)
 
@@ -229,8 +241,8 @@ func TestMarshalUnmarshalFileCommandFrame(t *testing.T) {
 	t.Parallel()
 
 	_, priv, _ := ed25519.GenerateKey(nil)
-	src := domain.PeerIdentity("aaaa111122223333444455556666777788889999")
-	dst := domain.PeerIdentity("bbbb111122223333444455556666777788889999")
+	src := mustID(t, "aaaa111122223333444455556666777788889999")
+	dst := mustID(t, "bbbb111122223333444455556666777788889999")
 
 	original := NewFileCommandFrame(src, dst, 10, "test-payload", priv)
 

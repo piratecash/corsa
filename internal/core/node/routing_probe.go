@@ -88,7 +88,7 @@ func (s *Service) handleRouteProbe(connID domain.ConnID, senderIdentity domain.P
 		log.Warn().
 			Err(err).
 			Uint64("probe_id", probe.ProbeID).
-			Str("target_identity", string(probe.TargetIdentity)).
+			Str("target_identity", probe.TargetIdentity.String()).
 			Msg("route_probe_ack_marshal_failed")
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Service) handleRouteProbe(connID domain.ConnID, senderIdentity domain.P
 // otherwise a fresh slice. Callers MUST NOT assume the returned
 // slice aliases the input.
 func filterSplitHorizon(routes []routing.RouteEntry, excludeVia domain.PeerIdentity) []routing.RouteEntry {
-	if excludeVia == "" || len(routes) == 0 {
+	if excludeVia.IsZero() || len(routes) == 0 {
 		return routes
 	}
 	// Fast path: scan first to avoid allocating when nothing
@@ -172,7 +172,7 @@ func (s *Service) handleRouteProbeAck(senderIdentity domain.PeerIdentity, ack pr
 		// fixtures pre-PR-11.3c). Defensive no-op.
 		log.Debug().
 			Uint64("probe_id", ack.ProbeID).
-			Str("sender_identity", string(senderIdentity)).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_probe_ack_dropped_no_registry")
 		return
 	}
@@ -194,7 +194,7 @@ func (s *Service) handleRouteProbeAck(senderIdentity domain.PeerIdentity, ack pr
 		// the distinction is not useful for the receive path.
 		log.Debug().
 			Uint64("probe_id", ack.ProbeID).
-			Str("sender_identity", string(senderIdentity)).
+			Str("sender_identity", senderIdentity.String()).
 			Msg("route_probe_ack_dropped_unknown_or_mismatched")
 		return
 	}

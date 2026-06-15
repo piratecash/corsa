@@ -30,7 +30,7 @@ func TestFileSendAnnounceSuccess(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_name": "document.pdf",
 		"file_size": 1024,
 		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
@@ -38,12 +38,12 @@ func TestFileSendAnnounceSuccess(t *testing.T) {
 
 	expectStatusCode(t, code, 200)
 	expectField(t, result, "status", "pending")
-	expectField(t, result, "to", "peer-addr")
+	expectField(t, result, "to", validTo)
 	expectField(t, result, "file_name", "document.pdf")
 	expectField(t, result, "file_hash", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
 
-	if capturedTo != "peer-addr" {
-		t.Errorf("expected capturedTo = %q, got %q", "peer-addr", capturedTo)
+	if capturedTo.String() != validTo {
+		t.Errorf("expected capturedTo = %q, got %q", validTo, capturedTo)
 	}
 }
 
@@ -59,7 +59,7 @@ func TestFileSendAnnounceValidationFailure(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_name": "document.pdf",
 		"file_size": 1024,
 		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
@@ -94,7 +94,7 @@ func TestFileSendAnnounceReturns503WhenWipePending(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_name": "document.pdf",
 		"file_size": 1024,
 		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
@@ -119,13 +119,64 @@ func TestFileSendAnnounceMissingTo(t *testing.T) {
 	expectFieldExists(t, result, "error")
 }
 
+// TestFileSendAnnounceRejectsMalformedTo pins the RPC boundary on the
+// file_announce path: a non-empty but non-hex recipient must be rejected
+// synchronously with 400 BEFORE SendFileAnnounce runs, instead of being
+// coerced to the zero identity and returning "pending".
+func TestFileSendAnnounceRejectsMalformedTo(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
+		"to":        "not-hex",
+		"file_name": "document.pdf",
+		"file_size": 1024,
+		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "valid peer identity") {
+		t.Errorf("expected peer-identity validation error, got %q", errMsg)
+	}
+
+	// The malformed address must not reach SendFileAnnounce.
+	dmRouter.AssertNotCalled(t, "SendFileAnnounce")
+}
+
+// TestFileSendAnnounceRejectsZeroIdentityTo pins the second half of the
+// file_announce boundary: the all-zero 40-hex address parses with a nil error
+// through domain.ParsePeerIdentity, so without the explicit IsZero gate the
+// absent sentinel would slip through. It must be rejected with 400 BEFORE
+// SendFileAnnounce runs.
+func TestFileSendAnnounceRejectsZeroIdentityTo(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
+	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
+		"to":        zeroIdentity,
+		"file_name": "document.pdf",
+		"file_size": 1024,
+		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+	})
+
+	expectStatusCode(t, code, 400)
+	if errMsg, _ := result["error"].(string); !strings.Contains(errMsg, "zero peer identity") {
+		t.Errorf("expected zero-identity validation error, got %q", errMsg)
+	}
+
+	// The zero identity must not reach SendFileAnnounce.
+	dmRouter.AssertNotCalled(t, "SendFileAnnounce")
+}
+
 func TestFileSendAnnounceMissingFileName(t *testing.T) {
 	node := newDefaultNodeProvider(t)
 	dmRouter := newDefaultDMRouterProvider(t)
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_size": 1024,
 		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 	})
@@ -140,7 +191,7 @@ func TestFileSendAnnounceMissingFileSize(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_name": "document.pdf",
 		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
 	})
@@ -155,7 +206,7 @@ func TestFileSendAnnounceZeroFileSize(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_name": "document.pdf",
 		"file_size": 0,
 		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
@@ -171,7 +222,7 @@ func TestFileSendAnnounceMissingFileHash(t *testing.T) {
 	server := setupTestServerWithDMRouter(t, node, nil, dmRouter)
 
 	code, result := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_name": "document.pdf",
 		"file_size": 1024,
 	})
@@ -212,7 +263,7 @@ func TestFileSendAnnounceDefaultContentType(t *testing.T) {
 
 	// Omit content_type — should default to "application/octet-stream"
 	code, _ := postJSON(t, server, "/rpc/v1/file/send_file_announce", map[string]interface{}{
-		"to":        "peer-addr",
+		"to":        validTo,
 		"file_name": "document.pdf",
 		"file_size": 1024,
 		"file_hash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
@@ -220,8 +271,8 @@ func TestFileSendAnnounceDefaultContentType(t *testing.T) {
 
 	expectStatusCode(t, code, 200)
 
-	if capturedTo != "peer-addr" {
-		t.Errorf("expected capturedTo = %q, got %q", "peer-addr", capturedTo)
+	if capturedTo.String() != validTo {
+		t.Errorf("expected capturedTo = %q, got %q", validTo, capturedTo)
 	}
 }
 
@@ -261,6 +312,26 @@ func TestExplainFileRouteRejectsMalformedIdentity(t *testing.T) {
 	}
 }
 
+// TestExplainFileRouteRejectsZeroIdentity pins the second half of the boundary:
+// the all-zero 40-hex address parses with a nil error through
+// domain.ParsePeerIdentity, so without the explicit IsZero gate the absent
+// sentinel would reach the file router. It must be rejected with ErrValidation
+// and node.ExplainFileRoute must never be called.
+func TestExplainFileRouteRejectsZeroIdentity(t *testing.T) {
+	node := newDefaultNodeProvider(t)
+	table := rpc.NewCommandTable()
+	rpc.RegisterFileCommands(table, node, newDefaultDMRouterProvider(t))
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "explainFileRoute",
+		Args: map[string]interface{}{"identity": zeroIdentity},
+	})
+	if resp.ErrorKind != rpc.ErrValidation {
+		t.Errorf("expected ErrValidation for zero identity, got %v", resp.ErrorKind)
+	}
+	node.AssertNotCalled(t, "ExplainFileRoute")
+}
+
 // TestExplainFileRouteForwardsToNodeProvider walks the happy path: a valid
 // identity reaches NodeProvider.ExplainFileRoute and the JSON it returns
 // is propagated verbatim back to the caller. This is the contract the
@@ -273,7 +344,7 @@ func TestExplainFileRouteForwardsToNodeProvider(t *testing.T) {
 	node.On("ClientVersion").Return("0.16-alpha").Maybe()
 
 	wantPayload := json.RawMessage(`[{"next_hop":"aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44","hops":1,"protocol_version":7,"connected_at":"2025-01-01T12:34:56Z","uptime_seconds":42,"best":true}]`)
-	node.On("ExplainFileRoute", domain.PeerIdentity("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")).
+	node.On("ExplainFileRoute", domain.PeerIdentityFromWire("aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44")).
 		Return(wantPayload, nil).Once()
 
 	table := rpc.NewCommandTable()

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // seedHealthyPeerSession installs a session under addr-<identity>
@@ -50,18 +51,18 @@ func TestQueryRateLimit_AllowsUpToLimitInWindow(t *testing.T) {
 	r := newQueryRateLimit(func() time.Time { return clk }, 30*time.Second, 3)
 
 	for i := 0; i < 3; i++ {
-		if !r.HasCapacity("id-target") {
+		if !r.HasCapacity(domaintest.ID("id-target")) {
 			t.Fatalf("HasCapacity returned false at i=%d, want true (budget 3)", i)
 		}
-		if !r.Record("id-target") {
+		if !r.Record(domaintest.ID("id-target")) {
 			t.Fatalf("Record returned false at i=%d, want true (budget 3)", i)
 		}
 	}
 	// Fourth attempt within the same window must be rejected.
-	if r.HasCapacity("id-target") {
+	if r.HasCapacity(domaintest.ID("id-target")) {
 		t.Fatal("HasCapacity returned true after 3 records, want false")
 	}
-	if r.Record("id-target") {
+	if r.Record(domaintest.ID("id-target")) {
 		t.Fatal("Record returned true after 3 records, want false (budget exhausted)")
 	}
 }
@@ -76,19 +77,19 @@ func TestQueryRateLimit_SlidingWindowReclaimsBudget(t *testing.T) {
 
 	// Fill the budget.
 	for i := 0; i < 3; i++ {
-		r.Record("id-target")
+		r.Record(domaintest.ID("id-target"))
 	}
-	if r.HasCapacity("id-target") {
+	if r.HasCapacity(domaintest.ID("id-target")) {
 		t.Fatal("setup: budget should be full")
 	}
 
 	// Step past the window.
 	clk = now.Add(31 * time.Second)
-	if !r.HasCapacity("id-target") {
+	if !r.HasCapacity(domaintest.ID("id-target")) {
 		t.Fatal("HasCapacity returned false after window expired, want true (budget reclaimed)")
 	}
-	if r.PendingCount("id-target") != 0 {
-		t.Fatalf("PendingCount = %d after window expired, want 0", r.PendingCount("id-target"))
+	if r.PendingCount(domaintest.ID("id-target")) != 0 {
+		t.Fatalf("PendingCount = %d after window expired, want 0", r.PendingCount(domaintest.ID("id-target")))
 	}
 }
 
@@ -100,14 +101,14 @@ func TestQueryRateLimit_SlidingWindowReclaimsPartialBudget(t *testing.T) {
 	clk := now
 	r := newQueryRateLimit(func() time.Time { return clk }, 30*time.Second, 3)
 
-	r.Record("id-target") // t=0
+	r.Record(domaintest.ID("id-target")) // t=0
 	clk = now.Add(10 * time.Second)
-	r.Record("id-target") // t=10
+	r.Record(domaintest.ID("id-target")) // t=10
 	clk = now.Add(20 * time.Second)
-	r.Record("id-target") // t=20
+	r.Record(domaintest.ID("id-target")) // t=20
 
-	if r.PendingCount("id-target") != 3 {
-		t.Fatalf("setup: PendingCount = %d, want 3", r.PendingCount("id-target"))
+	if r.PendingCount(domaintest.ID("id-target")) != 3 {
+		t.Fatalf("setup: PendingCount = %d, want 3", r.PendingCount(domaintest.ID("id-target")))
 	}
 
 	// Advance past the first stamp (t=0 + 30s = t=30s).
@@ -115,10 +116,10 @@ func TestQueryRateLimit_SlidingWindowReclaimsPartialBudget(t *testing.T) {
 	// `before(cutoff = now - window = t=31s - 30s = t=1s)` and
 	// t=0 < t=1s. Two stamps remain (t=10, t=20).
 	clk = now.Add(31 * time.Second)
-	if got := r.PendingCount("id-target"); got != 2 {
+	if got := r.PendingCount(domaintest.ID("id-target")); got != 2 {
 		t.Fatalf("PendingCount = %d after partial window pass, want 2", got)
 	}
-	if !r.HasCapacity("id-target") {
+	if !r.HasCapacity(domaintest.ID("id-target")) {
 		t.Fatal("HasCapacity false after partial reclaim, want true")
 	}
 }
@@ -130,9 +131,9 @@ func TestQueryRateLimit_PerTargetIsolation(t *testing.T) {
 	r := newQueryRateLimit(nil, 30*time.Second, 3)
 
 	for i := 0; i < 3; i++ {
-		r.Record("id-target-A")
+		r.Record(domaintest.ID("id-target-A"))
 	}
-	if !r.HasCapacity("id-target-B") {
+	if !r.HasCapacity(domaintest.ID("id-target-B")) {
 		t.Fatal("HasCapacity for target B returned false; budget must be per-target, not global")
 	}
 }
@@ -189,7 +190,7 @@ func TestSendRouteQuery_EmptyTargetReturnsZero(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.queryRateLimit = newQueryRateLimit(nil, 30*time.Second, 3)
 
-	if got := svc.SendRouteQuery(""); got != 0 {
+	if got := svc.SendRouteQuery(domain.PeerIdentity{}); got != 0 {
 		t.Fatalf("SendRouteQuery(\"\") returned %d, want 0", got)
 	}
 }

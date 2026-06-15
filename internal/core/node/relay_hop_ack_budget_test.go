@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // relay_hop_ack_budget_test.go covers Phase 3 PR 12.2 — the relay state
@@ -27,7 +28,7 @@ func TestHopAckBudget_TickerFiresOnExactlyOneTickAfterCountdown(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-1",
 		ForwardedTo:          domain.PeerAddress("peer-b"),
-		Recipient:            domain.PeerIdentity("id-recipient"),
+		Recipient:            domaintest.ID("id-recipient"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 3,
 	})
@@ -66,7 +67,7 @@ func TestHopAckBudget_MarkObservedCancelsTimer(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-cancel",
 		ForwardedTo:          domain.PeerAddress("peer-b"),
-		Recipient:            domain.PeerIdentity("id-recipient"),
+		Recipient:            domaintest.ID("id-recipient"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 3,
 	})
@@ -100,7 +101,7 @@ func TestHopAckBudget_NotTrackingWhenRemainingTicksZero(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:    "msg-final",
 		ForwardedTo:  domain.PeerAddress(""),
-		Recipient:    domain.PeerIdentity("id-recipient"),
+		Recipient:    domaintest.ID("id-recipient"),
 		RemainingTTL: 60,
 		// HopAckRemainingTicks: 0 left explicit for clarity.
 		HopAckRemainingTicks: 0,
@@ -122,14 +123,14 @@ func TestHopAckBudget_TracksMultipleStatesIndependently(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-short",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-x"),
+		Recipient:            domaintest.ID("id-x"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 2,
 	})
 	rs.store(&relayForwardState{
 		MessageID:            "msg-long",
 		ForwardedTo:          domain.PeerAddress("peer-b"),
-		Recipient:            domain.PeerIdentity("id-y"),
+		Recipient:            domaintest.ID("id-y"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 4,
 	})
@@ -169,7 +170,7 @@ func TestHopAckBudget_StoreUpsertRerouteResetsBudget(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-reroute",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 3,
 	})
@@ -191,7 +192,7 @@ func TestHopAckBudget_StoreUpsertRerouteResetsBudget(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-reroute",
 		ForwardedTo:          domain.PeerAddress("peer-b"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 3,
 		HopAckObserved:       false,
@@ -236,7 +237,7 @@ func TestHopAckBudget_StoreUpsertSameForwardedToDoesNotResetBudget(t *testing.T)
 	rs.store(&relayForwardState{
 		MessageID:            "msg-retry",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 3,
 	})
@@ -248,7 +249,7 @@ func TestHopAckBudget_StoreUpsertSameForwardedToDoesNotResetBudget(t *testing.T)
 	rs.store(&relayForwardState{
 		MessageID:            "msg-retry",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: 99, // attempt to reset — must be ignored
 		HopAckObserved:       false,
@@ -292,7 +293,7 @@ func TestHopAckBudget_TTLEvictionInvalidatesPendingBudget(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-short-ttl",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         2, // expires in 2 ticks
 		HopAckRemainingTicks: 5, // would otherwise fire at tick 5
 	})
@@ -326,7 +327,7 @@ func TestHopAckBudget_OriginPathStampsBudget(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-origin",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         180,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 	})
@@ -364,8 +365,8 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-fail",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
-		RouteOrigin:          domain.PeerIdentity("origin-x"),
+		Recipient:            domaintest.ID("id-target"),
+		RouteOrigin:          domaintest.ID("origin-x"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 		HopAckObserved:       true, // simulate timeout-already-fired
@@ -394,8 +395,8 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 	if st.HopAckObserved {
 		t.Fatal("HopAckObserved must be false after retry (fresh window)")
 	}
-	if st.RouteOrigin != "" {
-		t.Fatalf("RouteOrigin = %q, want empty (failover does not carry origin)", st.RouteOrigin)
+	if !st.RouteOrigin.IsZero() {
+		t.Fatalf("RouteOrigin = %q, want empty (failover does not carry origin)", st.RouteOrigin.String())
 	}
 	// FrameLine must survive — the same payload is being retried.
 	if st.FrameLine == "" {
@@ -428,7 +429,7 @@ func TestFailoverRetry_RecordSamePeerDoesNotAppendAbandoned(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-same",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 		HopAckObserved:       true,
@@ -465,7 +466,7 @@ func TestRetryAttemptCountFor_ReturnsCurrentValue(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-counted",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 		RetryAttempt:         3,
@@ -492,7 +493,7 @@ func TestFailoverRetry_AccumulatesAbandonedAcrossMultipleRetries(t *testing.T) {
 	rs.store(&relayForwardState{
 		MessageID:            "msg-chain",
 		ForwardedTo:          domain.PeerAddress("peer-a"),
-		Recipient:            domain.PeerIdentity("id-target"),
+		Recipient:            domaintest.ID("id-target"),
 		RemainingTTL:         60,
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 	})
