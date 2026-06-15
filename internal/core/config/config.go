@@ -361,7 +361,7 @@ const (
 	// correctly.
 	ClientVersionMajor = 1
 	ClientVersionMinor = 0
-	ClientVersionBuild = 59
+	ClientVersionBuild = 60
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
@@ -381,7 +381,7 @@ const (
 	// relay_delivery_receipt). Additive: pre-v23 binaries reject the unknown
 	// status at parse time and drop the frame; the seen-sender's bounded
 	// retry absorbs that until both ends are v23+.
-	ProtocolVersion        = 23
+	ProtocolVersion        = 24
 	MinimumProtocolVersion = 20
 	// ProtocolVersionSeenAck is the version that introduced
 	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
