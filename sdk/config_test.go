@@ -111,3 +111,38 @@ func TestNodeConfigHoldDMUntilReachableMapping(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeConfigEnvelopeRetentionMapping pins the SDK boundary for the
+// transit gossip-storm cure: the public *bool maps into the internal bool with
+// "nil means the default, which is ENABLED". Guards against the SDK path
+// silently shipping the bool zero value (false = legacy no-ceiling), which
+// would leave embedded runtimes accepting/re-propagating aged transit DMs.
+func TestNodeConfigEnvelopeRetentionMapping(t *testing.T) {
+	t.Parallel()
+
+	tr := true
+	fa := false
+
+	cases := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{name: "nil_defaults_to_enabled", in: nil, want: true},
+		{name: "explicit_true_stays_enabled", in: &tr, want: true},
+		{name: "explicit_false_is_kill_switch", in: &fa, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := DefaultConfig()
+			cfg.Node.EnvelopeRetentionEnabled = tc.in
+
+			if got := cfg.internal().Node.EnvelopeRetentionEnabled; got != tc.want {
+				t.Fatalf("EnvelopeRetentionEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

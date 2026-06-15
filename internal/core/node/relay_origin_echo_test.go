@@ -97,6 +97,104 @@ func TestStoreIncomingMessage_OriginEchoNotRepropagated(t *testing.T) {
 	}
 }
 
+// TestHandleRelayMessage_OwnOriginEchoDropped is the relay fast-path companion
+// to the store-path origin-echo guard: a relay_message whose ORIGIN sender is
+// this node (recipient != self) is our own DM echoing back through the mesh and
+// MUST NOT be re-forwarded — the fast path forwards before storeIncomingMessage,
+// so without this guard it would bypass the store-path originEcho check and
+// revive an abandoned delivery (the zombie-DM storm).
+func TestHandleRelayMessage_OwnOriginEchoDropped(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+	thirdParty, _ := identity.Generate()
+	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-1:64646", domain.PeerIdentity{})
+
+	frame := protocol.Frame{
+		Type:        "relay_message",
+		ID:          "own-echo-relay-1",
+		Address:     svc.Address(), // origin sender == self → echo of our own DM
+		Recipient:   thirdParty.Address,
+		Topic:       "dm",
+		Body:        "x",
+		Flag:        string(protocol.MessageFlagSenderDelete),
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		HopCount:    2,
+		MaxHops:     10,
+		PreviousHop: "10.0.0.9:64646",
+	}
+	status := svc.handleRelayMessage(domain.PeerAddress("10.0.0.9:64646"), nil, frame)
+	if status != "" {
+		t.Fatalf("own-origin echo relay must be dropped (status %q, want empty)", status)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if drainForRepropagation(sendCh, "own-echo-relay-1") {
+		t.Error("own-origin echo relay must NOT be forwarded/re-gossiped")
+	}
+}
+
+// registerForeignKey publishes a third party's identity keys so
+// storeIncomingMessage's VerifyEnvelope accepts a transit DM it authored.
+func registerForeignKey(t *testing.T, svc *Service, id *identity.Identity) {
+	t.Helper()
+	svc.knowledgeMu.Lock()
+	svc.pubKeys[id.Address] = identity.PublicKeyBase64(id.PublicKey)
+	svc.boxKeys[id.Address] = identity.BoxPublicKeyBase64(id.BoxPublicKey)
+	svc.boxSigs[id.Address] = identity.SignBoxKeyBinding(id)
+	svc.known[id.Address] = struct{}{}
+	svc.knowledgeMu.Unlock()
+}
+
+// TestStoreIncomingMessage_ForwardOnceTransitNotStored pins the Phase 3
+// forward-once contract: a TRANSIT DM (neither party is this node) is forwarded
+// in a SINGLE PASS (the usual gossip+relay frames, deduped at the receiver —
+// forward-once bounds buffering/re-gossip over TIME, not the per-pass frame
+// count) but is NEVER stored in s.topics nor tracked in the relay-retry contour
+// — so retryRelayDeliveries has nothing to re-gossip (storm removed at the
+// source). Durability is the sender's receipt-driven engine, not this hop.
+func TestStoreIncomingMessage_ForwardOnceTransitNotStored(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.cfg.TransitForwardOnce = true
+	sender, _ := identity.Generate()
+	recipient, _ := identity.Generate()
+	registerForeignKey(t, svc, sender)
+	body := sealDMBody(t, sender, recipient.Address, identity.BoxPublicKeyBase64(recipient.BoxPublicKey))
+
+	sendCh := attachCapableRelayPeer(t, svc, "relay-peer-1:64646", domain.PeerIdentity{})
+
+	msg := incomingMessage{
+		ID:        "fwd-once-1",
+		Topic:     "dm",
+		Sender:    sender.Address,
+		Recipient: recipient.Address,
+		Flag:      protocol.MessageFlagSenderDelete,
+		CreatedAt: time.Now().UTC(),
+		Body:      body,
+	}
+	_, _, errCode := svc.storeIncomingMessage(msg, false)
+	if errCode != "" {
+		t.Fatalf("unexpected errCode %q", errCode)
+	}
+
+	// Not stored.
+	svc.gossipMu.RLock()
+	n := len(svc.topics["dm"])
+	svc.gossipMu.RUnlock()
+	if n != 0 {
+		t.Errorf("forward-once transit must not enter s.topics, got %d", n)
+	}
+	// No relay-retry entry.
+	if svc.hasRelayRetryEntry("fwd-once-1") {
+		t.Error("forward-once transit must not be tracked for relay-retry")
+	}
+	// But still forwarded on the wire (the single-pass send is not suppressed;
+	// only the buffer + over-time re-gossip are removed).
+	time.Sleep(100 * time.Millisecond)
+	if !drainForRepropagation(sendCh, "fwd-once-1") {
+		t.Error("forward-once transit must still be forwarded once")
+	}
+}
+
 // TestStoreIncomingMessage_FirstSendIsPropagated is the companion positive
 // guard: a freshly authored DM (Via == "", local send) MUST still be
 // propagated, so the origin-echo gate does not suppress initial delivery.

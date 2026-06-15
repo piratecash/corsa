@@ -73,6 +73,13 @@ type NodeConfig struct {
 	// and CORSA_HOLD_DM_UNTIL_REACHABLE. Set to a pointer to false to restore
 	// the legacy blind-gossip baseline for an embedded/SDK runtime.
 	HoldDMUntilReachable *bool
+	// EnvelopeRetentionEnabled turns on the message-lifetime ceiling that
+	// drops aged transit/broadcast envelopes (the transit gossip-storm cure).
+	// nil means "use the default", which is ENABLED — matching the operator
+	// default and CORSA_ENVELOPE_RETENTION. Set to a pointer to false to
+	// restore the legacy no-ceiling behaviour. The per-class MaxAge values use
+	// their built-in defaults (24h) for SDK runtimes.
+	EnvelopeRetentionEnabled *bool
 }
 
 // RPCConfig configures the optional HTTP RPC server.
@@ -259,7 +266,11 @@ func (c Config) internal() coreconfig.Config {
 			MaxIncomingPeers: cfg.Node.MaxIncomingPeers,
 			// Default ON (the storm cure) unless the embedder explicitly
 			// opts out via a non-nil pointer to false.
-			HoldDMUntilReachable: cfg.Node.HoldDMUntilReachable == nil || *cfg.Node.HoldDMUntilReachable,
+			HoldDMUntilReachable:     cfg.Node.HoldDMUntilReachable == nil || *cfg.Node.HoldDMUntilReachable,
+			EnvelopeRetentionEnabled: cfg.Node.EnvelopeRetentionEnabled == nil || *cfg.Node.EnvelopeRetentionEnabled,
+			// TransitMaxAge / BroadcastMaxAge left zero → node-package defaults
+			// (24h) apply when retention is enabled; GossipFanoutLimit /
+			// TransitForwardOnce left at their opt-in OFF defaults.
 		},
 		RPC: coreconfig.RPC{
 			Host:     cfg.RPC.Host,

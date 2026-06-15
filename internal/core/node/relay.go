@@ -694,6 +694,43 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		return ""
 	}
 
+	// Origin echo on the FAST path: a relay_message whose ORIGIN sender is
+	// THIS node is our own DM echoing back through the mesh (recipient != self
+	// here — the local-delivery branch returned above). Re-forwarding it via
+	// the transit contour re-injects a delivery the sender-owned engine may
+	// have abandoned — the months-long zombie-DM storm. Re-send of our own DMs
+	// is owned EXCLUSIVELY by the sender-owned engine (delivery_retry), so drop
+	// here. Mirror of the originEcho guard in storeIncomingMessage; the fast
+	// path bypasses that guard because it forwards before storeIncomingMessage.
+	// No hop-ack (same as the max-hops drop).
+	if s.identity != nil && originSender == s.identity.Address {
+		s.relayStates.release(messageID)
+		log.Debug().
+			Str("node", s.identity.Address).
+			Str("id", messageID).
+			Str("recipient", recipient).
+			Msg("relay_drop_origin_echo")
+		return ""
+	}
+
+	// Age ceiling on the FAST path (envelope_retention.go): the
+	// direct/table/gossip forwards below run BEFORE storeIncomingMessage, so a
+	// frame with a live next hop would otherwise bypass the admission ceiling
+	// — exactly the aged-transit-with-a-route case the refactor targets (and
+	// the control-DM backstop, whose only other bound is the emit gate that a
+	// live next hop also skips). Drop it here; relays are forwarding-only, not
+	// a mailbox. No hop-ack (same as the max-hops drop): the previous hop's own
+	// ceiling reaps its copy.
+	if s.relayFrameAged(frame, originSender, recipient) {
+		s.relayStates.release(messageID)
+		log.Debug().
+			Str("node", s.identity.Address).
+			Str("id", messageID).
+			Str("recipient", recipient).
+			Msg("relay_drop_transit_age_ceiling")
+		return ""
+	}
+
 	newHopCount := hopCount + 1
 
 	// Build the forwarded frame.
@@ -1523,7 +1560,12 @@ func (s *Service) retryRelayDeliveries() {
 		// (hop budget + ingress suppression, transit_retention.go): a
 		// retry is a re-emission of the SAME hop, not a new one, so
 		// the stored Hops value is reused, not decremented again.
-		gossipTargets := s.filterGossipTargetsForEnvelope(msg, decision.GossipTargets)
+		// gossipTargetsForRelay drops the table next-hop from the fan-out
+		// (it gets the directed relay_message below), then applies the
+		// hop/ingress/ack/K-of-N gates — so the retry tick no longer emits a
+		// duplicate push_message+relay_message to the same peer (the repeated
+		// double-send visible in the capture).
+		gossipTargets := s.gossipTargetsForRelay(msg, decision)
 		s.executeGossipTargets(msg, gossipTargets)
 		// Table-directed relay (Phase 1.2): mirror the logic in
 		// storeIncomingMessage — use the routing table when a next-hop
@@ -1760,6 +1802,22 @@ func relayMessageKey(id protocol.MessageID) string {
 	return "msg|" + string(id)
 }
 
+// relayFrameAged reports whether an incoming relay_message is past its class
+// age ceiling. handleRelayMessage forwards on the FAST path (direct / table /
+// gossip) BEFORE any call into storeIncomingMessage, so the admission-time
+// ceiling there is bypassed for any frame that has a live next hop — this gate
+// re-applies it. It parses the wire CreatedAt (an unparseable value is treated
+// as zero) and defers to the shared envelopePropagationAged gate, so transit
+// AND the control-DM backstop are covered with identical semantics to the
+// store-path emit.
+func (s *Service) relayFrameAged(frame protocol.Frame, sender, recipient string) bool {
+	created, err := time.Parse(time.RFC3339, strings.TrimSpace(frame.CreatedAt))
+	if err != nil {
+		created = time.Time{} // unparseable → zero → handled by the DM-class rule
+	}
+	return s.envelopePropagationAged(frame.Topic, sender, recipient, created.UTC(), time.Now().UTC())
+}
+
 func relayReceiptKey(receipt protocol.DeliveryReceipt) string {
 	return "receipt|" + receipt.Recipient + "|" + string(receipt.MessageID) + "|" + receipt.Status
 }
@@ -1815,6 +1873,10 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 	log.Debug().Str("node", s.identity.Address).Str("recipient", recipient).Str("id", string(messageID)).Int("before", before).Int("after", len(filtered)).Int("removed", removed).Msg("deleteBacklogMessageForRecipient")
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "deleteBacklogMessageForRecipient").Str("phase", "lock_released").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
+	// The envelope left s.topics — drop its ack_delete suppression set too
+	// (relay_delivered.go). Leaf lock, taken after both domain mutexes are
+	// released.
+	s.forgetRelayDelivered([]protocol.MessageID{messageID})
 	return removed
 }
 

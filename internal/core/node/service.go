@@ -100,8 +100,20 @@ type Service struct {
 	// surface (see docs/rpc/system.md → /rpc/v1/system/node_status).
 	// Immutable after construction — no synchronisation required.
 	startedAt time.Time
-	peerMu    sync.RWMutex
-	peers     []transport.Peer // dial candidates (typed: Address + Source)
+
+	// relayDeliveredTo records, per message id, the peer identities that
+	// confirmed (via ack_delete) they already hold the message, so the
+	// gossip fan-out stops re-sending it to them (relay_delivered.go,
+	// Phase 2). Deliberately OUTSIDE the domain-mutex scheme: it has its
+	// OWN leaf mutex (relayDeliveredMu) that is only ever taken alone or
+	// as the innermost lock (snapshotted before peerMu), never while
+	// acquiring a domain mutex — so it adds no edge to the canonical lock
+	// order. See docs/locking.md.
+	relayDeliveredMu sync.Mutex
+	relayDeliveredTo map[protocol.MessageID]map[domain.PeerIdentity]struct{}
+
+	peerMu sync.RWMutex
+	peers  []transport.Peer // dial candidates (typed: Address + Source)
 
 	// deliveryMu guards the "message-delivery" domain: the per-recipient
 	// pending queues, outbound delivery state, relay retry bookkeeping,
@@ -1197,6 +1209,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		pending:                 pending,
 		pendingKeys:             pendingKeys,
 		relayRetry:              relayRetry,
+		relayDeliveredTo:        make(map[protocol.MessageID]map[domain.PeerIdentity]struct{}),
 		outbound:                make(map[string]outboundDelivery),
 		awaitingDelivered:       make(map[protocol.MessageID]*deliveryRetryEntry),
 		awaitingSeenAck:         make(map[protocol.MessageID]*seenAckRetryEntry),
@@ -4937,6 +4950,19 @@ func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (
 	switch strings.TrimSpace(frame.AckType) {
 	case "dm":
 		count = s.deleteBacklogMessageForRecipient(frame.Address, protocol.MessageID(frame.ID))
+		// The acking peer confirmed it holds this id. For a TRANSIT DM
+		// (recipient is a third party) deleteBacklog removes nothing, so
+		// record the acker to stop the gossip fan-out re-sending the id to a
+		// peer that already has it (Phase 2 — relay_delivered.go). Gate on an
+		// ACTIVE relayRetry entry, NOT on count==0: count is also 0 when the
+		// id is simply absent, so an authenticated peer could otherwise spam
+		// ack_delete for phantom ids and fill relayDeliveredTo to its hard cap,
+		// starving real suppression. A relayRetry entry exists only for transit
+		// DMs we are actually relaying (recipient-delete clears it, phantom ids
+		// never had one). frame.Address is verified == hello.Address above.
+		if s.hasRelayRetryEntry(protocol.MessageID(frame.ID)) {
+			s.recordRelayDeliveredTo(protocol.MessageID(frame.ID), domain.PeerIdentityFromWire(frame.Address))
+		}
 	case "receipt":
 		count = s.deleteBacklogReceiptForRecipient(frame.Address, protocol.MessageID(frame.ID), frame.Status)
 	default:
@@ -4965,6 +4991,19 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// that cached it from a direct handshake land here and are dropped.
 	if s.dropsInboundDM(msg) {
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("sender", msg.Sender).Msg("inbound_dm_dropped_no_dm_inbox")
+		return false, 0, ""
+	}
+
+	// Absolute age ceiling on TRANSIT DMs (envelope_retention.go). A transit
+	// envelope older than the transit MaxAge — anchored on the IMMUTABLE
+	// sender CreatedAt, so a re-injection that would reset the local StoredAt
+	// cannot revive it — is neither stored nor propagated: relays are
+	// forwarding-only, not a mailbox. Returning the duplicate-style outcome
+	// (false, 0, "") acks the previous hop so its retries stop, exactly like
+	// dropsInboundDM. Only transit is refused here; local/broadcast envelopes
+	// are retained for local history/subscribers and aged out by cleanup.
+	if s.transitAgedOnAdmission(msg, time.Now().UTC()) {
+		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Time("created_at", msg.CreatedAt).Msg("transit_dm_dropped_age_ceiling")
 		return false, 0, ""
 	}
 
@@ -5163,7 +5202,15 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// relayRetry entries are dropped AFTER gossipMu is released (the
 	// canonical deliveryMu → gossipMu order forbids nesting here).
 	var evictedIDs []protocol.MessageID
-	if storeResult != StoreDuplicate && msg.Topic != protocol.TopicControlDM {
+	// Forward-once (Phase 3, CORSA_TRANSIT_FORWARD_ONCE): a transit DM is
+	// forwarded on the wire below but NEVER stored in s.topics — relays are
+	// pure forwarders, not a buffer. This removes the re-gossip storm at its
+	// source (nothing stored ⇒ retryRelayDeliveries has nothing to re-emit).
+	// Durability is the sender's (HoldDMUntilReachable + delivery_retry). The
+	// bloom (s.seen) still dedups in-window; no backlog-dedup is needed because
+	// there is no backlog. trackRelayMessage is skipped below for the same id.
+	forwardOnceTransit := s.cfg.TransitForwardOnce && s.isTransitEnvelope(envelope)
+	if storeResult != StoreDuplicate && msg.Topic != protocol.TopicControlDM && !forwardOnceTransit {
 		// Single admission pass over the backlog (transit_retention.go):
 		// exact-ID dedup plus transit accounting. The rotating bloom
 		// (s.seen) forgets IDs after 5–10 min while the backlog lives
@@ -5201,6 +5248,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// snapshot, so relayRetry entries of evicted envelopes would never
 	// be visited (and never lazily deleted) again.
 	s.dropRelayRetryEntries(evictedIDs)
+	s.forgetRelayDelivered(evictedIDs)
 	if len(evictedIDs) > 0 {
 		log.Debug().Str("node", s.identity.Address).Int("evicted", len(evictedIDs)).Str("recipient", msg.Recipient).Msg("transit_backlog_cap_eviction")
 	}
@@ -5239,6 +5287,16 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			// surface in any chat thread, and the gateway has its own
 			// fanout mechanism for chatlog updates that we are
 			// deliberately bypassing.
+			//
+			// Execution is intentionally NOT age-gated. The retention
+			// ceiling (envelope_retention.go) is PROPAGATION-only — it
+			// bounds re-gossip/forwarding of zombies, mirroring bitchat /
+			// SimpleX where TTL bounds the queue, not delivered-command
+			// execution. The command here is signature-verified
+			// (VerifyEnvelope above), so honouring it regardless of the
+			// (unsigned, tamperable) outer CreatedAt is required for correct
+			// offline delivery: a recipient who was offline longer than the
+			// ceiling must still apply an authentic delete/edit on reconnect.
 			if msg.Recipient == s.identity.Address {
 				event.Type = protocol.LocalChangeNewControlMessage
 				s.eventBus.Publish(ebus.TopicMessageControl, event)
@@ -5303,22 +5361,33 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	if originUnreachableHold {
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("origin_send_held_unreachable")
 	}
-	if s.shouldRouteStoredMessage(msg) && !originEcho && !originUnreachableHold {
-		s.trackRelayMessage(envelope)
+	// Re-propagation age gate (envelope_retention.go): a broadcast or control
+	// DM past its class MaxAge must not be gossiped even once. Transit is
+	// already refused at admission; control DMs never enter s.topics so
+	// cleanup cannot age them — this emit gate is their only bound. Anchored
+	// on the immutable CreatedAt; MaxAge=0 classes (local) are never gated.
+	propagationAged := s.envelopePropagationAged(msg.Topic, msg.Sender, msg.Recipient, msg.CreatedAt, time.Now().UTC())
+	if s.shouldRouteStoredMessage(msg) && !originEcho && !originUnreachableHold && !propagationAged {
+		// Forward-once: do NOT register a relay-retry entry for transit — the
+		// frame is forwarded below in a single pass and never re-gossiped over
+		// time (it was also not stored above). Local-origin sends still track
+		// via the sender-owned engine, not this transit contour.
+		if !forwardOnceTransit {
+			s.trackRelayMessage(envelope)
+		}
 
 		// Gossip is the baseline delivery mechanism. It spreads the
 		// envelope so relays can forward it (transit DMs are held IN
 		// MEMORY only as the in-flight buffer of the forwarding
 		// operation — bounded by the transit retention caps, never a
 		// mailbox), plus push delivery to connected clients and the
-		// sender-side backlog. Two propagation gates
-		// apply (transit_retention.go): the hop budget (no re-gossip
-		// once the decremented budget hits 0 — bounds blind-delivery
-		// radius like bitchat's hop TTL) and ingress suppression (the
-		// link the message arrived on is excluded — it already has
-		// it). Runs inline: executeGossipTargets only enqueues jobs on
-		// the bounded gossip dispatch pool (gossip_dispatch.go).
-		gossipTargets := s.filterGossipTargetsForEnvelope(envelope, decision.GossipTargets)
+		// sender-side backlog. Propagation gates live in
+		// gossipTargetsForRelay: the table next-hop is dropped (it gets the
+		// directed relay_message below — no duplicate push), then the hop
+		// budget, ingress suppression, ack_delete suppression and the K-of-N
+		// cap are applied. Runs inline: executeGossipTargets only enqueues
+		// jobs on the bounded gossip dispatch pool (gossip_dispatch.go).
+		gossipTargets := s.gossipTargetsForRelay(envelope, decision)
 		s.executeGossipTargets(envelope, gossipTargets)
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
@@ -7098,6 +7167,7 @@ func (s *Service) cleanupExpiredMessages() {
 //	                  section proportional to expired count, not total count.
 func (s *Service) cleanupExpiredMessagesForce() {
 	now := time.Now().UTC()
+	drift := s.effectiveClockDrift()
 
 	// Phase 1: collect expired IDs under read lock.
 	type expiredEntry struct {
@@ -7116,14 +7186,26 @@ func (s *Service) cleanupExpiredMessagesForce() {
 					continue
 				}
 			}
+			// Absolute age ceiling (envelope_retention.go): drop any
+			// envelope past its class MaxAge, anchored on the IMMUTABLE
+			// sender CreatedAt. This is what re-injection cannot reset —
+			// unlike the StoredAt-anchored transit window below — so a
+			// re-circulated months-old transit DM finally dies, and
+			// broadcast/global topics (which had NO age bound at all)
+			// are bounded too. Local classes carry MaxAge=0 (lifetime
+			// owned by chatlog / the sender engine) and are unaffected.
+			pol := s.envelopeRetentionPolicy(topic, message.Sender, message.Recipient)
+			if envelopeAgeExceeded(message.CreatedAt, now, pol.MaxAge, drift) {
+				expired = append(expired, expiredEntry{topic, string(message.ID)})
+				continue
+			}
 			// Forwarding-only transit (transit_retention.go): a
 			// transit envelope (neither party is this node) is the
 			// in-flight buffer of its forwarding operation, dropped
 			// unconditionally once transitInFlightWindow closes —
-			// relays do NOT store user messages. Before this gate,
-			// ordinary DMs (TTLSeconds=0, no auto-delete flag) to
-			// never-returning recipients were IMMORTAL — the third
-			// leak of the June 2026 hunt.
+			// relays do NOT store user messages. This StoredAt-anchored
+			// window still bounds the SHORT forwarding op; the CreatedAt
+			// ceiling above is the re-injection-proof global cap.
 			if s.isTransitEnvelope(message) && transitExpired(message, now) {
 				expired = append(expired, expiredEntry{topic, string(message.ID)})
 			}
@@ -7192,14 +7274,12 @@ func (s *Service) cleanupExpiredMessagesForce() {
 		removedIDs = append(removedIDs, protocol.MessageID(e.id))
 	}
 	s.dropRelayRetryEntries(removedIDs)
+	s.forgetRelayDelivered(removedIDs)
 }
 
 func (s *Service) validateMessageTiming(msg incomingMessage) error {
 	now := time.Now().UTC()
-	drift := s.cfg.MaxClockDrift
-	if drift <= 0 {
-		drift = protocol.DefaultMessageTimeDrift
-	}
+	drift := s.effectiveClockDrift()
 
 	if msg.CreatedAt.After(now.Add(drift)) {
 		return fmt.Errorf("message timestamp %s outside allowed future drift %s", msg.CreatedAt.Format(time.RFC3339), drift)

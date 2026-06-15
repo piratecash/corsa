@@ -623,7 +623,11 @@ func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope) (emitted boo
 		s.goBackground(func() { s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers) })
 	}
 
-	gossipTargets := s.filterGossipTargetsForEnvelope(envelope, decision.GossipTargets)
+	// gossipTargetsForRelay drops the table next-hop from the fan-out (it gets
+	// the directed relay_message below) before the gates/K-of-N — so the
+	// sender-owned retry tick does not duplicate push_message+relay_message to
+	// the same peer.
+	gossipTargets := s.gossipTargetsForRelay(envelope, decision)
 	s.executeGossipTargets(envelope, gossipTargets)
 
 	if decision.RelayNextHop != nil {

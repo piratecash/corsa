@@ -4367,7 +4367,12 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 
 	// Goroutine: wait for loadConversation to populate activeMessages,
 	// then nil chatLog so updatePreviewFromStore fails → partial success.
+	// gdone closes after the setChatLogForTest write so the test can await
+	// the goroutine before the deferred Close reads the store — without it
+	// the fire-and-forget write races Close (g.store write vs read).
+	gdone := make(chan struct{})
 	go func() {
+		defer close(gdone)
 		pollCondition(2*time.Second, func() bool {
 			r.mu.RLock()
 			defer r.mu.RUnlock()
@@ -4391,6 +4396,10 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 		t.Fatal("seenMessageIDs was evicted on partial success — " +
 			"dedup gate must stay closed when messages are already in cache")
 	}
+
+	// Await the store-mutating goroutine before returning so its
+	// setChatLogForTest write happens-before the deferred Close reads g.store.
+	<-gdone
 }
 
 // TestUpdatePreviewFromCacheFallback verifies that when loadConversation

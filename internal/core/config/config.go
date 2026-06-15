@@ -88,6 +88,52 @@ type Node struct {
 	// while the gated path is exercised by explicit-flag tests.
 	HoldDMUntilReachable bool
 
+	// EnvelopeRetentionEnabled turns on the unified message-lifetime layer
+	// (internal/core/node/envelope_retention.go): an absolute age ceiling on
+	// transit/broadcast envelopes anchored on the immutable sender CreatedAt.
+	// ENABLED by default — this is the cure for the transit gossip storm
+	// (months-old DMs re-circulating forever). The env var CORSA_ENVELOPE_RETENTION
+	// is a kill-switch (set falsey to restore the legacy no-ceiling behaviour).
+	// NOTE: a literal config.Node (tests) gets the zero value (false), so the
+	// legacy path stays covered while the gated path is exercised explicitly.
+	EnvelopeRetentionEnabled bool
+
+	// TransitMaxAge is the absolute lifetime ceiling for transit DMs (neither
+	// party is this node) and the control-DM backstop. Zero selects the
+	// node-package default (24h). Env: CORSA_TRANSIT_MAX_AGE_HOURS.
+	TransitMaxAge time.Duration
+
+	// BroadcastMaxAge is the absolute lifetime ceiling for broadcast/global
+	// topics. Zero selects the node-package default (24h).
+	// Env: CORSA_BROADCAST_MAX_AGE_HOURS.
+	BroadcastMaxAge time.Duration
+
+	// TransitForwardOnce makes a relay forward transit DMs (neither party is
+	// this node) WITHOUT storing them in s.topics or tracking them in the
+	// relay-retry contour: the frame is gossiped/relayed in a single pass and
+	// forgotten (no buffering, no re-gossip over time).
+	// Delivery durability is the sender's job (HoldDMUntilReachable +
+	// delivery_retry), so a relay is purely a forwarder — no in-flight buffer,
+	// no re-gossip, which removes the transit gossip-storm at its source.
+	// Behaviour-changing (drops the 5-min forwarding-retry buffer), so opt-in.
+	// Env: CORSA_TRANSIT_FORWARD_ONCE.
+	TransitForwardOnce bool
+
+	// GossipFanoutLimit is a general BLIND-PROPAGATION cap: it bounds how many
+	// peers a single message reaches per emission via the deterministic K-of-N
+	// subset (seeded by message id). The cap is applied to the shared target
+	// set BEFORE the per-path capability filter, so it limits BOTH the gossip
+	// push fan-out AND the blind relay fallback (tryRelayToCapableFullNodes) —
+	// a small limit can therefore exclude a relay-capable peer from a given
+	// pass; set it high enough that the subset still spans forwarding-capable
+	// full nodes (the table-directed relay path to a KNOWN route is unaffected,
+	// it does not go through this cap). Zero (the default) applies NO extra
+	// K-of-N cap on top of the legacy target selection — which already bounds
+	// session fan-out itself (routingTargetsFiltered caps scored session
+	// targets at maxTargets=3) — so the legacy behaviour is preserved exactly.
+	// Topology-affecting, so it is opt-in. Env: CORSA_GOSSIP_FANOUT_LIMIT.
+	GossipFanoutLimit int
+
 	// AllowPrivatePeers disables the private/loopback IP filter for peer
 	// addresses. Production nodes never set this — it exists solely for
 	// unit tests that use RFC 1918 addresses as fake peers.
@@ -381,6 +427,11 @@ func Default() Config {
 	pendingRingSize := pendingRingSizeFromEnv()
 	deliveryRetryMaxAttempts := deliveryRetryMaxAttemptsFromEnv()
 	holdDMUntilReachable := holdDMUntilReachableFromEnv()
+	envelopeRetentionEnabled := envelopeRetentionEnabledFromEnv()
+	transitMaxAge := transitMaxAgeFromEnv()
+	broadcastMaxAge := broadcastMaxAgeFromEnv()
+	gossipFanoutLimit := gossipFanoutLimitFromEnv()
+	transitForwardOnce := transitForwardOnceFromEnv()
 
 	return Config{
 		App: App{
@@ -410,6 +461,11 @@ func Default() Config {
 			PendingRingSize:            pendingRingSize,
 			DeliveryRetryMaxAttempts:   deliveryRetryMaxAttempts,
 			HoldDMUntilReachable:       holdDMUntilReachable,
+			EnvelopeRetentionEnabled:   envelopeRetentionEnabled,
+			TransitMaxAge:              transitMaxAge,
+			BroadcastMaxAge:            broadcastMaxAge,
+			GossipFanoutLimit:          gossipFanoutLimit,
+			TransitForwardOnce:         transitForwardOnce,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
 			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
 			SeqAdvanceWindow:           seqAdvanceWindow,
@@ -855,6 +911,77 @@ func holdDMUntilReachableFromEnv() bool {
 		// Unset, empty, truthy, or unrecognised → enabled (the new default).
 		return true
 	}
+}
+
+// envelopeRetentionEnabledFromEnv reads CORSA_ENVELOPE_RETENTION. Defaults to
+// ENABLED (absolute age ceiling on transit/broadcast envelopes) — the cure for
+// the transit gossip storm. The variable is a kill-switch: an explicit falsey
+// value restores the legacy no-ceiling behaviour.
+func envelopeRetentionEnabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENVELOPE_RETENTION"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// transitForwardOnceFromEnv reads CORSA_TRANSIT_FORWARD_ONCE. Defaults to OFF
+// (the legacy in-flight buffer + relay-retry behaviour); a truthy value makes
+// relays forward transit DMs once without storing them. Opt-in because it
+// drops the per-hop forwarding-retry buffer (delivery falls back to sender
+// end-to-end retry).
+func transitForwardOnceFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_TRANSIT_FORWARD_ONCE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// gossipFanoutLimitFromEnv reads CORSA_GOSSIP_FANOUT_LIMIT (positive integer
+// peer count). Unset/invalid/non-positive returns 0 — no extra K-of-N cap on
+// top of the legacy target selection (itself already bounded), the legacy
+// default. Topology-affecting, so it stays opt-in.
+func gossipFanoutLimitFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_GOSSIP_FANOUT_LIMIT"))
+	if raw == "" {
+		return 0
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 {
+		return 0
+	}
+	return limit
+}
+
+// transitMaxAgeFromEnv reads CORSA_TRANSIT_MAX_AGE_HOURS (positive integer
+// hours). Unset/invalid/non-positive selects the node-package default (24h),
+// signalled here as 0 so the node layer applies its own constant.
+func transitMaxAgeFromEnv() time.Duration {
+	return positiveHoursFromEnv("CORSA_TRANSIT_MAX_AGE_HOURS")
+}
+
+// broadcastMaxAgeFromEnv reads CORSA_BROADCAST_MAX_AGE_HOURS. See
+// transitMaxAgeFromEnv for the unset/invalid → 0 (node default) contract.
+func broadcastMaxAgeFromEnv() time.Duration {
+	return positiveHoursFromEnv("CORSA_BROADCAST_MAX_AGE_HOURS")
+}
+
+// positiveHoursFromEnv parses a positive integer hour count into a Duration,
+// returning 0 when the variable is unset, malformed, or non-positive — the
+// caller treats 0 as "use the node-package default".
+func positiveHoursFromEnv(key string) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0
+	}
+	hours, err := strconv.Atoi(raw)
+	if err != nil || hours <= 0 {
+		return 0
+	}
+	return time.Duration(hours) * time.Hour
 }
 
 // enableMeshRoutingV3FromEnv reads CORSA_ENABLE_MESH_ROUTING_V3 and returns

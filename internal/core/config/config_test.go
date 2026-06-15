@@ -133,6 +133,79 @@ func TestHoldDMUntilReachableFromEnv(t *testing.T) {
 	}
 }
 
+// TestEnvelopeRetentionFromEnv pins the default-ON / kill-switch semantics for
+// the message-lifetime ceiling and the hours-parsing of the MaxAge knobs.
+func TestEnvelopeRetentionFromEnv(t *testing.T) {
+	// Default-on: unset/empty/truthy/unrecognised → enabled.
+	for _, v := range []string{"", "  ", "1", "true", "on", "wat"} {
+		t.Setenv("CORSA_ENVELOPE_RETENTION", v)
+		if !envelopeRetentionEnabledFromEnv() {
+			t.Fatalf("CORSA_ENVELOPE_RETENTION=%q: want default true", v)
+		}
+	}
+	// Explicit kill-switch.
+	for _, v := range []string{"0", "false", "no", "off", "OFF", " False "} {
+		t.Setenv("CORSA_ENVELOPE_RETENTION", v)
+		if envelopeRetentionEnabledFromEnv() {
+			t.Fatalf("CORSA_ENVELOPE_RETENTION=%q: want false (kill-switch)", v)
+		}
+	}
+
+	// Hours parsing: unset/invalid/non-positive → 0 (node default), valid → hours.
+	for _, v := range []string{"", "  ", "0", "-3", "abc"} {
+		t.Setenv("CORSA_TRANSIT_MAX_AGE_HOURS", v)
+		if got := transitMaxAgeFromEnv(); got != 0 {
+			t.Fatalf("CORSA_TRANSIT_MAX_AGE_HOURS=%q: got %s, want 0", v, got)
+		}
+	}
+	t.Setenv("CORSA_TRANSIT_MAX_AGE_HOURS", "12")
+	if got := transitMaxAgeFromEnv(); got != 12*time.Hour {
+		t.Fatalf("CORSA_TRANSIT_MAX_AGE_HOURS=12: got %s, want 12h", got)
+	}
+	t.Setenv("CORSA_BROADCAST_MAX_AGE_HOURS", "48")
+	if got := broadcastMaxAgeFromEnv(); got != 48*time.Hour {
+		t.Fatalf("CORSA_BROADCAST_MAX_AGE_HOURS=48: got %s, want 48h", got)
+	}
+
+	// Wired default surfaces ON.
+	t.Setenv("CORSA_ENVELOPE_RETENTION", "")
+	if !Default().Node.EnvelopeRetentionEnabled {
+		t.Fatal("Default().Node.EnvelopeRetentionEnabled: want true (default ON)")
+	}
+}
+
+// TestGossipFanoutLimitFromEnv pins the opt-in K-of-N fan-out cap: unset/
+// invalid/non-positive → 0 (unlimited, legacy), a positive integer passes through.
+func TestGossipFanoutLimitFromEnv(t *testing.T) {
+	for _, v := range []string{"", "  ", "0", "-1", "abc"} {
+		t.Setenv("CORSA_GOSSIP_FANOUT_LIMIT", v)
+		if got := gossipFanoutLimitFromEnv(); got != 0 {
+			t.Fatalf("CORSA_GOSSIP_FANOUT_LIMIT=%q: got %d, want 0", v, got)
+		}
+	}
+	t.Setenv("CORSA_GOSSIP_FANOUT_LIMIT", "4")
+	if got := gossipFanoutLimitFromEnv(); got != 4 {
+		t.Fatalf("CORSA_GOSSIP_FANOUT_LIMIT=4: got %d, want 4", got)
+	}
+}
+
+// TestTransitForwardOnceFromEnv pins the opt-in forward-once knob: default OFF
+// (legacy in-flight buffer), only explicit truthy values enable it.
+func TestTransitForwardOnceFromEnv(t *testing.T) {
+	for _, v := range []string{"", "  ", "0", "false", "no", "off", "wat"} {
+		t.Setenv("CORSA_TRANSIT_FORWARD_ONCE", v)
+		if transitForwardOnceFromEnv() {
+			t.Fatalf("CORSA_TRANSIT_FORWARD_ONCE=%q: want default false", v)
+		}
+	}
+	for _, v := range []string{"1", "true", "yes", "on", "ON"} {
+		t.Setenv("CORSA_TRANSIT_FORWARD_ONCE", v)
+		if !transitForwardOnceFromEnv() {
+			t.Fatalf("CORSA_TRANSIT_FORWARD_ONCE=%q: want true", v)
+		}
+	}
+}
+
 // TestAcceptDirectMessagesFromEnv pins the headless DM-acceptance knob:
 // default OFF (unset/empty/unrecognised) — a console node has no user
 // reading messages — only explicit truthy values enable acceptance.

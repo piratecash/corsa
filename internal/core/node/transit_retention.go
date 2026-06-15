@@ -341,6 +341,37 @@ func (s *Service) sameCanonicalAddress(a, b domain.PeerAddress) bool {
 	return s.resolveHealthAddress(a) == s.resolveHealthAddress(b)
 }
 
+// excludeNextHopFromGossip returns targets without the table-directed relay
+// next-hop, so the peer that receives the directed relay_message is not ALSO
+// sent a duplicate push_message (Phase 2.2). Matches on IDENTITY first
+// (alias-proof: an inbound:<raw> next-hop address and a plain <raw> gossip
+// target resolve to the same PeerIdentity, which resolveHealthAddress alone
+// cannot bridge — it only collapses dialOrigin fallback-port aliases), then
+// falls back to the canonical-address compare for peers whose identity is not
+// yet learned. A zero identity AND empty address, or empty targets, is a
+// no-op. Allocates a fresh backing array. Takes peerMu.RLock — caller must NOT
+// hold peerMu.
+func (s *Service) excludeNextHopFromGossip(targets []domain.PeerAddress, id domain.PeerIdentity, addr domain.PeerAddress) []domain.PeerAddress {
+	if (id.IsZero() && addr == "") || len(targets) == 0 {
+		return targets
+	}
+	out := targets[:0:0]
+	s.peerMu.RLock()
+	canonAddr := s.resolveHealthAddress(addr)
+	for _, t := range targets {
+		canonT := s.resolveHealthAddress(t)
+		if !id.IsZero() && s.peerIDs[canonT] == id {
+			continue
+		}
+		if addr != "" && (t == addr || canonT == canonAddr) {
+			continue
+		}
+		out = append(out, t)
+	}
+	s.peerMu.RUnlock()
+	return out
+}
+
 // filterGossipTargetsForEnvelope applies the propagation gates to a
 // routing decision's gossip targets: ingress suppression (never echo a
 // message straight back into the link it arrived on — compared on
@@ -359,19 +390,39 @@ func (s *Service) filterGossipTargetsForEnvelope(e protocol.Envelope, targets []
 	if envelopeEmitHops(e) < 1 {
 		return nil
 	}
-	if e.Via == "" {
-		return targets
+	// Snapshot the ack_delete suppression set BEFORE taking peerMu so the
+	// leaf relayDeliveredMu never nests under peerMu (relay_delivered.go).
+	delivered := s.relayDeliveredSnapshot(e.ID)
+	if e.Via == "" && len(delivered) == 0 {
+		// No ingress/ack exclusions — still apply the K-of-N fan-out cap.
+		return selectFanoutSubset(targets, s.gossipFanoutLimit(), e.ID)
 	}
 	via := domain.PeerAddress(e.Via)
+	hasVia := e.Via != ""
 	filtered := targets[:0:0]
 	s.peerMu.RLock()
 	canonVia := s.resolveHealthAddress(via)
 	for _, t := range targets {
-		if t == via || s.resolveHealthAddress(t) == canonVia {
+		canonT := s.resolveHealthAddress(t)
+		// Ingress suppression: never echo a message back into the link it
+		// arrived on (canonical-address compared, so a fallback-port alias
+		// of the Via peer is suppressed too).
+		if hasVia && (t == via || canonT == canonVia) {
 			continue
+		}
+		// ack_delete suppression: skip a peer that already confirmed it
+		// holds this id (the gossip-storm amplifier — a peer acked every
+		// push and we re-pushed anyway).
+		if len(delivered) > 0 {
+			if _, has := delivered[s.peerIDs[canonT]]; has {
+				continue
+			}
 		}
 		filtered = append(filtered, t)
 	}
 	s.peerMu.RUnlock()
-	return filtered
+	// K-of-N fan-out cap (gossip_fanout.go): trim the survivors to a
+	// deterministic subset seeded by the message id. Applied AFTER the
+	// exclusions so the cap counts only genuinely sendable peers.
+	return selectFanoutSubset(filtered, s.gossipFanoutLimit(), e.ID)
 }
