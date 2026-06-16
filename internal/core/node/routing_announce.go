@@ -70,24 +70,26 @@ func (s *Service) routingTableTTLLoop(ctx context.Context) {
 
 // isAnnouncePlaneFrameType reports whether a frame type belongs to the
 // announce plane (announce_routes, routes_update, request_resync,
-// route_announce_v3, route_poison_v1). These frames are subject to the
-// strict 128 KiB MaxFrameLine budget even when received over peer
-// sessions whose generic line reader accepts up to 8 MiB, because the
-// writer side (chunkAnnounceEntriesBySize + the v3 chunker + the fixed-
-// size poison emitter) caps them at MaxFrameLine and a wider receive
-// budget would let sender and receiver diverge on which routes a peer
-// is willing to carry. route_poison_v1 is a fixed-size control signal
-// (~200B) so the cap is purely a defence: a peer that pads a poison
-// frame past 128 KiB is buggy or hostile, and bypassing the cap on
-// poison alone would leave us doing base64+ed25519 verify on a
-// multi-megabyte input the writer side could never legitimately emit.
+// route_announce_v3, route_poison_v1, route_poison_v2). These frames are
+// subject to the strict 128 KiB MaxFrameLine budget even when received over
+// peer sessions whose generic line reader accepts up to 8 MiB, because the
+// writer side (chunkAnnounceEntriesBySize + the v3 chunker + the poison
+// emitters, including the v2 batch chunker at poisonBatchChunkSize) caps them
+// at MaxFrameLine and a wider receive budget would let sender and receiver
+// diverge on which routes a peer is willing to carry. route_poison_v1 is a
+// fixed-size control signal (~200B) and route_poison_v2 is chunked to stay
+// under the cap, so the budget is purely a defence: a peer that pads a poison
+// frame past 128 KiB is buggy or hostile, and bypassing the cap on poison
+// alone would leave us doing base64+ed25519 verify on a multi-megabyte input
+// the writer side could never legitimately emit.
 // Used by readPeerSession to drop oversize announce-plane frames
 // before they reach the routing table.
 func isAnnouncePlaneFrameType(frameType string) bool {
 	switch frameType {
 	case "announce_routes", "routes_update", "request_resync",
 		protocol.RouteAnnounceV3FrameType,
-		protocol.RoutePoisonFrameType:
+		protocol.RoutePoisonFrameType,
+		protocol.RoutePoisonV2FrameType:
 		return true
 	default:
 		return false
@@ -117,22 +119,23 @@ func isAnnouncePlaneFrameType(frameType string) bool {
 //     the chatty trigger targets the cascading work of delta churn.
 //     See handleAnnounceRoutes / recordInboundAnnounceAndMaybeArm.
 //
-// IMPORTANT: this predicate DOES NOT include request_resync or
-// route_poison_v1. Those are single-message control frames — a
-// peer's natural rate for either is bounded by reconnect cycles
-// (request_resync) or route lifecycle events (route_poison_v1),
-// each well under 1/s. The cmd limiter's 30/s is plenty for them;
-// flooding them past that rate is protocol-level misbehaviour, not
-// chattiness, and the TCP close that cmd limit produces is the
-// appropriate response. Exempting control frames would also leave
-// only the (loose) per-route bucket as the per-peer defence — at
-// 200 tokens/s with cost=1 per control frame that is 200/s
-// sustained, far above legitimate use — without any chatty trigger
-// to compensate.
+// IMPORTANT: this predicate DOES NOT include request_resync,
+// route_poison_v1 or route_poison_v2. Those are control frames — a
+// peer's natural rate is bounded by reconnect cycles (request_resync)
+// or route lifecycle events (the poison frames), well under 1/s. The
+// cmd limiter's 30/s is plenty for them; flooding them past that rate
+// is protocol-level misbehaviour, not chattiness, and the TCP close
+// that cmd limit produces is the appropriate response. Exempting
+// control frames would also leave only the (loose) per-route bucket as
+// the per-peer defence — at 200 tokens/s with cost=1 per unit-cost control
+// frame (request_resync / route_poison_v1) that is 200/s sustained, far
+// above legitimate use — without any chatty trigger to compensate.
+// route_poison_v2 is NOT unit-cost: it charges len(identities) tokens, so
+// its per-route bound is tighter still.
 //
 // The broader isAnnouncePlaneFrameType (above) still covers the
 // control types for SIZE-budget enforcement (peer_management.go's
-// MaxFrameLine check), which IS uniform across all five types.
+// MaxFrameLine check), which IS uniform across all six types.
 func isAnnouncePlaneBulkFrameType(frameType string) bool {
 	switch frameType {
 	case "announce_routes", "routes_update",
@@ -164,7 +167,8 @@ func isRawLineBackedFrameType(frameType string) bool {
 	switch frameType {
 	case "route_sync_digest_v1", "route_sync_summary_v1",
 		protocol.RouteAnnounceV3FrameType,
-		protocol.RoutePoisonFrameType:
+		protocol.RoutePoisonFrameType,
+		protocol.RoutePoisonV2FrameType:
 		return true
 	default:
 		return false
@@ -975,6 +979,56 @@ func (s *Service) SendRoutePoison(ctx context.Context, peerAddress domain.PeerAd
 	return true
 }
 
+// SendRoutePoisonBatch emits a single batched poison-reverse frame
+// (route_poison_v2) naming all `identities` for one shared reason to
+// peerAddress. Cap-gated on mesh_routing_v1 + mesh_poison_reverse_v2 (the
+// caller only routes here for peers known to advertise v2). Signs over the
+// batch canonical bytes when a private key is wired. Returns true when the
+// frame was enqueued. Zero identities or all-zero after filtering is a no-op.
+func (s *Service) SendRoutePoisonBatch(ctx context.Context, peerAddress domain.PeerAddress, identities []domain.PeerIdentity, reason string) bool {
+	if peerAddress == "" || len(identities) == 0 {
+		return false
+	}
+	idStrs := make([]string, 0, len(identities))
+	for _, id := range identities {
+		if id.IsZero() {
+			continue
+		}
+		idStrs = append(idStrs, id.String())
+	}
+	if len(idStrs) == 0 {
+		return false
+	}
+	frame := protocol.RoutePoisonV2Frame{
+		Type:       protocol.RoutePoisonV2FrameType,
+		Identities: idStrs,
+		Reason:     reason,
+		IssuedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(s.identity.PrivateKey) != 0 {
+		frame.SenderSig = base64.StdEncoding.EncodeToString(
+			ed25519.Sign(s.identity.PrivateKey, frame.CanonicalSenderSigBytes()),
+		)
+	}
+	raw, err := protocol.MarshalRoutePoisonV2Frame(frame)
+	if err != nil {
+		log.Warn().Err(err).Str("peer_address", string(peerAddress)).Int("identities", len(idStrs)).Str("reason", reason).Msg("route_poison_v2_marshal_failed")
+		return false
+	}
+	wireFrame := protocol.Frame{
+		Type:    protocol.RoutePoisonV2FrameType,
+		RawLine: string(raw) + "\n",
+	}
+	if !s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, wireFrame,
+		domain.CapMeshRoutingV1,
+		domain.CapMeshPoisonReverseV2,
+	) {
+		log.Debug().Str("peer_address", string(peerAddress)).Int("identities", len(idStrs)).Str("reason", reason).Msg("route_poison_v2_skipped_or_failed_at_send_time")
+		return false
+	}
+	return true
+}
+
 // handleRoutePoison processes an incoming route_poison_v1 frame
 // (Phase 4 13.3, overview §7.7). The receiver verifies the
 // sender_sig if present (Tier-2 lenient: present-and-invalid
@@ -1086,56 +1140,104 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 		}
 	}
 	target := domain.PeerIdentityFromWire(frame.Identity)
+	if s.applyRoutePoisonForIdentity(senderIdentity, target, frame.Reason) {
+		s.poisonReverseToOtherPeers(s.runCtx, senderIdentity, []routing.PeerIdentity{routing.PeerIdentity(target)})
+	}
+}
+
+// applyRoutePoisonForIdentity invalidates the claims[target][senderIdentity]
+// storage slot. It returns cascade=true when the invalidation left NO
+// surviving uplink to target — meaning the caller must fan a poison-reverse
+// about target to other peers. The caller owns that fan-out so it can BATCH it
+// across all zeroed-out targets (v2) instead of emitting one fan-out per
+// identity (which would re-explode the flood on the propagation hop). When a
+// backup uplink survives, the drain is triggered here and cascade=false. The
+// caller has ALREADY gated quarantine, rate limit, and signature.
+func (s *Service) applyRoutePoisonForIdentity(senderIdentity, target domain.PeerIdentity, reason string) (cascade bool) {
 	mutated := s.routingTable.InvalidateUplinkClaim(target, senderIdentity)
 	log.Debug().
 		Str("from", senderIdentity.String()).
-		Str("identity", frame.Identity).
-		Str("reason", frame.Reason).
+		Str("identity", target.String()).
+		Str("reason", reason).
 		Bool("mutated", mutated).
 		Msg("route_poison_applied")
-	if mutated {
-		s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
-			Reason: domain.RouteChangeAnnouncement,
-			PeerID: senderIdentity,
-		})
-		// Two mutually-exclusive follow-ups based on whether ANY uplink
-		// to target survives the invalidation:
-		//
-		//   - remaining > 0: we still have a backup uplink, so our
-		//     claim to target is still live and downstream peers can
-		//     keep routing through us. The pending queue might now
-		//     be deliverable via the alternate path —
-		//     triggerDrainForExposed handles the empty-pending
-		//     fast-path internally.
-		//
-		//   - remaining == 0: we no longer have any path to target,
-		//     so downstream peers that were routing target through
-		//     us must be told to invalidate THEIR (target, us) slot
-		//     too. Round-16 fix: fan out our own route_poison_v1 to
-		//     all other direct peers via poisonReverseToOtherPeers.
-		//     Without this the wave stops at the first receiver
-		//     because transit tombstones (the storage residue of
-		//     InvalidateUplinkClaim) are NOT emitted by
-		//     AnnounceProjectionFor — only own-direct tombstones
-		//     are. Downstream peers would keep the stale claim
-		//     until TTL (≈ 2 min) and count-to-infinity would only
-		//     collapse one hop per cycle. poisonReverseToOtherPeers
-		//     already filters senderIdentity (passed as lostUplink)
-		//     so we don't echo the poison straight back; the helper
-		//     also charges through SendRoutePoison's cap gate so
-		//     peers without mesh_poison_reverse_v1 are silently
-		//     skipped. The (target == senderIdentity) corner — the
-		//     poison is about the sender itself — is handled by the
-		//     helper's identity == lostUplink skip; the legacy
-		//     session-close fanout (when the sender disconnects)
-		//     covers that case via the normal RemoveDirectPeer
-		//     withdrawal path.
-		remaining := s.routingTable.Lookup(target)
-		if len(remaining) > 0 {
-			s.triggerDrainForExposed([]routing.PeerIdentity{routing.PeerIdentity(target)})
-		} else {
-			s.poisonReverseToOtherPeers(s.runCtx, senderIdentity, []routing.PeerIdentity{routing.PeerIdentity(target)})
+	if !mutated {
+		return false
+	}
+	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+		Reason: domain.RouteChangeAnnouncement,
+		PeerID: senderIdentity,
+	})
+	// remaining > 0: a backup uplink survives, our claim stays live and the
+	// pending queue may now be deliverable via the alternate path. remaining
+	// == 0: no path left — the caller must poison-reverse target to other
+	// peers so the wave does not stall at us (transit tombstones are not
+	// emitted by AnnounceProjectionFor, so the announce cycle alone would not
+	// propagate the withdrawal).
+	if len(s.routingTable.Lookup(target)) > 0 {
+		s.triggerDrainForExposed([]routing.PeerIdentity{routing.PeerIdentity(target)})
+		return false
+	}
+	return true
+}
+
+// handleRoutePoisonV2 processes an incoming batched poison-reverse frame
+// (route_poison_v2). Same gates as handleRoutePoison — quarantine, the shared
+// announce rate limit (charged len(identities) tokens so v2 is cost-equivalent
+// to the v1 fan-out it replaces, no multiplicative bypass), and Tier-2-lenient
+// signature verification over the batch canonical bytes (verified ONCE) — then
+// applies the poison to every listed identity via the shared core. Zeroed-out
+// targets are collected and cascaded ONCE via poisonReverseToOtherPeers (which
+// batches per peer), so the propagation hop does not re-explode into singletons.
+func (s *Service) handleRoutePoisonV2(senderIdentity domain.PeerIdentity, frame protocol.RoutePoisonV2Frame) {
+	if !identity.IsValidAddress(senderIdentity.String()) {
+		log.Warn().Str("sender", senderIdentity.String()).Msg("route_poison_v2_malformed_sender")
+		return
+	}
+	if s.IsPeerInRouteQuarantine(senderIdentity) {
+		log.Debug().Str("from", senderIdentity.String()).Str("frame_type", "route_poison_v2").Int("identities", len(frame.Identities)).Msg("routing_announce_drop_quarantined_sender")
+		return
+	}
+	// Charge ONE token per identity, not one per frame: the batch does the
+	// work of N v1 frames (N invalidations + up to N cascades), so a flat cost
+	// of 1 would let an authenticated peer get an N× multiplicative bypass of
+	// the announce-plane rate limit relative to v1. Cost == len(identities)
+	// keeps v2 cost-equivalent to the v1 fan-out it replaces.
+	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, len(frame.Identities)) {
+		log.Warn().Str("from", senderIdentity.String()).Str("frame_type", "route_poison_v2").Int("identities", len(frame.Identities)).Msg("announce_rate_limit_drop")
+		return
+	}
+	// Tier-2-lenient signature check over the batch canonical bytes, once.
+	if frame.SenderSig != "" {
+		sig, err := base64.StdEncoding.DecodeString(frame.SenderSig)
+		if err != nil {
+			log.Warn().Err(err).Str("from", senderIdentity.String()).Msg("route_poison_v2_sig_malformed_drop")
+			return
 		}
+		if pubkey, ok := s.publicKeyForIdentity(senderIdentity); ok {
+			if !ed25519.Verify(pubkey, frame.CanonicalSenderSigBytes(), sig) {
+				log.Warn().Str("from", senderIdentity.String()).Msg("route_poison_v2_sig_invalid_drop")
+				return
+			}
+		}
+	}
+	// Collect the targets that zeroed out, then fan the cascade ONCE as a
+	// batch — applying per-identity fan-out here would re-explode the flood on
+	// the propagation hop (a 500-identity batch from A would become 500
+	// singleton frames downstream). poisonReverseToOtherPeers batches per peer.
+	var cascade []routing.PeerIdentity
+	for _, idStr := range frame.Identities {
+		if !identity.IsValidAddress(idStr) {
+			log.Warn().Str("from", senderIdentity.String()).Str("frame_identity", idStr).Msg("route_poison_v2_malformed_identity")
+			continue
+		}
+		target := domain.PeerIdentityFromWire(idStr)
+		if s.applyRoutePoisonForIdentity(senderIdentity, target, frame.Reason) {
+			cascade = append(cascade, routing.PeerIdentity(target))
+		}
+	}
+	if len(cascade) > 0 {
+		s.poisonReverseToOtherPeers(s.runCtx, senderIdentity, cascade)
 	}
 }
 

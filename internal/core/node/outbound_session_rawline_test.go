@@ -46,6 +46,7 @@ func TestIsAnnouncePlaneFrameType_CoversV3AndPoison(t *testing.T) {
 		"request_resync",
 		protocol.RouteAnnounceV3FrameType,
 		protocol.RoutePoisonFrameType,
+		protocol.RoutePoisonV2FrameType,
 	}
 	for _, ft := range must {
 		if !isAnnouncePlaneFrameType(ft) {
@@ -80,6 +81,7 @@ func TestIsRawLineBackedFrameType_CoversV3AndPoison(t *testing.T) {
 		"route_sync_summary_v1",
 		protocol.RouteAnnounceV3FrameType,
 		protocol.RoutePoisonFrameType,
+		protocol.RoutePoisonV2FrameType,
 	}
 	for _, ft := range must {
 		if !isRawLineBackedFrameType(ft) {

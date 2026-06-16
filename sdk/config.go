@@ -80,6 +80,19 @@ type NodeConfig struct {
 	// restore the legacy no-ceiling behaviour. The per-class MaxAge values use
 	// their built-in defaults (24h) for SDK runtimes.
 	EnvelopeRetentionEnabled *bool
+	// PoisonBatchEnabled batches poison-reverse fan-out (route_poison_v2)
+	// toward v2-capable peers instead of one frame per identity. nil means
+	// "use the default", which is ENABLED — matching the operator default and
+	// CORSA_POISON_BATCH. Set to a pointer to false to force the legacy
+	// per-identity v1 fan-out for an embedded/SDK runtime.
+	PoisonBatchEnabled *bool
+	// ProbeBackoffEnabled delays the Good→Questionable transition (60s→90s) for
+	// proven-stable routes so they are actively probed less often; Bad/Dead are
+	// unchanged, so failure detection is not slowed. nil means "use the
+	// default", which is ENABLED — matching the operator default and
+	// CORSA_PROBE_BACKOFF. Set to a pointer to false to restore the flat
+	// 60/122/182s timeline for an embedded/SDK runtime.
+	ProbeBackoffEnabled *bool
 }
 
 // RPCConfig configures the optional HTTP RPC server.
@@ -268,6 +281,8 @@ func (c Config) internal() coreconfig.Config {
 			// opts out via a non-nil pointer to false.
 			HoldDMUntilReachable:     cfg.Node.HoldDMUntilReachable == nil || *cfg.Node.HoldDMUntilReachable,
 			EnvelopeRetentionEnabled: cfg.Node.EnvelopeRetentionEnabled == nil || *cfg.Node.EnvelopeRetentionEnabled,
+			PoisonBatchEnabled:       cfg.Node.PoisonBatchEnabled == nil || *cfg.Node.PoisonBatchEnabled,
+			ProbeBackoffEnabled:      cfg.Node.ProbeBackoffEnabled == nil || *cfg.Node.ProbeBackoffEnabled,
 			// TransitMaxAge / BroadcastMaxAge left zero → node-package defaults
 			// (24h) apply when retention is enabled; GossipFanoutLimit /
 			// TransitForwardOnce left at their opt-in OFF defaults.

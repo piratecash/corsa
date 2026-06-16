@@ -108,6 +108,27 @@ type Node struct {
 	// Env: CORSA_BROADCAST_MAX_AGE_HOURS.
 	BroadcastMaxAge time.Duration
 
+	// ProbeBackoffEnabled delays ONLY the Good→Questionable transition for
+	// proven-stable routes (60s → 90s, an additive +30s once a route has been
+	// confirmed healthy enough), so a stable route is actively probed ~90s
+	// instead of ~60s. The Bad (122s) and Dead (182s) thresholds are UNCHANGED,
+	// so a stable route that then dies silently is still detected just as fast —
+	// there is no failure-detection regression, only fewer probes for healthy
+	// stable routes. New or recently-failed routes keep the flat 60s timeline,
+	// so onboarding is unaffected. ENABLED by default; CORSA_PROBE_BACKOFF is a
+	// kill-switch (set falsey to restore the flat 60/122/182s timeline).
+	ProbeBackoffEnabled bool
+
+	// PoisonBatchEnabled makes poison-reverse fan-out use the batched
+	// route_poison_v2 frame (one frame per peer carrying the whole lost-identity
+	// list) toward peers that advertise mesh_poison_reverse_v2, instead of one
+	// route_poison_v1 frame per (identity × peer). ENABLED by default — it
+	// collapses the per-disconnect poison burst (hundreds of frames → ~one per
+	// peer). The env var CORSA_POISON_BATCH is a kill-switch (set falsey to
+	// force the legacy per-identity v1 fan-out everywhere). Peers without the v2
+	// capability always get the v1 fan-out regardless.
+	PoisonBatchEnabled bool
+
 	// TransitForwardOnce makes a relay forward transit DMs (neither party is
 	// this node) WITHOUT storing them in s.topics or tracking them in the
 	// relay-retry contour: the frame is gossiped/relayed in a single pass and
@@ -432,6 +453,8 @@ func Default() Config {
 	broadcastMaxAge := broadcastMaxAgeFromEnv()
 	gossipFanoutLimit := gossipFanoutLimitFromEnv()
 	transitForwardOnce := transitForwardOnceFromEnv()
+	poisonBatchEnabled := poisonBatchEnabledFromEnv()
+	probeBackoffEnabled := probeBackoffEnabledFromEnv()
 
 	return Config{
 		App: App{
@@ -466,6 +489,8 @@ func Default() Config {
 			BroadcastMaxAge:            broadcastMaxAge,
 			GossipFanoutLimit:          gossipFanoutLimit,
 			TransitForwardOnce:         transitForwardOnce,
+			PoisonBatchEnabled:         poisonBatchEnabled,
+			ProbeBackoffEnabled:        probeBackoffEnabled,
 			MaxNextHopsPerOrigin:       maxNextHopsPerOrigin,
 			MaxSeqAdvancePerWindow:     maxSeqAdvancePerWindow,
 			SeqAdvanceWindow:           seqAdvanceWindow,
@@ -919,6 +944,31 @@ func holdDMUntilReachableFromEnv() bool {
 // value restores the legacy no-ceiling behaviour.
 func envelopeRetentionEnabledFromEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENVELOPE_RETENTION"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// probeBackoffEnabledFromEnv reads CORSA_PROBE_BACKOFF. Defaults to ENABLED
+// (stable routes age/probe progressively slower). Kill-switch: an explicit
+// falsey value restores the flat 60/122/182s health timeline for every route.
+func probeBackoffEnabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_PROBE_BACKOFF"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// poisonBatchEnabledFromEnv reads CORSA_POISON_BATCH. Defaults to ENABLED
+// (batched route_poison_v2 toward v2-capable peers — collapses the poison
+// burst). The variable is a kill-switch: an explicit falsey value forces the
+// legacy per-identity v1 fan-out everywhere.
+func poisonBatchEnabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_POISON_BATCH"))) {
 	case "0", "false", "no", "off":
 		return false
 	default:

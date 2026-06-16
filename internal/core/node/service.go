@@ -1438,6 +1438,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		routing.WithMaxSeqAdvancePerWindow(cfg.MaxSeqAdvancePerWindow),
 		routing.WithSeqAdvanceWindow(cfg.SeqAdvanceWindow),
 		routing.WithMaxSaneHops(cfg.MaxSaneHops),
+		routing.WithProbeBackoff(cfg.ProbeBackoffEnabled),
 	)
 	svc.router = NewTableRouter(svc, svc.routingTable)
 
@@ -1984,9 +1985,9 @@ func (s *Service) handleConn(conn net.Conn) {
 		//     ("quarantine does NOT close TCP").
 		//
 		// NOT exempt (intentional, even though they ARE announce-plane):
-		// request_resync and route_poison_v1. Those are single-message
+		// request_resync, route_poison_v1 and route_poison_v2. Those are
 		// control frames whose natural per-peer rate is well under 1/s
-		// (request_resync: bounded by reconnect cycles; route_poison_v1:
+		// (request_resync: bounded by reconnect cycles; the poison frames:
 		// bounded by route lifecycle). The cmd limiter (100 burst /
 		// 30 cmd/s) is the right defence — exempting them would leave
 		// only the loose 200-token-per-second route bucket, which permits
@@ -2761,6 +2762,26 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		}
 		s.handleRoutePoison(s.inboundPeerIdentity(connID), poison)
 		return true
+	case "route_poison_v2":
+		// Auth gate enforced above. Batched poison-reverse, gated by
+		// mesh_routing_v1 + mesh_poison_reverse_v2. Same scope rationale as
+		// route_poison_v1; type string is the raw literal kept in sync with
+		// protocol.RoutePoisonV2FrameType for the command_scope_test inspector.
+		if !s.connHasCapability(connID, domain.CapMeshRoutingV1) {
+			accepted = false
+			return true
+		}
+		if !s.connHasCapability(connID, domain.CapMeshPoisonReverseV2) {
+			accepted = false
+			return true
+		}
+		poisonBatch, err := protocol.UnmarshalRoutePoisonV2Frame([]byte(line))
+		if err != nil {
+			accepted = false
+			return true
+		}
+		s.handleRoutePoisonV2(s.inboundPeerIdentity(connID), poisonBatch)
+		return true
 	case "route_announce_v3":
 		// Auth gate enforced above. Phase 4 compact announce gated by the
 		// FULL triplet mesh_routing_v1 + mesh_routing_v3 + mesh_relay_v1,
@@ -2842,6 +2863,9 @@ var p2pWireCommands = map[string]bool{
 	// poison-reverse signal for accelerated count-to-infinity
 	// convergence — same string-literal pattern.
 	"route_poison_v1": true,
+	// Batched poison-reverse (mesh_poison_reverse_v2, additive): one frame
+	// carries a list of lost identities — same auth/scope as v1.
+	"route_poison_v2": true,
 }
 
 // isP2PWireCommand returns true if the command name belongs to the

@@ -366,47 +366,101 @@ func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity,
 	s.maybeScheduleDeferredWithdrawal(peerIdentity, caps)
 }
 
-// poisonReverseToOtherPeers emits route_poison_v1 about each lost
-// transit identity to every direct peer EXCEPT lostUplink itself
-// (the lost peer is, by definition, gone). Reason is always
-// uplink_lost — the trigger that called this helper is the lost
-// session; the more granular health-dead / loop-detected reasons
-// have their own emit sites (see TODO in 13.3-B's phase-4 doc
-// entry). Capability gating happens inside SendRoutePoison; peers
-// without mesh_poison_reverse_v1 silently skip.
+// poisonReverseToOtherPeers emits poison-reverse about each lost transit
+// identity to every direct peer EXCEPT lostUplink itself (the lost peer is,
+// by definition, gone). Reason is always uplink_lost — the trigger that
+// called this helper is the lost session. Per peer it uses the batched
+// route_poison_v2 (one frame for the whole identity list) when the peer
+// advertises mesh_poison_reverse_v2 AND CORSA_POISON_BATCH is enabled, and
+// falls back to per-identity route_poison_v1 otherwise. Capability gating
+// happens inside the Send* helpers; peers without poison-reverse silently skip.
 //
-// Scaling: this emits len(targets) × len(other-peers) frames. For a
-// 100-identity, 8-peer mesh that is ~700 frames per disconnect —
-// each is small (<200B). A future batch-frame extension can
-// collapse this; current single-identity-per-frame matches the
-// spec.
+// Scaling: with per-identity v1 frames this emits len(targets) ×
+// len(other-peers) frames (~700 for a 100-identity, 8-peer mesh per
+// disconnect). The batched poison-reverse (route_poison_v2,
+// CapMeshPoisonReverseV2) collapses the identity dimension to ONE frame per
+// peer carrying the whole list — ~peers frames per disconnect on the wire
+// (the receiver still charges len(identities) rate-limiter tokens, so the
+// batch is throttle-equivalent to the v1 fan-out, just far fewer frames). The
+// batch goes only to peers that advertise v2 AND only when CORSA_POISON_BATCH
+// is enabled (default on); every other peer (legacy, or batch disabled) gets
+// the per-identity v1 fan-out, so a mixed-version mesh is unaffected.
 func (s *Service) poisonReverseToOtherPeers(ctx context.Context, lostUplink domain.PeerIdentity, targets []routing.PeerIdentity) {
-	// Snapshot the routing-capable peer set once; SendRoutePoison
-	// applies its own capability filter (v1 + poison_reverse) so
-	// peers without mesh_poison_reverse_v1 will see SendRoutePoison
-	// return false without enqueueing any frame.
 	peers := s.routingCapablePeers()
 	if len(peers) == 0 {
 		return
 	}
+	// Build the identity list once, excluding the lost uplink's own
+	// identity — the legacy withdrawal path already withdraws claims about
+	// the disconnected peer itself; the transit-identity poisons are this
+	// helper's unique value-add.
+	idents := make([]domain.PeerIdentity, 0, len(targets))
 	for _, target := range targets {
-		identity := domain.PeerIdentity(target)
-		// Skip the lost uplink's own identity — the legacy withdrawal
-		// path (fanoutAnnounceRoutes on result.Withdrawals above)
-		// already withdraws claims about the disconnected peer
-		// itself. Emitting poison about the same identity would be
-		// a redundant signal handled identically by the receiver
-		// (both end up withdrawing claims[lostUplink][us]); the
-		// transit-identity poisons are the unique value-add of this
-		// helper.
-		if identity == lostUplink {
+		id := domain.PeerIdentity(target)
+		if id == lostUplink {
 			continue
 		}
-		for _, peer := range peers {
-			if peer.Identity == lostUplink {
-				continue
-			}
-			s.SendRoutePoison(ctx, peer.Address, identity, protocol.RoutePoisonReasonUplinkLost)
+		idents = append(idents, id)
+	}
+	if len(idents) == 0 {
+		return
+	}
+	batch := s.cfg.PoisonBatchEnabled
+	for _, peer := range peers {
+		if peer.Identity == lostUplink {
+			continue
+		}
+		// Capability is read from the AnnounceTarget snapshot (works for BOTH
+		// inbound and outbound peers) — sessionHasCapability only sees outbound
+		// sessions, so an inbound v2 peer would otherwise wrongly fall to v1.
+		if batch && announceTargetHasCapability(peer.Capabilities, domain.CapMeshPoisonReverseV2) {
+			s.fanPoisonReverseBatched(ctx, peer.Address, idents)
+			continue
+		}
+		// Legacy / batch-disabled fan-out: one v1 frame per identity.
+		for _, id := range idents {
+			s.SendRoutePoison(ctx, peer.Address, id, protocol.RoutePoisonReasonUplinkLost)
 		}
 	}
+}
+
+// poisonBatchChunkSize caps how many identities ride in one route_poison_v2
+// frame. Each identity is ~43 wire bytes (40-hex + JSON quoting); 1024 keeps
+// a chunk near ~44 KiB, comfortably under protocol.MaxFrameLine (128 KiB) even
+// with the reason / issued_at / signature overhead, so a large transit set
+// fans out as a few frames rather than one oversize frame the receiver rejects.
+const poisonBatchChunkSize = 1024
+
+// fanPoisonReverseBatched sends idents to a v2-capable peer as one or more
+// chunked route_poison_v2 frames. If a chunk fails to enqueue (oversize,
+// marshal error, transient dispatch failure), it falls back to per-identity
+// route_poison_v1 for that chunk — so poison is NEVER silently lost on a large
+// disconnect burst (the very scenario batching is meant to help).
+func (s *Service) fanPoisonReverseBatched(ctx context.Context, peerAddress domain.PeerAddress, idents []domain.PeerIdentity) {
+	for start := 0; start < len(idents); start += poisonBatchChunkSize {
+		end := start + poisonBatchChunkSize
+		if end > len(idents) {
+			end = len(idents)
+		}
+		chunk := idents[start:end]
+		if s.SendRoutePoisonBatch(ctx, peerAddress, chunk, protocol.RoutePoisonReasonUplinkLost) {
+			continue
+		}
+		for _, id := range chunk {
+			s.SendRoutePoison(ctx, peerAddress, id, protocol.RoutePoisonReasonUplinkLost)
+		}
+	}
+}
+
+// announceTargetHasCapability reports whether the peer's negotiated capability
+// snapshot (from routingCapablePeers / AnnounceTarget) includes c. Used in
+// preference to sessionHasCapability so the check is correct for inbound peers
+// too (PeerCapability is a domain.Capability alias, compared directly).
+func announceTargetHasCapability(caps []routing.PeerCapability, c domain.Capability) bool {
+	for _, pc := range caps {
+		if pc == c {
+			return true
+		}
+	}
+	return false
 }

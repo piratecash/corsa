@@ -29,6 +29,9 @@ import (
 //     verify and the Table.InvalidateUplinkClaim mutation. Sharing
 //     the announce bucket means a peer cannot flip from announce
 //     frames to poison frames to dodge the throttle.
+//   - route_poison_v2 (batched) — charges len(identities) tokens (one per
+//     listed identity), so the batch is cost-equivalent to the v1 fan-out it
+//     replaces and an authenticated peer gets no multiplicative bypass.
 //
 // Budgeting is by ROUTE COUNT, not by frame count (Round-10 fix). The
 // earlier per-frame budget silently truncated legitimate chunked
@@ -58,8 +61,10 @@ type announceRateLimiter struct {
 // cutting off a sustained flood within seconds. A mesh growing past
 // this scale grows the constant as a one-line operator change.
 //
-// Control frames (request_resync, route_poison_v1) and announce
-// frames with empty Entries each charge exactly 1 token, so the
+// Control frames request_resync / route_poison_v1 and announce frames
+// with empty Entries each charge exactly 1 token. route_poison_v2 is the
+// exception: it charges len(identities) tokens (one per listed identity) so
+// the batch is throttle-equivalent to the v1 fan-out it replaces. So the
 // per-peer per-second control-frame ceiling is announceRefillRoutesPerSec.
 const announceBurstRoutesPerPeer = 10000
 
@@ -92,11 +97,12 @@ func newAnnounceRateLimiter() *announceRateLimiter {
 // given peer identity should be accepted. cost is the per-frame token
 // charge expressed in route-entry units: announce-plane frames pass
 // max(1, len(entries)) so a single large full-sync frame correctly
-// drains proportional to its work; control frames
-// (request_resync, route_poison_v1) and empty announce frames pass 1
-// so they still consume the per-peer rate (and a flood of control
-// frames is bounded by announceRefillRoutesPerSec). cost <= 0 is
-// clamped to 1 so a buggy caller never silently bypasses the limiter.
+// drains proportional to its work; request_resync / route_poison_v1 and
+// empty announce frames pass 1, while route_poison_v2 passes
+// len(identities) (one per listed identity), so they still consume the
+// per-peer rate (and a flood of control frames is bounded by
+// announceRefillRoutesPerSec). cost <= 0 is clamped to 1 so a buggy caller
+// never silently bypasses the limiter.
 //
 // Returns true and decrements `cost` tokens on success. Returns false
 // when the bucket holds fewer than `cost` tokens — the receive

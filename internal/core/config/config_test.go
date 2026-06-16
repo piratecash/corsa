@@ -189,6 +189,48 @@ func TestGossipFanoutLimitFromEnv(t *testing.T) {
 	}
 }
 
+// TestProbeBackoffEnabledFromEnv pins the default-ON / kill-switch semantics of
+// the probe back-off knob.
+func TestProbeBackoffEnabledFromEnv(t *testing.T) {
+	for _, v := range []string{"", "  ", "1", "true", "on", "wat"} {
+		t.Setenv("CORSA_PROBE_BACKOFF", v)
+		if !probeBackoffEnabledFromEnv() {
+			t.Fatalf("CORSA_PROBE_BACKOFF=%q: want default true", v)
+		}
+	}
+	for _, v := range []string{"0", "false", "no", "off", "OFF"} {
+		t.Setenv("CORSA_PROBE_BACKOFF", v)
+		if probeBackoffEnabledFromEnv() {
+			t.Fatalf("CORSA_PROBE_BACKOFF=%q: want false (kill-switch)", v)
+		}
+	}
+	t.Setenv("CORSA_PROBE_BACKOFF", "")
+	if !Default().Node.ProbeBackoffEnabled {
+		t.Fatal("Default().Node.ProbeBackoffEnabled: want true (default ON)")
+	}
+}
+
+// TestPoisonBatchEnabledFromEnv pins the default-ON / kill-switch semantics of
+// the batched poison-reverse knob.
+func TestPoisonBatchEnabledFromEnv(t *testing.T) {
+	for _, v := range []string{"", "  ", "1", "true", "on", "wat"} {
+		t.Setenv("CORSA_POISON_BATCH", v)
+		if !poisonBatchEnabledFromEnv() {
+			t.Fatalf("CORSA_POISON_BATCH=%q: want default true", v)
+		}
+	}
+	for _, v := range []string{"0", "false", "no", "off", "OFF"} {
+		t.Setenv("CORSA_POISON_BATCH", v)
+		if poisonBatchEnabledFromEnv() {
+			t.Fatalf("CORSA_POISON_BATCH=%q: want false (kill-switch)", v)
+		}
+	}
+	t.Setenv("CORSA_POISON_BATCH", "")
+	if !Default().Node.PoisonBatchEnabled {
+		t.Fatal("Default().Node.PoisonBatchEnabled: want true (default ON)")
+	}
+}
+
 // TestTransitForwardOnceFromEnv pins the opt-in forward-once knob: default OFF
 // (legacy in-flight buffer), only explicit truthy values enable it.
 func TestTransitForwardOnceFromEnv(t *testing.T) {

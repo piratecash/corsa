@@ -106,6 +106,11 @@ func localCapabilities(enableV3 bool) []domain.Capability {
 		// so advertising the cap is honest about what this node will
 		// do with incoming poison frames.
 		caps = append(caps, domain.CapMeshPoisonReverseV1)
+		// Batched poison-reverse (route_poison_v2): advertising it means
+		// "I can receive and apply a list-of-identities poison frame". The
+		// emit side only uses it toward peers that also advertise it, and
+		// falls back to per-identity v1 otherwise (poisonReverseToOtherPeers).
+		caps = append(caps, domain.CapMeshPoisonReverseV2)
 	}
 	return caps
 }

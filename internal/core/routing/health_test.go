@@ -7,6 +7,78 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
+// TestRouteHealth_BackoffEarnedThreshold pins that the back-off is earned only
+// after stabilityStreakForBackoff consecutive confirmations.
+func TestRouteHealth_BackoffEarnedThreshold(t *testing.T) {
+	s := &RouteHealthState{}
+	for i := 0; i < stabilityStreakForBackoff-1; i++ {
+		s.StabilityStreak = i
+		if s.backoffEarned() {
+			t.Fatalf("streak %d must NOT earn back-off (threshold %d)", i, stabilityStreakForBackoff)
+		}
+	}
+	s.StabilityStreak = stabilityStreakForBackoff
+	if !s.backoffEarned() {
+		t.Fatalf("streak %d must earn back-off", stabilityStreakForBackoff)
+	}
+}
+
+// TestRouteHealth_ProbeBackoffDelaysQuestionable verifies a proven-stable route
+// stays Good past 60s (delayed to 90s) when backoff is on, while Bad/Dead are
+// UNCHANGED — a stable route that dies is still detected at the base timeline.
+func TestRouteHealth_ProbeBackoffDelaysQuestionable(t *testing.T) {
+	base := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Identity: domaintest.ID("id-target"), Uplink: domaintest.ID("id-uplink"),
+		Health: HealthGood, LastHopAck: base, TransitionAt: base,
+	}
+	for i := 0; i < maxStabilityStreak; i++ {
+		state.applyHopAck(base) // earn the back-off (also pins LastHopAck=base)
+	}
+	if !state.backoffEarned() {
+		t.Fatalf("after %d confirmations back-off must be earned", maxStabilityStreak)
+	}
+
+	// At 60s: a base route would be Questionable, but the stable route stays
+	// Good until the extended 90s threshold.
+	state.applyIdleTick(base.Add(60*time.Second), true)
+	if state.Health != HealthGood {
+		t.Fatalf("backoff: stable route must stay Good at 60s, got %s", state.Health)
+	}
+	// Just past the extended threshold (90s).
+	want := HealthQuestionableAfter + stableQuestionableExtension
+	state.applyIdleTick(base.Add(want+time.Second), true)
+	if state.Health != HealthQuestionable {
+		t.Fatalf("backoff: past %s a stable route must be Questionable, got %s", want, state.Health)
+	}
+
+	// Sanity: the extension stays below the (unchanged) Bad threshold so
+	// ordering is preserved and death detection is not slowed.
+	if want >= HealthBadAfter {
+		t.Fatalf("extended Questionable %s must stay below HealthBadAfter %s", want, HealthBadAfter)
+	}
+}
+
+// TestRouteHealth_ProbeBackoffResetsOnFailure verifies that any negative
+// evidence drops the route back to the fast base timeline immediately.
+func TestRouteHealth_ProbeBackoffResetsOnFailure(t *testing.T) {
+	base := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Identity: domaintest.ID("id-target"), Uplink: domaintest.ID("id-uplink"),
+		Health: HealthGood, LastHopAck: base, TransitionAt: base,
+	}
+	for i := 0; i < maxStabilityStreak; i++ {
+		state.applyHopAck(base)
+	}
+	state.applyProbeFailure(base)
+	if state.StabilityStreak != 0 {
+		t.Fatalf("streak must reset to 0 on probe failure, got %d", state.StabilityStreak)
+	}
+	if state.backoffEarned() {
+		t.Fatal("back-off must be lost after the streak resets")
+	}
+}
+
 // TestRouteHealth_StringRoundTrip — RouteHealth.String returns stable
 // lower-case wire labels used by RPC observability and structured
 // logs. The labels are part of the surface contract for fetchRouteHealth
@@ -45,14 +117,14 @@ func TestRouteHealth_GoodToQuestionableTransitionAt60Seconds(t *testing.T) {
 	}
 
 	// 59s idle — still Good.
-	state.applyIdleTick(base.Add(59 * time.Second))
+	state.applyIdleTick(base.Add(59*time.Second), false)
 	if state.Health != HealthGood {
 		t.Fatalf("after 59s idle: Health = %s, want good", state.Health)
 	}
 
 	// 60s idle — transitions to Questionable.
 	now := base.Add(60 * time.Second)
-	state.applyIdleTick(now)
+	state.applyIdleTick(now, false)
 	if state.Health != HealthQuestionable {
 		t.Fatalf("after 60s idle: Health = %s, want questionable", state.Health)
 	}
@@ -72,7 +144,7 @@ func TestRouteHealth_QuestionableToBadAtHopAckTimeout(t *testing.T) {
 		LastHopAck:   base,
 		TransitionAt: base,
 	}
-	state.applyIdleTick(base.Add(122 * time.Second))
+	state.applyIdleTick(base.Add(122*time.Second), false)
 	if state.Health != HealthBad {
 		t.Fatalf("after 122s idle: Health = %s, want bad", state.Health)
 	}
@@ -90,7 +162,7 @@ func TestRouteHealth_BadToDeadAt182s(t *testing.T) {
 		LastHopAck:   base,
 		TransitionAt: base,
 	}
-	state.applyIdleTick(base.Add(182 * time.Second))
+	state.applyIdleTick(base.Add(182*time.Second), false)
 	if state.Health != HealthDead {
 		t.Fatalf("after 182s idle: Health = %s, want dead", state.Health)
 	}
@@ -110,7 +182,7 @@ func TestRouteHealth_IdleTickSkipsBadWhenLatentToDead(t *testing.T) {
 		LastHopAck:   base,
 		TransitionAt: base,
 	}
-	state.applyIdleTick(base.Add(300 * time.Second))
+	state.applyIdleTick(base.Add(300*time.Second), false)
 	if state.Health != HealthDead {
 		t.Fatalf("after 300s idle: Health = %s, want dead", state.Health)
 	}
@@ -289,7 +361,7 @@ func TestRouteHealth_TransitionAtStampedOnEveryChange(t *testing.T) {
 	// Force the transition: stamp LastHopAck back to base for the
 	// idle-since calculation to trigger.
 	state.LastHopAck = base
-	state.applyIdleTick(transitionTime)
+	state.applyIdleTick(transitionTime, false)
 	if state.Health != HealthQuestionable {
 		t.Fatalf("state did not transition, got %s", state.Health)
 	}
@@ -371,7 +443,7 @@ func TestHealthStore_ScopedToUplink_HopAckForUplinkADoesNotAffectUplinkB(t *test
 
 	// Force B into Questionable via a passive tick after A's recent
 	// hop_ack.
-	stateB.applyIdleTick(base.Add(70 * time.Second))
+	stateB.applyIdleTick(base.Add(70*time.Second), false)
 	if stateB.Health != HealthQuestionable {
 		t.Fatalf("setup: stateB.Health = %s, want questionable", stateB.Health)
 	}

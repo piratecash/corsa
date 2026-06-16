@@ -100,6 +100,25 @@ const (
 	// burst size.
 	HealthProbeInterval = 30 * time.Second
 
+	// The OPT-IN probe back-off (CORSA_PROBE_BACKOFF) delays ONLY the
+	// Good→Questionable transition for proven-stable routes, leaving the Bad
+	// (122s) and Dead (182s) thresholds UNCHANGED. Since Questionable is what
+	// triggers active probing, a stable route is probed ~stableQuestionable
+	// (90s) instead of 60s — but if it then dies silently it is still detected
+	// at the SAME 122s/182s as any other route. The extension is deliberately
+	// kept below HealthBadAfter (with one probe-interval of margin) so the
+	// Good≻Questionable≻Bad ordering is never inverted — that is why this is an
+	// additive +30s step rather than a multiplier on the whole timeline.
+	//
+	// A route earns the back-off once its StabilityStreak (incremented per
+	// positive confirmation, reset on any negative evidence) reaches
+	// stabilityStreakForBackoff, so a new or recently-flapping route keeps the
+	// fast 60s timeline.
+	stabilityStreakForBackoff   = 3
+	stableQuestionableExtension = HealthProbeInterval // +30s → 90s, < 122s Bad
+	// maxStabilityStreak caps the counter so it cannot grow unbounded.
+	maxStabilityStreak = stabilityStreakForBackoff
+
 	// HealthProbeTimeout — per-probe send-to-ack budget. After this
 	// elapses without a probe_ack, the pair gets one
 	// applyProbeFailure tick. Hooked up by PR 11.3.
@@ -275,6 +294,15 @@ type RouteHealthState struct {
 	// to force Bad even when LastHopAck is still recent.
 	ProbeFailures int
 
+	// StabilityStreak counts consecutive positive confirmations (hop_ack or
+	// reachable probe_ack), capped at maxStabilityStreak. Once it reaches
+	// stabilityStreakForBackoff (backoffEarned) the opt-in probe back-off
+	// extends the Good→Questionable threshold by stableQuestionableExtension.
+	// Reset to 0 on any negative evidence (probe timeout / reachable=false) or
+	// on a transition to Bad/Dead, so a route that begins flapping immediately
+	// loses its slow-age privilege.
+	StabilityStreak int
+
 	// RTT is the EWMA estimate of round-trip latency for this pair.
 	// Updated by UpdateRTT (see score.go) using samples from hop_ack
 	// turnaround (PR 11.2) and probe round-trip timing (PR 11.3).
@@ -368,10 +396,30 @@ func (s *RouteHealthState) applyHopAck(now time.Time) {
 	s.LastHopAck = now
 	s.Confirmed = true // first real positive evidence; sticky thereafter.
 	s.ProbeFailures = 0
+	s.bumpStability()
 	if s.Health != HealthGood {
 		s.TransitionAt = now
 		s.Health = HealthGood
 	}
+}
+
+// bumpStability records one positive confirmation, capped at
+// maxStabilityStreak. resetStability clears it on negative evidence. Both are
+// no-ops for the back-off when CORSA_PROBE_BACKOFF is off (backoffEarned is
+// only consulted by applyIdleTick when the Table passes backoff=true).
+func (s *RouteHealthState) bumpStability() {
+	if s.StabilityStreak < maxStabilityStreak {
+		s.StabilityStreak++
+	}
+}
+
+func (s *RouteHealthState) resetStability() { s.StabilityStreak = 0 }
+
+// backoffEarned reports whether the route has confirmed itself stable enough
+// to earn the delayed Good→Questionable transition. Pure; the caller decides
+// whether the back-off is enabled at all.
+func (s *RouteHealthState) backoffEarned() bool {
+	return s.StabilityStreak >= stabilityStreakForBackoff
 }
 
 // applyProbeAck advances the state machine on route_probe_ack
@@ -399,6 +447,7 @@ func (s *RouteHealthState) applyProbeAck(reachable bool, now time.Time) {
 		s.LastHopAck = now
 		s.Confirmed = true // first real positive evidence; sticky thereafter.
 		s.ProbeFailures = 0
+		s.bumpStability()
 		if s.Health != HealthGood {
 			s.TransitionAt = now
 			s.Health = HealthGood
@@ -406,6 +455,7 @@ func (s *RouteHealthState) applyProbeAck(reachable bool, now time.Time) {
 		return
 	}
 	s.ProbeFailures++
+	s.resetStability()
 	if s.Health == HealthDead {
 		// Dead is sticky against negative evidence. The
 		// counter still bumps so observability sees the
@@ -435,6 +485,7 @@ func (s *RouteHealthState) applyProbeAck(reachable bool, now time.Time) {
 func (s *RouteHealthState) applyProbeFailure(now time.Time) {
 	s.LastProbe = now
 	s.ProbeFailures++
+	s.resetStability()
 	if s.ProbeFailures >= HealthProbeFailureThreshold && s.Health != HealthBad && s.Health != HealthDead {
 		s.TransitionAt = now
 		s.Health = HealthBad
@@ -460,16 +511,28 @@ func (s *RouteHealthState) applyProbeFailure(now time.Time) {
 // while the timer logic here stays simple and correct.
 //
 // Caller must hold the owning routing.Table's t.mu in W mode.
-func (s *RouteHealthState) applyIdleTick(now time.Time) {
+func (s *RouteHealthState) applyIdleTick(now time.Time, backoff bool) {
 	idle := now.Sub(s.LastHopAck)
+	// Probe back-off (opt-in): a proven-stable route delays ONLY its
+	// Good→Questionable transition by one probe interval (60s → 90s), so it is
+	// actively probed less often. Bad (122s) and Dead (182s) are UNCHANGED, so
+	// a stable route that dies silently is detected just as fast as any other
+	// — and 90s stays below HealthBadAfter with a full probe-interval of margin
+	// so the Good≻Questionable≻Bad ordering is never inverted.
+	questionableAfter := HealthQuestionableAfter
+	if backoff && s.backoffEarned() {
+		questionableAfter += stableQuestionableExtension
+	}
 	switch {
 	case idle >= HealthDeadAfter && s.Health != HealthDead:
 		s.TransitionAt = now
 		s.Health = HealthDead
+		s.resetStability()
 	case idle >= HealthBadAfter && s.Health != HealthBad && s.Health != HealthDead:
 		s.TransitionAt = now
 		s.Health = HealthBad
-	case idle >= HealthQuestionableAfter && s.Health == HealthGood:
+		s.resetStability()
+	case idle >= questionableAfter && s.Health == HealthGood:
 		s.TransitionAt = now
 		s.Health = HealthQuestionable
 	}

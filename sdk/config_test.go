@@ -146,3 +146,67 @@ func TestNodeConfigEnvelopeRetentionMapping(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeConfigPoisonBatchMapping pins the SDK boundary for the batched
+// poison-reverse knob: nil → default ENABLED, explicit false → kill-switch.
+func TestNodeConfigPoisonBatchMapping(t *testing.T) {
+	t.Parallel()
+
+	tr := true
+	fa := false
+
+	cases := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{name: "nil_defaults_to_enabled", in: nil, want: true},
+		{name: "explicit_true_stays_enabled", in: &tr, want: true},
+		{name: "explicit_false_is_kill_switch", in: &fa, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := DefaultConfig()
+			cfg.Node.PoisonBatchEnabled = tc.in
+
+			if got := cfg.internal().Node.PoisonBatchEnabled; got != tc.want {
+				t.Fatalf("PoisonBatchEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNodeConfigProbeBackoffMapping pins the SDK boundary for the probe
+// back-off knob: nil → default ENABLED, explicit false → kill-switch.
+func TestNodeConfigProbeBackoffMapping(t *testing.T) {
+	t.Parallel()
+
+	tr := true
+	fa := false
+
+	cases := []struct {
+		name string
+		in   *bool
+		want bool
+	}{
+		{name: "nil_defaults_to_enabled", in: nil, want: true},
+		{name: "explicit_true_stays_enabled", in: &tr, want: true},
+		{name: "explicit_false_is_kill_switch", in: &fa, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := DefaultConfig()
+			cfg.Node.ProbeBackoffEnabled = tc.in
+
+			if got := cfg.internal().Node.ProbeBackoffEnabled; got != tc.want {
+				t.Fatalf("ProbeBackoffEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

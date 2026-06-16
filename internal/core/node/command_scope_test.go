@@ -136,6 +136,11 @@ var requiredP2PWireCommands = map[string]bool{
 	// docs/cluster-mesh/phase-4-compact-wire-signed.md §3.3 and
 	// overview §7.7 for the wire contract.
 	"route_poison_v1": true,
+
+	// Batched poison-reverse (mesh_poison_reverse_v2 capability gate).
+	// route_poison_v2 carries a LIST of lost identities in one frame — same
+	// auth/scope as v1, added to collapse the per-disconnect fan-out burst.
+	"route_poison_v2": true,
 }
 
 // extractSwitchCasesFromFunc parses service.go via go/ast and returns every

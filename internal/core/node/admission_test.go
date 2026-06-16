@@ -732,14 +732,15 @@ func TestCmdLimiterExemption_BulkAnnounceFramesExempt(t *testing.T) {
 }
 
 // TestCmdLimiterExemption_ControlAnnounceFramesNOTExempt pins the
-// inverse: request_resync and route_poison_v1 are announce-plane
-// (they share announceLimiter, sender-identity gating, etc.) BUT
-// they MUST stay under cmd-limiter coverage. Their natural per-peer
-// rate is well under 1/s (request_resync: bounded by reconnect
-// cycles; route_poison_v1: bounded by route lifecycle), so the
+// inverse: request_resync, route_poison_v1 and route_poison_v2 are
+// announce-plane (they share announceLimiter, sender-identity gating,
+// etc.) BUT they MUST stay under cmd-limiter coverage. Their natural
+// per-peer rate is well under 1/s (request_resync: bounded by reconnect
+// cycles; the poison frames: bounded by route lifecycle), so the
 // 30 cmd/s budget never bites in normal operation. Exempting them
 // would leave only the 200-tokens/s route bucket as the per-peer
-// defence — at cost=1 per control frame that allows 200/s sustained,
+// defence — at cost=1 per unit-cost control frame that allows 200/s
+// sustained (route_poison_v2 charges len(identities), tighter still),
 // far above legitimate use, AND chatty_routes does not count control
 // frames in its trigger window (it is wired only into the three
 // bulk handlers).
@@ -755,6 +756,7 @@ func TestCmdLimiterExemption_ControlAnnounceFramesNOTExempt(t *testing.T) {
 	}{
 		{"request_resync", `{"type":"request_resync"}`},
 		{"route_poison_v1", `{"type":"` + protocol.RoutePoisonFrameType + `","identity":"x","sig":"y"}`},
+		{"route_poison_v2", `{"type":"` + protocol.RoutePoisonV2FrameType + `","identities":["x"],"reason":"uplink_lost"}`},
 	}
 
 	for _, tt := range cases {

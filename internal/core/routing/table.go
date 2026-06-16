@@ -224,6 +224,12 @@ type Table struct {
 	// MarkReconnected, so the on-wire epoch value matters only within
 	// a session.
 	epoch uint64
+
+	// probeBackoff delays the Good→Questionable transition (TickHealth →
+	// applyIdleTick) for proven-stable pairs by stableQuestionableExtension
+	// (60s→90s), so they are actively probed less often; Bad/Dead are
+	// unchanged. Off restores the flat 60s timeline. Set via WithProbeBackoff.
+	probeBackoff bool
 }
 
 // TableOption configures optional Table parameters.
@@ -233,6 +239,16 @@ type TableOption func(*Table)
 func WithClock(clock func() time.Time) TableOption {
 	return func(t *Table) {
 		t.clock = clock
+	}
+}
+
+// WithProbeBackoff enables the opt-in probe back-off (CORSA_PROBE_BACKOFF):
+// proven-stable pairs delay Good→Questionable by stableQuestionableExtension,
+// so they are probed less often (Bad/Dead unchanged). Default false keeps the
+// flat timeline.
+func WithProbeBackoff(enabled bool) TableOption {
+	return func(t *Table) {
+		t.probeBackoff = enabled
 	}
 }
 

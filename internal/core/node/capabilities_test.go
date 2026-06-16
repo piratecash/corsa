@@ -62,6 +62,7 @@ func TestLocalCapabilities_EnabledAppendsV3(t *testing.T) {
 		domain.CapMeshRouteSyncV1,
 		domain.CapMeshRoutingV3,
 		domain.CapMeshPoisonReverseV1,
+		domain.CapMeshPoisonReverseV2,
 	}
 	if len(caps) != len(want) {
 		t.Fatalf("localCapabilities(true) = %v, want %v", caps, want)
@@ -118,9 +119,9 @@ func TestLocalCapabilityStrings_EnabledIncludesV3(t *testing.T) {
 	// pinned by TestLocalCapabilities_DoesNotAdvertiseAttestedLinks.
 	// Phase 5 re-enables the cap together with the self-attestation
 	// entry stream.
-	tail := strs[len(strs)-2:]
-	if tail[0] != "mesh_routing_v3" || tail[1] != "mesh_poison_reverse_v1" {
-		t.Fatalf("localCapabilityStrings(true) tail = %v, want [mesh_routing_v3 mesh_poison_reverse_v1]", tail)
+	tail := strs[len(strs)-3:]
+	if tail[0] != "mesh_routing_v3" || tail[1] != "mesh_poison_reverse_v1" || tail[2] != "mesh_poison_reverse_v2" {
+		t.Fatalf("localCapabilityStrings(true) tail = %v, want [mesh_routing_v3 mesh_poison_reverse_v1 mesh_poison_reverse_v2]", tail)
 	}
 }
 

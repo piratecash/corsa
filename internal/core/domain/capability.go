@@ -211,6 +211,18 @@ const (
 	// its own claim (which then signals via the normal route_announce
 	// flow at hops=HopsInfinity).
 	CapMeshPoisonReverseV1 Capability = "mesh_poison_reverse_v1"
+
+	// CapMeshPoisonReverseV2 gates the BATCHED poison-reverse frame
+	// (route_poison_v2): one frame carries a LIST of lost identities for a
+	// single reason, instead of one frame per (identity × peer). Semantically
+	// identical to v1 (the receiver invalidates claims[identity][sender] for
+	// each listed identity); it exists purely to collapse the per-disconnect
+	// fan-out — a well-connected uplink dropping can poison dozens-to-hundreds
+	// of transit identities, which as single v1 frames is a burst of hundreds
+	// of small frames that partly hits the announce rate limiter. Additive and
+	// mixed-version safe: an emitter sends v2 only to peers advertising this
+	// cap and falls back to per-identity v1 for the rest.
+	CapMeshPoisonReverseV2 Capability = "mesh_poison_reverse_v2"
 )
 
 // String returns the stable string label for the capability.
@@ -222,7 +234,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1:
+	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1, CapMeshPoisonReverseV2:
 		return c, true
 	default:
 		return "", false

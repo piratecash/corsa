@@ -3071,6 +3071,31 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			return
 		}
 		s.handleRoutePoison(session.peerIdentity, poison)
+	case "route_poison_v2":
+		// Batched poison-reverse on an outbound session. Same cap pair as v1
+		// but with mesh_poison_reverse_v2, same per-session cmd-rate gate.
+		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+			return
+		}
+		if !s.sessionHasCapability(address, domain.CapMeshPoisonReverseV2) {
+			return
+		}
+		s.peerMu.RLock()
+		sessionV2 := s.sessions[address]
+		s.peerMu.RUnlock()
+		if sessionV2 == nil {
+			return
+		}
+		if !s.outboundControlFrameAllowed(sessionV2) {
+			log.Debug().Str("peer", string(address)).Str("frame_type", "route_poison_v2").Msg("outbound_session: control frame cmd rate limit exceeded")
+			return
+		}
+		poisonBatch, err := protocol.UnmarshalRoutePoisonV2Frame([]byte(frame.RawLine))
+		if err != nil {
+			log.Debug().Err(err).Str("peer", string(address)).Msg("peer_session: route_poison_v2 parse failed")
+			return
+		}
+		s.handleRoutePoisonV2(sessionV2.peerIdentity, poisonBatch)
 	case "route_announce_v3":
 		// Phase 4 compact announce arriving on an outbound session. Same
 		// capability triplet as the inbound dispatcher (v1 + v3 + relay)

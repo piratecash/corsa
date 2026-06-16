@@ -547,7 +547,7 @@ func (t *Table) TickHealth() {
 			continue
 		}
 		prev := state.Health
-		state.applyIdleTick(now)
+		state.applyIdleTick(now, t.probeBackoff)
 		if state.Health != prev {
 			mutated = true
 		}
