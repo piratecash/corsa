@@ -530,7 +530,7 @@ func registerSenderKey(t *testing.T, svc *Service) *identity.Identity {
 	svc.pubKeys[sender.Address] = identity.PublicKeyBase64(sender.PublicKey)
 	svc.boxKeys[sender.Address] = identity.BoxPublicKeyBase64(sender.BoxPublicKey)
 	svc.boxSigs[sender.Address] = identity.SignBoxKeyBinding(sender)
-	svc.known[sender.Address] = struct{}{}
+	svc.known.Add(sender.Address)
 	svc.knowledgeMu.Unlock()
 	return sender
 }
@@ -1285,7 +1285,7 @@ func TestRelayMessageRejectsNonDMTopic(t *testing.T) {
 	svc.pubKeys[senderKey.Address] = identity.PublicKeyBase64(senderKey.PublicKey)
 	svc.boxKeys[senderKey.Address] = identity.BoxPublicKeyBase64(senderKey.BoxPublicKey)
 	svc.boxSigs[senderKey.Address] = identity.SignBoxKeyBinding(senderKey)
-	svc.known[senderKey.Address] = struct{}{}
+	svc.known.Add(senderKey.Address)
 	svc.knowledgeMu.Unlock()
 
 	nonDMTopics := []string{"general", "announcements", "custom-topic", ""}

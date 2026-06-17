@@ -6,7 +6,12 @@ All identity commands require no arguments.
 
 ### POST /rpc/v1/identity/identities
 
-All known identities (ed25519 fingerprints observed on the network).
+All known identities (ed25519 fingerprints observed on the network). The set
+is bounded (most recent observations, capped at `maxKnownIdentities`); on a
+busy relay the oldest idle entries are evicted, so a long-lived node returns a
+recent window rather than every identity ever seen. Trusted contacts are not
+sourced from this set — use `fetch_trusted_contacts` for the authoritative,
+persistent contact list.
 
 #### CLI
 
@@ -60,7 +65,12 @@ fetchTrustedContacts
 
 ### POST /rpc/v1/identity/identities
 
-Все известные идентификаторы (ed25519-отпечатки, обнаруженные в сети).
+Все известные идентификаторы (ed25519-отпечатки, обнаруженные в сети). Набор
+ограничен (последние наблюдения, лимит `maxKnownIdentities`); на нагруженном
+relay самые старые неактивные записи вытесняются, поэтому долгоживущий узел
+возвращает недавнее окно, а не все когда-либо виденные идентичности. Доверенные
+контакты берутся не отсюда — авторитетный персистентный список даёт
+`fetch_trusted_contacts`.
 
 #### CLI
 

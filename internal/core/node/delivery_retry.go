@@ -155,6 +155,12 @@ func (s *Service) deliveryRetryMaxAttempts() int {
 // wake it the moment a route/connection appears; an emitted send registers
 // held=false (it is merely awaiting its receipt on the normal schedule).
 func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, now time.Time, held bool) {
+	// Record that THIS node originated this DM so storeDeliveryReceipt can tell
+	// a solicited delivered/seen receipt from an unsolicited one. Done before
+	// the idempotency check so a re-send promotes the id in the LRU; the entry
+	// survives the delivered→seen transition because it is evicted only by LRU
+	// capacity, never on receipt arrival.
+	s.sentDMIDs.Add(string(envelope.ID))
 	if _, exists := s.awaitingDelivered[envelope.ID]; exists {
 		return
 	}

@@ -1900,6 +1900,10 @@ func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID p
 		}
 		filtered = append(filtered, receipt)
 	}
+	// Zero the tail left in the shared backing array so the removed receipts'
+	// string fields are not pinned until a future append overwrites them (same
+	// hygiene as deleteBacklogMessageForRecipient above).
+	clear(list[len(filtered):])
 	if len(filtered) == 0 {
 		delete(s.receipts, recipient)
 	} else {

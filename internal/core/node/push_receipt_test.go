@@ -41,8 +41,8 @@ func (s *Service) initMaps() {
 	}
 	s.topics = make(map[string][]protocol.Envelope)
 	s.seen = newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
-	s.seenReceipts = make(map[string]struct{})
-	s.known = make(map[string]struct{})
+	s.seenReceipts = newRotatingHashDedup(receiptDedupRotation, maxReceiptDedupEntries, nil)
+	s.known = newBoundedKnownIdentities(maxKnownIdentities)
 	s.sessions = make(map[domain.PeerAddress]*peerSession)
 	s.subs = make(map[string]map[string]*subscriber)
 	s.receipts = make(map[string][]protocol.DeliveryReceipt)
@@ -54,6 +54,7 @@ func (s *Service) initMaps() {
 	s.relayRetry = make(map[string]relayAttempt)
 	s.outbound = make(map[string]outboundDelivery)
 	s.awaitingDelivered = make(map[protocol.MessageID]*deliveryRetryEntry)
+	s.sentDMIDs = newBoundedKnownIdentities(maxSentDMIDs)
 	s.awaitingSeenAck = make(map[protocol.MessageID]*seenAckRetryEntry)
 	s.upstream = make(map[domain.PeerAddress]struct{})
 	s.health = make(map[domain.PeerAddress]*peerHealth)
@@ -158,6 +159,7 @@ func TestPushDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 
 	conn := drainPipe(t)
 
+	svc.sentDMIDs.Add("msg-2") // we sent this message; the delivered receipt is solicited
 	receiptFrame := protocol.ReceiptFrame{
 		MessageID:   "msg-2",
 		Sender:      "some-sender",
@@ -827,7 +829,7 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 	// Verify: receipt not stored locally and not marked in seenReceipts.
 	svc.deliveryMu.RLock()
 	key := "foreign-recipient-recovery:msg-recovery-1:delivered"
-	_, markedAfterFirst := svc.seenReceipts[key]
+	markedAfterFirst := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if markedAfterFirst {
 		t.Fatal("receipt must NOT be marked as seen when no targets exist on first arrival")
@@ -861,7 +863,7 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 	// Verify: now marked as seen after successful gossip.
 	// gossipTransitReceipt is synchronous, so the mark is immediate.
 	svc.deliveryMu.RLock()
-	_, markedAfterSecond := svc.seenReceipts[key]
+	markedAfterSecond := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if !markedAfterSecond {
 		t.Fatal("receipt must be marked as seen after successful gossip delivery")
@@ -905,7 +907,7 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		svc.deliveryMu.RLock()
-		_, marked := svc.seenReceipts[key]
+		marked := svc.seenReceipts.Has(key)
 		svc.deliveryMu.RUnlock()
 		if !marked {
 			break
@@ -913,7 +915,7 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	svc.deliveryMu.RLock()
-	_, markedAfterFirst := svc.seenReceipts[key]
+	markedAfterFirst := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if markedAfterFirst {
 		t.Fatal("receipt must NOT be marked as seen when no targets exist (session)")
@@ -948,7 +950,7 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	// The pre-mark in dispatchPeerSessionFrame marks the receipt before
 	// the goroutine runs; gossipTransitReceipt only unmarks on failure.
 	svc.deliveryMu.RLock()
-	_, markedAfterSecond := svc.seenReceipts[key]
+	markedAfterSecond := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if !markedAfterSecond {
 		t.Fatal("receipt must be marked as seen after successful gossip delivery (session)")
@@ -1026,7 +1028,7 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 
 	svc.deliveryMu.RLock()
 	key := "foreign-recipient-sendfail:msg-sendfail-1:delivered"
-	_, markedAfterFail := svc.seenReceipts[key]
+	markedAfterFail := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if markedAfterFail {
 		t.Fatal("receipt must NOT be marked as seen when all sends failed")
@@ -1055,7 +1057,7 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 
 	// Verify: now marked as seen after successful delivery.
 	svc.deliveryMu.RLock()
-	_, markedAfterSuccess := svc.seenReceipts[key]
+	markedAfterSuccess := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if !markedAfterSuccess {
 		t.Fatal("receipt must be marked as seen after successful send")
@@ -1080,6 +1082,7 @@ func TestRelayDeliveryReceiptAcceptsOwnIdentity(t *testing.T) {
 	conn, _ := net.Pipe()
 	defer func() { _ = conn.Close() }()
 
+	svc.sentDMIDs.Add("msg-relay-2") // we sent this message; the delivered receipt is solicited
 	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
 		Type:        "relay_delivery_receipt",
 		ID:          "msg-relay-2",

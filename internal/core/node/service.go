@@ -154,7 +154,9 @@ type Service struct {
 	//                     delivered/seen receipt (delivery_retry.go)
 	//   • awaitingSeenAck — locally-sent seen receipts awaiting the original
 	//                     sender's seen_ack (delivery_retry.go)
-	//   • seenReceipts  — transit-receipt dedup set (receipt id → nothing)
+	//   • seenReceipts  — transit-receipt dedup set, bounded sliding window
+	//                     (rotatingHashDedup, receipt_dedup.go) — self-
+	//                     synchronised, but still a deliveryMu-domain field
 	//   • receipts      — recipient → persisted DeliveryReceipt batches
 	//   • upstream      — peer address → upstream-subscription marker; set of
 	//                     peers that have subscribed to our outbox
@@ -165,6 +167,15 @@ type Service struct {
 	relayRetry        map[string]relayAttempt
 	awaitingDelivered map[protocol.MessageID]*deliveryRetryEntry
 	awaitingSeenAck   map[protocol.MessageID]*seenAckRetryEntry
+	// sentDMIDs is a bounded LRU of message IDs this node has originated as
+	// DMs (populated when registering the end-to-end delivery retry). It is
+	// the "did we send this?" signal storeDeliveryReceipt uses to reject
+	// UNSOLICITED delivered/seen receipts addressed to our own identity, so an
+	// authenticated peer cannot flood s.receipts with receipts for phantom
+	// message IDs. Survives the delivered→seen transition (unlike
+	// awaitingDelivered, which is deleted on the first receipt) because it is
+	// only ever evicted by LRU capacity, never on receipt.
+	sentDMIDs *boundedKnownIdentities
 	// seenAckJournal / deliveryFailureJournal are the optional durable
 	// journals behind awaitingSeenAck and the retry-abandonment path
 	// (delivery_retry.go). Set once by RegisterDeliveryOutbox before Run —
@@ -184,7 +195,7 @@ type Service struct {
 	// Only ever touched by retryableRelayMessages under s.deliveryMu.Lock, and
 	// never returned to callers, so reuse is race-free.
 	relayRetryScratch []protocol.Envelope
-	seenReceipts      map[string]struct{}
+	seenReceipts      *rotatingHashDedup
 	receipts          map[string][]protocol.DeliveryReceipt
 	upstream          map[domain.PeerAddress]struct{}
 
@@ -218,7 +229,7 @@ type Service struct {
 	//                to the ed25519 identity; stored for re-verification
 	//                and for re-gossip to peers that are missing it
 	knowledgeMu sync.RWMutex
-	known       map[string]struct{}
+	known       *boundedKnownIdentities
 	boxKeys     map[string]string
 	pubKeys     map[string]string
 	boxSigs     map[string]string
@@ -1103,12 +1114,12 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		panic(err)
 	}
 
-	known := map[string]struct{}{}
+	known := newBoundedKnownIdentities(maxKnownIdentities)
 	boxKeys := map[string]string{}
 	pubKeys := map[string]string{}
 	boxSigs := map[string]string{}
 	for address, contact := range trust.trustedContacts() {
-		known[address] = struct{}{}
+		known.Add(address)
 		boxKeys[address] = contact.BoxKey
 		pubKeys[address] = contact.PubKey
 		boxSigs[address] = contact.BoxSignature
@@ -1128,7 +1139,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// in-memory only, so there is nothing to re-seed after a restart.
 	seen := newRotatingBloomDedup(bloomDedupBits, bloomDedupHashes, bloomDedupRotation, nil)
 	receipts := make(map[string][]protocol.DeliveryReceipt)
-	seenReceipts := make(map[string]struct{})
+	// seenReceipts mirrors the seen bloom: a bounded sliding-window dedup
+	// (receipt_dedup.go) instead of the old unbounded map. nil clock = wall
+	// clock; starts empty (receipt dedup state is in-memory only).
+	seenReceipts := newRotatingHashDedup(receiptDedupRotation, maxReceiptDedupEntries, nil)
 
 	// Seed health map from persisted peer metadata so that scores,
 	// failure counts and timestamps survive a restart+flush cycle
@@ -1225,6 +1239,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		outbound:                make(map[string]outboundDelivery),
 		awaitingDelivered:       make(map[protocol.MessageID]*deliveryRetryEntry),
 		awaitingSeenAck:         make(map[protocol.MessageID]*seenAckRetryEntry),
+		sentDMIDs:               newBoundedKnownIdentities(maxSentDMIDs),
 		upstream:                make(map[domain.PeerAddress]struct{}),
 		dialOrigin:              make(map[domain.PeerAddress]domain.PeerAddress),
 		observedAddrs:           make(map[domain.PeerIdentity]string),
@@ -4421,10 +4436,7 @@ func (s *Service) emitPeerBannedNoticeByID(id domain.ConnID, until time.Time, re
 
 func (s *Service) identitiesFrame() protocol.Frame {
 	s.knowledgeMu.RLock()
-	parts := make([]string, 0, len(s.known))
-	for address := range s.known {
-		parts = append(parts, address)
-	}
+	parts := s.known.Snapshot()
 	s.knowledgeMu.RUnlock()
 
 	return protocol.Frame{
@@ -5098,12 +5110,12 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// DM-class senders are cryptographically verified above
 		// (VerifyEnvelope) — register them in s.known regardless of
 		// pre-existing pubkey snapshot, identical to the data-DM path.
-		s.known[msg.Sender] = struct{}{}
+		s.known.Add(msg.Sender)
 	} else if _, hasPK := s.pubKeys[msg.Sender]; hasPK {
-		s.known[msg.Sender] = struct{}{}
+		s.known.Add(msg.Sender)
 	}
 	if msg.Recipient != "*" {
-		s.known[msg.Recipient] = struct{}{}
+		s.known.Add(msg.Recipient)
 	}
 	s.knowledgeMu.Unlock()
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("knowledgeMu_writer")
@@ -5565,13 +5577,46 @@ func (s *Service) shouldRouteStoredMessage(msg incomingMessage) bool {
 	return msg.Recipient != "" && msg.Recipient != "*"
 }
 
+// maxSentDMIDs bounds the sentDMIDs LRU. Sized above any realistic
+// outstanding-DM count so a legitimate receipt is never gated out; only a
+// node that has sent more than this many DMs without the corresponding
+// (long-since-evicted) receipts is affected, and there the fallback is merely
+// the receipt being treated as unsolicited.
+const maxSentDMIDs = 50_000
+
+// maxReceiptBacklogPerRecipient bounds the in-memory delivery-receipt backlog
+// for a SINGLE recipient, evicting the oldest past the bound. It applies to
+// every recipient so an authenticated peer cannot stream unique receipts for
+// one active-subscriber recipient (or our own identity) and grow that list
+// without limit before an ack_delete/disconnect drains it.
+//
+// Eviction is safe for both backlog kinds:
+//   - own identity (receipts for messages we sent): the durable status is in
+//     the chatlog (MessageStore.UpdateDeliveryStatus); the in-memory copy only
+//     adds the precise DeliveredAt, and the desktop already falls back to the
+//     chatlog status with a synthesized timestamp when the map is empty (e.g.
+//     after a restart), so eviction costs only timestamp precision on old
+//     messages, never the delivered/seen state itself.
+//   - transit/subscriber backlog: receipts are best-effort relay artefacts;
+//     the end-to-end sender re-sends them on its own retry schedule, so an
+//     evicted old receipt is recovered by a later retransmission.
+//
+// NOTE: this caps each recipient's list, not the number of distinct recipient
+// keys in s.receipts — bounding the active-subscriber key set is tracked
+// separately (transit-backlog follow-up).
+const maxReceiptBacklogPerRecipient = 4096
+
 // storeDeliveryReceipt persists a receipt addressed to this node, dedupes
 // against seenReceipts, clears the corresponding outbound/pending/relayRetry
 // bookkeeping and recomputes the aggregate status.
 //
 // Cross-domain: writes s.seenReceipts/receipts/outbound/pending/relayRetry
-// (deliveryMu) and s.aggregateStatus (statusMu).  Canonical order:
-// peerMu → deliveryMu → statusMu.
+// (deliveryMu) and s.aggregateStatus (statusMu), and reads s.subs (gossipMu)
+// for the admission check below. Canonical order:
+// peerMu → deliveryMu → gossipMu → statusMu — the gossipMu admission read is a
+// brief nested RLock inside the deliveryMu section (deliveryMu OUTER → gossipMu
+// INNER), released before the statusMu window; see the offline-recipient early
+// return.
 func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, int) {
 	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
 
@@ -5581,7 +5626,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	if _, ok := s.seenReceipts[key]; ok {
+	if s.seenReceipts.Has(key) {
 		count := len(s.receipts[receipt.Recipient])
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_dup").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
@@ -5612,13 +5657,107 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 			return false, count
 		}
 	}
-	s.seenReceipts[key] = struct{}{}
+	// Unsolicited-receipt gate: a delivered/seen receipt addressed to our own
+	// identity is only meaningful for a message WE actually sent. Without this
+	// gate an authenticated peer could stream receipts for phantom message IDs
+	// and grow s.receipts without bound (each unique key bypasses the
+	// seenReceipts dedup). The message is "ours" if it is still awaiting a
+	// receipt (awaitingDelivered) OR was recorded in the sentDMIDs LRU when we
+	// originated it — the latter survives the delivered→seen transition (which
+	// deletes the awaitingDelivered entry), the former covers the edge where a
+	// still-outstanding id was evicted from the bounded LRU. A genuine receipt
+	// passes; a phantom one is dropped before any store / persist / event.
+	_, stillAwaiting := s.awaitingDelivered[receipt.MessageID]
+	if receipt.Recipient == s.identity.Address &&
+		(receipt.Status == protocol.ReceiptStatusDelivered || receipt.Status == protocol.ReceiptStatusSeen) &&
+		!stillAwaiting && !s.sentDMIDs.Has(string(receipt.MessageID)) {
+		count := len(s.receipts[receipt.Recipient])
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_unsolicited").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_unsolicited").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
+		log.Warn().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("status", receipt.Status).Msg("delivery receipt dropped: no matching locally-sent message")
+		return false, count
+	}
+	// Admission: gate the buffer/dedup/track/distribute ONLY for the
+	// store-and-forward-for-a-subscriber case — a receipt that ARRIVED for some
+	// recipient R that we hold because R subscribes to us. If R lost its last
+	// subscriber (it disconnected between the handler's hasSubscriber gate,
+	// which released gossipMu, and here, so its teardown drop already ran),
+	// holding the receipt only leaks: drop it cleanly so no seenReceipts key is
+	// poisoned and no s.receipts/relayRetry orphan is left.
+	//
+	// Two cases are ALWAYS admitted, never gated on a subscriber:
+	//   - receipt.Recipient == us — addressed to this node (bounded separately);
+	//   - receipt.Sender == us — a receipt WE generated (deliveredReceiptFor for
+	//     an inbound/relayed DM, emitDeliveryReceipt): its Recipient is the
+	//     original DM sender, who is reachable via relay/gossip and is NOT
+	//     required to be a local subscriber. Gating it would silently swallow
+	//     the delivered/seen receipt, so the sender never learns the DM landed.
+	// seen_ack is plumbing (never buffered), also always admitted.
+	//
+	// Reading s.subs under a nested gossipMu.RLock while holding deliveryMu
+	// (deliveryMu OUTER → gossipMu INNER, canonical order) makes the decision
+	// atomic with the disconnect-drop: both take deliveryMu, so a recipient that
+	// disconnects after admission is reclaimed by its drop, serialised after
+	// this store.
+	if receipt.Recipient != s.identity.Address &&
+		receipt.Sender != s.identity.Address &&
+		receipt.Status != protocol.ReceiptStatusSeenAck {
+		s.gossipMu.RLock()
+		offline := len(s.subs[receipt.Recipient]) == 0
+		s.gossipMu.RUnlock()
+		if offline {
+			// Race: the recipient lost its last subscriber between the inbound
+			// handler's hasSubscriber gate (which released gossipMu) and here,
+			// so its teardown drop already ran. Drop the receipt CLEANLY and
+			// early — do not dedup, buffer, track, distribute, clear
+			// outbound/pending/relayRetry, touch the message store, emit a local
+			// change, or claim it was stored. Continuing would let a stale
+			// receipt erase live delivery state on a colliding MessageID and
+			// surface a phantom UI event. The sender's end-to-end retry
+			// re-delivers once the recipient reconnects.
+			count := len(s.receipts[receipt.Recipient])
+			s.deliveryMu.Unlock()
+			log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_offline_recipient").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
+			s.peerMu.Unlock()
+			log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_offline_recipient").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
+			log.Debug().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("delivery receipt dropped: recipient subscriber gone")
+			return false, count
+		}
+	}
+	s.seenReceipts.Add(key)
 	// seen_ack is scheduler plumbing, not a deliverable artefact: dedupe it
 	// via seenReceipts but never store it in s.receipts, so it cannot leak
 	// through fetch_delivery_receipts or the auth-time backlog replay
 	// (neither surface has a v23 gate).
 	if receipt.Status != protocol.ReceiptStatusSeenAck {
-		s.receipts[receipt.Recipient] = append(s.receipts[receipt.Recipient], receipt)
+		list := append(s.receipts[receipt.Recipient], receipt)
+		// Hard-cap every recipient's backlog. Own-identity receipts are never
+		// drained by ack_delete (that only fires for relay/forward recipients),
+		// and a transit/subscriber backlog can be kept growing by a peer that
+		// streams unique receipts while holding a subscriber active — both grow
+		// without bound otherwise. Keep the most recent; see
+		// maxReceiptBacklogPerRecipient for why eviction is safe for each kind.
+		if len(list) > maxReceiptBacklogPerRecipient {
+			// Evicting an entry must also drop its dedup + retry shadows.
+			// Otherwise (a) a later re-send of the evicted receipt hits the
+			// seenReceipts duplicate branch above and is silently suppressed
+			// instead of restoring the backlog, and (b) its relayRetry entry is
+			// orphaned — retryableRelayReceipts only walks the live s.receipts,
+			// so the entry never reaches TTL cleanup and accumulates toward
+			// maxRelayRetryEntries, eventually starving live receipt retries.
+			evicted := list[:len(list)-maxReceiptBacklogPerRecipient]
+			for i := range evicted {
+				ev := evicted[i]
+				s.seenReceipts.Delete(ev.Recipient + ":" + string(ev.MessageID) + ":" + ev.Status)
+				delete(s.relayRetry, relayReceiptKey(ev))
+			}
+			trimmed := make([]protocol.DeliveryReceipt, maxReceiptBacklogPerRecipient)
+			copy(trimmed, list[len(list)-maxReceiptBacklogPerRecipient:])
+			list = trimmed
+		}
+		s.receipts[receipt.Recipient] = list
 	}
 	now := time.Now().UTC()
 	switch {
@@ -5742,7 +5881,7 @@ func (s *Service) isTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
 	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
 
 	s.deliveryMu.RLock()
-	_, ok := s.seenReceipts[key]
+	ok := s.seenReceipts.Has(key)
 	s.deliveryMu.RUnlock()
 	return ok
 }
@@ -5766,13 +5905,12 @@ func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool 
 	log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	if _, ok := s.seenReceipts[key]; ok {
-		s.deliveryMu.Unlock()
+	duplicate := s.seenReceipts.MarkIfAbsent(key)
+	s.deliveryMu.Unlock()
+	if duplicate {
 		log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_released_dup").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 		return true
 	}
-	s.seenReceipts[key] = struct{}{}
-	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	return false
 }
@@ -5789,7 +5927,7 @@ func (s *Service) unmarkTransitReceiptSeen(receipt protocol.DeliveryReceipt) {
 	log.Trace().Str("site", "unmarkTransitReceiptSeen").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "unmarkTransitReceiptSeen").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	delete(s.seenReceipts, key)
+	s.seenReceipts.Delete(key)
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "unmarkTransitReceiptSeen").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 }
@@ -6522,8 +6660,7 @@ func (s *Service) addKnownIdentity(identity domain.PeerIdentity) {
 	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
 	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	_, existed := s.known[address]
-	s.known[address] = struct{}{}
+	existed := !s.known.Add(address)
 	s.knowledgeMu.Unlock()
 	log.Trace().Str("site", "addKnownIdentity").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
 
@@ -7106,6 +7243,64 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	}
 }
 
+// dropReceiptBacklogForOfflineRecipients reclaims the in-memory delivery-receipt
+// backlog for recipients whose LAST subscription was just removed (peer
+// disconnected / transport dead). An unsubscribed recipient is offline, and the
+// node is deliberately NOT a store-and-forward mailbox: the durable delivery
+// guarantee is the original sender's end-to-end retry (chatlog-backed), which
+// re-delivers when the recipient returns. Holding the backlog for an offline
+// recipient only leaks memory — its s.receipts key is otherwise reclaimed only
+// by an ack_delete that will never arrive once the recipient is gone. The
+// dedup/retry shadows are cleared too, so a future re-send is not silently
+// suppressed and no relayRetry orphan accumulates (same hygiene as the cap
+// eviction). Own identity is never passed here (it is not a peer subscription;
+// its backlog is bounded separately by the unsolicited gate + per-recipient cap).
+//
+// Caller MUST NOT hold gossipMu: this takes deliveryMu OUTER and, nested,
+// gossipMu.RLock INNER across the whole check+drop loop, and the canonical
+// order is deliveryMu → gossipMu, so the drop must run AFTER the caller's
+// gossipMu section — entering with gossipMu held would be the forbidden
+// reverse edge.
+func (s *Service) dropReceiptBacklogForOfflineRecipients(recipients []string) {
+	if len(recipients) == 0 {
+		return
+	}
+	s.deliveryMu.Lock()
+	// Hold gossipMu.RLock across the WHOLE check+drop loop, not just a momentary
+	// hasSubscriber probe. The caller released gossipMu before calling us, so a
+	// concurrent reconnect (registerHelloRoute) may re-subscribe a recipient in
+	// the gap; if we only sampled subscriber-presence and then dropped, a
+	// reconnect landing between the sample and the delete would wipe a freshly
+	// online subscriber's backlog. Keeping gossipMu.RLock held for the duration
+	// makes "still offline?" and the delete atomic against s.subs writers
+	// (registerHelloRoute takes gossipMu.Lock and so cannot interleave). The
+	// nesting is deliveryMu OUTER → gossipMu INNER — the canonical order — so it
+	// is deadlock-free; released LIFO below. The body does only in-memory work
+	// (no I/O, no callbacks), so the held window stays short.
+	s.gossipMu.RLock()
+	for _, recipient := range recipients {
+		if recipient == s.identity.Address {
+			continue
+		}
+		if len(s.subs[recipient]) > 0 {
+			// Reconnected while we held the locks — keep the backlog.
+			continue
+		}
+		list := s.receipts[recipient]
+		if len(list) == 0 {
+			continue
+		}
+		for i := range list {
+			ev := list[i]
+			s.seenReceipts.Delete(ev.Recipient + ":" + string(ev.MessageID) + ":" + ev.Status)
+			delete(s.relayRetry, relayReceiptKey(ev))
+		}
+		delete(s.receipts, recipient)
+	}
+	s.gossipMu.RUnlock()
+	s.deliveryMu.Unlock()
+}
+
 // removeSubscriberConnID removes every subscriber owned by the given
 // connection. The lifecycle caller (handleConn teardown defer) resolves the
 // ConnID once up-front because removeSubscriberConnID runs after
@@ -7117,10 +7312,7 @@ func (s *Service) removeSubscriberConnID(connID domain.ConnID) {
 	log.Trace().Str("site", "removeSubscriberConnID").Str("phase", "lock_wait").Uint64("conn_id", uint64(connID)).Msg("gossipMu_writer")
 	s.gossipMu.Lock()
 	log.Trace().Str("site", "removeSubscriberConnID").Str("phase", "lock_held").Uint64("conn_id", uint64(connID)).Msg("gossipMu_writer")
-	defer func() {
-		s.gossipMu.Unlock()
-		log.Trace().Str("site", "removeSubscriberConnID").Str("phase", "lock_released").Uint64("conn_id", uint64(connID)).Msg("gossipMu_writer")
-	}()
+	var orphaned []string
 	for recipient, group := range s.subs {
 		for id, sub := range group {
 			if sub != nil && sub.connID == connID {
@@ -7129,26 +7321,39 @@ func (s *Service) removeSubscriberConnID(connID domain.ConnID) {
 		}
 		if len(group) == 0 {
 			delete(s.subs, recipient)
+			orphaned = append(orphaned, recipient)
 		}
 	}
+	s.gossipMu.Unlock()
+	log.Trace().Str("site", "removeSubscriberConnID").Str("phase", "lock_released").Uint64("conn_id", uint64(connID)).Msg("gossipMu_writer")
+	// Recipients that lost their last subscription are offline now — drop their
+	// receipt backlog. Separate lock section (deliveryMu → gossipMu order).
+	s.dropReceiptBacklogForOfflineRecipients(orphaned)
 }
 
 func (s *Service) removeSubscriberByID(recipient, id string) {
 	log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_wait").Str("recipient", recipient).Str("sub_id", id).Msg("gossipMu_writer")
 	s.gossipMu.Lock()
 	log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_held").Str("recipient", recipient).Str("sub_id", id).Msg("gossipMu_writer")
-	defer func() {
-		s.gossipMu.Unlock()
-		log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_released").Str("recipient", recipient).Str("sub_id", id).Msg("gossipMu_writer")
-	}()
 
 	group := s.subs[recipient]
 	if group == nil {
+		s.gossipMu.Unlock()
+		log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_released").Str("recipient", recipient).Str("sub_id", id).Msg("gossipMu_writer")
 		return
 	}
 	delete(group, id)
+	orphaned := false
 	if len(group) == 0 {
 		delete(s.subs, recipient)
+		orphaned = true
+	}
+	s.gossipMu.Unlock()
+	log.Trace().Str("site", "removeSubscriberByID").Str("phase", "lock_released").Str("recipient", recipient).Str("sub_id", id).Msg("gossipMu_writer")
+	if orphaned {
+		// Last subscription gone — recipient is offline, drop its receipt
+		// backlog (separate section: deliveryMu → gossipMu order).
+		s.dropReceiptBacklogForOfflineRecipients([]string{recipient})
 	}
 }
 

@@ -42,7 +42,7 @@ func newSyncTestService() *Service {
 		health:        make(map[domain.PeerAddress]*peerHealth),
 		pending:       make(map[domain.PeerAddress][]pendingFrame),
 		peers:         []transport.Peer{},
-		known:         make(map[string]struct{}),
+		known:         newBoundedKnownIdentities(maxKnownIdentities),
 		peerTypes:     make(map[domain.PeerAddress]domain.NodeType),
 		peerIDs:       make(map[domain.PeerAddress]domain.PeerIdentity),
 		persistedMeta: make(map[domain.PeerAddress]*peerEntry),

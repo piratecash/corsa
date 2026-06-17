@@ -19,7 +19,7 @@ func registerSelfKey(t *testing.T, svc *Service) {
 	svc.pubKeys[svc.identity.Address] = identity.PublicKeyBase64(svc.identity.PublicKey)
 	svc.boxKeys[svc.identity.Address] = identity.BoxPublicKeyBase64(svc.identity.BoxPublicKey)
 	svc.boxSigs[svc.identity.Address] = identity.SignBoxKeyBinding(svc.identity)
-	svc.known[svc.identity.Address] = struct{}{}
+	svc.known.Add(svc.identity.Address)
 	svc.knowledgeMu.Unlock()
 }
 
@@ -140,7 +140,7 @@ func registerForeignKey(t *testing.T, svc *Service, id *identity.Identity) {
 	svc.pubKeys[id.Address] = identity.PublicKeyBase64(id.PublicKey)
 	svc.boxKeys[id.Address] = identity.BoxPublicKeyBase64(id.BoxPublicKey)
 	svc.boxSigs[id.Address] = identity.SignBoxKeyBinding(id)
-	svc.known[id.Address] = struct{}{}
+	svc.known.Add(id.Address)
 	svc.knowledgeMu.Unlock()
 }
 

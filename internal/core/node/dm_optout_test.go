@@ -81,7 +81,7 @@ func TestDisableDMDropsInboundDMToSelf(t *testing.T) {
 	}
 
 	svc.knowledgeMu.RLock()
-	_, senderKnown := svc.known[sender.Address]
+	senderKnown := svc.known.Has(sender.Address)
 	svc.knowledgeMu.RUnlock()
 	if senderKnown {
 		t.Fatal("dropped DM must not register the sender as a known identity")

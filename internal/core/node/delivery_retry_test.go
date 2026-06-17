@@ -268,6 +268,8 @@ func TestSeenReceiptTriggersSeenAckFromOriginalSender(t *testing.T) {
 	}
 	reader := attachPushObserver(t, svc, seenSenderID.Address, netcore.ConnID(7403))
 
+	// This node originated the message, so the seen receipt is solicited.
+	svc.sentDMIDs.Add("seen-ack-2")
 	seen := protocol.DeliveryReceipt{
 		MessageID:   "seen-ack-2",
 		Sender:      seenSenderID.Address,
@@ -371,6 +373,7 @@ func TestSeenAckNotPushedToPreV23Subscriber(t *testing.T) {
 	}
 	reader := attachPushObserverWithVersion(t, svc, seenSenderID.Address, netcore.ConnID(7404), config.ProtocolVersionSeenAck-1)
 
+	svc.sentDMIDs.Add("seen-ack-3") // we sent this message; the seen receipt is solicited
 	svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
 		MessageID:   "seen-ack-3",
 		Sender:      seenSenderID.Address,
@@ -695,6 +698,7 @@ func TestFailDeliverySkipsWhenReceiptAlreadyArrived(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	envelope := protocol.Envelope{ID: "race-1", Topic: "dm", Sender: svc.Address(), Recipient: recipientID.Address, CreatedAt: now}
+	svc.sentDMIDs.Add("race-1") // this node originated the message; its delivered receipt is solicited
 
 	// The receipt lands in the unlocked window before failDelivery runs.
 	svc.storeDeliveryReceipt(protocol.DeliveryReceipt{

@@ -29,7 +29,7 @@ func newSyncPeerTestService(aggregateStatus domain.NetworkStatus) *Service {
 		health:        make(map[domain.PeerAddress]*peerHealth),
 		pending:       make(map[domain.PeerAddress][]pendingFrame),
 		peers:         []transport.Peer{},
-		known:         make(map[string]struct{}),
+		known:         newBoundedKnownIdentities(maxKnownIdentities),
 		boxKeys:       make(map[string]string),
 		pubKeys:       make(map[string]string),
 		boxSigs:       make(map[string]string),

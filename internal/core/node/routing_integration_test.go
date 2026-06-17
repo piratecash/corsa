@@ -2438,9 +2438,11 @@ func newTestServiceWithPendingDrain(t *testing.T, localIdentity domain.PeerIdent
 	svc.outbound = make(map[string]outboundDelivery)
 	svc.relayRetry = make(map[string]relayAttempt)
 	svc.awaitingDelivered = make(map[protocol.MessageID]*deliveryRetryEntry)
+	svc.sentDMIDs = newBoundedKnownIdentities(maxSentDMIDs)
 	svc.awaitingSeenAck = make(map[protocol.MessageID]*seenAckRetryEntry)
 	svc.topics = make(map[string][]protocol.Envelope)
 	svc.receipts = make(map[string][]protocol.DeliveryReceipt)
+	svc.seenReceipts = newRotatingHashDedup(receiptDedupRotation, maxReceiptDedupEntries, nil)
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
 	svc.dialOrigin = make(map[domain.PeerAddress]domain.PeerAddress)
 	svc.relayStates = newRelayStateStore()
@@ -3383,9 +3385,11 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 		outbound:              make(map[string]outboundDelivery),
 		relayRetry:            make(map[string]relayAttempt),
 		awaitingDelivered:     make(map[protocol.MessageID]*deliveryRetryEntry),
+		sentDMIDs:             newBoundedKnownIdentities(maxSentDMIDs),
 		awaitingSeenAck:       make(map[protocol.MessageID]*seenAckRetryEntry),
 		topics:                make(map[string][]protocol.Envelope),
 		receipts:              make(map[string][]protocol.DeliveryReceipt),
+		seenReceipts:          newRotatingHashDedup(receiptDedupRotation, maxReceiptDedupEntries, nil),
 		health:                make(map[domain.PeerAddress]*peerHealth),
 		dialOrigin:            make(map[domain.PeerAddress]domain.PeerAddress),
 		relayStates:           newRelayStateStore(),

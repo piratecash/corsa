@@ -2791,6 +2791,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 		DeliveredAt: time.Now().UTC(),
 	}
 
+	svc.sentDMIDs.Add(frame.ID) // we sent this message; the delivered receipt is solicited
 	stored, _ := svc.storeDeliveryReceipt(receipt)
 	if !stored {
 		t.Fatalf("expected receipt to be stored")
@@ -6138,6 +6139,7 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 		DeliveredAt: time.Now().UTC(),
 	}
 
+	svc.sentDMIDs.Add("race-msg-1") // we sent this message; the delivered receipt is solicited
 	receiptStored, _ := svc.storeDeliveryReceipt(receipt)
 	if !receiptStored {
 		t.Fatal("expected delivery receipt to be stored")
@@ -8863,7 +8865,7 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	nodeA.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
 	nodeA.boxKeys[senderID.Address] = identity.BoxPublicKeyBase64(senderID.BoxPublicKey)
 	nodeA.boxSigs[senderID.Address] = identity.SignBoxKeyBinding(senderID)
-	nodeA.known[senderID.Address] = struct{}{}
+	nodeA.known.Add(senderID.Address)
 	nodeA.peerMu.Unlock()
 
 	// Verify nodeB does NOT know the sender's key yet.

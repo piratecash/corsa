@@ -153,7 +153,7 @@ Removes a contact from the trust store. Also drops all pending outbound messages
 
 **Scope:** LOCAL ONLY — available through RPC HTTP and `handleLocalFrameDispatch`. Not available on the TCP data port.
 
-Retrieves the list of all known identity addresses. This includes the local node and every peer whose identity has been learned through contact exchange or direct connection.
+Retrieves the list of known identity addresses — the local node, contacts, and peers whose identity has been observed through contact exchange, direct connection, or transit. The set is bounded (LRU, capped at `maxKnownIdentities`): on a long-lived relay the least-recently-seen entries are evicted, so the response is a recent window rather than every identity ever learned. It is a diagnostic listing only — the authoritative, persistent contact list comes from `fetch_trusted_contacts`, which is never evicted.
 
 **Request Format:**
 ```json
@@ -180,12 +180,13 @@ Retrieves the list of all known identity addresses. This includes the local node
 |-------|------|-------------|
 | `type` | string | Fixed value: `"identities"` |
 | `count` | integer | Number of known identities |
-| `identities` | string[] | List of known identity fingerprints (from `s.known` map) |
+| `identities` | string[] | List of known identity fingerprints (from the bounded LRU `s.known` set) |
 
 **Implementation Notes:**
-- Returns all addresses the node has ever learned about, not just the local identity
+- Returns a bounded, recency-windowed set of observed addresses — not every address ever learned. The set is an LRU capped at `maxKnownIdentities`; on a long-lived relay the least-recently-seen entries are evicted, so the response reflects recent activity rather than full history
+- This is a diagnostic listing only. The authoritative, persistent contact list is `fetch_trusted_contacts` (trust store), which is never evicted
 - Does not include key material — use `fetch_contacts` to get pubkey/boxkey/boxsig for specific addresses
-- The list includes the node's own address plus addresses discovered via peer exchange and contact import
+- The set includes the node's own address plus addresses discovered via peer exchange, contact import, and transit
 
 ### fetch_dm_headers
 
@@ -450,7 +451,7 @@ sequenceDiagram
 
 **Область:** ТОЛЬКО ЛОКАЛЬНО — доступна через RPC HTTP и `handleLocalFrameDispatch`. Недоступна на TCP data port.
 
-Возвращает список всех известных identity-адресов. Включает локальную ноду и каждый пир, чей identity был получен через обмен контактами или прямое подключение.
+Возвращает список известных identity-адресов — локальную ноду, контакты и пиров, чей identity наблюдался через обмен контактами, прямое подключение или транзит. Набор ограничен (LRU, лимит `maxKnownIdentities`): на долгоживущем relay самые давно не наблюдавшиеся записи вытесняются, поэтому ответ — недавнее окно, а не все когда-либо изученные identity. Это диагностический листинг — авторитетный персистентный список контактов даёт `fetch_trusted_contacts`, который не вытесняется.
 
 **Формат запроса:**
 ```json
@@ -477,12 +478,13 @@ sequenceDiagram
 |------|-----|---------|
 | `type` | строка | Фиксированное значение: `"identities"` |
 | `count` | целое число | Количество известных identity |
-| `identities` | string[] | Список известных identity fingerprints (из карты `s.known`) |
+| `identities` | string[] | Список известных identity fingerprints (из ограниченного LRU-набора `s.known`) |
 
 **Примечания реализации:**
-- Возвращает все адреса, о которых нода когда-либо узнала, а не только локальный identity
+- Возвращает ограниченный набор недавно наблюдавшихся адресов — а не все, о которых нода когда-либо узнала. Набор — это LRU с лимитом `maxKnownIdentities`; на долгоживущем relay самые давно не наблюдавшиеся записи вытесняются, поэтому ответ отражает недавнюю активность, а не полную историю
+- Это только диагностический листинг. Авторитетный персистентный список контактов — `fetch_trusted_contacts` (trust store), который не вытесняется
 - Не включает ключевой материал — используйте `fetch_contacts` для получения pubkey/boxkey/boxsig конкретных адресов
-- Список включает собственный адрес ноды плюс адреса, обнаруженные через peer exchange и import contacts
+- Набор включает собственный адрес ноды плюс адреса, обнаруженные через peer exchange, import contacts и транзит
 
 ### fetch_dm_headers
 

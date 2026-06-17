@@ -154,7 +154,7 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 	// a new listen binding, both caught by the comparison.
 	// s.known, s.boxKeys, s.pubKeys, s.boxSigs all live under s.knowledgeMu.
 	svc.knowledgeMu.RLock()
-	_, knownHad := svc.known[selfAddr]
+	knownHad := svc.known.Has(selfAddr)
 	boxKeysBefore, boxKeysHad := svc.boxKeys[selfAddr]
 	pubKeysBefore, pubKeysHad := svc.pubKeys[selfAddr]
 	boxSigsBefore, boxSigsHad := svc.boxSigs[selfAddr]
@@ -167,7 +167,7 @@ func TestLearnIdentityFromWelcome_SelfIdentity_SkipsIngest(t *testing.T) {
 
 	// known is map[string]struct{} — only presence can change under the
 	// guarded call. A flipped presence bit is the tell-tale of ingest.
-	_, knownHasNow := svc.known[selfAddr]
+	knownHasNow := svc.known.Has(selfAddr)
 	if knownHasNow != knownHad {
 		t.Fatalf("known[selfAddr] presence flipped by guarded learnIdentityFromWelcome: before=%v, after=%v", knownHad, knownHasNow)
 	}

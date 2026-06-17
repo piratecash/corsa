@@ -126,7 +126,7 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 	seen := svc.seen.Has("forged-msg-1")
 	svc.gossipMu.RUnlock()
 	svc.knowledgeMu.RLock()
-	_, inKnown := svc.known["completely-fake-sender"]
+	inKnown := svc.known.Has("completely-fake-sender")
 	svc.knowledgeMu.RUnlock()
 
 	if seen {
@@ -339,7 +339,7 @@ func TestStoreIncomingMessage_NonDM_DoesNotPoisonKnown(t *testing.T) {
 
 	// s.known lives under s.knowledgeMu.
 	svc.knowledgeMu.RLock()
-	_, inKnown := svc.known["unregistered-sender-xyz"]
+	inKnown := svc.known.Has("unregistered-sender-xyz")
 	svc.knowledgeMu.RUnlock()
 
 	if inKnown {
@@ -379,7 +379,7 @@ func TestStoreIncomingMessage_NonDM_VerifiedSenderAddedToKnown(t *testing.T) {
 
 	// s.known lives under s.knowledgeMu.
 	svc.knowledgeMu.RLock()
-	_, inKnown := svc.known[knownSender.Address]
+	inKnown := svc.known.Has(knownSender.Address)
 	svc.knowledgeMu.RUnlock()
 
 	if !inKnown {
