@@ -114,6 +114,7 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_NODE_TYPE` — `full` or `client`
 - `CORSA_MAX_OUTGOING_PEERS` — max outbound peer sessions, default `8`
+- `CORSA_CONNECT_ONLY` — pin all outbound dialing to a single peer. Accepts an IP, an overlay address (`.onion` / `.b32.i2p`), or a DNS hostname, with or without a port (a bare host gets the default peer port); a DNS hostname is resolved once to an IP at pin time. The node drops every other outbound connection and (re)dials only this address; **incoming connections are unaffected**. Empty (default) means no restriction. This is a startup seed only — the runtime `connectOnly` RPC command can change the target or clear it. A self-pin is rejected, and the handshake self-identity guard still prevents connecting to our own identity.
 - `CORSA_MAX_INCOMING_PEERS` — optional inbound peer cap; `0` means no app-level cap
 - `CORSA_PENDING_RING_SIZE` — per-peer in-memory pending ring capacity (frames queued for a momentarily-offline peer), default `200`. Hard memory bound: at capacity the oldest frame for that peer is evicted (ring), never spilled to disk — the pending queue is in-memory only and does not survive a restart. Raising it lets a reconnecting peer receive more missed frames, at the cost of RAM.
 - `CORSA_MAX_CLOCK_DRIFT_SECONDS` — allowed past/future clock drift for relayed messages, default `600`

@@ -173,7 +173,7 @@ graph TD
     TABLE["CommandTable<br/>(single source of truth)"]
 
     REG_SYS["RegisterSystemCommands<br/>help · ping · hello · version"]
-    REG_NET["RegisterNetworkCommands<br/>getPeers · fetchPeerHealth · fetchNetworkStats · addPeer"]
+    REG_NET["RegisterNetworkCommands<br/>getPeers · fetchPeerHealth · fetchNetworkStats · addPeer · connectOnly"]
     REG_IDN["RegisterIdentityCommands<br/>fetchIdentities · fetchContacts · fetchTrustedContacts"]
     REG_MSG["RegisterMessageCommands<br/>fetchMessages · fetchMessageIds · fetchMessage<br/>fetchInbox · fetchPendingMessages · fetchDeliveryReceipts<br/>fetchDmHeaders · sendDm*"]
     REG_CHT["RegisterChatlogCommands<br/>fetchChatlog · fetchChatlogPreviews · fetchConversations*"]
@@ -650,7 +650,7 @@ graph TD
     TABLE["CommandTable<br/>(единственный источник истины)"]
 
     REG_SYS["RegisterSystemCommands<br/>help · ping · hello · version"]
-    REG_NET["RegisterNetworkCommands<br/>getPeers · fetchPeerHealth · fetchNetworkStats · addPeer"]
+    REG_NET["RegisterNetworkCommands<br/>getPeers · fetchPeerHealth · fetchNetworkStats · addPeer · connectOnly"]
     REG_IDN["RegisterIdentityCommands<br/>fetchIdentities · fetchContacts · fetchTrustedContacts"]
     REG_MSG["RegisterMessageCommands<br/>fetchMessages · fetchMessageIds · fetchMessage<br/>fetchInbox · fetchPendingMessages · fetchDeliveryReceipts<br/>fetchDmHeaders · sendDm*"]
     REG_CHT["RegisterChatlogCommands<br/>fetchChatlog · fetchChatlogPreviews · fetchConversations*"]

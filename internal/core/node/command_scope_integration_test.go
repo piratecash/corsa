@@ -146,6 +146,7 @@ func TestDataCommandViaTCP_UnknownCommand_SnakeCase(t *testing.T) {
 		{"fetch_delivery_receipts", protocol.Frame{Type: "fetch_delivery_receipts", Recipient: "addr"}},
 		{"fetch_notices", protocol.Frame{Type: "fetch_notices"}},
 		{"fetch_reachable_ids", protocol.Frame{Type: "fetch_reachable_ids"}},
+		{"connect_only", protocol.Frame{Type: "connect_only", Peers: []string{"addr:64646"}}},
 		{"delete_trusted_contact", protocol.Frame{Type: "delete_trusted_contact", Address: "addr"}},
 		{"import_contacts", protocol.Frame{Type: "import_contacts"}},
 		{"send_message", protocol.Frame{Type: "send_message", Topic: "global", ID: "msg-1", Address: "addr", Recipient: "*", Body: "test"}},
@@ -217,6 +218,7 @@ func TestDataCommandViaTCP_UnknownCommand_CamelCase(t *testing.T) {
 		"sendMessage",
 		"importMessage",
 		"publishNotice",
+		"connectOnly",
 	}
 
 	for _, cmd := range dataCamelCase {
@@ -281,6 +283,7 @@ func TestDataCommandViaTCP_UnknownCommand_KebabCase(t *testing.T) {
 		"send-message",
 		"import-message",
 		"publish-notice",
+		"connect-only",
 	}
 
 	for _, cmd := range dataKebabCase {

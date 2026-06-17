@@ -17,6 +17,7 @@ var canonicalNames = map[string]string{
 	"fetchpeerhealth":       "fetchPeerHealth",
 	"fetchnetworkstats":     "fetchNetworkStats",
 	"addpeer":               "addPeer",
+	"connectonly":           "connectOnly",
 	"fetchreachableids":     "fetchReachableIds",
 	"fetchrelaystatus":      "fetchRelayStatus",
 	"fetchidentities":       "fetchIdentities",
@@ -58,6 +59,7 @@ var canonicalNames = map[string]string{
 	"fetch_peer_health":        "fetchPeerHealth",
 	"fetch_network_stats":      "fetchNetworkStats",
 	"add_peer":                 "addPeer",
+	"connect_only":             "connectOnly",
 	"fetch_reachable_ids":      "fetchReachableIds",
 	"fetch_relay_status":       "fetchRelayStatus",
 	"fetch_identities":         "fetchIdentities",
@@ -300,8 +302,10 @@ func normalizeFrameArgs(command string, args map[string]interface{}) {
 	// Match both camelCase (canonical) and snake_case (deprecated alias).
 	cmd := strings.ToLower(command)
 	switch cmd {
-	case "addpeer", "add_peer":
-		// Wire: {"peers": ["host:port"]}  →  RPC: {"address": "host:port"}
+	case "addpeer", "add_peer", "connectonly", "connect_only":
+		// Wire: {"peers": ["host:port"]}  →  RPC: {"address": "host:port"}.
+		// For connect_only an absent/empty peers list leaves address unset,
+		// which the handler reads as the disable intent.
 		if _, has := args["address"]; !has {
 			if peers, ok := args["peers"]; ok {
 				if list, ok := peers.([]interface{}); ok && len(list) > 0 {
@@ -388,6 +392,15 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 			return nil, fmt.Errorf("deleteTrustedContact requires address argument")
 		}
 		return map[string]interface{}{"address": args[0]}, nil
+
+	case "connectonly", "connect_only":
+		// Optional single argument: an address pins egress to that peer; no
+		// argument (or "off") clears the pin. An empty address propagates the
+		// disable intent to the node's connect_only handler.
+		if len(args) > 1 {
+			return nil, fmt.Errorf("connectOnly takes at most one argument")
+		}
+		return map[string]interface{}{"address": stringArgOrDefault(args, 0, "")}, nil
 
 	case "fetchmessages", "fetch_messages":
 		topic := stringArgOrDefault(args, 0, "global")

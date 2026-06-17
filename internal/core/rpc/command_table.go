@@ -304,6 +304,7 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_peer_health":              "fetchPeerHealth",
 		"fetch_network_stats":            "fetchNetworkStats",
 		"add_peer":                       "addPeer",
+		"connect_only":                   "connectOnly",
 		"fetch_reachable_ids":            "fetchReachableIds",
 		"fetch_aggregate_status":         "fetchAggregateStatus",
 		"fetch_relay_status":             "fetchRelayStatus",
@@ -381,6 +382,42 @@ func frameResponse(frame protocol.Frame) CommandResponse {
 		return internalError(fmt.Errorf("marshal frame: %w", err))
 	}
 	return CommandResponse{Data: data}
+}
+
+// connectOnlyTargetArg extracts the connectOnly pin target from a command's
+// args, distinguishing three cases:
+//   - target ABSENT (no "address", no "peers", or an empty "peers" list) →
+//     returns "" with no error: the disable intent.
+//   - target PRESENT and well-formed → returns the trimmed address string.
+//   - target PRESENT but malformed (wrong JSON type) → returns an error so
+//     the caller surfaces a 400 instead of silently disabling the pin.
+//
+// It accepts both the RPC "address" field and a raw wire "peers" array so that
+// a pasted frame ({"type":"connect_only","peers":["host:port"]}) and an HTTP
+// body ({"address":"host:port"}) are validated identically.
+func connectOnlyTargetArg(args map[string]interface{}) (string, error) {
+	if raw, ok := args["address"]; ok {
+		s, ok := raw.(string)
+		if !ok {
+			return "", fmt.Errorf("address must be a string")
+		}
+		return strings.TrimSpace(s), nil
+	}
+	if raw, ok := args["peers"]; ok {
+		list, ok := raw.([]interface{})
+		if !ok {
+			return "", fmt.Errorf("peers must be an array")
+		}
+		if len(list) == 0 {
+			return "", nil
+		}
+		s, ok := list[0].(string)
+		if !ok {
+			return "", fmt.Errorf("peers[0] must be a string")
+		}
+		return strings.TrimSpace(s), nil
+	}
+	return "", nil
 }
 
 // jsonResponse serializes any value into a CommandResponse.
@@ -619,6 +656,32 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 			reply := node.HandleLocalFrame(protocol.Frame{
 				Type:  "add_peer",
 				Peers: []string{address},
+			})
+			return frameResponse(reply)
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "connectOnly", Description: "Pin outbound dialing to a single peer (drops all other outbound connections); empty argument or 'off' disables", Category: "network", Usage: "[<address>|off]"},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			// Resolve the optional target from either the RPC "address"
+			// field or a raw wire "peers" array. A genuinely ABSENT target is
+			// the disable intent; a target that is PRESENT but malformed
+			// (wrong JSON type) is a 400 — not a silent disable.
+			address, err := connectOnlyTargetArg(req.Args)
+			if err != nil {
+				return validationError(err)
+			}
+			peers := []string{}
+			if address != "" {
+				peers = []string{address}
+			}
+			reply := node.HandleLocalFrame(protocol.Frame{
+				Type:  "connect_only",
+				Peers: peers,
 			})
 			return frameResponse(reply)
 		},

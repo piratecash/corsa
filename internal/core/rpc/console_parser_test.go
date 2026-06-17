@@ -90,6 +90,65 @@ func TestParseConsoleInputAddPeerMissingArg(t *testing.T) {
 	}
 }
 
+func TestParseConsoleInputConnectOnly(t *testing.T) {
+	req, err := ParseConsoleInput("connect_only 192.168.1.1:9000")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Name != "connectOnly" {
+		t.Errorf("expected name connectOnly, got %s", req.Name)
+	}
+	if req.Args["address"] != "192.168.1.1:9000" {
+		t.Errorf("expected address 192.168.1.1:9000, got %v", req.Args["address"])
+	}
+}
+
+func TestParseConsoleInputConnectOnlyNoArgDisables(t *testing.T) {
+	req, err := ParseConsoleInput("connectOnly")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Name != "connectOnly" {
+		t.Errorf("expected name connectOnly, got %s", req.Name)
+	}
+	// No argument maps to an empty address — the disable intent.
+	if req.Args["address"] != "" {
+		t.Errorf("expected empty address for disable, got %v", req.Args["address"])
+	}
+}
+
+func TestParseConsoleInputConnectOnlyOff(t *testing.T) {
+	req, err := ParseConsoleInput("connectOnly off")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Args["address"] != "off" {
+		t.Errorf("expected address off, got %v", req.Args["address"])
+	}
+}
+
+func TestParseConsoleInputConnectOnlyTooManyArgs(t *testing.T) {
+	_, err := ParseConsoleInput("connectOnly host:1 host:2")
+	if err == nil {
+		t.Error("expected error for connectOnly with more than one argument")
+	}
+}
+
+func TestParseConsoleInputConnectOnlyJSONFrameMapsPeers(t *testing.T) {
+	// A pasted raw wire frame must map peers[0] → address so the handler
+	// enables the pin instead of seeing an empty address (disable).
+	req, err := ParseConsoleInput(`{"type":"connect_only","peers":["x:64646"]}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Name != "connectOnly" {
+		t.Errorf("expected name connectOnly, got %s", req.Name)
+	}
+	if req.Args["address"] != "x:64646" {
+		t.Errorf("expected address x:64646 from peers, got %v", req.Args["address"])
+	}
+}
+
 func TestParseConsoleInputFetchMessages(t *testing.T) {
 	req, err := ParseConsoleInput("fetch_messages global")
 	if err != nil {

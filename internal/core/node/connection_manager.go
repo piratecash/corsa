@@ -1137,6 +1137,61 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 	}
 }
 
+// RetainOnly evicts every outbound slot whose address differs from keep,
+// leaving at most the single pinned peer in the slot table. It is the
+// egress half of the connectOnly pin: incoming connections are tracked
+// outside the ConnectionManager (Service ipState domain), so they are
+// untouched here. Mirrors shrinkToLimit's teardown discipline — slots are
+// deactivated/removed under cm.mu, then slot-removed events and teardown
+// callbacks fire AFTER the lock is released so no session I/O or re-entrant
+// Service callback runs while cm.mu is held.
+//
+// keep is matched verbatim against slot.Address (the dial address). A keep
+// that matches no current slot evicts everything — the caller is expected
+// to enqueue the pinned dial separately (ManualPeerRequested).
+func (cm *ConnectionManager) RetainOnly(keep domain.PeerAddress) {
+	cm.mu.Lock()
+
+	var victims []*slot
+	for _, s := range cm.slots {
+		if s.Address != keep {
+			victims = append(victims, s)
+		}
+	}
+	if len(victims) == 0 {
+		cm.mu.Unlock()
+		return
+	}
+
+	log.Info().
+		Str("keep", string(keep)).
+		Int("evicting", len(victims)).
+		Int("slots", len(cm.slots)).
+		Msg("cm: retaining only pinned peer, evicting other outbound slots")
+
+	var teardowns []SessionInfo
+	evictedAddrs := make([]domain.PeerAddress, 0, len(victims))
+	for _, v := range victims {
+		evictedAddrs = append(evictedAddrs, v.Address)
+		if info := cm.deactivateSlotLocked(v); info != nil {
+			teardowns = append(teardowns, *info)
+		}
+		cm.removeSlotLocked(v)
+	}
+
+	cm.mu.Unlock()
+
+	for _, addr := range evictedAddrs {
+		cm.emitSlotRemoved(addr)
+	}
+
+	if cm.config.OnSessionTeardown != nil {
+		for _, info := range teardowns {
+			cm.config.OnSessionTeardown(info)
+		}
+	}
+}
+
 // beginInitSlotLocked transitions a slot to Initializing after a successful
 // TCP handshake. The slot is NOT yet Active — application-level setup
 // (syncPeerSession) has not completed. Slots(), ActiveCount(),

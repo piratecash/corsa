@@ -429,6 +429,18 @@ type Service struct {
 	connManager  *ConnectionManager              // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
 	bannedIPSet  map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
 
+	// connectOnly holds the single-peer egress pin (connectOnly command /
+	// CORSA_CONNECT_ONLY). nil means "no pin — normal candidate-driven
+	// dialing"; a non-nil pointer holds the one normalised PeerAddress the
+	// node is allowed to dial. Deliberately OUTSIDE the seven domain
+	// mutexes (per docs/locking.md): it is a single pointer with its own
+	// atomic synchronisation, read on the Candidates() dial hot path
+	// (connectOnlyTarget) without taking any domain lock — the same
+	// "hot read = atomic snapshot, no RLock" rule the routing snapshot
+	// follows. Writers (enableConnectOnly / disableConnectOnly) swap the
+	// whole pointer, so readers always observe a consistent value.
+	connectOnly atomic.Pointer[domain.PeerAddress]
+
 	// setupFailures tracks consecutive cm_session_setup_failed events per
 	// dial-target address. Above setupFailureBanThreshold the address is
 	// pushed out of PeerProvider.Candidates() for setupFailureCooldown to
@@ -1315,6 +1327,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 			return svc.isPeerRemoteBannedLocked(addr, time.Now().UTC())
 		},
 		SetupFailureBannedFn:   svc.IsSetupFailureBanned,
+		ConnectOnlyFn:          svc.connectOnlyTarget,
 		ListenAddr:             domain.ListenAddress(cfg.ListenAddress),
 		DefaultPort:            config.DefaultPeerPort,
 		AllowPrivateCandidates: cfg.AllowPrivatePeers,
@@ -1657,6 +1670,10 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.primeBootstrapOnRun {
 		s.primeStartupBootstrapPeers()
 	}
+	// Apply the CORSA_CONNECT_ONLY startup seed after bootstrap priming so the
+	// pinned target is registered against the freshly primed peer set and any
+	// bootstrap-driven outbound slots are dropped right away.
+	s.applyStartupConnectOnly()
 
 	// Bounded gossip-dispatch pool (gossip_dispatch.go): must be up
 	// before bootstrapLoop's first retryRelayDeliveries tick enqueues
@@ -2977,6 +2994,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.fetchNoticesFrame()
 	case "add_peer":
 		return s.addPeerFrame(frame)
+	case "connect_only":
+		return s.connectOnlyFrame(frame)
 	case "fetch_dm_headers":
 		return s.fetchDMHeadersFrame()
 	case "fetch_relay_status":

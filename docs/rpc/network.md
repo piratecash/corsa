@@ -39,6 +39,35 @@ Add a peer. This is the explicit operator override mechanism: in addition to add
 
 Request: `{"address": "host:port"}`
 
+### POST /rpc/v1/network/connect_only
+
+Pin outbound dialing to a single peer. The node drops every other outbound connection, suppresses auto-discovery of further dial candidates, and (re)dials only the pinned address, retrying it indefinitely. This governs **egress only** — incoming connections are never affected. The self-connection guard still applies: pinning to the node's own address is rejected, and the handshake-level identity check (`isSelfIdentity`) prevents a session even if a pinned address happens to resolve to our own identity.
+
+Command name: `connectOnly` (snake_case alias: `connect_only`). Startup seed via the `CORSA_CONNECT_ONLY` environment variable. The target may be an IP, an overlay address (`.onion` / `.b32.i2p`), or a DNS hostname — with or without a port (a bare host gets the default peer port). A DNS hostname is resolved **once to an IP at pin time** (the node dials the resolved IP, preferring IPv4); re-issue the command to re-resolve if the record changes. The environment variable is a startup seed only — the runtime command may later change the target or clear the pin. The pinned target is dialled at **exactly** the resolved address — the default-port fallback that a non-default port (e.g. `host:7777`) would normally add is suppressed, so the node can never silently connect to a different peer on the default port. Resolution failure, the node's own address, a forbidden IP range, or an unreachable network group all return a `type: "error"` frame.
+
+Enable: `{"address": "host:port"}` — pins egress to that peer.
+
+Disable: send an empty body, omit `address`, or pass `{"address": "off"}` (also accepts `none` / `clear`) — clears the pin and restores normal candidate-driven dialing.
+
+Response (enable):
+```json
+{
+  "type": "ok",
+  "peers": ["host:port"],
+  "status": "connect-only pinned to host:port"
+}
+```
+
+Response (disable):
+```json
+{
+  "type": "ok",
+  "status": "connect-only disabled"
+}
+```
+
+Returns a `type: "error"` frame when the target is the node's own address or is otherwise inadmissible (unresolvable hostname, forbidden IP range, unreachable network group). A failed change leaves the **previous** pin intact: if a pin was already active it is preserved (egress stays on the old target); if none was active the node stays unrestricted. So a fat-fingered re-pin can never silently drop an existing pin or strand egress at zero. (The `CORSA_CONNECT_ONLY` startup seed is the one exception — an invalid seed fails **closed**, blocking all egress until corrected, since the operator demanded a pin from boot.)
+
 ### POST /rpc/v1/network/active_connections
 
 Snapshot of all currently live peer connections (both inbound and outbound). Unlike `getActivePeers` which returns ConnectionManager slot snapshots, this command returns connection-oriented data from the health subsystem — every TCP socket that has completed the handshake and is in a healthy, degraded, or stalled state.
@@ -120,6 +149,35 @@ The `version` field enables forward-compatible evolution. See the design documen
 Добавление пира. Это явный механизм override оператора: помимо добавления/повышения приоритета пира и сброса бана, команда также обнуляет всю диагностику несовместимых версий (`IncompatibleVersionAttempts`, `LastErrorCode`, поля наблюдаемых версий) и удаляет персистированный version lockout. Version policy пересчитывается немедленно, чтобы lockout больше не влиял на `update_available`. Дозвон к пиру запускается сразу после override.
 
 Запрос: `{"address": "host:port"}`
+
+### POST /rpc/v1/network/connect_only
+
+Привязка исходящих подключений к единственному пиру. Нода разрывает все остальные исходящие соединения, подавляет авто-обнаружение других кандидатов на дозвон и (пере)подключается только к закреплённому адресу, повторяя попытки бесконечно. Это управляет **только исходящими** соединениями — входящие никогда не затрагиваются. Защита от само-подключения сохраняется: привязка к собственному адресу ноды отклоняется, а проверка идентичности на уровне handshake (`isSelfIdentity`) не даёт установить сессию, даже если закреплённый адрес разрешается в нашу собственную identity.
+
+Имя команды: `connectOnly` (snake_case алиас: `connect_only`). Стартовое значение задаётся переменной окружения `CORSA_CONNECT_ONLY`. Цель может быть IP, overlay-адресом (`.onion` / `.b32.i2p`) или DNS-именем — с портом или без (для голого хоста подставляется порт пира по умолчанию). DNS-имя резолвится **один раз в IP в момент установки пина** (нода дозванивается на полученный IP, предпочитая IPv4); чтобы перерезолвить при смене записи — повторите команду. Переменная окружения — только стартовое значение: runtime-команда может позже сменить цель или снять привязку. Дозвон к закреплённой цели идёт **строго** по разрешённому адресу — fallback на порт по умолчанию, который обычно добавляется для нестандартного порта (напр. `host:7777`), для пина подавляется, поэтому нода не сможет молча подключиться к другому пиру на дефолтном порту. Ошибка резолва, собственный адрес ноды, запрещённый диапазон IP или недостижимая сетевая группа возвращают фрейм `type: "error"`.
+
+Включение: `{"address": "host:port"}` — закрепляет исходящие за этим пиром.
+
+Выключение: отправьте пустое тело, опустите `address` или передайте `{"address": "off"}` (также принимаются `none` / `clear`) — снимает привязку и восстанавливает обычный дозвон по кандидатам.
+
+Ответ (включение):
+```json
+{
+  "type": "ok",
+  "peers": ["host:port"],
+  "status": "connect-only pinned to host:port"
+}
+```
+
+Ответ (выключение):
+```json
+{
+  "type": "ok",
+  "status": "connect-only disabled"
+}
+```
+
+Возвращает фрейм `type: "error"`, если цель — собственный адрес ноды или иным образом недопустима (неразрешимое имя, запрещённый диапазон IP, недостижимая сетевая группа). Неудачная смена сохраняет **предыдущую** привязку: если пин уже был активен — он сохраняется (исходящие остаются на старой цели); если пина не было — нода остаётся без ограничений. Таким образом ошибочный повторный пин не может молча сбросить существующий или оставить egress на нуле. (Исключение — стартовое значение `CORSA_CONNECT_ONLY`: невалидный seed срабатывает **fail-closed**, блокируя все исходящие до исправления, так как оператор потребовал пин с момента запуска.)
 
 ### POST /rpc/v1/network/active_connections
 

@@ -238,6 +238,9 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	rpc.Post("/network/health", s.legacyHandler("fetchPeerHealth"))
 	rpc.Post("/network/stats", s.legacyHandler("fetchNetworkStats"))
 	rpc.Post("/network/add_peer", s.legacyArgHandler("addPeer"))
+	// connect_only: {"address":"host:port"} pins egress to one peer; an empty
+	// body (or {"address":"off"}) clears the pin.
+	rpc.Post("/network/connect_only", s.legacyArgHandler("connectOnly"))
 
 	// Metrics — arg handler so the optional incremental cursor
 	// ({"since":"<RFC3339>"}) reaches the command; an empty body still

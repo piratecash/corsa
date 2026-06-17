@@ -134,6 +134,14 @@ type PeerProviderConfig struct {
 	// NowFn returns the current time. Injected for testability.
 	NowFn func() time.Time
 
+	// ConnectOnlyFn returns the single-peer egress pin: the normalised
+	// target address and ok=true when connectOnly is active, ok=false when
+	// dialing is unrestricted. When active, Candidates() drops every peer
+	// whose address differs from the target, so the ConnectionManager can
+	// only ever (re)dial that one peer. nil is treated as "never pinned"
+	// (the production wiring always sets it; some unit tests leave it nil).
+	ConnectOnlyFn func() (domain.PeerAddress, bool)
+
 	// AllowPrivateCandidates disables the private/loopback IP filter in
 	// Candidates(), letting RFC1918 / loopback peers become automatic dial
 	// candidates. In production it is wired from cfg.AllowPrivatePeers — the
@@ -353,9 +361,26 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		addedAt time.Time
 	}
 
+	// connectOnly pin: when active, only the pinned address survives — every
+	// other known peer is dropped before the regular gates run, so the
+	// ConnectionManager has exactly one (re)dial target. Evaluated once
+	// outside the loop. ok=false leaves dialing unrestricted.
+	pinAddr, pinned := domain.PeerAddress(""), false
+	if cfg.ConnectOnlyFn != nil {
+		pinAddr, pinned = cfg.ConnectOnlyFn()
+	}
+
 	// First pass: filter peers, collect scored entries.
 	var filtered []scored
 	for _, kp := range pp.known {
+		// 6a.0: connectOnly egress pin — when pinned, only the target
+		// survives. isPin also exempts the target from the private/loopback
+		// auto-dial guard below so a LAN/private pin keeps being re-dialed.
+		isPin := pinned && kp.Address == pinAddr
+		if pinned && !isPin {
+			continue
+		}
+
 		// 6a: skip self-address.
 		if cfg.IsSelfAddress != nil && cfg.IsSelfAddress(kp.Address) {
 			continue
@@ -380,13 +405,27 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		// same mode under which subnetGroupKey deliberately exempts
 		// private addresses from the subnet-diversity filter (see
 		// netgroup.go) — the two carve-outs are intentionally aligned.
-		if !cfg.AllowPrivateCandidates && shouldSkipPersistedPrivatePeer(kp) {
+		//
+		// The connectOnly pin is a third carve-out: an explicit operator
+		// dial intent (like add_peer's ManualPeerRequested bypass) that must
+		// be re-dialed indefinitely, so a pinned LAN/private target is NOT
+		// dropped here — otherwise the pin would dial once and never reconnect.
+		if !isPin && !cfg.AllowPrivateCandidates && shouldSkipPersistedPrivatePeer(kp) {
 			continue
 		}
 
-		// 6b: skip forbidden IPs.
+		// 6b: skip forbidden IPs. The connectOnly pin is exempt for the same
+		// reason as the private carve-out above: in production ForbiddenFn
+		// (svc.isForbiddenDialIP) rejects loopback/RFC1918, which would drop a
+		// pinned LAN target and break its indefinite re-dial. This exemption is
+		// only ever reached by a VALIDATED pin: a runtime pin that equals a real
+		// peer has already cleared applyAddPeer's dial-admission check (which
+		// admits LAN via isManualLocalDialIP and still rejects structurally-
+		// undialable ranges), while a fail-closed startup pin uses a sentinel
+		// that no real peer address can equal (connectOnlyBlockedSentinel), so
+		// this branch never matches a forbidden peer restored from peers.json.
 		ip := net.ParseIP(kp.IP)
-		if cfg.ForbiddenFn != nil && cfg.ForbiddenFn(ip) {
+		if !isPin && cfg.ForbiddenFn != nil && cfg.ForbiddenFn(ip) {
 			continue
 		}
 
@@ -545,6 +584,13 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		}
 
 		dialAddrs := pp.buildDialAddresses(s.peer)
+		if pinned {
+			// Egress pin: dial EXACTLY the pinned address, never the
+			// default-port fallback. Falling back to host:<DefaultPort>
+			// could reach a different node/identity, breaking the
+			// "connect only to this address" contract.
+			dialAddrs = []domain.PeerAddress{s.peer.Address}
+		}
 		if len(dialAddrs) == 0 {
 			continue
 		}
@@ -1043,6 +1089,18 @@ func shouldSkipPersistedPrivatePeer(kp *knownPeer) bool {
 // callers that have a raw domain.PeerAddress but no *knownPeer (e.g.
 // addPeerFrame → ManualPeerRequested).
 func (pp *PeerProvider) BuildDialAddresses(address domain.PeerAddress) []domain.PeerAddress {
+	// Egress pin: the pinned target is dialled EXACTLY as specified — no
+	// default-port fallback, which could otherwise reach a different
+	// node/identity and break the "connect only to this address" contract.
+	// This covers the operator add-peer manual-dial path (ManualPeerRequested
+	// uses BuildDialAddresses); the Candidates() re-dial path is pinned in
+	// Candidates' DialAddresses generation.
+	if pp.config.ConnectOnlyFn != nil {
+		if pin, ok := pp.config.ConnectOnlyFn(); ok && address == pin {
+			return []domain.PeerAddress{address}
+		}
+	}
+
 	host, port, err := net.SplitHostPort(string(address))
 	if err != nil {
 		return []domain.PeerAddress{address}

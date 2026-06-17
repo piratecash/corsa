@@ -51,6 +51,18 @@ type Node struct {
 	ChatLogDir       string // directory for chatlog/state files
 	DownloadDir      string // directory for downloaded files (defaults to "<DataDir>/downloads")
 	ProxyAddress     string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
+
+	// ConnectOnly pins outbound dialing to a single peer address. When set
+	// (env: CORSA_CONNECT_ONLY), the node drops every other outbound
+	// connection and dials ONLY this address, retrying it indefinitely;
+	// auto-discovery of other dial candidates is suppressed. Empty (the
+	// default) means "no restriction — normal candidate-driven dialing".
+	// This is a STARTUP seed only: the runtime connectOnly RPC command may
+	// later change the target or clear it. Incoming connections are never
+	// affected — the pin governs egress only. The self-connection guard
+	// (isSelfIdentity) still applies, so pinning to our own identity never
+	// establishes a session.
+	ConnectOnly string
 	Type             NodeType
 	ListenerEnabled  bool
 	ListenerSet      bool
@@ -435,6 +447,7 @@ func Default() Config {
 	chatLogDir := resolveStartupPath(envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir()))
 	downloadDir := resolveStartupPath(envOrDefault("CORSA_DOWNLOAD_DIR", ""))
 	proxyAddress := envOrDefault("CORSA_PROXY", "")
+	connectOnly := connectOnlyFromEnv()
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
@@ -474,6 +487,7 @@ func Default() Config {
 			ChatLogDir:                 chatLogDir,
 			DownloadDir:                downloadDir,
 			ProxyAddress:               proxyAddress,
+			ConnectOnly:                connectOnly,
 			Type:                       nodeType,
 			ListenerEnabled:            listenerEnabled,
 			ListenerSet:                listenerSet,
@@ -615,6 +629,14 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// connectOnlyFromEnv reads the CORSA_CONNECT_ONLY startup seed for the
+// single-peer egress pin. The value is a peer address (host or host:port —
+// the node layer normalises a bare host to the default port). An unset or
+// blank value disables the pin (normal candidate-driven dialing).
+func connectOnlyFromEnv() string {
+	return strings.TrimSpace(os.Getenv("CORSA_CONNECT_ONLY"))
 }
 
 func resolveStartupPath(path string) string {
