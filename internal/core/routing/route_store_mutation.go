@@ -1160,7 +1160,7 @@ func (s *routeStore) AdmitDirectPeer(peerIdentity PeerIdentity, now time.Time) (
 // non-expired backup survives via a different uplink.
 //
 // Caller contract: t.mu held (writer).
-func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]AnnounceEntry, int, []PeerIdentity) {
+func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]AnnounceEntry, int, []PeerIdentity, []PeerIdentity) {
 	var withdrawals []AnnounceEntry
 	transitInvalidated := 0
 	affectedIdentities := make(map[PeerIdentity]struct{})
@@ -1275,6 +1275,14 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 		}
 	}
 
+	// affected: every identity whose (identity, uplink) claim was invalidated.
+	// The caller (RemoveDirectPeer) evicts their health states so they do not
+	// linger for a whole tombstone TTL.
+	affected := make([]PeerIdentity, 0, len(affectedIdentities))
+	for identity := range affectedIdentities {
+		affected = append(affected, identity)
+	}
+
 	// For each affected identity, check if a non-withdrawn,
 	// non-expired backup claim survives via a different uplink.
 	var exposed []PeerIdentity
@@ -1287,7 +1295,7 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 		}
 	}
 
-	return withdrawals, transitInvalidated, exposed
+	return withdrawals, transitInvalidated, affected, exposed
 }
 
 // InvalidateTransitVia is the storage half of
@@ -1298,12 +1306,14 @@ func (s *routeStore) InvalidateAllVia(uplink PeerIdentity, now time.Time) ([]Ann
 // mesh_routing_v1 (could advertise routes) but not
 // mesh_relay_v1 (no direct route was created).
 //
-// Returns the count invalidated and identities where the
-// invalidation exposed a surviving non-withdrawn backup claim
-// via a different uplink.
+// Returns the count invalidated, the identities whose (identity, uplink)
+// claim was tombstoned (affected — the caller evicts their health states so
+// they do not linger for a full tombstone TTL), and the identities where the
+// invalidation exposed a surviving non-withdrawn backup claim via a different
+// uplink (exposed).
 //
 // Caller contract: t.mu held (writer).
-func (s *routeStore) InvalidateTransitVia(uplink PeerIdentity, now time.Time) (int, []PeerIdentity) {
+func (s *routeStore) InvalidateTransitVia(uplink PeerIdentity, now time.Time) (int, []PeerIdentity, []PeerIdentity) {
 	invalidated := 0
 	affectedIdentities := make(map[PeerIdentity]struct{})
 
@@ -1325,6 +1335,11 @@ func (s *routeStore) InvalidateTransitVia(uplink PeerIdentity, now time.Time) (i
 		}
 	}
 
+	affected := make([]PeerIdentity, 0, len(affectedIdentities))
+	for identity := range affectedIdentities {
+		affected = append(affected, identity)
+	}
+
 	var exposed []PeerIdentity
 	for identity := range affectedIdentities {
 		for _, c := range s.buckets[identity] {
@@ -1335,7 +1350,7 @@ func (s *routeStore) InvalidateTransitVia(uplink PeerIdentity, now time.Time) (i
 		}
 	}
 
-	return invalidated, exposed
+	return invalidated, affected, exposed
 }
 
 // CompactExpired is the storage half of Table.TickTTL. Removes

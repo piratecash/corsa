@@ -506,7 +506,17 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 
 	now := t.clock()
 	t.flap.recordWithdrawalLocked(peerIdentity, now)
-	withdrawals, transitInvalidated, exposed := t.store.InvalidateAllVia(peerIdentity, now)
+	withdrawals, transitInvalidated, affected, exposed := t.store.InvalidateAllVia(peerIdentity, now)
+	// Eagerly evict the health states backing the just-invalidated routes
+	// (identity, uplink=peerIdentity). Same reasoning as InvalidateTransitRoutes:
+	// without this they linger for a whole tombstone TTL until CompactExpired +
+	// reconcileHealthLocked, accumulating O(identities) stale entries per
+	// departed peer under churn.
+	if t.health != nil {
+		for _, identity := range affected {
+			t.health.evictUplinkLocked(identity, peerIdentity)
+		}
+	}
 	// The peer is gone as a RECEIVER too: drop its per-receiver outbound
 	// SeqNo watermarks so they cannot leak (it is never emitted to again;
 	// a reconnect gets a fresh full sync). This is the safe, lifecycle
@@ -519,8 +529,10 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 	// Hops/SeqNo/ExpiresAt. Both are part of the published Snapshot.
 	t.dirty.Store(true)
 	// InvalidateAllVia touches an unbounded set of identities (every
-	// destination reachable through the lost uplink) and returns only a
-	// count, not the affected set — force a full incremental re-copy.
+	// destination reachable through the lost uplink); the returned `affected`
+	// set is used above only for health eviction, while the snapshot still
+	// forces a full incremental re-copy here (cheaper than per-identity marking
+	// for a churn this wide).
 	t.markSnapFullDirtyLocked()
 
 	return RemoveDirectPeerResult{
@@ -546,8 +558,23 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	invalidated, exposed := t.store.InvalidateTransitVia(peerIdentity, t.clock())
+	invalidated, affected, exposed := t.store.InvalidateTransitVia(peerIdentity, t.clock())
 	if invalidated > 0 {
+		// Eagerly evict the health states backing the just-tombstoned transit
+		// claims (identity, uplink=peerIdentity). Without this they linger until
+		// the tombstone's TTL elapses AND CompactExpired physically removes the
+		// claim AND reconcileHealthLocked runs (it only fires on totalRemoved>0)
+		// — so under peer churn the health store accumulates O(identities) stale
+		// entries per departed peer for a whole TTL window (observed as the
+		// dominant time-growing heap allocator). Evicting now is consistent with
+		// reconcileHealthLocked's own intent: a later announce that resurrects
+		// the (Identity, Uplink) pair must not be filtered by a stale Bad/Dead
+		// label, so it gets a fresh placeholder via ensureLocked.
+		if t.health != nil {
+			for _, identity := range affected {
+				t.health.evictUplinkLocked(identity, peerIdentity)
+			}
+		}
 		t.dirty.Store(true)
 		// Transit invalidation spans every identity routed via this
 		// next-hop; force a full incremental re-copy.

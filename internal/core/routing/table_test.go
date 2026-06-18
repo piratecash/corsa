@@ -2005,6 +2005,64 @@ func TestInvalidateTransitRoutesSkipsDirectRoutes(t *testing.T) {
 	}
 }
 
+func TestInvalidateTransitRoutesEvictsHealthEagerly(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
+	target := domaintest.ID("target-X")
+	peer := domaintest.ID("peer-A")
+
+	// Transit route to target-X via peer-A — UpdateRoute admits it and creates
+	// a health state for (target-X, peer-A) via ensureLocked.
+	if _, err := tbl.UpdateRoute(RouteEntry{
+		Identity: target, Origin: target, NextHop: peer,
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(DefaultTTL),
+	}); err != nil {
+		t.Fatalf("UpdateRoute failed: %v", err)
+	}
+	if tbl.health.getLocked(target, peer) == nil {
+		t.Fatal("expected a health state for the admitted transit route")
+	}
+
+	// Invalidating the peer's transit routes must evict the backing health
+	// state immediately — not leave it lingering until the tombstone TTL
+	// elapses, CompactExpired removes the claim, and reconcileHealthLocked runs.
+	tbl.InvalidateTransitRoutes(peer)
+
+	if tbl.health.getLocked(target, peer) != nil {
+		t.Fatal("health state must be evicted eagerly on transit invalidation")
+	}
+}
+
+func TestRemoveDirectPeerEvictsHealthEagerly(t *testing.T) {
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
+	target := domaintest.ID("target-X")
+	peer := domaintest.ID("peer-A")
+
+	// Direct route to peer-A plus a transit route to target-X via peer-A; both
+	// get health states (peer-A,peer-A) and (target-X,peer-A) via ensureLocked.
+	mustAddDirect(t, tbl, peer)
+	if _, err := tbl.UpdateRoute(RouteEntry{
+		Identity: target, Origin: target, NextHop: peer,
+		Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement,
+		ExpiresAt: time.Now().Add(DefaultTTL),
+	}); err != nil {
+		t.Fatalf("UpdateRoute failed: %v", err)
+	}
+	if tbl.health.getLocked(target, peer) == nil {
+		t.Fatal("expected a health state for the transit route via peer-A")
+	}
+
+	// Removing the direct peer invalidates all routes via it and must evict
+	// their health states immediately, not after the tombstone TTL.
+	if _, err := tbl.RemoveDirectPeer(peer); err != nil {
+		t.Fatalf("RemoveDirectPeer failed: %v", err)
+	}
+
+	if tbl.health.getLocked(target, peer) != nil {
+		t.Fatal("transit health via the removed direct peer must be evicted eagerly")
+	}
+}
+
 func TestInvalidateTransitRoutesNoMatch(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("me")))
 
