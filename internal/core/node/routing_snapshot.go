@@ -127,10 +127,17 @@ func (s *Service) loadRoutingSnapshot() routing.Snapshot {
 // routingSnapshotMinInterval coalesces routingSnap rebuilds: even when the
 // table stays dirty on every tick (steady route-announce stream), the
 // incremental snapshot is rebuilt at most this often. Routing decisions
-// consume the snapshot with bounded staleness, so 1s of lag is acceptable
-// while it cuts the dominant per-tick churn. Tunable; kept >= the 500ms
-// ticker so it actually throttles.
-const routingSnapshotMinInterval = 1 * time.Second
+// consume the snapshot with bounded staleness, so a couple of seconds of
+// lag is acceptable while it cuts the dominant per-tick churn.
+//
+// Raised 1s→2s: each rebuild deep-copies the full health set
+// (healthStore.snapshotLocked) and the flap set on top of the
+// copy-on-write route projection, so on a dense node (250+ peers) the
+// per-rebuild cost is large and dominated alloc_space churn. Halving the
+// rebuild cadence halves that churn at the cost of one extra second of
+// snapshot staleness, well inside the bounded-staleness contract above.
+// Tunable; kept >= the 500ms ticker so it actually throttles.
+const routingSnapshotMinInterval = 2 * time.Second
 
 // routingSnapshotFullInterval upgrades a rebuild that is happening anyway
 // (the table was dirty) to a FULL (non-incremental) re-copy once this much
