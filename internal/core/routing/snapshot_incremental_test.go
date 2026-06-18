@@ -12,8 +12,10 @@ import (
 
 // snapshotsEqual compares the route-projection-relevant parts of two
 // snapshots: the Routes map and the Total/Active counters. FlapState /
-// Health / CapStats are fully copied by both paths (incremental does not
-// touch them), so the projection contract is fully captured by these three.
+// Health / CapStats are produced identically by both paths (incremental
+// reuses route buckets but rebuilds these from the same source — Health is
+// the Dead∪cooled routing-relevant subset via routingRelevantStatesLocked),
+// so the projection contract is fully captured by these three.
 func snapshotsEqual(t *testing.T, want, got Snapshot) {
 	t.Helper()
 	if want.TotalEntries != got.TotalEntries {

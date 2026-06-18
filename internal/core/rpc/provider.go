@@ -144,8 +144,10 @@ type RoutingProvider interface {
 	OverloadStats() routing.OverloadStats
 
 	// HealthSnapshot returns a deep copy of every tracked
-	// RouteHealthState (Phase 2). Used by fetchRouteHealth RPC
-	// observability — the snapshot is built under
+	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,
+	// since Snapshot.Health was narrowed to the Dead∪cooled subset, by
+	// fetchRouteLookup's CompositeScore ranking (which needs the full
+	// per-pair tiers). The snapshot is built under
 	// routing.Table.t.mu.RLock and is safe to publish lock-free.
 	// Returns nil when no health entries are tracked yet so
 	// callers can compare cheaply.

@@ -562,22 +562,28 @@ type Snapshot struct {
 	// table.
 	CapStats RouteCapStats
 
-	// Health is the deep-copied Phase 2 RouteHealthState slice
-	// captured under the same lock as Routes/FlapState/CapStats — the
-	// publisher's SnapshotIncremental build holds t.mu.Lock (exclusive,
-	// since it consumes the snap dirty-set) for all of them in one
-	// critical section (PR 11.27 P2#1). RPC handlers that need to apply
-	// the live Lookup contract (Dead filter, CompositeScore ranking) can
-	// read this directly from the cached snapshot without taking t.mu at
-	// all per request — restoring the documented hot-read behaviour for
-	// fetchRouteLookup. Refresh latency matches the rest of the snapshot
-	// (≤ rebuildRoutingSnapshot interval).
+	// Health is the ROUTING-RELEVANT subset of the tracked
+	// RouteHealthState set — Dead pairs and black-hole-cooled pairs only
+	// (see healthStore.routingRelevantStatesLocked). It is NOT a full
+	// health dump. The healthy majority is omitted because deep-copying
+	// every tracked pair into each rebuild dominated alloc_space on dense
+	// nodes, and the consumers reading this field need nothing more:
+	//   - Snapshot.BestRoute (data plane) excludes Dead uplinks;
+	//   - fetchRouteSummary drops Dead and cooled pairs from reachability.
+	// Captured under the same lock as Routes/FlapState/CapStats — the
+	// publisher's SnapshotIncremental build holds t.mu.Lock (exclusive)
+	// for all of them in one critical section.
+	//
+	// Consumers that need the COMPLETE per-pair tier set (the
+	// fetchRouteLookup CompositeScore diagnostic, which must distinguish
+	// Good/Questionable/Bad) must NOT read this field — they call
+	// Table.HealthSnapshot directly at request time.
 	//
 	// Returned as a value slice (not a map keyed by (Identity,
 	// Uplink)) because RouteHealthState already carries Identity
 	// and Uplink as fields — callers that need O(1) per-identity
-	// lookup build a local index. Empty slice means no health
-	// entries are tracked (cold-start, no traffic).
+	// lookup build a local index. Empty slice means no Dead or cooled
+	// pairs are currently tracked.
 	Health []RouteHealthState
 }
 
@@ -615,9 +621,16 @@ func (s Snapshot) BestRoute(identity PeerIdentity) *RouteEntry {
 	if !ok {
 		return nil
 	}
-	// Build per-uplink Dead lookup from the snapshot's Health
-	// slice. O(N) join; N is bounded by the per-identity uplink
-	// cap (≤ MaxOutgoingPeers + MaxIncomingPeers in production).
+	// Build per-uplink Dead lookup by scanning the snapshot's Health
+	// slice. Since Snapshot.Health was narrowed to the routing-relevant
+	// {Dead ∪ cooled} subset, this slice is GLOBAL (every Dead/cooled pair
+	// across all identities), not a per-identity slice — so the scan is
+	// O(total Dead∪cooled pairs), filtered down to this `identity`. That set
+	// is normally small (most routes are healthy), but callers that invoke
+	// BestRoute across many identities (reachableFromSnapshot /
+	// reachableIDsFrame) pay it per identity: O(identities × |Dead∪cooled|).
+	// If that ever shows up in a profile, build the per-identity Dead index
+	// once at the call site instead of re-scanning here.
 	deadUplinks := map[PeerIdentity]struct{}{}
 	for _, h := range s.Health {
 		if h.Identity == identity && h.Health == HealthDead {

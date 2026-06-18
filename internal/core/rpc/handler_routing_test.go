@@ -37,12 +37,13 @@ func newMockRoutingProvider(
 	// Default to a zero stats struct in handler tests; specific tests
 	// asserting overload reporting can override with their own mock setup.
 	m.On("OverloadStats").Return(routing.OverloadStats{}).Maybe()
-	// PR 11.26 P2#1: fetchRouteLookup now consults HealthSnapshot to
-	// apply the Phase 2 Dead filter + CompositeScore ranking. Default
-	// to an empty health snapshot so existing tests pass unchanged —
-	// they exercise the wire shape, not health-aware sorting.
-	// Health-specific tests can override with their own .On call.
-	m.On("HealthSnapshot").Return([]routing.RouteHealthState(nil)).Maybe()
+	// fetchRouteLookup reads HealthSnapshot (full per-pair tiers) for its
+	// Dead/cooldown filters + CompositeScore ranking, because the published
+	// Snapshot.Health now carries only the routing-relevant {Dead ∪ cooled}
+	// subset. Echo the snapshot's Health through HealthSnapshot so a test that
+	// seeds Snapshot.Health drives the lookup filters too; health-specific
+	// tests can still override with their own .On call.
+	m.On("HealthSnapshot").Return(snapshot.Health).Maybe()
 
 	if peerTransports != nil {
 		m.EXPECT().PeerTransport(mock.Anything).RunAndReturn(
@@ -588,6 +589,61 @@ func TestFetchRouteLookupNoRoutes(t *testing.T) {
 	}
 	if v, _ := result["count"].(float64); int(v) != 0 {
 		t.Errorf("expected count=0, got %v", v)
+	}
+	// Perf invariant: a lookup miss must NOT pay for the full health
+	// deep-copy (RLock + copy of the whole set). The live-route guard in
+	// routeLookupHandler skips rp.HealthSnapshot() when the target has no
+	// live route — a regression that drops the guard would reintroduce the
+	// per-request copy churn the Snapshot.Health narrowing removed.
+	provider.AssertNotCalled(t, "HealthSnapshot")
+}
+
+// TestFetchRouteLookupMissSkipsHealthSnapshot pins the live-route guard for the
+// other miss shapes: a target whose only routes are withdrawn or expired must
+// also skip rp.HealthSnapshot().
+func TestFetchRouteLookupMissSkipsHealthSnapshot(t *testing.T) {
+	target := domaintest.ID("miss-target")
+	now := time.Now()
+
+	cases := map[string]routing.RouteEntry{
+		"withdrawn": {
+			Identity: target, Origin: domaintest.ID("o"), NextHop: domaintest.ID("nh"),
+			Hops: routing.HopsInfinity, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+			ExpiresAt: now.Add(100 * time.Second),
+		},
+		"expired": {
+			Identity: target, Origin: domaintest.ID("o"), NextHop: domaintest.ID("nh"),
+			Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+			ExpiresAt: now.Add(-1 * time.Second), // already expired at snapshot time
+		},
+	}
+
+	for name, entry := range cases {
+		t.Run(name, func(t *testing.T) {
+			provider := newMockRoutingProvider(t, routing.Snapshot{
+				Routes:  map[routing.PeerIdentity][]routing.RouteEntry{target: {entry}},
+				TakenAt: now,
+			}, nil)
+
+			table := rpc.NewCommandTable()
+			rpc.RegisterRoutingCommands(table, provider)
+
+			resp := table.Execute(rpc.CommandRequest{
+				Name: "fetchRouteLookup",
+				Args: map[string]interface{}{"identity": target.String()},
+			})
+			if resp.Error != nil {
+				t.Fatalf("unexpected error: %v", resp.Error)
+			}
+			var result map[string]interface{}
+			if err := json.Unmarshal(resp.Data, &result); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if v, _ := result["count"].(float64); int(v) != 0 {
+				t.Errorf("expected count=0 (no live route), got %v", v)
+			}
+			provider.AssertNotCalled(t, "HealthSnapshot")
+		})
 	}
 }
 

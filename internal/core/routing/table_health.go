@@ -452,13 +452,20 @@ func (t *Table) ClearDirectPairCooldown(peerIdentity PeerIdentity) bool {
 
 // HealthSnapshot returns a deep copy of every tracked
 // RouteHealthState. Backs the fetchRouteHealth RPC handler in
-// internal/core/rpc/routing_commands.go (PR 11.5) — the handler
-// calls this synchronously per request, no intermediate
+// internal/core/rpc/routing_commands.go (PR 11.5) AND the
+// fetchRouteLookup handler (which needs full per-pair tiers for
+// CompositeScore once Snapshot.Health was narrowed to Dead∪cooled;
+// fetchRouteLookup gates the call on the target having a live route,
+// so a lookup miss never reaches here) — the handlers
+// call this synchronously per request, no intermediate
 // atomic.Pointer cache. Each call takes t.mu in R mode, walks
-// the healthStore (≤ MaxOutgoingPeers + MaxIncomingPeers entries
-// in production), deep-copies each state into the returned
-// slice, and releases the lock. Returns nil when the store is
-// empty so callers can compare cheaply.
+// the ENTIRE healthStore — O(total tracked (Identity, Uplink)
+// pairs), which scales with the whole routing table, NOT with the
+// direct-peer count: on a dense node this is hundreds of thousands
+// of pairs (exactly why the periodic Snapshot.Health copy was
+// narrowed to the Dead∪cooled subset). It deep-copies each state
+// into the returned slice and releases the lock. Returns nil when
+// the store is empty so callers can compare cheaply.
 //
 // Lock window. Reading under R mode means concurrent
 // HealthSnapshot calls do not block each other, but they do
@@ -466,12 +473,15 @@ func (t *Table) ClearDirectPairCooldown(peerIdentity PeerIdentity) bool {
 // TickHealth, UpdateRoute's health bookkeeping) on the same
 // t.mu. Go's sync.RWMutex prioritises writers, so a queued
 // writer blocks subsequent RPC reads until it completes. The
-// map walk and deep copy are O(N) where N is bounded by the
-// per-identity uplink cap and the active identity count — a
-// non-blocking workload in practice. If this RPC ever turns
-// into a hot path that conflicts with the writer workload,
-// migrate to the atomic.Pointer snapshot pattern used by
-// peerHealthSnap in internal/core/node/peer_health_snapshot.go.
+// map walk and deep copy are O(total tracked health pairs),
+// which on a dense mesh is large — so although fetchRouteHealth
+// and fetchRouteLookup are on-demand diagnostics (and
+// fetchRouteLookup additionally gates the call on a live route to
+// skip misses), a high rate of these RPCs reintroduces real
+// copy/lock pressure. If either ever turns into a hot path that
+// conflicts with the writer workload, migrate to the
+// atomic.Pointer snapshot pattern used by peerHealthSnap in
+// internal/core/node/peer_health_snapshot.go.
 //
 // Safe to call from any goroutine.
 func (t *Table) HealthSnapshot() []RouteHealthState {

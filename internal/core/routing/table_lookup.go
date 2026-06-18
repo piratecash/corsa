@@ -594,15 +594,17 @@ func (t *Table) Snapshot() Snapshot {
 	// FlapEntry; see flap.go for the exact contract.
 	snap.FlapState = t.flap.snapshotLocked(now)
 
-	// Phase 2 health snapshot (PR 11.27 P2#1) captured inside the
-	// same RLock as routes/flap so consumers that need to apply
-	// Lookup-style ranking (HealthDead filter, CompositeScore) read
-	// a self-consistent view without a second t.mu.RLock round
-	// trip. fetchRouteLookup is the primary consumer; without this
-	// the RPC would call HealthSnapshot separately and break the
-	// documented hot-read contract (cached snapshot, no routing
-	// mutex per request).
-	snap.Health = t.health.snapshotLocked()
+	// Snapshot.Health is the ROUTING-RELEVANT subset only — Dead pairs
+	// (Snapshot.BestRoute excludes their uplinks; fetchRouteSummary drops
+	// them) and black-hole-cooled pairs (fetchRouteSummary drops them too).
+	// The healthy majority is omitted on purpose: deep-copying every tracked
+	// pair into each 2s rebuild dominated alloc_space on dense nodes, and the
+	// only data-plane consumer (BestRoute) needs nothing beyond Dead. The
+	// CompositeScore diagnostic (fetchRouteLookup) needs full per-pair tiers,
+	// so it reads Table.HealthSnapshot directly at request time instead.
+	// Captured in the same RLock as routes/flap. See routingRelevantStatesLocked
+	// and the routing.Snapshot.Health doc for the full contract.
+	snap.Health = t.health.routingRelevantStatesLocked()
 
 	// CapStats is read AFTER the routes/flap pass: a writer that
 	// landed an admission decision after we released that pass would
@@ -688,7 +690,7 @@ func (t *Table) SnapshotIncremental(forceFull bool) (Snapshot, bool) {
 		)
 	}
 	snap.FlapState = t.flap.snapshotLocked(now)
-	snap.Health = t.health.snapshotLocked()
+	snap.Health = t.health.routingRelevantStatesLocked()
 	snap.CapStats = t.store.CapStats()
 
 	return snap, full

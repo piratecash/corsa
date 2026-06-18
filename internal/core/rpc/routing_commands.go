@@ -349,16 +349,20 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 // needing exact relay-path parity should treat same-score entries
 // as equivalent.
 //
-// PR 11.26 P2#1 / 11.27 P2#1 — cached hot-read. Both the route
-// entries AND the per-(Identity, Uplink) Health labels are read
-// from the SAME atomic RoutingSnapshot pointer (routing.Snapshot
-// carries Health alongside Routes, populated atomically by the
-// publisher's Table.SnapshotIncremental under one t.mu.Lock). The
-// RPC handler never touches t.mu directly — it grabs the cached snapshot via
-// rp.RoutingSnapshot() (Load on an atomic.Pointer) and walks it
-// in process. This preserves the "fetchRouteLookup is a cached
-// hot-read; no routing-mutex blocking" contract documented in
-// docs/rpc/routing.md and docs/locking.md.
+// Read model: route entries come from the cached atomic RoutingSnapshot
+// pointer (rp.RoutingSnapshot() — a single atomic.Pointer Load, no routing
+// mutex). The per-(Identity, Uplink) Health TIERS do NOT come from that
+// snapshot: Snapshot.Health was narrowed to the routing-relevant (Dead/cooled)
+// subset to kill the periodic 2s full-health copy churn, and this
+// CompositeScore diagnostic needs the complete Good/Questionable/Bad tiers, so
+// it reads them from rp.HealthSnapshot() per request (a brief t.mu.RLock plus
+// a copy of the live health set, skipped on a miss via the live-route guard
+// below).
+//
+// Consequences for latency/alloc analysis: fetchRouteLookup is NOT a pure
+// cached hot-read — on a hit it briefly takes t.mu.RLock and its route vs
+// health view may be skewed by up to one snapshot interval (immaterial for a
+// reported ranking). See docs/rpc/routing.md and docs/locking.md.
 func routeLookupHandler(rp RoutingProvider) CommandHandler {
 	return func(req CommandRequest) CommandResponse {
 		if r, done := ctxDone(req); done {
@@ -388,16 +392,42 @@ func routeLookupHandler(rp RoutingProvider) CommandHandler {
 
 		// Build a (uplink) → *RouteHealthState index keyed by Uplink
 		// only — we are looking at a single Identity, so all entries
-		// in the index share that Identity. snap.Health is the cached
-		// deep-copied slice — iterating it is O(total_health) but
-		// happens against the immutable snapshot, no lock taken.
+		// in the index share that Identity.
+		//
+		// Source is Table.HealthSnapshot (full per-pair tiers), NOT
+		// snap.Health: this diagnostic mirrors the data-plane CompositeScore
+		// (line below), which needs every pair's Good/Questionable/Bad tier.
+		// Snapshot.Health now carries only the routing-relevant subset
+		// (Dead ∪ cooled — see routing.Snapshot.Health doc), so a Questionable
+		// or Bad pair would be absent there and CompositeScore would mis-score
+		// it as nil-health (by-hops). fetch_route_lookup is an on-demand
+		// diagnostic, so the per-request full copy is acceptable; the small
+		// route/health skew versus snap is immaterial for a reported ranking.
+		//
+		// Miss guard: HealthSnapshot is an RLock + deep copy of the entire
+		// health set, so it is fetched ONLY when the target has at least one
+		// live route. Without this, a burst of lookup-miss requests (unknown /
+		// fully-withdrawn / expired target) on a dense node would reintroduce
+		// the per-request copy churn this patch removes from the periodic
+		// snapshot path. The scoring loop below re-applies the withdrawn/
+		// expired skip, so a target with no live route yields an empty result
+		// regardless.
 		healthByUplink := map[routing.PeerIdentity]*routing.RouteHealthState{}
-		for _, state := range snap.Health {
-			if state.Identity != target {
-				continue
+		hasLiveRoute := false
+		for i := range entries {
+			if !entries[i].IsWithdrawn() && !entries[i].IsExpired(snapTime) {
+				hasLiveRoute = true
+				break
 			}
-			s := state // capture by value, take address of the copy
-			healthByUplink[state.Uplink] = &s
+		}
+		if hasLiveRoute {
+			for _, state := range rp.HealthSnapshot() {
+				if state.Identity != target {
+					continue
+				}
+				s := state // capture by value, take address of the copy
+				healthByUplink[state.Uplink] = &s
+			}
 		}
 
 		type wireRoute struct {

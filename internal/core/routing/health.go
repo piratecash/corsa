@@ -940,8 +940,10 @@ func (s *healthStore) lenLocked() int {
 
 // snapshotLocked returns a deep copy of every tracked state.
 // Backs Table.HealthSnapshot, which is called synchronously per
-// fetchRouteHealth RPC request (see Table.HealthSnapshot's
-// doc-comment and docs/locking.md for the locking contract).
+// fetchRouteHealth AND fetchRouteLookup RPC request (the latter joined
+// this path once Snapshot.Health was narrowed to the Dead∪cooled subset;
+// see Table.HealthSnapshot's doc-comment and docs/locking.md for the
+// locking contract).
 // There is no atomic.Pointer cache between this method and the
 // RPC handler — the handler takes t.mu.RLock() on each request,
 // walks the healthStore here, and releases. Returns nil for an
@@ -975,6 +977,33 @@ func (s *healthStore) questionableTargetsLocked() []HealthProbeTarget {
 	for _, state := range s.states {
 		if state.Health == HealthQuestionable {
 			out = append(out, HealthProbeTarget{Identity: state.Identity, Uplink: state.Uplink})
+		}
+	}
+	return out
+}
+
+// routingRelevantStatesLocked returns only the health states the PUBLISHED
+// routing snapshot's consumers act on: Dead pairs (Snapshot.BestRoute excludes
+// them and fetchRouteSummary's reachability filter drops them) and pairs inside
+// an armed black-hole cooldown (fetchRouteSummary excludes those too). The
+// healthy majority is omitted — Snapshot.Health is a routing-relevance view,
+// NOT a full dump.
+//
+// This is what stops SnapshotIncremental from deep-copying the entire health
+// set (hundreds of thousands of Good pairs) into every 2s rebuild — the
+// dominant alloc_space source on a dense node. The Dead/cooled subset is a
+// handful of pairs, so the copy is cheap. Consumers that need the complete
+// per-pair tiers (the fetchRouteLookup CompositeScore diagnostic, and
+// fetchRouteHealth) call Table.HealthSnapshot directly at request time
+// instead of reading Snapshot.Health. Returns nil when nothing is
+// routing-relevant.
+//
+// Callers must hold t.mu in R mode.
+func (s *healthStore) routingRelevantStatesLocked() []RouteHealthState {
+	var out []RouteHealthState
+	for _, state := range s.states {
+		if state.Health == HealthDead || !state.CooldownUntil.IsZero() {
+			out = append(out, *state)
 		}
 	}
 	return out
