@@ -764,6 +764,15 @@ type healthKey struct {
 	Uplink   domain.PeerIdentity
 }
 
+// HealthProbeTarget is a lean (Identity, Uplink) pair handed to the probe
+// scheduler. It exists so probeTick can enumerate the Questionable pairs
+// it needs to probe without deep-copying the entire RouteHealthState set
+// (see healthStore.questionableTargetsLocked).
+type HealthProbeTarget struct {
+	Identity domain.PeerIdentity
+	Uplink   domain.PeerIdentity
+}
+
 // healthStore owns the RouteHealthState map. It is a leaf data
 // structure with no own mutex — locking is provided by the owning
 // routing.Table.t.mu. The "Locked" suffix on every method documents
@@ -946,6 +955,27 @@ func (s *healthStore) snapshotLocked() []RouteHealthState {
 	out := make([]RouteHealthState, 0, len(s.states))
 	for _, state := range s.states {
 		out = append(out, *state)
+	}
+	return out
+}
+
+// questionableTargetsLocked returns the (Identity, Uplink) pairs whose
+// state is currently HealthQuestionable — the only states the probe
+// scheduler acts on. It deliberately does NOT deep-copy the full
+// RouteHealthState set the way snapshotLocked does: on a dense node the
+// health store holds hundreds of thousands of pairs, almost all Good,
+// and probeTick ran every HealthProbeInterval copying the entire set
+// just to pick out the Questionable handful — a dominant alloc_space
+// source. Allocating only for the Questionable subset (typically a few
+// pairs) removes that churn. Returns nil when none are Questionable.
+//
+// Callers must hold t.mu in R mode.
+func (s *healthStore) questionableTargetsLocked() []HealthProbeTarget {
+	var out []HealthProbeTarget
+	for _, state := range s.states {
+		if state.Health == HealthQuestionable {
+			out = append(out, HealthProbeTarget{Identity: state.Identity, Uplink: state.Uplink})
+		}
 	}
 	return out
 }

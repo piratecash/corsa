@@ -342,8 +342,13 @@ func (s *Service) probeTick() {
 		return
 	}
 
-	snap := s.routingTable.HealthSnapshot()
-	if len(snap) == 0 {
+	// Enumerate only the Questionable pairs: probeTick acts on nothing
+	// else, and deep-copying the whole health set (HealthSnapshot) just to
+	// filter it down was a dominant alloc_space source on dense nodes
+	// (healthStore.snapshotLocked). QuestionableHealthTargets allocates
+	// only for the Questionable subset.
+	targets := s.routingTable.QuestionableHealthTargets()
+	if len(targets) == 0 {
 		return
 	}
 	// Per-tick probe budget: cap how many probes a single tick may put
@@ -367,17 +372,14 @@ func (s *Service) probeTick() {
 	// possible future refinement if active coverage of very large
 	// Questionable sets becomes important.
 	sent := 0
-	for _, state := range snap {
+	for _, tgt := range targets {
 		if sent >= maxProbesPerTick {
 			break
 		}
-		if state.Health != routing.HealthQuestionable {
+		if s.probeRegistry.HasOutstanding(tgt.Identity, tgt.Uplink) {
 			continue
 		}
-		if s.probeRegistry.HasOutstanding(state.Identity, state.Uplink) {
-			continue
-		}
-		if s.sendProbe(state.Identity, state.Uplink) {
+		if s.sendProbe(tgt.Identity, tgt.Uplink) {
 			sent++
 		}
 	}

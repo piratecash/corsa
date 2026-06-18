@@ -480,6 +480,18 @@ func (t *Table) HealthSnapshot() []RouteHealthState {
 	return t.health.snapshotLocked()
 }
 
+// QuestionableHealthTargets returns the (Identity, Uplink) pairs whose
+// health is currently HealthQuestionable — the probe scheduler's working
+// set. Unlike HealthSnapshot it does not deep-copy every tracked state,
+// only the Questionable subset, so the periodic probeTick no longer
+// allocates a full-set copy each pass (see
+// healthStore.questionableTargetsLocked). Safe to call from any goroutine.
+func (t *Table) QuestionableHealthTargets() []HealthProbeTarget {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.health.questionableTargetsLocked()
+}
+
 // TickHealth walks every tracked RouteHealthState and applies the
 // passive-timeline transition (Good→Questionable→Bad→Dead) based
 // on hop-ack idle. Without this tick the state machine cannot
