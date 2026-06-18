@@ -43,14 +43,14 @@ type Node struct {
 	// signal" rule, and the domain type prevents silent mix-ups with raw
 	// ints elsewhere in the config. Any invalid input (empty, non-numeric,
 	// out of 1..65535) collapses to nil at env-parse time.
-	AdvertisePort    *domain.PeerPort
-	BootstrapPeers   []string
-	IdentityPath     string
-	TrustStorePath   string
-	PeersStatePath   string
-	ChatLogDir       string // directory for chatlog/state files
-	DownloadDir      string // directory for downloaded files (defaults to "<DataDir>/downloads")
-	ProxyAddress     string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
+	AdvertisePort  *domain.PeerPort
+	BootstrapPeers []string
+	IdentityPath   string
+	TrustStorePath string
+	PeersStatePath string
+	ChatLogDir     string // directory for chatlog/state files
+	DownloadDir    string // directory for downloaded files (defaults to "<DataDir>/downloads")
+	ProxyAddress   string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
 
 	// ConnectOnly pins outbound dialing to a single peer address. When set
 	// (env: CORSA_CONNECT_ONLY), the node drops every other outbound
@@ -62,7 +62,7 @@ type Node struct {
 	// affected — the pin governs egress only. The self-connection guard
 	// (isSelfIdentity) still applies, so pinning to our own identity never
 	// establishes a session.
-	ConnectOnly string
+	ConnectOnly      string
 	Type             NodeType
 	ListenerEnabled  bool
 	ListenerSet      bool
@@ -394,7 +394,7 @@ const (
 	// correctly.
 	ClientVersionMajor = 1
 	ClientVersionMinor = 0
-	ClientVersionBuild = 60
+	ClientVersionBuild = 61
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
@@ -414,8 +414,8 @@ const (
 	// relay_delivery_receipt). Additive: pre-v23 binaries reject the unknown
 	// status at parse time and drop the frame; the seen-sender's bounded
 	// retry absorbs that until both ends are v23+.
-	ProtocolVersion        = 24
-	MinimumProtocolVersion = 20
+	ProtocolVersion        = 25
+	MinimumProtocolVersion = 21
 	// ProtocolVersionSeenAck is the version that introduced
 	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
 	// peer advertising >= this version (a pre-v23 binary only rejects the
