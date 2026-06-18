@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"sort"
+	"sync"
 
 	"github.com/rs/zerolog/log"
 )
@@ -350,32 +351,23 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 		return &AnnounceSnapshot{}
 	}
 
-	// Stage 1: exact wire-dedup.
-	type wireKey struct {
-		Identity PeerIdentity
-		Origin   PeerIdentity
-		SeqNo    uint64
-		Hops     int
-		Extra    string // normalized canonical bytes
-		// Round-19 alignment: include the attested-links signature
-		// in the dedup key, since Round-14 promoted AttestedSig to
-		// wire content (it now participates in ComputeDelta and the
-		// outboundEmitSig content cache). Treating two entries that
-		// differ only in sig as exact-duplicates here would silently
-		// drop one of them before the per-Identity collapse, which
-		// could lose a verified-bytes upgrade if the producer ever
-		// hands BuildAnnounceSnapshot two pre-collapse copies (one
-		// signed, one not). In production AnnounceProjectionFor
-		// always emits one entry per (Identity) winner so this case
-		// is degenerate, but aligning the key with the rest of the
-		// wire-content contract removes the foot-gun. Raw bytes →
-		// string conversion (Go allows []byte→string for arbitrary
-		// bytes; the string just holds the byte sequence) keeps
-		// wireKey map-comparable.
-		AttestedSig string
-	}
-	seen := make(map[wireKey]struct{}, len(raw))
-	deduped := make([]AnnounceEntry, 0, len(raw))
+	// Stage 1: exact wire-dedup. Scratch (seen map + deduped slice) is
+	// pooled — see the pool declarations after this function for the
+	// churn rationale.
+	seen := announceSeenPool.Get().(map[announceWireKey]struct{})
+	dedupedPtr := announceDedupedPool.Get().(*[]AnnounceEntry)
+	deduped := (*dedupedPtr)[:0]
+	defer func() {
+		clear(seen)
+		announceSeenPool.Put(seen)
+		// clear() before [:0] zeroes the AnnounceEntry elements so the
+		// pooled backing array does not pin the Extra / AttestedSig byte
+		// slices of a previous (potentially large) announce input until
+		// the cells are overwritten or GC runs.
+		clear(deduped)
+		*dedupedPtr = deduped[:0]
+		announceDedupedPool.Put(dedupedPtr)
+	}()
 	for _, e := range raw {
 		// normalizeExtra is used ONLY to build the dedup key — the
 		// emitted AnnounceEntry below carries e.Extra verbatim
@@ -392,7 +384,7 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 		// and drop the entry. Normalization is fine in the dedup key
 		// because the key is internal-only — never touches the wire.
 		ne := normalizeExtra(e.Extra)
-		k := wireKey{
+		k := announceWireKey{
 			Identity:    e.Identity,
 			Origin:      e.Origin,
 			SeqNo:       e.SeqNo,
@@ -444,15 +436,13 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 	// corrupted the payload or a protocol version mismatch exists.
 	// We log the violation and fall back to deterministic tie-break
 	// to preserve convergence.
-	type seqKey struct {
-		Identity  PeerIdentity
-		Origin    PeerIdentity
-		SeqNo     uint64
-		Withdrawn bool
-	}
-	bestBySeq := make(map[seqKey]AnnounceEntry, len(deduped))
+	bestBySeq := announceBestBySeqPool.Get().(map[announceSeqKey]AnnounceEntry)
+	defer func() {
+		clear(bestBySeq)
+		announceBestBySeqPool.Put(bestBySeq)
+	}()
 	for _, e := range deduped {
-		k := seqKey{Identity: e.Identity, Origin: e.Origin, SeqNo: e.SeqNo, Withdrawn: e.Hops >= HopsInfinity}
+		k := announceSeqKey{Identity: e.Identity, Origin: e.Origin, SeqNo: e.SeqNo, Withdrawn: e.Hops >= HopsInfinity}
 		existing, found := bestBySeq[k]
 		if !found {
 			bestBySeq[k] = e
@@ -515,39 +505,19 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 	// monotonicity continue to apply on receivers (with the
 	// migration-contract caveats documented in uplink_claim.go for
 	// the per-Identity SeqNo-namespace interaction).
-	type identityGroup struct {
-		// tombBest is the single tombstone winner per Identity. The
-		// snapshot carries AT MOST one tombstone per Identity so that
-		// ComputeDelta's `(Identity, IsWithdrawn)` tracking key
-		// covers the entire tombstone set for an Identity in one
-		// slot. In production routeStore.AnnounceProjectionFor emits
-		// at most one own-direct tombstone per Identity (storage is
-		// per-(Identity, Uplink) and only Source==Direct tombstones
-		// make it through), so the collapse is a no-op for routing-
-		// driven inputs. The collapse remains defensive against
-		// synthetic test-fixture inputs that hand BuildAnnounceSnapshot
-		// multiple tombstones per Identity with different Origins —
-		// without this collapse, two identical synthetic snapshots
-		// would produce a non-empty ComputeDelta because the
-		// (Identity, IsWithdrawn) keyed oldIdx silently overwrites
-		// all but the last tombstone, and the surviving slot would
-		// not match the earlier tombstones in newSnap on SeqNo.
-		//
-		// Selection mirrors live-winner ordering for the same
-		// determinism: highest SeqNo wins (latest withdrawal info),
-		// then Extra tie-break, then Origin lex tie-break. The
-		// "own-origin only" guarantee is enforced by the caller
-		// (routeStore.AnnounceProjectionFor filters transit tombstones
-		// upstream); see the AnnounceSnapshot doc-comment for the
-		// full contract.
-		tombBest *AnnounceEntry
-		liveBest *AnnounceEntry // best live winner across all live entries
-	}
-	groups := make(map[PeerIdentity]*identityGroup, len(bestBySeq))
+	//
+	// announceIdentityGroup (the per-Identity accumulator) and this
+	// scratch map are declared/pooled at package scope (see after this
+	// function).
+	groups := announceGroupsPool.Get().(map[PeerIdentity]*announceIdentityGroup)
+	defer func() {
+		clear(groups)
+		announceGroupsPool.Put(groups)
+	}()
 	for _, e := range bestBySeq {
 		g, ok := groups[e.Identity]
 		if !ok {
-			g = &identityGroup{}
+			g = &announceIdentityGroup{}
 			groups[e.Identity] = g
 		}
 		cand := e // capture for &-addressing
@@ -611,6 +581,90 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 
 	return &AnnounceSnapshot{Entries: result}
 }
+
+// announceWireKey is the Stage-1 exact-dedup key for BuildAnnounceSnapshot.
+type announceWireKey struct {
+	Identity PeerIdentity
+	Origin   PeerIdentity
+	SeqNo    uint64
+	Hops     int
+	Extra    string // normalized canonical bytes
+	// Round-19 alignment: include the attested-links signature
+	// in the dedup key, since Round-14 promoted AttestedSig to
+	// wire content (it now participates in ComputeDelta and the
+	// outboundEmitSig content cache). Treating two entries that
+	// differ only in sig as exact-duplicates here would silently
+	// drop one of them before the per-Identity collapse, which
+	// could lose a verified-bytes upgrade if the producer ever
+	// hands BuildAnnounceSnapshot two pre-collapse copies (one
+	// signed, one not). In production AnnounceProjectionFor
+	// always emits one entry per (Identity) winner so this case
+	// is degenerate, but aligning the key with the rest of the
+	// wire-content contract removes the foot-gun. Raw bytes →
+	// string conversion (Go allows []byte→string for arbitrary
+	// bytes; the string just holds the byte sequence) keeps
+	// the key map-comparable.
+	AttestedSig string
+}
+
+// announceSeqKey is the Stage-2 per-(Identity, Origin, SeqNo, Withdrawn)
+// aggregation key. The Withdrawn axis keeps a live entry and an
+// own-direct tombstone in distinct buckets even when their
+// (Origin, SeqNo) coincide — see the Stage 2 block for the rationale.
+type announceSeqKey struct {
+	Identity  PeerIdentity
+	Origin    PeerIdentity
+	SeqNo     uint64
+	Withdrawn bool
+}
+
+// announceIdentityGroup is the Stage-3 per-Identity accumulator.
+type announceIdentityGroup struct {
+	// tombBest is the single tombstone winner per Identity. The
+	// snapshot carries AT MOST one tombstone per Identity so that
+	// ComputeDelta's `(Identity, IsWithdrawn)` tracking key
+	// covers the entire tombstone set for an Identity in one
+	// slot. In production routeStore.AnnounceProjectionFor emits
+	// at most one own-direct tombstone per Identity (storage is
+	// per-(Identity, Uplink) and only Source==Direct tombstones
+	// make it through), so the collapse is a no-op for routing-
+	// driven inputs. The collapse remains defensive against
+	// synthetic test-fixture inputs that hand BuildAnnounceSnapshot
+	// multiple tombstones per Identity with different Origins —
+	// without this collapse, two identical synthetic snapshots
+	// would produce a non-empty ComputeDelta because the
+	// (Identity, IsWithdrawn) keyed oldIdx silently overwrites
+	// all but the last tombstone, and the surviving slot would
+	// not match the earlier tombstones in newSnap on SeqNo.
+	//
+	// Selection mirrors live-winner ordering for the same
+	// determinism: highest SeqNo wins (latest withdrawal info),
+	// then Extra tie-break, then Origin lex tie-break. The
+	// "own-origin only" guarantee is enforced by the caller
+	// (routeStore.AnnounceProjectionFor filters transit tombstones
+	// upstream); see the AnnounceSnapshot doc-comment for the
+	// full contract.
+	tombBest *AnnounceEntry
+	liveBest *AnnounceEntry // best live winner across all live entries
+}
+
+// BuildAnnounceSnapshot's three aggregation stages each need a scratch
+// map (plus a Stage-1 scratch slice). AnnounceLoop calls BuildAnnounceSnapshot
+// once per peer from 125+ concurrent goroutines on every delta cycle,
+// so re-allocating route-table-sized maps each call dominated steady-
+// state heap churn (alloc_space profiling: BuildAnnounceSnapshot was
+// ~32% of all bytes allocated). These pools recycle the scratch across
+// calls — the aggregation logic is byte-for-byte identical; only the
+// backing storage is reused. The result slice (AnnounceSnapshot.Entries)
+// is the retained output and is NEVER pooled. sync.Pool is concurrency-
+// safe by construction and drops its contents on GC, so the recycled
+// scratch stays bounded.
+var (
+	announceSeenPool      = sync.Pool{New: func() any { return make(map[announceWireKey]struct{}) }}
+	announceDedupedPool   = sync.Pool{New: func() any { s := make([]AnnounceEntry, 0, 64); return &s }}
+	announceBestBySeqPool = sync.Pool{New: func() any { return make(map[announceSeqKey]AnnounceEntry) }}
+	announceGroupsPool    = sync.Pool{New: func() any { return make(map[PeerIdentity]*announceIdentityGroup) }}
+)
 
 // isBetterAnnounceEntry returns true when `candidate` should replace
 // `incumbent` as the per-Identity winner in BuildAnnounceSnapshot's
