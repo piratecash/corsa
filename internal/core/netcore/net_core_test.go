@@ -574,3 +574,40 @@ func TestNetCoreIsLocal(t *testing.T) {
 		t.Fatal("IsLocal should return true after SetLocal(true)")
 	}
 }
+
+// TestNetCoreCapabilitiesRef pins the no-copy accessor used by the
+// snapshotEntryLocked hot path: CapabilitiesRef returns the same set as
+// Capabilities, the (copying) Capabilities result does not alias NetCore
+// storage, and a wholesale ApplyOpts replace is reflected by the ref.
+func TestNetCoreCapabilitiesRef(t *testing.T) {
+	conn, _ := newBufferedMockConn(t)
+	pc := New(60, conn, Inbound, Options{
+		Caps: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+	})
+	defer pc.Close()
+
+	ref := pc.CapabilitiesRef()
+	owned := pc.Capabilities()
+	if len(ref) != len(owned) {
+		t.Fatalf("CapabilitiesRef len=%d, Capabilities len=%d", len(ref), len(owned))
+	}
+	for i := range owned {
+		if ref[i] != owned[i] {
+			t.Fatalf("ref[%d]=%q != owned[%d]=%q", i, ref[i], i, owned[i])
+		}
+	}
+
+	// The caller-owned Capabilities() copy must not alias NetCore storage:
+	// mutating it must not change what CapabilitiesRef returns.
+	owned[0] = domain.Capability("tampered")
+	if pc.CapabilitiesRef()[0] == domain.Capability("tampered") {
+		t.Fatal("Capabilities() copy aliased NetCore storage")
+	}
+
+	// ApplyOpts replaces caps wholesale; the ref reflects the new set.
+	pc.ApplyOpts(Options{Caps: []domain.Capability{domain.CapMeshRoutingV3}})
+	ref2 := pc.CapabilitiesRef()
+	if len(ref2) != 1 || ref2[0] != domain.CapMeshRoutingV3 {
+		t.Fatalf("after ApplyOpts, CapabilitiesRef = %v, want [mesh_routing_v3]", ref2)
+	}
+}

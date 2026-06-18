@@ -175,14 +175,21 @@ func (s *Service) connHasCapability(id domain.ConnID, capability domain.Capabili
 // connection is not registered. Used by session-lifecycle hooks that need
 // the full capability list (not just a single relay-cap boolean) so
 // routing-announce state can record what the peer actually supports.
+//
+// info.capabilities is now a READ-ONLY alias of NetCore storage (see
+// snapshotEntryLocked / the connInfo type doc). This accessor still hands its
+// callers an OWNED copy: it feeds onPeerSessionEstablished/Closed, which may
+// retain the slice in routing-announce state, and it runs only on session
+// establish / close (not a hot path), so the copy is cheap and keeps callers
+// free of the "must not mutate the alias" constraint.
 func (s *Service) connCapabilitiesForID(id domain.ConnID) []domain.Capability {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
 	info, ok := s.connInfoByIDLocked(id)
-	if !ok {
+	if !ok || len(info.capabilities) == 0 {
 		return nil
 	}
-	return info.capabilities
+	return append([]domain.Capability(nil), info.capabilities...)
 }
 
 // peerSupportsRoutingV3 reports whether the peer reachable at address

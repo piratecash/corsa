@@ -678,6 +678,26 @@ func (pc *NetCore) Capabilities() []domain.Capability {
 	return cloneCaps(pc.caps)
 }
 
+// CapabilitiesRef returns the negotiated capability set WITHOUT copying. The
+// returned slice aliases NetCore-owned storage and MUST be treated as
+// read-only — callers must not append, sort, or index-assign it. This is safe
+// because domain.Capability is an immutable string and pc.caps is only ever
+// REPLACED wholesale (a cloneCaps assignment under pc.mu.Lock), never mutated
+// in place, so a reader holding the reference sees a stable immutable snapshot
+// even across a concurrent ApplyOpts/SetCaps replace (the old backing array is
+// untouched). Use Capabilities() instead when an owned, mutable copy is needed.
+//
+// Added for the snapshotEntryLocked hot path (forEachInboundConnLocked / gossip
+// fan-out), where the per-entry cloneCaps copy was a top alloc_space source and
+// every consumer of the resulting connInfo.capabilities is read-only
+// (capsContain / range); the one consumer that needs its own buffer
+// (dm_router) already makes a defensive copy.
+func (pc *NetCore) CapabilitiesRef() []domain.Capability {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.caps
+}
+
 // ApplyOpts overwrites NetCore state from an opts struct. This is the
 // post-handshake counterpart of newNetCore's opts: the NetCore is created
 // at accept time with empty opts (identity unknown yet), and ApplyOpts fills

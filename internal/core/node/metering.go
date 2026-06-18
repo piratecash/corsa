@@ -152,12 +152,13 @@ func (s *Service) liveTrafficLocked() map[domain.PeerAddress]liveTraffic {
 // least for read.
 //
 // The inbound walk uses forEachInboundConnIDLocked, NOT forEachInboundConnLocked:
-// the latter builds a full connInfo via snapshotEntryLocked, which calls
-// core.Capabilities() → cloneCaps and would re-introduce a per-connection
-// allocation on this once-a-second collector path. The lightweight iterator
-// exposes exactly the id / address this sum needs (the trust check and metered
-// lookup are keyed by id), applying the identical inbound-direction filter, so
-// the total is unchanged while the capability copy is avoided entirely.
+// the latter builds a full connInfo per entry via snapshotEntryLocked, which is
+// wasted work on this once-a-second collector path that only needs id / address.
+// (snapshotEntryLocked's capability read is now the no-copy CapabilitiesRef, so
+// it no longer clones, but the rest of the connInfo build is still pointless
+// here.) The lightweight iterator exposes exactly the id / address this sum
+// needs (the trust check and metered lookup are keyed by id), applying the
+// identical inbound-direction filter, so the total is unchanged.
 func (s *Service) sumLiveTrafficLocked() (sent, received int64) {
 	for _, session := range s.sessions {
 		if session.metered == nil {

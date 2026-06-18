@@ -17,9 +17,14 @@ import (
 // mutate identity/address/auth or race with the handshake-time writes
 // that coreForIDLocked still permits.
 //
-// All fields are value-typed; the capabilities slice is a defensive copy so
-// callers cannot scribble back into the live *netcore.NetCore. Walkers must
-// populate every field — partial snapshots are a contract violation.
+// All fields are value-typed; the capabilities slice is a READ-ONLY alias of
+// the live *netcore.NetCore's capability set (via CapabilitiesRef, no per-entry
+// copy — it was a top alloc_space source). It is safe to alias because
+// domain.Capability is an immutable string and pc.caps is replace-only, and
+// every connInfo.capabilities consumer treats it read-only (capsContain /
+// range); the one consumer needing its own buffer (dm_router) makes a defensive
+// copy. Callers MUST NOT mutate it. Walkers must populate every field — partial
+// snapshots are a contract violation.
 //
 // remoteIP and peerDir are resolved at snapshot time so consumers that need
 // typed network metadata (capture resolver, traffic bridge) never dereference
@@ -54,23 +59,29 @@ func (c connInfo) HasCapability(cap domain.Capability) bool {
 }
 
 // snapshotEntryLocked builds a connInfo from a registry entry. The capability
-// slice is copied so the caller never aliases NetCore-owned storage. Returns
-// the zero value and false if the entry or its core is missing — the caller
+// slice is a READ-ONLY alias of NetCore-owned storage (via CapabilitiesRef, no
+// per-entry copy — see the connInfo type doc and CapabilitiesRef); consumers
+// must not mutate it, and any consumer that needs to retain a mutable copy
+// makes its own (e.g. connCapabilitiesForID, routing_announce's AnnounceTarget
+// build). Returns the zero value and false if the entry or its core is
+// missing — the caller
 // must treat that as "skip this connection". The caller must hold s.peerMu.
 func snapshotEntryLocked(id domain.ConnID, entry *connEntry) (connInfo, bool) {
 	if entry == nil || entry.core == nil {
 		return connInfo{}, false
 	}
 	core := entry.core
-	// core.Capabilities() already returns a fresh, caller-owned copy of the
-	// capability slice (its contract guarantees the result is safe to retain),
-	// so the previous second make+copy into capsCopy was a redundant per-entry
-	// allocation. snapshotEntryLocked is the dominant cloneCaps caller
-	// (forEachInboundConnLocked / sendGossipFrameToPeer hot path), so the
-	// duplicate copy doubled this allocation source for no benefit. Reuse the
-	// owned slice directly; normalise an empty (possibly non-nil) slice back to
-	// nil to preserve the previous nil-for-empty connInfo.capabilities semantics.
-	caps := core.Capabilities()
+	// Use CapabilitiesRef (no copy) rather than Capabilities (per-call
+	// cloneCaps): snapshotEntryLocked is the dominant cloneCaps caller
+	// (forEachInboundConnLocked / sendGossipFrameToPeer hot path), and that
+	// per-entry copy was a top alloc_space source. The ref is safe here because
+	// every consumer of connInfo.capabilities is read-only (capsContain / range
+	// — see capabilities.go), and pc.caps is an immutable, replace-only slice
+	// (see CapabilitiesRef's doc). The one consumer that needs its own buffer
+	// (dm_router) makes a defensive copy. Normalise an empty (possibly non-nil)
+	// slice back to nil to preserve the previous nil-for-empty
+	// connInfo.capabilities semantics (this only reassigns the local).
+	caps := core.CapabilitiesRef()
 	if len(caps) == 0 {
 		caps = nil
 	}
@@ -398,10 +409,13 @@ func (s *Service) forEachInboundConnLocked(fn func(connInfo) bool) {
 // forEachInboundConnLocked for callers that only need to match or return
 // connection IDs by overlay address (inboundConnIDsLocked,
 // inboundConnIDForAddressLocked). It reads ONLY id / address / tracked and
-// deliberately does NOT build a connInfo via snapshotEntryLocked — that path
-// calls core.Capabilities(), whose per-call cloneCaps copy showed up as GC
-// churn on the sendGossipFrameToPeer → inboundConnIDForAddressLocked hot path,
-// even though capabilities are irrelevant to a connID-by-address lookup.
+// deliberately does NOT build a connInfo via snapshotEntryLocked — building the
+// full connInfo per entry on the sendGossipFrameToPeer →
+// inboundConnIDForAddressLocked hot path is wasted work when capabilities and
+// the other snapshot fields are irrelevant to a connID-by-address lookup.
+// (Historically snapshotEntryLocked's core.Capabilities() per-call cloneCaps
+// copy was the dominant cost here; it now uses the no-copy CapabilitiesRef, but
+// skipping the whole connInfo build is still the right call for an ID lookup.)
 // fn is invoked once per inbound connection; iteration stops when fn returns
 // false. The caller must hold s.peerMu.
 func (s *Service) forEachInboundConnIDLocked(fn func(id domain.ConnID, address domain.PeerAddress, tracked bool) bool) {

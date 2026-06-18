@@ -79,11 +79,16 @@ type connInfo struct {
 }
 ```
 
-`capabilities` is a defensive copy; the caller cannot scribble back into
-NetCore-owned storage. Writes to identity / address / auth keep their
-handshake-time path through `coreForIDLocked`, which remains the single
-carve-out that returns the live handle. The snapshot shape guarantees
-that a walk callback cannot race with those writes.
+`capabilities` is a READ-ONLY alias of NetCore-owned storage (built via
+`CapabilitiesRef`, no per-entry copy — the copy was a top alloc_space source on
+the gossip fan-out hot path). Aliasing is safe because `domain.Capability` is an
+immutable string and `pc.caps` is replace-only (never mutated in place), and
+every snapshot consumer treats it read-only; consumers that must retain a
+mutable copy (`connCapabilitiesForID`, the AnnounceTarget build) make their own.
+Callers must not mutate the alias. Writes to identity / address / auth keep
+their handshake-time path through `coreForIDLocked`, which remains the single
+carve-out that returns the live handle. The snapshot shape guarantees that a
+walk callback cannot race with those writes.
 
 ### Single-writer invariant
 
@@ -314,11 +319,17 @@ type connInfo struct {
 }
 ```
 
-`capabilities` — защитная копия; caller не может писать обратно в
-хранилище, принадлежащее NetCore. Запись identity / address / auth
-остаётся на handshake-time пути через `coreForIDLocked`, который и
-есть единственный carve-out, возвращающий живой handle. Форма снимка
-гарантирует, что callback walker'а не гоняется с этими записями.
+`capabilities` — READ-ONLY алиас хранилища, принадлежащего NetCore
+(строится через `CapabilitiesRef`, без per-entry копии — копия была
+топ-источником alloc_space на горячем пути gossip fan-out). Алиасить
+безопасно: `domain.Capability` — иммутабельная строка, а `pc.caps` только
+заменяется целиком (никогда не мутируется in-place), и все потребители снимка
+читают его read-only; те, кому нужна своя mutable-копия (`connCapabilitiesForID`,
+сборка AnnounceTarget), делают её сами. Мутировать алиас нельзя. Запись
+identity / address / auth остаётся на handshake-time пути через
+`coreForIDLocked`, который и есть единственный carve-out, возвращающий живой
+handle. Форма снимка гарантирует, что callback walker'а не гоняется с этими
+записями.
 
 ### Инвариант single-writer
 

@@ -1553,11 +1553,12 @@ func (s *Service) routingCapablePeers() []routing.AnnounceTarget {
 			// via Network().RemoteAddr and deadlocks as soon as any
 			// writer queues between the outer and inner acquisition.
 			//
-			// info.capabilities is already a fresh copy produced by
-			// snapshotEntryLocked, but an additional copy is taken here so
-			// that all AnnounceTarget slices come from the same producer
-			// and the contract "AnnounceTarget.Capabilities is private to
-			// the target" does not depend on connInfo internals.
+			// info.capabilities is a READ-ONLY alias of NetCore storage
+			// (snapshotEntryLocked uses CapabilitiesRef — no per-entry copy),
+			// so copyCapabilitiesForAnnounce MUST copy before the slice lands
+			// in an AnnounceTarget that outlives this walk: it satisfies the
+			// "AnnounceTarget.Capabilities is private to the target" contract
+			// and prevents retaining/mutating the shared alias.
 			targets = append(targets, routing.AnnounceTarget{
 				Address:      inboundConnKeyFromInfo(info),
 				Identity:     info.identity,
