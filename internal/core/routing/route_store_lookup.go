@@ -349,7 +349,10 @@ func (s *routeStore) AnnounceableFor(excludeVia PeerIdentity, now time.Time, isD
 func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool) ([]AnnounceEntry, bool) {
 	origin := s.localOrigin
 
-	var result []AnnounceEntry
+	// result is a pooled projection buffer (see announceEntryBufPool): it is
+	// returned up through Table.AnnounceTo and MUST be handed back via
+	// Table.ReleaseAnnounceEntries after BuildAnnounceSnapshot consumes it.
+	result := getAnnounceEntryBuf()
 	mutated := false
 	for identity, bucket := range s.buckets {
 		if identity == excludeVia {

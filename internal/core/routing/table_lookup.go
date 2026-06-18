@@ -57,6 +57,16 @@ func (t *Table) Announceable(excludeVia PeerIdentity) []RouteEntry {
 // the announce delta mechanism). Post-Phase-A there is no per-Origin
 // filter — storage no longer keeps a transit Origin.
 //
+// OWNERSHIP: the returned slice is a POOLED projection buffer
+// (announceEntryBufPool). The caller MUST hand it back via
+// Table.ReleaseAnnounceEntries exactly once, after consuming it (typically a
+// BuildAnnounceSnapshot call), and MUST NOT read it after releasing. Forgetting
+// the release is not a correctness bug but forfeits the reuse and reintroduces
+// the per-peer projection alloc churn; releasing a foreign slice or releasing
+// twice IS a corruption-class bug — see ReleaseAnnounceEntries. The two
+// in-tree callers (the announce loop and sendConnectTimeFullSync) both release
+// via defer.
+//
 // AnnounceTo runs under the writer lock because AnnounceProjectionFor
 // updates per-Identity outbound SeqNo state (routeStore.outboundContent,
 // outboundMax, outboundPeerMax) so the wire SeqNo timeline stays
@@ -105,6 +115,24 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 		t.dirty.Store(true)
 	}
 	return entries
+}
+
+// ReleaseAnnounceEntries returns a slice obtained from AnnounceTo to the
+// internal projection-buffer pool (announceEntryBufPool).
+//
+// STRICT OWNERSHIP CONTRACT: the argument MUST be a slice returned by
+// AnnounceTo, released EXACTLY ONCE, and not read after release. The pool will
+// hand the backing array to a future AnnounceProjectionFor, so:
+//   - releasing a slice NOT produced by AnnounceTo (e.g. snapshot.Entries, a
+//     test fixture, a sub-slice) donates another owner's backing array to the
+//     pool — a later projection then writes into live foreign memory
+//     (corruption / data race);
+//   - releasing twice, or reading the slice after release, is a
+//     use-after-free-class bug.
+// A nil / zero-cap slice is ignored (it owns no backing). Safe to call from any
+// goroutine.
+func (t *Table) ReleaseAnnounceEntries(entries []AnnounceEntry) {
+	releaseAnnounceEntryBuf(entries)
 }
 
 // AnnounceTargetFor returns the per-receiver wire projection of

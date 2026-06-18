@@ -666,6 +666,45 @@ var (
 	announceGroupsPool    = sync.Pool{New: func() any { return make(map[PeerIdentity]*announceIdentityGroup) }}
 )
 
+// announceEntryBufPool recycles the []AnnounceEntry PROJECTION buffer that
+// AnnounceProjectionFor builds and BuildAnnounceSnapshot consumes. The announce
+// loop rebuilds this per peer per cycle across many goroutines (plus one per
+// connect-time full sync), so the per-peer slice was a top alloc_space source
+// (AnnounceProjectionFor ~30%). Unlike the BuildAnnounceSnapshot scratch pools
+// above, this buffer ESCAPES the producer (AnnounceTo returns it), so it cannot
+// be released with a defer inside one function — the consumer returns it via
+// Table.ReleaseAnnounceEntries once BuildAnnounceSnapshot has run.
+var announceEntryBufPool = sync.Pool{New: func() any { s := make([]AnnounceEntry, 0, 64); return &s }}
+
+// getAnnounceEntryBuf returns a length-0 AnnounceEntry buffer from the pool.
+// AnnounceProjectionFor appends its projection into it; the result is returned
+// up through AnnounceTo and MUST be handed back via releaseAnnounceEntryBuf
+// (exposed to callers as Table.ReleaseAnnounceEntries) after consumption.
+func getAnnounceEntryBuf() []AnnounceEntry {
+	return (*announceEntryBufPool.Get().(*[]AnnounceEntry))[:0]
+}
+
+// releaseAnnounceEntryBuf returns a projection buffer to the pool. It clears the
+// elements first so the pool does not pin the AnnounceEntry Extra / AttestedSig
+// byte slices (which reference route-store-owned bytes) until the next reuse.
+//
+// STRICT OWNERSHIP: s MUST be a buffer that originated from getAnnounceEntryBuf
+// (i.e. came back from AnnounceProjectionFor / AnnounceTo). The pool will hand
+// its backing array to a future projection, so donating a slice owned by anyone
+// else (e.g. snapshot.Entries, a fixture) lets a later projection overwrite live
+// foreign memory — corruption / data race. Releasing twice or reading s after
+// release is a use-after-free-class bug. A nil / zero-cap slice is ignored (it
+// owns no backing); this is a cheap guard, NOT a license to pass foreign
+// slices. Callers reach this only through Table.ReleaseAnnounceEntries.
+func releaseAnnounceEntryBuf(s []AnnounceEntry) {
+	if cap(s) == 0 {
+		return
+	}
+	clear(s)
+	s = s[:0]
+	announceEntryBufPool.Put(&s)
+}
+
 // isBetterAnnounceEntry returns true when `candidate` should replace
 // `incumbent` as the per-Identity winner in BuildAnnounceSnapshot's
 // Stage 3 aggregation. The helper is used for BOTH the live-entry

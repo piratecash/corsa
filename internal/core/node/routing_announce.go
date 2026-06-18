@@ -1662,6 +1662,9 @@ func (s *Service) sendOutboundFullTableSync(ctx context.Context, peerIdentity do
 func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
 	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Msg("connect_time_full_sync_begin")
 	routes := s.routingTable.AnnounceTo(peerIdentity)
+	// routes is a pooled projection buffer; return it after
+	// BuildAnnounceSnapshot consumes it (nothing below reads routes again).
+	defer s.routingTable.ReleaseAnnounceEntries(routes)
 	snapshot := routing.BuildAnnounceSnapshot(routes)
 	registry := s.announceLoop.StateRegistry()
 

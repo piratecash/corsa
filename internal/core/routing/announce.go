@@ -1204,8 +1204,12 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				return
 			}
 
-			// Build peer-specific raw entries from table.
+			// Build peer-specific raw entries from table. rawRoutes is a
+			// pooled projection buffer; return it once BuildAnnounceSnapshot
+			// has consumed it (nothing below reads rawRoutes again). Deferred
+			// to the goroutine end so every early return still releases it.
 			rawRoutes := a.table.AnnounceTo(peer.Identity)
+			defer a.table.ReleaseAnnounceEntries(rawRoutes)
 			totalRaw.Add(int32(len(rawRoutes)))
 
 			// Build canonical aggregated snapshot.
