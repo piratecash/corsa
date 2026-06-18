@@ -34,9 +34,15 @@ type nonceCache struct {
 }
 
 // newNonceCache creates a nonce cache with the given capacity and TTL.
+//
+// The entries map grows lazily: `capacity` is the LRU EVICTION bound, not the
+// initial size. Pre-sizing the map to capacity reserved ~1 MB of empty hashmap
+// buckets at startup even on nodes that never receive a file command — pure
+// baseline waste. The LRU cap (Add-time eviction) still bounds the live size,
+// and Go grows the map amortised-O(1) under real file-transfer load.
 func newNonceCache(capacity int, ttl time.Duration) *nonceCache {
 	return &nonceCache{
-		entries:  make(map[string]*nonceEntry, capacity),
+		entries:  make(map[string]*nonceEntry),
 		capacity: capacity,
 		ttl:      ttl,
 	}
