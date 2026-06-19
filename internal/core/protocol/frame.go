@@ -592,6 +592,31 @@ func MarshalFrameLine(frame Frame) (string, error) {
 	return line, nil
 }
 
+// MarshalFrameLineBytes is MarshalFrameLine returning a single caller-owned
+// []byte (the newline-terminated wire line) instead of a string. The hot
+// network senders (sendFrameViaNetwork / sendHandshakeReplyViaNetwork) hand
+// the wire line to the async Network.SendFrame as []byte, so MarshalFrameLine
+// forced them to allocate twice — once for buf.String() and again for
+// []byte(line). This path copies the encoded buffer out exactly once.
+//
+// For a RawLine frame the single []byte(RawLine) copy matches what the old
+// MarshalFrameLine + []byte(line) pair did (the string return was zero-copy
+// but the caller's []byte conversion was not), so the compact-frame senders
+// see no regression while the JSON-encoded senders drop a whole copy. The
+// wire bytes are identical to MarshalFrameLine's string, byte for byte.
+func MarshalFrameLineBytes(frame Frame) ([]byte, error) {
+	if frame.RawLine != "" {
+		return []byte(frame.RawLine), nil
+	}
+	buf, err := encodeFrameLineToPooledBuf(frame)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]byte(nil), buf.Bytes()...)
+	putFrameEncodeBuf(buf)
+	return out, nil
+}
+
 // frameEncodeBufPool reuses the scratch bytes.Buffer that MarshalFrameLine[WithLimit]
 // encode into (the write path — distinct from frameLineBufPool, which recycles
 // the []byte scratch of the ParseFrameLine read path). Every outbound frame is

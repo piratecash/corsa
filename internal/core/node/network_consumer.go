@@ -103,7 +103,7 @@ func (s *Service) sendFrameViaNetwork(ctx context.Context, id domain.ConnID, fra
 	network := s.Network()
 	addr := network.RemoteAddr(id)
 
-	line, marshalErr := protocol.MarshalFrameLine(frame)
+	data, marshalErr := protocol.MarshalFrameLineBytes(frame)
 	if marshalErr != nil {
 		// Mirror writeJSONFrameByID's marshal-fallback: try to deliver a
 		// structured error frame to the peer so the other side sees
@@ -116,7 +116,7 @@ func (s *Service) sendFrameViaNetwork(ctx context.Context, id domain.ConnID, fra
 			Code:  protocol.ErrCodeEncodeFailed,
 			Error: marshalErr.Error(),
 		})
-		data := append(fallback, '\n')
+		data = append(fallback, '\n')
 		res := classifyNetworkSendResult(network.SendFrame(ctx, id, data))
 		emitProtocolTrace(addr, frame, res)
 		if res == enqueueUnregistered {
@@ -126,7 +126,7 @@ func (s *Service) sendFrameViaNetwork(ctx context.Context, id domain.ConnID, fra
 		return nil
 	}
 
-	sendErr := network.SendFrame(ctx, id, []byte(line))
+	sendErr := network.SendFrame(ctx, id, data)
 	res := classifyNetworkSendResult(sendErr)
 	emitProtocolTrace(addr, frame, res)
 
@@ -211,7 +211,7 @@ func (s *Service) sendFrameViaNetworkSync(ctx context.Context, id domain.ConnID,
 	network := s.Network()
 	addr := network.RemoteAddr(id)
 
-	line, marshalErr := protocol.MarshalFrameLine(frame)
+	data, marshalErr := protocol.MarshalFrameLineBytes(frame)
 	if marshalErr != nil {
 		// Mirror writeJSONFrameSyncByID's marshal-fallback path: attempt
 		// to deliver a structured encode-failed frame so the peer sees a
@@ -222,7 +222,7 @@ func (s *Service) sendFrameViaNetworkSync(ctx context.Context, id domain.ConnID,
 			Code:  protocol.ErrCodeEncodeFailed,
 			Error: marshalErr.Error(),
 		})
-		data := append(fallback, '\n')
+		data = append(fallback, '\n')
 		res := classifyNetworkSendResult(network.SendFrameSync(ctx, id, data))
 		emitProtocolTrace(addr, frame, res)
 		if res == enqueueUnregistered {
@@ -232,7 +232,7 @@ func (s *Service) sendFrameViaNetworkSync(ctx context.Context, id domain.ConnID,
 		return nil
 	}
 
-	sendErr := network.SendFrameSync(ctx, id, []byte(line))
+	sendErr := network.SendFrameSync(ctx, id, data)
 	res := classifyNetworkSendResult(sendErr)
 	emitProtocolTrace(addr, frame, res)
 
@@ -315,7 +315,7 @@ func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.Co
 	network := s.Network()
 	addr := network.RemoteAddr(id)
 
-	line, marshalErr := protocol.MarshalFrameLine(frame)
+	data, marshalErr := protocol.MarshalFrameLineBytes(frame)
 	if marshalErr != nil {
 		// Caller-side encode bug. Best-effort fallback path mirrors
 		// sendFrameViaNetwork: attempt to deliver a structured
@@ -327,7 +327,7 @@ func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.Co
 			Code:  protocol.ErrCodeEncodeFailed,
 			Error: marshalErr.Error(),
 		})
-		data := append(fallback, '\n')
+		data = append(fallback, '\n')
 		sendErr := network.SendFrame(ctx, id, data)
 		emitProtocolTrace(addr, frame, classifyNetworkSendResult(sendErr))
 		if sendErr != nil && errors.Is(sendErr, netcore.ErrUnknownConn) {
@@ -336,8 +336,6 @@ func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.Co
 		}
 		return sendErr
 	}
-
-	data := []byte(line)
 
 	// Tier 1: async enqueue (matches sendFrameViaNetwork timing).
 	sendErr := network.SendFrame(ctx, id, data)
@@ -550,8 +548,7 @@ func (s *Service) sendSessionFrameViaNetwork(ctx context.Context, session *peerS
 		}
 	}
 
-	line, marshalErr := protocol.MarshalFrameLine(frame)
-	var data []byte
+	data, marshalErr := protocol.MarshalFrameLineBytes(frame)
 	if marshalErr != nil {
 		// Marshal-fallback: build an ErrCodeEncodeFailed frame so the
 		// peer learns the encode bug instead of getting a silent drop.
@@ -559,8 +556,6 @@ func (s *Service) sendSessionFrameViaNetwork(ctx context.Context, session *peerS
 		// is what reaches the wire.
 		fallback, _ := json.Marshal(protocol.Frame{Type: "error", Code: protocol.ErrCodeEncodeFailed, Error: marshalErr.Error()})
 		data = append(fallback, '\n')
-	} else {
-		data = []byte(line)
 	}
 
 	// Primary path: route through Network so test backends observe the
