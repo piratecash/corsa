@@ -307,11 +307,6 @@ type ResourceUsageFrame struct {
 
 	ConnectionCount int `json:"connection_count"`
 
-	// ShadowDivergenceTotal — Phase 3 deploy-1 cumulative announce
-	// delta-cursor shadow mismatches. See domain.ResourceUsage for the
-	// observation contract. Temporary; removed with the shadow stage.
-	ShadowDivergenceTotal uint64 `json:"shadow_divergence_total"`
-
 	UptimeSeconds int64  `json:"uptime_seconds"`
 	UptimeHuman   string `json:"uptime_human"`
 	SampledAt     string `json:"sampled_at"` // RFC3339Nano UTC

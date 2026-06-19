@@ -146,11 +146,11 @@ func TestAnnounceStateRegistry_MarkReconnected_FreshState_NoBaseline(t *testing.
 }
 
 // TestAnnouncePeerState_Baseline_SurvivesRecordCalls pins that the regular
-// send-side bookkeeping methods (RecordFullSyncSuccess, RecordFullSyncAttempt,
-// RecordDeltaSendSuccess) do not flip the baseline flag in either direction.
-// The flag is owned exclusively by MarkBaselineReceived / session-boundary
-// resets — any leak through a Record* call would entangle the receive gate
-// with the send-side cache and is a design regression.
+// send-side bookkeeping methods (RecordFullSyncSuccess, RecordFullSyncAttempt)
+// do not flip the baseline flag in either direction. The flag is owned
+// exclusively by MarkBaselineReceived / session-boundary resets — any leak
+// through a Record* call would entangle the receive gate with the send-side
+// cache and is a design regression.
 func TestAnnouncePeerState_Baseline_SurvivesRecordCalls(t *testing.T) {
 	now := time.Now()
 	registry := routing.NewAnnounceStateRegistry()
@@ -165,10 +165,6 @@ func TestAnnouncePeerState_Baseline_SurvivesRecordCalls(t *testing.T) {
 	if state.HasReceivedBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not flip baseline to true")
 	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
-	if state.HasReceivedBaseline() {
-		t.Fatalf("RecordDeltaSendSuccess must not flip baseline to true")
-	}
 
 	// Now flip baseline manually — Record* calls must keep it true.
 	state.MarkBaselineReceived()
@@ -180,10 +176,6 @@ func TestAnnouncePeerState_Baseline_SurvivesRecordCalls(t *testing.T) {
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not clear baseline back to false")
-	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
-	if !state.HasReceivedBaseline() {
-		t.Fatalf("RecordDeltaSendSuccess must not clear baseline back to false")
 	}
 }
 
@@ -308,8 +300,8 @@ func TestAnnounceStateRegistry_MarkReconnected_FreshState_NoWireBaseline(t *test
 
 // TestAnnouncePeerState_WireBaseline_SurvivesRecordCalls pins that the
 // regular send-side bookkeeping methods (RecordFullSyncSuccess,
-// RecordFullSyncAttempt, RecordDeltaSendSuccess) do not flip the
-// wire-baseline flag in either direction. The flag is owned exclusively
+// RecordFullSyncAttempt) do not flip the wire-baseline flag in either
+// direction. The flag is owned exclusively
 // by MarkWireBaselineSent and the session-boundary resets — a leak through
 // any Record* method would entangle the wire-baseline gate with the
 // snapshot-cache bookkeeping and is a design regression.
@@ -333,10 +325,6 @@ func TestAnnouncePeerState_WireBaseline_SurvivesRecordCalls(t *testing.T) {
 	if state.HasSentWireBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not flip wire-baseline to true (empty-baseline branch must leave it false)")
 	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
-	if state.HasSentWireBaseline() {
-		t.Fatalf("RecordDeltaSendSuccess must not flip wire-baseline to true on its own — the call site flips via MarkWireBaselineSent")
-	}
 
 	// Now flip the flag manually — Record* calls must keep it true.
 	state.MarkWireBaselineSent()
@@ -348,9 +336,5 @@ func TestAnnouncePeerState_WireBaseline_SurvivesRecordCalls(t *testing.T) {
 	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if !state.HasSentWireBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not clear wire-baseline back to false")
-	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
-	if !state.HasSentWireBaseline() {
-		t.Fatalf("RecordDeltaSendSuccess must not clear wire-baseline back to false")
 	}
 }

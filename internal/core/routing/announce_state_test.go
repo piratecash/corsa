@@ -34,6 +34,41 @@ func TestAnnounceStateRegistry_GetOrCreate(t *testing.T) {
 	}
 }
 
+// TestRecordCursorAdvance_Monotonic pins that a stale in-flight delta cannot
+// roll the cursor backwards below a newer head a concurrent forced/connect-time
+// full sync already committed — a backwards roll would replay a stale journal
+// window or trip needFull + full-sync rate limiting.
+func TestRecordCursorAdvance_Monotonic(t *testing.T) {
+	r := NewAnnounceStateRegistry()
+	s := r.GetOrCreate(domaintest.ID("peer-A"))
+	now := time.Now()
+
+	// A forced full sync advanced the peer to cursor 10.
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 10, now)
+	if got := s.AnnounceCursor(); got != 10 {
+		t.Fatalf("after full sync: cursor=%d, want 10", got)
+	}
+
+	// A stale in-flight delta (older head) must be ignored.
+	s.RecordCursorAdvance(5)
+	if got := s.AnnounceCursor(); got != 10 {
+		t.Fatalf("stale delta rolled cursor back to %d, want 10 (monotonic)", got)
+	}
+
+	// A newer head advances it.
+	s.RecordCursorAdvance(12)
+	if got := s.AnnounceCursor(); got != 12 {
+		t.Fatalf("newer delta: cursor=%d, want 12", got)
+	}
+
+	// A stale FULL sync (older head) must also not roll the cursor back — the
+	// forced-full commit goes through the same monotonic guard.
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 7, now)
+	if got := s.AnnounceCursor(); got != 12 {
+		t.Fatalf("stale full sync rolled cursor back to %d, want 12 (monotonic)", got)
+	}
+}
+
 func TestAnnounceStateRegistry_TimestampsInitializedToZero(t *testing.T) {
 	r := NewAnnounceStateRegistry()
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
@@ -44,14 +79,6 @@ func TestAnnounceStateRegistry_TimestampsInitializedToZero(t *testing.T) {
 	}
 	if !view.LastFullSyncAttemptAt.IsZero() {
 		t.Fatal("LastFullSyncAttemptAt should be zero")
-	}
-
-	// lastDeltaSendAt is not in View — read under lock.
-	s.mu.Lock()
-	deltaSendAt := s.lastDeltaSendAt
-	s.mu.Unlock()
-	if !deltaSendAt.IsZero() {
-		t.Fatal("LastDeltaSendAt should be zero")
 	}
 }
 

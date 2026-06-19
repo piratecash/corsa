@@ -1,5 +1,7 @@
 package routing
 
+import "time"
+
 // This file holds the Table-level read-side entry points. The actual
 // storage-shape projections live on routeStore (see
 // route_store_lookup.go); these wrappers exist because the read
@@ -84,14 +86,13 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 	return entries
 }
 
-// AnnounceToWithChangeHead is AnnounceTo plus the Phase 3 change-journal head
-// captured atomically with the projection (same t.mu critical section). The
-// announce loop uses the head as the cursor bound: ChangeLogSinceUpTo(cursor,
-// head) enumerates exactly the mutations this projection reflects, so a
-// mutation landing AFTER the projection (but before the loop reads the journal)
-// is neither validated against this delta nor consumed by the cursor — removing
-// the race that a separately-read head would create (false shadow divergence in
-// deploy 1; a lost update in deploy 2). The returned slice carries the same
+// AnnounceToWithChangeHead is AnnounceTo (the full projection, used on
+// forced-full / first-sync) plus the change-journal head captured atomically
+// with the projection (same t.mu critical section). The forced full commits this
+// head as the peer's cursor (RecordFullSyncSuccess), so a mutation landing AFTER
+// this projection is not skipped: it stays in the journal window the next
+// AnnounceDeltaTo reads, rather than being consumed by a separately-read head.
+// The returned slice carries the same
 // pooled-buffer OWNERSHIP contract as AnnounceTo (release via
 // ReleaseAnnounceEntries).
 func (t *Table) AnnounceToWithChangeHead(excludeVia PeerIdentity) ([]AnnounceEntry, uint64) {
@@ -122,50 +123,12 @@ func (t *Table) AnnounceToWithChangeHead(excludeVia PeerIdentity) ([]AnnounceEnt
 	// Phase 3 PR 12.4: black-hole cooldown filter on the same
 	// projection path — symmetric with Announceable above.
 	now := t.clock()
-	// Phase 3: release expired SeqNo flap-cap hold-downs at the projection
-	// boundary and journal them. AnnounceProjectionFor's isInSeqHoldDownLocked
-	// gate un-suppresses an identity the instant its hold-down deadline passes
-	// (a time-driven transition with no mutation event). Clearing + journalling
-	// here — before the head is captured below — makes the un-suppress and the
-	// journal entry simultaneous, so the identity's reappearing delta is covered
-	// (no false shadow miss in deploy 1; a journalled change in deploy 2). If
-	// TickTTL already cleared it, the set is empty and it was journalled there.
-	// No dirty is set: SeqNo hold-down state is announce-emit-only and is not
-	// part of the published routing.Snapshot.
-	if released, _ := t.flap.clearExpiredSeqHoldDownsLocked(now); len(released) > 0 {
-		for _, id := range released {
-			t.markRouteChangedLocked(id)
-		}
-	}
-	cooledDown := func(identity, uplink PeerIdentity) bool {
-		state := t.health.getLocked(identity, uplink)
-		if state == nil || state.CooldownUntil.IsZero() {
-			return false
-		}
-		if now.Before(state.CooldownUntil) {
-			return true
-		}
-		// Phase 3: the cooldown deadline has passed but TickHealth has not
-		// cleared the field yet. Clear it lazily HERE — at the projection
-		// boundary, under t.mu.Lock — and journal the identity, so the un-filter
-		// (this projection now selects the route) and the change-journal entry
-		// happen in the same instant. Without this the route would un-filter on
-		// a time deadline with no journal entry (a false shadow miss in deploy 1
-		// and a missed time-driven delta in deploy 2). Across peers in the same
-		// cycle the first projection clears it, so it is journalled once.
-		//
-		// applyCooldownExpiryLocked mutates CooldownUntil / ConsecutiveFailures
-		// / LastCooldownClearedAt and removes the pair from the routing-relevant
-		// Snapshot.Health subset, so mark the table dirty too — otherwise the
-		// snapshot publisher never republishes (a later TickHealth sees the
-		// field already zero and also skips dirty) and fetchRouteSummary keeps
-		// reporting the route as cooled against a stale cached snapshot.
-		state.applyCooldownExpiryLocked(now)
-		t.dirty.Store(true)
-		t.markRouteChangedLocked(identity)
-		return false
-	}
-	entries, mutated := t.store.AnnounceProjectionFor(excludeVia, now, t.health.isDeadLocked, cooledDown)
+	// Release expired SeqNo flap-cap hold-downs at the projection boundary and
+	// journal them (shared with the delta path). See
+	// releaseExpiredSeqHoldDownsLocked for the un-suppress/journal-simultaneity
+	// rationale.
+	t.releaseExpiredSeqHoldDownsLocked(now)
+	entries, mutated := t.store.AnnounceProjectionFor(excludeVia, now, t.health.isDeadLocked, t.cooldownExpiryFilterLocked(now))
 	if mutated {
 		t.dirty.Store(true)
 	}
@@ -177,6 +140,100 @@ func (t *Table) AnnounceToWithChangeHead(excludeVia PeerIdentity) ([]AnnounceEnt
 		changeHead = t.changeLog.headLocked()
 	}
 	return entries, changeHead
+}
+
+// AnnounceDeltaTo is the deploy-2 cursor-authoritative projection. Instead of
+// rebuilding the whole projection and diffing it against a stored baseline, it
+// projects ONLY the destination identities the change journal recorded since
+// `cursor` — those entries ARE the delta to send to excludeVia.
+//
+// Returns:
+//   - entries: the wire delta (pooled buffer; release via ReleaseAnnounceEntries).
+//     nil when needFull.
+//   - newHead: the journal head to commit as the peer's cursor after the paired
+//     send succeeds. Captured AFTER projection (the lazy cooldown-clear may have
+//     re-journalled an already-projected identity), consistent with `entries`.
+//   - needFull: the [cursor, head) window cannot be served incrementally (cursor
+//     behind a bulk reset, or fell out of the ring); the caller must fall back to
+//     the full AnnounceToWithChangeHead path.
+//
+// Same lock + time-driven-sweep + lazy-cooldown-clear contract as
+// AnnounceToWithChangeHead; the per-identity body (projectChangedFor →
+// projectIdentityLocked) is shared with the full path so the wire SeqNo matches.
+func (t *Table) AnnounceDeltaTo(excludeVia PeerIdentity, cursor uint64) (entries []AnnounceEntry, newHead uint64, needFull bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.clock()
+
+	// Same time-driven SeqNo hold-down release + journal as the full path, so a
+	// hold-down that expired since the last cycle is inside the journal window.
+	t.releaseExpiredSeqHoldDownsLocked(now)
+
+	if t.changeLog == nil {
+		return nil, 0, true
+	}
+	head := t.changeLog.headLocked()
+	changed, needFull := t.changeLog.sinceUpToLocked(cursor, head)
+	if needFull {
+		return nil, head, true
+	}
+
+	entries, mutated := t.store.projectChangedFor(excludeVia, changed, now, t.health.isDeadLocked, t.cooldownExpiryFilterLocked(now))
+	if mutated {
+		t.dirty.Store(true)
+	}
+	// Capture the head AFTER projection: a lazy cooldown-clear above may have
+	// journalled an identity, and that identity is necessarily one we just
+	// projected (the filter only runs for `changed`), so committing the cursor
+	// to this head skips a redundant re-emit next cycle without dropping any
+	// unsent change.
+	newHead = t.changeLog.headLocked()
+	return entries, newHead, false
+}
+
+// releaseExpiredSeqHoldDownsLocked sweeps expired SeqNo flap-cap hold-downs and
+// journals each released identity. AnnounceProjectionFor's isInSeqHoldDownLocked
+// gate un-suppresses an identity the instant its hold-down deadline passes (a
+// time-driven transition with no mutation event); clearing + journalling here —
+// before the journal head is captured — makes the un-suppress and the journal
+// entry simultaneous, so the reappearing route is journalled and the cursor
+// delta picks it up. If TickTTL already cleared it, the set is empty and it was
+// journalled there. No dirty is set: SeqNo hold-down
+// state is announce-emit-only and not part of the published routing.Snapshot.
+// Caller holds t.mu (write).
+func (t *Table) releaseExpiredSeqHoldDownsLocked(now time.Time) {
+	if released, _ := t.flap.clearExpiredSeqHoldDownsLocked(now); len(released) > 0 {
+		for _, id := range released {
+			t.markRouteChangedLocked(id)
+		}
+	}
+}
+
+// cooldownExpiryFilterLocked returns the isCooledDown predicate shared by the
+// full and delta projection paths: it reports whether (identity, uplink) is in
+// black-hole cooldown, and lazily clears+journals an EXPIRED cooldown at the
+// projection boundary so the un-filter (this projection now selects the route)
+// and the change-journal entry happen in the same instant — without it the route
+// would un-filter on a time deadline with no journal entry, so the cursor delta
+// would miss the time-driven change. applyCooldownExpiryLocked
+// also removes the pair from the routing-relevant Snapshot.Health subset, so it
+// marks the table dirty (otherwise a later TickHealth sees the field already zero
+// and skips dirty too, and fetchRouteSummary keeps reporting the route as cooled
+// against a stale cached snapshot). Caller holds t.mu (write).
+func (t *Table) cooldownExpiryFilterLocked(now time.Time) func(identity, uplink PeerIdentity) bool {
+	return func(identity, uplink PeerIdentity) bool {
+		state := t.health.getLocked(identity, uplink)
+		if state == nil || state.CooldownUntil.IsZero() {
+			return false
+		}
+		if now.Before(state.CooldownUntil) {
+			return true
+		}
+		state.applyCooldownExpiryLocked(now)
+		t.dirty.Store(true)
+		t.markRouteChangedLocked(identity)
+		return false
+	}
 }
 
 // ReleaseAnnounceEntries returns a slice obtained from AnnounceTo to the

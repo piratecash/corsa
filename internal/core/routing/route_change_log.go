@@ -4,30 +4,26 @@ package routing
 // comfortably exceed the number of route/health changes a busy node accumulates
 // within one forced-full-sync window (≤ DefaultTTL/2), so a peer synced at the
 // previous forced-full is still served incrementally rather than tripping the
-// overflow force-full. Sized generously for the shadow stage and recalibrated
-// from the observed changes/window metric. ~16k changes is well above a dense
-// node's per-minute churn.
+// overflow force-full. Recalibrated from the observed changes/window metric;
+// ~16k changes is well above a dense node's per-minute churn.
 const defaultRouteChangeLogCapacity = 16384
 
-// routeChangeLog is the Phase 3 (announce delta-cursor) change journal: a
-// fixed-size ring of destination identities whose announce projection MIGHT
-// have changed. Each route/health mutation that today marks the table dirty
-// appends the affected identity here; a per-peer cursor later reads the set of
-// identities changed since it last synced (sinceLocked).
+// routeChangeLog is the announce delta-cursor change journal: a fixed-size ring
+// of destination identities whose announce WIRE projection changed. Each
+// wire-relevant route/health mutation appends the affected identity here (a
+// TTL-only refresh or a rejection does NOT — see Table.markRouteChangedLocked vs
+// markSnapDirtyNoJournalLocked); a per-peer cursor reads the identities changed
+// since it last synced (sinceUpToLocked).
 //
-// DEPLOY-1 SCOPE (shadow): the log is recorded and read only to validate
-// completeness — the authoritative delta is still ComputeDelta over the
-// rebuilt snapshot. The shadow check asserts that every identity ComputeDelta
-// actually emitted is covered by the log; a miss means a mutation site was not
-// wired and is reported (it is the whole point of the shadow stage). The log
-// does NOT yet drive what is sent, so an incomplete wiring is observable but
-// harmless.
+// AUTHORITATIVE: the journal drives what the announce delta sends
+// (AnnounceDeltaTo → projectChangedFor over the changed set). A bulk reset
+// (recordFullLocked) forces cursors behind it to a full sync; the periodic
+// forced full reconciles any gap as the ≤TTL/2 self-heal.
 //
 // Concurrency: the log has no mutex of its own. It is owned by routing.Table
-// and every method requires the caller to hold t.mu (write mode for record*,
-// at least read for sinceLocked — though sinceLocked is in practice called
-// under the same write lock as AnnounceProjectionFor). This mirrors the
-// snapDirtyIDs / healthStore ownership model.
+// and every method requires the caller to hold t.mu (write mode for record*;
+// sinceUpToLocked is called under the same write lock as projectChangedFor in
+// AnnounceDeltaTo). This mirrors the snapDirtyIDs / healthStore ownership model.
 type routeChangeLog struct {
 	// ring holds the last len(ring) appended identities. The entry for
 	// monotonic sequence number s lives at ring[s % len(ring)].

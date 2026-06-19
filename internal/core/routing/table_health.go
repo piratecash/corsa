@@ -198,12 +198,18 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 		return RouteRejected, true
 	}
 
-	status, mutated := t.store.ApplyUpdate(confirmed, now)
+	status, mutated, wireChanged := t.store.ApplyUpdate(confirmed, now)
 	if mutated {
 		t.dirty.Store(true)
-		// Source promotion rewrote the claim (Announcement → HopAck),
-		// which changes the route projection — re-copy this identity.
-		t.markSnapDirtyLocked(identity)
+		// Snapshot always, but journal only when the wire projection changed —
+		// same rationale as UpdateRoute. A HopAck source promotion that only
+		// refreshes ExpiresAt is wire-identical (wireChanged=false) and must not
+		// drive a cursor-mode re-emit; a sig/Extra upgrade on the same
+		// reconfirmation journals normally.
+		t.markSnapDirtyNoJournalLocked(identity)
+		if wireChanged {
+			t.markRouteChangedLocked(identity)
+		}
 	}
 	return status, true
 }

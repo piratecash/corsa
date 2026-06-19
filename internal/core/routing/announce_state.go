@@ -59,9 +59,6 @@ type AnnouncePeerState struct {
 	// attempt, regardless of success.
 	lastFullSyncAttemptAt time.Time
 
-	// lastDeltaSendAt is the timestamp of the last successful delta send.
-	lastDeltaSendAt time.Time
-
 	// lastSeenLiveAt is the last time this peer appeared in the announce
 	// loop's authoritative live routing-capable set. It is seeded at
 	// creation and refreshed every cycle by ReconcileLiveSet. Eviction is
@@ -167,17 +164,20 @@ type AnnouncePeerState struct {
 	// touches the legacy flag, and vice versa.
 	wireBaselineV3SentToPeer bool
 
-	// announceCursor is the Phase 3 change-journal cursor: the change-log head
-	// value this peer's lastSentSnapshot was reconciled to. It MUST advance in
-	// lock-step with lastSentSnapshot — and does, because it is committed in the
-	// SAME s.mu critical section that advances lastSentSnapshot
-	// (commitSentProgressLocked, reached via RecordDeltaSendSuccess /
-	// RecordFullSyncSuccess on a successful send, or RecordDeltaNoop on a no-op
-	// cycle). A failed send commits neither, leaving the pair put so the
-	// recomputed delta next cycle still validates against the same journal
-	// window. Atomic commit is what makes the pair safe against the concurrent
-	// connect-time full sync that mutates the same AnnouncePeerState from another
-	// goroutine. DEPLOY-1 SCOPE: used only by the shadow completeness check.
+	// announceCursor is the change-journal cursor: the change-log head value this
+	// peer has been synced up to. It is the AUTHORITATIVE position for the
+	// cursor-mode delta path (AnnounceDeltaTo projects the journal window
+	// [cursor, head)); lastSentSnapshot is the separate forced-full baseline and
+	// the two are intentionally DECOUPLED:
+	//   - a delta send advances only the cursor (RecordCursorAdvance), and
+	//     monotonically — a stale in-flight delta must never roll it back below a
+	//     newer head a concurrent forced/connect-time full sync already committed,
+	//     which would replay a stale window or trip needFull + full-sync rate
+	//     limiting;
+	//   - a forced full sync advances the (lastSentSnapshot, cursor) pair together
+	//     (commitSentProgressLocked via RecordFullSyncSuccess); that pair is always
+	//     internally consistent (the snapshot and head are from the same
+	//     projection), so even a late-committing full sync self-heals.
 	// Guarded by s.mu.
 	announceCursor uint64
 }
@@ -220,12 +220,12 @@ type announcePeerStateView struct {
 	// announceToAllPeers to decide whether a v3 kind="delta" is safe.
 	HasSentWireBaselineV3 bool
 
-	// AnnounceCursor is the Phase 3 change-journal cursor captured in the SAME
-	// lock acquisition as LastSentSnapshot, so the announce loop validates the
-	// delta (computed from LastSentSnapshot) against the journal window from the
-	// MATCHING cursor. Reading the cursor separately would tear the pair against
-	// a concurrent connect-time full sync that commits a newer snapshot+cursor
-	// in between (see commitSentProgressLocked).
+	// AnnounceCursor is the change-journal cursor: the authoritative position the
+	// cursor-mode delta path projects from (AnnounceDeltaTo reads the journal
+	// window [cursor, head)). Captured in the same lock acquisition as
+	// the rest of the view so the loop reads a consistent cursor; the delta is
+	// journal-projected from it, NOT diffed against LastSentSnapshot (which is the
+	// separate forced-full baseline / first-sync nil-check).
 	AnnounceCursor uint64
 }
 
@@ -248,20 +248,18 @@ func (s *AnnouncePeerState) View() announcePeerStateView {
 	}
 }
 
-// commitSentProgressLocked atomically advances the (lastSentSnapshot,
-// announceCursor) pair — the Phase 3 invariant that they move in lock-step.
-// Both MUST be set in the same s.mu critical section: the announce loop and the
-// connect-time full sync mutate the same AnnouncePeerState from different
-// goroutines (see service.go's full-sync spawn), so two separate calls could
-// otherwise tear the pair (a reader seeing a new snapshot with an old cursor)
-// or let a stale send roll back one field but not the other. A stale send that
-// commits a wholly-older pair self-heals: ComputeDelta against the older
-// snapshot is validated against the matching older cursor window, so no false
-// shadow divergence results — only a redundant (additive-safe) delta next cycle.
-// Caller must hold s.mu.
+// commitSentProgressLocked advances the forced-full baseline (lastSentSnapshot)
+// and the cursor for the FORCED-FULL path (RecordFullSyncSuccess), in the same
+// s.mu critical section. The cursor is advanced MONOTONICALLY: a stale full sync
+// that finishes after a newer delta/full must not roll the cursor back below the
+// head already committed (which would trip needFull + full-sync rate limiting in
+// cursor mode). lastSentSnapshot is set unconditionally — it is the forced-full
+// baseline and the first-sync nil-check, never a per-delta diff base, so a
+// slightly older baseline paired with a newer cursor is harmless (the next
+// forced-full rebuilds from scratch anyway). Caller must hold s.mu.
 func (s *AnnouncePeerState) commitSentProgressLocked(snapshot *AnnounceSnapshot, cursor uint64) {
 	s.lastSentSnapshot = snapshot
-	s.announceCursor = cursor
+	s.advanceCursorMonotonicLocked(cursor)
 }
 
 // RecordFullSyncSuccess updates the state after a successful full sync,
@@ -284,26 +282,33 @@ func (s *AnnouncePeerState) RecordFullSyncAttempt(now time.Time) {
 	s.lastFullSyncAttemptAt = now
 }
 
-// RecordDeltaSendSuccess updates the state after a successful delta send,
-// atomically advancing the (lastSentSnapshot, cursor) pair (see
-// commitSentProgressLocked). The full snapshot (not just the delta) is stored
-// as the new baseline.
-func (s *AnnouncePeerState) RecordDeltaSendSuccess(fullSnapshot *AnnounceSnapshot, cursor uint64, now time.Time) {
+// RecordCursorAdvance advances ONLY the announceCursor — the cursor-authoritative
+// delta commit. lastSentSnapshot is deliberately NOT touched: the delta is
+// projected from the change journal (projectChangedFor), not diffed against
+// lastSentSnapshot, so lastSentSnapshot is refreshed only by the periodic
+// forced-full sync (which doubles as reconciliation / self-heal). The two are
+// intentionally decoupled — lastSentSnapshot serves only the first-sync nil-check
+// and the forced-full baseline. Caller passes the journal head returned by
+// AnnounceDeltaTo, committed (monotonically) only after the paired send succeeded.
+func (s *AnnouncePeerState) RecordCursorAdvance(cursor uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.commitSentProgressLocked(fullSnapshot, cursor)
-	s.lastDeltaSendAt = now
+	s.advanceCursorMonotonicLocked(cursor)
 }
 
-// RecordDeltaNoop advances the (lastSentSnapshot, cursor) pair atomically on a
-// no-op delta cycle: nothing was sent, but the freshly-built snapshot is
-// content-equal to the prior baseline and the journal was consumed up to
-// `cursor`. Committing both together (rather than advancing only the cursor)
-// keeps the pair from tearing against a concurrent connect-time full sync.
-func (s *AnnouncePeerState) RecordDeltaNoop(snapshot *AnnounceSnapshot, cursor uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.commitSentProgressLocked(snapshot, cursor)
+// advanceCursorMonotonicLocked advances announceCursor to max(current, cursor).
+// Every commit path goes through it so a stale in-flight send — a delta
+// (RecordCursorAdvance) OR a forced/connect-time full sync
+// (commitSentProgressLocked) that finishes after a newer one — can never roll the
+// cursor backwards. A backwards roll would make the next AnnounceDeltaTo replay a
+// large stale [old, head) window, or fall behind a bulk reset / out of the ring
+// and trip needFull + full-sync rate limiting, delaying fresh journal changes.
+// The journal head only grows, so the larger cursor is always the more-synced
+// one. Caller must hold s.mu.
+func (s *AnnouncePeerState) advanceCursorMonotonicLocked(cursor uint64) {
+	if cursor > s.announceCursor {
+		s.announceCursor = cursor
+	}
 }
 
 // HasCapability returns true when the peer's stored capability snapshot

@@ -53,11 +53,17 @@ func runReconnectSuppressionCycle(t *testing.T, hardResync bool) int {
 		routing.WithStateRegistry(registry),
 	)
 
-	// Seed a baseline equal to the current projection so the delta is
-	// empty; the only thing that can produce a send is a forced full.
-	baseline := routing.BuildAnnounceSnapshot(table.AnnounceTo(domaintest.ID("peer-C")))
+	// Seed a baseline equal to the current projection AND a cursor at the
+	// matching journal head, so the cursor delta is empty (nothing changed since)
+	// and the only thing that can produce a send is a forced full. Seeding a
+	// stale cursor (e.g. 0) would leave the AddDirectPeer journal entry pending
+	// and the cursor path would re-emit it — the production forced-full commits
+	// snapHead exactly like this.
+	raw, head := table.AnnounceToWithChangeHead(domaintest.ID("peer-C"))
+	baseline := routing.BuildAnnounceSnapshot(raw)
+	table.ReleaseAnnounceEntries(raw)
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
-	state.RecordFullSyncSuccess(baseline, 0, now)
+	state.RecordFullSyncSuccess(baseline, head, now)
 
 	if hardResync {
 		registry.MarkInvalid(domaintest.ID("peer-C")) // request_resync / consistency loss

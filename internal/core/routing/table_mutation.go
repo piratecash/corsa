@@ -117,10 +117,21 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	status, mutated := t.store.ApplyUpdate(entry, t.clock())
+	status, mutated, wireChanged := t.store.ApplyUpdate(entry, t.clock())
 	if mutated {
 		t.dirty.Store(true)
-		t.markSnapDirtyLocked(entry.Identity)
+		// Snapshot always (ApplyUpdate may have refreshed ExpiresAt, a Snapshot
+		// field), but journal — which drives the cursor-mode delta — only when the
+		// announce WIRE projection actually changed. A same-SeqNo/same-hops TTL
+		// refresh is mutated-but-wire-identical (wireChanged=false): journaling it
+		// would re-emit an unchanged delta and fan out unchanged routes across the
+		// mesh on every refresh. A sig/Extra upgrade on the same reconfirmation IS
+		// wire content (wireChanged=true) and journals normally, so it still
+		// propagates as a delta rather than waiting for the forced full.
+		t.markSnapDirtyNoJournalLocked(entry.Identity)
+		if wireChanged {
+			t.markRouteChangedLocked(entry.Identity)
+		}
 	}
 	// Phase 2 health bookkeeping at the live-update boundary
 	// (review concerns P1#1 / P1#2 / 11.21 P2#1):
@@ -534,12 +545,19 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 	// InvalidateAllVia rewrites every affected route's
 	// Hops/SeqNo/ExpiresAt. Both are part of the published Snapshot.
 	t.dirty.Store(true)
-	// InvalidateAllVia touches an unbounded set of identities (every
-	// destination reachable through the lost uplink); the returned `affected`
-	// set is used above only for health eviction, while the snapshot still
-	// forces a full incremental re-copy here (cheaper than per-identity marking
-	// for a churn this wide).
-	t.markSnapFullDirtyLocked()
+	// The snapshot needs a full re-copy (InvalidateAllVia rewrote every affected
+	// route's Hops/SeqNo/ExpiresAt and may have shrunk buckets), but the affected
+	// identity set IS known, so journal those identities precisely instead of a
+	// bulk reset. A bulk reset would force every cursor-mode peer into a
+	// rate-limited full sync on each direct-peer disconnect — delaying the
+	// withdrawal and defeating the delta savings under churn. `affected` is the
+	// complete set of destinations reachable through the lost uplink (peer's own
+	// direct claim included; exposed backups are a subset), i.e. exactly the
+	// identities whose announce projection changed.
+	t.markSnapshotFullDirtyLocked()
+	for _, identity := range affected {
+		t.markRouteChangedLocked(identity)
+	}
 
 	return RemoveDirectPeerResult{
 		Withdrawals:        withdrawals,
@@ -582,9 +600,13 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 			}
 		}
 		t.dirty.Store(true)
-		// Transit invalidation spans every identity routed via this
-		// next-hop; force a full incremental re-copy.
-		t.markSnapFullDirtyLocked()
+		// Snapshot needs a full re-copy, but the affected set is known — journal
+		// it precisely so cursor-mode peers get a targeted delta rather than a
+		// rate-limited full sync (see the RemoveDirectPeer rationale).
+		t.markSnapshotFullDirtyLocked()
+		for _, identity := range affected {
+			t.markRouteChangedLocked(identity)
+		}
 	}
 	return invalidated, exposed
 }

@@ -177,17 +177,17 @@ type Table struct {
 	// never mutated in place.
 	snapRawCache map[PeerIdentity][]RouteEntry
 
-	// changeLog is the Phase 3 (announce delta-cursor) change journal. Every
-	// route/health mutation that marks the table dirty also appends the
-	// affected identity here (markRouteChangedLocked / markRouteChangedFullLocked),
-	// so a per-peer cursor can later read the identities changed since it last
-	// synced instead of rebuilding the whole projection.
+	// changeLog is the announce delta-cursor change journal. Every route/health
+	// mutation that changes the WIRE projection appends the affected identity here
+	// (markRouteChangedLocked / markRouteChangedFullLocked); a per-peer cursor
+	// reads the identities changed since it last synced (AnnounceDeltaTo) instead
+	// of rebuilding the whole projection and diffing it.
 	//
-	// DEPLOY-1 SCOPE: recorded and read only by the shadow completeness check
-	// in the announce loop — it does NOT drive what is sent (the authoritative
-	// delta is still ComputeDelta over the rebuilt snapshot). See
-	// docs/refactoring/phase3-announce-delta-cursor.md. Guarded by t.mu, same
-	// as snapDirtyIDs.
+	// AUTHORITATIVE: the journal drives what the announce delta sends. Mutations
+	// that do NOT change the wire projection (TTL-only ExpiresAt refresh, cap
+	// rejections) deliberately do not append, so cursor deltas do not fan out
+	// unchanged routes. See docs/refactoring/phase3-announce-delta-cursor.md.
+	// Guarded by t.mu, same as snapDirtyIDs.
 	changeLog *routeChangeLog
 
 	// health owns the RouteHealthState map keyed per (Identity,
@@ -469,11 +469,10 @@ func NewTable(opts ...TableOption) *Table {
 		clock:  time.Now,
 		flap:   newFlapDetector(),
 		health: newHealthStore(),
-		// Phase 3 change journal (announce delta-cursor, shadow stage). The
-		// ring must remember at least one forced-full-sync window's worth of
-		// changes so a peer synced at the previous forced-full can still be
-		// served incrementally; defaultRouteChangeLogCapacity is sized
-		// generously for that and recalibrated from the shadow-stage metrics.
+		// Announce delta-cursor change journal. The ring must remember at least
+		// one forced-full-sync window's worth of changes so a peer synced at the
+		// previous forced-full can still be served incrementally rather than
+		// tripping the overflow force-full; see defaultRouteChangeLogCapacity.
 		changeLog: newRouteChangeLog(defaultRouteChangeLogCapacity),
 		// Phase 4 v3 epoch default. WithEpoch overrides for tests. See
 		// the Table.epoch field doc for the immutability rationale.
@@ -579,20 +578,44 @@ func (t *Table) IsDirty() bool {
 // per-identity route mutation that needs a snapshot re-copy is exactly a
 // change a per-peer announce cursor must learn about.
 func (t *Table) markSnapDirtyLocked(identity PeerIdentity) {
+	t.markSnapDirtyNoJournalLocked(identity)
+	t.markRouteChangedLocked(identity)
+}
+
+// markSnapDirtyNoJournalLocked marks the published Snapshot dirty for `identity`
+// WITHOUT journaling a change. Used where a mutation touches a Snapshot field
+// that is NOT on the announce wire (e.g. ExpiresAt on a same-SeqNo/same-hops TTL
+// refresh): the routing.Snapshot must re-copy the bucket, but the AnnounceEntry
+// is byte-identical, so journaling would make the cursor-mode delta re-emit an
+// unchanged route and fan it out across the mesh on every refresh. The caller
+// journals separately only when the wire projection actually changed. Caller
+// must hold t.mu in W mode.
+func (t *Table) markSnapDirtyNoJournalLocked(identity PeerIdentity) {
 	if t.snapDirtyIDs == nil {
 		t.snapDirtyIDs = make(map[PeerIdentity]struct{})
 	}
 	t.snapDirtyIDs[identity] = struct{}{}
-	t.markRouteChangedLocked(identity)
 }
 
 // markSnapFullDirtyLocked forces the next SnapshotIncremental to re-copy
-// every bucket. Used by bulk mutations that touch an unbounded identity
-// set. Caller must hold t.mu in W mode. It also records a full reset in the
-// Phase 3 change journal so per-peer cursors below it force a full sync.
+// every bucket. Used by bulk mutations that touch an UNBOUNDED, unknown
+// identity set. Caller must hold t.mu in W mode. It also records a full reset
+// in the Phase 3 change journal so per-peer cursors below it force a full sync —
+// the safe option when the affected set cannot be enumerated cheaply.
 func (t *Table) markSnapFullDirtyLocked() {
 	t.snapFullDirty = true
 	t.markRouteChangedFullLocked()
+}
+
+// markSnapshotFullDirtyLocked forces the next SnapshotIncremental to re-copy
+// every bucket WITHOUT recording a change-journal bulk reset. Used by bulk
+// mutations that DO know their affected identity set: the published snapshot
+// still needs a full re-copy (buckets removed/shrunk), but the caller journals
+// each affected identity precisely (markRouteChangedLocked) so cursor-mode peers
+// receive a targeted delta instead of being forced — and then rate-limited —
+// into a full sync. Caller must hold t.mu in W mode.
+func (t *Table) markSnapshotFullDirtyLocked() {
+	t.snapFullDirty = true
 }
 
 // markRouteChangedLocked appends a per-identity change to the Phase 3 change
@@ -615,19 +638,4 @@ func (t *Table) markRouteChangedFullLocked() {
 		return
 	}
 	t.changeLog.recordFullLocked()
-}
-
-// ChangeLogSinceUpTo returns the distinct identities changed in [cursor, bound)
-// and needFull (cursor fell behind a bulk reset or out of the ring window).
-// `bound` is a head captured under t.mu atomically with an announce projection
-// (see AnnounceToWithChangeHead), so the result reflects exactly that
-// projection's mutations. Takes t.mu in R mode. DEPLOY-1 SCOPE: consumed only by
-// the announce loop's shadow completeness check.
-func (t *Table) ChangeLogSinceUpTo(cursor, bound uint64) (changed []PeerIdentity, needFull bool) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if t.changeLog == nil {
-		return nil, false
-	}
-	return t.changeLog.sinceUpToLocked(cursor, bound)
 }

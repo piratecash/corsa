@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"bytes"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -104,7 +105,22 @@ func logFastInvalidation(entry RouteEntry, accepted bool, reason string) {
 // Status mapping: returns RouteAccepted on insert/improve,
 // RouteUnchanged on alive same-or-worse reconfirmation,
 // RouteRejected on tombstone/SeqNo guards.
-func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateStatus, bool) {
+// ApplyUpdate returns (status, mutated, wireChanged). `mutated` is true whenever
+// storage changed in a way the published Snapshot must re-copy — including an
+// ExpiresAt-only TTL refresh, a RouteCapStats counter bump on a cap rejection, or
+// a tombstone slice reshape on an admit-rejection. `wireChanged` is the narrower
+// "did the announce WIRE projection (Origin/Hops/SeqNo/Extra/AttestedSig) change"
+// signal that drives the cursor-mode change journal, so TTL refreshes and
+// rejections do not fan out unchanged routes across the mesh:
+//   - RouteAccepted → wireChanged=true (admission / SeqNo bump / hops improve /
+//     lineage replace all change the emitted entry).
+//   - RouteRejected → wireChanged=false ALWAYS: the incoming was not accepted, so
+//     the stored winner/tombstone is preserved and the projection is unchanged,
+//     even when buckets were reshaped or counters moved (mutated=true).
+//   - RouteUnchanged on a same-SeqNo/same-hops reconfirmation → wireChanged is
+//     true only if the AttestedSig/Extra bytes actually changed (a sig upgrade,
+//     which IS wire content); a pure TTL refresh keeps it false.
+func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateStatus, bool, bool) {
 	// Direct routes are socket-bound, not TTL-managed (see
 	// docs/routing.md "Direct route lifecycle"): ExpiresAt is
 	// intentionally zero so that IsExpired never triggers and
@@ -170,7 +186,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// clamped-bad-hops) the incoming claim lands on.
 	if entry.Source == RouteSourceAnnouncement && s.flap.isInSeqHoldDownLocked(entry.Identity, now) {
 		if entry.SeqNo > s.outboundMax[entry.Identity]+1 {
-			return RouteRejected, false
+			return RouteRejected, false, false
 		}
 	}
 
@@ -253,7 +269,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// short route re-announced) is admitted normally even while
 		// hold-down is active.
 		if s.flap.isInBadHopsHoldDownLocked(entry.Identity, now) {
-			return RouteRejected, false
+			return RouteRejected, false, false
 		}
 
 		incoming.Withdrawn = true
@@ -266,7 +282,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			s.capStats.fastInvalidations.Add(1)
 			logFastInvalidation(entry, true, "")
 			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.Origin, now, &s.capStats.badHopsHoldowns)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		}
 
 		old := &bucket[idx]
@@ -285,7 +301,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
 			if prevHigh, ok := old.SeenOriginSeqs[entry.Origin]; ok && entry.SeqNo <= prevHigh {
 				logFastInvalidation(entry, false, "cross_origin_stale_replay")
-				return RouteRejected, false
+				return RouteRejected, false, false
 			}
 		}
 		if entry.SeqNo > old.SeqNo {
@@ -299,14 +315,14 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			s.capStats.fastInvalidations.Add(1)
 			logFastInvalidation(entry, true, "")
 			s.flap.recordBadHopsInvalidationLocked(entry.Identity, entry.Origin, now, &s.capStats.badHopsHoldowns)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		}
 		// Stale bad-hops replay: the stored claim is already at a
 		// higher SeqNo and presumably loop-free. Drop without
 		// bumping the counter — the counter measures successful
 		// invalidations, not stale samples.
 		logFastInvalidation(entry, false, "stale_seqno")
-		return RouteRejected, false
+		return RouteRejected, false, false
 	}
 
 	// HopAck promotion lineage override. confirmRouteViaHopAck
@@ -396,7 +412,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			incoming.SeenOriginSeqs = mergeOriginObservation(nil, entry.Origin, entry.SeqNo)
 			s.buckets[entry.Identity] = append(bucket, incoming)
 			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		}
 
 		// Live admission. AdmitNew owns the actual append /
@@ -424,7 +440,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		switch decision {
 		case AdmissionAccepted, AdmissionAcceptedReplaced:
 			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		case AdmissionRejectedFull, AdmissionRejectedAllProtected:
 			// Counters in AdmitNew were incremented even though
 			// the buckets map is unchanged. RouteCapStats rides
@@ -444,14 +460,14 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			// RouteUnchanged branches deliberately return
 			// mutated=false because they touch nothing observable
 			// in the snapshot.
-			return RouteRejected, true
+			return RouteRejected, true, false
 		default:
 			// Defence in depth: an unrecognised decision from a
 			// future AdmitNew extension still surfaces as
 			// RouteRejected so the caller does not see a bogus
 			// RouteAccepted, and mutated stays false so we do
 			// not mask the missing case under a phantom rebuild.
-			return RouteRejected, false
+			return RouteRejected, false, false
 		}
 	}
 
@@ -506,7 +522,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 	// requires entry.Origin != old.LastIngressOrigin.
 	if !entry.Origin.IsZero() && !old.LastIngressOrigin.IsZero() && entry.Origin != old.LastIngressOrigin {
 		if prevHigh, ok := old.SeenOriginSeqs[entry.Origin]; ok && entry.SeqNo <= prevHigh {
-			return RouteRejected, false
+			return RouteRejected, false, false
 		}
 	}
 
@@ -548,7 +564,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 			switch decision {
 			case AdmissionAccepted, AdmissionAcceptedReplaced:
 				s.syncSeqCounterLocked(entry)
-				return RouteAccepted, true
+				return RouteAccepted, true, true
 			default:
 				s.buckets[entry.Identity] = append(s.buckets[entry.Identity], savedTombstone)
 				// AdmitNew already bumped the rejection counter;
@@ -556,14 +572,14 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 				// with the updated counter and the rebuilt slice
 				// (the tombstone may now sit at a different
 				// index).
-				return RouteRejected, true
+				return RouteRejected, true, false
 			}
 		}
 
 		incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 		bucket[idx] = incoming
 		s.syncSeqCounterLocked(entry)
-		return RouteAccepted, true
+		return RouteAccepted, true, true
 	}
 
 	if incoming.SeqNo == old.SeqNo {
@@ -617,16 +633,16 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 				switch decision {
 				case AdmissionAccepted, AdmissionAcceptedReplaced:
 					s.syncSeqCounterLocked(entry)
-					return RouteAccepted, true
+					return RouteAccepted, true, true
 				default:
 					s.buckets[entry.Identity] = append(s.buckets[entry.Identity], savedTombstone)
-					return RouteRejected, true
+					return RouteRejected, true, false
 				}
 			}
 			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 			bucket[idx] = incoming
 			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		}
 
 		// Observation tracking: record entry.Origin's high-water on
@@ -676,19 +692,19 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		// (subject only to the per-Origin high-water guard at the
 		// top of ApplyUpdate).
 		if old.IsWithdrawn() {
-			return RouteRejected, false
+			return RouteRejected, false, false
 		}
 		if incoming.Source.TrustRank() > old.Source.TrustRank() {
 			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 			bucket[idx] = incoming
 			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		}
 		if incoming.Source == old.Source && incoming.Hops < old.Hops {
 			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 			bucket[idx] = incoming
 			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		}
 		// Same SeqNo, same or worse trust/hops. The existing
 		// claim is alive and unchanged — this is a
@@ -738,6 +754,13 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		if !old.IsExpired(now) {
 			sameHopsReconfirmation := incoming.Hops == old.Hops
 			if sameHopsReconfirmation && old.Source != RouteSourceDirect {
+				// Snapshot the wire-content bytes BEFORE the upgrade so we can tell
+				// a pure TTL refresh (wire-identical) from a sig/Extra upgrade
+				// (wire-changed) for the change journal below. AttestedSigVerified
+				// is NOT wire content (local-only), so a verify-only flip with the
+				// same bytes stays wireChanged=false.
+				prevSig := bucket[idx].AttestedSig
+				prevExtra := bucket[idx].Extra
 				bucket[idx].ExpiresAt = now.Add(s.defaultTTL)
 				bucket[idx].UpdatedAt = now
 				// Round-11: upgrade attested-links signature
@@ -829,9 +852,16 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 				// republish on upgrade is also required for the
 				// new bonus to surface to Lookup callers
 				// reading from the snapshot.
-				return RouteUnchanged, true
+				//
+				// wireChanged distinguishes a sig/Extra upgrade (the announce
+				// entry's AttestedSig/Extra bytes changed → journal it so the
+				// cursor delta carries it) from a pure TTL refresh (wire-identical
+				// → snapshot-only, no journal, no mesh fan-out).
+				wireChanged := !bytes.Equal(prevSig, bucket[idx].AttestedSig) ||
+					!normalizedExtraEqual(prevExtra, bucket[idx].Extra)
+				return RouteUnchanged, true, wireChanged
 			}
-			return RouteUnchanged, false
+			return RouteUnchanged, false, false
 		}
 
 		// Expired claim with same SeqNo: the route died because
@@ -846,7 +876,7 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 		incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 		bucket[idx] = incoming
 		s.syncSeqCounterLocked(entry)
-		return RouteAccepted, true
+		return RouteAccepted, true, true
 	}
 
 	// Stale SeqNo (incoming.SeqNo < old.SeqNo).
@@ -933,19 +963,19 @@ func (s *routeStore) ApplyUpdate(entry RouteEntry, now time.Time) (RouteUpdateSt
 				switch decision {
 				case AdmissionAccepted, AdmissionAcceptedReplaced:
 					s.syncSeqCounterLocked(entry)
-					return RouteAccepted, true
+					return RouteAccepted, true, true
 				default:
 					s.buckets[entry.Identity] = append(s.buckets[entry.Identity], savedTombstone)
-					return RouteRejected, true
+					return RouteRejected, true, false
 				}
 			}
 			incoming.SeenOriginSeqs = mergeOriginObservation(old.SeenOriginSeqs, entry.Origin, entry.SeqNo)
 			bucket[idx] = incoming
 			s.syncSeqCounterLocked(entry)
-			return RouteAccepted, true
+			return RouteAccepted, true, true
 		}
 	}
-	return RouteRejected, false
+	return RouteRejected, false, false
 }
 
 // WithdrawTriple marks (identity, uplink=key.NextHop) as

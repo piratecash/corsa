@@ -355,221 +355,265 @@ func (s *routeStore) AnnounceProjectionFor(excludeVia PeerIdentity, now time.Tim
 	result := getAnnounceEntryBuf()
 	mutated := false
 	for identity, bucket := range s.buckets {
-		if identity == excludeVia {
+		var m bool
+		result, m = s.projectIdentityLocked(identity, bucket, excludeVia, origin, now, isDead, isCooledDown, result)
+		mutated = mutated || m
+	}
+	return result, mutated
+}
+
+// projectChangedFor is the deploy-2 cursor-authoritative projection: it emits
+// the wire entries for ONLY the destination identities in `changed` (the change
+// journal's set since a peer's cursor), instead of sweeping every bucket. The
+// per-identity body (projectIdentityLocked) is shared with AnnounceProjectionFor,
+// and the per-receiver wire SeqNo for an identity depends only on that identity's
+// own outbound state (outboundContent / outboundBroadcastMax / outboundPeerMax),
+// never on other identities — so projecting a subset assigns the IDENTICAL SeqNo
+// the full sweep would. Identities absent from s.buckets are skipped (fully gone,
+// no tombstone): the full path emits nothing for them either, since ComputeDelta
+// only walks present entries.
+//
+// Caller holds t.mu (write). Returns the pooled projection buffer (release via
+// Table.ReleaseAnnounceEntries) and whether outbound SeqNo state mutated in a
+// way that requires a republish.
+func (s *routeStore) projectChangedFor(excludeVia PeerIdentity, changed []PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool) ([]AnnounceEntry, bool) {
+	origin := s.localOrigin
+	result := getAnnounceEntryBuf()
+	mutated := false
+	for _, identity := range changed {
+		bucket, ok := s.buckets[identity]
+		if !ok {
 			continue
 		}
+		var m bool
+		result, m = s.projectIdentityLocked(identity, bucket, excludeVia, origin, now, isDead, isCooledDown, result)
+		mutated = mutated || m
+	}
+	return result, mutated
+}
 
-		// Phase 1 P2: skip Identities currently in SeqNo flap-cap
-		// hold-down. Wire emit for X is suppressed to every peer for
-		// the entire DefaultSeqHoldDownDuration window once the
-		// per-Identity advance rate has crossed
-		// MaxSeqAdvancePerWindow — the suppression is what bounds
-		// the per-cycle delta dispatcher's work, the per-peer
-		// announce baseline cache size, and the CPU cost of
-		// BuildAnnounceSnapshot when a single Identity hot-loops.
-		// Receive-side state stays accurate (ApplyUpdate keeps
-		// processing legitimate ingest); only the wire-emit side is
-		// gated. See flap.go::isInSeqHoldDownLocked.
-		if s.flap.isInSeqHoldDownLocked(identity, now) {
+// projectIdentityLocked appends the wire AnnounceEntry(s) for ONE destination
+// identity to result and returns the (possibly grown) slice plus whether it
+// mutated outbound SeqNo state in a way that requires a republish (a SeqNo
+// flap-cap hold-down engaged inside the emit). It is the shared per-identity
+// body of AnnounceProjectionFor (full sweep) and projectChangedFor (journal
+// subset), so both assign the identical per-receiver wire SeqNo. Caller holds
+// t.mu (write).
+func (s *routeStore) projectIdentityLocked(identity PeerIdentity, bucket []UplinkClaim, excludeVia, origin PeerIdentity, now time.Time, isDead, isCooledDown func(identity, uplink PeerIdentity) bool, result []AnnounceEntry) ([]AnnounceEntry, bool) {
+	if identity == excludeVia {
+		return result, false
+	}
+
+	// Phase 1 P2: skip Identities currently in SeqNo flap-cap
+	// hold-down. Wire emit for X is suppressed to every peer for
+	// the entire DefaultSeqHoldDownDuration window once the
+	// per-Identity advance rate has crossed
+	// MaxSeqAdvancePerWindow — the suppression is what bounds
+	// the per-cycle delta dispatcher's work, the per-peer
+	// announce baseline cache size, and the CPU cost of
+	// BuildAnnounceSnapshot when a single Identity hot-loops.
+	// Receive-side state stays accurate (ApplyUpdate keeps
+	// processing legitimate ingest); only the wire-emit side is
+	// gated. See flap.go::isInSeqHoldDownLocked.
+	if s.flap.isInSeqHoldDownLocked(identity, now) {
+		return result, false
+	}
+
+	// emitOrigin defaults to localOrigin (Phase A migration
+	// contract — sender-originated semantic, same for live
+	// and withdrawal so pre-A1 receivers track them under one
+	// (Identity, sender, sender) triple). Empty fallback to
+	// identity matches toRouteEntry, keeping test fixtures
+	// without WithLocalOrigin from emitting Origin == "".
+	emitOrigin := origin
+	if emitOrigin.IsZero() {
+		emitOrigin = identity
+	}
+
+	var liveWinner *UplinkClaim
+	var tombstones []UplinkClaim
+	for i := range bucket {
+		claim := &bucket[i]
+		if claim.Uplink == excludeVia {
 			continue
 		}
-
-		// emitOrigin defaults to localOrigin (Phase A migration
-		// contract — sender-originated semantic, same for live
-		// and withdrawal so pre-A1 receivers track them under one
-		// (Identity, sender, sender) triple). Empty fallback to
-		// identity matches toRouteEntry, keeping test fixtures
-		// without WithLocalOrigin from emitting Origin == "".
-		emitOrigin := origin
-		if emitOrigin.IsZero() {
-			emitOrigin = identity
-		}
-
-		var liveWinner *UplinkClaim
-		var tombstones []UplinkClaim
-		for i := range bucket {
-			claim := &bucket[i]
-			if claim.Uplink == excludeVia {
-				continue
-			}
-			if claim.IsExpired(now) {
-				continue
-			}
-			if claim.IsWithdrawn() {
-				if claim.Source == RouteSourceDirect {
-					tombstones = append(tombstones, *claim)
-				}
-				continue
-			}
-			// Phase 2 health filter (PR 11.23 P2 / 11.24 P2#1):
-			// skip locally-Dead transit pairs so they are not
-			// re-advertised. Direct (own-origin) claims are
-			// exempt — their lifecycle is session-driven via
-			// AddDirectPeer / RemoveDirectPeer, which emit real
-			// wire withdrawals on disconnect. Health-Dead on a
-			// Direct claim is a "no recent organic hop_ack"
-			// signal, NOT "route is gone", and silently dropping
-			// it from announce would violate the own-origin
-			// withdrawal contract on the HealthDead constant
-			// (health.go) — neighbours would keep the prior live
-			// route until TTL (~120 s) instead of seeing an
-			// authoritative withdrawal. See AnnounceableFor for
-			// the symmetric exemption.
-			if claim.Source != RouteSourceDirect && isDead != nil && isDead(identity, claim.Uplink) {
-				continue
-			}
-			// Phase 3 PR 12.4: black-hole cooldown filter, no
-			// Direct exemption — mirror of the AnnounceableFor
-			// branch. The arm comes from reputation's 5
-			// consecutive hop-ack failures (PR 12.2 wiring) and
-			// auto-clears after BlackHoleCooldown.
-			if isCooledDown != nil && isCooledDown(identity, claim.Uplink) {
-				continue
-			}
-			if liveWinner == nil || isBetterLiveClaim(claim, liveWinner) {
-				w := *claim
-				liveWinner = &w
-			}
-		}
-
-		if liveWinner != nil {
-			sig := outboundEmitSig{
-				Uplink:    liveWinner.Uplink,
-				Hops:      liveWinner.Hops,
-				Withdrawn: false,
-				ExtraSig:  string(normalizeExtra(liveWinner.Extra)),
-				// Round-14 fix: include AttestedSig bytes in the
-				// content cache key so a sig-only upgrade in
-				// storage (reconfirmation path) produces a fresh
-				// outbound SeqNo. Without this the cache hits on
-				// the unsigned prior emit and the new signed
-				// content ships at the burnt SeqNo, which the
-				// receiver rejects as stale.
-				AttestedSig: string(liveWinner.AttestedSig),
-			}
-			// Per-peer emit: only excludeVia's receiver state
-			// advances on this AnnounceTo call. The per-peer
-			// helper consults both outboundBroadcastMax (cross-
-			// peer watermark) AND outboundPeerMax[(Identity,
-			// excludeVia)] (this peer's last-emitted high water)
-			// so a winner-switch A→B→A on the same peer's
-			// timeline forces a fresh SeqNo. See
-			// nextOutboundSeqLockedPerPeer's doc-comment.
-			wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, liveWinner.SeqNo, liveWinner.LastIngressOrigin, now)
-			if armed {
-				// The advance we just recorded crossed the SeqNo
-				// flap-cap threshold and engaged hold-down INSIDE
-				// this call. The top-of-loop isInSeqHoldDownLocked
-				// gate already passed (hold-down was not active
-				// when we entered this iteration), so without this
-				// extra suppression the peer that triggered the
-				// engage would still receive the over-threshold
-				// emit — only the NEXT AnnounceTo cycle on the
-				// next peer would observe suppression. That
-				// contradicts the "wire emit suppressed to EVERY
-				// peer" contract documented on the SeqNo flap cap.
-				//
-				// Storage state (outboundContent, outboundMax,
-				// outboundPeerMax) is intentionally kept past this
-				// branch: when hold-down expires the cache hit on
-				// the same sig will reuse the burnt SeqNo on the
-				// receiver's first post-release emit, so the
-				// receiver's monotonic-SeqNo timeline never goes
-				// backwards and ComputeDelta stays a no-op on
-				// stable content. Mark dirty so the snapshot
-				// publisher republishes the SeqNoFlapHoldowns
-				// bump.
-				mutated = true
-				continue
-			}
-			result = append(result, AnnounceEntry{
-				Identity: identity,
-				Origin:   emitOrigin,
-				Hops:     int(liveWinner.Hops),
-				SeqNo:    wireSeqNo,
-				Extra:    liveWinner.Extra,
-				// Phase 4 13.2-A: carry the stored attested-links
-				// signature through the projection so a v3 re-emit
-				// forwards the original signer's bytes unchanged.
-				// Empty for legacy/unsigned claims — the v3 build path
-				// omits the wire "sig" field via omitempty.
-				AttestedSig:         liveWinner.AttestedSig,
-				AttestedSigVerified: liveWinner.AttestedSigVerified,
-			})
-			// Live winner suppresses own-direct tombstone emits
-			// for this Identity on the wire — see the live-vs-
-			// tombstone exclusivity paragraph in this function's
-			// doc-comment for the ordering-hazard rationale.
-			// Storage retains the tombstone (it still gates the
-			// SeqNo-resurrection invariant for THIS uplink in
-			// ApplyUpdate); we just don't advertise it alongside
-			// a live alternative.
+		if claim.IsExpired(now) {
 			continue
 		}
-		for _, tomb := range tombstones {
-			sig := outboundEmitSig{
-				Uplink:    tomb.Uplink,
-				Hops:      tomb.Hops,
-				Withdrawn: true,
-				ExtraSig:  string(normalizeExtra(tomb.Extra)),
-				// Round-14: same content-key contract as the live
-				// branch above — see liveWinner comment for the
-				// sig-upgrade fresh-SeqNo rationale.
-				AttestedSig: string(tomb.AttestedSig),
+		if claim.IsWithdrawn() {
+			if claim.Source == RouteSourceDirect {
+				tombstones = append(tombstones, *claim)
 			}
-			// Per-peer tombstone retry: announce-delta withdrawal
-			// redelivery to a peer where the original
-			// RemoveDirectPeer fanout did not land. The original
-			// broadcast advanced outboundBroadcastMax; this
-			// per-peer retry advances only excludeVia's
-			// outboundPeerMax. Only reached when no live winner
-			// exists for this Identity — otherwise the live
-			// winner's emit above already informs the receiver
-			// of the current state via a strictly newer SeqNo,
-			// and trailing a tombstone behind it would invert
-			// the receiver's view (see doc-comment).
-			wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, tomb.SeqNo, tomb.LastIngressOrigin, now)
-			if armed {
-				// Same threshold-crossing suppression as the
-				// live-winner branch above: the peer whose emit
-				// engaged the hold-down must NOT receive the
-				// over-threshold frame, otherwise the
-				// "suppressed to EVERY peer" contract is broken
-				// on the engage cycle itself. Break out of the
-				// tombstones loop too — subsequent tombstones
-				// for this Identity in this cycle are equally
-				// part of the suppressed wire emit.
-				mutated = true
-				break
-			}
-			result = append(result, AnnounceEntry{
-				Identity: identity,
-				Origin:   emitOrigin,
-				Hops:     HopsInfinity,
-				SeqNo:    wireSeqNo,
-				Extra:    tomb.Extra,
-				// Round-13 fix: forward the stored attested-links
-				// signature on tombstone projections, mirroring
-				// the liveWinner branch above. Without this the
-				// per-peer tombstone retry (and the full-sync
-				// withdrawal redelivery this branch feeds) drops
-				// the sig that route_store_mutation.go::
-				// InvalidateAllVia carefully preserved on the
-				// live→tombstone transition. buildRouteAnnounceV3Frame
-				// would then emit the withdrawal with sig="" even
-				// though storage still held the destination
-				// identity's attestation — breaking the
-				// attested-links forwarding contract for the
-				// withdrawal half of the v3 wire stream. The
-				// canonical signing bytes are (identity ||
-				// extra) and exclude per-emitter wire fields
-				// (hops, epoch, seq_no), so the sig stays valid
-				// on the tombstone exactly the way it stayed
-				// valid across the live→withdrawn transition.
-				AttestedSig:         tomb.AttestedSig,
-				AttestedSigVerified: tomb.AttestedSigVerified,
-			})
+			continue
 		}
+		// Phase 2 health filter (PR 11.23 P2 / 11.24 P2#1):
+		// skip locally-Dead transit pairs so they are not
+		// re-advertised. Direct (own-origin) claims are
+		// exempt — their lifecycle is session-driven via
+		// AddDirectPeer / RemoveDirectPeer, which emit real
+		// wire withdrawals on disconnect. Health-Dead on a
+		// Direct claim is a "no recent organic hop_ack"
+		// signal, NOT "route is gone", and silently dropping
+		// it from announce would violate the own-origin
+		// withdrawal contract on the HealthDead constant
+		// (health.go) — neighbours would keep the prior live
+		// route until TTL (~120 s) instead of seeing an
+		// authoritative withdrawal. See AnnounceableFor for
+		// the symmetric exemption.
+		if claim.Source != RouteSourceDirect && isDead != nil && isDead(identity, claim.Uplink) {
+			continue
+		}
+		// Phase 3 PR 12.4: black-hole cooldown filter, no
+		// Direct exemption — mirror of the AnnounceableFor
+		// branch. The arm comes from reputation's 5
+		// consecutive hop-ack failures (PR 12.2 wiring) and
+		// auto-clears after BlackHoleCooldown.
+		if isCooledDown != nil && isCooledDown(identity, claim.Uplink) {
+			continue
+		}
+		if liveWinner == nil || isBetterLiveClaim(claim, liveWinner) {
+			w := *claim
+			liveWinner = &w
+		}
+	}
+
+	if liveWinner != nil {
+		sig := outboundEmitSig{
+			Uplink:    liveWinner.Uplink,
+			Hops:      liveWinner.Hops,
+			Withdrawn: false,
+			ExtraSig:  string(normalizeExtra(liveWinner.Extra)),
+			// Round-14 fix: include AttestedSig bytes in the
+			// content cache key so a sig-only upgrade in
+			// storage (reconfirmation path) produces a fresh
+			// outbound SeqNo. Without this the cache hits on
+			// the unsigned prior emit and the new signed
+			// content ships at the burnt SeqNo, which the
+			// receiver rejects as stale.
+			AttestedSig: string(liveWinner.AttestedSig),
+		}
+		// Per-peer emit: only excludeVia's receiver state
+		// advances on this AnnounceTo call. The per-peer
+		// helper consults both outboundBroadcastMax (cross-
+		// peer watermark) AND outboundPeerMax[(Identity,
+		// excludeVia)] (this peer's last-emitted high water)
+		// so a winner-switch A→B→A on the same peer's
+		// timeline forces a fresh SeqNo. See
+		// nextOutboundSeqLockedPerPeer's doc-comment.
+		wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, liveWinner.SeqNo, liveWinner.LastIngressOrigin, now)
+		if armed {
+			// The advance we just recorded crossed the SeqNo
+			// flap-cap threshold and engaged hold-down INSIDE
+			// this call. The top-of-loop isInSeqHoldDownLocked
+			// gate already passed (hold-down was not active
+			// when we entered this iteration), so without this
+			// extra suppression the peer that triggered the
+			// engage would still receive the over-threshold
+			// emit — only the NEXT AnnounceTo cycle on the
+			// next peer would observe suppression. That
+			// contradicts the "wire emit suppressed to EVERY
+			// peer" contract documented on the SeqNo flap cap.
+			//
+			// Storage state (outboundContent, outboundMax,
+			// outboundPeerMax) is intentionally kept past this
+			// branch: when hold-down expires the cache hit on
+			// the same sig will reuse the burnt SeqNo on the
+			// receiver's first post-release emit, so the
+			// receiver's monotonic-SeqNo timeline never goes
+			// backwards and ComputeDelta stays a no-op on
+			// stable content. Mark dirty so the snapshot
+			// publisher republishes the SeqNoFlapHoldowns
+			// bump.
+			return result, true
+		}
+		result = append(result, AnnounceEntry{
+			Identity: identity,
+			Origin:   emitOrigin,
+			Hops:     int(liveWinner.Hops),
+			SeqNo:    wireSeqNo,
+			Extra:    liveWinner.Extra,
+			// Phase 4 13.2-A: carry the stored attested-links
+			// signature through the projection so a v3 re-emit
+			// forwards the original signer's bytes unchanged.
+			// Empty for legacy/unsigned claims — the v3 build path
+			// omits the wire "sig" field via omitempty.
+			AttestedSig:         liveWinner.AttestedSig,
+			AttestedSigVerified: liveWinner.AttestedSigVerified,
+		})
+		// Live winner suppresses own-direct tombstone emits
+		// for this Identity on the wire — see the live-vs-
+		// tombstone exclusivity paragraph in this function's
+		// doc-comment for the ordering-hazard rationale.
+		// Storage retains the tombstone (it still gates the
+		// SeqNo-resurrection invariant for THIS uplink in
+		// ApplyUpdate); we just don't advertise it alongside
+		// a live alternative.
+		return result, false
+	}
+	mutated := false
+	for _, tomb := range tombstones {
+		sig := outboundEmitSig{
+			Uplink:    tomb.Uplink,
+			Hops:      tomb.Hops,
+			Withdrawn: true,
+			ExtraSig:  string(normalizeExtra(tomb.Extra)),
+			// Round-14: same content-key contract as the live
+			// branch above — see liveWinner comment for the
+			// sig-upgrade fresh-SeqNo rationale.
+			AttestedSig: string(tomb.AttestedSig),
+		}
+		// Per-peer tombstone retry: announce-delta withdrawal
+		// redelivery to a peer where the original
+		// RemoveDirectPeer fanout did not land. The original
+		// broadcast advanced outboundBroadcastMax; this
+		// per-peer retry advances only excludeVia's
+		// outboundPeerMax. Only reached when no live winner
+		// exists for this Identity — otherwise the live
+		// winner's emit above already informs the receiver
+		// of the current state via a strictly newer SeqNo,
+		// and trailing a tombstone behind it would invert
+		// the receiver's view (see doc-comment).
+		wireSeqNo, armed := s.nextOutboundSeqLockedPerPeer(identity, excludeVia, sig, tomb.SeqNo, tomb.LastIngressOrigin, now)
+		if armed {
+			// Same threshold-crossing suppression as the
+			// live-winner branch above: the peer whose emit
+			// engaged the hold-down must NOT receive the
+			// over-threshold frame, otherwise the
+			// "suppressed to EVERY peer" contract is broken
+			// on the engage cycle itself. Break out of the
+			// tombstones loop too — subsequent tombstones
+			// for this Identity in this cycle are equally
+			// part of the suppressed wire emit.
+			mutated = true
+			break
+		}
+		result = append(result, AnnounceEntry{
+			Identity: identity,
+			Origin:   emitOrigin,
+			Hops:     HopsInfinity,
+			SeqNo:    wireSeqNo,
+			Extra:    tomb.Extra,
+			// Round-13 fix: forward the stored attested-links
+			// signature on tombstone projections, mirroring
+			// the liveWinner branch above. Without this the
+			// per-peer tombstone retry (and the full-sync
+			// withdrawal redelivery this branch feeds) drops
+			// the sig that route_store_mutation.go::
+			// InvalidateAllVia carefully preserved on the
+			// live→tombstone transition. buildRouteAnnounceV3Frame
+			// would then emit the withdrawal with sig="" even
+			// though storage still held the destination
+			// identity's attestation — breaking the
+			// attested-links forwarding contract for the
+			// withdrawal half of the v3 wire stream. The
+			// canonical signing bytes are (identity ||
+			// extra) and exclude per-emitter wire fields
+			// (hops, epoch, seq_no), so the sig stays valid
+			// on the tombstone exactly the way it stayed
+			// valid across the live→withdrawn transition.
+			AttestedSig:         tomb.AttestedSig,
+			AttestedSigVerified: tomb.AttestedSigVerified,
+		})
 	}
 	return result, mutated
 }

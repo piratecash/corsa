@@ -9,13 +9,13 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
-// announce_shadow_commit_test.go covers the Phase 3 deploy-1 cursor commit
-// contract end-to-end: the change-journal cursor must advance only when the
-// delta send actually succeeded. A cursor that advanced on a failed send would
-// move past the journal entry that produced the delta, so the retried delta
-// next cycle would no longer be covered by the journal — surfacing as a false
-// ShadowDivergenceTotal. The test asserts that count stays zero across a
-// fail-then-retry delta.
+// announce_cursor_commit_test.go covers the cursor commit contract end-to-end:
+// the change-journal cursor advances ONLY when the delta send actually
+// succeeded (RecordCursorAdvance runs in the send helper's onSuccess). A cursor
+// that advanced on a failed send would move past the journal entry that produced
+// the delta, so the retried delta next cycle would no longer be projected and
+// the route would silently never reach the peer. The test fails a delta send,
+// then asserts the retry re-delivers the same route.
 
 func waitUntil(t *testing.T, cond func() bool) {
 	t.Helper()
@@ -28,7 +28,7 @@ func waitUntil(t *testing.T, cond func() bool) {
 	}
 }
 
-func TestAnnounceLoop_ShadowCursorHoldsOnSendFailure(t *testing.T) {
+func TestAnnounceLoop_CursorHoldsOnSendFailure(t *testing.T) {
 	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("node-A")))
 	sender, rec := newControllableMockPeerSender(t)
 
@@ -69,23 +69,36 @@ func TestAnnounceLoop_ShadowCursorHoldsOnSendFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fail the next delta send: the cursor must NOT advance past dest-Y.
+	// Fail the next delta send: onSuccess (RecordCursorAdvance) must not run, so
+	// the cursor stays put and dest-Y remains in the journal window.
 	rec.setFailNext(1)
 	loop.TriggerUpdate()
 	waitUntil(t, func() bool { return rec.callCount() >= 2 })
 
-	// Retry: the same delta goes out successfully now.
+	// Retry: because the cursor held, AnnounceDeltaTo re-projects dest-Y and the
+	// delta goes out successfully now. (If the cursor had advanced on the failed
+	// send, dest-Y would be past it and the retry would be a no-op — no 3rd send,
+	// and this wait would time out.)
 	loop.TriggerUpdate()
 	waitUntil(t, func() bool { return rec.callCount() >= 3 })
 
 	cancel()
 	<-done
 
-	// dest-Y was journaled and its delta was failed-then-retried. If the cursor
-	// had advanced on the failed send, the retry would find dest-Y past the
-	// cursor and not in the journal window → a false divergence. Zero proves the
-	// cursor held on failure.
-	if got := loop.ShadowDivergenceTotal(); got != 0 {
-		t.Fatalf("shadow divergence must stay 0 (cursor must not advance on send failure); got %d", got)
+	calls := rec.getCalls()
+	if len(calls) < 3 {
+		t.Fatalf("expected at least 3 sends (full + failed delta + retry), got %d", len(calls))
+	}
+	// The retry (3rd send) must carry dest-Y — proof the failed send did not
+	// advance the cursor past it.
+	retry := calls[2]
+	foundY := false
+	for _, r := range retry.Routes {
+		if r.Identity == domaintest.ID("dest-Y") {
+			foundY = true
+		}
+	}
+	if !foundY {
+		t.Fatalf("retry delta must re-deliver dest-Y (cursor must hold on failure); got %+v", retry.Routes)
 	}
 }
