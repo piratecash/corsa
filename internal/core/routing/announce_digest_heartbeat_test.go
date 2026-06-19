@@ -175,6 +175,44 @@ func TestReconcileDigestSuppression_EvictsAbsentPeers(t *testing.T) {
 	}
 }
 
+// TestConsumeDigestMismatch pins the single-shot, atomic correlate+consume the
+// summary handler uses so a correlated mismatch counts exactly once per
+// heartbeat even under replay.
+func TestConsumeDigestMismatch(t *testing.T) {
+	a := &AnnounceLoop{interval: 10 * time.Second} // cadence 20s, grace 5s
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	peer := domaintest.ID("p")
+
+	if a.ConsumeDigestMismatch(peer, "d", now) {
+		t.Fatal("no pending digest must not correlate")
+	}
+	a.MarkPeerDigestPending(peer, now, "d")
+	if a.ConsumeDigestMismatch(peer, "stale-or-spoofed", now) {
+		t.Fatal("a different echo must not correlate (anti-spoof / anti-stale)")
+	}
+	if a.ConsumeDigestMismatch(peer, "d", now.Add(time.Hour)) {
+		t.Fatal("an echo after the window elapsed must not correlate")
+	}
+	// First correlated mismatch consumes the entry...
+	if !a.ConsumeDigestMismatch(peer, "d", now) {
+		t.Fatal("the echo of our pending digest within the window must correlate")
+	}
+	// ...so a replayed/duplicate mismatch finds it gone and is NOT counted again.
+	if a.ConsumeDigestMismatch(peer, "d", now) {
+		t.Fatal("a replayed mismatch must not correlate again after consume (single-shot)")
+	}
+
+	// A digest already consumed by a confirmed MATCH must not then be counted as
+	// a mismatch (the !confirmed gate).
+	a.MarkPeerDigestPending(peer, now, "d2")
+	if !a.ConfirmPeerDigestMatch(peer, "d2", now) {
+		t.Fatal("precondition: first correlated match should confirm")
+	}
+	if a.ConsumeDigestMismatch(peer, "d2", now) {
+		t.Fatal("a confirmed (already-consumed) digest must not be counted as a mismatch")
+	}
+}
+
 func TestReconcileDigestSuppression_EmptyLiveSetClearsAll(t *testing.T) {
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)

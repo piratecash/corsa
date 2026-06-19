@@ -402,7 +402,22 @@ type Service struct {
 	// gossipNoticesDropped counts push_notice fan-out jobs shed because
 	// the dedicated notice lane overflowed — only plausible under a
 	// notice flood. Logged at Warn (notices have no retry path).
-	gossipNoticesDropped           atomic.Uint64
+	gossipNoticesDropped atomic.Uint64
+	// digestStats are cumulative observability counters for the route_sync
+	// digest-as-heartbeat exchange (docs/protocol/route_sync.md). They answer,
+	// without debug logging, whether periodic heartbeats are actually being
+	// confirmed (and thus suppressing full syncs) or diverging. All fields are
+	// atomic, so they live outside the seven-domain mutex scheme (own
+	// synchronization, per CLAUDE.md): incremented from the network-dispatch
+	// and announce-send goroutines, read lock-free by the fetchRouteSummary RPC
+	// (surfaced as routing.DigestHeartbeatStats via Service.DigestHeartbeatStats).
+	digestStats struct {
+		heartbeatsSent  atomic.Uint64 // periodic route_sync_digest_v1 frames we emitted
+		summaryMatch    atomic.Uint64 // inbound summaries reporting match=true for our digest
+		summaryMismatch atomic.Uint64 // inbound summaries reporting match=false
+		digestsCompared atomic.Uint64 // inbound digests we compared as receiver
+		compareMatch    atomic.Uint64 // of those, how many matched our via-peer view (→ TTL refresh)
+	}
 	relayStates                    *relayStateStore                             // hop-by-hop relay forwarding state (Iteration 1)
 	relayLimiter                   *relayRateLimiter                            // per-peer token bucket for relay fan-out
 	announceLimiter                *announceRateLimiter                         // per-peer token bucket for received announce-plane frames (Phase 4 13.7)

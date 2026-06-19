@@ -143,6 +143,22 @@ func (s *Service) OverloadStats() routing.OverloadStats {
 	}
 }
 
+// DigestHeartbeatStats returns the cumulative route_sync digest-as-heartbeat
+// counters. Surfaced via fetchRouteSummary so operators can see, without debug
+// logging, whether periodic heartbeats are confirmed (suppressing full syncs)
+// or diverging. Lock-free: all underlying counters are in-memory atomics.
+//
+// Implements rpc.RoutingProvider.
+func (s *Service) DigestHeartbeatStats() routing.DigestHeartbeatStats {
+	return routing.DigestHeartbeatStats{
+		HeartbeatsSent:  s.digestStats.heartbeatsSent.Load(),
+		SummaryMatch:    s.digestStats.summaryMatch.Load(),
+		SummaryMismatch: s.digestStats.summaryMismatch.Load(),
+		DigestsCompared: s.digestStats.digestsCompared.Load(),
+		CompareMatch:    s.digestStats.compareMatch.Load(),
+	}
+}
+
 // HealthSnapshot returns the Phase 2 per-(Identity, Uplink)
 // RouteHealthState snapshot for fetchRouteHealth RPC observability.
 // Delegates to routing.Table.HealthSnapshot which takes t.mu.RLock

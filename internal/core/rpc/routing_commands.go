@@ -319,6 +319,19 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"engaged_cycles": overload.EngagedCycles,
 		}
 
+		// route_sync digest-as-heartbeat counters (docs/protocol/route_sync.md).
+		// summary_match ≫ summary_mismatch means our periodic heartbeats are
+		// confirmed and full syncs are suppressed; a high mismatch share means
+		// digests diverge and the heartbeat is escalating to fulls.
+		digest := rp.DigestHeartbeatStats()
+		digestStats := map[string]uint64{
+			"heartbeats_sent":  digest.HeartbeatsSent,
+			"summary_match":    digest.SummaryMatch,
+			"summary_mismatch": digest.SummaryMismatch,
+			"digests_compared": digest.DigestsCompared,
+			"compare_match":    digest.CompareMatch,
+		}
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -329,6 +342,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"flap_state":           flapState,
 			"cap_admission":        capStats,
 			"overload":             overloadStats,
+			"digest":               digestStats,
 		})
 	}
 }

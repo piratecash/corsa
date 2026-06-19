@@ -15,7 +15,8 @@ import (
 func NewMockRoutingProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *MockRoutingProvider {
+},
+) *MockRoutingProvider {
 	mock := &MockRoutingProvider{}
 	mock.Mock.Test(t)
 
@@ -35,6 +36,50 @@ type MockRoutingProvider_Expecter struct {
 
 func (_m *MockRoutingProvider) EXPECT() *MockRoutingProvider_Expecter {
 	return &MockRoutingProvider_Expecter{mock: &_m.Mock}
+}
+
+// DigestHeartbeatStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) DigestHeartbeatStats() routing.DigestHeartbeatStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for DigestHeartbeatStats")
+	}
+
+	var r0 routing.DigestHeartbeatStats
+	if returnFunc, ok := ret.Get(0).(func() routing.DigestHeartbeatStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(routing.DigestHeartbeatStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_DigestHeartbeatStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DigestHeartbeatStats'
+type MockRoutingProvider_DigestHeartbeatStats_Call struct {
+	*mock.Call
+}
+
+// DigestHeartbeatStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) DigestHeartbeatStats() *MockRoutingProvider_DigestHeartbeatStats_Call {
+	return &MockRoutingProvider_DigestHeartbeatStats_Call{Call: _e.mock.On("DigestHeartbeatStats")}
+}
+
+func (_c *MockRoutingProvider_DigestHeartbeatStats_Call) Run(run func()) *MockRoutingProvider_DigestHeartbeatStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_DigestHeartbeatStats_Call) Return(digestHeartbeatStats routing.DigestHeartbeatStats) *MockRoutingProvider_DigestHeartbeatStats_Call {
+	_c.Call.Return(digestHeartbeatStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_DigestHeartbeatStats_Call) RunAndReturn(run func() routing.DigestHeartbeatStats) *MockRoutingProvider_DigestHeartbeatStats_Call {
+	_c.Call.Return(run)
+	return _c
 }
 
 // HealthSnapshot provides a mock function for the type MockRoutingProvider

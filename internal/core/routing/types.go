@@ -905,6 +905,39 @@ type OverloadStats struct {
 	EngagedCycles uint64
 }
 
+// DigestHeartbeatStats captures cumulative observability counters for the
+// route_sync digest-as-heartbeat exchange (docs/protocol/route_sync.md). It
+// answers, without debug logging, whether the periodic heartbeat is doing its
+// job — a healthy node has SummaryMatch ≫ SummaryMismatch (our digests are
+// confirmed, so full syncs are suppressed) and CompareMatch close to
+// DigestsCompared (we agree with peers' digests). A high SummaryMismatch ratio
+// means digests diverge and every heartbeat escalates to a full, i.e. the
+// optimisation is inert. Surfaced by fetchRouteSummary under the "digest" JSON
+// object.
+//
+// Wire-safe value type — copy-by-value, no internal pointers, no mutex. Each
+// numeric is monotonically non-decreasing; all reset to zero on restart (the
+// underlying counters are in-memory atomics).
+type DigestHeartbeatStats struct {
+	// HeartbeatsSent is the cumulative count of route_sync_digest_v1 frames
+	// this node emitted (periodic heartbeats + reconnect digests).
+	HeartbeatsSent uint64
+
+	// SummaryMatch / SummaryMismatch count inbound route_sync_summary_v1
+	// verdicts for digests WE sent: match=true (our view confirmed, full
+	// suppressed) vs match=false (diverged, escalates to a full). Their sum can
+	// be below HeartbeatsSent when a peer never replies (lost / timed out).
+	SummaryMatch    uint64
+	SummaryMismatch uint64
+
+	// DigestsCompared is the cumulative count of inbound digests this node
+	// compared as the receiver; CompareMatch is how many matched our via-peer
+	// view (and therefore refreshed those routes' TTL). The mismatch share is
+	// DigestsCompared - CompareMatch.
+	DigestsCompared uint64
+	CompareMatch    uint64
+}
+
 // FlapEntry describes the flap detection state for a single peer.
 // Exported for RPC observability — callers should treat this as read-only.
 type FlapEntry struct {

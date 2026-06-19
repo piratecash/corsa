@@ -2981,9 +2981,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// connID — the session's own writer goroutine takes the
 		// summary via sendCh. Build the summary inline here so the
 		// reply mirrors the digest-handler logic without needing
-		// connID plumbing through the outbound side.
-		localDigest, localCount := s.routingTable.SyncDigestFor(session.peerIdentity)
-		match := localDigest == digestFrame.Digest
+		// connID plumbing through the outbound side. The compare,
+		// TTL refresh and digests_compared/compare_match counters are
+		// shared with the inbound path via compareInboundDigest so this
+		// outbound arrival is no longer second-class (it previously
+		// skipped both the receiver-side TTL refresh and the counters).
+		localDigest, localCount, match := s.compareInboundDigest(session.peerIdentity, digestFrame.Digest)
 		summary := protocol.RouteSyncSummaryFrame{
 			Type:           protocol.RouteSyncSummaryFrameType,
 			Digest:         digestFrame.Digest,

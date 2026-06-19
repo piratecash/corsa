@@ -143,6 +143,13 @@ type RoutingProvider interface {
 	// section for the contract.
 	OverloadStats() routing.OverloadStats
 
+	// DigestHeartbeatStats returns the cumulative route_sync
+	// digest-as-heartbeat counters (sent / summary match / summary mismatch /
+	// digests compared / compare match). Value-safe for JSON. Lets operators
+	// see, without debug logging, whether periodic heartbeats are confirmed
+	// (suppressing full syncs) or diverging. See docs/protocol/route_sync.md.
+	DigestHeartbeatStats() routing.DigestHeartbeatStats
+
 	// HealthSnapshot returns a deep copy of every tracked
 	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,
 	// since Snapshot.Health was narrowed to the Dead∪cooled subset, by

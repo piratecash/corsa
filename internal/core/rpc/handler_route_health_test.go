@@ -28,6 +28,7 @@ type stubRoutingProvider struct {
 	snapshot   routing.Snapshot
 	health     []routing.RouteHealthState
 	overload   routing.OverloadStats
+	digest     routing.DigestHeartbeatStats
 	reputation []routing.RouteReputationState
 }
 
@@ -41,6 +42,10 @@ func (s *stubRoutingProvider) PeerTransport(_ domain.PeerIdentity) (domain.PeerA
 
 func (s *stubRoutingProvider) OverloadStats() routing.OverloadStats {
 	return s.overload
+}
+
+func (s *stubRoutingProvider) DigestHeartbeatStats() routing.DigestHeartbeatStats {
+	return s.digest
 }
 
 func (s *stubRoutingProvider) HealthSnapshot() []routing.RouteHealthState {

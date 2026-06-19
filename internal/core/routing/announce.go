@@ -507,6 +507,37 @@ func (a *AnnounceLoop) ConfirmPeerDigestMatch(peer PeerIdentity, echo string, no
 	return true
 }
 
+// ConsumeDigestMismatch atomically reports whether an inbound match=false
+// route_sync_summary_v1 correlates with the digest we sent this peer and have
+// not yet consumed (entry present, within its window, !confirmed, expected ==
+// echo), AND removes that entry in the SAME critical section. It returns true
+// at most once per heartbeat: a concurrent or replayed duplicate finds the
+// entry already gone and returns false, so the summary_mismatch counter cannot
+// be inflated past one verdict per heartbeat — the mismatch analogue of
+// ConfirmPeerDigestMatch's single-shot consume for match=true.
+//
+// It is purely the COUNT gate. The caller still clears any window
+// unconditionally afterwards (ClearPeerDigestSuppression) as the safe default
+// for uncorrelated/stale mismatches — a mismatch always errs toward a full; for
+// a correlated mismatch that follow-up clear is a no-op because the entry is
+// already removed here. Safe from any goroutine.
+func (a *AnnounceLoop) ConsumeDigestMismatch(peer PeerIdentity, echo string, now time.Time) bool {
+	if peer.IsZero() || echo == "" {
+		return false
+	}
+	a.digestSuppressionMu.Lock()
+	defer a.digestSuppressionMu.Unlock()
+	if a.digestSuppression == nil {
+		return false
+	}
+	entry, ok := a.digestSuppression[peer]
+	if !ok || entry.confirmed || !now.Before(entry.until) || entry.expected != echo {
+		return false
+	}
+	delete(a.digestSuppression, peer)
+	return true
+}
+
 // MarkPeerDigestPending arms a SHORT suppression window when a
 // route_sync_digest_v1 has just been emitted to the peer on reconnect
 // and we are awaiting its summary. Without it the reconnect's own

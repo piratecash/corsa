@@ -37,6 +37,9 @@ func newMockRoutingProvider(
 	// Default to a zero stats struct in handler tests; specific tests
 	// asserting overload reporting can override with their own mock setup.
 	m.On("OverloadStats").Return(routing.OverloadStats{}).Maybe()
+	// route_sync digest-as-heartbeat counters also surface through
+	// fetchRouteSummary; default to zero, override in digest-specific tests.
+	m.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Maybe()
 	// fetchRouteLookup reads HealthSnapshot (full per-pair tiers) for its
 	// Dead/cooldown filters + CompositeScore ranking, because the published
 	// Snapshot.Health now carries only the routing-relevant {Dead ∪ cooled}
@@ -403,6 +406,7 @@ func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
 	provider.On("OverloadStats").Return(routing.OverloadStats{
 		EngagedCycles: expectedEngagedCycles,
 	}).Once()
+	provider.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -437,6 +441,60 @@ func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
 	if uint64(engaged) != expectedEngagedCycles {
 		t.Fatalf("expected overload.engaged_cycles=%d, got %v",
 			expectedEngagedCycles, engaged)
+	}
+}
+
+// TestFetchRouteSummary_DigestStatsSurfaced pins that the route_sync
+// digest-as-heartbeat counters flow from the provider through to the JSON
+// "digest" object, so operators can read match/mismatch without debug logging.
+func TestFetchRouteSummary_DigestStatsSurfaced(t *testing.T) {
+	now := time.Now()
+	want := routing.DigestHeartbeatStats{
+		HeartbeatsSent:  11,
+		SummaryMatch:    9,
+		SummaryMismatch: 2,
+		DigestsCompared: 14,
+		CompareMatch:    13,
+	}
+
+	provider := rpcmocks.NewMockRoutingProvider(t)
+	provider.On("RoutingSnapshot").Return(routing.Snapshot{
+		TakenAt: now,
+		Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
+	}).Once()
+	provider.On("OverloadStats").Return(routing.OverloadStats{}).Once()
+	provider.On("DigestHeartbeatStats").Return(want).Once()
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	digestRaw, ok := result["digest"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response missing 'digest' object: %v", result)
+	}
+	for key, exp := range map[string]uint64{
+		"heartbeats_sent":  want.HeartbeatsSent,
+		"summary_match":    want.SummaryMatch,
+		"summary_mismatch": want.SummaryMismatch,
+		"digests_compared": want.DigestsCompared,
+		"compare_match":    want.CompareMatch,
+	} {
+		got, ok := digestRaw[key].(float64) // JSON numbers decode as float64
+		if !ok {
+			t.Fatalf("'digest.%s' missing or not a number: %v", key, digestRaw[key])
+		}
+		if uint64(got) != exp {
+			t.Fatalf("digest.%s = %v, want %d", key, got, exp)
+		}
 	}
 }
 

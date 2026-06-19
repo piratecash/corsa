@@ -91,6 +91,7 @@ func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, c
 			Msg("route_sync_digest_send_skipped")
 		return
 	}
+	s.digestStats.heartbeatsSent.Add(1)
 	log.Debug().
 		Str("peer_identity", peer.String()).
 		Str("digest", digest).
@@ -130,7 +131,11 @@ func (s *Service) SendRouteSyncDigest(ctx context.Context, peerAddress domain.Pe
 		Type:    protocol.RouteSyncDigestFrameType,
 		RawLine: string(raw) + "\n",
 	}
-	return s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, wire, domain.CapMeshRouteSyncV1)
+	sent := s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, wire, domain.CapMeshRouteSyncV1)
+	if sent {
+		s.digestStats.heartbeatsSent.Add(1)
+	}
+	return sent
 }
 
 // recordPeerDigestOnSessionClose computes the current per-peer
@@ -166,6 +171,42 @@ func (s *Service) recordPeerDigestOnSessionClose(peer domain.PeerIdentity) {
 		Msg("route_sync_digest_recorded_for_reconnect")
 }
 
+// compareInboundDigest performs the shared receiver-side work for an inbound
+// route_sync_digest_v1 from `peer`: compute our digest over the routes we hold
+// via that peer (SyncDigestFor), compare it to theirDigest, and on a match
+// renew those routes' TTL (the receiver half of digest-as-heartbeat) and bump
+// the observability counters. It returns our local digest + count + the match
+// verdict so the caller builds the route_sync_summary_v1 reply on whichever
+// transport it owns — the inbound dispatcher answers by connID
+// (handleRouteSyncDigest), while the outbound-session dispatcher replies via the
+// session writer (peer_management.go). Centralising the compare here keeps the
+// TTL refresh and the digests_compared / compare_match counters consistent
+// across BOTH paths; the earlier inline outbound copy did neither.
+func (s *Service) compareInboundDigest(peer domain.PeerIdentity, theirDigest string) (localDigest string, localCount uint32, match bool) {
+	localDigest, localCount = s.routingTable.SyncDigestFor(peer)
+	match = localDigest == theirDigest
+
+	s.digestStats.digestsCompared.Add(1)
+	if !match {
+		// A mismatch refreshes nothing — the sender follows with a full.
+		return localDigest, localCount, false
+	}
+	s.digestStats.compareMatch.Add(1)
+	// Digest-as-heartbeat freshness (receiver half): a matching digest proves
+	// our routes learned through this peer are exactly what the peer still
+	// announces, so renew their TTL here instead of waiting for the peer to
+	// ship a full announce — what lets the sender replace the periodic
+	// full-sync with a cheap digest on the stable path without letting
+	// unchanged routes age out (docs/routing.md "Refresh interval invariant").
+	if refreshed := s.routingTable.RefreshRoutesVia(peer, time.Now().UTC()); refreshed > 0 {
+		log.Debug().
+			Str("sender_identity", peer.String()).
+			Int("refreshed", refreshed).
+			Msg("route_sync_digest_match_refreshed_ttl")
+	}
+	return localDigest, localCount, true
+}
+
 // handleRouteSyncDigest answers an inbound route_sync_digest_v1
 // from the given senderIdentity. The receiver computes its OWN
 // digest over (Identity, SeqNo) pairs of every live claim
@@ -199,25 +240,7 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 		return
 	}
 
-	localDigest, localCount := s.routingTable.SyncDigestFor(senderIdentity)
-	match := localDigest == frame.Digest
-
-	// Digest-as-heartbeat freshness (receiver half): a matching digest proves
-	// our routes learned through this peer are exactly what the peer still
-	// announces, so renew their TTL here instead of waiting for the peer to
-	// ship a full announce. This is what lets the sender replace the periodic
-	// full-sync with a cheap digest on the stable path without letting
-	// unchanged routes age out (docs/routing.md "Refresh interval invariant").
-	// A mismatch refreshes nothing — the sender will follow with a full.
-	if match {
-		refreshed := s.routingTable.RefreshRoutesVia(senderIdentity, time.Now().UTC())
-		if refreshed > 0 {
-			log.Debug().
-				Str("sender_identity", senderIdentity.String()).
-				Int("refreshed", refreshed).
-				Msg("route_sync_digest_match_refreshed_ttl")
-		}
-	}
+	localDigest, localCount, match := s.compareInboundDigest(senderIdentity, frame.Digest)
 
 	summary := protocol.RouteSyncSummaryFrame{
 		Type:           protocol.RouteSyncSummaryFrameType,
@@ -305,14 +328,19 @@ func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, fra
 			Msg("route_sync_summary_dropped_no_announce_loop")
 		return
 	}
+	now := time.Now().UTC()
 	if !frame.Match {
-		// Mismatch — the digests diverged, so the receiver needs a
-		// fresh full sync. Clear any pending suppression window armed
-		// on reconnect (MarkPeerDigestPending) so the next announce
-		// cycle full-syncs promptly instead of waiting out the grace.
-		// If no window is active this is a no-op. Logged at debug to
-		// keep the operator-visible signal honest about which peers had
-		// digest churn since their last reconnect.
+		// Mismatch — the digests diverged, so the receiver needs a fresh full
+		// sync. ConsumeDigestMismatch atomically checks correlation AND removes
+		// the entry under one lock, so a concurrent / replayed duplicate finds
+		// it already gone and cannot double-count (single-shot, like
+		// ConfirmPeerDigestMatch for the match path). The window is then cleared
+		// unconditionally as the safe default for uncorrelated / stale
+		// mismatches (a no-op when the correlated consume above already removed
+		// it).
+		if s.announceLoop.ConsumeDigestMismatch(senderIdentity, frame.Digest, now) {
+			s.digestStats.summaryMismatch.Add(1)
+		}
 		s.announceLoop.ClearPeerDigestSuppression(senderIdentity)
 		log.Debug().
 			Str("sender_identity", senderIdentity.String()).
@@ -320,11 +348,14 @@ func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, fra
 			Msg("route_sync_summary_mismatch_cleared_suppression")
 		return
 	}
-	// Match — extend suppression ONLY if the echo correlates with the
-	// digest we emitted to this peer on reconnect. A stale, unsolicited,
-	// or spoofed summary that echoes some other digest is ignored, so it
-	// cannot suppress a forced full sync it has no relation to.
-	if s.announceLoop.ConfirmPeerDigestMatch(senderIdentity, frame.Digest, time.Now().UTC()) {
+	// Match — ConfirmPeerDigestMatch is single-shot (it refuses an already
+	// confirmed echo), so counting summary_match on its true return makes the
+	// counter exactly one per correlated heartbeat even under duplicate /
+	// replayed / concurrently-delivered summaries. A stale, unsolicited, or
+	// spoofed match that echoes some other digest returns false here and is
+	// neither counted nor allowed to suppress a full it has no relation to.
+	if s.announceLoop.ConfirmPeerDigestMatch(senderIdentity, frame.Digest, now) {
+		s.digestStats.summaryMatch.Add(1)
 		log.Debug().
 			Str("sender_identity", senderIdentity.String()).
 			Str("digest", frame.Digest).
