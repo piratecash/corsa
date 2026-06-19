@@ -24,8 +24,21 @@ const (
 )
 
 const (
-	// DefaultTTL is the default route lifetime.
-	DefaultTTL = 120 * time.Second
+	// DefaultTTL is the default lifetime of a learned route on a neighbour
+	// before it must be refreshed by a forced full sync.
+	//
+	// It was raised from 120s to 600s to move off the RIP-style "re-flood the
+	// whole table often" model toward BGP/OSPF: route liveness is carried by
+	// cheap, already-existing signals — session close (RemoveDirectPeer emits an
+	// immediate withdrawal of every route via the dropped peer) and the Phase 2
+	// health path (hop_ack-driven Dead detection excludes a silently-dead uplink
+	// from Lookup well before this TTL) — so this TTL is only the soft-state
+	// backstop against a missed withdrawal, not the primary freshness mechanism.
+	// A longer TTL lets the forced-full cadence (DefaultTTL/2 ceiling) stretch
+	// from 60s to 300s, cutting the per-peer full re-projection — the dominant
+	// announce-plane allocator on a large mesh — by ~5x. See
+	// ForcedFullSyncMultiplier and docs/routing.md "Refresh interval invariant".
+	DefaultTTL = 600 * time.Second
 )
 
 // Table is the local distance-vector routing table. It stores routes keyed
@@ -377,8 +390,8 @@ func WithSeqHoldDownDuration(d time.Duration) TableOption {
 // WithMaxSaneHops overrides the Phase 1 P3 fast-invalidation
 // threshold. Ingest with `Hops > MaxSaneHops` is recorded as a
 // tombstone at the observed SeqNo and dropped from Lookup
-// immediately, sparing the next 120s TTL window the cost of
-// steering traffic onto a count-to-infinity uplink. Default
+// immediately, sparing the next route-TTL window (DefaultTTL, 600s)
+// the cost of steering traffic onto a count-to-infinity uplink. Default
 // MaxSaneHops (8); env var CORSA_MAX_SANE_HOPS lets operators on
 // deep meshes raise it. Zero (or negative) disables the
 // invalidation path (every ingest with `Hops < HopsInfinity`

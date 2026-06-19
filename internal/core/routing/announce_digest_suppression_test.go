@@ -25,7 +25,7 @@ import (
 // TestMarkPeerDigestPending_ArmsShortWindow — the reconnect pending
 // window must be DigestRoundTripGrace long when the cadence is larger.
 func TestMarkPeerDigestPending_ArmsShortWindow(t *testing.T) {
-	// interval=10s → cadence=20s > DigestRoundTripGrace (5s) → grace unclamped.
+	// interval=10s → cadence=100s > DigestRoundTripGrace (5s) → grace unclamped.
 	a := &AnnounceLoop{interval: 10 * time.Second}
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	a.MarkPeerDigestPending(domaintest.ID("id-peer"), now, "dig")
@@ -45,8 +45,8 @@ func TestMarkPeerDigestPending_ArmsShortWindow(t *testing.T) {
 // announce interval has a cadence below DigestRoundTripGrace, so the
 // pending window must clamp to the cadence (freshness invariant).
 func TestMarkPeerDigestPending_ClampedToCadence(t *testing.T) {
-	// interval=1s → cadence=2s < DigestRoundTripGrace (5s) → clamp to 2s.
-	a := &AnnounceLoop{interval: 1 * time.Second}
+	// interval=200ms → cadence=multiplier*200ms=2s < DigestRoundTripGrace (5s) → clamp to 2s.
+	a := &AnnounceLoop{interval: 200 * time.Millisecond}
 	cadence := EffectiveForcedFullSyncInterval(a.interval)
 	if cadence >= DigestRoundTripGrace {
 		t.Fatalf("precondition: cadence %v must be below grace %v", cadence, DigestRoundTripGrace)

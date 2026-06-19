@@ -75,11 +75,18 @@ const (
 //     meshes can raise this via CORSA_MAX_SEQNO_ADVANCE_PER_WINDOW.
 //   - DefaultSeqAdvanceWindow: 5-minute sliding window. Tunable via
 //     CORSA_SEQNO_ADVANCE_WINDOW_SECONDS.
-//   - DefaultSeqHoldDownDuration: DefaultTTL/2 (60s on defaults).
-//     NOT separately tunable — preserves the refresh-interval
-//     invariant EffectiveForcedFullSyncInterval <= DefaultTTL/2,
-//     so a hold-down cannot be shorter than the receiver-side TTL
-//     window that the suppression must outlast.
+//   - DefaultSeqHoldDownDuration: DefaultTTL/2 (300s on defaults,
+//     after the 120s→600s TTL change). NOT separately tunable — it is
+//     INTENTIONALLY pinned to DefaultTTL/2 so the hold-down always
+//     tracks the forced-full cadence (EffectiveForcedFullSyncInterval
+//     <= DefaultTTL/2). A hold-down shorter than the forced-full
+//     cadence would let a forced full sync re-emit the flapping
+//     Identity mid-hold-down — burning a fresh outbound SeqNo and
+//     defeating the suppression — so when the cadence stretched from
+//     60s to 300s the hold-down followed it by design, NOT by
+//     oversight. A confirmed flapper (>MaxSeqAdvancePerWindow advances
+//     in the window) therefore stays wire-suppressed for up to 300s,
+//     which is the conservative-safe direction for a defensive cap.
 //
 // Hold-down semantics: receive-side ingest keeps processing announces
 // (local stored state stays accurate); wire emit for the Identity to

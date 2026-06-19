@@ -20,11 +20,19 @@ const (
 
 	// ForcedFullSyncMultiplier controls how often a forced full sync is
 	// sent to each peer: every ForcedFullSyncMultiplier * AnnounceInterval,
-	// capped by DefaultTTL/2 (see effectiveForcedFullSyncInterval).
-	// At the default 30s interval this means a full sync every 60 seconds,
-	// which is exactly DefaultTTL/2 — the upper bound that keeps learned
-	// routes on neighbors alive between cycles even on a single dropped
-	// sync. The invariant
+	// capped by DefaultTTL/2 (see EffectiveForcedFullSyncInterval).
+	// At the default 30s interval this means a full sync every 300 seconds,
+	// which is exactly DefaultTTL/2 (600s/2) — the upper bound that keeps
+	// learned routes on neighbours alive between cycles even on a single
+	// dropped sync.
+	//
+	// It was raised from 2 to 10 together with DefaultTTL (120s→600s) to cut
+	// the forced-full cadence from every 60s to every 300s — ~5x fewer full
+	// per-peer re-projections, the dominant announce-plane allocator on a large
+	// mesh. Real topology changes still propagate every AnnounceInterval (30s)
+	// through the cheap cursor delta path; only the byte-heavy full re-flood
+	// (the RIP-style "re-advertise the whole table" backstop) is rarer. The
+	// invariant
 	//
 	//   effective forced-full-sync interval <= DefaultTTL / 2
 	//
@@ -38,7 +46,7 @@ const (
 	// because each tick lands at or after the forced-full-sync deadline.
 	// See docs/routing.md "Refresh interval invariant" for the full
 	// contract.
-	ForcedFullSyncMultiplier = 2
+	ForcedFullSyncMultiplier = 10
 
 	// MinForcedFullSyncInterval is the minimum time between forced full
 	// sync attempts for a single peer. Prevents flood when a peer is
@@ -475,7 +483,7 @@ func (a *AnnounceLoop) NoopSuppressedTotal() uint64 {
 //   - `echo` differs from the digest we sent (stale or spoofed).
 //
 // On a correlated match the window length is derived from THIS loop's
-// EffectiveForcedFullSyncInterval (= min(2*AnnounceInterval,
+// EffectiveForcedFullSyncInterval (= min(10*AnnounceInterval,
 // DefaultTTL/2)) anchored at `now`, never a caller-supplied deadline,
 // so custom operator intervals stay honest and the window never exceeds
 // one cadence (beyond which the digest is too stale to trust).
@@ -709,7 +717,7 @@ func (a *AnnounceLoop) TickInterval() time.Duration {
 // CORSA_ANNOUNCE_INTERVAL_SECONDS (whole-integer seconds) and
 // `EffectiveForcedFullSyncInterval` is itself derived from the
 // operator value, so in production both inputs are whole-second
-// multiples and `1s` always divides the cap (DefaultTTL/2 = 60s).
+// multiples and `1s` always divides the cap (DefaultTTL/2 = 300s).
 // The floor is therefore a no-op in normal operation; it only
 // engages on direct misuse like
 // `WithAnnounceInterval(59*time.Second + 1*time.Nanosecond)` where
@@ -733,14 +741,13 @@ const minProductionTick = time.Second
 //
 // Why both: an earlier "largest divisor of forced ≤ interval"
 // version of this helper preserved invariant (1) but broke (2). With
-// announceInterval=45s and forced=60s, that version returned 30s
-// (largest divisor of 60 below 45). 45 doesn't divide 30, so on each
+// announceInterval=45s and forced=300s, that version returned 30s
+// (largest divisor of 300 below 45). 45 doesn't divide 30, so on each
 // tick `now - lastDeltaCycleAt >= 45s` would only fire at every
-// SECOND tick — effective delta cadence collapsed to 60s, defeating
-// the operator's "fewer delta cycles" intent. Worse, every delta-due
-// tick aligned with a forced-due tick (60s LCM), so the delta path
-// was always pre-empted by forced-full and no standalone delta sends
-// happened. gcd is the natural fix: the largest period that divides
+// SECOND tick — effective delta cadence coarsened to a multiple of the
+// tick, defeating the operator's "fewer delta cycles" intent, and
+// delta-due ticks kept aligning with forced-due ticks so the delta
+// path was pre-empted. gcd is the natural fix: the largest period that divides
 // both cadences cleanly.
 //
 // Algorithm:
@@ -761,18 +768,18 @@ const minProductionTick = time.Second
 //     a malformed value), but the loop cannot busy-spin.
 //
 // Examples (forced computed via EffectiveForcedFullSyncInterval =
-// min(2 × announceInterval, DefaultTTL/2)):
+// min(10 × announceInterval, DefaultTTL/2), cap = DefaultTTL/2 = 300s):
 //
-//	announceInterval=30s, forced=60s → gcd=30s (operator value, divides both)
-//	announceInterval=25s, forced=50s → gcd=25s (operator value, divides both)
-//	announceInterval=20s, forced=40s → gcd=20s (operator value, divides both)
-//	announceInterval=45s, forced=60s → gcd=15s (delta every 45s, forced every 60s)
-//	announceInterval=50s, forced=60s → gcd=10s (delta every 50s, forced every 60s)
-//	announceInterval=55s, forced=60s → gcd=5s  (delta every 55s, forced every 60s)
-//	announceInterval=120s, forced=60s → tick=60s (cap dominates; delta cadence = 120s
+//	announceInterval=30s, forced=300s → gcd=30s (operator value, divides both)
+//	announceInterval=25s, forced=250s → gcd=25s (operator value, divides both)
+//	announceInterval=20s, forced=200s → gcd=20s (operator value, divides both)
+//	announceInterval=45s, forced=300s → gcd=15s (delta every 45s, forced every 300s)
+//	announceInterval=50s, forced=300s → gcd=50s (delta every 50s, forced every 300s)
+//	announceInterval=55s, forced=300s → gcd=5s  (delta every 55s, forced every 300s)
+//	announceInterval=120s, forced=300s → tick=60s (gcd; delta cadence = 120s
 //	                                              from per-peer lastDeltaCycleAt check)
-//	announceInterval=59s+1ns, forced=60s → gcd=1ns → floor=1s (busy-loop guard)
-//	announceInterval=10ms (test), forced=20ms → gcd=10ms (sub-second, no floor)
+//	announceInterval=59s+1ns, forced=300s → gcd≈1ns → floor=1s (busy-loop guard)
+//	announceInterval=10ms (test), forced=100ms → gcd=10ms (sub-second, no floor)
 func chooseTickInterval(announceInterval, forced time.Duration) time.Duration {
 	if announceInterval <= 0 || forced <= 0 {
 		// Defensive: should never happen in production. Fall back to
@@ -1002,13 +1009,14 @@ func (a *AnnounceLoop) Run(ctx context.Context) {
 	// than tickInterval, each Reset pushed the next periodic tick
 	// forward, and the periodic forced-full deadline check kept
 	// getting delayed until a trigger happened to land past the cap.
-	// Example with AnnounceInterval=60s, forcedCap=60s, triggers at
-	// 59s and 118s: the natural tick at 60s was reset to 119s; the
-	// trigger at 59s saw deadline-not-due; the trigger at 118s saw
-	// deadline-elapsed-by-58s and fired forced full at 118s — gap
-	// 118s, 2× the cap. Receivers in the single-dropped-sync
-	// scenario lost learned routes silently between these stretched
-	// syncs.
+	// Example with AnnounceInterval=60s, forcedCap=300s, tick=60s,
+	// triggers every 59s (slightly faster than the tick): each Reset
+	// pushed the natural tick (60s, 120s, … 300s) forward so it never
+	// fired at the 300s deadline; the trigger at 295s saw
+	// deadline-not-due, the trigger at 354s saw deadline-elapsed and
+	// only then fired forced full — gap 354s, past the cap. Receivers
+	// in the single-dropped-sync scenario lost learned routes silently
+	// between these stretched syncs.
 	//
 	// With no Reset, the ticker fires on its natural schedule
 	// independently of triggers; back-to-back trigger+tick is
@@ -1400,19 +1408,20 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				// The rate-limit window is clamped to forcedFullSyncInterval
 				// so it never exceeds the documented forced-full cadence.
 				// Without the clamp, an operator setting
-				// CORSA_ANNOUNCE_INTERVAL_SECONDS=10s would get
-				// forcedFullSyncInterval=20s from EffectiveForcedFullSyncInterval
+				// CORSA_ANNOUNCE_INTERVAL_SECONDS=2s would get
+				// forcedFullSyncInterval=20s (10×2s) from EffectiveForcedFullSyncInterval
 				// (and exported helper would project a 20s deadline), but
 				// after the first successful sync the second forced-full
 				// attempt at the 20s deadline would be rate-limited by the
 				// fixed MinForcedFullSyncInterval=30s — actual cadence
 				// silently stretches to 30s, contradicting the helper's
-				// projection. With the clamp, rate-limit window =
-				// min(MinForcedFullSyncInterval, forcedFullSyncInterval),
+				// projection. (At the default 30s interval the cadence is
+				// 300s ≫ 30s, so the clamp is a no-op there.) With the clamp,
+				// rate-limit window = min(MinForcedFullSyncInterval, forcedFullSyncInterval),
 				// so it is at most the cap and the helper's projection
 				// stays honest. Default 30s interval is unchanged
-				// (forcedFullSyncInterval=60s clamped against
-				// MinForcedFullSyncInterval=30s ≥ rate-limit=30s).
+				// (forcedFullSyncInterval=300s, so rate-limit window =
+				// min(30s, 300s) = 30s; clamp is a no-op).
 				rateLimitWindow := MinForcedFullSyncInterval
 				if forcedFullSyncInterval < rateLimitWindow {
 					rateLimitWindow = forcedFullSyncInterval

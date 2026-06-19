@@ -236,7 +236,7 @@ well-defined digest.
    suppress a forced full sync it has no relation to. On a correlated
    match the window length is OWNED by the announce loop — derived as
    `EffectiveForcedFullSyncInterval(announceInterval) =
-   min(2 × AnnounceInterval, DefaultTTL/2)` anchored at `now`, never a
+   min(10 × AnnounceInterval, DefaultTTL/2)` anchored at `now`, never a
    caller-supplied deadline — so it spans exactly one forced-full
    cadence and a single summary suppresses at most one forced-full.
 
@@ -530,7 +530,7 @@ well-defined digest.
    так что не может подавить forced full sync, к которому не имеет
    отношения. На correlated match длину окна ВЛАДЕЕТ announce loop —
    `EffectiveForcedFullSyncInterval(announceInterval) =
-   min(2 × AnnounceInterval, DefaultTTL/2)`, привязанная к `now`, а не
+   min(10 × AnnounceInterval, DefaultTTL/2)`, привязанная к `now`, а не
    caller-supplied deadline — поэтому окно ровно в одну forced-full
    cadence, и один summary подавляет максимум один forced-full.
 

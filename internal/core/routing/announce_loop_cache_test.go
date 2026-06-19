@@ -72,7 +72,7 @@ func TestAnnounceLoop_NoopSuppression(t *testing.T) {
 	// schedule for freshness.
 	//
 	// Design note: this test deliberately uses a LONG AnnounceInterval
-	// (10s) so the periodic forced-full deadline (forcedCap=20s)
+	// (10s) so the periodic forced-full deadline (forcedCap=100s)
 	// cannot fire during the test budget — the test then exercises
 	// the no-op suppression path explicitly via `TriggerUpdate()`.
 	// An older version of this test ran with AnnounceInterval=50ms
@@ -108,7 +108,7 @@ func TestAnnounceLoop_NoopSuppression(t *testing.T) {
 		}
 	}
 
-	// AnnounceInterval=10s → forcedCap=20s; periodic forced-full
+	// AnnounceInterval=10s → forcedCap=100s; periodic forced-full
 	// deadline never fires during the ≤500ms test budget. Initial
 	// sync is forced via TriggerUpdate to avoid waiting 10s for
 	// the first natural tick.

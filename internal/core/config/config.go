@@ -253,8 +253,8 @@ type Node struct {
 	// fresh ingest is fast-invalidated locally (Phase 1 P3). Claims
 	// with `Hops > MaxSaneHops` are recorded as tombstones at the
 	// observed SeqNo and dropped from Lookup immediately, sparing
-	// the next 120s TTL window the cost of steering traffic onto a
-	// count-to-infinity uplink. Zero (or negative) disables the
+	// the next route-TTL window (DefaultTTL, 600s) the cost of steering
+	// traffic onto a count-to-infinity uplink. Zero (or negative) disables the
 	// path. Production default is routing.MaxSaneHops (8) read from
 	// CORSA_MAX_SANE_HOPS; operators on deep meshes can raise this
 	// if 9+ hop chains are routinely legitimate.
@@ -263,8 +263,9 @@ type Node struct {
 	// AnnounceInterval overrides the periodic routing-announce cadence
 	// (env: CORSA_ANNOUNCE_INTERVAL_SECONDS). The default is
 	// routing.DefaultAnnounceInterval (30s) which produces a delta
-	// cycle every 30s and a forced full sync every 60s
-	// (DefaultTTL/2). For densely-connected meshes (>10 direct peers)
+	// cycle every 30s and a forced full sync every 300s
+	// (DefaultTTL/2, after the multiplier 2→10 / TTL 120s→600s change).
+	// For densely-connected meshes (>10 direct peers)
 	// operators can raise this to 45-60s to halve the periodic
 	// delta-computation CPU; the forced-full-sync cadence is
 	// independently capped at DefaultTTL/2 so freshness invariants

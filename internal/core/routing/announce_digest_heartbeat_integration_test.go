@@ -85,7 +85,7 @@ func TestAnnounceLoop_DigestHeartbeat_NoFullOnIntermediateTick(t *testing.T) {
 	}
 
 	loop := routing.NewAnnounceLoop(table, m, peers,
-		routing.WithAnnounceInterval(10*time.Second), // cadence = min(2*10, TTL/2) = 20s
+		routing.WithAnnounceInterval(10*time.Second), // cadence = min(10*10, TTL/2) = 100s
 		routing.WithStateRegistry(registry),
 	)
 	cadence := routing.EffectiveForcedFullSyncInterval(10 * time.Second)

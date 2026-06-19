@@ -285,7 +285,7 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 //
 // The suppression window length is owned by the AnnounceLoop:
 // ConfirmPeerDigestMatch derives it from EffectiveForcedFullSyncInterval
-// of the calling node (min(2*AnnounceInterval, DefaultTTL/2)), so a
+// of the calling node (min(10*AnnounceInterval, DefaultTTL/2)), so a
 // single correlated reply defers at most one forced-full-sync cycle.
 // The handler passes only the echo digest and `now`; it does not
 // compute the deadline.

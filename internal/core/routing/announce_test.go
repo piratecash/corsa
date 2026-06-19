@@ -447,9 +447,10 @@ func TestAnnounceLoop_OverloadGate_DisengagedAllowsDeltas(t *testing.T) {
 // AnnounceInterval cleanly. Two invariants:
 //
 //  1. `cap % tick == 0` — forced-full deadlines land exactly on a
-//     tick. Without this, with cap=60s and tick=45s the deadline at
-//     60s is observed at the 90s tick, actual gap = 90s past
-//     cap=60s, single-dropped-sync window collapses past TTL=120s.
+//     tick. Without this, with cap=300s and tick=45s the deadline at
+//     300s is observed only at the 315s tick (45×7), actual gap = 15s
+//     past cap=300s, eroding the single-dropped-sync window against
+//     TTL=600s.
 //
 //  2. `announceInterval % tick == 0` — delta-cycle deadlines also
 //     land exactly on a tick. Without this, with interval=45s and
@@ -465,7 +466,7 @@ func TestAnnounceLoop_OverloadGate_DisengagedAllowsDeltas(t *testing.T) {
 // cap, no scaling), coprime-style inputs (gcd shrinks to a small
 // common factor), and above-cap inputs (cap dominates).
 func TestAnnounceLoop_TickInterval_DividesBothCadences(t *testing.T) {
-	ttlHalf := routing.DefaultTTL / 2 // 60s with default constants
+	ttlHalf := routing.DefaultTTL / 2 // 300s with default constants
 
 	cases := []struct {
 		name     string
@@ -473,29 +474,28 @@ func TestAnnounceLoop_TickInterval_DividesBothCadences(t *testing.T) {
 		want     time.Duration
 	}{
 		// Divisor inputs — operator value already divides the
-		// per-input cap, gcd returns the operator value.
-		{"default_30s_divides_60s_cap", routing.DefaultAnnounceInterval, routing.DefaultAnnounceInterval},
-		{"divisor_25s_50s_cap", 25 * time.Second, 25 * time.Second},
-		{"divisor_20s_40s_cap", 20 * time.Second, 20 * time.Second},
-		{"divisor_15s_30s_cap", 15 * time.Second, 15 * time.Second},
-		{"divisor_12s_24s_cap", 12 * time.Second, 12 * time.Second},
-		{"divisor_10s_20s_cap", 10 * time.Second, 10 * time.Second},
-		{"divisor_60s_at_cap", ttlHalf, ttlHalf},
-		// Coprime-style inputs — gcd produces a smaller common
-		// factor that divides BOTH operator's interval AND the cap
-		// (TTL/2=60s for these because 2 × interval > 60s).
-		{"non_coprime_45s_60s_gcd_15s", 45 * time.Second, 15 * time.Second},
-		{"non_coprime_50s_60s_gcd_10s", 50 * time.Second, 10 * time.Second},
-		{"non_coprime_55s_60s_gcd_5s", 55 * time.Second, 5 * time.Second},
-		// Above-cap inputs — operator value > TTL/2, cap dominates.
-		// Tick = cap, delta cadence is enforced via per-peer
-		// lastDeltaCycleAt check (every tick where elapsed ≥
-		// announceInterval), so delta fires every announceInterval
-		// rounded up to the nearest tick boundary (which equals
-		// announceInterval when it's a multiple of cap, else the
-		// next multiple).
-		{"above_cap_120s_clamped", 120 * time.Second, ttlHalf},
-		{"above_cap_300s_clamped", 5 * time.Minute, ttlHalf},
+		// per-input cap (= min(10×interval, 300s)), gcd returns the
+		// operator value.
+		{"default_30s_divides_300s_cap", routing.DefaultAnnounceInterval, routing.DefaultAnnounceInterval},
+		{"divisor_25s_250s_cap", 25 * time.Second, 25 * time.Second},
+		{"divisor_20s_200s_cap", 20 * time.Second, 20 * time.Second},
+		{"divisor_15s_150s_cap", 15 * time.Second, 15 * time.Second},
+		{"divisor_12s_120s_cap", 12 * time.Second, 12 * time.Second},
+		{"divisor_10s_100s_cap", 10 * time.Second, 10 * time.Second},
+		{"divisor_300s_at_cap", ttlHalf, ttlHalf},
+		// Coprime-style inputs — gcd(interval, cap) produces a smaller
+		// common factor that divides BOTH the operator interval AND the
+		// cap. The cap is DefaultTTL/2 (300s) for these because
+		// multiplier × interval > 300s.
+		{"non_coprime_45s_gcd_15s", 45 * time.Second, 15 * time.Second}, // gcd(45,300)=15
+		{"non_coprime_50s_gcd_50s", 50 * time.Second, 50 * time.Second}, // gcd(50,300)=50
+		{"non_coprime_55s_gcd_5s", 55 * time.Second, 5 * time.Second},   // gcd(55,300)=5
+		// At/below-cap inputs — interval ≤ TTL/2 (300s). 120s is now
+		// BELOW the 300s cap (was above the old 60s cap), so
+		// gcd(120,300)=60s applies; 300s sits exactly at the cap. Tick
+		// divides the cap so forced-full deadlines land on a tick.
+		{"below_cap_120s_gcd_60s", 120 * time.Second, 60 * time.Second}, // gcd(120,300)=60
+		{"at_cap_300s", 5 * time.Minute, ttlHalf},                       // interval==cap → tick=cap
 	}
 
 	for _, tc := range cases {
@@ -551,16 +551,17 @@ func TestAnnounceLoop_TickInterval_DividesBothCadences(t *testing.T) {
 // so it cannot stretch the effective forced-full cadence beyond what
 // EffectiveForcedFullSyncInterval projects.
 //
-// Without the clamp, an operator setting AnnounceInterval=10s gets
-// forcedFullSyncInterval=20s from the helper (and the exported
+// Without the clamp, an operator setting AnnounceInterval=2s gets
+// forcedFullSyncInterval=20s (10×2s) from the helper (and the exported
 // helper docs project "next forced-full deadline = LastSuccessful +
 // 20s"), but after a successful sync the next forced attempt at 20s
 // would be rate-limited by the fixed MinForcedFullSyncInterval=30s,
 // silently stretching the actual cadence to 30s. Receivers in
 // single-dropped-sync scenarios depend on the helper's projection
-// being honest; a stretch from 20s to 30s narrows the dropped-sync
-// margin (TTL=120s, two missed = 60s gap; 30s actual leaves only
-// 60s margin instead of 80s).
+// being honest; a stretch from 20s to 30s contradicts that projection
+// and narrows the dropped-sync margin against the route TTL. (At the
+// default 30s interval the cadence is 300s ≫ 30s, so the clamp is a
+// no-op and this only bites operators who configure a sub-3s interval.)
 //
 // This test exercises the clamp by driving a scenario where the
 // fixed MinForcedFullSyncInterval would have rate-limited a
@@ -568,13 +569,14 @@ func TestAnnounceLoop_TickInterval_DividesBothCadences(t *testing.T) {
 // The presence of a SECOND wire send within the forced cadence
 // window is the operator-visible signal that the clamp is active.
 func TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap(t *testing.T) {
-	// AnnounceInterval=10s would be hit by the clamp (forcedCap=20s,
-	// rate-limit-window must clamp from 30s down to 20s). For test
-	// time-budget we use a sub-second analogue: AnnounceInterval=
-	// 100ms gives forcedCap=200ms. MinForcedFullSyncInterval is
-	// fixed at 30s — way above forcedCap=200ms — so the clamp MUST
-	// kick in. Without the clamp, rate-limit window = 30s and the
-	// second forced attempt would be blocked for the entire test.
+	// The clamp only fires when the forced-full cadence is SHORTER than
+	// the fixed MinForcedFullSyncInterval=30s — i.e. a sub-3s
+	// AnnounceInterval (10×interval < 30s). For test time-budget we use
+	// AnnounceInterval=20ms → forcedCap=multiplier*20ms=200ms; 30s is way
+	// above 200ms, so the clamp MUST kick in. Without it, the rate-limit
+	// window stays 30s and the second forced attempt would be blocked for
+	// the entire test. (At the default 30s interval the cadence is 300s,
+	// so the clamp is a no-op there.)
 	//
 	// We force needsFull=true on each cycle by NOT seeding
 	// LastSentSnapshot through any prior path, then verify TWO
@@ -599,10 +601,10 @@ func TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap(t *testing.T) {
 		}
 	}
 
-	// AnnounceInterval=100ms → forcedCap=200ms. Without clamp the
+	// AnnounceInterval=20ms → forcedCap=200ms. Without clamp the
 	// rate-limit window is 30s, blocking the second forced attempt.
 	loop := routing.NewAnnounceLoop(table, sender, peers,
-		routing.WithAnnounceInterval(100*time.Millisecond),
+		routing.WithAnnounceInterval(20*time.Millisecond),
 		routing.WithOverloadGate(gate),
 	)
 
@@ -687,27 +689,27 @@ func TestAnnounceLoop_TickInterval_BusyLoopGuard(t *testing.T) {
 		{
 			name:     "subsecond_test_cadence_bypasses_floor_10ms",
 			interval: 10 * time.Millisecond,
-			want:     10 * time.Millisecond, // gcd(10ms, 20ms) = 10ms, no floor
+			want:     10 * time.Millisecond, // gcd(10ms, 100ms) = 10ms, no floor
 		},
 		{
 			name:     "subsecond_test_cadence_bypasses_floor_20ms",
 			interval: 20 * time.Millisecond,
-			want:     20 * time.Millisecond, // gcd(20ms, 40ms) = 20ms, no floor
+			want:     20 * time.Millisecond, // gcd(20ms, 200ms) = 20ms, no floor
 		},
 		{
 			name:     "whole_second_input_unaffected_by_floor",
 			interval: 45 * time.Second,
-			want:     15 * time.Second, // gcd(45s, 60s) = 15s, above floor, returned as-is
+			want:     15 * time.Second, // gcd(45s, 300s) = 15s, above floor, returned as-is
 		},
 		{
-			// Sanity: 37s + 500ms gives gcd(37500ms, 60000ms) =
-			// 7.5s — that's WELL above the 1s floor, so the floor
-			// does NOT kick in. This case is here to pin the math
-			// (early reviewers hit the false intuition that
+			// Sanity: 37s + 500ms gives gcd(37500ms, cap=300000ms) =
+			// 37.5s (37.5 divides 300 exactly) — WELL above the 1s
+			// floor, so the floor does NOT kick in. This case pins the
+			// math (early reviewers hit the false intuition that
 			// "non-second-aligned ⇒ tiny gcd"; not always true).
 			name:     "non_second_aligned_with_large_gcd_unfloored",
 			interval: 37*time.Second + 500*time.Millisecond,
-			want:     7500 * time.Millisecond,
+			want:     37500 * time.Millisecond,
 		},
 	}
 
@@ -758,37 +760,42 @@ func TestAnnounceLoop_TickInterval_BusyLoopGuard(t *testing.T) {
 // Receivers in single-dropped-sync scenarios then lost learned
 // routes silently between stretched syncs.
 //
-// Scenario: AnnounceInterval=200ms → forcedCap=400ms,
-// tickInterval=200ms. Triggers fire every 180ms (slightly faster
-// than the natural tick), peer has a baseline after the initial
-// forced-full so subsequent cycles take the delta path AND check
+// Scenario: AnnounceInterval=200ms → forcedCap=EffectiveForcedFullSyncInterval
+// (multiplier*200ms, capped at TTL/2), tickInterval=200ms. Triggers fire every
+// 180ms (slightly faster than the natural tick); the peer has a baseline after
+// the initial forced-full so subsequent cycles take the delta path AND check
 // the forced-full deadline.
 //
-//	Without the bug (current code): the natural tick at t≈400ms
-//	  fires the forced-full deadline check on schedule. Second
-//	  wire send lands at ≤ ~450ms after the first.
-//	With the bug back: every trigger at 180ms / 360ms reset the
-//	  ticker, so the natural tick at 400ms never fires. The first
-//	  cycle that catches the deadline is the trigger at 540ms,
-//	  giving a 540ms gap — 35% past the cap.
+//	Without the bug (current code): the natural tick at t≈forcedCap fires the
+//	  forced-full deadline check on schedule (forcedCap is a multiple of the
+//	  tick, so the deadline lands ON a tick). Second wire send lands ≤
+//	  forcedCap + tolerance after the first.
+//	With the bug back: every trigger reset the ticker, so the natural tick at
+//	  the deadline never fires; the first cycle that catches the deadline is
+//	  the trigger PAST it (~forcedCap + one tick), exceeding the budget.
 //
-// The assertion `gap ≤ forcedCap + tolerance` (450ms) fails on
-// the bug shape and passes on the current code, regardless of
-// the exact number of triggers that interleave. The tolerance
-// absorbs scheduler jitter without admitting the bug envelope.
+// The assertion `gap ≤ forcedCap + tolerance` fails on the bug shape and passes
+// on the current code, regardless of how many triggers interleave. The
+// tolerance absorbs scheduler jitter without admitting the bug envelope.
 func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 	const (
 		announceInterval = 200 * time.Millisecond
-		forcedCap        = 400 * time.Millisecond // EffectiveForcedFullSyncInterval(200ms) = 400ms
 		triggerCadence   = 180 * time.Millisecond // slightly faster than the natural tick
-		gapTolerance     = 50 * time.Millisecond  // absorb scheduler jitter
-		// gapBudget is the assertion threshold. forcedCap + tolerance
-		// must be < the bug-shape gap (~540ms) so the assertion
-		// distinguishes the two shapes cleanly. 450ms passes on the
-		// current code (~400ms ideal, plus jitter) and fails on the
-		// bug shape (~540ms).
-		gapBudget = forcedCap + gapTolerance
+		// gapTolerance sits between the ideal gap (≈ forcedCap, the deadline
+		// lands on the cap-th tick) and the bug-shape gap (the first trigger
+		// past the deadline). With forcedCap=multiplier*200ms and
+		// triggerCadence=180ms the bug-shape gap is ceil(cap/180)*180, i.e.
+		// ~160ms past cap, so 80ms leaves ~80ms of headroom on BOTH sides —
+		// enough to absorb scheduler jitter without admitting the regression.
+		gapTolerance = 80 * time.Millisecond
 	)
+	// forcedCap tracks the constants (EffectiveForcedFullSyncInterval =
+	// multiplier*interval, capped at TTL/2) so the test auto-adjusts when
+	// ForcedFullSyncMultiplier / DefaultTTL change. gapBudget = forcedCap +
+	// tolerance must stay below the bug-shape gap (~forcedCap + one tick) so the
+	// assertion distinguishes the ticker.Reset regression cleanly.
+	forcedCap := routing.EffectiveForcedFullSyncInterval(announceInterval)
+	gapBudget := forcedCap + gapTolerance
 
 	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("self-node-identity")))
 	if _, err := table.AddDirectPeer(domaintest.ID("peer-a-identity-direct")); err != nil {
@@ -809,7 +816,7 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 	loop := routing.NewAnnounceLoop(table, sender, peers,
 		routing.WithAnnounceInterval(announceInterval))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), forcedCap+1500*time.Millisecond)
 	defer cancel()
 	go loop.Run(ctx)
 
@@ -830,9 +837,10 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 	// Drive triggers every triggerCadence (180ms). The trigger
 	// goroutine stops when ctx is cancelled by the assertion path
 	// below or by t.Cleanup. Bug shape: each trigger ticker.Reset()
-	// would push the natural tick at 200ms / 400ms forward by 200ms
-	// each time, so the forced-full deadline at t=400ms wouldn't be
-	// caught until the trigger past it (t=540ms).
+	// would push the natural tick forward by one tick each time, so the
+	// natural tick at the forced-full deadline (t≈forcedCap) never fires
+	// and the deadline is only caught at the first TRIGGER past it
+	// (t≈ceil(forcedCap/triggerCadence)*triggerCadence), exceeding the budget.
 	triggerCtx, stopTriggers := context.WithCancel(ctx)
 	defer stopTriggers()
 	go func() {
@@ -849,8 +857,9 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 	}()
 
 	// Wait for the second wire send. Budget is generous so the test
-	// can still observe the bug shape (gap=540ms) and fail on the
-	// gap assertion below — failing fast here would mask the bug
+	// can still observe the bug shape (gap ≈ first trigger past the
+	// forcedCap deadline) and fail on the gap assertion below — failing
+	// fast here would mask the bug
 	// signal.
 	secondDeadline := time.Now().Add(forcedCap + 500*time.Millisecond)
 	for rec.callCount() < 2 && time.Now().Before(secondDeadline) {
@@ -877,9 +886,9 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 // cadence MUST NOT exceed DefaultTTL/2. A regression that drops the
 // cap reintroduces the silent-expiry window the cap was added to
 // close (an operator setting interval=120s would otherwise push
-// forced-full to 240s, > DefaultTTL=120s, and learned routes age out
-// silently between syncs). See docs/routing.md "Refresh interval
-// invariant" for the contract.
+// forced-full to multiplier*120s = 1200s, far beyond DefaultTTL/2=300s,
+// and learned routes age out silently between syncs). See
+// docs/routing.md "Refresh interval invariant" for the contract.
 func TestEffectiveForcedFullSyncInterval_CappedAtTTLHalf(t *testing.T) {
 	maxAllowed := routing.DefaultTTL / 2
 
@@ -896,7 +905,7 @@ func TestEffectiveForcedFullSyncInterval_CappedAtTTLHalf(t *testing.T) {
 		{
 			name:     "short_test_interval_uses_multiplier",
 			interval: 10 * time.Second,
-			want:     20 * time.Second,
+			want:     100 * time.Second, // 10 * multiplier(10), below the 300s cap
 		},
 		{
 			name:     "interval_exactly_at_cap_uses_cap",
@@ -909,9 +918,9 @@ func TestEffectiveForcedFullSyncInterval_CappedAtTTLHalf(t *testing.T) {
 			want:     maxAllowed,
 		},
 		{
-			name:     "operator_dense_60s_clamped_to_60s",
+			name:     "operator_dense_60s_clamped_to_cap",
 			interval: 60 * time.Second,
-			want:     maxAllowed, // 60s = DefaultTTL/2
+			want:     maxAllowed, // 60s*multiplier(10)=600s > cap → clamped to DefaultTTL/2
 		},
 		{
 			name:     "operator_extreme_300s_still_clamped",
