@@ -477,6 +477,12 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 	if state := t.health.getLocked(peerIdentity, peerIdentity); state != nil {
 		if state.applySessionEstablishedLocked(now) {
 			t.dirty.Store(true)
+			// Lifting the armed cooldown un-filters the direct pair from the
+			// announce projection. In the idempotent reconnect path storage did
+			// not mutate (no markSnapDirtyLocked), so journal the change
+			// explicitly — the symmetric path Table.ClearDirectPairCooldown
+			// already does. (Direct pair: identity == uplink == peerIdentity.)
+			t.markRouteChangedLocked(peerIdentity)
 		}
 	}
 
@@ -607,7 +613,14 @@ func (t *Table) TickTTL() TickTTLResult {
 	// Snapshot exposes both Routes and FlapState. Mark dirty if
 	// either changed; a no-op tick (nothing expired and no flap-state
 	// cleanup) must not force a republish.
-	flapMutated := t.flap.tickLocked(now)
+	seqHoldReleased, flapMutated := t.flap.tickLocked(now)
+	// Phase 3: each identity whose SeqNo flap-cap hold-down was released
+	// re-appears in the announce projection, so journal the change. (If an
+	// AnnounceTo on the announce path cleared it first, this set is empty for
+	// it — whichever path clears it journals it.)
+	for _, id := range seqHoldReleased {
+		t.markRouteChangedLocked(id)
+	}
 	// Phase 2 health reconciliation: when CompactExpired physically
 	// removes a claim, the matching RouteHealthState entry is no
 	// longer backed by storage. Without the reconciliation step,

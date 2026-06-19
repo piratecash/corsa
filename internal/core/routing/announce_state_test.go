@@ -64,7 +64,7 @@ func TestAnnounceStateRegistry_MarkDisconnected(t *testing.T) {
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Set up initial state: resync done, baseline received.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, now.Add(-time.Minute))
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, now.Add(-time.Minute))
 	s.MarkBaselineReceived()
 
 	r.MarkDisconnected(domaintest.ID("peer-A"))
@@ -97,7 +97,7 @@ func TestAnnounceStateRegistry_MarkReconnected(t *testing.T) {
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Set up: mark as synced, then record an attempt.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, clk)
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, clk)
 	s.RecordFullSyncAttempt(clk)
 
 	// Advance the clock so the reconnect watermark refresh is observable.
@@ -377,7 +377,7 @@ func TestAnnounceStateRegistry_MarkInvalid(t *testing.T) {
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Clear the initial NeedsFullResync via a successful full sync.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, time.Now())
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, time.Now())
 
 	view := s.View()
 	if view.NeedsFullResync {
@@ -411,7 +411,7 @@ func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
 
 	// Establish a baseline so the suppression gate's LastSentSnapshot
 	// precondition is met and the classification becomes meaningful.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, time.Now())
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, time.Now())
 	if v := s.View(); v.NeedsFullResync || v.ResyncIsHard {
 		t.Fatalf("RecordFullSyncSuccess must clear both flags, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
 	}
@@ -423,7 +423,7 @@ func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
 	}
 
 	// A successful full sync clears the hardness again.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, time.Now())
+	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, time.Now())
 	if s.View().ResyncIsHard {
 		t.Fatal("RecordFullSyncSuccess did not clear ResyncIsHard")
 	}

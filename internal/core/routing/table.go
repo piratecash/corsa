@@ -177,6 +177,19 @@ type Table struct {
 	// never mutated in place.
 	snapRawCache map[PeerIdentity][]RouteEntry
 
+	// changeLog is the Phase 3 (announce delta-cursor) change journal. Every
+	// route/health mutation that marks the table dirty also appends the
+	// affected identity here (markRouteChangedLocked / markRouteChangedFullLocked),
+	// so a per-peer cursor can later read the identities changed since it last
+	// synced instead of rebuilding the whole projection.
+	//
+	// DEPLOY-1 SCOPE: recorded and read only by the shadow completeness check
+	// in the announce loop — it does NOT drive what is sent (the authoritative
+	// delta is still ComputeDelta over the rebuilt snapshot). See
+	// docs/refactoring/phase3-announce-delta-cursor.md. Guarded by t.mu, same
+	// as snapDirtyIDs.
+	changeLog *routeChangeLog
+
 	// health owns the RouteHealthState map keyed per (Identity,
 	// Uplink) — the Phase 2 quality-signal layer introduced in
 	// docs/protocol/route_health.md. healthStore has no
@@ -456,6 +469,12 @@ func NewTable(opts ...TableOption) *Table {
 		clock:  time.Now,
 		flap:   newFlapDetector(),
 		health: newHealthStore(),
+		// Phase 3 change journal (announce delta-cursor, shadow stage). The
+		// ring must remember at least one forced-full-sync window's worth of
+		// changes so a peer synced at the previous forced-full can still be
+		// served incrementally; defaultRouteChangeLogCapacity is sized
+		// generously for that and recalibrated from the shadow-stage metrics.
+		changeLog: newRouteChangeLog(defaultRouteChangeLogCapacity),
 		// Phase 4 v3 epoch default. WithEpoch overrides for tests. See
 		// the Table.epoch field doc for the immutability rationale.
 		epoch: 1,
@@ -555,16 +574,60 @@ func (t *Table) IsDirty() bool {
 // changed, so the next SnapshotIncremental re-copies it instead of
 // reusing the cached projection. Caller must hold t.mu in W mode (every
 // call site already holds it for the storage mutation it accompanies).
+//
+// It also feeds the Phase 3 change journal (markRouteChangedLocked): every
+// per-identity route mutation that needs a snapshot re-copy is exactly a
+// change a per-peer announce cursor must learn about.
 func (t *Table) markSnapDirtyLocked(identity PeerIdentity) {
 	if t.snapDirtyIDs == nil {
 		t.snapDirtyIDs = make(map[PeerIdentity]struct{})
 	}
 	t.snapDirtyIDs[identity] = struct{}{}
+	t.markRouteChangedLocked(identity)
 }
 
 // markSnapFullDirtyLocked forces the next SnapshotIncremental to re-copy
 // every bucket. Used by bulk mutations that touch an unbounded identity
-// set. Caller must hold t.mu in W mode.
+// set. Caller must hold t.mu in W mode. It also records a full reset in the
+// Phase 3 change journal so per-peer cursors below it force a full sync.
 func (t *Table) markSnapFullDirtyLocked() {
 	t.snapFullDirty = true
+	t.markRouteChangedFullLocked()
+}
+
+// markRouteChangedLocked appends a per-identity change to the Phase 3 change
+// journal. Called from markSnapDirtyLocked (route mutations) and directly from
+// the health/flap mutation sites that set the coarse dirty flag without a
+// snapshot re-copy (their per-identity change still alters the announce
+// projection). Caller must hold t.mu in W mode. nil-safe for tables built
+// without a journal (defensive — production always has one).
+func (t *Table) markRouteChangedLocked(identity PeerIdentity) {
+	if t.changeLog == nil {
+		return
+	}
+	t.changeLog.recordLocked(identity)
+}
+
+// markRouteChangedFullLocked records a bulk reset in the Phase 3 change
+// journal. Caller must hold t.mu in W mode.
+func (t *Table) markRouteChangedFullLocked() {
+	if t.changeLog == nil {
+		return
+	}
+	t.changeLog.recordFullLocked()
+}
+
+// ChangeLogSinceUpTo returns the distinct identities changed in [cursor, bound)
+// and needFull (cursor fell behind a bulk reset or out of the ring window).
+// `bound` is a head captured under t.mu atomically with an announce projection
+// (see AnnounceToWithChangeHead), so the result reflects exactly that
+// projection's mutations. Takes t.mu in R mode. DEPLOY-1 SCOPE: consumed only by
+// the announce loop's shadow completeness check.
+func (t *Table) ChangeLogSinceUpTo(cursor, bound uint64) (changed []PeerIdentity, needFull bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.changeLog == nil {
+		return nil, false
+	}
+	return t.changeLog.sinceUpToLocked(cursor, bound)
 }

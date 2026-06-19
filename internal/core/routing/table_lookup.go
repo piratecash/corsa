@@ -80,6 +80,21 @@ func (t *Table) Announceable(excludeVia PeerIdentity) []RouteEntry {
 // hot path go through the lock-free Snapshot cache in node.Service,
 // not direct Table calls.
 func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
+	entries, _ := t.AnnounceToWithChangeHead(excludeVia)
+	return entries
+}
+
+// AnnounceToWithChangeHead is AnnounceTo plus the Phase 3 change-journal head
+// captured atomically with the projection (same t.mu critical section). The
+// announce loop uses the head as the cursor bound: ChangeLogSinceUpTo(cursor,
+// head) enumerates exactly the mutations this projection reflects, so a
+// mutation landing AFTER the projection (but before the loop reads the journal)
+// is neither validated against this delta nor consumed by the cursor — removing
+// the race that a separately-read head would create (false shadow divergence in
+// deploy 1; a lost update in deploy 2). The returned slice carries the same
+// pooled-buffer OWNERSHIP contract as AnnounceTo (release via
+// ReleaseAnnounceEntries).
+func (t *Table) AnnounceToWithChangeHead(excludeVia PeerIdentity) ([]AnnounceEntry, uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// Phase 1 P2: AnnounceProjectionFor can engage a per-Identity
@@ -107,14 +122,61 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 	// Phase 3 PR 12.4: black-hole cooldown filter on the same
 	// projection path — symmetric with Announceable above.
 	now := t.clock()
+	// Phase 3: release expired SeqNo flap-cap hold-downs at the projection
+	// boundary and journal them. AnnounceProjectionFor's isInSeqHoldDownLocked
+	// gate un-suppresses an identity the instant its hold-down deadline passes
+	// (a time-driven transition with no mutation event). Clearing + journalling
+	// here — before the head is captured below — makes the un-suppress and the
+	// journal entry simultaneous, so the identity's reappearing delta is covered
+	// (no false shadow miss in deploy 1; a journalled change in deploy 2). If
+	// TickTTL already cleared it, the set is empty and it was journalled there.
+	// No dirty is set: SeqNo hold-down state is announce-emit-only and is not
+	// part of the published routing.Snapshot.
+	if released, _ := t.flap.clearExpiredSeqHoldDownsLocked(now); len(released) > 0 {
+		for _, id := range released {
+			t.markRouteChangedLocked(id)
+		}
+	}
 	cooledDown := func(identity, uplink PeerIdentity) bool {
-		return t.health.isCooledDownLocked(identity, uplink, now)
+		state := t.health.getLocked(identity, uplink)
+		if state == nil || state.CooldownUntil.IsZero() {
+			return false
+		}
+		if now.Before(state.CooldownUntil) {
+			return true
+		}
+		// Phase 3: the cooldown deadline has passed but TickHealth has not
+		// cleared the field yet. Clear it lazily HERE — at the projection
+		// boundary, under t.mu.Lock — and journal the identity, so the un-filter
+		// (this projection now selects the route) and the change-journal entry
+		// happen in the same instant. Without this the route would un-filter on
+		// a time deadline with no journal entry (a false shadow miss in deploy 1
+		// and a missed time-driven delta in deploy 2). Across peers in the same
+		// cycle the first projection clears it, so it is journalled once.
+		//
+		// applyCooldownExpiryLocked mutates CooldownUntil / ConsecutiveFailures
+		// / LastCooldownClearedAt and removes the pair from the routing-relevant
+		// Snapshot.Health subset, so mark the table dirty too — otherwise the
+		// snapshot publisher never republishes (a later TickHealth sees the
+		// field already zero and also skips dirty) and fetchRouteSummary keeps
+		// reporting the route as cooled against a stale cached snapshot.
+		state.applyCooldownExpiryLocked(now)
+		t.dirty.Store(true)
+		t.markRouteChangedLocked(identity)
+		return false
 	}
 	entries, mutated := t.store.AnnounceProjectionFor(excludeVia, now, t.health.isDeadLocked, cooledDown)
 	if mutated {
 		t.dirty.Store(true)
 	}
-	return entries
+	// Capture the journal head AFTER the projection (the lazy cooldown-clear
+	// above may have appended entries) but still under this same lock, so it is
+	// consistent with `entries`.
+	var changeHead uint64
+	if t.changeLog != nil {
+		changeHead = t.changeLog.headLocked()
+	}
+	return entries, changeHead
 }
 
 // ReleaseAnnounceEntries returns a slice obtained from AnnounceTo to the
@@ -129,6 +191,7 @@ func (t *Table) AnnounceTo(excludeVia PeerIdentity) []AnnounceEntry {
 //     (corruption / data race);
 //   - releasing twice, or reading the slice after release, is a
 //     use-after-free-class bug.
+//
 // A nil / zero-cap slice is ignored (it owns no backing). Safe to call from any
 // goroutine.
 func (t *Table) ReleaseAnnounceEntries(entries []AnnounceEntry) {

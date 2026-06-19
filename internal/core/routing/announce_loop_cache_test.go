@@ -338,7 +338,7 @@ func TestAnnounceLoop_RateLimitForcedFullSync(t *testing.T) {
 	// but now needs forced full resync (e.g. after reconnect).
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
 	// Establish a prior baseline so the rate limiter applies.
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now.Add(-1*time.Minute))
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now.Add(-1*time.Minute))
 	// Mark as needing full resync (simulating reconnect).
 	state.SetNeedsFullResyncForTest()
 	// Record a recent full sync attempt to trigger rate limiting.

@@ -324,6 +324,15 @@ type AnnounceLoop struct {
 	// Monotonic; safe for concurrent reads.
 	noopSuppressedTotal atomic.Uint64
 
+	// shadowDivergence counts Phase 3 (deploy-1) shadow mismatches: delta
+	// entries whose identity was NOT covered by the change journal since the
+	// peer's cursor, i.e. a mutation site that did not record into the journal.
+	// A non-zero, growing value on a canary means the journal wiring is
+	// incomplete and the cursor model is not yet safe to make authoritative.
+	// Monotonic; safe for concurrent reads. See
+	// docs/refactoring/phase3-announce-delta-cursor.md.
+	shadowDivergence atomic.Uint64
+
 	// lastDeltaCycleAt tracks the wall-clock of the most recent
 	// delta-cycle wake. When the operator-configured AnnounceInterval
 	// exceeds EffectiveForcedFullSyncInterval (capped at DefaultTTL/2),
@@ -423,6 +432,62 @@ func (a *AnnounceLoop) OverloadCycleCount() uint64 {
 // signal — not surfaced through RPC.
 func (a *AnnounceLoop) NoopSuppressedTotal() uint64 {
 	return a.noopSuppressedTotal.Load()
+}
+
+// ShadowDivergenceTotal returns the cumulative Phase 3 (deploy-1) shadow
+// mismatch count — delta identities the change journal failed to cover since
+// the peer's cursor. Zero on a healthy canary; a growing value flags an unwired
+// mutation site. Internal observability signal.
+func (a *AnnounceLoop) ShadowDivergenceTotal() uint64 {
+	return a.shadowDivergence.Load()
+}
+
+// shadowValidateDelta is the Phase 3 deploy-1 shadow probe. It compares the
+// authoritative `delta` (already computed via ComputeDelta) against the set of
+// identities the change journal recorded since this peer's cursor, logs and
+// counts (shadowDivergence) any delta identity the journal did NOT record — a
+// mutation site that failed to journal a change the cursor model would later
+// miss — and returns the current journal head. The journal does NOT drive what
+// is sent; `delta` remains authoritative.
+//
+// It does NOT advance the cursor: the caller commits `bound` only after the
+// paired send succeeds (or immediately on a no-op cycle), so a failed send does
+// not move the cursor past entries that produced a delta to be resent. A
+// needFull window (cursor behind a bulk reset or out of the ring) cannot be
+// validated incrementally, so the check is skipped that cycle (the caller still
+// commits `bound` on success to advance past the stale window).
+//
+// `bound` is the change-journal head captured atomically with the projection
+// that produced `delta` (AnnounceToWithChangeHead), and the window enumerated is
+// [cursor, bound) — exactly this snapshot's mutations. A mutation landing after
+// the projection is outside the window, so it is neither falsely flagged nor
+// consumed: it surfaces in the next cycle's delta against a cursor that did not
+// pass it. This is what makes the cursor model race-free (deploy-2-safe).
+func (a *AnnounceLoop) shadowValidateDelta(peerIdentity PeerIdentity, cursor, bound uint64, delta []AnnounceEntry) {
+	changed, needFull := a.table.ChangeLogSinceUpTo(cursor, bound)
+	if needFull {
+		return
+	}
+	changedSet := make(map[PeerIdentity]struct{}, len(changed))
+	for _, id := range changed {
+		changedSet[id] = struct{}{}
+	}
+	var missed uint64
+	for _, e := range delta {
+		if _, ok := changedSet[e.Identity]; ok {
+			continue
+		}
+		missed++
+		log.Warn().
+			Str("peer", peerIdentity.String()).
+			Str("identity", e.Identity.String()).
+			Uint64("cursor", cursor).
+			Uint64("bound", bound).
+			Msg("phase3_shadow: delta identity not covered by change journal — a mutation site is unwired")
+	}
+	if missed > 0 {
+		a.shadowDivergence.Add(missed)
+	}
 }
 
 // ConfirmPeerDigestMatch correlates an inbound route_sync_summary_v1
@@ -1208,7 +1273,11 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// pooled projection buffer; return it once BuildAnnounceSnapshot
 			// has consumed it (nothing below reads rawRoutes again). Deferred
 			// to the goroutine end so every early return still releases it.
-			rawRoutes := a.table.AnnounceTo(peer.Identity)
+			// PHASE 3 SHADOW (deploy 1): snapHead is the change-journal head
+			// captured atomically with this projection, so the shadow check and
+			// cursor commit below validate/advance against exactly the mutations
+			// this snapshot reflects (no AnnounceTo↔journal-read race).
+			rawRoutes, snapHead := a.table.AnnounceToWithChangeHead(peer.Identity)
 			defer a.table.ReleaseAnnounceEntries(rawRoutes)
 			totalRaw.Add(int32(len(rawRoutes)))
 
@@ -1250,7 +1319,11 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 					return
 				}
 
-				a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, now)
+				// PHASE 3 SHADOW (deploy 1): snapHead (journal head atomic with
+				// this full snapshot) is committed with lastSentSnapshot inside
+				// RecordFullSyncSuccess on success; a failed full sync leaves both
+				// put.
+				a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, snapHead, now)
 				forcedFull.Add(1)
 				return
 			}
@@ -1260,7 +1333,27 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			delta := ComputeDelta(view.LastSentSnapshot, snapshot)
 			totalDelta.Add(int32(len(delta)))
 
+			// PHASE 3 SHADOW (deploy 1): validate that the change journal
+			// captured every identity this delta carries. Authoritative output
+			// is still `delta`; this only reports unwired mutation sites. The
+			// cursor is STAGED here and committed in lock-step with
+			// lastSentSnapshot — on a successful send (RecordDeltaSendSuccess)
+			// or immediately on the no-op branch below (nothing deliverable). A
+			// failed send leaves the cursor put so the recomputed delta next
+			// cycle still validates against the same window. The commit happens
+			// after the send below, gated on its success. See
+			// docs/refactoring/phase3-announce-delta-cursor.md.
+			// Cursor from the SAME View() that produced view.LastSentSnapshot
+			// above, so the delta (computed from that snapshot) is validated
+			// against the matching journal window — not a cursor a concurrent
+			// connect-time full sync advanced in between.
+			a.shadowValidateDelta(peer.Identity, view.AnnounceCursor, snapHead, delta)
+
 			if len(delta) == 0 {
+				// No changes — nothing to send. Advance the cursor atomically
+				// with the (content-equal) snapshot so the pair cannot tear
+				// against a concurrent connect-time full sync.
+				peerState.RecordDeltaNoop(snapshot, snapHead)
 				// No changes — suppress send. Two counters fire here:
 				//   - skippedNoop is the per-cycle log field
 				//     (`announce_skipped_noop`), reset every cycle;
@@ -1330,16 +1423,20 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 					Msg("announce_v2_downgraded_no_wire_baseline")
 				mode = deltaModeV1
 			}
+			// PHASE 3 SHADOW (deploy 1): snapHead is committed atomically with
+			// lastSentSnapshot inside RecordDeltaSendSuccess on a successful
+			// send; a failed send leaves both put so the recomputed delta next
+			// cycle validates against the same window.
 			switch mode {
 			case deltaModeV3:
 				deltaV3.Add(1)
-				a.sendIncrementalAnnounceV3(ctx, cycleID, peer, peerState, snapshot, delta, now)
+				a.sendIncrementalAnnounceV3(ctx, cycleID, peer, peerState, snapshot, delta, snapHead, now)
 			case deltaModeV2:
 				deltaV2.Add(1)
-				a.sendIncrementalAnnounceV2(ctx, cycleID, peer, peerState, snapshot, delta, now)
+				a.sendIncrementalAnnounceV2(ctx, cycleID, peer, peerState, snapshot, delta, snapHead, now)
 			case deltaModeV1:
 				deltaV1.Add(1)
-				a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
+				a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, snapHead, now)
 			case deltaModeDivergence:
 				modeDivergence.Add(1)
 				a.stateRegistry.MarkInvalid(peer.Identity)
@@ -1348,7 +1445,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 					Str("peer_identity", peer.Identity.String()).
 					Str("peer_address", string(peer.Address)).
 					Msg("announce_mode_divergence_fallback_to_legacy_delta")
-				a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, now)
+				a.sendIncrementalAnnounce(ctx, cycleID, peer, peerState, snapshot, delta, snapHead, now)
 			}
 		}(peer)
 	}
@@ -1588,8 +1685,9 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	peer AnnounceTarget,
 	state *AnnouncePeerState,
 	snapshot *AnnounceSnapshot,
+	changeHead uint64,
 	now time.Time,
-) {
+) bool {
 	state.RecordFullSyncAttempt(now)
 
 	// Empty snapshot after split horizon / empty table: record a successful
@@ -1601,8 +1699,8 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	// frame — the relevant baseline flag stays false on purpose so the
 	// next non-empty cycle re-emits a real full frame.
 	if len(snapshot.Entries) == 0 {
-		state.RecordFullSyncSuccess(snapshot, now)
-		return
+		state.RecordFullSyncSuccess(snapshot, changeHead, now)
+		return true
 	}
 
 	if PeerSupportsV3(peer.Capabilities) {
@@ -1613,15 +1711,15 @@ func (a *AnnounceLoop) sendFullAnnounce(
 				Str("peer_address", string(peer.Address)).
 				Int("routes", len(snapshot.Entries)).
 				Msg("announce_v3_full_send_failed")
-			return
+			return false
 		}
 		// A non-empty v3 kind="full" frame went out — the peer has now
 		// observed a v3 baseline in this session, so the v3 receive gate
 		// in handleRouteAnnounceV3 is open and subsequent cycles may
 		// pick v3 kind="delta".
 		state.MarkWireBaselineV3Sent()
-		state.RecordFullSyncSuccess(snapshot, now)
-		return
+		state.RecordFullSyncSuccess(snapshot, changeHead, now)
+		return true
 	}
 
 	if !a.sendLegacyFull(ctx, peer, snapshot) {
@@ -1632,13 +1730,14 @@ func (a *AnnounceLoop) sendFullAnnounce(
 			Int("routes", len(snapshot.Entries)).
 			Msg("announce_full_send_failed")
 		// Cache remains in previous state; next cycle will retry.
-		return
+		return false
 	}
 	// A non-empty legacy announce_routes frame went out — the peer has now
 	// observed a wire baseline in this session, so the v2 receive gate is
 	// open. Subsequent deltas may pick the v2 wire frame when caps agree.
 	state.MarkWireBaselineSent()
-	state.RecordFullSyncSuccess(snapshot, now)
+	state.RecordFullSyncSuccess(snapshot, changeHead, now)
+	return true
 }
 
 // sendV3Full is the v3-generation counterpart of sendLegacyFull: the
@@ -1702,8 +1801,9 @@ func (a *AnnounceLoop) sendIncrementalAnnounce(
 	state *AnnouncePeerState,
 	fullSnapshot *AnnounceSnapshot,
 	delta []AnnounceEntry,
+	changeHead uint64,
 	now time.Time,
-) {
+) bool {
 	if !a.sender.SendAnnounceRoutes(ctx, peer.Address, delta) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
@@ -1712,15 +1812,17 @@ func (a *AnnounceLoop) sendIncrementalAnnounce(
 			Int("delta_routes", len(delta)).
 			Msg("announce_delta_send_failed_v1")
 		// Cache remains in previous state; next cycle will retry.
-		return
+		return false
 	}
 	// A legacy announce_routes frame went out — even on the v1 delta path,
 	// the peer's v2 receive gate (if any) treats this arrival as the wire
 	// baseline. Flip the flag so future cycles may pick the v2 frame when
 	// both capability sources agree.
 	state.MarkWireBaselineSent()
-	// Cache stores the full snapshot, not just the delta payload.
-	state.RecordDeltaSendSuccess(fullSnapshot, now)
+	// Cache stores the full snapshot, not just the delta payload; the cursor
+	// advances atomically with it (Phase 3 lock-step).
+	state.RecordDeltaSendSuccess(fullSnapshot, changeHead, now)
+	return true
 }
 
 // sendIncrementalAnnounceV2 sends the delta via the v2 routes_update wire
@@ -1744,8 +1846,9 @@ func (a *AnnounceLoop) sendIncrementalAnnounceV2(
 	state *AnnouncePeerState,
 	fullSnapshot *AnnounceSnapshot,
 	delta []AnnounceEntry,
+	changeHead uint64,
 	now time.Time,
-) {
+) bool {
 	if !a.sender.SendRoutesUpdate(ctx, peer.Address, delta) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
@@ -1753,9 +1856,10 @@ func (a *AnnounceLoop) sendIncrementalAnnounceV2(
 			Str("peer_address", string(peer.Address)).
 			Int("delta_routes", len(delta)).
 			Msg("announce_delta_send_failed_v2")
-		return
+		return false
 	}
-	state.RecordDeltaSendSuccess(fullSnapshot, now)
+	state.RecordDeltaSendSuccess(fullSnapshot, changeHead, now)
+	return true
 }
 
 // sendIncrementalAnnounceV3 sends the delta via the Phase 4 compact
@@ -1779,8 +1883,9 @@ func (a *AnnounceLoop) sendIncrementalAnnounceV3(
 	state *AnnouncePeerState,
 	fullSnapshot *AnnounceSnapshot,
 	delta []AnnounceEntry,
+	changeHead uint64,
 	now time.Time,
-) {
+) bool {
 	if !a.sender.SendRouteAnnounceV3(ctx, peer.Address, routeAnnounceV3KindDelta, a.table.Epoch(), delta) {
 		log.Debug().
 			Uint64("announce_cycle_id", cycleID).
@@ -1788,7 +1893,8 @@ func (a *AnnounceLoop) sendIncrementalAnnounceV3(
 			Str("peer_address", string(peer.Address)).
 			Int("delta_routes", len(delta)).
 			Msg("announce_delta_send_failed_v3")
-		return
+		return false
 	}
-	state.RecordDeltaSendSuccess(fullSnapshot, now)
+	state.RecordDeltaSendSuccess(fullSnapshot, changeHead, now)
+	return true
 }

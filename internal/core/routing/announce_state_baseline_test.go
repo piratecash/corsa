@@ -161,11 +161,11 @@ func TestAnnouncePeerState_Baseline_SurvivesRecordCalls(t *testing.T) {
 	if state.HasReceivedBaseline() {
 		t.Fatalf("RecordFullSyncAttempt must not flip baseline to true")
 	}
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if state.HasReceivedBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not flip baseline to true")
 	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if state.HasReceivedBaseline() {
 		t.Fatalf("RecordDeltaSendSuccess must not flip baseline to true")
 	}
@@ -177,11 +177,11 @@ func TestAnnouncePeerState_Baseline_SurvivesRecordCalls(t *testing.T) {
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("RecordFullSyncAttempt must not clear baseline back to false")
 	}
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not clear baseline back to false")
 	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("RecordDeltaSendSuccess must not clear baseline back to false")
 	}
@@ -329,11 +329,11 @@ func TestAnnouncePeerState_WireBaseline_SurvivesRecordCalls(t *testing.T) {
 	if state.HasSentWireBaseline() {
 		t.Fatalf("RecordFullSyncAttempt must not flip wire-baseline to true")
 	}
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if state.HasSentWireBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not flip wire-baseline to true (empty-baseline branch must leave it false)")
 	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if state.HasSentWireBaseline() {
 		t.Fatalf("RecordDeltaSendSuccess must not flip wire-baseline to true on its own — the call site flips via MarkWireBaselineSent")
 	}
@@ -345,11 +345,11 @@ func TestAnnouncePeerState_WireBaseline_SurvivesRecordCalls(t *testing.T) {
 	if !state.HasSentWireBaseline() {
 		t.Fatalf("RecordFullSyncAttempt must not clear wire-baseline back to false")
 	}
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if !state.HasSentWireBaseline() {
 		t.Fatalf("RecordFullSyncSuccess must not clear wire-baseline back to false")
 	}
-	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordDeltaSendSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if !state.HasSentWireBaseline() {
 		t.Fatalf("RecordDeltaSendSuccess must not clear wire-baseline back to false")
 	}

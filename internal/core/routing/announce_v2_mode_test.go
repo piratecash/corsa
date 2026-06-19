@@ -458,7 +458,7 @@ func TestAnnounceLoop_DeltaModeV2_DowngradedWithoutWireBaseline(t *testing.T) {
 	// is non-nil so the loop takes the delta path, but the wire-baseline
 	// flag stays false so the override below must downgrade v2→v1.
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now)
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now)
 	if state.HasSentWireBaseline() {
 		t.Fatalf("precondition: empty-baseline must NOT flip wire-baseline to true")
 	}
@@ -574,7 +574,7 @@ func TestAnnounceLoop_ForcedFull_V2Capable_StillLegacy(t *testing.T) {
 	// not bite because LastFullSyncAttemptAt is zero on a freshly recorded
 	// success.
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now.Add(-1*time.Minute))
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now.Add(-1*time.Minute))
 	state.SetNeedsFullResyncForTest()
 
 	runOneCycle(t, loop)

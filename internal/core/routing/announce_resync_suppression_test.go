@@ -57,7 +57,7 @@ func runReconnectSuppressionCycle(t *testing.T, hardResync bool) int {
 	// empty; the only thing that can produce a send is a forced full.
 	baseline := routing.BuildAnnounceSnapshot(table.AnnounceTo(domaintest.ID("peer-C")))
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
-	state.RecordFullSyncSuccess(baseline, now)
+	state.RecordFullSyncSuccess(baseline, 0, now)
 
 	if hardResync {
 		registry.MarkInvalid(domaintest.ID("peer-C")) // request_resync / consistency loss

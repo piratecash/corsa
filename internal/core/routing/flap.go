@@ -373,11 +373,13 @@ func (f *FlapDetector) snapshotLocked(now time.Time) []FlapEntry {
 // and all withdrawal timestamps are outside the window. Returns true
 // when any state was mutated (callers use this to decide dirty
 // marking). Caller must hold the owning Table's t.mu (writer).
-func (f *FlapDetector) tickLocked(now time.Time) bool {
+func (f *FlapDetector) tickLocked(now time.Time) (seqHoldReleased []PeerIdentity, mutated bool) {
 	// Phase 1 P2: also clear expired SeqNo flap-cap hold-downs and
 	// trim stale advance timestamps. Identical lock contract — t.mu
-	// (writer) — so the two sub-passes share a single tick cycle.
-	mutated := f.clearExpiredSeqHoldDownsLocked(now)
+	// (writer) — so the two sub-passes share a single tick cycle. The
+	// released identities are returned so TickTTL can journal them into the
+	// Phase 3 change log (each re-announces on release).
+	seqHoldReleased, mutated = f.clearExpiredSeqHoldDownsLocked(now)
 	// Bad-hops hysteresis cleanup — same lock contract, same tick.
 	if f.clearExpiredBadHopsHoldDownsLocked(now) {
 		mutated = true
@@ -424,7 +426,7 @@ func (f *FlapDetector) tickLocked(now time.Time) bool {
 			}
 		}
 	}
-	return mutated
+	return seqHoldReleased, mutated
 }
 
 // recordSeqAdvanceLocked accounts a single accepted outbound-SeqNo
@@ -553,15 +555,16 @@ func (f *FlapDetector) isInSeqHoldDownLocked(identity PeerIdentity, now time.Tim
 // hold-down has expired, and zeroes holdUntil / holdTrigger on
 // entries where hold-down has expired but advances within the window
 // remain (so a fresh advance reuses the entry without inheriting
-// stale hold-down state). Returns whether any field changed
-// (callers use this to decide dirty marking, mirroring tickLocked).
-// Caller must hold t.mu (writer).
-func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) bool {
+// stale hold-down state). Returns the identities whose SeqNo hold-down was
+// RELEASED this call (each becomes announceable again, so callers must journal
+// it into the Phase 3 change log — see AnnounceToWithChangeHead / TickTTL) and
+// whether any field changed at all (callers use mutated to decide dirty
+// marking, mirroring tickLocked). Caller must hold t.mu (writer).
+func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) (released []PeerIdentity, mutated bool) {
 	if f == nil {
-		return false
+		return nil, false
 	}
 	cutoff := now.Add(-f.seqAdvanceWindow)
-	mutated := false
 	for id, sv := range f.seqVelocities {
 		// Clear expired hold-down state. Hold-down expiry is a
 		// time-derived transition — AnnounceProjectionFor's gate
@@ -586,6 +589,9 @@ func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) bool {
 			sv.holdUntil = time.Time{}
 			sv.holdTrigger = PeerIdentity{}
 			mutated = true
+			// The identity un-suppresses on the announce projection now, so
+			// its reappearance is a journal-able change (Phase 3).
+			released = append(released, id)
 		}
 
 		// Trim stale advance timestamps.
@@ -606,7 +612,7 @@ func (f *FlapDetector) clearExpiredSeqHoldDownsLocked(now time.Time) bool {
 			mutated = true
 		}
 	}
-	return mutated
+	return released, mutated
 }
 
 // recordBadHopsInvalidationLocked feeds the bad-hops hysteresis with

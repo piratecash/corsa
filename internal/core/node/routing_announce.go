@@ -1661,9 +1661,12 @@ func (s *Service) sendOutboundFullTableSync(ctx context.Context, peerIdentity do
 // sync-flush wait rather than waiting for the internal syncFlushTimeout.
 func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
 	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Msg("connect_time_full_sync_begin")
-	routes := s.routingTable.AnnounceTo(peerIdentity)
-	// routes is a pooled projection buffer; return it after
-	// BuildAnnounceSnapshot consumes it (nothing below reads routes again).
+	// AnnounceToWithChangeHead captures the Phase 3 change-journal head atomic
+	// with the projection so the cursor commit below stays in lock-step with
+	// lastSentSnapshot (committed only on send success). routes is a pooled
+	// projection buffer; return it after BuildAnnounceSnapshot consumes it
+	// (nothing below reads routes again).
+	routes, snapHead := s.routingTable.AnnounceToWithChangeHead(peerIdentity)
 	defer s.routingTable.ReleaseAnnounceEntries(routes)
 	snapshot := routing.BuildAnnounceSnapshot(routes)
 	registry := s.announceLoop.StateRegistry()
@@ -1680,7 +1683,9 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 		// branch is orthogonal to the first-sync wire-frame invariant (see
 		// docs/routing.md): empty-baseline emits neither the legacy
 		// announce_routes frame nor the v2 routes_update frame.
-		peerState.RecordFullSyncSuccess(snapshot, now)
+		// Phase 3: an empty-baseline full sync reconciles the peer to the whole
+		// (empty) table; snapHead is committed atomically with lastSentSnapshot.
+		peerState.RecordFullSyncSuccess(snapshot, snapHead, now)
 		log.Debug().
 			Str("peer", peerIdentity.String()).
 			Str("address", string(address)).
@@ -1732,7 +1737,11 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 	} else {
 		peerState.MarkWireBaselineSent()
 	}
-	peerState.RecordFullSyncSuccess(snapshot, now)
+	// Phase 3: the peer is now reconciled to the whole table — snapHead is
+	// committed atomically with lastSentSnapshot inside RecordFullSyncSuccess
+	// (only on this success path; a failed send returned above without touching
+	// either).
+	peerState.RecordFullSyncSuccess(snapshot, snapHead, now)
 	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Msg("connect_time_full_sync_end")
 }
 

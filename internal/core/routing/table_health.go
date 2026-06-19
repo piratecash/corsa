@@ -52,6 +52,7 @@ func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
 	defer t.mu.Unlock()
 	now := t.clock()
 	state := t.health.ensureLocked(identity, uplink, now)
+	prevDead, prevCooled := healthProjectionSig(state)
 	state.applyHopAck(now)
 	if rtt > 0 {
 		state.RTT = UpdateRTT(state.RTT, rtt)
@@ -77,6 +78,9 @@ func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
 	// health view because both ride the same atomic snapshot
 	// pointer in node.Service.
 	t.dirty.Store(true)
+	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
+		t.markRouteChangedLocked(identity)
+	}
 }
 
 // ConfirmHopAck is the atomic counterpart of MarkHopAck used by
@@ -149,6 +153,7 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 	// at the top of MarkHopAck guards that); we already validated
 	// non-empty above.
 	state := t.health.ensureLocked(identity, uplink, now)
+	prevDead, prevCooled := healthProjectionSig(state)
 	state.applyHopAck(now)
 	if rtt > 0 {
 		state.RTT = UpdateRTT(state.RTT, rtt)
@@ -168,6 +173,9 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 	// "health refresh implies dirty" invariant local to this
 	// function regardless of which branch runs.
 	t.dirty.Store(true)
+	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
+		t.markRouteChangedLocked(identity)
+	}
 
 	// Source promotion: only needed when the live claim is below
 	// HopAck (Announcement → HopAck). HopAck-or-better claims
@@ -269,6 +277,7 @@ func (t *Table) MarkProbeAck(identity, uplink PeerIdentity, reachable bool, rtt 
 			return
 		}
 	}
+	prevDead, prevCooled := healthProjectionSig(state)
 	state.applyProbeAck(reachable, now)
 	if rtt > 0 {
 		state.RTT = UpdateRTT(state.RTT, rtt)
@@ -276,6 +285,9 @@ func (t *Table) MarkProbeAck(identity, uplink PeerIdentity, reachable bool, rtt 
 	// PR 11.28 P2#1: Snapshot.Health needs republish on every
 	// health mutation; see MarkHopAck doc-comment.
 	t.dirty.Store(true)
+	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
+		t.markRouteChangedLocked(identity)
+	}
 }
 
 // MarkProbeFailure records a probe timeout — no route_probe_ack_v1
@@ -307,10 +319,14 @@ func (t *Table) MarkProbeFailure(identity, uplink PeerIdentity) {
 	if state == nil {
 		return
 	}
+	prevDead, prevCooled := healthProjectionSig(state)
 	state.applyProbeFailure(t.clock())
 	// PR 11.28 P2#1: Snapshot.Health republish trigger; see
 	// MarkHopAck doc-comment.
 	t.dirty.Store(true)
+	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
+		t.markRouteChangedLocked(identity)
+	}
 }
 
 // MarkHopFailure records a relay hop-ack timeout for the
@@ -399,11 +415,15 @@ func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
 	if state == nil {
 		return
 	}
+	prevDead, prevCooled := healthProjectionSig(state)
 	state.applyHopAckFailure(now)
 	// PR 11.28 P2#1: Snapshot.Health (and the Phase 3 reputation
 	// fields it includes) needs republish on every mutation; see
 	// MarkHopAck doc-comment.
 	t.dirty.Store(true)
+	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
+		t.markRouteChangedLocked(identity)
+	}
 }
 
 // ClearDirectPairCooldown lifts an armed black-hole cooldown (and the
@@ -447,6 +467,10 @@ func (t *Table) ClearDirectPairCooldown(peerIdentity PeerIdentity) bool {
 		return false
 	}
 	t.dirty.Store(true)
+	// applySessionEstablishedLocked lifting an armed cooldown un-filters the
+	// direct pair from the projection, so journal the change. (Direct pair:
+	// identity == uplink == peerIdentity.)
+	t.markRouteChangedLocked(peerIdentity)
 	return true
 }
 
@@ -557,21 +581,30 @@ func (t *Table) TickHealth() {
 		// no-op-on-zero / future-deadline branches inside
 		// applyCooldownExpiryLocked keep this cheap for the
 		// common case where no pair is cooled down.
+		prevDead, prevCooled := healthProjectionSig(state)
 		before := state.CooldownUntil
 		state.applyCooldownExpiryLocked(now)
 		if !before.Equal(state.CooldownUntil) {
 			mutated = true
 		}
 
-		if key.Identity == key.Uplink {
-			// Direct pair — lifecycle is session-driven, see
-			// the doc-comment above. Skip aging.
-			continue
+		if key.Identity != key.Uplink {
+			// Non-direct pairs age on the passive timeline. Direct
+			// pairs (Identity == Uplink) are session-driven and skip
+			// aging — see the doc-comment above — but still ran the
+			// cooldown-expiry release above and reach the journal check.
+			prev := state.Health
+			state.applyIdleTick(now, t.probeBackoff)
+			if state.Health != prev {
+				mutated = true
+			}
 		}
-		prev := state.Health
-		state.applyIdleTick(now, t.probeBackoff)
-		if state.Health != prev {
-			mutated = true
+
+		// Phase 3 change journal: record the identity only when the
+		// projection-relevant signal (Dead / cooled) flipped on this tick,
+		// not on every Good↔Questionable↔Bad transition.
+		if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
+			t.markRouteChangedLocked(key.Identity)
 		}
 	}
 	// PR 11.28 P2#1: passive aging mutates the published
@@ -711,4 +744,16 @@ func (t *Table) ForceHealthForTest(identity, uplink PeerIdentity, h RouteHealth)
 	state := t.health.ensureLocked(identity, uplink, now)
 	state.Health = h
 	state.TransitionAt = now
+}
+
+// healthProjectionSig returns the two health bits that gate the announce
+// projection for an (identity, uplink) pair: dead (excluded by the live-winner
+// HealthDead filter) and cooled (excluded by the black-hole cooldown filter).
+// When either flips, AnnounceProjectionFor's output for the identity changes,
+// so the identity must be recorded in the Phase 3 change journal. A transition
+// between non-Dead tiers (Good/Questionable/Bad) or an RTT-only update does NOT
+// flip these bits and is intentionally not journalled — that would flood the
+// ring on every hop_ack. Caller must hold t.mu.
+func healthProjectionSig(state *RouteHealthState) (dead, cooled bool) {
+	return state.Health == HealthDead, !state.CooldownUntil.IsZero()
 }

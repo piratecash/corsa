@@ -409,7 +409,7 @@ func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 	registry.MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 	state := registry.Get(idPeerB)
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, time.Now())
 	if state.View().NeedsFullResync {
 		t.Fatalf("precondition: NeedsFullResync must be cleared")
 	}

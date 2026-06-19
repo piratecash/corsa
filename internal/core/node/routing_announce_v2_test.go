@@ -35,7 +35,7 @@ func TestHandleRequestResync_MarksInvalidAndTriggersUpdate(t *testing.T) {
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, time.Now())
 	if state.View().NeedsFullResync {
 		t.Fatalf("precondition: NeedsFullResync must be cleared before handler call")
 	}
@@ -80,7 +80,7 @@ func TestHandleRequestResync_QuarantinedSender_DropsSilently(t *testing.T) {
 	}
 	// Clear NeedsFullResync so the assertion below proves the
 	// handler did NOT re-set it (vs. leftover from MarkReconnected).
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, time.Now())
 	if state.View().NeedsFullResync {
 		t.Fatalf("precondition: NeedsFullResync must be cleared")
 	}
@@ -121,7 +121,7 @@ func TestHandleRequestResync_DebouncesRepeatedRequests(t *testing.T) {
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, time.Now())
 
 	// First request: accepted.
 	svc.handleRequestResync(idPeerB)
@@ -137,7 +137,7 @@ func TestHandleRequestResync_DebouncesRepeatedRequests(t *testing.T) {
 	// here: PendingTrigger is non-consuming, so the first call's
 	// token is still pending; the no-trigger side of the debounce is
 	// covered by the fresh-service test below.)
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, time.Now())
 	svc.handleRequestResync(idPeerB)
 	if state.View().NeedsFullResync {
 		t.Fatal("repeat request_resync inside the debounce window must NOT MarkInvalid")
@@ -169,7 +169,7 @@ func TestHandleRequestResync_DebouncedRequestDoesNotTrigger(t *testing.T) {
 	if state == nil {
 		t.Fatalf("per-peer state must exist after MarkReconnected")
 	}
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, time.Now())
 	if svc.announceLoop.PendingTrigger() {
 		t.Fatalf("precondition: trigger channel must be empty")
 	}
@@ -210,7 +210,7 @@ func TestHandleRequestResync_MalformedSenderIsRejected(t *testing.T) {
 	// MarkReconnected leaves NeedsFullResync==true; record a successful full
 	// sync so the post-condition can prove the malformed handler did not
 	// flip it.
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, time.Now())
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, time.Now())
 	if state.View().NeedsFullResync {
 		t.Fatalf("precondition: NeedsFullResync must be false after RecordFullSyncSuccess")
 	}

@@ -166,12 +166,33 @@ type AnnouncePeerState struct {
 	// orthogonal — a session that picks the v3 generation never
 	// touches the legacy flag, and vice versa.
 	wireBaselineV3SentToPeer bool
+
+	// announceCursor is the Phase 3 change-journal cursor: the change-log head
+	// value this peer's lastSentSnapshot was reconciled to. It MUST advance in
+	// lock-step with lastSentSnapshot — and does, because it is committed in the
+	// SAME s.mu critical section that advances lastSentSnapshot
+	// (commitSentProgressLocked, reached via RecordDeltaSendSuccess /
+	// RecordFullSyncSuccess on a successful send, or RecordDeltaNoop on a no-op
+	// cycle). A failed send commits neither, leaving the pair put so the
+	// recomputed delta next cycle still validates against the same journal
+	// window. Atomic commit is what makes the pair safe against the concurrent
+	// connect-time full sync that mutates the same AnnouncePeerState from another
+	// goroutine. DEPLOY-1 SCOPE: used only by the shadow completeness check.
+	// Guarded by s.mu.
+	announceCursor uint64
 }
 
 // PeerIdentity returns the immutable identity of this peer state.
 func (s *AnnouncePeerState) PeerIdentity() PeerIdentity {
 	// Immutable after creation — no lock needed.
 	return s.peerIdentity
+}
+
+// AnnounceCursor returns the Phase 3 change-journal cursor for this peer.
+func (s *AnnouncePeerState) AnnounceCursor() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.announceCursor
 }
 
 // announcePeerStateView is a read-only snapshot of AnnouncePeerState fields
@@ -198,6 +219,14 @@ type announcePeerStateView struct {
 	// for the gating contract. Read by the Phase 4 mode selection in
 	// announceToAllPeers to decide whether a v3 kind="delta" is safe.
 	HasSentWireBaselineV3 bool
+
+	// AnnounceCursor is the Phase 3 change-journal cursor captured in the SAME
+	// lock acquisition as LastSentSnapshot, so the announce loop validates the
+	// delta (computed from LastSentSnapshot) against the journal window from the
+	// MATCHING cursor. Reading the cursor separately would tear the pair against
+	// a concurrent connect-time full sync that commits a newer snapshot+cursor
+	// in between (see commitSentProgressLocked).
+	AnnounceCursor uint64
 }
 
 // View returns a consistent read-only snapshot of the state fields needed
@@ -215,14 +244,33 @@ func (s *AnnouncePeerState) View() announcePeerStateView {
 		HasReceivedBaseline:      s.hasReceivedBaseline,
 		HasSentWireBaseline:      s.wireBaselineSentToPeer,
 		HasSentWireBaselineV3:    s.wireBaselineV3SentToPeer,
+		AnnounceCursor:           s.announceCursor,
 	}
 }
 
-// RecordFullSyncSuccess updates the state after a successful full sync.
-func (s *AnnouncePeerState) RecordFullSyncSuccess(snapshot *AnnounceSnapshot, now time.Time) {
+// commitSentProgressLocked atomically advances the (lastSentSnapshot,
+// announceCursor) pair — the Phase 3 invariant that they move in lock-step.
+// Both MUST be set in the same s.mu critical section: the announce loop and the
+// connect-time full sync mutate the same AnnouncePeerState from different
+// goroutines (see service.go's full-sync spawn), so two separate calls could
+// otherwise tear the pair (a reader seeing a new snapshot with an old cursor)
+// or let a stale send roll back one field but not the other. A stale send that
+// commits a wholly-older pair self-heals: ComputeDelta against the older
+// snapshot is validated against the matching older cursor window, so no false
+// shadow divergence results — only a redundant (additive-safe) delta next cycle.
+// Caller must hold s.mu.
+func (s *AnnouncePeerState) commitSentProgressLocked(snapshot *AnnounceSnapshot, cursor uint64) {
+	s.lastSentSnapshot = snapshot
+	s.announceCursor = cursor
+}
+
+// RecordFullSyncSuccess updates the state after a successful full sync,
+// atomically advancing the (lastSentSnapshot, cursor) pair (see
+// commitSentProgressLocked).
+func (s *AnnouncePeerState) RecordFullSyncSuccess(snapshot *AnnounceSnapshot, cursor uint64, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastSentSnapshot = snapshot
+	s.commitSentProgressLocked(snapshot, cursor)
 	s.needsFullResync = false
 	s.resyncIsHard = false
 	s.lastSuccessfulFullSyncAt = now
@@ -236,13 +284,26 @@ func (s *AnnouncePeerState) RecordFullSyncAttempt(now time.Time) {
 	s.lastFullSyncAttemptAt = now
 }
 
-// RecordDeltaSendSuccess updates the state after a successful delta send.
-// The full snapshot (not just the delta) is stored as the new baseline.
-func (s *AnnouncePeerState) RecordDeltaSendSuccess(fullSnapshot *AnnounceSnapshot, now time.Time) {
+// RecordDeltaSendSuccess updates the state after a successful delta send,
+// atomically advancing the (lastSentSnapshot, cursor) pair (see
+// commitSentProgressLocked). The full snapshot (not just the delta) is stored
+// as the new baseline.
+func (s *AnnouncePeerState) RecordDeltaSendSuccess(fullSnapshot *AnnounceSnapshot, cursor uint64, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastSentSnapshot = fullSnapshot
+	s.commitSentProgressLocked(fullSnapshot, cursor)
 	s.lastDeltaSendAt = now
+}
+
+// RecordDeltaNoop advances the (lastSentSnapshot, cursor) pair atomically on a
+// no-op delta cycle: nothing was sent, but the freshly-built snapshot is
+// content-equal to the prior baseline and the journal was consumed up to
+// `cursor`. Committing both together (rather than advancing only the cursor)
+// keeps the pair from tearing against a concurrent connect-time full sync.
+func (s *AnnouncePeerState) RecordDeltaNoop(snapshot *AnnounceSnapshot, cursor uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commitSentProgressLocked(snapshot, cursor)
 }
 
 // HasCapability returns true when the peer's stored capability snapshot

@@ -117,7 +117,7 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 	// The rate-limit timer must be zero so the cycle is not coalesced
 	// under "too soon since last forced full sync attempt".
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, now.Add(-1*time.Minute))
+	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now.Add(-1*time.Minute))
 	state.SetNeedsFullResyncForTest()
 
 	ctx, cancel := context.WithCancel(context.Background())

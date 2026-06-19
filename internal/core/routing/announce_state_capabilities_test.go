@@ -132,7 +132,7 @@ func TestAnnounceStateRegistry_UpdateCapabilities_DoesNotTouchSyncState(t *testi
 	// Establish a baseline send so NeedsFullResync clears and
 	// LastSuccessfulFullSyncAt is set to a known value.
 	snapshot := &routing.AnnounceSnapshot{}
-	state.RecordFullSyncSuccess(snapshot, now)
+	state.RecordFullSyncSuccess(snapshot, 0, now)
 	view := state.View()
 	if view.NeedsFullResync {
 		t.Fatalf("precondition: NeedsFullResync must be false after RecordFullSyncSuccess")
