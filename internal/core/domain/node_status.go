@@ -190,6 +190,14 @@ type ResourceUsage struct {
 	// is working set, not a leak.
 	ConnectionCount int `json:"connection_count"`
 
+	// ShadowDivergenceTotal is the Phase 3 deploy-1 cumulative count of
+	// announce delta-cursor shadow mismatches — delta entries the change
+	// journal failed to cover. A canary that holds this at 0 over sustained
+	// churn proves the journal complete before the cursor model is made
+	// authoritative (deploy-2); a non-zero, growing value flags an unwired
+	// mutation site. Temporary observability — removed with the shadow stage.
+	ShadowDivergenceTotal uint64 `json:"shadow_divergence_total"`
+
 	// UptimeSeconds is whole seconds since process start.
 	UptimeSeconds int64 `json:"uptime_seconds"`
 	// UptimeHuman is the uptime rendered in the largest of three

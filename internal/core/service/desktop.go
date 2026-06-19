@@ -304,6 +304,11 @@ type ResourceUsage struct {
 
 	ConnectionCount int
 
+	// ShadowDivergenceTotal — Phase 3 deploy-1 cumulative announce
+	// delta-cursor shadow mismatches, carried verbatim from the wire
+	// frame. Temporary observability; removed with the shadow stage.
+	ShadowDivergenceTotal uint64
+
 	UptimeSeconds int64
 	UptimeHuman   string
 

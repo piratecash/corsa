@@ -202,26 +202,27 @@ func TestSystemGetResourceUsageViaExecEndpoint(t *testing.T) {
 	// mapper or a mismatched JSON tag (which would serialise the zero
 	// value) is caught — a presence-only check would pass even then.
 	expected := domain.ResourceUsage{
-		MemSysBytes:         62390272,
-		MemSysHuman:         "59.50 MB",
-		MemHeapAllocBytes:   41943040,
-		MemHeapAllocHuman:   "40.00 MB",
-		HeapInuseBytes:      45088768,
-		HeapInuseHuman:      "43.00 MB",
-		HeapIdleBytes:       12582912,
-		HeapIdleHuman:       "12.00 MB",
-		HeapReleasedBytes:   8388608,
-		HeapReleasedHuman:   "8.00 MB",
-		GCSysBytes:          4194304,
-		GCSysHuman:          "4.00 MB",
-		CgroupMemLimitBytes: 536870912,
-		CgroupMemLimitHuman: "512.00 MB",
-		CgroupMemUsageBytes: 157286400,
-		CgroupMemUsageHuman: "150.00 MB",
-		ConnectionCount:     12,
-		UptimeSeconds:       192600,
-		UptimeHuman:         "2.23 d",
-		SampledAt:           time.Date(2026, time.June, 6, 5, 15, 47, 0, time.UTC),
+		MemSysBytes:           62390272,
+		MemSysHuman:           "59.50 MB",
+		MemHeapAllocBytes:     41943040,
+		MemHeapAllocHuman:     "40.00 MB",
+		HeapInuseBytes:        45088768,
+		HeapInuseHuman:        "43.00 MB",
+		HeapIdleBytes:         12582912,
+		HeapIdleHuman:         "12.00 MB",
+		HeapReleasedBytes:     8388608,
+		HeapReleasedHuman:     "8.00 MB",
+		GCSysBytes:            4194304,
+		GCSysHuman:            "4.00 MB",
+		CgroupMemLimitBytes:   536870912,
+		CgroupMemLimitHuman:   "512.00 MB",
+		CgroupMemUsageBytes:   157286400,
+		CgroupMemUsageHuman:   "150.00 MB",
+		ConnectionCount:       12,
+		ShadowDivergenceTotal: 7,
+		UptimeSeconds:         192600,
+		UptimeHuman:           "2.23 d",
+		SampledAt:             time.Date(2026, time.June, 6, 5, 15, 47, 0, time.UTC),
 	}
 	node.ExpectedCalls = filterCalls(node.ExpectedCalls, "ResourceUsage")
 	node.On("ResourceUsage").Return(expected)
@@ -254,6 +255,7 @@ func TestSystemGetResourceUsageViaExecEndpoint(t *testing.T) {
 	expectField(t, result, "cgroup_mem_usage_bytes", float64(expected.CgroupMemUsageBytes))
 	expectField(t, result, "cgroup_mem_usage_human", expected.CgroupMemUsageHuman)
 	expectField(t, result, "connection_count", float64(expected.ConnectionCount))
+	expectField(t, result, "shadow_divergence_total", float64(expected.ShadowDivergenceTotal))
 	expectField(t, result, "uptime_seconds", float64(expected.UptimeSeconds))
 	expectField(t, result, "uptime_human", expected.UptimeHuman)
 	expectFieldExists(t, result, "sampled_at")

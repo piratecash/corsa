@@ -44,6 +44,14 @@ func (s *Service) ResourceUsage() domain.ResourceUsage {
 	// peerHealthFrames snapshot).
 	connCount := s.activeConnectionCount()
 
+	// Phase 3 deploy-1 shadow counter — lock-free atomic on the announce
+	// loop (same pattern as OverloadStats). Nil-guarded because the loop is
+	// absent in some construction paths (tests, headless-without-routing).
+	var shadowDivergence uint64
+	if s.announceLoop != nil {
+		shadowDivergence = s.announceLoop.ShadowDivergenceTotal()
+	}
+
 	return domain.ResourceUsage{
 		MemSysBytes:       m.Sys,
 		MemSysHuman:       formatBytes(m.Sys),
@@ -65,6 +73,8 @@ func (s *Service) ResourceUsage() domain.ResourceUsage {
 
 		ConnectionCount: connCount,
 
+		ShadowDivergenceTotal: shadowDivergence,
+
 		UptimeSeconds: int64(uptime / time.Second),
 		UptimeHuman:   formatUptime(uptime),
 		SampledAt:     now,
@@ -81,26 +91,27 @@ func (s *Service) resourceUsageFrame() protocol.Frame {
 	return protocol.Frame{
 		Type: "resource_usage",
 		ResourceUsage: &protocol.ResourceUsageFrame{
-			MemSysBytes:         ru.MemSysBytes,
-			MemSysHuman:         ru.MemSysHuman,
-			MemHeapAllocBytes:   ru.MemHeapAllocBytes,
-			MemHeapAllocHuman:   ru.MemHeapAllocHuman,
-			HeapInuseBytes:      ru.HeapInuseBytes,
-			HeapInuseHuman:      ru.HeapInuseHuman,
-			HeapIdleBytes:       ru.HeapIdleBytes,
-			HeapIdleHuman:       ru.HeapIdleHuman,
-			HeapReleasedBytes:   ru.HeapReleasedBytes,
-			HeapReleasedHuman:   ru.HeapReleasedHuman,
-			GCSysBytes:          ru.GCSysBytes,
-			GCSysHuman:          ru.GCSysHuman,
-			CgroupMemLimitBytes: ru.CgroupMemLimitBytes,
-			CgroupMemLimitHuman: ru.CgroupMemLimitHuman,
-			CgroupMemUsageBytes: ru.CgroupMemUsageBytes,
-			CgroupMemUsageHuman: ru.CgroupMemUsageHuman,
-			ConnectionCount:     ru.ConnectionCount,
-			UptimeSeconds:       ru.UptimeSeconds,
-			UptimeHuman:         ru.UptimeHuman,
-			SampledAt:           ru.SampledAt.Format(time.RFC3339Nano),
+			MemSysBytes:           ru.MemSysBytes,
+			MemSysHuman:           ru.MemSysHuman,
+			MemHeapAllocBytes:     ru.MemHeapAllocBytes,
+			MemHeapAllocHuman:     ru.MemHeapAllocHuman,
+			HeapInuseBytes:        ru.HeapInuseBytes,
+			HeapInuseHuman:        ru.HeapInuseHuman,
+			HeapIdleBytes:         ru.HeapIdleBytes,
+			HeapIdleHuman:         ru.HeapIdleHuman,
+			HeapReleasedBytes:     ru.HeapReleasedBytes,
+			HeapReleasedHuman:     ru.HeapReleasedHuman,
+			GCSysBytes:            ru.GCSysBytes,
+			GCSysHuman:            ru.GCSysHuman,
+			CgroupMemLimitBytes:   ru.CgroupMemLimitBytes,
+			CgroupMemLimitHuman:   ru.CgroupMemLimitHuman,
+			CgroupMemUsageBytes:   ru.CgroupMemUsageBytes,
+			CgroupMemUsageHuman:   ru.CgroupMemUsageHuman,
+			ConnectionCount:       ru.ConnectionCount,
+			ShadowDivergenceTotal: ru.ShadowDivergenceTotal,
+			UptimeSeconds:         ru.UptimeSeconds,
+			UptimeHuman:           ru.UptimeHuman,
+			SampledAt:             ru.SampledAt.Format(time.RFC3339Nano),
 		},
 	}
 }

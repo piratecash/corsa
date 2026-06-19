@@ -1478,6 +1478,15 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 		Int("announce_v3_downgraded_no_wire_baseline", int(v3DowngradedNoBaseline.Load())).
 		Bool("announce_overload_engaged", overloaded).
 		Bool("announce_overload_suppressed_any", suppressedAny.Load()).
+		// Phase 3 deploy-1 heartbeat: cumulative shadow mismatches. Emitted on
+		// every cycle that PROCESSES peers (the zero-peer cycle returns early
+		// above, before this log) — an isolated/bootstrap canary observes the
+		// counter through getResourceUsage instead, which is always available.
+		// A canary steady at 0 over real churn proves the change journal covers
+		// every mutation site before the cursor model is trusted; a rising
+		// value names an unwired site (per-miss detail is warned separately in
+		// shadowValidateDelta). Removed with the shadow stage.
+		Uint64("announce_shadow_divergence_total", a.shadowDivergence.Load()).
 		Msg("announce_cycle_complete")
 }
 

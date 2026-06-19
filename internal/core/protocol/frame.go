@@ -78,19 +78,19 @@ type Frame struct {
 	// originator did not stamp a budget" and the receiver assigns
 	// defaultMessageHopBudget AS IF IT ORIGINATED the message — the
 	// value 0 is therefore never emitted on the wire.
-	Hops            int                   `json:"hops,omitempty"`
-	Body            string                `json:"body,omitempty"`
-	Ciphertext      string                `json:"ciphertext,omitempty"`
-	ExpiresAt       int64                 `json:"expires_at,omitempty"`
-	Count           int                   `json:"count,omitempty"`
-	Limit           int                   `json:"limit,omitempty"`
-	Status          string                `json:"status,omitempty"`
-	AckType         string                `json:"ack_type,omitempty"`
-	ObservedAddress string                `json:"observed_address,omitempty"`
-	Challenge       string                `json:"challenge,omitempty"`
-	Signature       string                `json:"signature,omitempty"`
-	Code            string                `json:"code,omitempty"`
-	Error           string                `json:"error,omitempty"`
+	Hops            int    `json:"hops,omitempty"`
+	Body            string `json:"body,omitempty"`
+	Ciphertext      string `json:"ciphertext,omitempty"`
+	ExpiresAt       int64  `json:"expires_at,omitempty"`
+	Count           int    `json:"count,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
+	Status          string `json:"status,omitempty"`
+	AckType         string `json:"ack_type,omitempty"`
+	ObservedAddress string `json:"observed_address,omitempty"`
+	Challenge       string `json:"challenge,omitempty"`
+	Signature       string `json:"signature,omitempty"`
+	Code            string `json:"code,omitempty"`
+	Error           string `json:"error,omitempty"`
 	// Details carries machine-readable payload for connection_notice-style
 	// control frames. Shape is a function of Code. Kept as json.RawMessage
 	// so the wire layer stays agnostic to per-code schemas — decode it in
@@ -305,6 +305,11 @@ type ResourceUsageFrame struct {
 	CgroupMemUsageHuman string `json:"cgroup_mem_usage_human"`
 
 	ConnectionCount int `json:"connection_count"`
+
+	// ShadowDivergenceTotal — Phase 3 deploy-1 cumulative announce
+	// delta-cursor shadow mismatches. See domain.ResourceUsage for the
+	// observation contract. Temporary; removed with the shadow stage.
+	ShadowDivergenceTotal uint64 `json:"shadow_divergence_total"`
 
 	UptimeSeconds int64  `json:"uptime_seconds"`
 	UptimeHuman   string `json:"uptime_human"`
