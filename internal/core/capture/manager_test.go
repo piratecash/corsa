@@ -150,6 +150,31 @@ func TestManager_StartByConnIDs_Success(t *testing.T) {
 	}
 }
 
+// TestManager_HasSession verifies the outbound-tap gate: HasSession is false
+// for a connection with no capture session (so OnSendAttempt skips its string
+// copy) and flips true once a session is started for that conn_id.
+func TestManager_HasSession(t *testing.T) {
+	info := capture.ConnInfo{ConnID: 42, RemoteIP: testIP, PeerDir: domain.PeerDirectionOutbound}
+	resolver, _ := testResolver(t, info)
+	m, _ := testManager(t, resolver)
+
+	if m.HasSession(42) {
+		t.Fatal("expected no session before StartByConnIDs")
+	}
+	if m.HasSession(99) {
+		t.Fatal("expected no session for an unknown conn_id")
+	}
+
+	m.StartByConnIDs([]domain.ConnID{42}, domain.CaptureFormatCompact)
+
+	if !m.HasSession(42) {
+		t.Fatal("expected a session after StartByConnIDs")
+	}
+	if m.HasSession(99) {
+		t.Fatal("unrelated conn_id must not report a session")
+	}
+}
+
 func TestManager_StartByConnIDs_NotFound(t *testing.T) {
 	resolver, _ := testResolver(t)
 	m, _ := testManager(t, resolver)

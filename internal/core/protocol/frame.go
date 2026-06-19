@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -587,11 +588,48 @@ func MarshalFrameLine(frame Frame) (string, error) {
 	if frame.RawLine != "" {
 		return frame.RawLine, nil
 	}
-	data, err := json.Marshal(frame)
+	buf, err := encodeFrameLineToPooledBuf(frame)
 	if err != nil {
 		return "", err
 	}
-	return string(data) + "\n", nil
+	line := buf.String()
+	putFrameEncodeBuf(buf)
+	return line, nil
+}
+
+// frameEncodeBufPool reuses the scratch bytes.Buffer that MarshalFrameLine[WithLimit]
+// encode into (the write path — distinct from frameLineBufPool, which recycles
+// the []byte scratch of the ParseFrameLine read path). Every outbound frame is
+// serialised on the hot writer path; a fresh json.Marshal []byte plus the old
+// `string(data)+"\n"` concat allocated the payload three times per send (the
+// dominant bytes.growSlice churn in the heap profile). The pooled buffer reuses
+// its backing array across calls and json.Encoder appends the newline, leaving a
+// single copy — buf.String() — for the returned wire line. The retain cap reuses
+// maxPooledFrameLineCap for the same "don't pin an 8 MiB response buffer" reason.
+var frameEncodeBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// encodeFrameLineToPooledBuf writes frame as a compact-JSON wire line
+// (terminated by '\n', exactly as json.Marshal(frame)+"\n" — encoding/json
+// HTML-escapes in both paths, so the wire bytes are unchanged) into a pooled
+// buffer the caller MUST hand back via putFrameEncodeBuf after copying out.
+func encodeFrameLineToPooledBuf(frame Frame) (*bytes.Buffer, error) {
+	buf := frameEncodeBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	if err := json.NewEncoder(buf).Encode(frame); err != nil {
+		putFrameEncodeBuf(buf)
+		return nil, err
+	}
+	return buf, nil
+}
+
+// putFrameEncodeBuf returns a scratch buffer to the encode pool unless it grew
+// past maxPooledFrameLineCap, in which case it is dropped so a one-off large
+// frame cannot pin memory in the pool.
+func putFrameEncodeBuf(buf *bytes.Buffer) {
+	if buf.Cap() > maxPooledFrameLineCap {
+		return
+	}
+	frameEncodeBufPool.Put(buf)
 }
 
 // MarshalFrameLineWithLimit serializes a frame to its wire form,
@@ -618,18 +656,22 @@ func MarshalFrameLineWithLimit(frame Frame, maxBytes int) (string, error) {
 		}
 		return frame.RawLine, nil
 	}
-	data, err := json.Marshal(frame)
+	buf, err := encodeFrameLineToPooledBuf(frame)
 	if err != nil {
 		return "", err
 	}
-	// +1 accounts for the trailing newline appended below — the
-	// receive-side line reader counts the newline as part of the
-	// line, so a JSON payload with len(data)==maxBytes would produce
-	// a maxBytes+1 wire line and be rejected by the remote.
-	if len(data)+1 > maxBytes {
-		return "", fmt.Errorf("MarshalFrameLineWithLimit: frame size %d (with newline %d) exceeds %d: %w", len(data), len(data)+1, maxBytes, ErrFrameTooLarge)
+	// buf already holds the full wire line (compact JSON + trailing '\n'), so
+	// buf.Len() is the exact byte count the receive-side line reader counts —
+	// the same len(data)+1 the previous json.Marshal path checked. Reject
+	// before copying the line out of the pooled buffer.
+	if buf.Len() > maxBytes {
+		jsonLen := buf.Len() - 1
+		putFrameEncodeBuf(buf)
+		return "", fmt.Errorf("MarshalFrameLineWithLimit: frame size %d (with newline %d) exceeds %d: %w", jsonLen, jsonLen+1, maxBytes, ErrFrameTooLarge)
 	}
-	return string(data) + "\n", nil
+	line := buf.String()
+	putFrameEncodeBuf(buf)
+	return line, nil
 }
 
 type ChatEntryFrame struct {

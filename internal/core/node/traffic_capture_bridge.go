@@ -244,6 +244,14 @@ type captureSinkAdapter struct {
 }
 
 func (a *captureSinkAdapter) OnSendAttempt(data []byte, ok bool) {
+	// Skip the per-frame string copy + classification when nothing is
+	// capturing this connection (the production default). Without this gate
+	// every outbound frame was copied to a string only for EnqueueSend to
+	// drop it on the same sessions-map miss — pure churn on the hot writer
+	// path. Behavior-preserving: see Manager.HasSession.
+	if !a.manager.HasSession(a.connID) {
+		return
+	}
 	outcome := domain.SendOutcomeSent
 	if !ok {
 		outcome = domain.SendOutcomeWriteFailed

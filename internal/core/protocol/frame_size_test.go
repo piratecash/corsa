@@ -210,3 +210,60 @@ func TestMarshalFrameLine_RoundTripUnderLimit(t *testing.T) {
 		t.Fatalf("round-trip mismatch: %+v vs %+v", out, frame)
 	}
 }
+
+// TestMarshalFrameLine_ByteIdenticalToMarshal pins the wire-compat contract of
+// the pooled-buffer encoder: its output MUST be byte-for-byte identical to the
+// legacy json.Marshal(frame)+"\n" for every frame, including bodies with HTML-
+// escapable runes (<, >, &) — encoding/json escapes those in both the Marshal
+// and the Encoder path, so a divergence here would mean a silent wire-format
+// change that desyncs receivers.
+func TestMarshalFrameLine_ByteIdenticalToMarshal(t *testing.T) {
+	frames := []Frame{
+		{Type: "ping"},
+		{Type: "test", Body: "hello"},
+		{Type: "test", Body: "a<b>c&d \"q\" \\z"},
+		{Type: "msg", Address: "<addr>", Recipient: "a&b"},
+		{Type: "test", Body: strings.Repeat("x", 200<<10)}, // > maxPooledFrameLineCap (128 KiB): pool-drop path
+	}
+	for _, f := range frames {
+		data, err := json.Marshal(f)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		want := string(data) + "\n"
+		got, err := MarshalFrameLine(f)
+		if err != nil {
+			t.Fatalf("MarshalFrameLine: %v", err)
+		}
+		if got != want {
+			t.Fatalf("pooled encoder diverged from json.Marshal+\\n\n got  %q\n want %q", got, want)
+		}
+	}
+}
+
+// TestMarshalFrameLine_PooledBufferReuse guards the buffer Reset + cap-drop
+// logic: a large frame (forcing buffer growth past the pooled cap) interleaved
+// with small frames must never leak residue from a prior, longer encode into a
+// later line.
+func TestMarshalFrameLine_PooledBufferReuse(t *testing.T) {
+	seq := []Frame{
+		{Type: "small", Body: "a"},
+		{Type: "big", Body: strings.Repeat("Z", 200<<10)}, // > 128 KiB cap → dropped, not pooled
+		{Type: "small", Body: "a"},
+		{Type: "mid", Body: strings.Repeat("m", 1<<10)},
+		{Type: "small", Body: "a"},
+	}
+	for i, f := range seq {
+		want, err := json.Marshal(f)
+		if err != nil {
+			t.Fatalf("seq[%d] json.Marshal: %v", i, err)
+		}
+		got, err := MarshalFrameLine(f)
+		if err != nil {
+			t.Fatalf("seq[%d] MarshalFrameLine: %v", i, err)
+		}
+		if got != string(want)+"\n" {
+			t.Fatalf("seq[%d] buffer reuse leaked residue\n got  %q\n want %q", i, got, string(want)+"\n")
+		}
+	}
+}

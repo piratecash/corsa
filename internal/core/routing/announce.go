@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"sync/atomic"
@@ -324,14 +325,26 @@ type AnnounceLoop struct {
 	// Monotonic; safe for concurrent reads.
 	noopSuppressedTotal atomic.Uint64
 
-	// shadowDivergence counts Phase 3 (deploy-1) shadow mismatches: delta
-	// entries whose identity was NOT covered by the change journal since the
-	// peer's cursor, i.e. a mutation site that did not record into the journal.
-	// A non-zero, growing value on a canary means the journal wiring is
-	// incomplete and the cursor model is not yet safe to make authoritative.
-	// Monotonic; safe for concurrent reads. See
+	// shadowDivergence counts Phase 3 (deploy-1) STRUCTURAL shadow mismatches:
+	// delta entries NOT covered by the change journal since the peer's cursor
+	// whose wire content changed in a routing-meaningful field (Origin, Hops,
+	// Extra, or AttestedSig — or a brand-new entry). That is the signal of a
+	// genuinely unwired mutation site: a non-zero, growing value on a canary
+	// means the journal is incomplete and the cursor model is NOT yet safe to
+	// make authoritative. Monotonic; safe for concurrent reads. See
 	// docs/refactoring/phase3-announce-delta-cursor.md.
 	shadowDivergence atomic.Uint64
+
+	// shadowSeqOnlyMisses counts unjournaled delta entries whose ONLY change vs
+	// the last-sent baseline is the per-receiver wire SeqNo. These are NOT
+	// unwired mutations: the outbound SeqNo is assigned at projection time from
+	// emit-side watermark bookkeeping (nextOutboundSeqLocked* in route_store),
+	// which the change journal deliberately does not track. The cursor model
+	// (deploy-2) correctly will NOT re-emit such an entry — the receiver already
+	// holds the identical routing content — so this counter measures the
+	// redundant SeqNo-only re-emits the rebuild model currently sends and
+	// deploy-2 will eliminate, NOT a correctness gap. Monotonic; concurrent-safe.
+	shadowSeqOnlyMisses atomic.Uint64
 
 	// lastDeltaCycleAt tracks the wall-clock of the most recent
 	// delta-cycle wake. When the operator-configured AnnounceInterval
@@ -434,36 +447,55 @@ func (a *AnnounceLoop) NoopSuppressedTotal() uint64 {
 	return a.noopSuppressedTotal.Load()
 }
 
-// ShadowDivergenceTotal returns the cumulative Phase 3 (deploy-1) shadow
-// mismatch count — delta identities the change journal failed to cover since
-// the peer's cursor. Zero on a healthy canary; a growing value flags an unwired
-// mutation site. Internal observability signal.
+// ShadowDivergenceTotal returns the cumulative Phase 3 (deploy-1) count of
+// STRUCTURAL shadow mismatches — delta identities the change journal failed to
+// cover whose routing content (Origin/Hops/Extra/AttestedSig) actually changed.
+// SeqNo-only re-emits are excluded (see ShadowSeqOnlyMissesTotal). Zero on a
+// healthy canary; a growing value flags an unwired mutation site. Internal
+// observability signal.
 func (a *AnnounceLoop) ShadowDivergenceTotal() uint64 {
 	return a.shadowDivergence.Load()
 }
 
+// ShadowSeqOnlyMissesTotal returns the cumulative count of unjournaled delta
+// entries whose only difference from the last-sent baseline is the per-receiver
+// wire SeqNo (emit-side watermark bookkeeping, not a routing mutation). It is
+// NOT a correctness signal — it measures the redundant SeqNo-only re-emits the
+// rebuild model sends today and the cursor model will drop. Internal
+// observability signal.
+func (a *AnnounceLoop) ShadowSeqOnlyMissesTotal() uint64 {
+	return a.shadowSeqOnlyMisses.Load()
+}
+
 // shadowValidateDelta is the Phase 3 deploy-1 shadow probe. It compares the
 // authoritative `delta` (already computed via ComputeDelta) against the set of
-// identities the change journal recorded since this peer's cursor, logs and
-// counts (shadowDivergence) any delta identity the journal did NOT record — a
-// mutation site that failed to journal a change the cursor model would later
-// miss — and returns the current journal head. The journal does NOT drive what
-// is sent; `delta` remains authoritative.
+// identities the change journal recorded since this peer's cursor and CLASSIFIES
+// every delta identity the journal did NOT record:
 //
-// It does NOT advance the cursor: the caller commits `bound` only after the
-// paired send succeeds (or immediately on a no-op cycle), so a failed send does
-// not move the cursor past entries that produced a delta to be resent. A
-// needFull window (cursor behind a bulk reset or out of the ring) cannot be
-// validated incrementally, so the check is skipped that cycle (the caller still
-// commits `bound` on success to advance past the stale window).
+//   - STRUCTURAL miss (shadowDivergence) — the entry's routing-meaningful wire
+//     content (Origin, Hops, Extra, AttestedSig) differs from the last-sent
+//     baseline, or the entry is brand-new. This is a genuinely unwired mutation
+//     site: the cursor model would fail to re-emit a real routing change.
+//   - SeqNo-ONLY miss (shadowSeqOnlyMisses) — the entry matches the baseline in
+//     every routing field and differs ONLY in the per-receiver wire SeqNo. That
+//     SeqNo is assigned at projection time from emit-side watermark bookkeeping
+//     (nextOutboundSeqLocked* in route_store), which the journal deliberately
+//     does not track. It is NOT a correctness gap: the cursor model correctly
+//     will not re-emit it (the receiver already holds the identical content), so
+//     this only measures redundant re-emits the rebuild model wastes today.
+//
+// `oldSnap` is the last-sent baseline (view.LastSentSnapshot) captured in the
+// same View() as the cursor, so the classification compares against exactly the
+// snapshot the cursor refers to. The journal does NOT drive what is sent; the
+// caller's `delta` remains authoritative and the cursor is committed only after
+// the paired send succeeds.
 //
 // `bound` is the change-journal head captured atomically with the projection
-// that produced `delta` (AnnounceToWithChangeHead), and the window enumerated is
-// [cursor, bound) — exactly this snapshot's mutations. A mutation landing after
-// the projection is outside the window, so it is neither falsely flagged nor
-// consumed: it surfaces in the next cycle's delta against a cursor that did not
-// pass it. This is what makes the cursor model race-free (deploy-2-safe).
-func (a *AnnounceLoop) shadowValidateDelta(peerIdentity PeerIdentity, cursor, bound uint64, delta []AnnounceEntry) {
+// that produced `delta` (AnnounceToWithChangeHead); the window enumerated is
+// [cursor, bound) — exactly this snapshot's mutations. A needFull window (cursor
+// behind a bulk reset or out of the ring) cannot be validated incrementally, so
+// the check is skipped that cycle.
+func (a *AnnounceLoop) shadowValidateDelta(peerIdentity PeerIdentity, oldSnap *AnnounceSnapshot, cursor, bound uint64, delta []AnnounceEntry) {
 	changed, needFull := a.table.ChangeLogSinceUpTo(cursor, bound)
 	if needFull {
 		return
@@ -472,21 +504,57 @@ func (a *AnnounceLoop) shadowValidateDelta(peerIdentity PeerIdentity, cursor, bo
 	for _, id := range changed {
 		changedSet[id] = struct{}{}
 	}
-	var missed uint64
+
+	// oldIdx is built lazily on the first unjournaled entry only. In the healthy
+	// steady state every delta entry is covered by changedSet and no
+	// classification is needed, so we must NOT pay a second O(snapshot)
+	// map/walk over oldSnap every cycle (ComputeDelta already walked it).
+	var oldIdx map[announceTrackKey]AnnounceEntry
+	oldIdxBuilt := false
+
+	var structuralMissed, seqOnlyMissed uint64
 	for _, e := range delta {
 		if _, ok := changedSet[e.Identity]; ok {
 			continue
 		}
-		missed++
+		if !oldIdxBuilt {
+			if oldSnap != nil {
+				oldIdx = make(map[announceTrackKey]AnnounceEntry, len(oldSnap.Entries))
+				for _, oe := range oldSnap.Entries {
+					oldIdx[trackKeyFor(oe)] = oe
+				}
+			}
+			oldIdxBuilt = true
+		}
+		// Unjournaled. A SeqNo-only diff vs the baseline is expected emit
+		// bookkeeping (see method doc); anything else is a real unwired site.
+		// trackKeyFor is (Identity, Withdrawn) — Origin is NOT in the key, so a
+		// lineage shift maps to the same baseline slot and must be compared
+		// explicitly here. Origin is wire content the cursor model would have to
+		// re-emit, so an Origin change is structural, not SeqNo-only.
+		old, found := oldIdx[trackKeyFor(e)]
+		seqOnly := found &&
+			old.Origin == e.Origin &&
+			old.Hops == e.Hops &&
+			normalizedExtraEqual(old.Extra, e.Extra) &&
+			bytes.Equal(old.AttestedSig, e.AttestedSig)
+		if seqOnly {
+			seqOnlyMissed++
+			continue
+		}
+		structuralMissed++
 		log.Warn().
 			Str("peer", peerIdentity.String()).
 			Str("identity", e.Identity.String()).
 			Uint64("cursor", cursor).
 			Uint64("bound", bound).
-			Msg("phase3_shadow: delta identity not covered by change journal — a mutation site is unwired")
+			Msg("phase3_shadow: STRUCTURAL delta identity not covered by change journal — a mutation site is unwired")
 	}
-	if missed > 0 {
-		a.shadowDivergence.Add(missed)
+	if structuralMissed > 0 {
+		a.shadowDivergence.Add(structuralMissed)
+	}
+	if seqOnlyMissed > 0 {
+		a.shadowSeqOnlyMisses.Add(seqOnlyMissed)
 	}
 }
 
@@ -1347,7 +1415,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// above, so the delta (computed from that snapshot) is validated
 			// against the matching journal window — not a cursor a concurrent
 			// connect-time full sync advanced in between.
-			a.shadowValidateDelta(peer.Identity, view.AnnounceCursor, snapHead, delta)
+			a.shadowValidateDelta(peer.Identity, view.LastSentSnapshot, view.AnnounceCursor, snapHead, delta)
 
 			if len(delta) == 0 {
 				// No changes — nothing to send. Advance the cursor atomically
@@ -1487,6 +1555,10 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 		// value names an unwired site (per-miss detail is warned separately in
 		// shadowValidateDelta). Removed with the shadow stage.
 		Uint64("announce_shadow_divergence_total", a.shadowDivergence.Load()).
+		// SeqNo-only misses: expected emit bookkeeping, not a correctness
+		// signal — tracked separately so a non-zero divergence stays meaningful
+		// and to size the redundant re-emits deploy-2 will drop.
+		Uint64("announce_shadow_seqonly_total", a.shadowSeqOnlyMisses.Load()).
 		Msg("announce_cycle_complete")
 }
 

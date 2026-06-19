@@ -191,11 +191,15 @@ type ResourceUsage struct {
 	ConnectionCount int `json:"connection_count"`
 
 	// ShadowDivergenceTotal is the Phase 3 deploy-1 cumulative count of
-	// announce delta-cursor shadow mismatches — delta entries the change
-	// journal failed to cover. A canary that holds this at 0 over sustained
-	// churn proves the journal complete before the cursor model is made
-	// authoritative (deploy-2); a non-zero, growing value flags an unwired
-	// mutation site. Temporary observability — removed with the shadow stage.
+	// STRUCTURAL announce delta-cursor shadow mismatches — delta entries the
+	// change journal failed to cover whose routing content (Origin/Hops/Extra/
+	// AttestedSig) actually changed. SeqNo-only re-emits (emit-side watermark
+	// bookkeeping, not a routing change) are excluded — they are expected and
+	// counted separately in the loop heartbeat (announce_shadow_seqonly_total).
+	// A canary that holds THIS at 0 over sustained churn proves the journal
+	// complete before the cursor model is made authoritative (deploy-2); a
+	// non-zero, growing value flags an unwired mutation site. Temporary
+	// observability — removed with the shadow stage.
 	ShadowDivergenceTotal uint64 `json:"shadow_divergence_total"`
 
 	// UptimeSeconds is whole seconds since process start.

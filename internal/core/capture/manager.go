@@ -518,6 +518,22 @@ func (m *Manager) EnqueueRecv(connID domain.ConnID, raw string, kind domain.Payl
 	})
 }
 
+// HasSession reports whether a capture session currently exists for connID.
+//
+// It is the cheap pre-check the outbound tap (captureSinkAdapter.OnSendAttempt)
+// uses to skip the per-frame string copy + payload classification when nothing
+// is capturing this connection — the common production case. EnqueueSend re-
+// checks the same sessions map under the lock and drops the event when absent,
+// so gating on this is behavior-preserving: at worst a session created in the
+// race window between this check and the send misses its very first in-flight
+// frame, which is acceptable for a best-effort diagnostic tap.
+func (m *Manager) HasSession(connID domain.ConnID) bool {
+	m.mu.Lock()
+	_, ok := m.sessions[connID]
+	m.mu.Unlock()
+	return ok
+}
+
 // EnqueueSend records an outbound wire event with its send outcome. Non-blocking.
 func (m *Manager) EnqueueSend(connID domain.ConnID, raw string, kind domain.PayloadKind, outcome domain.SendOutcome) {
 	m.mu.Lock()
