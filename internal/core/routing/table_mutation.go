@@ -631,7 +631,7 @@ func (t *Table) TickTTL() TickTTLResult {
 	defer t.mu.Unlock()
 
 	now := t.clock()
-	totalRemoved, exposed := t.store.CompactExpired(now)
+	totalRemoved, affected, exposed := t.store.CompactExpired(now)
 	// Snapshot exposes both Routes and FlapState. Mark dirty if
 	// either changed; a no-op tick (nothing expired and no flap-state
 	// cleanup) must not force a republish.
@@ -677,13 +677,18 @@ func (t *Table) TickTTL() TickTTLResult {
 	if totalRemoved > 0 || flapMutated {
 		t.dirty.Store(true)
 	}
-	// CompactExpired physically removes claims across an unbounded set of
-	// identities; force a full incremental re-copy so dropped buckets and
-	// shrunken bucket lengths are reflected. flap-only ticks do not change
-	// the Routes projection (flap is a separate, fully-copied snapshot
-	// field), so they do not force a full route rebuild.
+	// CompactExpired removed claims (dropped buckets / shrunken lengths), so the
+	// published Snapshot needs a full incremental re-copy. But the affected
+	// identity set IS known, so journal those precisely instead of a journal bulk
+	// reset — a bulk reset would force every cursor-mode peer into a rate-limited
+	// full sync on every TTL sweep that evicts anything, defeating the delta
+	// savings under churn (the dominant cost in the alloc profile). flap-only
+	// ticks do not change the Routes projection, so they do not re-copy.
 	if totalRemoved > 0 {
-		t.markSnapFullDirtyLocked()
+		t.markSnapshotFullDirtyLocked()
+		for _, identity := range affected {
+			t.markRouteChangedLocked(identity)
+		}
 	}
 	return TickTTLResult{Exposed: exposed, Removed: totalRemoved}
 }

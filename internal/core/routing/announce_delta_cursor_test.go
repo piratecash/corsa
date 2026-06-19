@@ -3,6 +3,7 @@ package routing
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
@@ -236,6 +237,49 @@ func TestAnnounceDeltaTo_CapRejectionIsNotADelta(t *testing.T) {
 	}
 	if len(delta) != 0 {
 		t.Fatalf("cap-rejected update must not produce a delta, got %d: %+v", len(delta), delta)
+	}
+}
+
+// TestAnnounceDeltaTo_TTLEvictionExposesBackupViaDelta: when a TTL sweep evicts
+// an identity's PRIMARY route and exposes a live backup (winner change), the
+// sweep must journal that identity precisely so the cursor delta re-emits it with
+// the backup route — and without a bulk reset that would needFull. Using a
+// winner-change (not a full removal) proves the journaling actually happened: a
+// missing journal entry would leave the delta empty and the assertion would fail.
+func TestAnnounceDeltaTo_TTLEvictionExposesBackupViaDelta(t *testing.T) {
+	origin := domaintest.ID("self")
+	peerZ := domaintest.ID("z")
+	x1 := domaintest.ID("x1")
+	u1, u2 := domaintest.ID("u1"), domaintest.ID("u2")
+
+	clk := time.Now()
+	tbl := NewTable(WithLocalOrigin(origin), WithClock(func() time.Time { return clk }))
+	// Primary via u1 (hops 2, expires soon) + live backup via u2 (hops 3, stays).
+	mustUpdateRoute(t, tbl, RouteEntry{Identity: x1, Origin: origin, NextHop: u1, Hops: 2, SeqNo: 1, Source: RouteSourceAnnouncement, ExpiresAt: clk.Add(1 * time.Second)})
+	mustUpdateRoute(t, tbl, RouteEntry{Identity: x1, Origin: origin, NextHop: u2, Hops: 3, SeqNo: 1, Source: RouteSourceAnnouncement, ExpiresAt: clk.Add(1 * time.Hour)})
+
+	base, head := tbl.AnnounceToWithChangeHead(peerZ)
+	if got := entryByIdentity(base)[x1].Hops; got != 2 {
+		t.Fatalf("baseline winner must be the hops-2 primary, got hops=%d", got)
+	}
+	tbl.ReleaseAnnounceEntries(base)
+
+	// Expire the primary; the sweep must journal x1 so the cursor delta re-emits
+	// the now-winning backup.
+	clk = clk.Add(2 * time.Second)
+	tbl.TickTTL()
+
+	delta, _, needFull := tbl.AnnounceDeltaTo(peerZ, head)
+	defer tbl.ReleaseAnnounceEntries(delta)
+	if needFull {
+		t.Fatal("TTL eviction must journal precisely (no bulk reset → no needFull)")
+	}
+	got, ok := entryByIdentity(delta)[x1]
+	if !ok {
+		t.Fatalf("TTL eviction must journal x1 so the delta re-emits the exposed backup; delta=%+v", delta)
+	}
+	if got.Hops != 3 {
+		t.Fatalf("delta must carry the exposed backup winner (hops 3), got hops=%d", got.Hops)
 	}
 }
 

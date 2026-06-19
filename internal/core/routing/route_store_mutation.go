@@ -1383,24 +1383,25 @@ func (s *routeStore) InvalidateTransitVia(uplink PeerIdentity, now time.Time) (i
 	return invalidated, affected, exposed
 }
 
-// CompactExpired is the storage half of Table.TickTTL. Removes
-// expired claims from every bucket (including own-origin
-// tombstones whose TTL elapsed). Identities whose bucket fully
-// drains are dropped from the store. Returns the total number of
-// claims removed and the identities where at least one survivor
-// is non-withdrawn (a backup is exposed).
+// CompactExpired is the storage half of Table.TickTTL. It removes expired
+// claims from every bucket (including own-origin tombstones whose TTL elapsed);
+// identities whose bucket fully drains are dropped from the store.
 //
-// Only ExpiresAt is checked — withdrawn claims are kept until
-// their ExpiresAt elapses. This preserves tombstones created by
-// WithdrawTriple that guard against resurrection from delayed
-// lower-SeqNo announcements. InvalidateAllVia and
-// InvalidateTransitVia set a short ExpiresAt on withdrawn
-// claims so they are cleaned up promptly without breaking
-// tombstone semantics.
+// Only ExpiresAt is checked — withdrawn claims are kept until their ExpiresAt
+// elapses. This preserves tombstones created by WithdrawTriple that guard against
+// resurrection from delayed lower-SeqNo announcements. InvalidateAllVia and
+// InvalidateTransitVia set a short ExpiresAt on withdrawn claims so they are
+// cleaned up promptly without breaking tombstone semantics.
 //
-// Caller contract: t.mu held (writer).
-func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity) {
+// Returns (totalRemoved, affected, exposed): `affected` is every identity whose
+// bucket was modified (a claim removed or the whole bucket deleted) — exactly the
+// identities whose announce projection may have changed, so TickTTL can journal
+// them precisely instead of a bulk reset that would force every cursor-mode peer
+// into a full sync on each TTL sweep. `exposed` is the subset that still has a
+// live (non-withdrawn) survivor. Caller contract: t.mu held (writer).
+func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity, []PeerIdentity) {
 	totalRemoved := 0
+	var affected []PeerIdentity
 	var exposed []PeerIdentity
 
 	for identity, bucket := range s.buckets {
@@ -1417,6 +1418,7 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity) {
 			continue
 		}
 		totalRemoved += removed
+		affected = append(affected, identity)
 		if n == 0 {
 			delete(s.buckets, identity)
 			continue
@@ -1433,7 +1435,7 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity) {
 		}
 	}
 
-	return totalRemoved, exposed
+	return totalRemoved, affected, exposed
 }
 
 // nextSeqLocked increments and returns the next SeqNo for a

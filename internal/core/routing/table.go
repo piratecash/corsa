@@ -597,11 +597,15 @@ func (t *Table) markSnapDirtyNoJournalLocked(identity PeerIdentity) {
 	t.snapDirtyIDs[identity] = struct{}{}
 }
 
-// markSnapFullDirtyLocked forces the next SnapshotIncremental to re-copy
-// every bucket. Used by bulk mutations that touch an UNBOUNDED, unknown
-// identity set. Caller must hold t.mu in W mode. It also records a full reset
-// in the Phase 3 change journal so per-peer cursors below it force a full sync —
-// the safe option when the affected set cannot be enumerated cheaply.
+// markSnapFullDirtyLocked forces the next SnapshotIncremental to re-copy every
+// bucket AND records a journal bulk reset so per-peer cursors below it force a
+// full sync. It is the FALLBACK for a bulk mutation that touches an UNBOUNDED,
+// unknown identity set and so cannot journal precisely. No production path needs
+// it today — RemoveDirectPeer, InvalidateTransitRoutes and TickTTL all know their
+// affected set and use markSnapshotFullDirtyLocked + per-identity journaling — so
+// this is reserved for a future mutation that genuinely cannot enumerate its set
+// (and is exercised by TestAnnounceDeltaTo_NeedFullOnBulkReset). Caller holds
+// t.mu in W mode.
 func (t *Table) markSnapFullDirtyLocked() {
 	t.snapFullDirty = true
 	t.markRouteChangedFullLocked()
