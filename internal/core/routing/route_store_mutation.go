@@ -1421,6 +1421,11 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity, []PeerI
 		affected = append(affected, identity)
 		if n == 0 {
 			delete(s.buckets, identity)
+			// Prune the derived hex memo in lockstep with the bucket
+			// it describes — this is the single bucket-removal
+			// chokepoint, so it bounds identityHex to the live
+			// identity set (see the field doc-comment).
+			delete(s.identityHex, identity)
 			continue
 		}
 		s.buckets[identity] = bucket[:n]
@@ -1436,6 +1441,26 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity, []PeerI
 	}
 
 	return totalRemoved, affected, exposed
+}
+
+// identityHexLocked returns the memoized lowercase-hex wire form of
+// identity, computing and caching it on first use. The hex is an
+// immutable function of the identity bytes, so a cache hit is always
+// valid. Caller must hold t.mu (writer) — the only callers are on the
+// projection path, which already holds the writer lock to advance
+// outbound SeqNo state. The zero identity maps to "" (matching
+// PeerIdentity.String()) and is not cached. See the identityHex field
+// doc-comment for the lifecycle / leak contract.
+func (s *routeStore) identityHexLocked(identity PeerIdentity) string {
+	if identity.IsZero() {
+		return ""
+	}
+	if hexStr, ok := s.identityHex[identity]; ok {
+		return hexStr
+	}
+	hexStr := identity.String()
+	s.identityHex[identity] = hexStr
+	return hexStr
 }
 
 // nextSeqLocked increments and returns the next SeqNo for a

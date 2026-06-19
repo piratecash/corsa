@@ -667,6 +667,15 @@ type AnnounceEntry struct {
 	Hops     int
 	SeqNo    uint64
 
+	// IdentityHex is the precomputed lowercase-hex wire form of
+	// Identity, carried out of the projection so the wire encoders do
+	// not re-run hex.EncodeToString per entry per peer (and again
+	// inside the v3 size-chunker's per-entry measure()). Populated by
+	// the routeStore projection via its identity-hex memo; empty for
+	// entries built outside that path (ToAnnounceEntry, tests), in
+	// which case IdentityHexString falls back to Identity.String().
+	IdentityHex string
+
 	// Extra holds unknown wire fields for forward-compatible relay.
 	// Nil for locally originated routes.
 	Extra json.RawMessage
@@ -687,6 +696,18 @@ type AnnounceEntry struct {
 	// (CompositeScore in Phase 4 13.2-C) can read it without
 	// re-running verification.
 	AttestedSigVerified bool
+}
+
+// IdentityHexString returns the lowercase-hex wire form of the entry's
+// Identity, preferring the projection-memoized IdentityHex (zero
+// allocation) and falling back to Identity.String() for entries built
+// outside the projection path. Wire encoders use this instead of
+// Identity.String() directly so the hot announce path reuses the memo.
+func (e AnnounceEntry) IdentityHexString() string {
+	if e.IdentityHex != "" {
+		return e.IdentityHex
+	}
+	return e.Identity.String()
 }
 
 // ToAnnounceEntry projects a RouteEntry into the wire format for

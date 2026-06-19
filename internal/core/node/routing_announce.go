@@ -602,7 +602,7 @@ func buildAnnounceFrame(kind announceWireType, entries []routing.AnnounceEntry) 
 	wireRoutes := make([]protocol.AnnounceRouteFrame, len(entries))
 	for i, r := range entries {
 		wireRoutes[i] = protocol.AnnounceRouteFrame{
-			Identity: r.Identity.String(),
+			Identity: r.IdentityHexString(),
 			Origin:   r.Origin.String(),
 			Hops:     r.Hops,
 			SeqNo:    r.SeqNo,
@@ -646,7 +646,7 @@ func buildRouteAnnounceV3Frame(kind string, epoch uint64, entries []routing.Anno
 	wireEntries := make([]protocol.RouteAnnounceV3Entry, len(entries))
 	for i, e := range entries {
 		wireEntries[i] = protocol.RouteAnnounceV3Entry{
-			Identity: e.Identity.String(),
+			Identity: e.IdentityHexString(),
 			Hops:     hopsIntToUint8(e.Hops),
 			SeqNo:    e.SeqNo,
 			Extra:    e.Extra,
@@ -903,11 +903,11 @@ func (s *Service) signOwnOriginV3Entries(entries []routing.AnnounceEntry, epoch 
 		if len(entries[i].AttestedSig) > 0 {
 			continue
 		}
-		if entries[i].Identity.String() != localIdentity {
+		if entries[i].IdentityHexString() != localIdentity {
 			continue
 		}
 		v3e := protocol.RouteAnnounceV3Entry{
-			Identity: entries[i].Identity.String(),
+			Identity: entries[i].IdentityHexString(),
 			SeqNo:    entries[i].SeqNo,
 			Extra:    entries[i].Extra,
 		}
@@ -2317,10 +2317,13 @@ func routeAnnounceV3EntriesToWire(senderIdentity domain.PeerIdentity, entries []
 	}
 	frames := make([]protocol.AnnounceRouteFrame, len(entries))
 	sigs := make([][]byte, len(entries))
+	// senderIdentity is constant across the batch — encode its hex once
+	// instead of re-allocating the same string per entry.
+	senderHex := senderIdentity.String()
 	for i, e := range entries {
 		frames[i] = protocol.AnnounceRouteFrame{
 			Identity: e.Identity,
-			Origin:   senderIdentity.String(),
+			Origin:   senderHex,
 			Hops:     int(e.Hops),
 			SeqNo:    e.SeqNo,
 			Extra:    e.Extra,

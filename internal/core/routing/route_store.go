@@ -70,6 +70,30 @@ type routeStore struct {
 	// dropped from storage).
 	seqCounters map[PeerIdentity]uint64
 
+	// identityHex memoizes the lowercase-hex wire form of each
+	// destination identity (PeerIdentity.String()). The projection
+	// path re-encodes every emitted identity to hex on every cycle,
+	// once per receiving peer and again inside the v3 size-chunker's
+	// per-entry measure() — the single largest non-snapshot allocator
+	// in the announce plane (alloc_space profiling, Jun 2026). Because
+	// the hex is a pure, immutable function of the 20 identity bytes
+	// (the map key itself), a memo never goes stale; the lookup
+	// returns a shared string with zero allocation.
+	//
+	// Lifecycle / leak contract: this is a DERIVED cache, not
+	// authoritative state. It is populated lazily under writer t.mu in
+	// identityHexLocked (the projection path holds the writer lock —
+	// AnnounceToWithChangeHead / AnnounceDeltaTo) and pruned at the
+	// single bucket-removal chokepoint in CompactExpired, so an entry
+	// lives exactly as long as its identity's bucket. Every dead
+	// bucket reaches CompactExpired via TTL, so the memo cannot
+	// outgrow the live identity set — unlike an unbounded global hex
+	// cache, which would be the same leak class as the ban-domain /
+	// seenReceipts maps. It is kept separate from buckets (rather than
+	// folded into a per-identity value struct) to avoid churning the
+	// ~45 hot bucket-access sites; consolidation is deferred.
+	identityHex map[PeerIdentity]string
+
 	// capStats holds the monotonic counters surfaced by CapStats /
 	// routing.Snapshot.CapStats. Fields are atomic so CapStats()
 	// can read without t.mu — the per-decision increments inside
@@ -417,6 +441,7 @@ func newRouteStore() *routeStore {
 	return &routeStore{
 		buckets:              make(map[PeerIdentity][]UplinkClaim),
 		seqCounters:          make(map[PeerIdentity]uint64),
+		identityHex:          make(map[PeerIdentity]string),
 		defaultTTL:           DefaultTTL,
 		outboundContent:      make(map[outboundContentKey]outboundSeqEntry),
 		outboundMax:          make(map[PeerIdentity]uint64),

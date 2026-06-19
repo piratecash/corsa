@@ -398,9 +398,14 @@ func BuildAnnounceSnapshot(raw []AnnounceEntry) *AnnounceSnapshot {
 		seen[k] = struct{}{}
 		deduped = append(deduped, AnnounceEntry{
 			Identity: e.Identity,
-			Origin:   e.Origin,
-			Hops:     e.Hops,
-			SeqNo:    e.SeqNo,
+			// Carry the projection-memoized identity hex through dedup
+			// so the forced-full path's wire encoders also skip
+			// hex.EncodeToString (the full sync is the path that still
+			// runs BuildAnnounceSnapshot).
+			IdentityHex: e.IdentityHex,
+			Origin:      e.Origin,
+			Hops:        e.Hops,
+			SeqNo:       e.SeqNo,
 			// Round-24: emit verbatim Extra bytes, not the
 			// normalized form — see the comment above for the
 			// attested-links pair-consistency contract.

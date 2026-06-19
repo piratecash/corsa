@@ -528,10 +528,13 @@ func (s *routeStore) projectIdentityLocked(identity PeerIdentity, bucket []Uplin
 		}
 		result = append(result, AnnounceEntry{
 			Identity: identity,
-			Origin:   emitOrigin,
-			Hops:     int(liveWinner.Hops),
-			SeqNo:    wireSeqNo,
-			Extra:    liveWinner.Extra,
+			// Memoized hex of identity, reused by the wire encoders
+			// instead of re-running hex.EncodeToString per peer.
+			IdentityHex: s.identityHexLocked(identity),
+			Origin:      emitOrigin,
+			Hops:        int(liveWinner.Hops),
+			SeqNo:       wireSeqNo,
+			Extra:       liveWinner.Extra,
 			// Phase 4 13.2-A: carry the stored attested-links
 			// signature through the projection so a v3 re-emit
 			// forwards the original signer's bytes unchanged.
@@ -589,10 +592,13 @@ func (s *routeStore) projectIdentityLocked(identity PeerIdentity, bucket []Uplin
 		}
 		result = append(result, AnnounceEntry{
 			Identity: identity,
-			Origin:   emitOrigin,
-			Hops:     HopsInfinity,
-			SeqNo:    wireSeqNo,
-			Extra:    tomb.Extra,
+			// Memoized hex of identity, reused by the wire encoders
+			// instead of re-running hex.EncodeToString per peer.
+			IdentityHex: s.identityHexLocked(identity),
+			Origin:      emitOrigin,
+			Hops:        HopsInfinity,
+			SeqNo:       wireSeqNo,
+			Extra:       tomb.Extra,
 			// Round-13 fix: forward the stored attested-links
 			// signature on tombstone projections, mirroring
 			// the liveWinner branch above. Without this the
