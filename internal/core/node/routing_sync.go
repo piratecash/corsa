@@ -41,6 +41,7 @@
 package node
 
 import (
+	"context"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -95,6 +96,41 @@ func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, c
 		Str("digest", digest).
 		Uint32("count", count).
 		Msg("route_sync_digest_emitted")
+}
+
+// SendRouteSyncDigest implements routing.PeerSender: it emits a
+// route_sync_digest_v1 to peerAddress carrying the sender-side announce
+// digest, as the announce loop's periodic freshness heartbeat (in place of an
+// unconditional full sync). It is the by-address sibling of emitRouteSyncDigest
+// (which sends by identity on reconnect); both gate on CapMeshRouteSyncV1 so a
+// peer without route_sync support simply never receives a digest and the
+// announce loop's "no confirmed match → full" fallback keeps it fresh.
+//
+// Returns true when the frame was enqueued. A false return (peer lacks
+// route_sync, or the transport dropped it) leaves the armed pending window to
+// elapse, so the next deadline escalates to a full — the documented safe
+// degradation, identical to a silent peer.
+func (s *Service) SendRouteSyncDigest(ctx context.Context, peerAddress domain.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool {
+	frame := protocol.RouteSyncDigestFrame{
+		Type:                 protocol.RouteSyncDigestFrameType,
+		Digest:               digest,
+		KnownIdentitiesCount: knownIdentities,
+		GeneratedAt:          generatedAt.UTC().Format(time.RFC3339),
+	}
+	raw, err := protocol.MarshalRouteSyncDigestFrame(frame)
+	if err != nil {
+		log.Warn().
+			Err(err).
+			Str("peer_address", string(peerAddress)).
+			Str("digest", digest).
+			Msg("route_sync_digest_marshal_failed")
+		return false
+	}
+	wire := protocol.Frame{
+		Type:    protocol.RouteSyncDigestFrameType,
+		RawLine: string(raw) + "\n",
+	}
+	return s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, wire, domain.CapMeshRouteSyncV1)
 }
 
 // recordPeerDigestOnSessionClose computes the current per-peer
@@ -165,6 +201,23 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 
 	localDigest, localCount := s.routingTable.SyncDigestFor(senderIdentity)
 	match := localDigest == frame.Digest
+
+	// Digest-as-heartbeat freshness (receiver half): a matching digest proves
+	// our routes learned through this peer are exactly what the peer still
+	// announces, so renew their TTL here instead of waiting for the peer to
+	// ship a full announce. This is what lets the sender replace the periodic
+	// full-sync with a cheap digest on the stable path without letting
+	// unchanged routes age out (docs/routing.md "Refresh interval invariant").
+	// A mismatch refreshes nothing — the sender will follow with a full.
+	if match {
+		refreshed := s.routingTable.RefreshRoutesVia(senderIdentity, time.Now().UTC())
+		if refreshed > 0 {
+			log.Debug().
+				Str("sender_identity", senderIdentity.String()).
+				Int("refreshed", refreshed).
+				Msg("route_sync_digest_match_refreshed_ttl")
+		}
+	}
 
 	summary := protocol.RouteSyncSummaryFrame{
 		Type:           protocol.RouteSyncSummaryFrameType,

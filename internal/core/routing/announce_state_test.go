@@ -325,7 +325,7 @@ func TestAnnounceStateRegistry_ReconcileLiveSetKeepsAndRefreshesLive(t *testing.
 	s.lastSeenLiveAt = now.Add(-3 * time.Minute)
 	s.mu.Unlock()
 
-	evicted := r.ReconcileLiveSet([]PeerIdentity{domaintest.ID("peer-A")}, now)
+	evicted := r.ReconcileLiveSet(map[PeerIdentity]struct{}{domaintest.ID("peer-A"): {}}, now)
 	if evicted != 0 {
 		t.Fatalf("expected 0 evicted for live peer, got %d", evicted)
 	}

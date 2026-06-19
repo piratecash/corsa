@@ -6,6 +6,7 @@ package routing
 
 import (
 	"context"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/routing"
 	mock "github.com/stretchr/testify/mock"
@@ -16,7 +17,8 @@ import (
 func NewMockPeerSender(t interface {
 	mock.TestingT
 	Cleanup(func())
-}) *MockPeerSender {
+},
+) *MockPeerSender {
 	mock := &MockPeerSender{}
 	mock.Mock.Test(t)
 
@@ -172,6 +174,81 @@ func (_c *MockPeerSender_SendRouteAnnounceV3_Call) Return(b bool) *MockPeerSende
 }
 
 func (_c *MockPeerSender_SendRouteAnnounceV3_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, kind string, epoch uint64, entries []routing.AnnounceEntry) bool) *MockPeerSender_SendRouteAnnounceV3_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SendRouteSyncDigest provides a mock function for the type MockPeerSender
+func (_mock *MockPeerSender) SendRouteSyncDigest(ctx context.Context, peerAddress routing.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool {
+	ret := _mock.Called(ctx, peerAddress, digest, knownIdentities, generatedAt)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SendRouteSyncDigest")
+	}
+
+	var r0 bool
+	if returnFunc, ok := ret.Get(0).(func(context.Context, routing.PeerAddress, string, uint32, time.Time) bool); ok {
+		r0 = returnFunc(ctx, peerAddress, digest, knownIdentities, generatedAt)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+	return r0
+}
+
+// MockPeerSender_SendRouteSyncDigest_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SendRouteSyncDigest'
+type MockPeerSender_SendRouteSyncDigest_Call struct {
+	*mock.Call
+}
+
+// SendRouteSyncDigest is a helper method to define mock.On call
+//   - ctx context.Context
+//   - peerAddress routing.PeerAddress
+//   - digest string
+//   - knownIdentities uint32
+//   - generatedAt time.Time
+func (_e *MockPeerSender_Expecter) SendRouteSyncDigest(ctx interface{}, peerAddress interface{}, digest interface{}, knownIdentities interface{}, generatedAt interface{}) *MockPeerSender_SendRouteSyncDigest_Call {
+	return &MockPeerSender_SendRouteSyncDigest_Call{Call: _e.mock.On("SendRouteSyncDigest", ctx, peerAddress, digest, knownIdentities, generatedAt)}
+}
+
+func (_c *MockPeerSender_SendRouteSyncDigest_Call) Run(run func(ctx context.Context, peerAddress routing.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time)) *MockPeerSender_SendRouteSyncDigest_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 routing.PeerAddress
+		if args[1] != nil {
+			arg1 = args[1].(routing.PeerAddress)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 uint32
+		if args[3] != nil {
+			arg3 = args[3].(uint32)
+		}
+		var arg4 time.Time
+		if args[4] != nil {
+			arg4 = args[4].(time.Time)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+		)
+	})
+	return _c
+}
+
+func (_c *MockPeerSender_SendRouteSyncDigest_Call) Return(b bool) *MockPeerSender_SendRouteSyncDigest_Call {
+	_c.Call.Return(b)
+	return _c
+}
+
+func (_c *MockPeerSender_SendRouteSyncDigest_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool) *MockPeerSender_SendRouteSyncDigest_Call {
 	_c.Call.Return(run)
 	return _c
 }

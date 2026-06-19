@@ -16,6 +16,8 @@ package routing
 // t.mu → delegate to routeStore + flap → propagate the
 // "mutated"/"return value" signal → mark t.dirty if mutated.
 
+import "time"
+
 // AddDirectPeerResult describes the outcome of AddDirectPeer.
 type AddDirectPeerResult struct {
 	// Entry is the route entry that was created or refreshed.
@@ -609,6 +611,22 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 		}
 	}
 	return invalidated, exposed
+}
+
+// RefreshRoutesVia renews the TTL of every live route learned through `via`,
+// as if `via` had just re-announced them. It is the receiver half of the
+// digest-as-heartbeat freshness mechanism: when an inbound
+// route_sync_digest_v1 matches our via-peer view (handleRouteSyncDigest), the
+// routes through that peer are provably current, so we extend their lifetime
+// without the peer shipping a full announce. Returns the number of claims
+// refreshed (0 when the peer offers no learned routes).
+//
+// No dirty mark / journal: ExpiresAt is not a wire-projected field, so a TTL
+// bump must not synthesise an announce delta — see refreshViaLocked.
+func (t *Table) RefreshRoutesVia(via PeerIdentity, now time.Time) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.store.refreshViaLocked(via, now)
 }
 
 // TickTTL removes expired routes from the table and cleans up stale

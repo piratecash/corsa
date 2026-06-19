@@ -244,6 +244,24 @@ type PeerSender interface {
 	// has no method list, so adding methods here flows through on the
 	// next regen.
 	SendRouteAnnounceV3(ctx context.Context, peerAddress PeerAddress, kind string, epoch uint64, entries []AnnounceEntry) bool
+
+	// SendRouteSyncDigest emits a route_sync_digest_v1 frame carrying the
+	// sender-side digest (Table.AnnounceDigestFor) of what this node
+	// announces to peerAddress, plus the identity count and the digest's
+	// generation time. It is the heartbeat the announce loop sends at each
+	// periodic freshness deadline in place of an unconditional full sync:
+	// the receiver compares it against its via-this-node view and, on a
+	// match, refreshes the TTL of those routes (RefreshRoutesVia) and replies
+	// route_sync_summary_v1 match=true — which lets this node skip the
+	// byte-heavy full rebuild while still keeping the peer's learned routes
+	// from aging out (docs/routing.md "Refresh interval invariant",
+	// docs/protocol/route_sync.md). A mismatch / silence escalates to a full
+	// on the next deadline.
+	//
+	// Semantics of ctx, peerAddress, and the bool return value match
+	// SendAnnounceRoutes. Mocks regenerate from this interface via
+	// `make mocks`.
+	SendRouteSyncDigest(ctx context.Context, peerAddress PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool
 }
 
 // AnnounceLoop runs periodic and triggered routing announcements. It
@@ -386,8 +404,17 @@ type digestSuppressionEntry struct {
 	// single-shot: a duplicate or replayed summary echoing the same
 	// digest within the window cannot keep pushing `until` forward, so
 	// one correlated reply suppresses AT MOST one forced-full cadence
-	// (Phase 3 §4.5 invariant).
+	// (Phase 3 §4.5 invariant). In the digest-as-heartbeat path it also
+	// records the PREVIOUS heartbeat's outcome: the periodic deadline
+	// does a full only when the prior heartbeat did NOT confirm a match
+	// (see digestHeartbeatStatus).
 	confirmed bool
+	// lastHeartbeatAt is when we last emitted a periodic heartbeat digest
+	// to this peer (or armed a reconnect digest). It anchors the
+	// once-per-cadence heartbeat rhythm independently of
+	// LastSuccessfulFullSyncAt, which freezes once the stable path stops
+	// shipping fulls. Zero on a never-armed entry.
+	lastHeartbeatAt time.Time
 }
 
 // OverloadCycleCount returns the cumulative number of cycles where
@@ -520,8 +547,56 @@ func (a *AnnounceLoop) MarkPeerDigestPending(peer PeerIdentity, now time.Time, s
 		a.digestSuppression = make(map[PeerIdentity]digestSuppressionEntry)
 	}
 	a.digestSuppression[peer] = digestSuppressionEntry{
-		until:    now.Add(grace),
-		expected: sentDigest,
+		until:           now.Add(grace),
+		expected:        sentDigest,
+		lastHeartbeatAt: now,
+	}
+}
+
+// digestHeartbeatStatus reports, for the periodic digest-as-heartbeat path,
+// whether this peer is due a new heartbeat digest (no entry yet, or a full
+// cadence has elapsed since the last heartbeat emit) and whether the PREVIOUS
+// heartbeat confirmed a match. The caller emits a digest when due and falls
+// back to a full rebuild only when the previous heartbeat did NOT confirm —
+// which gives freshness parity with the old unconditional forced-full: a lost
+// or mismatched digest escalates to a full at the next deadline exactly like a
+// dropped full did. A brand-new peer (no entry) returns (due=true,
+// prevConfirmed=false) so it bootstraps with a full plus a first heartbeat.
+//
+// `now` injected for deterministic tests. Safe to call from any goroutine.
+func (a *AnnounceLoop) digestHeartbeatStatus(peer PeerIdentity, now time.Time) (due bool, prevConfirmed bool) {
+	cadence := EffectiveForcedFullSyncInterval(a.interval)
+	a.digestSuppressionMu.Lock()
+	defer a.digestSuppressionMu.Unlock()
+	if a.digestSuppression == nil {
+		return true, false
+	}
+	entry, ok := a.digestSuppression[peer]
+	if !ok {
+		return true, false
+	}
+	due = entry.lastHeartbeatAt.IsZero() || now.Sub(entry.lastHeartbeatAt) >= cadence
+	return due, entry.confirmed
+}
+
+// reconcileDigestSuppression evicts digest-heartbeat windows for peers that
+// are no longer in the authoritative live set. Membership-driven, like the
+// per-peer announce state's ReconcileLiveSet: it bounds digestSuppression to
+// the live route_sync peer set so churn over unique identities cannot leak
+// per-peer windows. Unlike lastSentSnapshot, a wrongly-evicted entry is cheap
+// — the next deadline simply re-emits a digest — so this evicts immediately on
+// absence rather than carrying a flap grace. No-op on an empty map (idle nodes
+// pay nothing). Called once per announce cycle under the loop goroutine.
+//
+// `liveSet` is the SAME map ReconcileLiveSet consumes — the caller builds it
+// once per cycle so this sweep adds no allocation to the stable hot path.
+func (a *AnnounceLoop) reconcileDigestSuppression(liveSet map[PeerIdentity]struct{}) {
+	a.digestSuppressionMu.Lock()
+	defer a.digestSuppressionMu.Unlock()
+	for peer := range a.digestSuppression {
+		if _, ok := liveSet[peer]; !ok {
+			delete(a.digestSuppression, peer)
+		}
 	}
 }
 
@@ -1031,11 +1106,23 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	// before the early return guarantees an isolated node (zero live peers)
 	// still reclaims everything that has aged out.
 	reconcileNow := a.stateRegistry.Clock()
-	liveIDs := make([]PeerIdentity, len(peers))
+	// Build the cycle's live-set membership map ONCE and share it with both
+	// garbage collectors below — the per-peer announce state and the digest
+	// heartbeat windows. A single map allocation per cycle, not one per sweep.
+	liveSet := make(map[PeerIdentity]struct{}, len(peers))
 	for i := range peers {
-		liveIDs[i] = peers[i].Identity
+		liveSet[peers[i].Identity] = struct{}{}
 	}
-	a.stateRegistry.ReconcileLiveSet(liveIDs, reconcileNow)
+	a.stateRegistry.ReconcileLiveSet(liveSet, reconcileNow)
+	// Prune digest-heartbeat windows for peers no longer in the live set, in
+	// lockstep with the per-peer announce state above. The periodic heartbeat
+	// arms an entry for every live route_sync peer; those entries are otherwise
+	// only removed on a mismatch or a lazy expired read, neither of which fires
+	// once a peer leaves peersFn — so without this membership sweep the map
+	// would grow unbounded across churn over unique identities (same leak class
+	// as lastSentSnapshot). Runs before the empty-peers return so an isolated
+	// node reclaims everything.
+	a.reconcileDigestSuppression(liveSet)
 
 	if len(peers) == 0 {
 		return
@@ -1134,51 +1221,76 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			view := peerState.View()
 			needsFull := view.NeedsFullResync || view.LastSentSnapshot == nil
 
-			// Check if periodic forced full sync is due. Inclusive (>=) so
-			// the cycle that lands exactly at multiplier*interval triggers
-			// the full sync — matching the cadence the
-			// "Refresh interval invariant" promises (docs/routing.md). With
-			// strict `>` the first eligible cycle would be one tick later,
-			// turning the effective cadence into (multiplier+1)*interval
-			// and pushing the next refresh past DefaultTTL/2.
-			if !needsFull && !view.LastSuccessfulFullSyncAt.IsZero() {
-				if now.Sub(view.LastSuccessfulFullSyncAt) >= forcedFullSyncInterval {
-					needsFull = true
-				}
-			}
-
-			// Phase 3 PR 12.5 — digest-match suppression. When a
-			// route_sync exchange for this peer is in flight or
-			// already reported match=true (and the suppression
-			// deadline has not elapsed), elide the forced full
-			// sync. The delta path still runs in this cycle, so any
-			// state that did change is still propagated; only the
-			// byte-heavy full re-confirmation is saved.
+			// Phase 3 PR 12.5 — digest-match suppression for the SOFT
+			// (session-boundary) reconnect resync. On reconnect the session
+			// hook arms a short pending window via MarkPeerDigestPending and
+			// emits a digest, so this very cycle (fired by the reconnect
+			// TriggerUpdate) sees an active window and holds off the resync
+			// full until the summary lands. A match extends the window; a
+			// mismatch / silence clears it and the next cycle full-syncs.
 			//
-			// The reconnect full sync is the PRIMARY path this gate
-			// targets (docs/protocol/route_sync.md): on reconnect
-			// the session hook arms a short pending window via
-			// MarkPeerDigestPending and emits the digest, so this
-			// very cycle (fired by the reconnect TriggerUpdate) sees
-			// an active window and holds off the full sync until the
-			// summary lands. A match extends the window for one
-			// cadence; a mismatch / silence clears it and the next
-			// cycle full-syncs.
-			//
-			// Two conditions exempt the gate so a peer never misses a
-			// needed baseline:
-			//
-			//   - view.LastSentSnapshot == nil: the peer has no prior
-			//     baseline (first-ever sync, or a hard reset).
-			//     Suppression would leave it with no routing state.
+			// Two conditions exempt the gate so a peer never misses a needed
+			// baseline:
+			//   - view.LastSentSnapshot == nil: no prior baseline (first-ever
+			//     sync, or a hard reset) — suppression would leave it with no
+			//     routing state.
 			//   - view.ResyncIsHard: an explicit request_resync or a
-			//     consistency-loss MarkInvalid set this. The peer is
-			//     demanding a fresh full table; a digest hint must not
-			//     suppress it. A soft (session-boundary) resync, by
-			//     contrast, IS suppressible — that is the reconnect
-			//     optimisation.
+			//     consistency-loss MarkInvalid demanded a fresh full table; a
+			//     digest hint must not suppress it.
 			if needsFull && view.LastSentSnapshot != nil && !view.ResyncIsHard && a.isDigestSuppressionActive(peer.Identity, now) {
 				needsFull = false
+			}
+
+			// Periodic freshness deadline → digest-as-heartbeat. Instead of an
+			// unconditional full rebuild every TTL/2 (the byte-heavy bulk of
+			// the announce alloc churn), emit a cheap digest: the receiver
+			// refreshes the TTL of routes via this node on a match
+			// (RefreshRoutesVia) and replies route_sync_summary_v1. A full
+			// rebuild fires only when the PREVIOUS heartbeat did not confirm a
+			// match (mismatch or silence) — freshness parity with the old
+			// forced-full, where a dropped sync likewise escalated to a full at
+			// the next deadline. First-sync and hard/soft resyncs never reach
+			// here (needsFull already set, or suppressed above).
+			//
+			// Inclusive (>=) deadline so the cycle landing exactly at the
+			// cadence acts — same boundary the old forced-full used to keep the
+			// refresh within DefaultTTL/2 (docs/routing.md).
+			if !needsFull && view.LastSentSnapshot != nil &&
+				!view.LastSuccessfulFullSyncAt.IsZero() &&
+				now.Sub(view.LastSuccessfulFullSyncAt) >= forcedFullSyncInterval {
+
+				// The freshness decision is taken at most once per cadence,
+				// gated by `due`. Once the stable path stops shipping fulls,
+				// LastSuccessfulFullSyncAt freezes and the outer deadline check
+				// stays true on EVERY tick — so without this gate an
+				// intermediate delta tick would re-escalate a heartbeat that is
+				// still in flight (MarkPeerDigestPending reset confirmed=false on
+				// emit). `due` is anchored on lastHeartbeatAt, so a lost/silent
+				// heartbeat falls back to a full at the NEXT cadence deadline,
+				// not on the next tick.
+				if due, prevConfirmed := a.digestHeartbeatStatus(peer.Identity, now); due {
+					switch {
+					case !hasCapRouteSync(peer.Capabilities):
+						// Peer cannot answer a digest (no mesh_route_sync_v1):
+						// take the old unconditional full. Arming a window it
+						// could never confirm would only waste an O(table) digest
+						// walk + marshal before the same full fallback fires.
+						needsFull = true
+					default:
+						// Escalate to a full only when the previous heartbeat
+						// never confirmed a match (mismatch or silence); a
+						// confirmed match already renewed the receiver's TTL, so
+						// a cheap re-heartbeat suffices. The heartbeat outcome is
+						// recorded by the route_sync_summary_v1 handler
+						// (ConfirmPeerDigestMatch / ClearPeerDigestSuppression).
+						if !prevConfirmed {
+							needsFull = true
+						}
+						digest, count := a.table.AnnounceDigestFor(peer.Identity)
+						a.MarkPeerDigestPending(peer.Identity, now, digest)
+						a.sender.SendRouteSyncDigest(ctx, peer.Address, digest, count, now)
+					}
+				}
 			}
 
 			// Phase 0 short-circuit before the expensive scan: if the
@@ -1520,6 +1632,22 @@ func hasCapV3Triplet(caps []PeerCapability) bool {
 		}
 	}
 	return v1 && v3 && relay
+}
+
+// hasCapRouteSync reports whether the peer negotiated mesh_route_sync_v1, the
+// single capability the digest-as-heartbeat path needs: a peer without it can
+// never answer a route_sync_digest_v1, so the periodic deadline skips the
+// digest walk + pending arm entirely and takes the unconditional full. This
+// mirrors the send-side gate inside Service.SendRouteSyncDigest /
+// dispatchAnnouncePlaneFrameWithCaps, moved up to the cycle so mixed-version
+// peers pay nothing for the heartbeat attempt during a rolling deploy.
+func hasCapRouteSync(caps []PeerCapability) bool {
+	for _, c := range caps {
+		if c == domain.CapMeshRouteSyncV1 {
+			return true
+		}
+	}
+	return false
 }
 
 // PeerSupportsV3 reports whether the cap snapshot includes the FULL

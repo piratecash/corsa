@@ -694,6 +694,13 @@ func copyCapabilities(caps []PeerCapability) []PeerCapability {
 // authoritative live set and evicts any state not observed in that set for
 // longer than 2*flapWindow. Returns the count of evicted entries.
 //
+// `liveSet` is the membership set of routing-capable peer identities for this
+// cycle. The caller builds it once and shares it with the announce loop's
+// digestSuppression sweep (reconcileDigestSuppression), so the hot path
+// allocates a single live-set map per cycle rather than one per reconciler. A
+// nil set is treated as "no live peers" (every aged-out entry evicts) — the
+// isolated-node case.
+//
 // This is the registry's sole garbage collector. It depends ONLY on the
 // live routing-capable peer set the announce loop already computes each
 // cycle — never on a matching MarkDisconnected. A state created by any path
@@ -707,14 +714,9 @@ func copyCapabilities(caps []PeerCapability) []PeerCapability {
 // Locking: r.mu is held for the whole sweep (map iteration + delete); each
 // entry's own s.mu guards the per-state watermark read/write. The nesting
 // is always r.mu → s.mu, never the reverse — see GetOrCreate / MarkReconnected.
-func (r *AnnounceStateRegistry) ReconcileLiveSet(live []PeerIdentity, now time.Time) int {
+func (r *AnnounceStateRegistry) ReconcileLiveSet(liveSet map[PeerIdentity]struct{}, now time.Time) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	liveSet := make(map[PeerIdentity]struct{}, len(live))
-	for _, id := range live {
-		liveSet[id] = struct{}{}
-	}
 
 	evictAfter := 2 * r.flapWindow
 	evicted := 0

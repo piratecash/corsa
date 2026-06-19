@@ -9,6 +9,19 @@ two peers reconnecting within a short window agree, via a deterministic
 digest exchange, that nothing has changed in their mutual routing view —
 and skip the next forced full sync on a match.
 
+**Digest-as-heartbeat (periodic freshness).** The same exchange also runs
+as the announce loop's periodic freshness heartbeat: at every refresh
+deadline (`EffectiveForcedFullSyncInterval`, ≤ TTL/2) the sender emits a
+digest instead of unconditionally rebuilding and resending the full table.
+On a match the receiver renews the TTL of the routes learned through the
+sender (`Table.RefreshRoutesVia`) — so an unchanged lineage stays alive
+without the byte-heavy full sync — and a full rebuild fires only when the
+previous heartbeat did not confirm a match (mismatch or silence). This is
+what eliminates the periodic full sync from the stable path; the freshness
+guarantee is unchanged because a lost/diverged digest escalates to a full at
+the next deadline exactly as a dropped full did. See `docs/routing.md`
+"Refresh interval invariant" / "Digest-as-heartbeat refresh".
+
 ### Scope
 
 The digest exchange is an optimisation on top of the existing announce
@@ -188,7 +201,14 @@ well-defined digest.
    dispatch switch; the handler defensively no-ops on an empty
    `senderIdentity` (auth-race).
 2. Compute `Table.SyncDigestFor(senderIdentity)`.
-3. Build and emit `route_sync_summary_v1` with `match = local ==
+3. On a match, renew the TTL of the routes learned through the sender
+   (`Table.RefreshRoutesVia(senderIdentity, now)`) — the receiver half of
+   the digest-as-heartbeat freshness mechanism. A match proves those routes
+   are exactly what the sender still announces, so they are renewed as if a
+   full announce had re-confirmed them, WITHOUT a journal entry (TTL is not a
+   wire-projected field, so the bump must not synthesise a delta). A mismatch
+   refreshes nothing — the sender follows with a full.
+4. Build and emit `route_sync_summary_v1` with `match = local ==
    wire.digest` through `s.sendFrameViaNetwork`. Marshal failures are
    logged at warn and the reply is dropped; the sender times out
    waiting for the summary and proceeds with the normal full sync.
@@ -279,6 +299,19 @@ PR 12.7 used for `fetchRouteReputation`), never aliased under the
 окна, договориться через детерминированный обмен digest'ами, что в
 их взаимном routing-представлении ничего не изменилось — и
 пропустить следующий forced full sync на match'е.
+
+**Digest-as-heartbeat (периодическая свежесть).** Тот же обмен работает
+и как периодический freshness-heartbeat announce-loop'а: на каждом refresh-
+дедлайне (`EffectiveForcedFullSyncInterval`, ≤ TTL/2) отправитель шлёт digest
+вместо безусловной пересборки и пересылки всей таблицы. На match'е получатель
+продлевает TTL маршрутов, изученных через отправителя (`Table.RefreshRoutesVia`),
+— неизменная lineage остаётся живой без байт-тяжёлого full sync, — а full
+rebuild срабатывает только если предыдущий heartbeat не подтвердил match
+(mismatch или тишина). Именно это убирает периодический full sync со
+стабильного пути; гарантия свежести не меняется, потому что потерянный/
+разошедшийся digest эскалирует в full на следующем дедлайне ровно как раньше
+эскалировал потерянный full. См. `docs/routing.md` «Инвариант интервала
+refresh» / «Digest-as-heartbeat refresh».
 
 ### Объём
 
@@ -461,7 +494,14 @@ well-defined digest.
    dispatch switch'ем; handler defensive no-op'ит на пустом
    `senderIdentity` (auth-race).
 2. Считает `Table.SyncDigestFor(senderIdentity)`.
-3. Строит и emit'ит `route_sync_summary_v1` с `match = local ==
+3. На match'е продлевает TTL маршрутов, изученных через отправителя
+   (`Table.RefreshRoutesVia(senderIdentity, now)`) — receiver-половина
+   digest-as-heartbeat механизма свежести. Match доказывает, что эти
+   маршруты ровно те, что отправитель всё ещё анонсирует, поэтому они
+   продлеваются как если бы full announce их переподтвердил, БЕЗ journal-
+   записи (TTL не wire-проецируемое поле, bump не должен синтезировать
+   дельту). Mismatch не продлевает ничего — отправитель следом шлёт full.
+4. Строит и emit'ит `route_sync_summary_v1` с `match = local ==
    wire.digest` через `s.sendFrameViaNetwork`. Marshal-failure
    log'ируется на warn и reply drop'ается; sender timeout'нется
    ожидая summary и proceed'нет с normal full sync.

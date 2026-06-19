@@ -78,6 +78,9 @@ func newWireFramePeerSender(t *testing.T) (*routingmocks.MockPeerSender, *wireFr
 			return false
 		},
 	).Maybe()
+	// Digest-as-heartbeat: periodic deadline emits a digest before the fallback
+	// full; not an announce wire frame, so it is unrecorded.
+	m.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(true).Maybe()
 	return m, c
 }
 

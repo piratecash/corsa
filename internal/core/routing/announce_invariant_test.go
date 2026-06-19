@@ -84,6 +84,9 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 			return false
 		},
 	).Maybe()
+	// Digest-as-heartbeat: periodic deadline emits a digest before the fallback
+	// full. Allowed (and unrecorded) — it is not an announce wire frame.
+	sender.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(true).Maybe()
 
 	peers := func() []routing.AnnounceTarget {
 		return []routing.AnnounceTarget{

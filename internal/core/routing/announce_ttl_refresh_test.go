@@ -51,6 +51,11 @@ func newApplyingPeerSender(
 			return true
 		},
 	).Maybe()
+	// Digest-as-heartbeat: periodic deadline emits a digest before the fallback
+	// full. No summary is wired back here, so no match is confirmed and the
+	// fallback full still fires every deadline (the refresh under test). The
+	// heartbeat itself applies nothing to the receiver.
+	m.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(true).Maybe()
 	return m, rec
 }
 

@@ -51,6 +51,10 @@ func newMockPeerSender(t *testing.T) (*routingmocks.MockPeerSender, *senderRecor
 			return true
 		},
 	).Maybe()
+	// Digest-as-heartbeat: the periodic deadline now emits a route_sync_digest
+	// before deciding on a fallback full. It is not a routing-table send, so it
+	// is NOT recorded into rec — tests count full/delta sends, not heartbeats.
+	m.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(true).Maybe()
 	return m, rec
 }
 

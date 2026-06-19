@@ -1443,6 +1443,47 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity, []PeerI
 	return totalRemoved, affected, exposed
 }
 
+// refreshViaLocked bumps the ExpiresAt of every live (non-withdrawn,
+// expiring) claim learned through `via` to now+defaultTTL, mirroring what a
+// re-confirming announce from that peer would do on the receive path (wire
+// frames strip ExpiresAt; the receiver derives now+defaultTTL on ingest).
+// It is the receiver half of the digest-as-heartbeat freshness mechanism:
+// when an inbound route_sync_digest_v1 matches our via-peer view, the routes
+// are provably current, so we renew their TTL WITHOUT the peer having to
+// ship a full announce. Returns the number of claims refreshed.
+//
+// TTL is NOT a wire-projected field, so this refresh deliberately does NOT
+// journal a route change or mark the snapshot dirty — it must not synthesise
+// a delta (see the wireChanged contract in ApplyUpdate). Claims with a zero
+// ExpiresAt (direct routes, "never expires") are left untouched. Caller must
+// hold t.mu (writer).
+func (s *routeStore) refreshViaLocked(via PeerIdentity, now time.Time) int {
+	refreshed := 0
+	newExpiry := now.Add(s.defaultTTL)
+	for identity, bucket := range s.buckets {
+		if identity == via {
+			// Split-horizon mirror of SyncDigestFor: a route to the peer
+			// via itself is degenerate and never part of the digested set.
+			continue
+		}
+		for i := range bucket {
+			claim := &bucket[i]
+			if claim.Uplink != via {
+				continue
+			}
+			if claim.IsWithdrawn() || claim.IsExpired(now) || claim.ExpiresAt.IsZero() {
+				// Withdrawn/expired claims are not part of the confirmed
+				// live set; zero-ExpiresAt claims never age out, so neither
+				// participates in the digest nor needs a TTL bump.
+				continue
+			}
+			claim.ExpiresAt = newExpiry
+			refreshed++
+		}
+	}
+	return refreshed
+}
+
 // identityHexLocked returns the memoized lowercase-hex wire form of
 // identity, computing and caching it on first use. The hex is an
 // immutable function of the identity bytes, so a cache hit is always
