@@ -301,9 +301,11 @@ func (s *Service) probeLoop(ctx context.Context) {
 //
 //  1. Age every tracked health state through the passive timeline
 //     (Good→Questionable at 60 s idle, Questionable→Bad at 122 s,
-//     Bad→Dead at 182 s). Without this step Good pairs would
-//     never transition without an explicit probe failure or hop_ack
-//     event, leaving the active probe path inert.
+//     and Bad→Dead at 182 s — but the Dead step only for pairs that
+//     have been Confirmed at least once; never-confirmed pairs cap at
+//     Bad, see routing.applyIdleTick). Without this step Good pairs
+//     would never transition without an explicit probe failure or
+//     hop_ack event, leaving the active probe path inert.
 //  2. Snapshot the post-tick states and schedule a probe for
 //     every Questionable pair that does not already have an
 //     outstanding probe.

@@ -75,7 +75,27 @@ per `(Identity, Uplink)` pair. Transitions are driven by:
   timeline:
   - `Good → Questionable` when hop-ack idle > 60 s.
   - `Questionable → Bad` when hop-ack idle > 122 s.
-  - `Bad → Dead` when hop-ack idle > 182 s.
+  - `Bad → Dead` when hop-ack idle > 182 s **and the pair has been
+    `Confirmed` at least once**. A never-confirmed pair (no `relay_hop_ack`
+    and no `route_probe_ack_v1(reachable=true)` ever observed) caps at
+    `Bad`.
+
+Passive idle measures "no confirmation in N seconds", so it carries "the
+route died" information only for a pair that once had a confirmation
+channel. For a never-confirmed transit pair, 182 s of idle is probe
+starvation (the active probe loop could not cover this pair within the
+timeline at mesh scale), not evidence the route is gone. Promoting such a
+pair to `Dead` would withdraw it from the announce projection — a false
+withdrawal the mesh immediately contradicts — and then get it evicted +
+reseeded to `Questionable` by the next accepted re-announce, restarting
+the 182 s clock: an unbounded `Dead ↔ Questionable` flap synced to the
+announce cadence that dominates `health_aging` journal churn and its
+downstream announce / allocation cost. Capping unconfirmed pairs at `Bad`
+keeps them penalised in `Lookup` and still emitted on the wire while
+removing them from `healthProjectionSig`, so they produce no journal flip
+and no withdrawal. Genuinely-gone routes are reclaimed by TTL expiry. The
+`Confirmed` flag is sticky, so a route that earns one confirmation and
+later goes silent still ages to `Dead` normally.
 
 The active and passive timelines are deliberately asymmetric. Three
 probe failures reach `Bad` in ~90 s; the same transition through the
@@ -117,7 +137,7 @@ combined hops / RTT / source within-tier spread.
 | any | `Good` | `relay_hop_ack` received OR `route_probe_ack_v1(reachable=true)` |
 | `Good` | `Questionable` | hop-ack idle > 60 s |
 | `Questionable` | `Bad` | hop-ack idle > 122 s OR `ProbeFailures >= 3` |
-| `Bad` | `Dead` | hop-ack idle > 182 s |
+| `Bad` | `Dead` | hop-ack idle > 182 s **AND `Confirmed == true`** (a never-confirmed pair caps at `Bad`) |
 | `Bad` | `Questionable` | `route_probe_ack_v1(reachable=false)` arrived (peer alive, just no route) |
 | `Dead` | — | Dead is **sticky** under negative evidence. `route_probe_ack_v1(reachable=false)`, probe timeouts, and idle ticks do NOT pull Dead back to Questionable — only a real confirmation (`relay_hop_ack` or `route_probe_ack_v1(reachable=true)`) can resurrect a Dead pair to Good. Rationale: `Lookup` filters Dead from selection, so an answer of "I cannot reach the target through this uplink" must not silently re-enable a route that was previously excluded — otherwise a flapping peer can keep oscillating an evicted route back into the candidate set. |
 
@@ -477,7 +497,27 @@ mixed-version контракт — в секции "Capability gating".
   (30s) refresher проходит по парам и применяет passive timeline:
   - `Good → Questionable` когда idle > 60s.
   - `Questionable → Bad` когда idle > 122s.
-  - `Bad → Dead` когда idle > 182s.
+  - `Bad → Dead` когда idle > 182s **и пара хотя бы раз была
+    `Confirmed`**. Никогда не подтверждённая пара (ни одного
+    `relay_hop_ack` и ни одного `route_probe_ack_v1(reachable=true)`)
+    упирается в `Bad` и не доходит до `Dead` по passive timeline.
+
+Passive idle меряет «нет подтверждения N секунд», поэтому несёт смысл
+«маршрут умер» только для пары, у которой когда-либо был канал
+подтверждения. Для никогда не подтверждённой транзитной пары 182s idle —
+это probe starvation (активный probe-loop не успел покрыть пару в рамках
+timeline на масштабе меша), а не доказательство, что маршрут пропал.
+Перевод такой пары в `Dead` снял бы её из announce-проекции (ложный
+withdrawal, который меш тут же опровергает) и затем привёл бы к
+evict + reseed в `Questionable` на следующем принятом ре-анонсе, заново
+запустив 182s-таймер — неограниченный flap `Dead ↔ Questionable` в такт
+каденции анонсов, доминирующий churn журнала `health_aging` и его
+downstream announce/alloc-стоимость. Кап на `Bad` оставляет пару
+penalised в `Lookup` и эмитируемой на проводе, но убирает её из
+`healthProjectionSig` — без journal-флипа и без withdrawal. Реально
+пропавшие маршруты собираются TTL-expiry. Флаг `Confirmed` sticky, так
+что маршрут, заработавший одно подтверждение и затем замолчавший,
+стареет в `Dead` обычным образом.
 
 Active и passive timelines намеренно асимметричны. 3 probe failures
 выводят на `Bad` за ~90s; passive idle path — за 122s. Active
@@ -516,7 +556,7 @@ Good/Questionable альтернативы». Значения штрафов
 | любое | `Good` | пришёл `relay_hop_ack` ИЛИ `route_probe_ack_v1(reachable=true)` |
 | `Good` | `Questionable` | hop-ack idle > 60s |
 | `Questionable` | `Bad` | hop-ack idle > 122s ИЛИ `ProbeFailures >= 3` |
-| `Bad` | `Dead` | hop-ack idle > 182s |
+| `Bad` | `Dead` | hop-ack idle > 182s **И `Confirmed == true`** (никогда не подтверждённая пара упирается в `Bad`) |
 | `Bad` | `Questionable` | пришёл `route_probe_ack_v1(reachable=false)` (peer жив, но нет маршрута) |
 | `Dead` | — | Dead **липкий** под негативными свидетельствами. `route_probe_ack_v1(reachable=false)`, таймауты проб и idle-тики НЕ возвращают Dead в Questionable — резюрекция возможна только реальным подтверждением (`relay_hop_ack` или `route_probe_ack_v1(reachable=true)`). Обоснование: `Lookup` исключает Dead из selection, и ответ «не могу достучаться до target через этот uplink» не должен молча включать обратно маршрут, который ранее был исключён — иначе мигающий peer мог бы циклично возвращать выкинутый маршрут в набор кандидатов. |
 

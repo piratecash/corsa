@@ -151,14 +151,18 @@ func TestRouteHealth_QuestionableToBadAtHopAckTimeout(t *testing.T) {
 }
 
 // TestRouteHealth_BadToDeadAt182s verifies the terminal passive
-// transition. Dead pairs are excluded from selection by CompositeScore
-// and locally invalidated by the caller.
+// transition for a CONFIRMED pair. Dead pairs are excluded from
+// selection by CompositeScore and locally invalidated by the caller.
+// Confirmed=true is required: passive idle may only assert Dead for a
+// pair that once had real reachability evidence and then went silent
+// (see applyIdleTick's Confirmed gate).
 func TestRouteHealth_BadToDeadAt182s(t *testing.T) {
 	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 	state := &RouteHealthState{
 		Identity:     domaintest.ID("id-target"),
 		Uplink:       domaintest.ID("id-uplink"),
 		Health:       HealthBad,
+		Confirmed:    true,
 		LastHopAck:   base,
 		TransitionAt: base,
 	}
@@ -169,9 +173,9 @@ func TestRouteHealth_BadToDeadAt182s(t *testing.T) {
 }
 
 // TestRouteHealth_IdleTickSkipsBadWhenLatentToDead verifies that a
-// single late tick at >=182s correctly promotes Questionable straight
-// to Dead, in case the ticker missed an intermediate run (e.g.,
-// process-pause). The reverse-severity check inside applyIdleTick
+// single late tick at >=182s correctly promotes a CONFIRMED Questionable
+// pair straight to Dead, in case the ticker missed an intermediate run
+// (e.g., process-pause). The reverse-severity check inside applyIdleTick
 // matches the Dead branch first.
 func TestRouteHealth_IdleTickSkipsBadWhenLatentToDead(t *testing.T) {
 	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
@@ -179,12 +183,72 @@ func TestRouteHealth_IdleTickSkipsBadWhenLatentToDead(t *testing.T) {
 		Identity:     domaintest.ID("id-target"),
 		Uplink:       domaintest.ID("id-uplink"),
 		Health:       HealthQuestionable,
+		Confirmed:    true,
 		LastHopAck:   base,
 		TransitionAt: base,
 	}
 	state.applyIdleTick(base.Add(300*time.Second), false)
 	if state.Health != HealthDead {
 		t.Fatalf("after 300s idle: Health = %s, want dead", state.Health)
+	}
+}
+
+// TestRouteHealth_UnconfirmedIdleCapsAtBad — a pair that was NEVER
+// confirmed (Confirmed=false: no hop_ack and no reachable probe_ack ever
+// observed) must NOT be passively aged to Dead. 182s of idle on such a
+// pair is not evidence the route died — only evidence we never had a
+// local confirmation channel for it (the probe loop cannot cover every
+// transit pair at mesh scale). Capping at Bad keeps it penalised in
+// Lookup and still emitted on the wire, but invisible to
+// healthProjectionSig — so it produces no JournalCauseHealthAging flip
+// and no false withdrawal, breaking the Dead<->Questionable re-announce
+// flap that dominated announce/alloc churn. Genuinely-gone routes are
+// reclaimed by TTL expiry, not by passive Dead.
+func TestRouteHealth_UnconfirmedIdleCapsAtBad(t *testing.T) {
+	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Identity:     domaintest.ID("id-target"),
+		Uplink:       domaintest.ID("id-uplink"),
+		Health:       HealthQuestionable,
+		Confirmed:    false,
+		LastHopAck:   base,
+		TransitionAt: base,
+	}
+	// Past the Dead threshold: an unconfirmed pair caps at Bad.
+	state.applyIdleTick(base.Add(182*time.Second), false)
+	if state.Health != HealthBad {
+		t.Fatalf("unconfirmed after 182s idle: Health = %s, want bad (Dead reserved for confirmed pairs)", state.Health)
+	}
+	// A later/latent tick must keep it at Bad, never escalating to Dead
+	// while it remains unconfirmed.
+	state.applyIdleTick(base.Add(600*time.Second), false)
+	if state.Health != HealthBad {
+		t.Fatalf("unconfirmed after 600s idle: Health = %s, want bad (still no confirmation)", state.Health)
+	}
+}
+
+// TestRouteHealth_UnconfirmedThenConfirmedAgesToDead — once a pair earns
+// its first real reachability evidence (Confirmed flips sticky-true), the
+// passive Dead timeline applies normally: a confirmed pair that later
+// goes silent IS evidence of a route that died, and must reach Dead.
+func TestRouteHealth_UnconfirmedThenConfirmedAgesToDead(t *testing.T) {
+	base := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	state := &RouteHealthState{
+		Identity:     domaintest.ID("id-target"),
+		Uplink:       domaintest.ID("id-uplink"),
+		Health:       HealthGood,
+		LastHopAck:   base,
+		TransitionAt: base,
+	}
+	// First positive evidence confirms the pair and refreshes the timer.
+	state.applyProbeAck(true, base.Add(10*time.Second))
+	if !state.Confirmed {
+		t.Fatal("applyProbeAck(reachable=true) must set Confirmed=true")
+	}
+	// 182s of idle since that confirmation ages the now-confirmed pair to Dead.
+	state.applyIdleTick(base.Add(10*time.Second).Add(182*time.Second), false)
+	if state.Health != HealthDead {
+		t.Fatalf("confirmed pair after 182s idle: Health = %s, want dead", state.Health)
 	}
 }
 

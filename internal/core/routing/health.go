@@ -494,8 +494,14 @@ func (s *RouteHealthState) applyProbeFailure(now time.Time) {
 
 // applyIdleTick performs the periodic passive-timeline transition:
 // 60 s of hop_ack idle promotes Good→Questionable, 122 s promotes to
-// Bad, 182 s promotes to Dead. Probe-driven transitions are handled
-// separately by applyProbeAck / applyProbeFailure.
+// Bad, and 182 s promotes to Dead — but the Dead step applies only to
+// pairs that have been Confirmed at least once. A never-confirmed pair
+// (no hop_ack / reachable probe_ack ever observed) caps at Bad, because
+// passive idle on a pair with no confirmation channel is probe
+// starvation, not evidence the route died; promoting it to Dead would
+// emit a false withdrawal and trigger the re-announce reseed flap. See
+// the Dead branch below for the full rationale. Probe-driven transitions
+// are handled separately by applyProbeAck / applyProbeFailure.
 //
 // The transitions are evaluated in reverse-severity order (Dead first)
 // because a single tick may have to skip Bad if the pair was sitting
@@ -525,6 +531,33 @@ func (s *RouteHealthState) applyIdleTick(now time.Time, backoff bool) {
 	}
 	switch {
 	case idle >= HealthDeadAfter && s.Health != HealthDead:
+		// Passive idle may assert Dead only for a pair that once held real
+		// reachability evidence (Confirmed) and then went silent. A pair that
+		// was NEVER confirmed has no hop_ack / probe_ack(reachable) channel, so
+		// 182s of idle is not proof the route died — only proof we never
+		// managed to confirm it locally. At mesh scale the probe loop cannot
+		// cover every transit pair within the timeline, so most unconfirmed
+		// transit pairs would otherwise hit Dead purely from probe starvation.
+		// Marking such a pair Dead is doubly harmful: projectIdentityLocked
+		// drops Dead transit from the announce projection (a false withdrawal
+		// the mesh immediately contradicts), and the next accepted re-announce
+		// evicts+reseeds it to Questionable (table_mutation.go), restarting the
+		// 182s clock — an infinite Dead<->Questionable flap synced to the
+		// announce cadence that drives the JournalCauseHealthAging churn and its
+		// downstream announce/alloc cost. Cap unconfirmed pairs at Bad: still
+		// penalised in Lookup (Bad score tier) and still emitted on the wire,
+		// but invisible to healthProjectionSig, so no journal flip and no
+		// withdrawal. Genuinely-gone routes are reclaimed by TTL expiry. Once a
+		// pair is confirmed the flag is sticky, so a real route that later dies
+		// still ages to Dead on the normal timeline.
+		if !s.Confirmed {
+			if s.Health != HealthBad {
+				s.TransitionAt = now
+				s.Health = HealthBad
+				s.resetStability()
+			}
+			return
+		}
 		s.TransitionAt = now
 		s.Health = HealthDead
 		s.resetStability()

@@ -534,7 +534,9 @@ func (t *Table) QuestionableHealthTargets() []HealthProbeTarget {
 
 // TickHealth walks every tracked RouteHealthState and applies the
 // passive-timeline transition (Good→Questionable→Bad→Dead) based
-// on hop-ack idle. Without this tick the state machine cannot
+// on hop-ack idle. The terminal Bad→Dead step only fires for pairs
+// that have been Confirmed at least once; never-confirmed pairs cap
+// at Bad (see applyIdleTick). Without this tick the state machine cannot
 // advance from Good for a pair that has not received any hop-ack
 // or probe traffic — Lookup would keep returning a stale-but-
 // "Good" pair and the probe sender would never see any
