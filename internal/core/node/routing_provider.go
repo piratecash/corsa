@@ -159,6 +159,19 @@ func (s *Service) DigestHeartbeatStats() routing.DigestHeartbeatStats {
 	}
 }
 
+// JournalCauseStats returns the per-cause change-journal append tally for
+// steady-state churn attribution, surfaced via fetchRouteSummary. Delegates to
+// routing.Table.JournalCauseStats (lock-free atomic reads). Returns nil when
+// the routing table is not wired (legacy test fixtures) or journal-less.
+//
+// Implements rpc.RoutingProvider.
+func (s *Service) JournalCauseStats() map[string]uint64 {
+	if s.routingTable == nil {
+		return nil
+	}
+	return s.routingTable.JournalCauseStats()
+}
+
 // HealthSnapshot returns the Phase 2 per-(Identity, Uplink)
 // RouteHealthState snapshot for fetchRouteHealth RPC observability.
 // Delegates to routing.Table.HealthSnapshot which takes t.mu.RLock

@@ -86,6 +86,46 @@ func TestBlackHole_TickHealthClearsExpiredCooldowns(t *testing.T) {
 	}
 }
 
+// TestTickHealth_CooldownClearNotMisattributedAsAging pins the churn-attribution
+// split in TickHealth: a tick that only auto-clears an expired black-hole
+// cooldown must count as cooldown_clear, NOT health_aging. Before the split the
+// combined Dead/cooled flip check tagged every flip as aging, so a node whose
+// background churn was really cooldown auto-release would report a dominant
+// health_aging share and mislead the operator into chasing a Dead↔Good flap
+// that wasn't happening.
+//
+// A DIRECT pair (Identity == Uplink) is used deliberately: TickHealth skips the
+// passive idle aging for direct pairs, so the ONLY projection bit that can flip
+// on the release tick is the cooled bit — isolating the attribution.
+func TestTickHealth_CooldownClearNotMisattributedAsAging(t *testing.T) {
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	clockMu := &mutableClock{now: now}
+	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")), WithClock(clockMu.nowFunc))
+
+	if _, err := tbl.AddDirectPeer(domaintest.ID("id-direct")); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	// Arm the cooldown via reputation failures (MarkHopFailure touches only the
+	// reputation surface — Health stays Good — so the Dead bit never moves).
+	for i := 0; i < BlackHoleThreshold; i++ {
+		tbl.MarkHopFailure(domaintest.ID("id-direct"), domaintest.ID("id-direct"))
+	}
+	armed := tbl.JournalCauseStats()
+
+	// Expire and tick: applyCooldownExpiryLocked clears CooldownUntil (cooled
+	// bit true→false); aging is skipped for the direct pair, Health stays Good.
+	clockMu.advance(BlackHoleCooldown + time.Second)
+	tbl.TickHealth()
+	after := tbl.JournalCauseStats()
+
+	if d := after["cooldown_clear"] - armed["cooldown_clear"]; d != 1 {
+		t.Fatalf("auto-release tick must record exactly 1 cooldown_clear, got %d", d)
+	}
+	if d := after["health_aging"] - armed["health_aging"]; d != 0 {
+		t.Fatalf("a bare cooldown expiry must NOT be counted as health_aging, got %d (misattribution bug)", d)
+	}
+}
+
 // TestBlackHole_DirectClaimNotExempt — release-blocking invariant
 // from Phase 3 §4.4. The Phase 2 Dead filter has a Direct
 // exemption (session-driven lifecycle), but the cooldown filter

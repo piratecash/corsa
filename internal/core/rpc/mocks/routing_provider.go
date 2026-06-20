@@ -128,6 +128,52 @@ func (_c *MockRoutingProvider_HealthSnapshot_Call) RunAndReturn(run func() []rou
 	return _c
 }
 
+// JournalCauseStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) JournalCauseStats() map[string]uint64 {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for JournalCauseStats")
+	}
+
+	var r0 map[string]uint64
+	if returnFunc, ok := ret.Get(0).(func() map[string]uint64); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[string]uint64)
+		}
+	}
+	return r0
+}
+
+// MockRoutingProvider_JournalCauseStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'JournalCauseStats'
+type MockRoutingProvider_JournalCauseStats_Call struct {
+	*mock.Call
+}
+
+// JournalCauseStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) JournalCauseStats() *MockRoutingProvider_JournalCauseStats_Call {
+	return &MockRoutingProvider_JournalCauseStats_Call{Call: _e.mock.On("JournalCauseStats")}
+}
+
+func (_c *MockRoutingProvider_JournalCauseStats_Call) Run(run func()) *MockRoutingProvider_JournalCauseStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_JournalCauseStats_Call) Return(stringToUint64 map[string]uint64) *MockRoutingProvider_JournalCauseStats_Call {
+	_c.Call.Return(stringToUint64)
+	return _c
+}
+
+func (_c *MockRoutingProvider_JournalCauseStats_Call) RunAndReturn(run func() map[string]uint64) *MockRoutingProvider_JournalCauseStats_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // OverloadStats provides a mock function for the type MockRoutingProvider
 func (_mock *MockRoutingProvider) OverloadStats() routing.OverloadStats {
 	ret := _mock.Called()

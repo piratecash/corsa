@@ -590,9 +590,9 @@ func (t *Table) IsDirty() bool {
 // It also feeds the Phase 3 change journal (markRouteChangedLocked): every
 // per-identity route mutation that needs a snapshot re-copy is exactly a
 // change a per-peer announce cursor must learn about.
-func (t *Table) markSnapDirtyLocked(identity PeerIdentity) {
+func (t *Table) markSnapDirtyLocked(identity PeerIdentity, cause JournalCause) {
 	t.markSnapDirtyNoJournalLocked(identity)
-	t.markRouteChangedLocked(identity)
+	t.markRouteChangedLocked(identity, cause)
 }
 
 // markSnapDirtyNoJournalLocked marks the published Snapshot dirty for `identity`
@@ -641,11 +641,22 @@ func (t *Table) markSnapshotFullDirtyLocked() {
 // snapshot re-copy (their per-identity change still alters the announce
 // projection). Caller must hold t.mu in W mode. nil-safe for tables built
 // without a journal (defensive — production always has one).
-func (t *Table) markRouteChangedLocked(identity PeerIdentity) {
+func (t *Table) markRouteChangedLocked(identity PeerIdentity, cause JournalCause) {
 	if t.changeLog == nil {
 		return
 	}
-	t.changeLog.recordLocked(identity)
+	t.changeLog.recordLocked(identity, cause)
+}
+
+// JournalCauseStats returns the lifetime per-cause tally of change-journal
+// appends for steady-state churn attribution (surfaced via fetchRouteSummary).
+// Lock-free: the counters are atomic, so this does not take t.mu and never
+// contends the announce write path. Returns nil for a journal-less table.
+func (t *Table) JournalCauseStats() map[string]uint64 {
+	if t.changeLog == nil {
+		return nil
+	}
+	return t.changeLog.causeStats()
 }
 
 // markRouteChangedFullLocked records a bulk reset in the Phase 3 change

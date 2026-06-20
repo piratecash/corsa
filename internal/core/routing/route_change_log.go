@@ -1,5 +1,79 @@
 package routing
 
+import "sync/atomic"
+
+// JournalCause classifies WHY an identity was appended to the change journal.
+// It exists purely for steady-state churn attribution: the per-cause counts are
+// surfaced through the fetchRouteSummary RPC (NOT the logs) so a production node
+// can be sampled without a restart, the same way the digest-heartbeat counters
+// are. The classification is set by each Table journal call site.
+type JournalCause uint8
+
+const (
+	// JournalCauseAnnounceUpsert: an inbound announce changed the wire
+	// projection (new claim, SeqNo bump, hops improvement, or sig/Extra
+	// upgrade) — the legitimate "a peer told us something new" path.
+	JournalCauseAnnounceUpsert JournalCause = iota
+	// JournalCauseHealthAging: TickHealth's passive Good→…→Dead idle timeline
+	// crossed the Dead/cooled projection boundary. Timer-driven, fires without
+	// any inbound traffic — the prime suspect for steady-state background churn.
+	JournalCauseHealthAging
+	// JournalCauseHealthEvidence: a hop-ack / probe result (positive or
+	// negative) flipped the Dead/cooled projection. Traffic-driven.
+	JournalCauseHealthEvidence
+	// JournalCauseTTLExpiry: TickTTL.CompactExpired physically removed a backing
+	// claim, changing an identity's projection.
+	JournalCauseTTLExpiry
+	// JournalCauseHoldDownRelease: a SeqNo flap-cap hold-down expired and the
+	// suppressed route re-appears in the projection.
+	JournalCauseHoldDownRelease
+	// JournalCauseCooldownClear: a black-hole cooldown was lifted or expired,
+	// un-filtering the (identity, uplink) pair.
+	JournalCauseCooldownClear
+	// JournalCausePeerRemove: RemoveDirectPeer withdrew every route via a lost
+	// uplink.
+	JournalCausePeerRemove
+	// JournalCauseTransitInvalidate: InvalidateTransitRoutes tombstoned transit
+	// claims via a peer.
+	JournalCauseTransitInvalidate
+	// JournalCauseDirectAdmit: AddDirectPeer admitted or reconnect-refreshed a
+	// direct route.
+	JournalCauseDirectAdmit
+	// JournalCauseWithdrawal: an inbound wire withdrawal (hops=16) tombstoned a
+	// claim.
+	JournalCauseWithdrawal
+	// JournalCausePoison: a route_poison_v1 frame invalidated an uplink claim.
+	JournalCausePoison
+	// JournalCauseBulkReset: a journal bulk reset (recordFullLocked) forced
+	// cursors below it into a full sync.
+	JournalCauseBulkReset
+	numJournalCauses
+)
+
+// journalCauseNames maps each cause to a stable snake_case key for the RPC
+// payload. Index-aligned with the constants above.
+var journalCauseNames = [numJournalCauses]string{
+	JournalCauseAnnounceUpsert:    "announce_upsert",
+	JournalCauseHealthAging:       "health_aging",
+	JournalCauseHealthEvidence:    "health_evidence",
+	JournalCauseTTLExpiry:         "ttl_expiry",
+	JournalCauseHoldDownRelease:   "holddown_release",
+	JournalCauseCooldownClear:     "cooldown_clear",
+	JournalCausePeerRemove:        "peer_remove",
+	JournalCauseTransitInvalidate: "transit_invalidate",
+	JournalCauseDirectAdmit:       "direct_admit",
+	JournalCauseWithdrawal:        "withdrawal",
+	JournalCausePoison:            "poison",
+	JournalCauseBulkReset:         "bulk_reset",
+}
+
+func (c JournalCause) String() string {
+	if int(c) >= len(journalCauseNames) {
+		return "unknown"
+	}
+	return journalCauseNames[c]
+}
+
 // defaultRouteChangeLogCapacity is the change-journal ring size. It must
 // comfortably exceed the number of route/health changes a busy node accumulates
 // within one forced-full-sync window (≤ DefaultTTL/2), so a peer synced at the
@@ -39,6 +113,13 @@ type routeChangeLog struct {
 	// the ring (the bulk change touched an unbounded identity set that was
 	// never enumerated into the ring) and must force a full sync.
 	fullResetSeq uint64
+
+	// causeCounts is a per-JournalCause lifetime tally of journal appends, for
+	// churn attribution via fetchRouteSummary. Written under t.mu(W) at the
+	// record chokepoint; read lock-free (atomic) from the RPC path so the hot
+	// read does not contend the write lock — the same atomic-snapshot rule the
+	// hot read RPCs already follow (see CLAUDE.md node.Service locking notes).
+	causeCounts [numJournalCauses]atomic.Uint64
 }
 
 // newRouteChangeLog returns a change log with the given ring capacity. A
@@ -50,14 +131,18 @@ func newRouteChangeLog(capacity int) *routeChangeLog {
 	return &routeChangeLog{ring: make([]PeerIdentity, capacity)}
 }
 
-// recordLocked appends a single-identity change. Caller must hold t.mu in
-// write mode. A zero identity is ignored (no destination to attribute).
-func (l *routeChangeLog) recordLocked(identity PeerIdentity) {
+// recordLocked appends a single-identity change attributed to cause. Caller
+// must hold t.mu in write mode. A zero identity is ignored (no destination to
+// attribute) and is NOT counted — the tally tracks real journal entries.
+func (l *routeChangeLog) recordLocked(identity PeerIdentity, cause JournalCause) {
 	if identity.IsZero() {
 		return
 	}
 	l.ring[l.head%uint64(len(l.ring))] = identity
 	l.head++
+	if int(cause) < len(l.causeCounts) {
+		l.causeCounts[cause].Add(1)
+	}
 }
 
 // recordFullLocked marks a bulk mutation that touched an unbounded identity
@@ -75,6 +160,18 @@ func (l *routeChangeLog) recordFullLocked() {
 	l.ring[l.head%uint64(len(l.ring))] = PeerIdentity{}
 	l.head++
 	l.fullResetSeq = l.head
+	l.causeCounts[JournalCauseBulkReset].Add(1)
+}
+
+// causeStatsLocked snapshots the per-cause journal tally. Reads are atomic so
+// this is safe without t.mu, but it is named *Locked-free intentionally: the
+// RPC path calls it through Table.JournalCauseStats which does NOT take t.mu.
+func (l *routeChangeLog) causeStats() map[string]uint64 {
+	out := make(map[string]uint64, numJournalCauses)
+	for c := JournalCause(0); c < numJournalCauses; c++ {
+		out[journalCauseNames[c]] = l.causeCounts[c].Load()
+	}
+	return out
 }
 
 // headLocked returns the current head (the cursor value a freshly-synced peer

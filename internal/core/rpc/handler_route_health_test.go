@@ -25,11 +25,12 @@ import (
 // can mutate them inline (e.g. set health = nil to test empty
 // store path).
 type stubRoutingProvider struct {
-	snapshot   routing.Snapshot
-	health     []routing.RouteHealthState
-	overload   routing.OverloadStats
-	digest     routing.DigestHeartbeatStats
-	reputation []routing.RouteReputationState
+	snapshot     routing.Snapshot
+	health       []routing.RouteHealthState
+	overload     routing.OverloadStats
+	digest       routing.DigestHeartbeatStats
+	reputation   []routing.RouteReputationState
+	journalChurn map[string]uint64
 }
 
 func (s *stubRoutingProvider) RoutingSnapshot() routing.Snapshot {
@@ -46,6 +47,10 @@ func (s *stubRoutingProvider) OverloadStats() routing.OverloadStats {
 
 func (s *stubRoutingProvider) DigestHeartbeatStats() routing.DigestHeartbeatStats {
 	return s.digest
+}
+
+func (s *stubRoutingProvider) JournalCauseStats() map[string]uint64 {
+	return s.journalChurn
 }
 
 func (s *stubRoutingProvider) HealthSnapshot() []routing.RouteHealthState {

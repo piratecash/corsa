@@ -150,6 +150,14 @@ type RoutingProvider interface {
 	// (suppressing full syncs) or diverging. See docs/protocol/route_sync.md.
 	DigestHeartbeatStats() routing.DigestHeartbeatStats
 
+	// JournalCauseStats returns the lifetime per-cause tally of change-journal
+	// appends (announce_upsert / health_aging / health_evidence / ttl_expiry /
+	// …), keyed by stable snake_case cause name. It attributes steady-state
+	// announce churn: a dominant health_aging share means quiet routes are
+	// flapping Dead↔Good on the passive timeline rather than the network
+	// actually changing. Value-safe for JSON; nil for a journal-less table.
+	JournalCauseStats() map[string]uint64
+
 	// HealthSnapshot returns a deep copy of every tracked
 	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,
 	// since Snapshot.Health was narrowed to the Dead∪cooled subset, by

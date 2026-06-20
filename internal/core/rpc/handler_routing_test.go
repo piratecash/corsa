@@ -40,6 +40,9 @@ func newMockRoutingProvider(
 	// route_sync digest-as-heartbeat counters also surface through
 	// fetchRouteSummary; default to zero, override in digest-specific tests.
 	m.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Maybe()
+	// Change-journal churn attribution also surfaces through fetchRouteSummary;
+	// default to nil, override in churn-specific tests.
+	m.On("JournalCauseStats").Return(map[string]uint64(nil)).Maybe()
 	// fetchRouteLookup reads HealthSnapshot (full per-pair tiers) for its
 	// Dead/cooldown filters + CompositeScore ranking, because the published
 	// Snapshot.Health now carries only the routing-relevant {Dead ∪ cooled}
@@ -407,6 +410,7 @@ func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
 		EngagedCycles: expectedEngagedCycles,
 	}).Once()
 	provider.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Once()
+	provider.On("JournalCauseStats").Return(map[string]uint64(nil)).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -464,6 +468,7 @@ func TestFetchRouteSummary_DigestStatsSurfaced(t *testing.T) {
 	}).Once()
 	provider.On("OverloadStats").Return(routing.OverloadStats{}).Once()
 	provider.On("DigestHeartbeatStats").Return(want).Once()
+	provider.On("JournalCauseStats").Return(map[string]uint64(nil)).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -494,6 +499,54 @@ func TestFetchRouteSummary_DigestStatsSurfaced(t *testing.T) {
 		}
 		if uint64(got) != exp {
 			t.Fatalf("digest.%s = %v, want %d", key, got, exp)
+		}
+	}
+}
+
+// TestFetchRouteSummary_JournalChurnSurfaced pins that the per-cause
+// change-journal tally flows from the provider through to the JSON
+// "journal_churn" object, so operators can attribute steady-state announce
+// churn (health_aging vs announce_upsert …) without debug logging.
+func TestFetchRouteSummary_JournalChurnSurfaced(t *testing.T) {
+	now := time.Now()
+	want := map[string]uint64{
+		"health_aging":    420,
+		"announce_upsert": 17,
+		"ttl_expiry":      3,
+	}
+
+	provider := rpcmocks.NewMockRoutingProvider(t)
+	provider.On("RoutingSnapshot").Return(routing.Snapshot{
+		TakenAt: now,
+		Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
+	}).Once()
+	provider.On("OverloadStats").Return(routing.OverloadStats{}).Once()
+	provider.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Once()
+	provider.On("JournalCauseStats").Return(want).Once()
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	churnRaw, ok := result["journal_churn"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response missing 'journal_churn' object: %v", result)
+	}
+	for key, exp := range want {
+		got, ok := churnRaw[key].(float64) // JSON numbers decode as float64
+		if !ok {
+			t.Fatalf("'journal_churn.%s' missing or not a number: %v", key, churnRaw[key])
+		}
+		if uint64(got) != exp {
+			t.Fatalf("journal_churn.%s = %v, want %d", key, got, exp)
 		}
 	}
 }

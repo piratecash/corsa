@@ -27,10 +27,10 @@ func TestRouteChangeLog_SinceReturnsDistinctChangedIdentities(t *testing.T) {
 	}
 
 	a, b, c := domaintest.ID("a"), domaintest.ID("b"), domaintest.ID("c")
-	l.recordLocked(a)
-	l.recordLocked(b)
-	l.recordLocked(a) // duplicate of a — must collapse in the set
-	l.recordLocked(c)
+	l.recordLocked(a, JournalCauseAnnounceUpsert)
+	l.recordLocked(b, JournalCauseAnnounceUpsert)
+	l.recordLocked(a, JournalCauseAnnounceUpsert) // duplicate of a — must collapse in the set
+	l.recordLocked(c, JournalCauseAnnounceUpsert)
 
 	changed, needFull := l.sinceUpToLocked(start, l.headLocked())
 	if needFull {
@@ -52,7 +52,7 @@ func TestRouteChangeLog_SinceReturnsDistinctChangedIdentities(t *testing.T) {
 
 func TestRouteChangeLog_NothingChangedSteadyState(t *testing.T) {
 	l := newRouteChangeLog(64)
-	l.recordLocked(domaintest.ID("a"))
+	l.recordLocked(domaintest.ID("a"), JournalCauseAnnounceUpsert)
 
 	cursor := l.headLocked()
 	// No further changes — a cursor at head sees an empty set, no force-full.
@@ -70,12 +70,12 @@ func TestRouteChangeLog_NothingChangedSteadyState(t *testing.T) {
 
 func TestRouteChangeLog_BulkResetForcesFull(t *testing.T) {
 	l := newRouteChangeLog(64)
-	l.recordLocked(domaintest.ID("a"))
+	l.recordLocked(domaintest.ID("a"), JournalCauseAnnounceUpsert)
 	cursor := l.headLocked() // peer is caught up here
 
 	// A bulk mutation touched an unbounded identity set.
 	l.recordFullLocked()
-	l.recordLocked(domaintest.ID("b")) // a normal change after the reset
+	l.recordLocked(domaintest.ID("b"), JournalCauseAnnounceUpsert) // a normal change after the reset
 
 	_, needFull := l.sinceUpToLocked(cursor, l.headLocked())
 	if !needFull {
@@ -95,7 +95,7 @@ func TestRouteChangeLog_RingOverflowForcesFull(t *testing.T) {
 	cursor := l.headLocked() // 0
 	// Append more than the ring can remember — the cursor falls out.
 	for i := 0; i < cap+5; i++ {
-		l.recordLocked(domaintest.ID("dest-" + string(rune('a'+i))))
+		l.recordLocked(domaintest.ID("dest-"+string(rune('a'+i))), JournalCauseAnnounceUpsert)
 	}
 
 	_, needFull := l.sinceUpToLocked(cursor, l.headLocked())
@@ -113,8 +113,38 @@ func TestRouteChangeLog_RingOverflowForcesFull(t *testing.T) {
 
 func TestRouteChangeLog_ZeroIdentityIgnored(t *testing.T) {
 	l := newRouteChangeLog(64)
-	l.recordLocked(PeerIdentity{})
+	l.recordLocked(PeerIdentity{}, JournalCauseAnnounceUpsert)
 	if l.headLocked() != 0 {
 		t.Fatalf("zero identity must not advance head, got %d", l.headLocked())
+	}
+}
+
+// TestRouteChangeLog_CauseStatsTallyPerCause pins the churn-attribution
+// counters: each non-zero recordLocked increments exactly its own cause, a
+// zero identity is not counted, and recordFullLocked counts as a bulk reset.
+func TestRouteChangeLog_CauseStatsTallyPerCause(t *testing.T) {
+	l := newRouteChangeLog(64)
+	l.recordLocked(domaintest.ID("a"), JournalCauseHealthAging)
+	l.recordLocked(domaintest.ID("b"), JournalCauseHealthAging)
+	l.recordLocked(domaintest.ID("c"), JournalCauseAnnounceUpsert)
+	l.recordLocked(PeerIdentity{}, JournalCauseHealthAging) // zero id: not counted
+	l.recordFullLocked()
+
+	stats := l.causeStats()
+	if got := stats["health_aging"]; got != 2 {
+		t.Fatalf("health_aging = %d, want 2 (zero id excluded)", got)
+	}
+	if got := stats["announce_upsert"]; got != 1 {
+		t.Fatalf("announce_upsert = %d, want 1", got)
+	}
+	if got := stats["bulk_reset"]; got != 1 {
+		t.Fatalf("bulk_reset = %d, want 1", got)
+	}
+	if got := stats["ttl_expiry"]; got != 0 {
+		t.Fatalf("untouched cause ttl_expiry = %d, want 0", got)
+	}
+	// Every cause must be present in the map so the RPC payload shape is stable.
+	if len(stats) != int(numJournalCauses) {
+		t.Fatalf("causeStats must list all %d causes, got %d", numJournalCauses, len(stats))
 	}
 }

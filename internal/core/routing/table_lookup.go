@@ -204,7 +204,7 @@ func (t *Table) AnnounceDeltaTo(excludeVia PeerIdentity, cursor uint64) (entries
 func (t *Table) releaseExpiredSeqHoldDownsLocked(now time.Time) {
 	if released, _ := t.flap.clearExpiredSeqHoldDownsLocked(now); len(released) > 0 {
 		for _, id := range released {
-			t.markRouteChangedLocked(id)
+			t.markRouteChangedLocked(id, JournalCauseHoldDownRelease)
 		}
 	}
 }
@@ -231,7 +231,7 @@ func (t *Table) cooldownExpiryFilterLocked(now time.Time) func(identity, uplink 
 		}
 		state.applyCooldownExpiryLocked(now)
 		t.dirty.Store(true)
-		t.markRouteChangedLocked(identity)
+		t.markRouteChangedLocked(identity, JournalCauseCooldownClear)
 		return false
 	}
 }

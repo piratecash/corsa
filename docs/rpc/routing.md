@@ -125,6 +125,14 @@ Response:
 | `digest.summary_mismatch` | int | Inbound summaries of `match=false` — the digests diverged, so the next deadline escalates to a full sync. **A high `summary_mismatch / (summary_match + summary_mismatch)` ratio means the heartbeat is inert** (every cycle still full-syncs); `summary_match ≫ summary_mismatch` means it is working. `summary_match + summary_mismatch < heartbeats_sent` is the silent / lost-reply share. |
 | `digest.digests_compared` | int | Inbound digests this node compared as the RECEIVER (someone else's heartbeat against our via-peer view). |
 | `digest.compare_match` | int | Of `digests_compared`, how many matched our view and therefore refreshed those routes' TTL (`Table.RefreshRoutesVia`). The mismatch share is `digests_compared - compare_match`. |
+| `journal_churn` | object | Lifetime per-cause tally of change-journal appends (`docs/routing.md`), keyed by stable cause name. Attributes the steady-state announce-plane alloc: it answers "is the table actually changing, or is the control plane churning itself?" Monotonic; reset on process restart. |
+| `journal_churn.announce_upsert` | int | A peer's inbound announce changed the wire projection (new claim, SeqNo bump, hops improvement, sig/Extra upgrade) — legitimate "told us something new". |
+| `journal_churn.health_aging` | int | `TickHealth`'s passive Good→…→Dead idle timeline crossed the Dead/cooled projection boundary. **Timer-driven, fires with no inbound traffic.** A dominant share here means quiet routes flap Dead↔Good between forced-fulls — control-plane churn, not topology change — and is the prime suspect for steady-state announce alloc. |
+| `journal_churn.health_evidence` | int | A hop-ack / probe result (positive or negative) flipped the Dead/cooled projection. Traffic-driven. |
+| `journal_churn.ttl_expiry` | int | `TickTTL.CompactExpired` physically removed a backing claim. |
+| `journal_churn.holddown_release` | int | A SeqNo flap-cap hold-down expired and the suppressed route re-appeared. |
+| `journal_churn.cooldown_clear` | int | A black-hole cooldown was lifted or expired, un-filtering the pair. |
+| `journal_churn.peer_remove` / `.transit_invalidate` / `.direct_admit` / `.withdrawal` / `.poison` / `.bulk_reset` | int | Peer-lifecycle and explicit-mutation causes (disconnect withdrawals, transit tombstones, direct-peer admit, inbound wire withdrawal, route_poison, journal bulk reset). Rare in a settled network; a non-trivial share indicates peer or admission churn. |
 
 ### fetchRouteLookup
 
@@ -468,6 +476,14 @@ corsa-cli fetchRouteSummary
 | `digest.summary_mismatch` | int | Входящие summary с `match=false` — digest'ы разошлись, следующий дедлайн эскалирует в full sync. **Высокая доля `summary_mismatch / (summary_match + summary_mismatch)` означает, что heartbeat бесполезен** (каждый цикл всё равно делает full sync); `summary_match ≫ summary_mismatch` — работает. `summary_match + summary_mismatch < heartbeats_sent` — доля молчания / потерянных ответов. |
 | `digest.digests_compared` | int | Входящие digest'ы, которые эта нода сравнила как ПОЛУЧАТЕЛЬ (чужой heartbeat против нашего via-peer представления). |
 | `digest.compare_match` | int | Сколько из `digests_compared` совпало с нашим представлением и потому продлило TTL этих маршрутов (`Table.RefreshRoutesVia`). Доля mismatch — `digests_compared - compare_match`. |
+| `journal_churn` | object | Кумулятивная разбивка append'ов change-журнала по причинам (`docs/routing.md`), ключ — стабильное имя причины. Атрибутирует steady-state alloc announce-плоскости: отвечает на вопрос «таблица реально меняется или control plane churn'ит сам себя?». Monotonic, сбрасывается при рестарте процесса. |
+| `journal_churn.announce_upsert` | int | Входящий announce от peer'а изменил wire-проекцию (новый claim, SeqNo bump, улучшение hops, sig/Extra upgrade) — легитимное «нам сообщили новое». |
+| `journal_churn.health_aging` | int | Пассивный idle-таймлайн `TickHealth` (Good→…→Dead) пересёк Dead/cooled-проекцию. **Timer-driven, срабатывает без входящего трафика.** Доминирующая доля = тихие маршруты флапают Dead↔Good между forced-full'ами (churn control-плоскости, не смена топологии) — главный подозреваемый по steady-state announce alloc. |
+| `journal_churn.health_evidence` | int | hop-ack / probe результат (позитивный или негативный) флипнул Dead/cooled-проекцию. Traffic-driven. |
+| `journal_churn.ttl_expiry` | int | `TickTTL.CompactExpired` физически удалил backing claim. |
+| `journal_churn.holddown_release` | int | SeqNo flap-cap hold-down истёк, подавленный маршрут вернулся. |
+| `journal_churn.cooldown_clear` | int | Black-hole cooldown снят или истёк, пара разфильтрована. |
+| `journal_churn.peer_remove` / `.transit_invalidate` / `.direct_admit` / `.withdrawal` / `.poison` / `.bulk_reset` | int | Причины peer-lifecycle и явных мутаций (withdrawal'ы при disconnect, транзитные tombstone'ы, admit прямого peer'а, входящий wire-withdrawal, route_poison, bulk reset журнала). В устаканившейся сети редки; нетривиальная доля = churn peer'ов или admission'а. |
 
 ### fetchRouteLookup
 

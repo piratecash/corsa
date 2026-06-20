@@ -79,7 +79,7 @@ func (t *Table) MarkHopAck(identity, uplink PeerIdentity, rtt time.Duration) {
 	// pointer in node.Service.
 	t.dirty.Store(true)
 	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
-		t.markRouteChangedLocked(identity)
+		t.markRouteChangedLocked(identity, JournalCauseHealthEvidence)
 	}
 }
 
@@ -174,7 +174,7 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 	// function regardless of which branch runs.
 	t.dirty.Store(true)
 	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
-		t.markRouteChangedLocked(identity)
+		t.markRouteChangedLocked(identity, JournalCauseHealthEvidence)
 	}
 
 	// Source promotion: only needed when the live claim is below
@@ -208,7 +208,7 @@ func (t *Table) ConfirmHopAck(identity, uplink PeerIdentity, rtt time.Duration) 
 		// reconfirmation journals normally.
 		t.markSnapDirtyNoJournalLocked(identity)
 		if wireChanged {
-			t.markRouteChangedLocked(identity)
+			t.markRouteChangedLocked(identity, JournalCauseAnnounceUpsert)
 		}
 	}
 	return status, true
@@ -292,7 +292,7 @@ func (t *Table) MarkProbeAck(identity, uplink PeerIdentity, reachable bool, rtt 
 	// health mutation; see MarkHopAck doc-comment.
 	t.dirty.Store(true)
 	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
-		t.markRouteChangedLocked(identity)
+		t.markRouteChangedLocked(identity, JournalCauseHealthEvidence)
 	}
 }
 
@@ -331,7 +331,7 @@ func (t *Table) MarkProbeFailure(identity, uplink PeerIdentity) {
 	// MarkHopAck doc-comment.
 	t.dirty.Store(true)
 	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
-		t.markRouteChangedLocked(identity)
+		t.markRouteChangedLocked(identity, JournalCauseHealthEvidence)
 	}
 }
 
@@ -428,7 +428,7 @@ func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
 	// MarkHopAck doc-comment.
 	t.dirty.Store(true)
 	if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
-		t.markRouteChangedLocked(identity)
+		t.markRouteChangedLocked(identity, JournalCauseHealthEvidence)
 	}
 }
 
@@ -476,7 +476,7 @@ func (t *Table) ClearDirectPairCooldown(peerIdentity PeerIdentity) bool {
 	// applySessionEstablishedLocked lifting an armed cooldown un-filters the
 	// direct pair from the projection, so journal the change. (Direct pair:
 	// identity == uplink == peerIdentity.)
-	t.markRouteChangedLocked(peerIdentity)
+	t.markRouteChangedLocked(peerIdentity, JournalCauseCooldownClear)
 	return true
 }
 
@@ -609,8 +609,24 @@ func (t *Table) TickHealth() {
 		// Phase 3 change journal: record the identity only when the
 		// projection-relevant signal (Dead / cooled) flipped on this tick,
 		// not on every Good↔Questionable↔Bad transition.
-		if d, c := healthProjectionSig(state); d != prevDead || c != prevCooled {
-			t.markRouteChangedLocked(key.Identity)
+		//
+		// Attribute by WHICH bit flipped: the two mutations above are
+		// independent — applyCooldownExpiryLocked touches CooldownUntil (the
+		// cooled bit), applyIdleTick touches Health (the Dead bit) — so a tick
+		// can flip either or both. A bare cooldown auto-clear is cooldown_clear,
+		// NOT aging; conflating them (the prior code tagged every flip as aging)
+		// would let black-hole cooldown auto-release churn masquerade as quiet
+		// routes flapping Dead↔Good and mislead the churn diagnostic. When both
+		// bits flip in one tick we count both so the per-cause ratio stays
+		// honest; the journal only needs the identity present once per cycle,
+		// and a second append for the same identity collapses in
+		// sinceUpToLocked's distinct set.
+		d, c := healthProjectionSig(state)
+		if c != prevCooled {
+			t.markRouteChangedLocked(key.Identity, JournalCauseCooldownClear)
+		}
+		if d != prevDead {
+			t.markRouteChangedLocked(key.Identity, JournalCauseHealthAging)
 		}
 	}
 	// PR 11.28 P2#1: passive aging mutates the published

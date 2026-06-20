@@ -132,7 +132,7 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 		// propagates as a delta rather than waiting for the forced full.
 		t.markSnapDirtyNoJournalLocked(entry.Identity)
 		if wireChanged {
-			t.markRouteChangedLocked(entry.Identity)
+			t.markRouteChangedLocked(entry.Identity, JournalCauseAnnounceUpsert)
 		}
 	}
 	// Phase 2 health bookkeeping at the live-update boundary
@@ -312,7 +312,7 @@ func (t *Table) InvalidateUplinkClaim(identity, uplink PeerIdentity) bool {
 	mutated := t.store.WithdrawTriple(key, seqNo+1, now)
 	if mutated {
 		t.dirty.Store(true)
-		t.markSnapDirtyLocked(identity)
+		t.markSnapDirtyLocked(identity, JournalCausePoison)
 	}
 	return mutated
 }
@@ -341,7 +341,7 @@ func (t *Table) WithdrawRoute(identity, origin, nextHop PeerIdentity, seqNo uint
 	mutated := t.store.WithdrawTriple(key, seqNo, t.clock())
 	if mutated {
 		t.dirty.Store(true)
-		t.markSnapDirtyLocked(identity)
+		t.markSnapDirtyLocked(identity, JournalCauseWithdrawal)
 	}
 	return mutated
 }
@@ -386,7 +386,7 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 		// Only the storage mutation changes the route projection; the
 		// health-only resets below affect snap.Health (still fully
 		// copied), not the incremental Routes map.
-		t.markSnapDirtyLocked(peerIdentity)
+		t.markSnapDirtyLocked(peerIdentity, JournalCauseDirectAdmit)
 	}
 
 	// PR 11.26 P2#3 — health seeding for direct peers. UpdateRoute's
@@ -495,7 +495,7 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 			// not mutate (no markSnapDirtyLocked), so journal the change
 			// explicitly — the symmetric path Table.ClearDirectPairCooldown
 			// already does. (Direct pair: identity == uplink == peerIdentity.)
-			t.markRouteChangedLocked(peerIdentity)
+			t.markRouteChangedLocked(peerIdentity, JournalCauseCooldownClear)
 		}
 	}
 
@@ -558,7 +558,7 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 	// identities whose announce projection changed.
 	t.markSnapshotFullDirtyLocked()
 	for _, identity := range affected {
-		t.markRouteChangedLocked(identity)
+		t.markRouteChangedLocked(identity, JournalCausePeerRemove)
 	}
 
 	return RemoveDirectPeerResult{
@@ -607,7 +607,7 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 		// rate-limited full sync (see the RemoveDirectPeer rationale).
 		t.markSnapshotFullDirtyLocked()
 		for _, identity := range affected {
-			t.markRouteChangedLocked(identity)
+			t.markRouteChangedLocked(identity, JournalCauseTransitInvalidate)
 		}
 	}
 	return invalidated, exposed
@@ -659,7 +659,7 @@ func (t *Table) TickTTL() TickTTLResult {
 	// AnnounceTo on the announce path cleared it first, this set is empty for
 	// it — whichever path clears it journals it.)
 	for _, id := range seqHoldReleased {
-		t.markRouteChangedLocked(id)
+		t.markRouteChangedLocked(id, JournalCauseHoldDownRelease)
 	}
 	// Phase 2 health reconciliation: when CompactExpired physically
 	// removes a claim, the matching RouteHealthState entry is no
@@ -705,7 +705,7 @@ func (t *Table) TickTTL() TickTTLResult {
 	if totalRemoved > 0 {
 		t.markSnapshotFullDirtyLocked()
 		for _, identity := range affected {
-			t.markRouteChangedLocked(identity)
+			t.markRouteChangedLocked(identity, JournalCauseTTLExpiry)
 		}
 	}
 	return TickTTLResult{Exposed: exposed, Removed: totalRemoved}

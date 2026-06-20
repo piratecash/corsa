@@ -332,6 +332,13 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"compare_match":    digest.CompareMatch,
 		}
 
+		// Change-journal churn attribution (docs/routing.md). A dominant
+		// health_aging share means quiet routes flap Dead↔Good on the passive
+		// timeline between forced-fulls — control-plane churn with no real
+		// topology change — rather than announce_upsert (a peer told us
+		// something new). Sample this to see which cause leads before tuning.
+		journalChurn := rp.JournalCauseStats()
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -343,6 +350,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"cap_admission":        capStats,
 			"overload":             overloadStats,
 			"digest":               digestStats,
+			"journal_churn":        journalChurn,
 		})
 	}
 }
