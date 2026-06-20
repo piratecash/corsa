@@ -74,7 +74,7 @@ type routeStore struct {
 	// destination identity (PeerIdentity.String()). The projection
 	// path re-encodes every emitted identity to hex on every cycle,
 	// once per receiving peer and again inside the v3 size-chunker's
-	// per-entry measure() — the single largest non-snapshot allocator
+	// per-entry size probe — the single largest non-snapshot allocator
 	// in the announce plane (alloc_space profiling, Jun 2026). Because
 	// the hex is a pure, immutable function of the 20 identity bytes
 	// (the map key itself), a memo never goes stale; the lookup

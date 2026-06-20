@@ -180,8 +180,10 @@ func TestChunkAnnounceEntriesBySize_SingleEntryTooLargeSkipped(t *testing.T) {
 }
 
 // TestAnnounceEntryWireEstimate_IsOverEstimate pins the safety invariant the
-// fast-accept gate in both chunkers depends on: announceEntryWireEstimate
-// must never under-estimate the bytes an entry actually adds to a frame.
+// legacy/v2 chunker's (chunkAnnounceEntriesBySize) fast-accept gate depends
+// on: announceEntryWireEstimate must never under-estimate the bytes an entry
+// actually adds to a frame. (The v3 chunker sizes exactly and does not use
+// this estimate — see TestChunkRouteAnnounceV3_ExactSizingIsPreciseAndSafe.)
 // If it did, a chunk accepted on the cheap estimate (curEst <= maxBytes/2)
 // could marshal past maxBytes and be rejected on the wire.  We measure the
 // real contribution as the marshalled-size delta of adding the entry to a
@@ -237,71 +239,6 @@ func TestAnnounceEntryWireEstimate_IsOverEstimate(t *testing.T) {
 			t.Fatalf("case %d: estimate %d UNDER real per-entry delta %d — fast-accept gate is unsafe", i, est, delta)
 		}
 	}
-}
-
-// TestAnnounceEntryWireEstimate_V3IsOverEstimate is the v3-wire twin of the
-// legacy check above.  The v3 frame has a different envelope (kind, epoch,
-// issued_at, RawLine + trailing newline) and a different per-entry shape
-// (Origin dropped, an optional base64 "sig" added), so the shared estimator
-// must over-cover this shape too — the v3 chunker's fast-accept gate relies
-// on it.  An entry carrying a non-empty AttestedSig is included so the
-// base64 sig term is exercised.  Pinned here so a future wire-shape change
-// (new per-entry field) is caught instead of silently letting an oversize
-// chunk past the gate.
-func TestAnnounceEntryWireEstimate_V3IsOverEstimate(t *testing.T) {
-	const kind = protocol.RouteAnnounceV3KindFull
-	const epoch = uint64(7)
-
-	base := routing.AnnounceEntry{
-		Identity: domaintest.ID("a"),
-		Hops:     1,
-		SeqNo:    1,
-	}
-	baseFrame, err := buildRouteAnnounceV3Frame(kind, epoch, []routing.AnnounceEntry{base})
-	if err != nil {
-		t.Fatalf("base v3 frame: %v", err)
-	}
-
-	smallExtra, _ := json.Marshal(map[string]string{"k": strings.Repeat("z", 200)})
-	// Literal '<' bytes that expand 6× on the v3 re-encode (same HTML-escape
-	// path as the legacy frame), proving the shared estimate's worst-case
-	// Extra factor covers the v3 wire too.
-	escapeExtra := json.RawMessage(`{"k":"` + strings.Repeat("<", 500) + `"}`)
-	cases := []routing.AnnounceEntry{
-		// Plain entry.
-		{Identity: domaintest.ID("c"), Hops: 15, SeqNo: 1 << 40},
-		// With Extra.
-		{Identity: domaintest.ID("e"), Hops: 3, SeqNo: 42, Extra: smallExtra},
-		// With a 64-byte attested signature (Ed25519 size) → base64 on the wire.
-		{Identity: domaintest.ID("g"), Hops: 7, SeqNo: 99, AttestedSig: bytesRepeat(0xAB, 64)},
-		// Extra + sig together.
-		{Identity: domaintest.ID("h"), Hops: 2, SeqNo: 5, Extra: smallExtra, AttestedSig: bytesRepeat(0xCD, 64)},
-		// Escapable Extra → exercises the escape overhead on the v3 path.
-		{Identity: domaintest.ID("k"), Hops: 1, SeqNo: 3, Extra: escapeExtra},
-		// Identity is now a fixed-width [20]byte fingerprint (constant 40-hex
-		// on the wire); the previous escapable-identity case no longer applies.
-		{Identity: domaintest.ID("idlt"), Hops: 1, SeqNo: 4},
-	}
-	for i, e := range cases {
-		twoFrame, err := buildRouteAnnounceV3Frame(kind, epoch, []routing.AnnounceEntry{base, e})
-		if err != nil {
-			t.Fatalf("case %d two-entry v3 frame: %v", i, err)
-		}
-		delta := len(twoFrame.RawLine) - len(baseFrame.RawLine)
-		if est := announceEntryWireEstimate(e); est < delta {
-			t.Fatalf("case %d: estimate %d UNDER real v3 per-entry delta %d — v3 fast-accept gate is unsafe", i, est, delta)
-		}
-	}
-}
-
-// bytesRepeat returns a b-byte slice filled with v.  Local helper so the
-// estimate test does not pull in bytes just for one call.
-func bytesRepeat(v byte, n int) []byte {
-	out := make([]byte, n)
-	for i := range out {
-		out[i] = v
-	}
-	return out
 }
 
 // makeAnnounceEntries builds n distinct AnnounceEntry rows with stable

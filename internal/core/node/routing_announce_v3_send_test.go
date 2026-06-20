@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -134,11 +135,14 @@ func TestChunkRouteAnnounceV3_SplitsWhenBudgetTight(t *testing.T) {
 }
 
 func TestChunkRouteAnnounceV3_SkipsSingleEntryOverBudget(t *testing.T) {
-	// A single entry whose own marshal exceeds the budget cannot be
-	// chunked further — reported via skipped and dropped from chunks.
-	huge := json.RawMessage(strings.Repeat("a", 1024))
+	// A single entry whose own VALID one-entry frame exceeds the budget cannot
+	// be chunked further — it hits the soloLen > maxBytes branch, is reported
+	// via skipped and dropped from chunks. Extra must be valid JSON so the size
+	// probe succeeds and the size guard (not the marshal-error guard) fires —
+	// invalid Extra is a different path, pinned in the test below.
+	bigExtra := json.RawMessage(`{"blob":"` + strings.Repeat("a", 1024) + `"}`)
 	entries := []routing.AnnounceEntry{
-		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1, Extra: huge},
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1, Extra: bigExtra},
 	}
 	chunks, skipped := chunkRouteAnnounceV3EntriesBySize(entries, protocol.RouteAnnounceV3KindFull, 1, 128)
 	if len(chunks) != 0 {
@@ -146,6 +150,126 @@ func TestChunkRouteAnnounceV3_SkipsSingleEntryOverBudget(t *testing.T) {
 	}
 	if len(skipped) != 1 || skipped[0] != 0 {
 		t.Fatalf("expected skipped=[0], got %v", skipped)
+	}
+}
+
+func TestChunkRouteAnnounceV3_SkipsEntryWithInvalidExtra(t *testing.T) {
+	// An entry whose Extra is not valid JSON can never be marshalled into a
+	// frame, so the size probe fails and the entry is skipped — while the
+	// well-formed entries around it still ship. This pins the side effect of
+	// the exact-sizing rewrite: every entry is now encoded during sizing, so a
+	// poison entry is reported individually instead of being fast-accepted and
+	// later failing the whole chunk on the send path.
+	badExtra := json.RawMessage(strings.Repeat("a", 64)) // not valid JSON.
+	entries := []routing.AnnounceEntry{
+		{Identity: idTargetX, Origin: idOriginC, Hops: 1, SeqNo: 1},
+		{Identity: idPeerB, Origin: idOriginC, Hops: 1, SeqNo: 2, Extra: badExtra},
+		{Identity: idOriginC, Origin: idOriginC, Hops: 1, SeqNo: 3},
+	}
+	chunks, skipped := chunkRouteAnnounceV3EntriesBySize(entries, protocol.RouteAnnounceV3KindFull, 1, protocol.MaxFrameLine)
+	if len(skipped) != 1 || skipped[0] != 1 {
+		t.Fatalf("expected the invalid-Extra entry at index 1 to be skipped; got %v", skipped)
+	}
+	// The two valid entries still ship and every produced chunk is a real,
+	// marshallable frame (the poison entry never reaches one).
+	shipped := 0
+	for ci, chunk := range chunks {
+		if _, err := buildRouteAnnounceV3Frame(protocol.RouteAnnounceV3KindFull, 1, chunk); err != nil {
+			t.Fatalf("chunk %d must be a marshallable frame, got %v", ci, err)
+		}
+		shipped += len(chunk)
+	}
+	if shipped != 2 {
+		t.Fatalf("expected 2 valid entries to ship around the poison one, got %d", shipped)
+	}
+}
+
+// TestChunkRouteAnnounceV3_ExactSizingIsPreciseAndSafe pins the O(N)
+// incremental size decomposition (baseLen + Σ entryLen + commas) against
+// ground truth — the actually marshalled frame for every produced chunk —
+// guarding both failure directions of the rewrite that dropped the old
+// O(N²) "re-marshal the whole growing candidate" probe:
+//
+//   - UNDER-sizing (predicted < real) would overflow the wire limit, so every
+//     produced chunk's real RawLine must be ≤ budget;
+//   - OVER-sizing (predicted > real) would split too eagerly and waste frames,
+//     so each non-final chunk must be greedily maximal: appending the first
+//     entry of the next chunk to it must actually exceed the budget.
+//
+// Entries are deliberately heterogeneous — SeqNo spans 1..~20 JSON digits,
+// a third carry an Extra object, a third carry a (base64-encoded) signature —
+// so any per-entry JSON length subtlety the standalone-marshal probe might
+// miss surfaces here as a real-frame overflow or a non-maximal chunk.
+func TestChunkRouteAnnounceV3_ExactSizingIsPreciseAndSafe(t *testing.T) {
+	const n = 600
+	entries := make([]routing.AnnounceEntry, n)
+	for i := 0; i < n; i++ {
+		e := routing.AnnounceEntry{
+			Identity: domaintest.ID("tgt" + intToHex4(i)),
+			Origin:   domaintest.ID("org" + intToHex4(i%7)),
+			Hops:     (i % 15) + 1,
+			// Widen the seq_no JSON across 1..20 digits so the per-entry size
+			// is not constant — a fixed-width estimate would pass trivially.
+			SeqNo: uint64(i)*0x0123456789abc + 1,
+		}
+		switch i % 3 {
+		case 0:
+			// Include HTML-escapable chars (< > &) so the size probe's
+			// json.Encoder and the frame's json.Marshal must agree on the
+			// \u00xx expansion — a mismatch would surface as overflow below.
+			e.Extra = json.RawMessage(`{"x":"<` + intToHex4(i) + `>&"}`)
+		case 1:
+			e.AttestedSig = []byte(strings.Repeat("s", (i%40)+1))
+		}
+		entries[i] = e
+	}
+
+	// Budget fits a handful of entries per chunk → many size-driven splits,
+	// all well under the maxRoutesPerAnnounceFrame=100 count cap.
+	const budget = 600
+	chunks, skipped := chunkRouteAnnounceV3EntriesBySize(entries, protocol.RouteAnnounceV3KindFull, 9, budget)
+	if len(skipped) != 0 {
+		t.Fatalf("no entry individually exceeds the budget; skipped must be empty, got %v", skipped)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("budget=%d must force multiple chunks, got %d", budget, len(chunks))
+	}
+
+	rejoined := 0
+	for ci, chunk := range chunks {
+		frame, err := buildRouteAnnounceV3Frame(protocol.RouteAnnounceV3KindFull, 9, chunk)
+		if err != nil {
+			t.Fatalf("chunk %d build: %v", ci, err)
+		}
+		if got := len(frame.RawLine); got > budget {
+			t.Fatalf("chunk %d real frame is %d bytes, exceeds budget %d (under-sizing — wire overflow)", ci, got, budget)
+		}
+		for j, e := range chunk {
+			want := entries[rejoined+j]
+			if e.SeqNo != want.SeqNo || e.Identity != want.Identity {
+				t.Fatalf("chunk %d entry %d out of order", ci, j)
+			}
+		}
+		rejoined += len(chunk)
+	}
+	if rejoined != n {
+		t.Fatalf("rejoined %d != input %d (lost or duplicated entries)", rejoined, n)
+	}
+
+	// Greedy maximality: each non-final chunk plus the first entry of the next
+	// chunk MUST overflow — otherwise the sizing over-estimated and split early.
+	for ci := 0; ci+1 < len(chunks); ci++ {
+		if len(chunks[ci]) >= maxRoutesPerAnnounceFrame {
+			continue // split forced by the entry-count cap, not by size.
+		}
+		probe := append(append([]routing.AnnounceEntry{}, chunks[ci]...), chunks[ci+1][0])
+		frame, err := buildRouteAnnounceV3Frame(protocol.RouteAnnounceV3KindFull, 9, probe)
+		if err != nil {
+			t.Fatalf("probe build at chunk %d: %v", ci, err)
+		}
+		if got := len(frame.RawLine); got <= budget {
+			t.Fatalf("chunk %d not greedily maximal: + next chunk's first entry = %d ≤ budget %d (over-sizing — premature split)", ci, got, budget)
+		}
 	}
 }
 

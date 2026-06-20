@@ -677,7 +677,7 @@ type AnnounceEntry struct {
 	// IdentityHex is the precomputed lowercase-hex wire form of
 	// Identity, carried out of the projection so the wire encoders do
 	// not re-run hex.EncodeToString per entry per peer (and again
-	// inside the v3 size-chunker's per-entry measure()). Populated by
+	// inside the v3 size-chunker's per-entry size probe). Populated by
 	// the routeStore projection via its identity-hex memo; empty for
 	// entries built outside that path (ToAnnounceEntry, tests), in
 	// which case IdentityHexString falls back to Identity.String().

@@ -19,9 +19,11 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -260,31 +262,35 @@ func jsonStringEscapeOverhead[T ~string | ~[]byte](v T) int {
 }
 
 // announceEntryWireEstimate returns a deliberate OVER-estimate of the JSON
-// bytes a single AnnounceEntry contributes to an announce frame (legacy/v2
-// AnnounceRouteFrame and the v3 RouteAnnounceV3Entry — whichever is larger,
-// so one estimate is safe for both chunkers).  It exists only so the
-// chunkers can decide when a chunk is comfortably under budget and SKIP the
-// expensive precise marshal; it must never under-estimate, or an oversize
-// chunk could slip past the cheap gate and the send path would then fail the
-// whole chunk WITHOUT the per-entry skip+report the precise path performs.
+// bytes a single AnnounceEntry contributes to a LEGACY/v2 announce frame
+// (AnnounceRouteFrame). It backs the fast-accept gate of
+// chunkAnnounceEntriesBySize only — the v3 chunker
+// (chunkRouteAnnounceV3EntriesBySize) no longer uses an estimate at all; it
+// sizes every entry exactly via a single per-entry marshal. The estimate
+// exists so the legacy chunker can decide when a chunk is comfortably under
+// budget and SKIP the precise marshal; it must never under-estimate, or an
+// oversize chunk could slip past the cheap gate and the send path would then
+// fail the whole chunk WITHOUT the per-entry skip+report the precise path
+// performs.
 //
 // Every variable-length string field is charged its raw length PLUS its
 // worst-case HTML-escape expansion (jsonStringEscapeOverhead).  This matters
-// because AnnounceRouteFrame.MarshalJSON (and the v3 marshaller) round-trips
-// the data through Go's encoder, whose post-Marshaler compaction re-escapes
-// '<', '>' and '&' (one byte → six) in both keys and values.  Crucially this
-// is applied to Identity and Origin as well as Extra: RouteEntry.Validate
-// does NOT enforce a hex/base64url shape, so a malicious or buggy route can
-// carry raw '<' bytes in its identity that balloon ~6× on re-announce.
-// Counting the escape overhead per-field keeps the estimate a true upper
-// bound for arbitrary content while charging clean fingerprints zero, so the
-// dominant hot path (small ASCII entries, nil Extra) still fast-accepts with
-// no marshal.  AttestedSig is base64 (escape-free alphabet), so it is charged
-// 1× plus its "sig" wrapper.
+// because AnnounceRouteFrame.MarshalJSON round-trips the data through Go's
+// encoder, whose post-Marshaler compaction re-escapes '<', '>' and '&' (one
+// byte → six) in both keys and values.  Crucially this is applied to Identity
+// and Origin as well as Extra: RouteEntry.Validate does NOT enforce a
+// hex/base64url shape, so a malicious or buggy route can carry raw '<' bytes
+// in its identity that balloon ~6× on re-announce. Counting the escape
+// overhead per-field keeps the estimate a true upper bound for arbitrary
+// content while charging clean fingerprints zero, so the dominant hot path
+// (small ASCII entries, nil Extra) still fast-accepts with no marshal.
+// AttestedSig is charged defensively (base64, escape-free alphabet, 1× plus
+// its "sig" wrapper) so the bound stays valid even though the legacy frame
+// rarely carries one.
 //
 // The precise byte budget is still enforced by the real marshal at the
-// boundary — this estimate only governs the fast path, where its job is to
-// be conservatively large, not exact.
+// boundary — this estimate only governs the legacy fast path, where its job
+// is to be conservatively large, not exact.
 func announceEntryWireEstimate(e routing.AnnounceEntry) int {
 	// fixedSlack covers: {"identity":"","origin":"","hops":N,"seq_no":N,
 	// "extra":}, the trailing comma, and worst-case 20-digit hops/seq_no.
@@ -303,9 +309,10 @@ func announceEntryWireEstimate(e routing.AnnounceEntry) int {
 	return n
 }
 
-// announceFastAcceptBudget is the running-estimate ceiling below which an
-// entry is packed into the current chunk WITHOUT a precise marshal.  Set to
-// half the wire budget: with maxBytes = MaxFrameLine (128 KiB) and the
+// announceFastAcceptBudget is the legacy/v2 chunker's running-estimate
+// ceiling below which an entry is packed into the current chunk WITHOUT a
+// precise marshal (the v3 chunker sizes exactly and has no such gate).  Set
+// to half the wire budget: with maxBytes = MaxFrameLine (128 KiB) and the
 // 100-entry count cap, a typical chunk of ~100 small entries lands near
 // ~25 KiB, far under 64 KiB, so the common path does zero per-entry
 // marshals (the old code marshalled the whole growing chunk on EVERY entry —
@@ -645,21 +652,7 @@ func buildAnnounceFrame(kind announceWireType, entries []routing.AnnounceEntry) 
 func buildRouteAnnounceV3Frame(kind string, epoch uint64, entries []routing.AnnounceEntry) (protocol.Frame, error) {
 	wireEntries := make([]protocol.RouteAnnounceV3Entry, len(entries))
 	for i, e := range entries {
-		wireEntries[i] = protocol.RouteAnnounceV3Entry{
-			Identity: e.IdentityHexString(),
-			Hops:     hopsIntToUint8(e.Hops),
-			SeqNo:    e.SeqNo,
-			Extra:    e.Extra,
-		}
-		// Phase 4 13.2-A: encode the stored attested-links signature
-		// for the wire. Empty AttestedSig → omitted "sig" field on the
-		// wire (omitempty on RouteAnnounceV3Entry.Sig keeps the JSON
-		// shape clean for the Tier-2 unsigned case). Base64 std
-		// encoding mirrors the wire-format contract documented on
-		// RouteAnnounceV3Entry.Sig.
-		if len(e.AttestedSig) > 0 {
-			wireEntries[i].Sig = base64.StdEncoding.EncodeToString(e.AttestedSig)
-		}
+		wireEntries[i] = toRouteAnnounceV3WireEntry(e)
 	}
 	v3 := protocol.RouteAnnounceV3Frame{
 		Type:  protocol.RouteAnnounceV3FrameType,
@@ -704,35 +697,94 @@ func hopsIntToUint8(hops int) uint8 {
 	}
 }
 
+// toRouteAnnounceV3WireEntry maps a stored AnnounceEntry to its compact v3
+// wire form. It is the single source of truth for the per-entry wire shape so
+// the size probe (routeAnnounceV3EntryWireLen) and the actual frame assembly
+// (buildRouteAnnounceV3Frame) can never disagree on the marshalled bytes — a
+// divergence there would silently mis-size chunks and overflow the wire limit.
+//
+// Phase 4 13.2-A: the stored attested-links signature is base64-encoded onto
+// Sig when non-empty; an empty AttestedSig leaves Sig "" so the omitempty tag
+// drops the field for the Tier-2 unsigned case.
+func toRouteAnnounceV3WireEntry(e routing.AnnounceEntry) protocol.RouteAnnounceV3Entry {
+	we := protocol.RouteAnnounceV3Entry{
+		Identity: e.IdentityHexString(),
+		Hops:     hopsIntToUint8(e.Hops),
+		SeqNo:    e.SeqNo,
+		Extra:    e.Extra,
+	}
+	if len(e.AttestedSig) > 0 {
+		we.Sig = base64.StdEncoding.EncodeToString(e.AttestedSig)
+	}
+	return we
+}
+
+// routeAnnounceV3EntryWireLen returns the exact number of JSON bytes the entry
+// occupies inside a route_announce_v3 frame's "entries" array — i.e. the bytes
+// json.Marshal produces for the single wire entry, which is byte-for-byte what
+// that element contributes inside the full frame's array.
+//
+// enc must be a json.Encoder writing into buf. We reuse one encoder+buffer
+// across all entries in a chunk pass so sizing the whole slice costs O(N) small
+// encodes into a growing-once buffer, instead of the old O(N²) "re-marshal the
+// entire growing candidate frame on every entry" probe. json.Encoder appends a
+// trailing newline that json.Marshal does not, so it is subtracted.
+func routeAnnounceV3EntryWireLen(e routing.AnnounceEntry, enc *json.Encoder, buf *bytes.Buffer) (int, error) {
+	buf.Reset()
+	if err := enc.Encode(toRouteAnnounceV3WireEntry(e)); err != nil {
+		return 0, err
+	}
+	return buf.Len() - 1, nil
+}
+
 // chunkRouteAnnounceV3EntriesBySize splits a route slice into wire-safe
 // v3 chunks. Each chunk's marshalled route_announce_v3 frame fits within
-// maxBytes. Algorithm mirrors chunkAnnounceEntriesBySize: greedy pack,
-// flush when the candidate marshal exceeds the budget, skip and report
-// any single entry whose own marshal is oversize (Extra blob too large
-// to ever fit, no chunking can save it).
+// maxBytes. Greedy pack, flush when the next entry would overflow the
+// budget, skip and report any single entry whose own one-entry frame is
+// oversize (Extra blob too large to ever fit, no chunking can save it).
 //
-// kind and epoch are passed through to every chunk's frame so the size
-// probe is faithful to the actual wire bytes.
+// Sizing is EXACT, not estimated, and costs one small JSON encode per
+// entry (reused encoder+buffer) instead of re-marshalling the whole
+// growing candidate frame on every entry past a fast-accept budget — the
+// old probe was O(N²) and was the dominant chunk-path allocator under load.
+// The frame size is decomposed once:
+//
+//	RawLine(c entries) = baseLen + Σ entryLen + (c-1 commas)   for c ≥ 1
+//
+// where baseLen is the wire size of the same frame with zero entries
+// (`…"entries":[]}`+"\n") and entryLen is each entry's standalone marshal —
+// byte-for-byte what that element contributes inside the array. kind/epoch
+// are passed through so baseLen matches the actual emitted frames; the
+// per-call issued_at is a fixed-length RFC3339 stamp, so baseLen is stable
+// across the real chunk frames built later on the send path.
 func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind string, epoch uint64, maxBytes int) (chunks [][]routing.AnnounceEntry, skipped []int) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	measure := func(es []routing.AnnounceEntry) (int, error) {
-		f, err := buildRouteAnnounceV3Frame(kind, epoch, es)
-		if err != nil {
-			return 0, err
+	baseFrame, err := buildRouteAnnounceV3Frame(kind, epoch, nil)
+	if err != nil {
+		// Kind/epoch can't even produce an empty frame (invalid kind) — no
+		// entry can ship. Report every index skipped, matching the per-entry
+		// skip-on-marshal-failure contract.
+		skipped = make([]int, len(entries))
+		for i := range entries {
+			skipped[i] = i
 		}
-		return len(f.RawLine), nil
+		return nil, skipped
 	}
+	baseLen := len(baseFrame.RawLine)
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf) // HTML-escape on by default — matches frame marshal.
+
 	var current []routing.AnnounceEntry
-	curEst := 0 // running over-estimate of current's marshalled size.
-	fastBudget := announceFastAcceptBudget(maxBytes)
+	curLen := baseLen // exact RawLine size of `current` as a frame.
 	flushCurrent := func() {
 		if len(current) > 0 {
 			chunks = append(chunks, current)
 			current = nil
 		}
-		curEst = 0
+		curLen = baseLen
 	}
 	for i, entry := range entries {
 		// Phase 4 13.5 entry-count cap mirror of the legacy chunker —
@@ -741,40 +793,35 @@ func chunkRouteAnnounceV3EntriesBySize(entries []routing.AnnounceEntry, kind str
 			flushCurrent()
 		}
 
-		// Fast path: provably under budget by the over-estimate — accept
-		// without the per-entry measure() (which here also runs base64 +
-		// time formatting through buildRouteAnnounceV3Frame, so skipping
-		// it is doubly worth it). Mirrors chunkAnnounceEntriesBySize.
-		est := announceEntryWireEstimate(entry)
-		if curEst+est <= fastBudget {
-			current = append(current, entry)
-			curEst += est
-			continue
-		}
-
-		candidate := append(current, entry)
-		size, err := measure(candidate)
+		entryLen, err := routeAnnounceV3EntryWireLen(entry, enc, &buf)
 		if err != nil {
 			// Marshal failure — drop this entry, keep going so previously-
 			// accepted entries still ship. Matches chunkAnnounceEntriesBySize.
 			skipped = append(skipped, i)
 			continue
 		}
-		if size <= maxBytes {
-			current = candidate
-			curEst += est
+
+		// Adding this entry costs entryLen plus one comma if current is
+		// non-empty (the array separator before it).
+		add := entryLen
+		if len(current) > 0 {
+			add++
+		}
+		if curLen+add <= maxBytes {
+			current = append(current, entry)
+			curLen += add
 			continue
 		}
-		// Candidate would exceed the budget — close the current chunk and
-		// try the entry alone.
+
+		// Doesn't fit — close the current chunk and try the entry alone.
 		flushCurrent()
-		soloSize, soloErr := measure([]routing.AnnounceEntry{entry})
-		if soloErr != nil || soloSize > maxBytes {
+		soloLen := baseLen + entryLen // first entry has no leading comma.
+		if soloLen > maxBytes {
 			skipped = append(skipped, i)
 			continue
 		}
-		current = []routing.AnnounceEntry{entry}
-		curEst = est
+		current = append(current, entry)
+		curLen = soloLen
 	}
 	flushCurrent()
 	return chunks, skipped
