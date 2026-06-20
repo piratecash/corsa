@@ -191,9 +191,9 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	// MarkPeerDigestPending arms a short suppression window first.
 	if sessionHasCap(caps, domain.CapMeshRouteSyncV1) {
 		now := time.Now().UTC()
-		if digest, count, generatedAt, ok := s.routingTable.ConsumePeerDigestSnapshot(peerIdentity, now); ok {
+		if digest, entries, count, generatedAt, ok := s.routingTable.ConsumePeerDigestSnapshot(peerIdentity, now); ok {
 			s.announceLoop.MarkPeerDigestPending(peerIdentity, now, digest)
-			s.emitRouteSyncDigest(peerIdentity, digest, count, generatedAt)
+			s.emitRouteSyncDigest(peerIdentity, digest, entries, count, generatedAt)
 		}
 	}
 

@@ -98,6 +98,18 @@ type sessionDigestEntry struct {
 	// re-walking.
 	EntryCount uint32
 
+	// Entries is the Phase-0 version vector (the (Identity, SeqNo)
+	// pairs the Digest summarises) captured at record time, so the
+	// reconnect emit carries it on the wire and the peer can
+	// reconcile per identity under the K-cap — exactly as the
+	// periodic heartbeat does. Recomputing at reconnect would NOT
+	// work: the per-peer outbound SeqNo state (outboundPeerMax) is
+	// reclaimed when the session departs, so AnnounceDigestVectorFor
+	// would yield an empty vector after teardown. nil for a
+	// pre-Phase-0 record (the reconnect then degrades to the
+	// hash-only compare).
+	Entries []DigestEntry
+
 	// GeneratedAt is the wall-clock time at which the digest was
 	// computed — emitted on the wire as RouteSyncDigestFrame.
 	// GeneratedAt so the receiver can log freshness without
@@ -203,6 +215,33 @@ func (t *Table) AnnounceDigestFor(peer PeerIdentity) (string, uint32) {
 	return ComputeSyncDigest(entries), uint32(len(entries))
 }
 
+// AnnounceDigestVectorFor is AnnounceDigestFor plus the underlying
+// (Identity, SeqNo) vector the hash summarises (Phase-0 scaling). The
+// sender ships the vector in RouteSyncDigestFrame.Entries so the receiver
+// can reconcile per identity (Table.ReconcileSyncVector) instead of an
+// all-or-nothing hash compare — which is what lets the digest match under
+// the K-cap. The hash is still returned for wire correlation (the summary
+// echoes it) and as the fallback compare for peers that predate the
+// vector field.
+//
+// The returned slice is the caller's to read only; it aliases freshly
+// built DigestEntry values (no pooled storage), but treat it as
+// read-only. Lock contract: acquires t.mu in R mode; pure CPU work.
+func (t *Table) AnnounceDigestVectorFor(peer PeerIdentity) (digest string, entries []DigestEntry, count uint32) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	now := t.clock()
+	cooledDown := func(identity, uplink PeerIdentity) bool {
+		return t.health.isCooledDownLocked(identity, uplink, now)
+	}
+	entries = t.store.announceDigestEntriesForLocked(peer, now, t.health.isDeadLocked, cooledDown)
+	// ComputeSyncDigest sorts entries in place by Identity; harmless for the
+	// vector (reconcile is order-independent) and keeps hash + vector derived
+	// from the same canonical slice.
+	digest = ComputeSyncDigest(entries)
+	return digest, entries, uint32(len(entries))
+}
+
 // RecordPeerDigestSnapshot stashes the current peer-keyed digest
 // snapshot in the in-memory cache so the next reconnect to the
 // same peer can emit it without re-walking the table. Production
@@ -223,7 +262,7 @@ func (t *Table) AnnounceDigestFor(peer PeerIdentity) (string, uint32) {
 // no return value because a duplicate record (e.g. two
 // disconnect events firing for the same peer in quick succession)
 // is harmless — the second overwrite refreshes the TTL anchor.
-func (t *Table) RecordPeerDigestSnapshot(peer PeerIdentity, digest string, entryCount uint32, generatedAt time.Time) {
+func (t *Table) RecordPeerDigestSnapshot(peer PeerIdentity, digest string, entries []DigestEntry, entryCount uint32, generatedAt time.Time) {
 	if peer.IsZero() {
 		return
 	}
@@ -235,6 +274,7 @@ func (t *Table) RecordPeerDigestSnapshot(peer PeerIdentity, digest string, entry
 	t.sessionDigestCache[peer] = sessionDigestEntry{
 		Digest:      digest,
 		EntryCount:  entryCount,
+		Entries:     entries,
 		GeneratedAt: generatedAt,
 		IdleSince:   generatedAt,
 	}
@@ -256,25 +296,25 @@ func (t *Table) RecordPeerDigestSnapshot(peer PeerIdentity, digest string, entry
 // future call does not waste another comparison on it).
 //
 // Lock contract: acquires t.mu in W mode (we mutate the cache).
-func (t *Table) ConsumePeerDigestSnapshot(peer PeerIdentity, now time.Time) (digest string, entryCount uint32, generatedAt time.Time, ok bool) {
+func (t *Table) ConsumePeerDigestSnapshot(peer PeerIdentity, now time.Time) (digest string, entries []DigestEntry, entryCount uint32, generatedAt time.Time, ok bool) {
 	if peer.IsZero() {
-		return "", 0, time.Time{}, false
+		return "", nil, 0, time.Time{}, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.sessionDigestCache == nil {
-		return "", 0, time.Time{}, false
+		return "", nil, 0, time.Time{}, false
 	}
 	entry, exists := t.sessionDigestCache[peer]
 	if !exists {
-		return "", 0, time.Time{}, false
+		return "", nil, 0, time.Time{}, false
 	}
 	if now.Sub(entry.IdleSince) > SessionDigestCacheTTL {
 		delete(t.sessionDigestCache, peer)
-		return "", 0, time.Time{}, false
+		return "", nil, 0, time.Time{}, false
 	}
 	delete(t.sessionDigestCache, peer)
-	return entry.Digest, entry.EntryCount, entry.GeneratedAt, true
+	return entry.Digest, entry.Entries, entry.EntryCount, entry.GeneratedAt, true
 }
 
 // PurgeDigestSnapshot drops the cached entry for the peer

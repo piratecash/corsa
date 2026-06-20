@@ -63,10 +63,15 @@ The wire exchange is driven by the session lifecycle hooks in
 
 - **On session close** (`onPeerSessionClosed`, last-session transition,
   peer ever advertised `mesh_route_sync_v1`): the node computes
-  `Table.AnnounceDigestFor(peer)` — the OUTBOUND announce projection to
-  the peer (what we would announce to it, keyed by the per-peer wire
-  SeqNos the peer stored) — and stashes the result via
-  `Table.RecordPeerDigestSnapshot`. This is deliberately NOT
+  `Table.AnnounceDigestVectorFor(peer)` — the OUTBOUND announce projection
+  to the peer (what we would announce to it, keyed by the per-peer wire
+  SeqNos the peer stored), returning both the hash and the Phase-0 version
+  vector — and stashes BOTH via `Table.RecordPeerDigestSnapshot`. The
+  vector is captured here, not recomputed on reconnect, because the
+  per-peer outbound SeqNo state (`outboundPeerMax`) is reclaimed when the
+  session departs, so a post-teardown recompute would yield an empty
+  vector. Carrying it lets the reconnect digest reconcile per identity
+  (and so match under the K-cap) exactly as the periodic heartbeat does. This is deliberately NOT
   `SyncDigestFor(peer)` (routes we learned THROUGH the peer): the
   receiver compares against its own via-(this node) view, and only the
   outbound projection lines up with that view, so only it can produce a
@@ -156,7 +161,8 @@ well-defined digest.
   "type":                   "route_sync_digest_v1",
   "digest":                 "<hex-sha256>",
   "known_identities_count": <uint32>,
-  "generated_at":           "<RFC3339 UTC>"
+  "generated_at":           "<RFC3339 UTC>",
+  "entries":                [ {"i": "<identity-hex>", "s": <uint64>}, ... ]
 }
 ```
 
@@ -169,6 +175,12 @@ well-defined digest.
 - `generated_at` — sender-local timestamp at digest computation. Used
   only as a freshness hint in structured logs; never consulted for
   the match decision.
+- `entries` — OPTIONAL Phase-0 version vector: the `(Identity, SeqNo)`
+  pairs the `digest` summarises, as compact `{"i": hex, "s": seqno}`
+  objects (one per announced identity). Omitted (`omitempty`) by senders
+  that predate it; when present it drives the per-identity reconcile in
+  "Phase-0 version vector and safety reconcile" below instead of the
+  whole-table hash compare. See `routing.AnnounceDigestVectorFor`.
 
 ### `route_sync_summary_v1` wire format
 
@@ -193,6 +205,61 @@ well-defined digest.
   but I would still like a full sync" without adding a third wire
   field.
 
+### Phase-0 version vector and safety reconcile
+
+The whole-table `digest` is all-or-nothing: any single divergent identity
+flips the hash and there is no cheap way to find which one. Under the
+receiver's per-origin K-cap this is fatal — the receiver drops the
+sender's cap-rejected routes, so the sender's "what I announced" set and
+the receiver's "what I kept" set are systematically different and the
+hash can NEVER match in a dense mesh (observed as `summary_match = 0`).
+The forced full then fires every cadence and the periodic-silence
+optimisation above is dead.
+
+The version vector (`entries`) localises the compare to the agreed
+subset. The receiver runs `Table.ReconcileSyncVector(peer, entries, now)`
+instead of the hash compare:
+
+- For every live route it holds via the sender whose stored SeqNo equals
+  the vector's entry for that identity, it renews the TTL
+  (proven-current) — the per-entry equivalent of `RefreshRoutesVia`.
+- It reports `match = true` only when it holds NO live via-sender route
+  the vector left unconfirmed (absent, or a different SeqNo = stale).
+- An identity the vector offers that the receiver does NOT hold via the
+  sender (a cap-rejected offer) does NOT affect `match` — it is the
+  sender's offer the receiver legitimately did not adopt. This is exactly
+  what lets the digest match under the cap.
+
+A stale route on the receiver (vector mismatch) flips `match = false`, so
+the sender escalates a full to reconcile it — and the stale route, left
+un-refreshed, ages out via `TickTTL` (it is never extended). A
+peer that predates the vector sends none and the receiver falls back to
+the hash compare unchanged.
+
+**Safety reconcile cadence.** Once the digest can actually match, route
+liveness on the stable path is maintained by the heartbeat's per-entry
+TTL refresh (at the forced-full cadence, which still satisfies the
+refresh-interval invariant) and the byte-heavy full stops firing. A stale
+route is caught immediately by a vector mismatch, but a route the receiver
+is MISSING because a best-effort delta was dropped would never reconcile
+under continuous match. So the sender forces a full regardless of match
+every `SafetyFullSyncMultiplier × EffectiveForcedFullSyncInterval`
+(≈30 min at the 300 s default), anchored on the last successful full. This
+bounds dropped-delta convergence while keeping the stable path otherwise
+silent.
+
+**Frame-size cap.** The vector is O(identities), so on a large table it can
+exceed the single-frame `MaxFrameLine` (128 KiB ≈ 2000 entries — the
+command-plane reader closes anything above it). Two guards keep the frame
+legal: the announce loop skips the vector and forces a chunked full above
+`maxRouteSyncVectorEntries` (1500), and `buildRouteSyncDigestWire` is an
+exact-size backstop that drops the vector to a hash-only frame if a built
+line would still exceed the limit (covering the reconnect-cache path, which
+has no entry-count gate). So the per-identity reconcile applies up to
+~1500 identities; beyond that the heartbeat falls back to the (chunked)
+full sync, and the structural overlay (scaling roadmap Phase 2+) is what
+scales reachability further.
+
 ### Receive-side semantics
 
 `handleRouteSyncDigest` (in `internal/core/node/routing_sync.go`):
@@ -200,9 +267,12 @@ well-defined digest.
 1. Capability gate (`CapMeshRouteSyncV1`) already enforced by the
    dispatch switch; the handler defensively no-ops on an empty
    `senderIdentity` (auth-race).
-2. Compute `Table.SyncDigestFor(senderIdentity)`.
+2. When the frame carries a version vector (`entries`), reconcile per
+   identity via `Table.ReconcileSyncVector` (above); otherwise fall back
+   to the whole-table `Table.SyncDigestFor(senderIdentity)` hash compare.
 3. On a match, renew the TTL of the routes learned through the sender
-   (`Table.RefreshRoutesVia(senderIdentity, now)`) — the receiver half of
+   (`Table.RefreshRoutesVia(senderIdentity, now)`, or the per-entry
+   refresh inside `ReconcileSyncVector`) — the receiver half of
    the digest-as-heartbeat freshness mechanism. A match proves those routes
    are exactly what the sender still announces, so they are renewed as if a
    full announce had re-confirmed them, WITHOUT a journal entry (TTL is not a
@@ -355,10 +425,15 @@ Wire-обмен driver'ится session lifecycle hooks в
 
 - **На закрытие сессии** (`onPeerSessionClosed`, last-session
   transition, peer когда-либо advertised `mesh_route_sync_v1`):
-  узел считает `Table.AnnounceDigestFor(peer)` — OUTBOUND announce
+  узел считает `Table.AnnounceDigestVectorFor(peer)` — OUTBOUND announce
   projection к peer'у (что мы анонсировали бы ему, keyed по per-peer
-  wire SeqNo'ам, которые peer сохранил) — и stash'ит результат через
-  `Table.RecordPeerDigestSnapshot`. Это намеренно НЕ
+  wire SeqNo'ам, которые peer сохранил), возвращая И хеш, И Phase-0
+  version-вектор — и stash'ит ОБА через `Table.RecordPeerDigestSnapshot`.
+  Вектор захватывается здесь, а не пересчитывается на реконнекте, потому
+  что per-peer outbound SeqNo state (`outboundPeerMax`) реклеймится при
+  уходе сессии, так что пост-teardown пересчёт дал бы пустой вектор.
+  Перенос его позволяет реконнект-digest сверять per-identity (и значит
+  совпадать под K-cap) ровно как периодический heartbeat. Это намеренно НЕ
   `SyncDigestFor(peer)` (routes, которые мы знаем ЧЕРЕЗ peer):
   receiver сравнивает со своим via-(этот узел) view, и только outbound
   projection совпадает с ним, поэтому только он даёт match в нормальной
@@ -449,7 +524,8 @@ well-defined digest.
   "type":                   "route_sync_digest_v1",
   "digest":                 "<hex-sha256>",
   "known_identities_count": <uint32>,
-  "generated_at":           "<RFC3339 UTC>"
+  "generated_at":           "<RFC3339 UTC>",
+  "entries":                [ {"i": "<identity-hex>", "s": <uint64>}, ... ]
 }
 ```
 
@@ -462,6 +538,13 @@ well-defined digest.
 - `generated_at` — sender-local timestamp на момент computation.
   Используется только как freshness hint в structured logs;
   никогда не consult'ится для match decision.
+- `entries` — ОПЦИОНАЛЬНЫЙ Phase-0 version-вектор: пары
+  `(Identity, SeqNo)`, которые суммирует `digest`, как компактные
+  объекты `{"i": hex, "s": seqno}` (по одному на анонсируемую
+  identity). Опускается (`omitempty`) отправителями, которые его не
+  знают; при наличии — драйвит per-identity reconcile (см. «Phase-0
+  version-вектор и safety reconcile» ниже) вместо whole-table hash
+  compare. См. `routing.AnnounceDigestVectorFor`.
 
 ### Wire format `route_sync_summary_v1`
 
@@ -486,6 +569,61 @@ well-defined digest.
   resync» и «match но мне всё равно нужен full sync» без
   добавления третьего wire-field'а.
 
+### Phase-0 version-вектор и safety reconcile
+
+Whole-table `digest` — all-or-nothing: любая одна разошедшаяся identity
+переворачивает хеш, и нет дешёвого способа найти какая. Под per-origin
+K-cap'ом получателя это фатально — получатель отбрасывает cap-rejected
+маршруты отправителя, поэтому множество отправителя «что я анонсировал» и
+множество получателя «что я сохранил» систематически разные, и хеш НИКОГДА
+не совпадёт в плотном меше (наблюдается как `summary_match = 0`). Тогда
+forced full срабатывает каждую каденцию, и оптимизация периодической
+тишины выше мертва.
+
+Version-вектор (`entries`) локализует сравнение до согласованного
+подмножества. Получатель вместо hash-сравнения зовёт
+`Table.ReconcileSyncVector(peer, entries, now)`:
+
+- Для каждого живого маршрута via отправитель, чей сохранённый SeqNo равен
+  записи вектора по этой identity, продлевает TTL (доказанно-текущий) —
+  per-entry эквивалент `RefreshRoutesVia`.
+- Сообщает `match = true` только когда НЕ держит ни одного живого
+  via-sender маршрута, не подтверждённого вектором (отсутствует или другой
+  SeqNo = stale).
+- Identity, которую вектор предлагает, но получатель НЕ держит via
+  отправитель (cap-rejected offer), НЕ влияет на `match` — это предложение
+  отправителя, которое получатель законно не принял. Ровно это и даёт
+  совпадение digest'а под cap'ом.
+
+Stale-маршрут у получателя (mismatch вектора) переворачивает
+`match = false`, поэтому отправитель эскалирует full его сверить — а
+stale-маршрут, не продлённый, уходит по `TickTTL` (никогда не
+продлевается). Пир, не знающий вектора, его не шлёт, и получатель падает
+на hash-сравнение без изменений.
+
+**Каденция safety reconcile.** Раз digest реально может совпасть, liveness
+маршрутов на стабильном пути держится per-entry TTL-рефрешем heartbeat'а
+(на forced-full каденции, которая всё ещё удовлетворяет refresh-invariant),
+и байт-тяжёлый full перестаёт срабатывать. Stale ловится сразу mismatch'ем
+вектора, но маршрут, которого получатель НЕ ИМЕЕТ из-за дропнутой
+best-effort дельты, при постоянном match не сверился бы никогда. Поэтому
+отправитель форсит full независимо от match раз в
+`SafetyFullSyncMultiplier × EffectiveForcedFullSyncInterval` (≈30 мин при
+дефолте 300 с), привязанный к последнему успешному full. Это ограничивает
+сходимость дропнутых дельт, оставляя стабильный путь в остальном молчащим.
+
+**Лимит размера кадра.** Вектор O(identities), поэтому на большой таблице
+он может превысить single-frame `MaxFrameLine` (128 KiB ≈ 2000 entries —
+reader команд-плоскости закрывает кадр выше). Два guard'а держат кадр
+легальным: announce-loop пропускает вектор и форсит chunked full выше
+`maxRouteSyncVectorEntries` (1500), а `buildRouteSyncDigestWire` —
+exact-size backstop, который сбрасывает вектор до hash-only кадра, если
+построенная строка всё равно превышает лимит (покрывает reconnect-cache
+путь, у которого нет entry-count gate). То есть per-identity reconcile
+применяется примерно до ~1500 identities; дальше heartbeat падает на
+(chunked) full, и структурный оверлей (scaling roadmap Phase 2+) — то, что
+масштабирует достижимость дальше.
+
 ### Receive-side семантика
 
 `handleRouteSyncDigest` (в `internal/core/node/routing_sync.go`):
@@ -493,9 +631,12 @@ well-defined digest.
 1. Capability gate (`CapMeshRouteSyncV1`) уже enforced'нут
    dispatch switch'ем; handler defensive no-op'ит на пустом
    `senderIdentity` (auth-race).
-2. Считает `Table.SyncDigestFor(senderIdentity)`.
+2. Когда фрейм несёт version-вектор (`entries`), сверяет per-identity
+   через `Table.ReconcileSyncVector` (выше); иначе падает на whole-table
+   hash-сравнение `Table.SyncDigestFor(senderIdentity)`.
 3. На match'е продлевает TTL маршрутов, изученных через отправителя
-   (`Table.RefreshRoutesVia(senderIdentity, now)`) — receiver-половина
+   (`Table.RefreshRoutesVia(senderIdentity, now)` или per-entry рефреш
+   внутри `ReconcileSyncVector`) — receiver-половина
    digest-as-heartbeat механизма свежести. Match доказывает, что эти
    маршруты ровно те, что отправитель всё ещё анонсирует, поэтому они
    продлеваются как если бы full announce их переподтвердил, БЕЗ journal-

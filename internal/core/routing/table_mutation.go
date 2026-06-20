@@ -643,6 +643,61 @@ func (t *Table) RefreshRoutesVia(via PeerIdentity, now time.Time) int {
 	return t.store.refreshViaLocked(via, now)
 }
 
+// ReconcileSyncVector is the version-vector receive path for the digest
+// heartbeat (Phase-0 scaling). It refreshes the TTL of routes via `peer`
+// whose stored SeqNo matches the peer's announce vector (proven-current)
+// and returns whether our via-peer view is free of stale routes the
+// vector did not confirm — the match verdict the sender uses to suppress
+// the byte-heavy full rebuild. Unlike RefreshRoutesVia (refresh all),
+// this refreshes only the confirmed subset and lets stale routes age out,
+// so it can never extend a route the peer no longer announces. See
+// reconcileSyncVectorLocked.
+//
+// `want` is the (Identity, SeqNo) vector from RouteSyncDigestFrame.Entries.
+// Acquires t.mu in W mode (mutates ExpiresAt).
+func (t *Table) ReconcileSyncVector(peer PeerIdentity, want []DigestEntry, now time.Time) (match bool, refreshed int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	wantSeq := make(map[PeerIdentity]uint64, len(want))
+	for _, e := range want {
+		// At most one entry per identity in a well-formed vector; on a
+		// duplicate keep the highest SeqNo defensively.
+		if prev, ok := wantSeq[e.Identity]; !ok || e.MaxSeqNo > prev {
+			wantSeq[e.Identity] = e.MaxSeqNo
+		}
+	}
+	match, refreshed, resurrect := t.store.reconcileSyncVectorLocked(peer, wantSeq, now, t.health.isDeadLocked)
+	// Dead-health resurrection: a confirmed vector entry is the same "peer
+	// is still announcing this route" liveness signal as a wire-identical
+	// TTL refresh in UpdateRoute, so apply the same Dead-only eviction +
+	// Questionable reseed (table_mutation.go UpdateRoute / PR 11.21 P2#1).
+	// Without it a route kept fresh by the steady-state heartbeat would stay
+	// filtered from Lookup and announce until the slow safety full. Bad is
+	// deliberately NOT resurrected here — a vector match is wire-identical,
+	// mirroring the "reseed Bad only on a real wire change" contract.
+	for _, identity := range resurrect {
+		t.health.evictUplinkLocked(identity, peer)
+		state := t.health.ensureLocked(identity, peer, now)
+		state.Health = HealthQuestionable
+		// The Dead→Questionable flip makes the identity announceable again
+		// (projectIdentityLocked no longer skips it), so it is a real wire-
+		// projection change: journal it (JournalCauseHealthEvidence — the
+		// peer's continued announcement is positive liveness evidence) so
+		// cursor deltas re-add the route to OTHER peers, mirroring the
+		// Dead-bit-flip journaling in TickHealth. Without this the route is
+		// visible to local Lookup but the re-add would not reach peers with
+		// current cursors until the next safety/full sync.
+		t.markRouteChangedLocked(identity, JournalCauseHealthEvidence)
+	}
+	if len(resurrect) > 0 {
+		// Snapshot-visible state changed (Dead∪cooled subset shrank); mark
+		// dirty so the published Snapshot.Health republishes, as TickHealth
+		// does on a health transition.
+		t.dirty.Store(true)
+	}
+	return match, refreshed
+}
+
 // TickTTL removes expired routes from the table and cleans up stale
 // flap detection state. Should be called periodically (e.g., every
 // second or every few seconds).

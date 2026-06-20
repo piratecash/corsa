@@ -168,9 +168,9 @@ func TestRecordAndConsumeDigestSnapshot_RoundTrip(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "digest-abc", 7, now)
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "digest-abc", nil, 7, now)
 
-	gotDigest, gotCount, gotGen, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now.Add(1*time.Second))
+	gotDigest, _, gotCount, gotGen, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now.Add(1*time.Second))
 	if !ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=false for fresh entry")
 	}
@@ -186,7 +186,7 @@ func TestRecordAndConsumeDigestSnapshot_RoundTrip(t *testing.T) {
 
 	// Second consume must return ok=false — the entry was
 	// removed on the first read.
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now.Add(2*time.Second)); ok {
+	if _, _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now.Add(2*time.Second)); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true on second call; single-shot contract broken")
 	}
 }
@@ -197,11 +197,11 @@ func TestRecordAndConsumeDigestSnapshot_RoundTrip(t *testing.T) {
 func TestConsumeDigestSnapshot_TTLExpired(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "stale", 3, now)
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "stale", nil, 3, now)
 
 	// Walk past the TTL window.
 	after := now.Add(SessionDigestCacheTTL + time.Second)
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), after); ok {
+	if _, _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), after); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true past TTL window")
 	}
 
@@ -219,7 +219,7 @@ func TestConsumeDigestSnapshot_TTLExpired(t *testing.T) {
 // recorded snapshot returns ok=false without touching anything.
 func TestConsumeDigestSnapshot_AbsentReturnsFalse(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-never"), time.Now()); ok {
+	if _, _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-never"), time.Now()); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true for absent peer")
 	}
 }
@@ -231,10 +231,10 @@ func TestPurgeDigestSnapshot_RemovesEntry(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "digest-x", 1, now)
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-peer"), "digest-x", nil, 1, now)
 	tbl.PurgeDigestSnapshot(domaintest.ID("id-peer"))
 
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now); ok {
+	if _, _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-peer"), now); ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=true after Purge")
 	}
 }
@@ -247,8 +247,8 @@ func TestPruneExpiredDigestSnapshots_EvictsStaleOnly(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
 
-	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-fresh"), "fresh-digest", 1, now)
-	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-stale"), "stale-digest", 1, now.Add(-2*SessionDigestCacheTTL))
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-fresh"), "fresh-digest", nil, 1, now)
+	tbl.RecordPeerDigestSnapshot(domaintest.ID("id-stale"), "stale-digest", nil, 1, now.Add(-2*SessionDigestCacheTTL))
 
 	tbl.mu.Lock()
 	evicted := tbl.pruneExpiredDigestSnapshotsLocked(now)
@@ -263,7 +263,7 @@ func TestPruneExpiredDigestSnapshots_EvictsStaleOnly(t *testing.T) {
 	}
 
 	// And the fresh one is still consumable.
-	if _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-fresh"), now); !ok {
+	if _, _, _, _, ok := tbl.ConsumePeerDigestSnapshot(domaintest.ID("id-fresh"), now); !ok {
 		t.Fatal("fresh entry consumed as ok=false after prune")
 	}
 }
@@ -273,7 +273,7 @@ func TestPruneExpiredDigestSnapshots_EvictsStaleOnly(t *testing.T) {
 // etc.). An empty peer identity must not create stray entries.
 func TestRecordDigestSnapshot_EmptyPeerIsNoop(t *testing.T) {
 	tbl := NewTable(WithLocalOrigin(domaintest.ID("self")))
-	tbl.RecordPeerDigestSnapshot(domain.PeerIdentity{}, "x", 1, time.Now())
+	tbl.RecordPeerDigestSnapshot(domain.PeerIdentity{}, "x", nil, 1, time.Now())
 
 	tbl.mu.RLock()
 	cacheLen := tbl.digestCacheLenLocked()

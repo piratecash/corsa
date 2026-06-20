@@ -36,7 +36,7 @@ func TestOnPeerSessionEstablished_ReconnectArmsPendingSuppression(t *testing.T) 
 	// ok=true inside the hook — the precondition for emitting a digest
 	// and arming the pending window on reconnect.
 	now := time.Now().UTC()
-	svc.routingTable.RecordPeerDigestSnapshot(idPeerA, "deadbeef", 3, now)
+	svc.routingTable.RecordPeerDigestSnapshot(idPeerA, "deadbeef", nil, 3, now)
 
 	svc.onPeerSessionEstablished(idPeerA, []domain.Capability{
 		domain.CapMeshRelayV1,

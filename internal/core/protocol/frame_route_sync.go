@@ -72,11 +72,43 @@ const RouteSyncSummaryFrameType = "route_sync_summary_v1"
 // computed, RFC3339 in UTC. Used by the receiver as a freshness
 // hint in structured logs; not consulted for the match decision
 // itself.
+//
+// Entries is the Phase-0 scaling addition: the per-identity
+// (Identity, SeqNo) vector the hash in Digest summarises. It is
+// ADDITIVE and optional (omitempty) — a peer that predates this
+// field simply ignores it and falls back to the whole-table Digest
+// equality compare. When present, the receiver reconciles per
+// identity (routing.Table.ReconcileSyncVector): it refreshes the TTL
+// of every route-via-sender whose stored SeqNo matches a vector
+// entry (proven-current), and reports Match=true only when it holds
+// NO via-sender route the vector leaves unconfirmed (no stale). This
+// is what makes the digest match achievable under the K-cap, where a
+// single whole-table hash can never match because the receiver drops
+// the sender's cap-rejected routes. The vector localises the compare
+// to the agreed subset, so a converged pair exchanges only cheap
+// heartbeats and the byte-heavy full rebuild is reserved for genuine
+// stale-route divergence (and a slow safety cadence). See
+// docs/refactoring/scaling-to-dht-roadmap.md Phase 0.
 type RouteSyncDigestFrame struct {
-	Type                 string `json:"type"`
-	Digest               string `json:"digest"`
-	KnownIdentitiesCount uint32 `json:"known_identities_count"`
-	GeneratedAt          string `json:"generated_at"`
+	Type                 string                 `json:"type"`
+	Digest               string                 `json:"digest"`
+	KnownIdentitiesCount uint32                 `json:"known_identities_count"`
+	GeneratedAt          string                 `json:"generated_at"`
+	Entries              []RouteSyncDigestEntry `json:"entries,omitempty"`
+}
+
+// RouteSyncDigestEntry is one (Identity, SeqNo) pair of the version
+// vector carried in RouteSyncDigestFrame.Entries. Identity is the
+// 40-char lowercase hex of the destination PeerIdentity (the same
+// wire encoding announce frames use); SeqNo is the per-peer wire
+// SeqNo the sender announced to this peer for that identity (the
+// value the receiver stored as claim.SeqNo for claim.Uplink ==
+// sender, so the two line up on a current route). JSON keys are kept
+// short ("i"/"s") because the vector carries one entry per announced
+// identity and is sent on every heartbeat.
+type RouteSyncDigestEntry struct {
+	Identity string `json:"i"`
+	SeqNo    uint64 `json:"s"`
 }
 
 // RouteSyncSummaryFrame is the wire form of the digest comparison

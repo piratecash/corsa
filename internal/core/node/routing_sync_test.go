@@ -199,7 +199,7 @@ func TestRecordPeerDigestOnSessionClose_CachedAndConsumable(t *testing.T) {
 
 	svc.recordPeerDigestOnSessionClose(idPeerA)
 
-	digest, count, _, ok := svc.routingTable.ConsumePeerDigestSnapshot(idPeerA, time.Now().UTC())
+	digest, _, count, _, ok := svc.routingTable.ConsumePeerDigestSnapshot(idPeerA, time.Now().UTC())
 	if !ok {
 		t.Fatal("ConsumePeerDigestSnapshot returned ok=false after record")
 	}

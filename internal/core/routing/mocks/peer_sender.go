@@ -179,16 +179,16 @@ func (_c *MockPeerSender_SendRouteAnnounceV3_Call) RunAndReturn(run func(ctx con
 }
 
 // SendRouteSyncDigest provides a mock function for the type MockPeerSender
-func (_mock *MockPeerSender) SendRouteSyncDigest(ctx context.Context, peerAddress routing.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool {
-	ret := _mock.Called(ctx, peerAddress, digest, knownIdentities, generatedAt)
+func (_mock *MockPeerSender) SendRouteSyncDigest(ctx context.Context, peerAddress routing.PeerAddress, digest string, entries []routing.DigestEntry, knownIdentities uint32, generatedAt time.Time) bool {
+	ret := _mock.Called(ctx, peerAddress, digest, entries, knownIdentities, generatedAt)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SendRouteSyncDigest")
 	}
 
 	var r0 bool
-	if returnFunc, ok := ret.Get(0).(func(context.Context, routing.PeerAddress, string, uint32, time.Time) bool); ok {
-		r0 = returnFunc(ctx, peerAddress, digest, knownIdentities, generatedAt)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, routing.PeerAddress, string, []routing.DigestEntry, uint32, time.Time) bool); ok {
+		r0 = returnFunc(ctx, peerAddress, digest, entries, knownIdentities, generatedAt)
 	} else {
 		r0 = ret.Get(0).(bool)
 	}
@@ -204,13 +204,14 @@ type MockPeerSender_SendRouteSyncDigest_Call struct {
 //   - ctx context.Context
 //   - peerAddress routing.PeerAddress
 //   - digest string
+//   - entries []routing.DigestEntry
 //   - knownIdentities uint32
 //   - generatedAt time.Time
-func (_e *MockPeerSender_Expecter) SendRouteSyncDigest(ctx interface{}, peerAddress interface{}, digest interface{}, knownIdentities interface{}, generatedAt interface{}) *MockPeerSender_SendRouteSyncDigest_Call {
-	return &MockPeerSender_SendRouteSyncDigest_Call{Call: _e.mock.On("SendRouteSyncDigest", ctx, peerAddress, digest, knownIdentities, generatedAt)}
+func (_e *MockPeerSender_Expecter) SendRouteSyncDigest(ctx interface{}, peerAddress interface{}, digest interface{}, entries interface{}, knownIdentities interface{}, generatedAt interface{}) *MockPeerSender_SendRouteSyncDigest_Call {
+	return &MockPeerSender_SendRouteSyncDigest_Call{Call: _e.mock.On("SendRouteSyncDigest", ctx, peerAddress, digest, entries, knownIdentities, generatedAt)}
 }
 
-func (_c *MockPeerSender_SendRouteSyncDigest_Call) Run(run func(ctx context.Context, peerAddress routing.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time)) *MockPeerSender_SendRouteSyncDigest_Call {
+func (_c *MockPeerSender_SendRouteSyncDigest_Call) Run(run func(ctx context.Context, peerAddress routing.PeerAddress, digest string, entries []routing.DigestEntry, knownIdentities uint32, generatedAt time.Time)) *MockPeerSender_SendRouteSyncDigest_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -224,13 +225,17 @@ func (_c *MockPeerSender_SendRouteSyncDigest_Call) Run(run func(ctx context.Cont
 		if args[2] != nil {
 			arg2 = args[2].(string)
 		}
-		var arg3 uint32
+		var arg3 []routing.DigestEntry
 		if args[3] != nil {
-			arg3 = args[3].(uint32)
+			arg3 = args[3].([]routing.DigestEntry)
 		}
-		var arg4 time.Time
+		var arg4 uint32
 		if args[4] != nil {
-			arg4 = args[4].(time.Time)
+			arg4 = args[4].(uint32)
+		}
+		var arg5 time.Time
+		if args[5] != nil {
+			arg5 = args[5].(time.Time)
 		}
 		run(
 			arg0,
@@ -238,6 +243,7 @@ func (_c *MockPeerSender_SendRouteSyncDigest_Call) Run(run func(ctx context.Cont
 			arg2,
 			arg3,
 			arg4,
+			arg5,
 		)
 	})
 	return _c
@@ -248,7 +254,7 @@ func (_c *MockPeerSender_SendRouteSyncDigest_Call) Return(b bool) *MockPeerSende
 	return _c
 }
 
-func (_c *MockPeerSender_SendRouteSyncDigest_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool) *MockPeerSender_SendRouteSyncDigest_Call {
+func (_c *MockPeerSender_SendRouteSyncDigest_Call) RunAndReturn(run func(ctx context.Context, peerAddress routing.PeerAddress, digest string, entries []routing.DigestEntry, knownIdentities uint32, generatedAt time.Time) bool) *MockPeerSender_SendRouteSyncDigest_Call {
 	_c.Call.Return(run)
 	return _c
 }

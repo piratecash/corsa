@@ -48,6 +48,37 @@ const (
 	// contract.
 	ForcedFullSyncMultiplier = 10
 
+	// SafetyFullSyncMultiplier sets the slow safety-reconcile cadence for
+	// the Phase-0 version-vector heartbeat, as a multiple of the effective
+	// forced-full-sync interval. Once the digest can actually match in
+	// steady state (per-identity vector reconcile), the cheap heartbeat
+	// keeps routes fresh (receiver refreshes TTL of matching entries) and
+	// the byte-heavy full stops firing on stable peers. A stale route is
+	// still caught immediately (vector mismatch → match=false → full), but a
+	// route the receiver is MISSING because a best-effort delta was dropped
+	// would otherwise never reconcile. A full forced every
+	// SafetyFullSyncMultiplier × forced-full-interval (≈30 min at the 300s
+	// default) bounds that convergence gap regardless of match. It is
+	// deliberately slower than the TTL: route liveness is now maintained by
+	// the heartbeat's TTL refresh at the forced-full cadence (which still
+	// satisfies the refresh-interval invariant), NOT by this full.
+	SafetyFullSyncMultiplier = 6
+
+	// maxRouteSyncVectorEntries bounds how many (Identity, SeqNo) pairs the
+	// Phase-0 version vector may carry in a single route_sync_digest_v1
+	// frame so the wire line stays under the command-plane frame limit
+	// (protocol.MaxFrameLine, 128 KiB — the reader closes any frame above
+	// it). Each entry is ~74 bytes of JSON (`{"i":"<40 hex>","s":<≤20
+	// digits>}`), so 1500 entries (~111 KiB plus the base frame) keeps a
+	// comfortable margin below 128 KiB. Above this the heartbeat skips the
+	// vector and forces a chunked full sync instead: a partial vector would
+	// falsely mark the omitted identities stale on the receiver, and the
+	// per-identity reconcile simply does not apply at that table size — the
+	// structural overlay (scaling roadmap Phase 2+) is what scales further.
+	// The node-side buildRouteSyncDigestWire is the exact-size backstop for
+	// paths without this gate (reconnect cache).
+	maxRouteSyncVectorEntries = 1500
+
 	// MinForcedFullSyncInterval is the minimum time between forced full
 	// sync attempts for a single peer. Prevents flood when a peer is
 	// repeatedly marked NeedsFullResync.
@@ -266,10 +297,19 @@ type PeerSender interface {
 	// docs/protocol/route_sync.md). A mismatch / silence escalates to a full
 	// on the next deadline.
 	//
+	// entries is the Phase-0 version vector (the (Identity, SeqNo) pairs
+	// the digest hash summarises) carried in RouteSyncDigestFrame.Entries.
+	// It lets the receiver reconcile per identity (Table.ReconcileSyncVector)
+	// — refresh the TTL of routes it holds via this node whose SeqNo matches,
+	// and report match=true unless it holds a stale via-this-node route the
+	// vector left unconfirmed — instead of an all-or-nothing hash compare
+	// that can never match under the receiver's K-cap. A nil/empty vector is
+	// valid (the receiver falls back to the whole-table hash compare).
+	//
 	// Semantics of ctx, peerAddress, and the bool return value match
 	// SendAnnounceRoutes. Mocks regenerate from this interface via
 	// `make mocks`.
-	SendRouteSyncDigest(ctx context.Context, peerAddress PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool
+	SendRouteSyncDigest(ctx context.Context, peerAddress PeerAddress, digest string, entries []DigestEntry, knownIdentities uint32, generatedAt time.Time) bool
 }
 
 // AnnounceLoop runs periodic and triggered routing announcements. It
@@ -1322,14 +1362,44 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 						// a cheap re-heartbeat suffices. The heartbeat outcome is
 						// recorded by the route_sync_summary_v1 handler
 						// (ConfirmPeerDigestMatch / ClearPeerDigestSuppression).
-						if !prevConfirmed {
+						digest, vector, count := a.table.AnnounceDigestVectorFor(peer.Identity)
+						if len(vector) > maxRouteSyncVectorEntries {
+							// The version vector would not fit a single
+							// route_sync_digest_v1 frame under MaxFrameLine, so the
+							// per-identity reconcile cannot apply at this table
+							// size. Skip the heartbeat and force a chunked full this
+							// cycle so the peer still converges; vector silence
+							// resumes if the table shrinks below the budget. Sending
+							// a partial vector would falsely mark the omitted
+							// identities stale on the receiver, and shipping the
+							// oversized frame would be closed by the reader.
 							needsFull = true
+						} else {
+							if !prevConfirmed {
+								needsFull = true
+							}
+							a.MarkPeerDigestPending(peer.Identity, now, digest)
+							a.sender.SendRouteSyncDigest(ctx, peer.Address, digest, vector, count, now)
 						}
-						digest, count := a.table.AnnounceDigestFor(peer.Identity)
-						a.MarkPeerDigestPending(peer.Identity, now, digest)
-						a.sender.SendRouteSyncDigest(ctx, peer.Address, digest, count, now)
 					}
 				}
+			}
+
+			// Phase-0 safety reconcile: the version-vector heartbeat above
+			// can now actually match in steady state, so the byte-heavy full
+			// stops firing on stable peers (their learned routes are kept
+			// fresh by the receiver's per-entry TTL refresh). A stale route is
+			// caught immediately by a vector mismatch (match=false → full
+			// above), but a route the receiver is MISSING because a best-effort
+			// delta was dropped would never reconcile. Force a full on the slow
+			// SafetyFullSyncMultiplier cadence regardless of match so lost
+			// updates converge. Anchored on LastSuccessfulFullSyncAt (frozen
+			// while fulls are suppressed), so it measures time since the last
+			// real full, not since the last heartbeat.
+			if !needsFull && view.LastSentSnapshot != nil &&
+				!view.LastSuccessfulFullSyncAt.IsZero() &&
+				now.Sub(view.LastSuccessfulFullSyncAt) >= time.Duration(SafetyFullSyncMultiplier)*forcedFullSyncInterval {
+				needsFull = true
 			}
 
 			// Phase 0 short-circuit before the expensive scan: if the

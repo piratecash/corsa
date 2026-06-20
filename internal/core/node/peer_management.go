@@ -2986,7 +2986,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// shared with the inbound path via compareInboundDigest so this
 		// outbound arrival is no longer second-class (it previously
 		// skipped both the receiver-side TTL refresh and the counters).
-		localDigest, localCount, match := s.compareInboundDigest(session.peerIdentity, digestFrame.Digest)
+		localDigest, localCount, match := s.compareInboundDigest(session.peerIdentity, digestFrame.Digest, digestFrame.Entries)
 		summary := protocol.RouteSyncSummaryFrame{
 			Type:           protocol.RouteSyncSummaryFrameType,
 			Digest:         digestFrame.Digest,

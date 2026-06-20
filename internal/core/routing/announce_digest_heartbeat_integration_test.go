@@ -69,8 +69,8 @@ func TestAnnounceLoop_DigestHeartbeat_NoFullOnIntermediateTick(t *testing.T) {
 			mu.Unlock()
 			return true
 		}).Maybe()
-	m.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ routing.PeerAddress, digest string, _ uint32, _ time.Time) bool {
+	m.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ routing.PeerAddress, digest string, _ []routing.DigestEntry, _ uint32, _ time.Time) bool {
 			mu.Lock()
 			digestCalls++
 			lastDigest = digest
@@ -182,8 +182,8 @@ func TestAnnounceLoop_DigestHeartbeat_NoDigestForPeerWithoutRouteSyncCap(t *test
 			mu.Unlock()
 			return true
 		}).Maybe()
-	m.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, _ routing.PeerAddress, _ string, _ uint32, _ time.Time) bool {
+	m.EXPECT().SendRouteSyncDigest(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, _ routing.PeerAddress, _ string, _ []routing.DigestEntry, _ uint32, _ time.Time) bool {
 			mu.Lock()
 			digestCalls++
 			mu.Unlock()

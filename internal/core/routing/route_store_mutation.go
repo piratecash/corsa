@@ -1484,6 +1484,81 @@ func (s *routeStore) refreshViaLocked(via PeerIdentity, now time.Time) int {
 	return refreshed
 }
 
+// reconcileSyncVectorLocked is the version-vector counterpart of
+// refreshViaLocked (Phase-0 scaling). Instead of refreshing EVERY live
+// route via `peer`, it refreshes only the ones the peer's announce
+// vector confirms as current, and reports whether we hold any live
+// via-peer route the vector leaves unconfirmed (stale on our side).
+//
+// `want` maps Identity -> the wire SeqNo the peer currently announces to
+// us. A live via-peer claim whose stored SeqNo equals want[identity] is
+// proven-current and gets its TTL bumped. A live via-peer claim that is
+// absent from `want`, or carries a different SeqNo, is stale: it is NOT
+// refreshed (so it ages out via TickTTL) and flips match=false so the
+// sender escalates a full to reconcile. Identities present in `want`
+// that we do NOT hold via the peer (e.g. dropped by our K-cap) do not
+// affect match — they are the peer's offer we legitimately did not
+// adopt, which is exactly why a whole-table digest could never match
+// under the cap while this per-identity reconcile can.
+//
+// Like refreshViaLocked this does NOT journal a change or mark the
+// snapshot dirty: TTL is not a wire-projected field, so a refresh must
+// not fan out a spurious delta. Caller must hold t.mu (writer): mutates
+// ExpiresAt.
+//
+// A matching vector entry is the same "peer is still announcing this
+// route" liveness signal as the wire-identical TTL refresh UpdateRoute
+// handles, so a confirmed pair that is currently HealthDead must be
+// resurrected (evicted + reseeded Questionable) exactly as UpdateRoute
+// does — otherwise the heartbeat keeps a Dead route fresh while it stays
+// filtered from Lookup/announce until the slow safety full. The health
+// store lives on the Table, not here, so this collects the matched Dead
+// identities into `resurrect` and the Table-level wrapper applies the
+// eviction/reseed. `isDead` is the same callback the projection uses
+// (Direct claims never reach this loop — they are identity == peer and
+// skipped above).
+func (s *routeStore) reconcileSyncVectorLocked(peer PeerIdentity, want map[PeerIdentity]uint64, now time.Time, isDead func(identity, uplink PeerIdentity) bool) (match bool, refreshed int, resurrect []PeerIdentity) {
+	newExpiry := now.Add(s.defaultTTL)
+	match = true
+	for identity, bucket := range s.buckets {
+		if identity == peer {
+			// Split-horizon mirror of refreshViaLocked / SyncDigestFor: a
+			// route to the peer via itself is never part of the digested set.
+			continue
+		}
+		for i := range bucket {
+			claim := &bucket[i]
+			if claim.Uplink != peer {
+				continue
+			}
+			if claim.IsWithdrawn() || claim.IsExpired(now) || claim.ExpiresAt.IsZero() {
+				// Not part of the confirmed live set (mirror refreshViaLocked).
+				continue
+			}
+			if seq, ok := want[identity]; ok && seq == claim.SeqNo {
+				claim.ExpiresAt = newExpiry
+				refreshed++
+				if isDead != nil && isDead(identity, claim.Uplink) {
+					// Confirmed-current but health-Dead: hand to the caller for
+					// the UpdateRoute-style resurrection (evict + reseed
+					// Questionable). Rare (only confirmed-then-died pairs reach
+					// Dead), so the slice stays small.
+					resurrect = append(resurrect, identity)
+				}
+			} else {
+				// We hold a live via-peer route the peer's current vector does
+				// not confirm: stale on our side. Leave it to age out and
+				// signal the sender to reconcile with a full.
+				match = false
+			}
+			// Per-(Identity, Uplink) storage: at most one claim via peer per
+			// identity, so stop after the first match.
+			break
+		}
+	}
+	return match, refreshed, resurrect
+}
+
 // identityHexLocked returns the memoized lowercase-hex wire form of
 // identity, computing and caching it on first use. The hex is an
 // immutable function of the identity bytes, so a cache hit is always

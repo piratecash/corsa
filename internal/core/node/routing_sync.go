@@ -48,7 +48,80 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
+
+// routeSyncEntriesToWire converts the routing version vector to its wire
+// form (compact (Identity-hex, SeqNo) pairs) for RouteSyncDigestFrame.
+// A nil/empty vector yields nil so the frame omits the entries field
+// (omitempty), keeping the wire shape identical to a legacy digest.
+func routeSyncEntriesToWire(entries []routing.DigestEntry) []protocol.RouteSyncDigestEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]protocol.RouteSyncDigestEntry, len(entries))
+	for i, e := range entries {
+		out[i] = protocol.RouteSyncDigestEntry{Identity: e.Identity.String(), SeqNo: e.MaxSeqNo}
+	}
+	return out
+}
+
+// routeSyncEntriesFromWire is the inverse: it decodes the wire vector
+// into routing.DigestEntry for Table.ReconcileSyncVector. Malformed or
+// zero identities are dropped (a zero identity cannot match any stored
+// claim's uplink-keyed bucket anyway).
+func routeSyncEntriesFromWire(entries []protocol.RouteSyncDigestEntry) []routing.DigestEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]routing.DigestEntry, 0, len(entries))
+	for _, e := range entries {
+		id := domain.PeerIdentityFromWire(e.Identity)
+		if id.IsZero() {
+			continue
+		}
+		out = append(out, routing.DigestEntry{Identity: id, MaxSeqNo: e.SeqNo})
+	}
+	return out
+}
+
+// buildRouteSyncDigestWire marshals a route_sync_digest_v1 wire line,
+// dropping the Phase-0 version vector if including it would push the line
+// past protocol.MaxFrameLine (128 KiB — the command-plane reader closes
+// any frame above it). A large vector blows past that exactly at the
+// table size the vector is for (~122 KiB at 2000 entries), which would
+// both drop the heartbeat and break the peer's frame stream. The announce
+// loop already skips the vector above maxRouteSyncVectorEntries, but the
+// reconnect cache path (emitRouteSyncDigest) has no such gate, so this is
+// the hard backstop: on a drop the receiver degrades to the hash-only
+// compare and converges via the normal full fallback. The hash-only frame
+// is tiny and always fits.
+func buildRouteSyncDigestWire(digest string, entries []routing.DigestEntry, count uint32, generatedAt time.Time) (protocol.Frame, error) {
+	frame := protocol.RouteSyncDigestFrame{
+		Type:                 protocol.RouteSyncDigestFrameType,
+		Digest:               digest,
+		KnownIdentitiesCount: count,
+		GeneratedAt:          generatedAt.UTC().Format(time.RFC3339),
+		Entries:              routeSyncEntriesToWire(entries),
+	}
+	raw, err := protocol.MarshalRouteSyncDigestFrame(frame)
+	if err != nil {
+		return protocol.Frame{}, err
+	}
+	// +1 for the trailing newline the wire line carries, matching the
+	// receive-side line counter that enforces MaxFrameLine.
+	if len(raw)+1 > protocol.MaxFrameLine {
+		frame.Entries = nil
+		raw, err = protocol.MarshalRouteSyncDigestFrame(frame)
+		if err != nil {
+			return protocol.Frame{}, err
+		}
+	}
+	return protocol.Frame{
+		Type:    protocol.RouteSyncDigestFrameType,
+		RawLine: string(raw) + "\n",
+	}, nil
+}
 
 // emitRouteSyncDigest builds a RouteSyncDigestFrame from the
 // supplied cached snapshot fields and emits it to the peer
@@ -64,14 +137,8 @@ import (
 //
 // Production caller: onPeerSessionEstablished after a successful
 // ConsumePeerDigestSnapshot.
-func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, count uint32, generatedAt time.Time) {
-	frame := protocol.RouteSyncDigestFrame{
-		Type:                 protocol.RouteSyncDigestFrameType,
-		Digest:               digest,
-		KnownIdentitiesCount: count,
-		GeneratedAt:          generatedAt.UTC().Format(time.RFC3339),
-	}
-	raw, err := protocol.MarshalRouteSyncDigestFrame(frame)
+func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, entries []routing.DigestEntry, count uint32, generatedAt time.Time) {
+	wire, err := buildRouteSyncDigestWire(digest, entries, count, generatedAt)
 	if err != nil {
 		log.Warn().
 			Err(err).
@@ -79,10 +146,6 @@ func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, c
 			Str("digest", digest).
 			Msg("route_sync_digest_marshal_failed")
 		return
-	}
-	wire := protocol.Frame{
-		Type:    protocol.RouteSyncDigestFrameType,
-		RawLine: string(raw) + "\n",
 	}
 	if !s.sendFrameToIdentity(peer, wire, domain.CapMeshRouteSyncV1) {
 		log.Debug().
@@ -111,14 +174,8 @@ func (s *Service) emitRouteSyncDigest(peer domain.PeerIdentity, digest string, c
 // route_sync, or the transport dropped it) leaves the armed pending window to
 // elapse, so the next deadline escalates to a full — the documented safe
 // degradation, identical to a silent peer.
-func (s *Service) SendRouteSyncDigest(ctx context.Context, peerAddress domain.PeerAddress, digest string, knownIdentities uint32, generatedAt time.Time) bool {
-	frame := protocol.RouteSyncDigestFrame{
-		Type:                 protocol.RouteSyncDigestFrameType,
-		Digest:               digest,
-		KnownIdentitiesCount: knownIdentities,
-		GeneratedAt:          generatedAt.UTC().Format(time.RFC3339),
-	}
-	raw, err := protocol.MarshalRouteSyncDigestFrame(frame)
+func (s *Service) SendRouteSyncDigest(ctx context.Context, peerAddress domain.PeerAddress, digest string, entries []routing.DigestEntry, knownIdentities uint32, generatedAt time.Time) bool {
+	wire, err := buildRouteSyncDigestWire(digest, entries, knownIdentities, generatedAt)
 	if err != nil {
 		log.Warn().
 			Err(err).
@@ -126,10 +183,6 @@ func (s *Service) SendRouteSyncDigest(ctx context.Context, peerAddress domain.Pe
 			Str("digest", digest).
 			Msg("route_sync_digest_marshal_failed")
 		return false
-	}
-	wire := protocol.Frame{
-		Type:    protocol.RouteSyncDigestFrameType,
-		RawLine: string(raw) + "\n",
 	}
 	sent := s.dispatchAnnouncePlaneFrameWithCaps(ctx, peerAddress, wire, domain.CapMeshRouteSyncV1)
 	if sent {
@@ -162,8 +215,8 @@ func (s *Service) recordPeerDigestOnSessionClose(peer domain.PeerIdentity) {
 	// compares this against its own via-(this node) view; the two sets
 	// only line up when we send what we would announce to it. See
 	// Table.AnnounceDigestFor.
-	digest, count := s.routingTable.AnnounceDigestFor(peer)
-	s.routingTable.RecordPeerDigestSnapshot(peer, digest, count, time.Now().UTC())
+	digest, entries, count := s.routingTable.AnnounceDigestVectorFor(peer)
+	s.routingTable.RecordPeerDigestSnapshot(peer, digest, entries, count, time.Now().UTC())
 	log.Debug().
 		Str("peer_identity", peer.String()).
 		Str("digest", digest).
@@ -182,11 +235,38 @@ func (s *Service) recordPeerDigestOnSessionClose(peer domain.PeerIdentity) {
 // session writer (peer_management.go). Centralising the compare here keeps the
 // TTL refresh and the digests_compared / compare_match counters consistent
 // across BOTH paths; the earlier inline outbound copy did neither.
-func (s *Service) compareInboundDigest(peer domain.PeerIdentity, theirDigest string) (localDigest string, localCount uint32, match bool) {
+func (s *Service) compareInboundDigest(peer domain.PeerIdentity, theirDigest string, theirEntries []protocol.RouteSyncDigestEntry) (localDigest string, localCount uint32, match bool) {
+	s.digestStats.digestsCompared.Add(1)
+
+	// Phase-0 version-vector path: when the sender carries the (Identity,
+	// SeqNo) vector, reconcile per identity instead of an all-or-nothing
+	// hash compare. ReconcileSyncVector refreshes the TTL of every route via
+	// the peer whose SeqNo matches (proven-current) and returns match=true
+	// only when we hold NO stale via-peer route the vector left unconfirmed
+	// — so a route we never adopted under our K-cap (an offer absent from
+	// our buckets) does not spoil the match, which is exactly what lets the
+	// digest match in a dense capped mesh. localDigest/localCount carry the
+	// refreshed count for the diagnostic log only (the summary echoes the
+	// sender's hash for correlation, not this value).
+	if want := routeSyncEntriesFromWire(theirEntries); len(want) > 0 {
+		var refreshed int
+		match, refreshed = s.routingTable.ReconcileSyncVector(peer, want, time.Now().UTC())
+		if match {
+			s.digestStats.compareMatch.Add(1)
+		}
+		if refreshed > 0 {
+			log.Debug().
+				Str("sender_identity", peer.String()).
+				Int("refreshed", refreshed).
+				Bool("match", match).
+				Msg("route_sync_vector_reconciled_ttl")
+		}
+		return theirDigest, uint32(refreshed), match
+	}
+
+	// Legacy hash fallback for peers that predate the version vector.
 	localDigest, localCount = s.routingTable.SyncDigestFor(peer)
 	match = localDigest == theirDigest
-
-	s.digestStats.digestsCompared.Add(1)
 	if !match {
 		// A mismatch refreshes nothing — the sender follows with a full.
 		return localDigest, localCount, false
@@ -240,7 +320,7 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 		return
 	}
 
-	localDigest, localCount, match := s.compareInboundDigest(senderIdentity, frame.Digest)
+	localDigest, localCount, match := s.compareInboundDigest(senderIdentity, frame.Digest, frame.Entries)
 
 	summary := protocol.RouteSyncSummaryFrame{
 		Type:           protocol.RouteSyncSummaryFrameType,
