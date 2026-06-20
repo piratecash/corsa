@@ -141,6 +141,81 @@ func TestReview_v2_P1_2_UpdateRoute_UnchangedEvictsDeadHealth(t *testing.T) {
 	}
 }
 
+// TestUpdateRoute_BadPairWireIdenticalTTLRefreshKeepsBad — a Bad
+// health entry must NOT be evicted+reseeded to Questionable on a
+// wire-identical same-SeqNo TTL refresh (RouteUnchanged,
+// wireChanged=false). Unlike Dead, Bad stays selectable and on the
+// wire, so it needs no resurrection; reseeding it on every refresh
+// would flap it Questionable<->Bad and dominate health alloc churn
+// (the never-confirmable transit pair re-ages straight back to Bad).
+func TestUpdateRoute_BadPairWireIdenticalTTLRefreshKeepsBad(t *testing.T) {
+	tbl := routing.NewTable(routing.WithLocalOrigin(idNodeA))
+
+	if _, err := tbl.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerB,
+		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("seed UpdateRoute: %v", err)
+	}
+	tbl.ForceHealthForTest(idTargetX, idPeerB, routing.HealthBad)
+
+	// Same-SeqNo, same-hops reconfirmation: RouteUnchanged, wire-identical.
+	status, err := tbl.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerB,
+		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	})
+	if err != nil {
+		t.Fatalf("reconfirmation UpdateRoute: %v", err)
+	}
+	if status != routing.RouteUnchanged {
+		t.Fatalf("status = %v, want RouteUnchanged for same-SeqNo reconfirmation", status)
+	}
+
+	snap := tbl.HealthSnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("HealthSnapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].Health != routing.HealthBad {
+		t.Fatalf("Bad pair after wire-identical TTL refresh: Health = %s, want bad (must not reseed to Questionable)", snap[0].Health)
+	}
+}
+
+// TestUpdateRoute_BadPairRouteChangeReseedsQuestionable — when the
+// announced content actually changes (SeqNo bump → RouteAccepted,
+// wireChanged=true), re-verification IS warranted, so the stale Bad
+// entry is evicted and reseeded as Questionable for the probe loop.
+func TestUpdateRoute_BadPairRouteChangeReseedsQuestionable(t *testing.T) {
+	tbl := routing.NewTable(routing.WithLocalOrigin(idNodeA))
+
+	if _, err := tbl.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerB,
+		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("seed UpdateRoute: %v", err)
+	}
+	tbl.ForceHealthForTest(idTargetX, idPeerB, routing.HealthBad)
+
+	// SeqNo bump: RouteAccepted, wireChanged=true.
+	status, err := tbl.UpdateRoute(routing.RouteEntry{
+		Identity: idTargetX, Origin: idTargetX, NextHop: idPeerB,
+		Hops: 2, SeqNo: 2, Source: routing.RouteSourceAnnouncement,
+	})
+	if err != nil {
+		t.Fatalf("seqno-bump UpdateRoute: %v", err)
+	}
+	if status != routing.RouteAccepted {
+		t.Fatalf("status = %v, want RouteAccepted for SeqNo bump", status)
+	}
+
+	snap := tbl.HealthSnapshot()
+	if len(snap) != 1 {
+		t.Fatalf("HealthSnapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].Health != routing.HealthQuestionable {
+		t.Fatalf("Bad pair after route change: Health = %s, want questionable (re-verify on real change)", snap[0].Health)
+	}
+}
+
 // --- P2 #3: ResolveMatching is atomic and uplink-aware ---
 
 // TestReview_v2_P2_3_ResolveMatching_MismatchKeepsPending —

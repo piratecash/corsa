@@ -139,12 +139,25 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	// (review concerns P1#1 / P1#2 / 11.21 P2#1):
 	//
 	//   1. Resurrection eviction. When admission accepts a live
-	//      claim and a stale Bad/Dead health entry survives for
-	//      the same (Identity, Uplink) pair, drop it so the next
-	//      Lookup does not filter the fresh claim out under the
-	//      stale "do-not-select" label. Good/Questionable entries
-	//      are preserved — only the labels that exclude the pair
-	//      from selection need to be cleared.
+	//      claim and a stale health entry survives for the same
+	//      (Identity, Uplink) pair, drop it so the next Lookup does
+	//      not filter the fresh claim out under the stale label.
+	//      Dead and Bad differ in WHEN this fires:
+	//        - Dead is excluded from BOTH Lookup and the announce
+	//          projection, so any live reconfirmation (even a
+	//          wire-identical same-SeqNo TTL refresh) must evict it
+	//          to let the claim rejoin — PR 11.21 P2#1.
+	//        - Bad stays selectable (last-resort) and is still
+	//          emitted on the wire, so it needs no resurrection to
+	//          remain usable. Re-verifying it is warranted only when
+	//          the announced content actually changed (wireChanged).
+	//          Reseeding Bad on every wire-identical TTL refresh just
+	//          flaps it Questionable<->Bad with no benefit: a
+	//          never-confirmable transit pair (Confirmed cap in
+	//          applyIdleTick) re-ages straight back to Bad every
+	//          cycle, and that churn dominated questionableTargetsLocked
+	//          / ensureLocked allocation under steady-state load.
+	//      Good/Questionable entries are always preserved.
 	//   2. New-pair ensure. After step 1, if no health entry
 	//      exists for the pair (cold start OR just-evicted Bad/
 	//      Dead), create a fresh Questionable entry. Without this
@@ -178,7 +191,8 @@ func (t *Table) UpdateRoute(entry RouteEntry) (RouteUpdateStatus, error) {
 	// resurrection should fire.
 	if mutated && !entry.IsWithdrawn() {
 		existing := t.health.getLocked(entry.Identity, entry.NextHop)
-		if existing != nil && (existing.Health == HealthBad || existing.Health == HealthDead) {
+		if existing != nil && (existing.Health == HealthDead ||
+			(existing.Health == HealthBad && wireChanged)) {
 			t.health.evictUplinkLocked(entry.Identity, entry.NextHop)
 			existing = nil
 		}
