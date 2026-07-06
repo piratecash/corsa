@@ -89,7 +89,14 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	return store, nil
 }
 
-func (s *trustStore) remember(contact trustedContact) error {
+// remember adds or refreshes a contact. stored reports whether the
+// contact is present in the LIVE store on return — true even when only
+// the disk persist failed, because the in-memory write has already been
+// applied by then. Callers keying side effects to live trust state (the
+// known-set pin in trustContact) must act on stored, not err: err alone
+// cannot distinguish "conflict-path save failed" (not stored) from
+// "stored but save failed".
+func (s *trustStore) remember(contact trustedContact) (stored bool, err error) {
 	now := time.Now().UTC()
 
 	s.mu.Lock()
@@ -99,9 +106,9 @@ func (s *trustStore) remember(contact trustedContact) error {
 			contacts, conflicts := s.snapshotLocked()
 			s.mu.Unlock()
 			if err := s.saveSnapshot(contacts, conflicts); err != nil {
-				return err
+				return false, err
 			}
-			return errTrustConflict
+			return false, errTrustConflict
 		}
 
 		existing.LastSeenAt = now
@@ -109,7 +116,7 @@ func (s *trustStore) remember(contact trustedContact) error {
 		s.contacts[contact.Address] = existing
 		contacts, conflicts := s.snapshotLocked()
 		s.mu.Unlock()
-		return s.saveSnapshot(contacts, conflicts)
+		return true, s.saveSnapshot(contacts, conflicts)
 	}
 
 	contact.FirstSeenAt = now
@@ -117,12 +124,17 @@ func (s *trustStore) remember(contact trustedContact) error {
 	s.contacts[contact.Address] = contact
 	contacts, conflicts := s.snapshotLocked()
 	s.mu.Unlock()
-	return s.saveSnapshot(contacts, conflicts)
+	return true, s.saveSnapshot(contacts, conflicts)
 }
 
 // forget removes a contact from the trust store and persists the change.
-// Returns true if the contact existed and was removed.
-func (s *trustStore) forget(identity domain.PeerIdentity) (bool, error) {
+// removed reports whether the contact was deleted from the LIVE store —
+// true even when the subsequent disk persist failed, because the
+// in-memory delete has already been applied by then. Callers keying side
+// effects to live trust state (the known-set unpin in
+// deleteTrustedContactFrame) must act on removed even when err is
+// non-nil.
+func (s *trustStore) forget(identity domain.PeerIdentity) (removed bool, err error) {
 	address := identity.String()
 
 	s.mu.Lock()
@@ -136,7 +148,7 @@ func (s *trustStore) forget(identity domain.PeerIdentity) (bool, error) {
 	s.mu.Unlock()
 
 	if err := s.saveSnapshot(contacts, conflicts); err != nil {
-		return false, fmt.Errorf("persist trust store after forget %s: %w", address, err)
+		return true, fmt.Errorf("persist trust store after forget %s: %w", address, err)
 	}
 	return true, nil
 }

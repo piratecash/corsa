@@ -110,6 +110,13 @@ type queryRateLimit struct {
 	// limit is the per-window emission cap; injectable for tests
 	// (production = queryFanOutLimit).
 	limit int
+	// lastSweep stamps the last full-map sweep (sweepLocked). Lazy
+	// per-target trimming only reclaims a target's entry when that SAME
+	// target is queried again — a target queried once and never revisited
+	// keeps its slice forever, so identity churn grows the map without
+	// bound. The full sweep, throttled to one pass per window, reclaims
+	// those.
+	lastSweep time.Time
 }
 
 // newQueryRateLimit constructs a queryRateLimit with production
@@ -206,6 +213,22 @@ func (r *queryRateLimit) trimLocked(target domain.PeerIdentity, now time.Time) {
 	r.emits[target] = append([]time.Time(nil), stamps[idx:]...)
 }
 
+// sweepLocked drops every fully-expired target entry from emits, at most
+// once per window. Complements trimLocked (which only reclaims the entry
+// of the target currently being touched). Caller must hold r.mu.
+func (r *queryRateLimit) sweepLocked(now time.Time) {
+	if now.Sub(r.lastSweep) < r.window {
+		return
+	}
+	r.lastSweep = now
+	cutoff := now.Add(-r.window)
+	for target, stamps := range r.emits {
+		if len(stamps) == 0 || stamps[len(stamps)-1].Before(cutoff) {
+			delete(r.emits, target)
+		}
+	}
+}
+
 // HasCapacity reports whether at least one more emission for target
 // fits inside the sliding window. The caller should check this
 // before generating wire bytes — every HasCapacity call also trims
@@ -215,6 +238,7 @@ func (r *queryRateLimit) HasCapacity(target domain.PeerIdentity) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
+	r.sweepLocked(now)
 	r.trimLocked(target, now)
 	return len(r.emits[target]) < r.limit
 }
@@ -227,6 +251,7 @@ func (r *queryRateLimit) Record(target domain.PeerIdentity) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
+	r.sweepLocked(now)
 	r.trimLocked(target, now)
 	if len(r.emits[target]) >= r.limit {
 		return false

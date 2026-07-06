@@ -385,6 +385,12 @@ func (s *Server) authMiddleware() fiber.Handler {
 type authRateLimiter struct {
 	mu       sync.Mutex
 	failures map[string]*authFailureRecord
+	// lastCleanup throttles the opportunistic stale-entry sweep to one
+	// pass per authCleanupInterval. The limiter has no background
+	// goroutine, so cleanup piggybacks on the middleware entry points
+	// (isLockedOut / recordFailure) — otherwise records for IPs that
+	// never authenticate successfully accumulate forever.
+	lastCleanup time.Time
 }
 
 type authFailureRecord struct {
@@ -402,6 +408,7 @@ func newAuthRateLimiter() *authRateLimiter {
 func (al *authRateLimiter) isLockedOut(ip string) bool {
 	al.mu.Lock()
 	defer al.mu.Unlock()
+	al.maybeCleanupLocked(time.Now())
 	rec, ok := al.failures[ip]
 	if !ok {
 		return false
@@ -419,6 +426,7 @@ func (al *authRateLimiter) recordFailure(ip string) {
 	defer al.mu.Unlock()
 
 	now := time.Now()
+	al.maybeCleanupLocked(now)
 	rec, ok := al.failures[ip]
 	if !ok {
 		rec = &authFailureRecord{}
@@ -449,11 +457,20 @@ func (al *authRateLimiter) resetFailures(ip string) {
 	delete(al.failures, ip)
 }
 
-// cleanup removes stale entries to prevent unbounded map growth.
-func (al *authRateLimiter) cleanup() {
-	al.mu.Lock()
-	defer al.mu.Unlock()
-	now := time.Now()
+// authCleanupInterval throttles maybeCleanupLocked to one full sweep per
+// interval. Matches authWindowDuration: sweeping faster cannot free
+// anything new (attempts only expire on window boundaries).
+const authCleanupInterval = authWindowDuration
+
+// maybeCleanupLocked removes stale entries to prevent unbounded map
+// growth. At most one sweep per authCleanupInterval; caller MUST hold
+// al.mu. Invoked from the middleware entry points because the limiter
+// has no background goroutine of its own.
+func (al *authRateLimiter) maybeCleanupLocked(now time.Time) {
+	if now.Sub(al.lastCleanup) < authCleanupInterval {
+		return
+	}
+	al.lastCleanup = now
 	for ip, rec := range al.failures {
 		if now.After(rec.lockedUntil) && len(rec.attempts) == 0 {
 			delete(al.failures, ip)

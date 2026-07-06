@@ -94,6 +94,17 @@ type Service struct {
 	externalListenCached atomic.Pointer[string]
 	eventBus             *ebus.Bus
 	trust                *trustStore
+	// trustMutationMu serialises the {trust-store mutation, pin update}
+	// PAIRS in trustContact (remember → Pin) and deleteTrustedContactFrame
+	// (forget → Unpin). The two halves live in different lock domains
+	// (trustStore.mu vs knowledgeMu), so without this outer mutex a
+	// concurrent import could re-remember + re-Pin a contact between a
+	// delete's forget and its Unpin, ending with a TRUSTED contact whose
+	// key knowledge is evictable. Lock order: trustMutationMu →
+	// trustStore.mu / knowledgeMu; nothing acquires it while holding
+	// either inner lock. Held across trust-store file I/O — acceptable,
+	// both operations are rare user/sync actions.
+	trustMutationMu sync.Mutex
 	// startedAt is the wall-clock time NewService was called, captured
 	// once and read without a lock from the NodeStatus RPC handler. It
 	// powers the uptime_seconds field of the PIP-0001 integration
@@ -164,6 +175,9 @@ type Service struct {
 	pending           map[domain.PeerAddress][]pendingFrame
 	pendingKeys       map[pendingKey]struct{}
 	outbound          map[string]outboundDelivery
+	// lastOutboundTerminalSweep throttles sweepTerminalOutbound (guarded
+	// by deliveryMu like the map it sweeps).
+	lastOutboundTerminalSweep time.Time
 	relayRetry        map[string]relayAttempt
 	awaitingDelivered map[protocol.MessageID]*deliveryRetryEntry
 	awaitingSeenAck   map[protocol.MessageID]*seenAckRetryEntry
@@ -522,7 +536,20 @@ type Service struct {
 	//
 	// Key: domain.PeerAddress (raw, before resolveHealthAddress).
 	// Value: *atomic.Int64 (UnixNano of last recompute).
+	//
+	// Because the key is the RAW address, inbound overlay addresses with
+	// ephemeral ports mint a fresh entry per reconnect and no peer-domain
+	// sweep ever sees them — evictStalePeerActivity (bootstrapLoop tick)
+	// is the ONLY reclaim path. Deleting a live entry is harmless: the
+	// next markPeerWrite/markPeerRead re-creates it via LoadOrStore at
+	// the cost of one early recompute.
 	peerActivityNanos sync.Map
+
+	// peerActivitySweepNanos throttles evictStalePeerActivity to one full
+	// Range per peerActivityEvictInterval. Atomic (CAS-guarded) because
+	// the whole peerActivityNanos domain deliberately lives outside
+	// s.peerMu.
+	peerActivitySweepNanos atomic.Int64
 
 	// trafficMu protects lastTrafficSnap. Separate from s.peerMu because
 	// emitTrafficDeltas already releases s.peerMu (RLock) before comparing
@@ -970,6 +997,18 @@ type outboundDelivery struct {
 	Error         string
 }
 
+// outboundTerminalRetention is how long a terminal ("expired"/"failed")
+// outbound entry stays visible in pendingMessagesFrame before
+// sweepTerminalOutbound reclaims it. Terminal entries have no other
+// delete path: the receipt that clears live entries never arrives for a
+// failed delivery, so without the sweep a node repeatedly messaging an
+// unreachable recipient accretes one entry per message forever.
+const outboundTerminalRetention = time.Hour
+
+// outboundTerminalSweepInterval spaces sweepTerminalOutbound scans; the
+// bootstrapLoop tick (2 s) is far finer than the retention needs.
+const outboundTerminalSweepInterval = time.Minute
+
 type banEntry struct {
 	Score       int
 	Blacklisted time.Time
@@ -1133,11 +1172,24 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	boxKeys := map[string]string{}
 	pubKeys := map[string]string{}
 	boxSigs := map[string]string{}
+	// Trusted contacts are PINNED: their key knowledge must survive
+	// transit-identity churn (see boundedKnownIdentities.pinned).
 	for address, contact := range trust.trustedContacts() {
-		known.Add(address)
+		known.Pin(address)
 		boxKeys[address] = contact.BoxKey
 		pubKeys[address] = contact.PubKey
 		boxSigs[address] = contact.BoxSignature
+	}
+	// LRU eviction cascades into the key maps, which is what bounds THEM:
+	// every addKnownBoxKey/addKnownPubKey/addKnownBoxSig insert registers
+	// its address in `known` under the same knowledgeMu hold, so the key
+	// maps stay subsets of known ∪ pinned (≤ maxKnownIdentities + trust
+	// store size). Before this hook the three maps grew monotonically —
+	// one entry per identity ever seen on the network, never deleted.
+	known.onEvict = func(address string) {
+		delete(boxKeys, address)
+		delete(pubKeys, address)
+		delete(boxSigs, address)
 	}
 
 	// Delivery state (pending rings, outbound tracking, relay retry, receipts)
@@ -4554,8 +4606,42 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 		return protocol.Frame{Type: "error", Error: "address is required"}
 	}
 
-	_, err := s.trust.forget(identity)
-	if err != nil {
+	// trustMutationMu makes {forget, Unpin} atomic against trustContact's
+	// {remember, Pin} — see the field doc for the interleaving this stops.
+	s.trustMutationMu.Lock()
+	removed, err := s.trust.forget(identity)
+	if removed {
+		// Revoke the LRU-eviction exemption granted on trust (NewService
+		// seed or trustContact). Pins and trust-store rows use the same
+		// raw address string, so identity.String() — the key forget just
+		// removed — is exactly the pinned key. Without this, add/delete
+		// contact churn accretes eviction-immune entries for the life of
+		// the process, breaking the "capacity + trust store size" bound
+		// on s.known and the key maps. Keyed to removed, NOT to err ==
+		// nil: forget applies the in-memory delete before persisting, so
+		// on a persist failure the LIVE store has already dropped the
+		// contact and the pin must mirror that — the pinned set tracks
+		// live trust state, never the disk snapshot.
+		s.knowledgeMu.Lock()
+		s.known.Unpin(identity.String())
+		s.knowledgeMu.Unlock()
+	}
+	s.trustMutationMu.Unlock()
+
+	// Skip the runtime cleanup only when live state is untouched AND the
+	// operation failed (today unreachable: forget errors only after the
+	// in-memory delete). Everything else cleans up:
+	//   - removed, err == nil — the normal delete;
+	//   - removed, err != nil — persist failed, but the LIVE store has
+	//     already dropped the contact (same reasoning as Unpin above);
+	//     leaving queued/retrying outbound frames and the UI entry
+	//     behind would desync them from actual trust state. The persist
+	//     error still reaches the caller as an error frame below;
+	//   - !removed, err == nil — not in the trust store at all, which is
+	//     not an error: the contact may have originated from network
+	//     discovery rather than the trusted contacts list, and the
+	//     user's delete must still drop its queues and UI entry.
+	if err != nil && !removed {
 		return protocol.Frame{Type: "error", Error: err.Error()}
 	}
 
@@ -4564,10 +4650,11 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 	// should not be delivered.
 	s.dropPendingForRecipient(identity.String())
 
-	// If the contact was not in the trust store, that is not an error —
-	// it may have originated from network discovery rather than the
-	// trusted contacts list.
 	ebus.PublishContactRemoved(s.eventBus, identity)
+
+	if err != nil {
+		return protocol.Frame{Type: "error", Error: err.Error()}
+	}
 	return protocol.Frame{Type: "ok", Address: identity.String()}
 }
 
@@ -6715,6 +6802,10 @@ func (s *Service) addKnownBoxKey(address, boxKey string) {
 		s.knowledgeMu.Unlock()
 		log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
 	}()
+	// Register the RAW address in the bounded known set so the entry
+	// written below is always reachable by the set's eviction hook —
+	// the invariant that keeps s.boxKeys bounded (see NewService).
+	s.known.Add(address)
 	s.boxKeys[address] = boxKey
 }
 
@@ -6730,6 +6821,8 @@ func (s *Service) addKnownPubKey(address, pubKey string) {
 		s.knowledgeMu.Unlock()
 		log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
 	}()
+	// Same bounded-set registration as addKnownBoxKey — see NewService.
+	s.known.Add(address)
 	s.pubKeys[address] = pubKey
 }
 
@@ -6748,6 +6841,8 @@ func (s *Service) addKnownBoxSig(address, boxSig string) {
 		s.knowledgeMu.Unlock()
 		log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
 	}()
+	// Same bounded-set registration as addKnownBoxKey — see NewService.
+	s.known.Add(address)
 	s.boxSigs[address] = boxSig
 }
 
@@ -6784,24 +6879,60 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 		return
 	}
 
+	// Register the identity (and fire the first-sight IdentityAdded event)
+	// BEFORE entering the mutation mutex: ebus sync subscribers run inline
+	// in this goroutine, and one that re-enters a trust mutation path
+	// would self-deadlock on trustMutationMu. Known-set membership carries
+	// no trust semantics (see known_identities.go), so registering ahead
+	// of remember() is safe even if remember later fails. This must also
+	// stay ahead of Pin for the event's sake: Pin pre-adds the raw
+	// address, and when it equals identity.String() a later
+	// addKnownIdentity would see the identity as already known and
+	// suppress the event.
+	identityFingerprint := domain.PeerIdentityFromWire(address)
+	s.addKnownIdentity(identityFingerprint)
+
+	// trustMutationMu makes {remember, Pin} atomic against
+	// deleteTrustedContactFrame's {forget, Unpin} — see the field doc.
+	s.trustMutationMu.Lock()
 	before := s.trust.trustedContacts()
 	_, existed := before[address]
 
-	if err := s.trust.remember(trustedContact{
+	stored, rememberErr := s.trust.remember(trustedContact{
 		Address:      address,
 		PubKey:       pubKey,
 		BoxKey:       boxKey,
 		BoxSignature: boxSig,
 		Source:       source,
-	}); err != nil {
-		if errors.Is(err, errTrustConflict) {
+	})
+	if !stored {
+		s.trustMutationMu.Unlock()
+		if errors.Is(rememberErr, errTrustConflict) {
 			log.Warn().Str("address", address).Str("source", source).Msg("trust conflict")
+		} else if rememberErr != nil {
+			log.Warn().Err(rememberErr).Str("address", address).Str("source", source).Msg("trust store persist failed on conflict path")
 		}
 		return
 	}
 
-	identityFingerprint := domain.PeerIdentityFromWire(address)
-	s.addKnownIdentity(identityFingerprint)
+	// Pin the raw address: a newly trusted contact's key knowledge must be
+	// exempt from LRU eviction, same as the trust-store seeds in NewService.
+	// Keyed to stored, NOT to rememberErr == nil: the contact is in the
+	// LIVE store even when only the disk persist failed, and the pinned
+	// set mirrors live trust state (symmetric with the Unpin in
+	// deleteTrustedContactFrame). ONLY {remember, Pin} lives under
+	// trustMutationMu — everything that can publish ebus events
+	// (addKnownIdentity above, PublishContactAdded below) stays outside it.
+	s.knowledgeMu.Lock()
+	s.known.Pin(address)
+	s.knowledgeMu.Unlock()
+	s.trustMutationMu.Unlock()
+	if rememberErr != nil {
+		// Contact is live-trusted this session but its row did not reach
+		// disk; it will be missing after a restart unless re-imported.
+		log.Warn().Err(rememberErr).Str("address", address).Str("source", source).Msg("trust store persist failed; contact trusted in-memory only")
+	}
+
 	s.addKnownBoxKey(address, boxKey)
 	s.addKnownPubKey(address, pubKey)
 	if !existed {

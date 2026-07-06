@@ -40,6 +40,21 @@ type boundedKnownIdentities struct {
 	order    *list.List
 	nodes    map[string]*list.Element
 	capacity int
+	// pinned members are exempt from capacity eviction. Used for
+	// trust-store contacts: their box/pub-key knowledge must never be
+	// dropped by transit-identity churn (a trusted contact's DM could
+	// otherwise fail sender verification until the next contact sync).
+	// Pin on trust (NewService seed / trustContact), Unpin on revoke
+	// (deleteTrustedContactFrame → trust.forget) — the set mirrors the
+	// live trust store, which is what keeps it (and thus the whole
+	// bound) at "capacity + current trust store size".
+	pinned map[string]struct{}
+	// onEvict, when non-nil, runs for every address dropped by capacity
+	// eviction. It executes under the caller's knowledgeMu hold — keep it
+	// to cheap map writes. Used to keep the knowledgeMu-domain key maps
+	// (boxKeys / pubKeys / boxSigs) subsets of this set, which is what
+	// makes THEIR growth bounded too.
+	onEvict func(address string)
 }
 
 func newBoundedKnownIdentities(capacity int) *boundedKnownIdentities {
@@ -49,6 +64,7 @@ func newBoundedKnownIdentities(capacity int) *boundedKnownIdentities {
 	return &boundedKnownIdentities{
 		order:    list.New(),
 		nodes:    make(map[string]*list.Element),
+		pinned:   make(map[string]struct{}),
 		capacity: capacity,
 	}
 }
@@ -67,6 +83,38 @@ func (b *boundedKnownIdentities) Add(address string) bool {
 	}
 	b.nodes[address] = b.order.PushBack(address)
 	return true
+}
+
+// Pin marks address as exempt from capacity eviction (adding it first if
+// absent). Membership above capacity is tolerated when everything else is
+// pinned — the pinned set is bounded by the persistent trust store.
+func (b *boundedKnownIdentities) Pin(address string) {
+	if address == "" {
+		return
+	}
+	b.pinned[address] = struct{}{}
+	b.Add(address)
+}
+
+// Unpin removes the eviction exemption. The address stays a regular LRU
+// member and is reclaimed by ordinary capacity eviction once it ages out
+// — matching "network-learned knowledge" semantics for an ex-contact.
+// No-op when the address was never pinned.
+//
+// Pins are the only way membership exceeds capacity (Add tolerates the
+// overshoot when everything evictable is pinned), and Add reclaims at
+// most one entry per insert — never enough to shrink an oversized set.
+// So Unpin, the only operation that turns an over-capacity set drainable
+// again, drains it back to the bound here.
+func (b *boundedKnownIdentities) Unpin(address string) {
+	delete(b.pinned, address)
+	for len(b.nodes) > b.capacity {
+		before := len(b.nodes)
+		b.evictOldestLocked()
+		if len(b.nodes) == before {
+			return // everything remaining is pinned — nothing to drain
+		}
+	}
 }
 
 // Has reports membership without affecting recency.
@@ -89,14 +137,21 @@ func (b *boundedKnownIdentities) Len() int {
 	return len(b.nodes)
 }
 
-// evictOldestLocked drops the least-recently-used member. The Locked suffix
-// matches the project convention even though synchronisation is the caller's
-// knowledgeMu, not an internal mutex.
+// evictOldestLocked drops the least-recently-used non-pinned member and
+// fires onEvict for it. The Locked suffix matches the project convention
+// even though synchronisation is the caller's knowledgeMu, not an
+// internal mutex.
 func (b *boundedKnownIdentities) evictOldestLocked() {
-	oldest := b.order.Front()
-	if oldest == nil {
+	for el := b.order.Front(); el != nil; el = el.Next() {
+		address := el.Value.(string)
+		if _, ok := b.pinned[address]; ok {
+			continue
+		}
+		b.order.Remove(el)
+		delete(b.nodes, address)
+		if b.onEvict != nil {
+			b.onEvict(address)
+		}
 		return
 	}
-	b.order.Remove(oldest)
-	delete(b.nodes, oldest.Value.(string))
 }

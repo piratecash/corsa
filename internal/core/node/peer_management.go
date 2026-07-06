@@ -72,6 +72,12 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			s.evictOrphanedHealthEntries()
 			s.evictOrphanedPeerMetadata()
 			s.evictStaleInboundConns()
+			// Raw-address activity throttle map: no other sweep reaches
+			// it (raw keys never match the health-address keys above).
+			s.evictStalePeerActivity(time.Now().UnixNano())
+			// Terminal outbound delivery states have no event-driven
+			// delete (no receipt ever arrives for a failed delivery).
+			s.sweepTerminalOutbound(time.Now().UTC())
 			// Periodic cleanup for the route-quarantine state machine:
 			// drop expired peerQuarantine entries whose recidivism
 			// window has elapsed, and prune peerDisconnectHistory
@@ -328,6 +334,7 @@ func (s *Service) evictStalePeers() {
 	// reconnected, score improved, etc.).
 	// ---------------------------------------------------------------
 	var evicted []domain.PeerAddress
+	var evictIdentities []domain.PeerIdentity
 
 	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -364,6 +371,9 @@ func (s *Service) evictStalePeers() {
 			if !lastSuccess.IsZero() && now.Sub(lastSuccess) > peerEvictStaleWindow {
 				delete(s.health, peer.Address)
 				delete(s.peerTypes, peer.Address)
+				if id := s.peerIDs[peer.Address]; !id.IsZero() {
+					evictIdentities = append(evictIdentities, id)
+				}
 				delete(s.peerIDs, peer.Address)
 				delete(s.peerVersions, peer.Address)
 				delete(s.peerBuilds, peer.Address)
@@ -376,20 +386,59 @@ func (s *Service) evictStalePeers() {
 		kept = append(kept, peer)
 	}
 	s.peers = kept
+	// Filter to identities whose LAST peerIDs anchor was just removed —
+	// must happen under the same peerMu hold as the deletions, before
+	// the identity → address association is unrecoverable.
+	evictIdentities = s.orphanedIdentitiesLocked(evictIdentities)
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_released").Msg("peer_mu_writer")
 
-	// Observed-IP hint history is ipState-domain — drop the evicted
-	// addresses' entries under a standalone ipStateMu hold (taken
-	// after peerMu is released; never the reverse order). Without
+	// Observed-IP hint history and observed-address votes are
+	// ipState-domain — drop the evicted addresses' entries (and fully
+	// orphaned identities' votes) under a standalone ipStateMu hold
+	// (taken after peerMu is released; never the reverse order). Without
 	// this the hint history outlived every other per-address record
-	// (memory-leak audit, 2026-06).
+	// (memory-leak audit, 2026-06), and observedAddrs votes outlived
+	// the peerIDs entry that markPeerDisconnected needs to resolve them.
 	if len(evicted) > 0 {
 		s.ipStateMu.Lock()
 		for _, addr := range evicted {
 			delete(s.observedIPHistoryByPeer, addr)
 		}
+		for _, id := range evictIdentities {
+			delete(s.observedAddrs, id)
+		}
 		s.ipStateMu.Unlock()
+	}
+
+	// Drop the evicted peers' pending rings. Eviction requires 24 h
+	// (peerEvictStaleWindow) without a successful connection while every
+	// queued frame is dead after pendingFrameTTL (5 min) anyway, so the
+	// frames are undeliverable — but without this drop the rings (and
+	// their s.pendingKeys entries, counted against maxPendingFramesTotal)
+	// survive forever: flushPendingPeerFrames only prunes on a session
+	// (re-)establish that will never come, and evictOrphanedHealthEntries
+	// only scans s.health rows, which this sweep just deleted.
+	// deliveryMu is taken standalone after peerMu is released (canonical
+	// order peerMu → deliveryMu → statusMu).
+	if len(evicted) > 0 {
+		log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_wait").Msg("delivery_mu_writer")
+		s.deliveryMu.Lock()
+		log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_held").Msg("delivery_mu_writer")
+		dropped := false
+		for _, addr := range evicted {
+			if _, ok := s.pending[addr]; ok {
+				s.capPendingRingLocked(addr, 0)
+				dropped = true
+			}
+		}
+		if dropped {
+			s.statusMu.Lock()
+			s.refreshAggregatePendingLocked()
+			s.statusMu.Unlock()
+		}
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "evictStalePeers").Str("phase", "lock_released").Msg("delivery_mu_writer")
 	}
 
 	// Remove evicted peers from PeerProvider so they no longer
@@ -399,6 +448,32 @@ func (s *Service) evictStalePeers() {
 			s.peerProvider.Remove(addr)
 		}
 	}
+}
+
+// orphanedIdentitiesLocked returns the subset of ids that no longer
+// resolve through ANY surviving s.peerIDs entry. Caller must hold
+// s.peerMu (write) and must have already applied its peerIDs deletions —
+// this is the last moment the identity → vote association is knowable,
+// because the only event-driven observedAddrs delete
+// (markPeerDisconnected) resolves the identity through s.peerIDs.
+// Identities still anchored by another live address keep their vote.
+// The caller then drops the returned identities' observedAddrs entries
+// under its ipStateMu section.
+func (s *Service) orphanedIdentitiesLocked(ids []domain.PeerIdentity) []domain.PeerIdentity {
+	if len(ids) == 0 {
+		return nil
+	}
+	live := make(map[domain.PeerIdentity]struct{}, len(s.peerIDs))
+	for _, id := range s.peerIDs {
+		live[id] = struct{}{}
+	}
+	orphaned := ids[:0]
+	for _, id := range ids {
+		if _, ok := live[id]; !ok {
+			orphaned = append(orphaned, id)
+		}
+	}
+	return orphaned
 }
 
 // evictOrphanedHealthEntries removes health map entries for inbound-only
@@ -473,6 +548,7 @@ func (s *Service) evictOrphanedHealthEntries() {
 	}
 
 	var evictedAddrs []domain.PeerAddress
+	var evictIdentities []domain.PeerIdentity
 	for _, addr := range candidates {
 		health := s.health[addr]
 		if health == nil || health.Connected {
@@ -489,11 +565,22 @@ func (s *Service) evictOrphanedHealthEntries() {
 		}
 		delete(s.health, addr)
 		delete(s.peerTypes, addr)
+		if id := s.peerIDs[addr]; !id.IsZero() {
+			evictIdentities = append(evictIdentities, id)
+		}
 		delete(s.peerIDs, addr)
 		delete(s.peerVersions, addr)
 		delete(s.peerBuilds, addr)
 		delete(s.persistedMeta, addr)
-		delete(s.pending, addr)
+		// Empty the pending ring through the shared helper rather than a
+		// bare delete(s.pending, addr): every queued frame owns an entry
+		// in the s.pendingKeys dedup set (and send_message frames an
+		// s.outbound record). A wholesale map delete strands those keys
+		// forever — no later path can reach them once the queue is gone —
+		// permanently eroding the maxPendingFramesTotal budget and making
+		// a returning peer's re-queue hit the "already queued" branch
+		// without any frame actually queued.
+		s.capPendingRingLocked(addr, 0)
 		delete(s.metaOrphanFirstSeen, addr)
 		evictedAddrs = append(evictedAddrs, addr)
 	}
@@ -503,20 +590,26 @@ func (s *Service) evictOrphanedHealthEntries() {
 		s.refreshAggregateStatusLocked()
 		s.statusMu.Unlock()
 	}
+	// Must run under the peerMu hold, while the surviving s.peerIDs
+	// entries are still consistent with the deletions above.
+	evictIdentities = s.orphanedIdentitiesLocked(evictIdentities)
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "evictOrphanedHealthEntries").Str("phase", "lock_released").Msg("peer_mu_writer")
 
-	// Observed-IP hint history is ipState-domain — standalone hold
-	// AFTER peerMu/deliveryMu are released (canonical order keeps
-	// ipStateMu innermost; a standalone acquisition avoids adding a
-	// deliveryMu↔ipStateMu edge entirely). See the memory-leak audit
-	// note on evictOrphanedPeerMetadata.
+	// Observed-IP hint history and observed-address votes are
+	// ipState-domain — standalone hold AFTER peerMu/deliveryMu are
+	// released (canonical order keeps ipStateMu innermost; a standalone
+	// acquisition avoids adding a deliveryMu↔ipStateMu edge entirely).
+	// See the memory-leak audit note on evictOrphanedPeerMetadata.
 	if evicted > 0 {
 		s.ipStateMu.Lock()
 		for _, addr := range evictedAddrs {
 			delete(s.observedIPHistoryByPeer, addr)
+		}
+		for _, id := range evictIdentities {
+			delete(s.observedAddrs, id)
 		}
 		s.ipStateMu.Unlock()
 	}
@@ -608,6 +701,14 @@ func (s *Service) evictOrphanedPeerMetadata() {
 	}
 
 	var evictObserved []domain.PeerAddress
+	// Identities whose LAST address anchor is evicted below must also drop
+	// their observedAddrs vote: the only other delete site
+	// (markPeerDisconnected) resolves the identity through s.peerIDs[addr],
+	// which this sweep is about to remove — after that the vote is
+	// unreachable forever. Seen in practice via the CM setup-failure path,
+	// which records the vote (onCMSessionEstablished) but never reaches
+	// markPeerDisconnected.
+	var evictIdentities []domain.PeerIdentity
 	evicted := 0
 	for addr := range candidates {
 		anchored := false
@@ -635,6 +736,9 @@ func (s *Service) evictOrphanedPeerMetadata() {
 			continue
 		}
 		delete(s.peerTypes, addr)
+		if id := s.peerIDs[addr]; !id.IsZero() {
+			evictIdentities = append(evictIdentities, id)
+		}
 		delete(s.peerIDs, addr)
 		delete(s.peerVersions, addr)
 		delete(s.peerBuilds, addr)
@@ -643,9 +747,15 @@ func (s *Service) evictOrphanedPeerMetadata() {
 		evicted++
 	}
 	if len(evictObserved) > 0 {
+		// Keep votes for identities that still resolve through another
+		// (surviving) address — only fully orphaned identities lose theirs.
+		evictIdentities = s.orphanedIdentitiesLocked(evictIdentities)
 		s.ipStateMu.Lock()
 		for _, addr := range evictObserved {
 			delete(s.observedIPHistoryByPeer, addr)
+		}
+		for _, id := range evictIdentities {
+			delete(s.observedAddrs, id)
 		}
 		s.ipStateMu.Unlock()
 	}
@@ -3428,6 +3538,40 @@ func (s *Service) peerActivityNeedsRecompute(address domain.PeerAddress, nowNano
 		return false
 	}
 	return last.CompareAndSwap(prev, nowNano)
+}
+
+// peerActivityEvictInterval / peerActivityEvictWindow drive
+// evictStalePeerActivity: at most one full sweep per interval, dropping
+// entries idle longer than the window. The window only has to be long
+// enough that an ACTIVE peer's entry is never churned (useful traffic
+// refreshes the timestamp on every recompute, i.e. at least once per
+// markPeerStateInterval while frames flow); idle entries — dominated by
+// never-returning ephemeral inbound addresses — are pure residue.
+const (
+	peerActivityEvictInterval = time.Minute
+	peerActivityEvictWindow   = 10 * time.Minute
+)
+
+// evictStalePeerActivity reclaims peerActivityNanos entries whose last
+// recompute is older than peerActivityEvictWindow. The map is keyed by
+// RAW address (see the field doc), so ephemeral inbound ports accumulate
+// one entry per reconnect and no other sweep covers them. Runs lock-free,
+// matching the domain: a racing peerActivityNeedsRecompute may lose its
+// CAS'd timestamp to our Delete, which merely forces that peer's next
+// recompute one interval early.
+func (s *Service) evictStalePeerActivity(nowNano int64) {
+	lastSweep := s.peerActivitySweepNanos.Load()
+	if nowNano-lastSweep < int64(peerActivityEvictInterval) ||
+		!s.peerActivitySweepNanos.CompareAndSwap(lastSweep, nowNano) {
+		return
+	}
+	cutoff := nowNano - int64(peerActivityEvictWindow)
+	s.peerActivityNanos.Range(func(key, value any) bool {
+		if value.(*atomic.Int64).Load() < cutoff {
+			s.peerActivityNanos.Delete(key)
+		}
+		return true
+	})
 }
 
 func (s *Service) markPeerWrite(address domain.PeerAddress, frame protocol.Frame) {

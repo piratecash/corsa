@@ -2006,6 +2006,45 @@ func (s *Service) markOutboundTerminalLocked(frame protocol.Frame, status, errTe
 	s.outbound[frame.ID] = state
 }
 
+// sweepTerminalOutbound reclaims s.outbound entries stuck in a terminal
+// status ("expired"/"failed") for longer than outboundTerminalRetention.
+// Live statuses (queued/retrying) are cleared by receipt arrival, channel
+// send, ring eviction or recipient removal; terminal ones reach none of
+// those paths and would otherwise accumulate one per undeliverable
+// message for the life of the process. Runs from bootstrapLoop.
+func (s *Service) sweepTerminalOutbound(now time.Time) {
+	log.Trace().Str("site", "sweepTerminalOutbound").Str("phase", "lock_wait").Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "sweepTerminalOutbound").Str("phase", "lock_held").Msg("delivery_mu_writer")
+	defer func() {
+		s.deliveryMu.Unlock()
+		log.Trace().Str("site", "sweepTerminalOutbound").Str("phase", "lock_released").Msg("delivery_mu_writer")
+	}()
+
+	if !s.lastOutboundTerminalSweep.IsZero() && now.Sub(s.lastOutboundTerminalSweep) < outboundTerminalSweepInterval {
+		return
+	}
+	s.lastOutboundTerminalSweep = now
+
+	removed := 0
+	for id, ob := range s.outbound {
+		if ob.Status != "expired" && ob.Status != "failed" {
+			continue
+		}
+		staleSince := ob.LastAttemptAt
+		if staleSince.IsZero() {
+			staleSince = ob.QueuedAt
+		}
+		if staleSince.IsZero() || now.Sub(staleSince) > outboundTerminalRetention {
+			delete(s.outbound, id)
+			removed++
+		}
+	}
+	if removed > 0 {
+		log.Debug().Int("removed", removed).Msg("outbound_terminal_entries_swept")
+	}
+}
+
 func (s *Service) clearOutboundQueued(messageID string) {
 	if strings.TrimSpace(messageID) == "" {
 		return

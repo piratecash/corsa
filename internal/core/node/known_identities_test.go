@@ -120,3 +120,101 @@ func TestBoundedKnownIdentities_StaysBoundedUnderChurn(t *testing.T) {
 		t.Fatal("most-recent key must be present")
 	}
 }
+
+func TestBoundedKnownIdentities_PinnedNeverEvicted(t *testing.T) {
+	b := newBoundedKnownIdentities(3)
+	b.Pin("contact")
+	for i := 0; i < 100; i++ {
+		b.Add(fmt.Sprintf("transit-%d", i))
+	}
+	if !b.Has("contact") {
+		t.Fatal("pinned member must survive sustained churn")
+	}
+	if b.Len() != 3 {
+		t.Fatalf("membership must stay at capacity, got %d", b.Len())
+	}
+}
+
+func TestBoundedKnownIdentities_OnEvictCascades(t *testing.T) {
+	keys := map[string]string{}
+	b := newBoundedKnownIdentities(2)
+	b.onEvict = func(address string) { delete(keys, address) }
+
+	b.Add("a")
+	keys["a"] = "key-a"
+	b.Add("b")
+	keys["b"] = "key-b"
+	b.Add("c") // evicts "a"
+	keys["c"] = "key-c"
+
+	if _, ok := keys["a"]; ok {
+		t.Fatal("onEvict must remove the evicted member's key-map entry")
+	}
+	if _, ok := keys["b"]; !ok {
+		t.Fatal("surviving member's key-map entry must remain")
+	}
+}
+
+func TestBoundedKnownIdentities_PinToleratesOverCapacity(t *testing.T) {
+	b := newBoundedKnownIdentities(2)
+	b.Pin("p1")
+	b.Pin("p2")
+	b.Pin("p3") // pinned membership may exceed capacity
+	if !b.Has("p1") || !b.Has("p2") || !b.Has("p3") {
+		t.Fatal("all pinned members must be present even above capacity")
+	}
+}
+
+func TestBoundedKnownIdentities_UnpinRestoresEvictability(t *testing.T) {
+	b := newBoundedKnownIdentities(3)
+	b.Pin("contact")
+	b.Unpin("contact")
+	for i := 0; i < 100; i++ {
+		b.Add(fmt.Sprintf("transit-%d", i))
+	}
+	if b.Has("contact") {
+		t.Fatal("unpinned member must become evictable again")
+	}
+	if b.Len() != 3 {
+		t.Fatalf("membership must stay at capacity after unpin, got %d", b.Len())
+	}
+	// Re-pinning after unpin must protect again (trust re-granted).
+	b.Pin("contact2")
+	for i := 0; i < 100; i++ {
+		b.Add(fmt.Sprintf("churn-%d", i))
+	}
+	if !b.Has("contact2") {
+		t.Fatal("re-pinned member must survive churn")
+	}
+}
+
+func TestBoundedKnownIdentities_UnpinDrainsOverCapacity(t *testing.T) {
+	b := newBoundedKnownIdentities(2)
+	b.Pin("p1")
+	b.Pin("p2")
+	b.Pin("p3") // membership 3 > capacity 2, all pinned
+	b.Unpin("p1")
+	if b.Len() != 2 {
+		t.Fatalf("unpin must drain membership back to capacity, got %d", b.Len())
+	}
+	if b.Has("p1") {
+		t.Fatal("the only unpinned member must be the one drained")
+	}
+	if !b.Has("p2") || !b.Has("p3") {
+		t.Fatal("pinned members must survive the drain")
+	}
+
+	// Unpin with everything else still pinned above capacity must not spin:
+	// p2/p3 pinned, capacity 1.
+	b2 := newBoundedKnownIdentities(1)
+	b2.Pin("q1")
+	b2.Pin("q2")
+	b2.Pin("q3")
+	b2.Unpin("q2")
+	if b2.Len() != 2 {
+		t.Fatalf("drain must stop once only pinned members remain over capacity, got %d", b2.Len())
+	}
+	if b2.Has("q2") {
+		t.Fatal("q2 must have been drained")
+	}
+}

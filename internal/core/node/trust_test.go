@@ -30,11 +30,11 @@ func TestForgetRemovesContact(t *testing.T) {
 	}
 
 	// Add two contacts.
-	if err := store.remember(trustedContact{Address: aaa.String(), PubKey: "pk-a", BoxKey: "bk-a"}); err != nil {
-		t.Fatalf("remember aaa: %v", err)
+	if stored, err := store.remember(trustedContact{Address: aaa.String(), PubKey: "pk-a", BoxKey: "bk-a"}); err != nil || !stored {
+		t.Fatalf("remember aaa: stored=%v err=%v", stored, err)
 	}
-	if err := store.remember(trustedContact{Address: bbb.String(), PubKey: "pk-b", BoxKey: "bk-b"}); err != nil {
-		t.Fatalf("remember bbb: %v", err)
+	if stored, err := store.remember(trustedContact{Address: bbb.String(), PubKey: "pk-b", BoxKey: "bk-b"}); err != nil || !stored {
+		t.Fatalf("remember bbb: stored=%v err=%v", stored, err)
 	}
 
 	// Forget aaa.
@@ -106,8 +106,8 @@ func TestForgetClearsConflict(t *testing.T) {
 	ccc := domaintest.ID("ccc")
 
 	// Add a contact then trigger a conflict by remembering with different keys.
-	_ = store.remember(trustedContact{Address: ccc.String(), PubKey: "pk-c1", BoxKey: "bk-c1"})
-	_ = store.remember(trustedContact{Address: ccc.String(), PubKey: "pk-c2", BoxKey: "bk-c2"}) // conflict
+	_, _ = store.remember(trustedContact{Address: ccc.String(), PubKey: "pk-c1", BoxKey: "bk-c1"})
+	_, _ = store.remember(trustedContact{Address: ccc.String(), PubKey: "pk-c2", BoxKey: "bk-c2"}) // conflict
 
 	store.mu.RLock()
 	_, hasConflict := store.conflicts[ccc.String()]
