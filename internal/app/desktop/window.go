@@ -756,20 +756,25 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 	}
 }
 
+// handleMessageSubmitShortcut sends the message on a bare Enter/Return
+// press. The filters deliberately do NOT declare Optional key.ModShift:
+// this handler runs before the editor's Update in the frame, and in
+// Gio's router the first matching filter consumes a key event. With
+// ModShift optional here, Shift+Enter was matched, consumed, and then
+// discarded — the editor never saw the key, so no newline was inserted.
+// Leaving Shift out of the filter lets Shift+Enter fall through to the
+// editor's own Enter filter, which inserts "\n" (Submit is false).
 func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
 	for {
 		ev, ok := gtx.Event(
-			key.Filter{Focus: &w.messageEditor, Name: key.NameEnter, Optional: key.ModShift},
-			key.Filter{Focus: &w.messageEditor, Name: key.NameReturn, Optional: key.ModShift},
+			key.Filter{Focus: &w.messageEditor, Name: key.NameEnter},
+			key.Filter{Focus: &w.messageEditor, Name: key.NameReturn},
 		)
 		if !ok {
 			break
 		}
 		ke, ok := ev.(key.Event)
 		if !ok || ke.State != key.Press {
-			continue
-		}
-		if ke.Modifiers.Contain(key.ModShift) {
 			continue
 		}
 		w.triggerSend()
