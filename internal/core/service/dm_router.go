@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -425,6 +426,44 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		sent, err := r.client.SendDirectMessage(ctx, to, msg)
 		cancel()
+
+		// The quoted message can vanish between composing and sending:
+		// the peer deletes it (single message_delete or a full
+		// conversation wipe) while the reply is still sitting in the
+		// editor. The UI drops the stale quote as soon as the deletion
+		// reaches its snapshot (Window.dropStaleReply), but a send
+		// dispatched inside that same window still carries the dead
+		// reference and fails reply-reference validation. Degrade to a
+		// plain send instead of surfacing "send failed" for a message
+		// the user can no longer even see — matching what they would
+		// have gotten had they pressed send a frame later.
+		//
+		// The sentinel only proves the reference is ABSENT, not that it
+		// was deleted (see ErrReplyToNotFound). Reading absence as
+		// deleted-mid-compose is sound HERE because this router is the
+		// composer entry point: ReplyTo provenance is a message bubble
+		// the user clicked in this very conversation, so a never-valid
+		// or cross-conversation ID can only mean a UI bug — logged at
+		// warn below so it cannot hide, but not worth failing the
+		// user's message over. Direct DesktopClient/SDK callers bypass
+		// this path and still get the validation error verbatim. A
+		// chatlog lookup FAILURE is a distinct error (not the
+		// sentinel), so a broken DB keeps failing loudly here too.
+		//
+		// msg itself is stripped (not a copy) so everything downstream
+		// of the retry — the TopicMessageSent publish included —
+		// describes the message actually sent, without a phantom
+		// ReplyTo.
+		if err != nil && msg.ReplyTo != "" && errors.Is(err, ErrReplyToNotFound) {
+			log.Warn().
+				Str("peer", to.String()).
+				Str("reply_to", string(msg.ReplyTo)).
+				Msg("dm_router: reply_to absent at send time (deleted while composing?), resending without quote")
+			msg.ReplyTo = ""
+			ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+			sent, err = r.client.SendDirectMessage(ctx, to, msg)
+			cancel()
+		}
 
 		r.mu.Lock()
 		if r.peerGen[to] != gen {

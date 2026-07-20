@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -12,6 +13,20 @@ import (
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
+
+// ErrReplyToNotFound marks a send rejected by reply-reference validation:
+// msg.ReplyTo names a message that is absent from the chatlog for that
+// conversation at send time. The sentinel asserts ABSENCE, nothing more —
+// it cannot distinguish "deleted after the user quoted it" from an ID
+// that never existed or belongs to another conversation; the chatlog
+// keeps no tombstones to tell those apart. Callers attach the meaning:
+// DMRouter.SendMessage (the composer path, where ReplyTo provenance is a
+// bubble the user clicked in THIS conversation) reads it as
+// deleted-mid-compose and degrades to a plain send; direct
+// DesktopClient/SDK callers get the error as-is and decide themselves.
+// A chatlog lookup FAILURE is a different error, never this sentinel —
+// see the validation block in SendDirectMessage.
+var ErrReplyToNotFound = errors.New("reply_to message not found in conversation")
 
 // DMCrypto owns all direct-message cryptographic operations split out of
 // the former DesktopClient:
@@ -65,15 +80,35 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		return nil, fmt.Errorf("reply_to must be a valid message ID (UUID v4)")
 	}
 
-	if msg.ReplyTo != "" && d.chatlog != nil && d.chatlog.Store() != nil {
-		if !d.chatlog.Store().HasEntryInConversation(to, domain.MessageID(msg.ReplyTo)) {
-			return nil, fmt.Errorf("reply_to message %q not found in conversation with %s", msg.ReplyTo, to)
-		}
-	}
-
 	contact, err := d.ensureRecipientContact(ctx, to.String())
 	if err != nil {
 		return nil, err
+	}
+
+	// Reply-reference validation runs AFTER the contact fetch (the RPC
+	// round-trip that dominates this function's latency) and immediately
+	// before the reference is baked into the ciphertext. Checking at the
+	// top of the function left the full contact-fetch window for a
+	// concurrent message_delete / conversation wipe to remove the quoted
+	// row after it had already passed validation — the send would then
+	// carry a dead reply_to that the deleted-mid-compose degrade path
+	// (DMRouter.SendMessage) never got to see. The residual window is
+	// encrypt+dispatch; a deletion landing inside it yields a dangling
+	// reference, which every renderer must tolerate anyway (the peer can
+	// delete the quoted message seconds after a fully valid send).
+	//
+	// A store lookup failure is deliberately NOT ErrReplyToNotFound: the
+	// sentinel asserts "the row is absent", and callers degrade to a
+	// plain send on it — masking a broken chatlog behind that would
+	// silently strip quotes from every reply while the DB is unhealthy.
+	if msg.ReplyTo != "" && d.chatlog != nil && d.chatlog.Store() != nil {
+		found, lookupErr := d.chatlog.Store().LookupEntryInConversation(to, domain.MessageID(msg.ReplyTo))
+		if lookupErr != nil {
+			return nil, fmt.Errorf("reply_to validation for %q: %w", msg.ReplyTo, lookupErr)
+		}
+		if !found {
+			return nil, fmt.Errorf("reply_to message %q not found in conversation with %s: %w", msg.ReplyTo, to, ErrReplyToNotFound)
+		}
 	}
 
 	recipient := domain.DMRecipient{

@@ -13,6 +13,7 @@ package chatlog
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -745,16 +746,36 @@ func (s *Store) HasEntryID(topic string, peerAddress domain.PeerIdentity, id dom
 // HasEntryInConversation checks whether a message with the given ID exists
 // within a specific DM conversation. Used to validate reply_to references
 // before encrypting — prevents dangling or cross-conversation reply links.
+// Collapses DB failures into false; callers that must distinguish "the row
+// is genuinely absent" from "the lookup itself failed" (the reply-degrade
+// path in DMCrypto.SendDirectMessage) use LookupEntryInConversation.
 func (s *Store) HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool {
+	found, err := s.LookupEntryInConversation(peerAddress, id)
+	return err == nil && found
+}
+
+// LookupEntryInConversation reports whether a message with the given ID
+// exists within a specific DM conversation, surfacing DB failures as a
+// separate error instead of folding them into "not found". A nil store,
+// zero peer or empty ID is a definitive miss (false, nil), matching the
+// HasEntryInConversation contract.
+func (s *Store) LookupEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) (bool, error) {
 	if s.db == nil || peerAddress.IsZero() || id == "" {
-		return false
+		return false, nil
 	}
 	query, params := s.peerQuery("dm", peerAddress,
 		`SELECT 1 FROM messages WHERE id = ? AND `, ` LIMIT 1`)
 	params = append([]interface{}{id}, params...)
 	var exists int
 	err := s.db.QueryRow(query, params...).Scan(&exists)
-	return err == nil
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("chatlog: lookup entry %s: %w", id, err)
+	}
 }
 
 // peerQuery builds a WHERE clause for messages in a specific conversation.

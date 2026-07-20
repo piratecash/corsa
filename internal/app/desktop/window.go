@@ -402,6 +402,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.rebuildMsgCache()
 	w.applyDeferredScroll()
 	w.resetReplyOnPeerChange()
+	w.dropStaleReply()
 	w.handlePendingActions()
 	w.handleActions(gtx)
 	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
@@ -471,6 +472,31 @@ func (w *Window) resetReplyOnPeerChange() {
 	// lastChatPeer and per-message widget caches (messageSelectables,
 	// msgRightClick) are updated lazily in messageSelectable() when the
 	// first bubble is rendered, which also handles the non-empty case.
+}
+
+// dropStaleReply clears the reply context when the quoted message no
+// longer exists in the active conversation — the peer deleted it (a
+// single message_delete or a full conversation wipe) while the user was
+// still composing. Without this the composer keeps rendering a quote of
+// a message that is gone and the eventual send fails reply-reference
+// validation ("reply_to message not found in conversation"). The editor
+// text is untouched: only the quote is dropped, matching the delete
+// semantics everywhere else in the UI.
+//
+// The lookup rides msgCacheByID (rebuilt in rebuildMsgCache only when
+// the snapshot generation changes), so the per-frame cost is one nil
+// check + one map hit while a reply is active. Gated on CacheReady so a
+// transiently empty snapshot mid conversation-load cannot wipe a reply
+// that is still valid; the peer-switch case is already handled by
+// resetReplyOnPeerChange above.
+func (w *Window) dropStaleReply() {
+	if w.replyToMsg == nil || !w.snap.CacheReady {
+		return
+	}
+	if _, ok := w.msgCacheByID[w.replyToMsg.ID]; ok {
+		return
+	}
+	w.replyToMsg = nil
 }
 
 // Gio widgets are single-threaded — mutations MUST happen on the UI goroutine.
