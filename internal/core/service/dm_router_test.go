@@ -428,7 +428,7 @@ func TestConsumePendingActions(t *testing.T) {
 
 	r.mu.Lock()
 	r.pendingScrollToEnd = true
-	r.pendingClearEditor = true
+	r.pendingComposerRestore = []ComposerRestore{{Peer: domaintest.ID("test-peer"), Body: "hi"}}
 	r.pendingRecipientText = domaintest.ID("test-peer")
 	r.mu.Unlock()
 
@@ -437,8 +437,8 @@ func TestConsumePendingActions(t *testing.T) {
 	if !pa.ScrollToEnd {
 		t.Fatal("ScrollToEnd should be true")
 	}
-	if !pa.ClearEditor {
-		t.Fatal("ClearEditor should be true")
+	if len(pa.ComposerRestore) != 1 {
+		t.Fatal("ComposerRestore should have one entry")
 	}
 	if pa.RecipientText != domaintest.ID("test-peer") {
 		t.Fatalf("RecipientText should be 'test-peer', got %q", pa.RecipientText)
@@ -449,8 +449,8 @@ func TestConsumePendingActions(t *testing.T) {
 	if r.pendingScrollToEnd {
 		t.Fatal("pendingScrollToEnd should be cleared")
 	}
-	if r.pendingClearEditor {
-		t.Fatal("pendingClearEditor should be cleared")
+	if r.pendingComposerRestore != nil {
+		t.Fatal("pendingComposerRestore should be cleared")
 	}
 	if !r.pendingRecipientText.IsZero() {
 		t.Fatalf("pendingRecipientText should be cleared, got %q", r.pendingRecipientText)

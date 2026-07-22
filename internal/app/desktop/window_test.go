@@ -455,9 +455,9 @@ func TestTriggerSendSetsReplyTo(t *testing.T) {
 		replyToMsg: replyMsg,
 	}
 
-	// triggerSend builds OutgoingDM with ReplyTo but does NOT clear
-	// replyToMsg — the router clears it via PendingActions.ClearReply
-	// after successful delivery.
+	// Verify triggerSend maps replyToMsg into OutgoingDM.ReplyTo. (triggerSend
+	// itself clears the composer synchronously after a successful dispatch;
+	// this test only checks the ReplyTo extraction, not the clear.)
 	outgoing := domain.OutgoingDM{Body: "my reply"}
 	if w.replyToMsg != nil {
 		outgoing.ReplyTo = domain.MessageID(w.replyToMsg.ID)
@@ -467,7 +467,7 @@ func TestTriggerSendSetsReplyTo(t *testing.T) {
 		t.Errorf("ReplyTo = %q, want %q", outgoing.ReplyTo, "reply-target-id")
 	}
 	if w.replyToMsg == nil {
-		t.Error("replyToMsg should remain set until ClearReply arrives")
+		t.Error("replyToMsg should remain set until the send completes")
 	}
 }
 

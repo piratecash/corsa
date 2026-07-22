@@ -57,4 +57,15 @@ type OutgoingDM struct {
 	ReplyTo     MessageID
 	Command     DMCommand // e.g. DMCommandFileAnnounce; empty for regular DMs
 	CommandData string    // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
+	// FromComposer marks a send originated by the desktop composer (not RPC).
+	// UI-only, NOT part of the wire message: the router uses it to route a
+	// failed send's text back to the composer (PendingActions.ComposerRestore)
+	// and to avoid accumulating restores for RPC sends in headless runtimes.
+	FromComposer bool
+	// ComposerEpoch is the desktop composer's per-peer forget-epoch captured at
+	// send time. UI-only, NOT part of the wire message: the router echoes it
+	// verbatim into ComposerRestore.Epoch on failure so the UI can drop a stale
+	// restore whose conversation was deleted while the send was in flight
+	// (instead of resurrecting the removed contact). Zero for RPC sends.
+	ComposerEpoch uint64
 }

@@ -139,24 +139,59 @@ type Window struct {
 	chatCursorTag int // stable tag for the chat-area pointer tracker
 
 	// File attachment state: when the user picks a file via the native dialog,
-	// these fields hold the selected file path and metadata until Send is pressed.
-	// attachedFile and attachGeneration are only mutated on the UI goroutine —
+	// these fields hold the selected file path until Send is pressed.
+	// attachedFile and attachGen are only mutated on the UI goroutine —
 	// background goroutines deliver the selected path via pendingAttach
-	// (buffered channel, drained in handlePendingActions) and call
+	// (buffered channel, fully drained in handlePendingActions) and call
 	// window.Invalidate() to trigger a frame.
 	//
-	// attachGeneration is a monotonic counter bumped every time the composer's
-	// attachment slot transitions (new user pick, explicit cancel). triggerFileSend
-	// captures the current generation as sendGen and embeds it in restoreAttach's
-	// closure; the drain in handlePendingActions only honors a restore message
-	// when its generation still matches attachGeneration. This prevents a late
-	// async-send-failure from overwriting a newer user-selected attachment
-	// through the shared single-slot channel.
-	attachButton     widget.Clickable
-	attachedFile     string // absolute path to the selected file (empty = no attachment)
-	attachGeneration uint64 // bumped on every new pick / cancel to invalidate stale restore deliveries
-	attachCancelBtn  widget.Clickable
-	pendingAttach    chan pendingAttachMsg // delivers attach updates from background goroutines → UI goroutine
+	// attachGen is a PER-PEER monotonic counter bumped every time a
+	// conversation's attachment slot transitions (new user pick, explicit
+	// cancel). It guards the file-picker delivery path in applyPendingAttach,
+	// which honors a delivery only when the generation still matches that
+	// peer's counter. Per-peer (not global) so an attachment action in one
+	// chat can never reject a valid delivery for a different chat.
+	attachButton    widget.Clickable
+	attachedFile    string // absolute path to the selected file for the OPEN chat (empty = none)
+	attachGen       map[domain.PeerIdentity]uint64
+	attachCancelBtn widget.Clickable
+	pendingAttach   chan pendingAttachMsg // delivers attach updates from background goroutines → UI goroutine
+
+	// Failed sends. When a send fails, the composer is NOT touched; the unsent
+	// message becomes a retriable entry here, keyed by recipient, and is shown
+	// as a banner above the composer with retry/dismiss. This keeps every
+	// failed send a distinct entity (no merging into the live composer, no
+	// silent loss). pendingFailed marshals file-send failures from their
+	// background goroutine onto the UI goroutine.
+	failedSends         map[domain.PeerIdentity][]failedSend
+	failedRetryButton   widget.Clickable
+	failedDismissButton widget.Clickable
+	pendingFailed       chan pendingFailedMsg
+	// failedShown is the number of entries the banner actually RENDERED for a
+	// peer on the last frame. New failures are only ever appended, so the shown
+	// set is always the prefix failedSends[peer][:failedShown[peer]]. Retry and
+	// Dismiss act on exactly that prefix, so a failure that arrives between the
+	// rendered frame and the user's click (which the user could not have seen)
+	// is neither silently re-sent nor discarded — it stays in the banner.
+	failedShown map[domain.PeerIdentity]int
+
+	// Per-contact composer drafts. When the user switches conversation, the
+	// unsent composer text and the currently selected attachment are stashed
+	// under the peer being left and restored when that peer is reopened. Held
+	// in memory only (lost on app exit). draftPeer is tracked separately from
+	// lastChatPeer because lastChatPeer is updated lazily in messageSelectable()
+	// (only once a bubble renders), so it never converges on empty chats and
+	// would let the swap clobber live input every frame.
+	drafts    map[domain.PeerIdentity]composerDraft
+	draftPeer domain.PeerIdentity
+
+	// peerForgetEpoch bumps whenever a conversation is removed
+	// (forgetPeerComposerState). A file pick / failed-send restore captures
+	// the epoch when its background work starts; applyPendingAttach drops the
+	// delivery if the epoch has since advanced — i.e. the target conversation
+	// was deleted while a native file dialog or a send was still in flight, so
+	// its result must not resurrect a draft for a peer that no longer exists.
+	peerForgetEpoch map[domain.PeerIdentity]uint64
 
 	// File download buttons for incoming file cards (keyed by message ID).
 	fileDownloadBtns       map[string]*widget.Clickable
@@ -192,46 +227,59 @@ type Window struct {
 // to this channel:
 //
 //   - triggerFileAttach (user picked a new file through the native dialog):
-//     restore=false. User picks unconditionally replace the composer
-//     attachment and bump the generation counter.
+//     restore=false. Applied to msg.peer's slot and bumps that peer's
+//     generation.
 //
-//   - restoreAttach inside triggerFileSend (async send failure — put the
-//     file back so the user can retry): restore=true with the generation
-//     captured at send start. The drain only honors the restore if
-//     generation still matches Window.attachGeneration. A mismatch means
-//     the user has already picked a different file or cancelled the
-//     attachment, and the stale restore must be dropped to avoid
-//     overwriting the newer selection.
+//   - restore=true (per-peer generation captured at send start; applied only
+//     if that peer's generation still matches and the target slot is empty).
+//     This branch has no live producer: async file-send failures now surface
+//     as a retriable "not sent" banner (failedSends) instead of re-populating
+//     the composer. The branch and its generation guard are retained (and
+//     still unit-tested in attach_generation_test.go) as the safe delivery
+//     path; they can be dropped in a later cleanup pass alongside those tests.
+//
+// The channel is generously buffered and fully drained each frame, and every
+// message carries peer, so producers block-send without any cross-peer
+// arbitration — nothing is dropped.
 type pendingAttachMsg struct {
 	path       string
 	restore    bool
 	generation uint64
+	// peer is the conversation the attachment belongs to, captured when the
+	// file dialog was opened (user pick) or when the send was dispatched
+	// (restore). applyPendingAttach routes the delivery to that conversation:
+	// the live composer if it is still open, otherwise that peer's draft — so
+	// a file picked or restored for one contact never lands on another.
+	peer domain.PeerIdentity
+	// epoch is peerForgetEpoch[peer] captured when the background work started.
+	// If it no longer matches at apply time the conversation was removed
+	// meanwhile, and the delivery is dropped rather than resurrecting a draft.
+	epoch uint64
+	// caption carries the file's caption text on a failed-send restore, so the
+	// text cleared synchronously at send is put back alongside the file. Empty
+	// for user picks.
+	caption string
 }
 
-// restoreShouldYield decides whether an incoming message must yield its slot
-// in the pendingAttach channel to an already-queued message. It is pure and
-// reads no shared state so it is safe to call from a background goroutine
-// during the convergent drain loop in restoreAttach.
-//
-// Yield rules:
-//   - A user pick (existing.restore == false) always wins over any restore.
-//     The user is actively selecting a file and the UI must reflect that.
-//   - An adopted user pick (incoming.restore == false, carried forward from
-//     a previous drain iteration) never yields — once the loop adopts a
-//     user pick as its candidate, it dominates all subsequent comparisons.
-//   - Between two restore messages, the higher-generation one wins. Queued
-//     restores from later sends supersede older ones; re-queueing the newer
-//     message preserves the fix for cross-send failure ordering.
-func restoreShouldYield(existing, incoming pendingAttachMsg) bool {
-	if !incoming.restore {
-		// incoming is a user pick (or an adopted user pick from a prior
-		// drain iteration) — never yield.
-		return false
-	}
-	if !existing.restore {
-		return true
-	}
-	return existing.generation >= incoming.generation
+// failedSend is one unsent message retained after a send failed, so the user
+// can retry or dismiss it without the composer ever being touched.
+type failedSend struct {
+	body    string           // message text / file caption
+	replyTo domain.MessageID // reply target, empty if none
+	file    string           // attached file path; empty for a plain text send
+}
+
+// pendingFailedMsg marshals a file-send failure from its background goroutine
+// onto the UI goroutine (via the pendingFailed channel), where it is turned
+// into a failedSend entry. epoch is the recipient's forget-epoch at send time;
+// a mismatch on apply means the contact was removed meanwhile and the entry is
+// dropped instead of resurrecting it.
+type pendingFailedMsg struct {
+	peer    domain.PeerIdentity
+	body    string
+	replyTo domain.MessageID
+	file    string
+	epoch   uint64
 }
 
 const (
@@ -278,9 +326,18 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		recipientRightClick: make(map[domain.PeerIdentity]*rightClickState),
 		messageSelectables:  make(map[string]*widget.Selectable),
 		msgRightClick:       make(map[string]*rightClickState),
+		drafts:              make(map[domain.PeerIdentity]composerDraft),
+		attachGen:           make(map[domain.PeerIdentity]uint64),
+		peerForgetEpoch:     make(map[domain.PeerIdentity]uint64),
+		failedSends:         make(map[domain.PeerIdentity][]failedSend),
+		failedShown:         make(map[domain.PeerIdentity]int),
+		pendingFailed:       make(chan pendingFailedMsg, 64),
 		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
 		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
-		pendingAttach:       make(chan pendingAttachMsg, 1),
+		// Generously buffered and fully drained each frame so background
+		// producers (file picks, failed-send restores) block-send without
+		// dropping cross-conversation events.
+		pendingAttach: make(chan pendingAttachMsg, 64),
 	}
 	w.aliasEditor.SingleLine = true
 	w.aliasEditor.Submit = true
@@ -401,8 +458,10 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.snap = w.router.Snapshot()
 	w.rebuildMsgCache()
 	w.applyDeferredScroll()
+	w.swapComposerDraftOnPeerChange()
 	w.resetReplyOnPeerChange()
 	w.dropStaleReply()
+	w.handleReplyContextClicks(gtx)
 	w.handlePendingActions()
 	w.handleActions(gtx)
 	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
@@ -457,6 +516,91 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	)
 }
 
+// composerDraft is the unsent state stashed per conversation: the message
+// text and the path of a picked-but-not-yet-sent attachment.
+type composerDraft struct {
+	text         string
+	attachedFile string
+}
+
+// swapComposerDraftOnPeerChange saves the current composer (text + selected
+// file) under the conversation being left and restores whatever was stashed
+// for the newly opened conversation. A draft is only kept when something was
+// actually typed or attached; an empty composer clears the slot so stale
+// drafts do not linger. Runs every frame before handlePendingActions so the
+// swap settles before any pending attachment delivery is applied.
+func (w *Window) swapComposerDraftOnPeerChange() {
+	peer := w.snap.ActivePeer
+	if peer == w.draftPeer {
+		return
+	}
+
+	// Stash the composer state we are leaving behind. Any typed character
+	// counts (not just non-whitespace) so an in-progress line of spaces or
+	// newlines is preserved, as is a picked-but-unsent attachment.
+	text := w.messageEditor.Text()
+	if text != "" || w.attachedFile != "" {
+		if w.drafts == nil {
+			w.drafts = make(map[domain.PeerIdentity]composerDraft)
+		}
+		w.drafts[w.draftPeer] = composerDraft{text: text, attachedFile: w.attachedFile}
+	} else {
+		delete(w.drafts, w.draftPeer)
+	}
+
+	// Restore (or clear) for the conversation we are entering.
+	d := w.drafts[peer]
+	w.messageEditor.SetText(d.text)
+	end := w.messageEditor.Len()
+	w.messageEditor.SetCaret(end, end)
+	w.attachedFile = d.attachedFile
+	// No attachGen bump here: async attachment deliveries (user picks and
+	// failed-send restores) are routed by their target conversation in
+	// applyPendingAttach, so a delivery for the peer we just left can no longer
+	// clobber this slot — and bumping would wrongly reject a valid restore
+	// whose only "staleness" was the user switching away and back.
+
+	w.draftPeer = peer
+}
+
+// setReplyContext sets (or, with nil, clears) the reply quote. Kept as a single
+// mutation point for readability. The composer is cleared synchronously at
+// send, so no revision bookkeeping is needed here.
+func (w *Window) setReplyContext(m *service.DirectMessage) {
+	w.replyToMsg = m
+}
+
+// clearReplyQuiet drops the reply quote. Alias of setReplyContext(nil), kept for
+// call-site readability at navigational/external reset points.
+func (w *Window) clearReplyQuiet() {
+	w.replyToMsg = nil
+}
+
+// forgetPeerComposerState drops all composer bookkeeping for a conversation
+// that has been removed, so re-adding the same identity does not resurrect its
+// stashed draft text/file and the next peer swap cannot re-save it. When the
+// removed conversation was the open one, the live composer (text, attachment,
+// reply) is cleared too. Pending send records for the peer are dropped so a
+// late completion cannot touch a rebuilt slot.
+func (w *Window) forgetPeerComposerState(peer domain.PeerIdentity, wasActive bool) {
+	delete(w.drafts, peer)
+	delete(w.attachGen, peer)
+	delete(w.failedSends, peer)
+	delete(w.failedShown, peer)
+	// Advance the forget-epoch so an in-flight file pick or restore whose
+	// dialog/send started before this removal is dropped by applyPendingAttach
+	// instead of resurrecting the deleted conversation's draft.
+	if w.peerForgetEpoch == nil {
+		w.peerForgetEpoch = make(map[domain.PeerIdentity]uint64)
+	}
+	w.peerForgetEpoch[peer]++
+	if wasActive {
+		w.messageEditor.SetText("")
+		w.attachedFile = ""
+		w.clearReplyQuiet()
+	}
+}
+
 // resetReplyOnPeerChange clears reply and message-context-menu state when
 // the active conversation changes. This runs every frame so that even
 // switching to an empty chat (where no message bubbles are rendered)
@@ -466,7 +610,7 @@ func (w *Window) resetReplyOnPeerChange() {
 	if peer == w.lastChatPeer {
 		return
 	}
-	w.replyToMsg = nil
+	w.clearReplyQuiet()
 	w.msgContextMsg = nil
 	w.scrollToMsgID = ""
 	// lastChatPeer and per-message widget caches (messageSelectables,
@@ -496,18 +640,41 @@ func (w *Window) dropStaleReply() {
 	if _, ok := w.msgCacheByID[w.replyToMsg.ID]; ok {
 		return
 	}
-	w.replyToMsg = nil
+	w.clearReplyQuiet()
 }
 
 // Gio widgets are single-threaded — mutations MUST happen on the UI goroutine.
 func (w *Window) handlePendingActions() {
 	pa := w.router.ConsumePendingActions()
 
-	if pa.ClearEditor {
-		w.messageEditor.SetText("")
+	// Drain ALL queued attachment updates (triggerFileAttach picks). Each
+	// carries its target conversation and is routed by applyPendingAttach, so
+	// draining the whole queue never lets one
+	// peer's delivery displace another's. All w.attachedFile / w.attachGen
+	// mutations stay on the UI goroutine.
+	w.drainPendingAttach()
+
+	// A failed TEXT send arrives here from the router (marshaled via
+	// PendingActions since the send completes on a background goroutine). A
+	// failed FILE send arrives over the pendingFailed channel. Both become
+	// retriable failedSend entries — the composer is never touched.
+	for _, r := range pa.ComposerRestore {
+		// Drop the restore if the contact was removed while this text send was
+		// in flight (its forget-epoch advanced past the one captured at send).
+		if w.peerForgetEpoch[r.Peer] != r.Epoch {
+			continue
+		}
+		w.addFailedSend(r.Peer, failedSend{body: r.Body, replyTo: r.ReplyTo})
 	}
-	if pa.ClearReply {
-		w.replyToMsg = nil
+	for drained := false; !drained; {
+		select {
+		case m := <-w.pendingFailed:
+			if w.peerForgetEpoch[m.peer] == m.epoch {
+				w.addFailedSend(m.peer, failedSend{body: m.body, replyTo: m.replyTo, file: m.file})
+			}
+		default:
+			drained = true
+		}
 	}
 	if pa.ScrollToEnd {
 		w.chatList.Position.BeforeEnd = false
@@ -515,39 +682,191 @@ func (w *Window) handlePendingActions() {
 	if !pa.RecipientText.IsZero() {
 		w.recipientEditor.SetText(pa.RecipientText.String())
 	}
+}
 
-	// Drain attachment update delivered by a background goroutine
-	// (triggerFileAttach for user picks, restoreAttach for async send
-	// failures). This keeps all w.attachedFile / w.attachGeneration
-	// mutations on the UI goroutine.
-	select {
-	case msg := <-w.pendingAttach:
-		w.applyPendingAttach(msg)
-	default:
+// drainPendingAttach applies every attachment delivery currently queued on the
+// pendingAttach channel (user picks, failed-send restores). Non-blocking: it
+// returns as soon as the channel is empty. Runs on the UI goroutine.
+func (w *Window) drainPendingAttach() {
+	for {
+		select {
+		case msg := <-w.pendingAttach:
+			w.applyPendingAttach(msg)
+		default:
+			return
+		}
 	}
+}
+
+// addFailedSend records an unsent message for retry. The composer is never
+// touched. Empty entries (no body, no file) are ignored. Callers are
+// responsible for the removed-contact guard: both the text (ComposerRestore)
+// and file (pendingFailed) drains in handlePendingActions compare the send's
+// captured forget-epoch against the peer's current one and skip a stale
+// restore, so a failure for a since-deleted contact never reaches here. A
+// peer absent from snap.Peers is NOT a drop reason — a Known-ID contact only
+// enters snap.Peers after its first successful send, and its failures must
+// still be retriable.
+func (w *Window) addFailedSend(peer domain.PeerIdentity, fs failedSend) {
+	if fs.body == "" && fs.file == "" {
+		return
+	}
+	if w.failedSends == nil {
+		w.failedSends = make(map[domain.PeerIdentity][]failedSend)
+	}
+	w.failedSends[peer] = append(w.failedSends[peer], fs)
+}
+
+// shownFailedPrefix splits a peer's failed sends into the entries the banner
+// last rendered (the prefix the user saw) and the rest that arrived afterwards.
+// Entries are only ever appended, so the shown set is always a leading prefix;
+// the count is clamped in case the list shrank (e.g. contact removed).
+func (w *Window) shownFailedPrefix(peer domain.PeerIdentity) (shown, unseen []failedSend) {
+	list := w.failedSends[peer]
+	n := w.failedShown[peer]
+	if n > len(list) {
+		n = len(list)
+	}
+	// Copy so the caller can reassign w.failedSends[peer] without aliasing the
+	// backing array of the slice it is iterating.
+	shown = append([]failedSend(nil), list[:n]...)
+	unseen = append([]failedSend(nil), list[n:]...)
+	return shown, unseen
+}
+
+// setFailedSends replaces a peer's failed-send list (deleting the key when
+// empty). failedShown is reset to 0, NOT len(list): the replacement list has
+// not been rendered yet, so nothing in it counts as "shown" until the next
+// layoutFailedSends records the real count. This is what makes a second
+// Retry/Dismiss click queued in the SAME frame a no-op instead of acting on
+// the unseen tail the first click preserved.
+func (w *Window) setFailedSends(peer domain.PeerIdentity, list []failedSend) {
+	if len(list) == 0 {
+		delete(w.failedSends, peer)
+		delete(w.failedShown, peer)
+		return
+	}
+	w.failedSends[peer] = list
+	w.failedShown[peer] = 0
+}
+
+// retryFailedSends re-dispatches only the failed sends the banner actually
+// showed (see shownFailedPrefix); entries that arrived after the last render
+// stay in the banner. Each re-dispatch that fails again re-appends itself
+// through the normal failure path.
+func (w *Window) retryFailedSends(peer domain.PeerIdentity) {
+	retrying, unseen := w.shownFailedPrefix(peer)
+	if len(retrying) == 0 {
+		return
+	}
+	w.setFailedSends(peer, unseen)
+	for _, fs := range retrying {
+		if fs.file != "" {
+			w.sendFileCore(peer, fs.file, fs.body, fs.replyTo)
+			continue
+		}
+		outgoing := domain.OutgoingDM{Body: fs.body, ReplyTo: fs.replyTo, FromComposer: true, ComposerEpoch: w.peerForgetEpoch[peer]}
+		if err := w.router.SendMessage(peer, outgoing); err != nil {
+			// Immediate rejection: keep it in the list to retry later.
+			w.setFailedSends(peer, append(w.failedSends[peer], fs))
+			if !errors.Is(err, service.ErrConversationDeleteInflight) {
+				w.router.SetSendStatus(w.t("status.send_failed", err.Error()))
+			}
+		}
+	}
+}
+
+// dismissShownFailedSends clears only the entries the banner showed, keeping
+// any that arrived after the last render (the user has not seen those yet).
+func (w *Window) dismissShownFailedSends(peer domain.PeerIdentity) {
+	_, unseen := w.shownFailedPrefix(peer)
+	w.setFailedSends(peer, unseen)
 }
 
 // applyPendingAttach commits a pendingAttachMsg to the composer. Must be
 // called on the UI goroutine.
 //
-// User picks always win: they unconditionally replace the current attachment
-// and bump attachGeneration, invalidating any in-flight restore from an
-// earlier send. Restores are conditional: they are honored only when the
-// generation they captured at send start still matches attachGeneration AND
-// the composer slot is currently empty. Either condition failing means the
-// user has already moved on (picked a different file, picked the same file
-// again, or explicitly cancelled), and replaying the old path would clobber
-// the newer state.
+// The delivery is first routed to the conversation it belongs to (msg.peer).
+// If that conversation is not the one currently open, the attachment is stored
+// in that peer's draft rather than applied to the live composer — so a file
+// picked in (or restored for) contact A never appears on contact B just because
+// the user switched while the background dialog/send was in flight.
+//
+// Generation checks are PER-PEER (attachGen[msg.peer]): a user pick bumps its
+// conversation's counter, so an in-flight restore for THAT conversation is
+// invalidated — but an attachment action in a different chat never is. A
+// restore is honored only when its captured generation still matches the
+// target conversation's counter AND that conversation's attachment slot is
+// empty, whether the slot is the open composer or a stashed draft.
 func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
+	// Drop deliveries for a conversation removed since the pick/send started —
+	// otherwise a late file-dialog result would resurrect a deleted contact's
+	// draft. (Non-removed peers keep epoch 0/unchanged, so normal picks pass.)
+	if w.peerForgetEpoch[msg.peer] != msg.epoch {
+		return
+	}
+	if w.attachGen == nil {
+		w.attachGen = make(map[domain.PeerIdentity]uint64)
+	}
+	if msg.peer != w.draftPeer {
+		// Belongs to a conversation the user has left — stash into its draft.
+		if w.drafts == nil {
+			w.drafts = make(map[domain.PeerIdentity]composerDraft)
+		}
+		d := w.drafts[msg.peer]
+		if !msg.restore {
+			// User pick: authoritative for its conversation's draft.
+			d.attachedFile = msg.path
+			w.drafts[msg.peer] = d
+			w.attachGen[msg.peer]++
+		} else if w.attachGen[msg.peer] == msg.generation {
+			// Failed-send restore into a since-left conversation's draft. Never
+			// drop: attach the file only if the draft slot is free, and always
+			// preserve the caption text (prepend if the draft already has some).
+			if d.attachedFile == "" {
+				d.attachedFile = msg.path
+			}
+			if msg.caption != "" {
+				if d.text == "" {
+					d.text = msg.caption
+				} else {
+					d.text = msg.caption + "\n" + d.text
+				}
+			}
+			w.drafts[msg.peer] = d
+		}
+		return
+	}
 	if !msg.restore {
 		w.attachedFile = msg.path
-		w.attachGeneration++
+		w.attachGen[msg.peer]++
 		return
 	}
-	if msg.generation != w.attachGeneration || w.attachedFile != "" {
+	if msg.generation != w.attachGen[msg.peer] {
 		return
 	}
-	w.attachedFile = msg.path
+	if w.attachedFile == "" && w.messageEditor.Text() == "" {
+		// Slot fully empty: replay the file and its caption for retry.
+		w.attachedFile = msg.path
+		if msg.caption != "" {
+			w.messageEditor.SetText(msg.caption)
+			end := w.messageEditor.Len()
+			w.messageEditor.SetCaret(end, end)
+		}
+		return
+	}
+	// The user is already composing here (text and/or a new attachment). Do NOT
+	// hijack that composition by re-attaching the old file or overwriting the
+	// caption. Preserve the failed caption text losslessly by prepending it.
+	if msg.caption != "" {
+		if cur := w.messageEditor.Text(); cur == "" {
+			w.messageEditor.SetText(msg.caption)
+		} else {
+			w.messageEditor.SetText(msg.caption + "\n" + cur)
+		}
+		end := w.messageEditor.Len()
+		w.messageEditor.SetCaret(end, end)
+	}
 }
 
 func (w *Window) handleActions(gtx layout.Context) {
@@ -567,17 +886,27 @@ func (w *Window) handleActions(gtx layout.Context) {
 		w.triggerSend()
 	}
 
+	for w.failedRetryButton.Clicked(gtx) {
+		w.retryFailedSends(w.draftPeer)
+	}
+
+	for w.failedDismissButton.Clicked(gtx) {
+		w.dismissShownFailedSends(w.draftPeer)
+	}
+
 	for w.attachButton.Clicked(gtx) {
 		w.triggerFileAttach()
 	}
 
 	for w.attachCancelBtn.Clicked(gtx) {
 		w.attachedFile = ""
-		// Bump generation so that any in-flight restoreAttach from a
-		// previously failing send is rejected by the drain — the user
-		// explicitly dismissed the attachment and must not see it
-		// reappear later.
-		w.attachGeneration++
+		// Bump this conversation's generation so any in-flight attach delivery
+		// is rejected — the user explicitly dismissed the attachment and must
+		// not see it reappear later.
+		if w.attachGen == nil {
+			w.attachGen = make(map[domain.PeerIdentity]uint64)
+		}
+		w.attachGen[w.draftPeer]++
 		if w.window != nil {
 			w.window.Invalidate()
 		}
@@ -598,7 +927,8 @@ func (w *Window) handleActions(gtx layout.Context) {
 
 	w.handleContextMenuActions(gtx)
 	w.handleMsgContextMenuActions(gtx)
-	w.handleReplyCancel(gtx)
+	// Reply set/cancel clicks are handled by handleReplyContextClicks earlier in
+	// the frame (before handlePendingActions), not here.
 }
 
 func (w *Window) handleContextMenuActions(gtx layout.Context) {
@@ -687,6 +1017,11 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 			}
 			return
 		}
+
+		// Drop every trace of this conversation's composer state so a later
+		// re-add starts clean (no resurrected draft text/file) and the next
+		// peer swap cannot re-save a draft for the peer just deleted.
+		w.forgetPeerComposerState(peer, wasActive)
 
 		// Remove saved alias together with the identity.
 		if w.prefs != nil {
@@ -835,25 +1170,29 @@ func (w *Window) triggerSend() {
 	if body == "" {
 		return
 	}
-	outgoing := domain.OutgoingDM{Body: body}
+	outgoing := domain.OutgoingDM{Body: body, FromComposer: true, ComposerEpoch: w.peerForgetEpoch[to]}
 	if w.replyToMsg != nil {
 		outgoing.ReplyTo = domain.MessageID(w.replyToMsg.ID)
 	}
-	// replyToMsg is cleared by handlePendingActions (ClearReply) after the
-	// send succeeds. On failure the editor text is preserved and the reply
-	// context stays intact so the user can retry without losing the quote.
 	if err := w.router.SendMessage(to, outgoing); err != nil {
-		// Outgoing barrier while a conversation_delete is in
-		// flight to this peer — render a localised hint so the
-		// user understands the input is intentionally blocked
-		// until the wipe terminates, not a transient transport
-		// failure.
+		// Immediate rejection: keep the composer intact so the user can retry.
+		// Outgoing barrier while a conversation_delete is in flight to this peer
+		// — render a localised hint so the user understands the input is
+		// intentionally blocked until the wipe terminates.
 		if errors.Is(err, service.ErrConversationDeleteInflight) {
 			w.router.SetSendStatus(w.t("status.compose_blocked_during_wipe"))
 			return
 		}
 		w.router.SetSendStatus(w.t("status.send_failed", err.Error()))
+		return
 	}
+	// Dispatched: clear the composer synchronously (UI goroutine). If the send
+	// later fails on the background goroutine, the router hands the text back
+	// via PendingActions.ComposerRestore, and handlePendingActions records it
+	// as a retriable failedSend (surfaced in the "not sent" banner) rather than
+	// re-filling the composer, which may have moved on to another conversation.
+	w.messageEditor.SetText("")
+	w.clearReplyQuiet()
 }
 
 // triggerFileAttach opens the native file picker dialog via Gio explorer
@@ -865,6 +1204,14 @@ func (w *Window) triggerFileAttach() {
 	if w.fileExplorer == nil {
 		return
 	}
+	// Capture the conversation the pick belongs to now, on the UI goroutine,
+	// before the blocking dialog runs. If the user switches away while the
+	// dialog is open, applyPendingAttach routes the file to this peer's draft
+	// rather than the composer that happens to be open when it resolves. The
+	// forget-epoch lets applyPendingAttach drop the result if the conversation
+	// is deleted while the dialog is open.
+	pickPeer := w.snap.ActivePeer
+	pickEpoch := w.peerForgetEpoch[pickPeer]
 	go func() {
 		rc, err := w.fileExplorer.ChooseFile()
 		if err != nil {
@@ -885,23 +1232,13 @@ func (w *Window) triggerFileAttach() {
 			return
 		}
 
-		// Deliver the path to the UI goroutine via buffered channel.
-		// User picks are authoritative: they always win over any stale
-		// queued message (previous pick the UI hasn't drained yet, or a
-		// pending restore from an earlier failing send) — the drain
-		// unconditionally applies user picks and bumps the generation,
-		// invalidating any in-flight restore.
-		msg := pendingAttachMsg{path: f.Name(), restore: false}
-		select {
-		case w.pendingAttach <- msg:
-		default:
-			// Channel full — drain stale value, then send the new one.
-			select {
-			case <-w.pendingAttach:
-			default:
-			}
-			w.pendingAttach <- msg
-		}
+		// Deliver the pick to the UI goroutine via the buffered channel. It
+		// carries pickPeer, so applyPendingAttach routes it to that
+		// conversation (live composer or draft) regardless of what is open
+		// when it is drained. The channel is generously buffered and fully
+		// drained each frame, so a blocking send never displaces another
+		// conversation's pending event.
+		w.pendingAttach <- pendingAttachMsg{path: f.Name(), restore: false, peer: pickPeer, epoch: pickEpoch}
 		if w.window != nil {
 			w.window.Invalidate()
 		}
@@ -916,65 +1253,46 @@ func (w *Window) triggerFileSend(to domain.PeerIdentity) {
 		return
 	}
 	srcPath := w.attachedFile
-	caption := w.messageEditor.Text() // capture before clearing
-	// Capture the attach generation BEFORE clearing. triggerFileSend does
-	// not bump the generation — it hands ownership of the current slot to
-	// the send goroutine, which may later restore if the send fails. Any
-	// user action after this point (new pick, cancel) bumps the generation
-	// and invalidates the pending restore.
-	sendGen := w.attachGeneration
-	w.attachedFile = "" // clear immediately so user cannot double-send
+	caption := w.messageEditor.Text()
+	var replyTo domain.MessageID
+	if w.replyToMsg != nil {
+		replyTo = domain.MessageID(w.replyToMsg.ID)
+	}
+	// Clear the composer synchronously (UI goroutine). On failure the file is
+	// NOT put back into the composer — it becomes a retriable failedSend entry.
+	w.attachedFile = ""
+	w.messageEditor.SetText("")
+	w.clearReplyQuiet()
+	w.sendFileCore(to, srcPath, caption, replyTo)
+}
+
+// sendFileCore imports the file and sends a file_announce DM. Shared by the
+// composer path (triggerFileSend) and retry (retryFailedSends); it reads no
+// composer state, so it never touches the UI's editor. On any failure the send
+// is recorded as a retriable failedSend via the pendingFailed channel.
+func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, replyTo domain.MessageID) {
+	if to.IsZero() {
+		return
+	}
+	// Forget-epoch so a failure entry is dropped if this contact is deleted
+	// while the send is in flight.
+	sendEpoch := w.peerForgetEpoch[to]
+	// Router removal generation captured BEFORE the (potentially seconds-long)
+	// local file import below, so a delete during import abandons the send
+	// instead of re-importing the contact and resurrecting it in the sidebar.
+	sendPeerGen := w.router.PeerGeneration(to)
 	w.router.SetSendStatus(w.t("file.sending"))
 
-	// restoreAttach delivers the source path back to the UI goroutine via
-	// pendingAttach so the user can retry without re-picking the file.
-	// attachedFile is only mutated on the UI goroutine (handlePendingActions
-	// drains the channel each frame), preserving the thread-safety invariant.
-	//
-	// The restore message carries sendGen, captured above. The UI drain
-	// honours the restore only if attachGeneration still equals sendGen
-	// (no user pick or cancel happened while the send was in flight) and
-	// the composer slot is currently empty. Cross-send races are also
-	// handled here: if the channel already holds a newer message (a
-	// user pick or a restore from a later send), this restore yields the
-	// slot rather than overwriting it.
-	restoreAttach := func() {
-		// Deliver the restore message to the UI goroutine via the
-		// pendingAttach channel (capacity 1). The loop converges
-		// because each iteration either succeeds (sends the winner)
-		// or makes progress by draining one message and picking the
-		// higher-priority survivor via restoreShouldYield.
-		//
-		// The previous drain-inspect-requeue approach had a TOCTOU
-		// race: between draining the existing message and requeueing
-		// it (non-blocking), another goroutine could fill the channel,
-		// causing the requeue to silently drop the existing message.
-		// When existing was a user pick, the composer ended up empty
-		// even though the user had just selected a replacement.
-		msg := pendingAttachMsg{path: srcPath, restore: true, generation: sendGen}
-		for {
-			select {
-			case w.pendingAttach <- msg:
-				return
-			default:
-			}
-			// Channel full — drain and decide which message survives.
-			select {
-			case existing := <-w.pendingAttach:
-				if restoreShouldYield(existing, msg) {
-					// existing wins — adopt it as our message so the
-					// next loop iteration requeues the winner instead
-					// of the stale restore. No non-blocking requeue
-					// that a concurrent producer could knock out.
-					msg = existing
-				}
-				// else: our msg wins over the drained message — loop
-				// will try to send msg on the next iteration.
-			default:
-				// Channel was drained between the two selects (UI
-				// goroutine or another producer). Loop back — the
-				// next iteration's send will likely succeed.
-			}
+	// failFile records the failed file send for retry (marshaled to the UI
+	// goroutine), instead of putting the file back into the composer. It runs on
+	// a background goroutine — including the router's async onAsyncFailure
+	// callback, which has no other repaint trigger — so it must schedule a frame
+	// itself, otherwise the "not sent" banner would appear only on the next
+	// unrelated redraw (heartbeat).
+	failFile := func() {
+		w.pendingFailed <- pendingFailedMsg{peer: to, body: caption, replyTo: replyTo, file: srcPath, epoch: sendEpoch}
+		if w.window != nil {
+			w.window.Invalidate()
 		}
 	}
 
@@ -986,7 +1304,7 @@ func (w *Window) triggerFileSend(to domain.PeerIdentity) {
 			srcPath,
 		)
 		if err != nil {
-			restoreAttach()
+			failFile()
 			w.router.SetSendStatus(w.t("file.prepare_failed", err))
 			if w.window != nil {
 				w.window.Invalidate()
@@ -995,11 +1313,29 @@ func (w *Window) triggerFileSend(to domain.PeerIdentity) {
 		}
 
 		outgoing, err := buildFileAnnounceOutgoing(result, caption)
+		if err == nil {
+			// Preserve the reply context on the file DM (both first send and
+			// retry); buildFileAnnounceOutgoing does not set it.
+			outgoing.ReplyTo = replyTo
+		}
 		if err != nil {
 			// Blob is stored but no token/mapping will ever reference it.
 			w.client.RemoveUnreferencedTransmitFile(result.FileHash)
-			restoreAttach()
+			failFile()
 			w.router.SetSendStatus(w.t("file.prepare_failed", err))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+
+		// Fast short-circuit: if the contact was deleted while the file was
+		// being imported/hashed, abandon the send WITHOUT running PrepareAndSend
+		// (no network send, no ensureRecipientContact re-import). Drop the
+		// prepared blob; do not restore the attachment (the conversation and its
+		// composer state are gone).
+		if w.router.PeerGeneration(to) != sendPeerGen {
+			w.client.RemoveUnreferencedTransmitFile(result.FileHash)
 			if w.window != nil {
 				w.window.Invalidate()
 			}
@@ -1012,7 +1348,11 @@ func (w *Window) triggerFileSend(to domain.PeerIdentity) {
 			FileSize:    result.FileSize,
 			ContentType: result.ContentType,
 		}
-		if err := w.router.SendFileAnnounce(to, outgoing, meta, restoreAttach); err != nil {
+		// Pass sendPeerGen (captured before the import) as the stale-send
+		// baseline so the router's own guard measures against it, not against a
+		// freshly captured generation — closing the TOCTOU between the check
+		// above and the router capturing its baseline.
+		if err := w.router.SendFileAnnounceFromComposer(to, outgoing, meta, failFile, sendPeerGen); err != nil {
 			// SendFileAnnounce failed synchronously (e.g. fileBridge == nil,
 			// or a conversation_delete wipe started while
 			// prepareFileForTransmit was running and tripped the outgoing
@@ -1020,7 +1360,7 @@ func (w *Window) triggerFileSend(to domain.PeerIdentity) {
 			// could take ownership. The blob has no ref and no pending —
 			// clean it up.
 			w.client.RemoveUnreferencedTransmitFile(result.FileHash)
-			restoreAttach()
+			failFile()
 			// The wipe-pending barrier is a deliberate refusal, not a
 			// file-prep bug; surface the same status the text-send path
 			// uses (compose_blocked_during_wipe) so the user sees the
@@ -1395,6 +1735,9 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 					return layout.Dimensions{}
 				}
 				return w.layoutSendStatusRow(gtx, sendStatus)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return w.layoutFailedSends(gtx)
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.layoutReplyPreview(gtx)
@@ -3791,16 +4134,9 @@ func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
 		return
 	}
 
-	if w.msgCtxReply.Clicked(gtx) {
-		msgCopy := *w.msgContextMsg
-		w.replyToMsg = &msgCopy
-		w.msgContextMsg = nil
-		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
-		if w.window != nil {
-			w.window.Invalidate()
-		}
-		return
-	}
+	// Note: the reply click is handled earlier in the frame by
+	// handleReplyContextClicks (before handlePendingActions) so replyRev is
+	// bumped before any same-frame send completion checks it.
 
 	if w.msgCtxCopy.Clicked(gtx) {
 		gtx.Execute(clipboard.WriteCmd{
@@ -4046,15 +4382,27 @@ func (w *Window) handleConversationDeleteOutcome(outcome ebus.ConversationDelete
 	}
 }
 
-// handleReplyCancel clears the reply state when the cancel button is clicked.
-func (w *Window) handleReplyCancel(gtx layout.Context) {
-	if w.replyToMsg == nil {
-		return
-	}
-	for w.replyCancelButton.Clicked(gtx) {
-		w.replyToMsg = nil
+// handleReplyContextClicks processes the user's reply set (from the message
+// context menu) and reply cancel clicks. It is invoked early in layout(),
+// before handlePendingActions, so a reply change bumps replyRev before a
+// same-frame send completion reads it — otherwise the completion could clear
+// text the user is re-targeting to a different reply.
+func (w *Window) handleReplyContextClicks(gtx layout.Context) {
+	if w.msgContextMsg != nil && w.msgCtxReply.Clicked(gtx) {
+		msgCopy := *w.msgContextMsg
+		w.setReplyContext(&msgCopy)
+		w.msgContextMsg = nil
+		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
 		if w.window != nil {
 			w.window.Invalidate()
+		}
+	}
+	if w.replyToMsg != nil {
+		for w.replyCancelButton.Clicked(gtx) {
+			w.setReplyContext(nil)
+			if w.window != nil {
+				w.window.Invalidate()
+			}
 		}
 	}
 }
@@ -4448,6 +4796,92 @@ func (w *Window) replyQuoteTag(replyToID string) *widget.Clickable {
 }
 
 // layoutReplyPreview renders the reply quote banner above the composer input.
+// layoutFailedSends renders the "not sent" banner above the composer for the
+// open conversation: how many messages failed, plus retry and dismiss buttons.
+// The composer itself is never touched by a failed send.
+func (w *Window) layoutFailedSends(gtx layout.Context) layout.Dimensions {
+	n := len(w.failedSends[w.draftPeer])
+	// Record the rendered prefix length so Retry/Dismiss (processed on a later
+	// frame) act only on what the user actually saw, never on failures that
+	// arrived after this frame was drawn.
+	if w.failedShown == nil {
+		w.failedShown = make(map[domain.PeerIdentity]int)
+	}
+	w.failedShown[w.draftPeer] = n
+	if n == 0 {
+		return layout.Dimensions{}
+	}
+	preview := ""
+	if last := w.failedSends[w.draftPeer][n-1]; last.body != "" {
+		preview = ellipsize(last.body, 60)
+	} else if n > 0 {
+		preview = "📎"
+	}
+	bgColor := color.NRGBA{R: 60, G: 34, B: 34, A: 255}
+	barColor := color.NRGBA{R: 210, G: 90, B: 90, A: 255}
+
+	return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Stack{}.Layout(gtx,
+			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+				defer clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(unit.Dp(6))).Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: bgColor}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+				return layout.Dimensions{Size: gtx.Constraints.Min}
+			}),
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							barW := gtx.Dp(unit.Dp(3))
+							barH := gtx.Dp(unit.Dp(24))
+							sz := image.Pt(barW, barH)
+							defer clip.UniformRRect(image.Rectangle{Max: sz}, gtx.Dp(unit.Dp(1))).Push(gtx.Ops).Pop()
+							paint.ColorOp{Color: barColor}.Add(gtx.Ops)
+							paint.PaintOp{}.Add(gtx.Ops)
+							return layout.Dimensions{Size: sz}
+						}),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										label := material.Caption(w.theme, w.t("compose.not_sent", n))
+										label.Color = color.NRGBA{R: 225, G: 150, B: 150, A: 255}
+										return label.Layout(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										label := material.Caption(w.theme, preview)
+										label.Color = color.NRGBA{R: 210, G: 185, B: 185, A: 255}
+										label.MaxLines = 1
+										return label.Layout(gtx)
+									}),
+								)
+							})
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								btn := material.Button(w.theme, &w.failedRetryButton, w.t("compose.retry"))
+								btn.Background = color.NRGBA{R: 70, G: 90, B: 60, A: 255}
+								btn.Color = color.NRGBA{R: 210, G: 225, B: 200, A: 255}
+								btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
+								return btn.Layout(gtx)
+							})
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								btn := material.Button(w.theme, &w.failedDismissButton, "✕")
+								btn.Background = color.NRGBA{R: 78, G: 50, B: 50, A: 255}
+								btn.Color = color.NRGBA{R: 225, G: 200, B: 200, A: 255}
+								btn.Inset = layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}
+								return btn.Layout(gtx)
+							})
+						}),
+					)
+				})
+			}),
+		)
+	})
+}
+
 func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 	if w.replyToMsg == nil {
 		return layout.Dimensions{}

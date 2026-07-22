@@ -69,6 +69,13 @@ type DMRouter struct {
 	eventBus      *ebus.Bus
 	statusMonitor NodeStatusProvider
 
+	// prepareAndSend performs the file_announce DM send inside
+	// SendFileAnnounceFromComposer's goroutine. nil in production — the call
+	// site falls back to fileBridge.PrepareAndSend. Overridable ONLY in tests,
+	// so the stale-reply degrade (which strips ReplyTo before this call) can be
+	// exercised without standing up a full node.
+	prepareAndSend func(ctx context.Context, to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload) (*AnnounceResult, error)
+
 	mu               sync.RWMutex
 	activePeer       domain.PeerIdentity
 	peerClicked      bool
@@ -183,10 +190,9 @@ type DMRouter struct {
 	dispatchControlConversationDeleteFn func(ctx context.Context, peer domain.PeerIdentity, requestID domain.ConversationDeleteRequestID) error
 
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
-	pendingScrollToEnd   bool
-	pendingClearEditor   bool
-	pendingClearReply    bool
-	pendingRecipientText domain.PeerIdentity
+	pendingScrollToEnd     bool
+	pendingComposerRestore []ComposerRestore
+	pendingRecipientText   domain.PeerIdentity
 }
 
 // routerSnapshotCache holds a pre-built snapshot and the generation at which
@@ -214,13 +220,24 @@ type dmSnapshotPart struct {
 	ActiveMessages []DirectMessage
 }
 
+// ComposerRestore carries an unsent message back to the UI after a send
+// failed, so the desktop can surface it as a retriable "not sent" entry.
+type ComposerRestore struct {
+	Peer    domain.PeerIdentity
+	Body    string
+	ReplyTo domain.MessageID
+	// Epoch is OutgoingDM.ComposerEpoch echoed back verbatim: the UI's per-peer
+	// forget-epoch captured when the composer dispatched this send. The UI drops
+	// the restore if the peer's epoch has since advanced (contact removed).
+	Epoch uint64
+}
+
 // PendingActions holds deferred widget mutations that must be applied
 // on the UI goroutine (Gio widgets are NOT thread-safe).
 type PendingActions struct {
-	ScrollToEnd   bool
-	ClearEditor   bool
-	ClearReply    bool
-	RecipientText domain.PeerIdentity
+	ScrollToEnd     bool
+	ComposerRestore []ComposerRestore
+	RecipientText   domain.PeerIdentity
 }
 
 func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus *ebus.Bus, statusMonitor NodeStatusProvider) *DMRouter {
@@ -277,14 +294,12 @@ func (r *DMRouter) Snapshot() RouterSnapshot {
 func (r *DMRouter) ConsumePendingActions() PendingActions {
 	r.mu.Lock()
 	pa := PendingActions{
-		ScrollToEnd:   r.pendingScrollToEnd,
-		ClearEditor:   r.pendingClearEditor,
-		ClearReply:    r.pendingClearReply,
-		RecipientText: r.pendingRecipientText,
+		ScrollToEnd:     r.pendingScrollToEnd,
+		ComposerRestore: r.pendingComposerRestore,
+		RecipientText:   r.pendingRecipientText,
 	}
 	r.pendingScrollToEnd = false
-	r.pendingClearEditor = false
-	r.pendingClearReply = false
+	r.pendingComposerRestore = nil
 	r.pendingRecipientText = domain.PeerIdentity{}
 	r.mu.Unlock()
 	return pa
@@ -478,6 +493,13 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 
 		if err != nil {
 			r.sendStatus = "send failed: " + err.Error()
+			// Hand the unsent text back to the composer to restore for retry
+			// (it cleared synchronously at send). Only for composer-originated
+			// sends: RPC sends have no composer and headless runtimes never
+			// drain PendingActions, so appending there would leak unbounded.
+			if msg.FromComposer {
+				r.pendingComposerRestore = append(r.pendingComposerRestore, ComposerRestore{Peer: to, Body: msg.Body, ReplyTo: msg.ReplyTo, Epoch: msg.ComposerEpoch})
+			}
 			r.mu.Unlock()
 			r.notify(UIEventStatusUpdated)
 			ebus.PublishMessageSendFailed(r.eventBus, ebus.MessageSendFailedResult{
@@ -488,8 +510,6 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 		}
 
 		r.sendStatus = "message sent"
-		r.pendingClearEditor = true
-		r.pendingClearReply = true
 
 		if sent != nil && r.cache.MatchesPeer(to) {
 			r.cache.AppendMessage(*sent)
@@ -525,6 +545,23 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 // is delegated to FileTransferBridge; DMRouter handles only the peerGen
 // stale-send guard and UI state updates.
 func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func()) error {
+	return r.sendFileAnnounceWithBaseline(to, msg, meta, onAsyncFailure, nil)
+}
+
+// SendFileAnnounceFromComposer is like SendFileAnnounce but pins the removal
+// generation the caller captured BEFORE its own slow local work (the desktop
+// file import). Guarding against that earlier baseline closes the TOCTOU where
+// a contact deleted between the caller's own pre-check and this call would be
+// measured against a freshly captured (already bumped) generation and slip
+// through, re-importing the identity and re-adding it to the sidebar.
+func (r *DMRouter) SendFileAnnounceFromComposer(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func(), baselineGen uint64) error {
+	return r.sendFileAnnounceWithBaseline(to, msg, meta, onAsyncFailure, &baselineGen)
+}
+
+// sendFileAnnounceWithBaseline is the shared body. baseline, when non-nil, is
+// the removal generation to guard against (captured by the caller before its
+// own slow work); when nil the current generation is captured here.
+func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func(), baseline *uint64) error {
 	if r.fileBridge == nil {
 		return fmt.Errorf("file transfer not available")
 	}
@@ -541,9 +578,14 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 		return ErrConversationDeleteInflight
 	}
 
-	r.mu.RLock()
-	gen := r.peerGen[to]
-	r.mu.RUnlock()
+	var gen uint64
+	if baseline != nil {
+		gen = *baseline
+	} else {
+		r.mu.RLock()
+		gen = r.peerGen[to]
+		r.mu.RUnlock()
+	}
 
 	r.setSendStatusNotify("sending…")
 
@@ -551,10 +593,63 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 		defer recoverLog("SendFileAnnounce")
 		defer r.convDeleteRetry.releaseSend(to)
 
+		// Guard BEFORE PrepareAndSend: it performs the actual DM send + chatlog
+		// write, which RollbackMapping cannot undo. If the peer was already
+		// removed (deleted during the caller's local import, or between the
+		// caller's pre-check and here), abandon WITHOUT sending. Same status +
+		// ebus ordering as the failure paths below.
+		r.mu.RLock()
+		stale := r.peerGen[to] != gen
+		r.mu.RUnlock()
+		if stale {
+			// The desktop already imported the file (prepareFileForTransmit) and
+			// PrepareAndSend — which owns the normal cleanup — will not run, so
+			// remove the now-unreferenced blob here. The caller saw a nil return,
+			// so its synchronous-error cleanup path never fires either.
+			r.client.RemoveUnreferencedTransmitFile(meta.FileHash)
+			r.setSendStatusNotify("file announce cancelled: peer removed")
+			ebus.PublishFileSendFailed(r.eventBus, ebus.FileSendFailedResult{
+				To:  to,
+				Err: fmt.Errorf("peer removed before file announce"),
+			})
+			if onAsyncFailure != nil {
+				onAsyncFailure()
+			}
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 		defer cancel()
 
-		result, err := r.fileBridge.PrepareAndSend(ctx, to, msg, meta)
+		// Degrade a stale reply reference BEFORE consuming the transmit blob.
+		// Unlike the text send (SendMessage), PrepareAndSend cannot be retried
+		// in place on ErrReplyToNotFound: its failed attempt runs token.Rollback,
+		// which deletes the now-unreferenced blob, so a second call would fail
+		// with "file deleted" instead. Every desktop retry re-imports the file
+		// but reuses the same stale ReplyTo, so without this pre-check a file
+		// whose quoted message was deleted would fail on every retry forever.
+		// Strip the quote only when the chatlog DEFINITIVELY reports it absent;
+		// a lookup error (broken DB) leaves the quote intact and lets the send
+		// fail loudly, matching SendMessage's degrade contract.
+		if msg.ReplyTo != "" {
+			if gw := r.client.ChatlogGateway(); gw != nil {
+				if store := gw.Store(); store != nil {
+					if found, lookErr := store.LookupEntryInConversation(to, domain.MessageID(msg.ReplyTo)); lookErr == nil && !found {
+						log.Warn().
+							Str("peer", to.String()).
+							Str("reply_to", string(msg.ReplyTo)).
+							Msg("dm_router: reply_to absent at file announce (deleted while composing?), sending without quote")
+						msg.ReplyTo = ""
+					}
+				}
+			}
+		}
+
+		sendFn := r.fileBridge.PrepareAndSend
+		if r.prepareAndSend != nil {
+			sendFn = r.prepareAndSend
+		}
+		result, err := sendFn(ctx, to, msg, meta)
 		if err != nil {
 			// Order matters: status + ebus event MUST be published
 			// before the callback unblocks the caller. Tests (and any
@@ -601,8 +696,6 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 			return
 		}
 		r.sendStatus = "message sent"
-		r.pendingClearEditor = true
-		r.pendingClearReply = true
 
 		if r.cache.MatchesPeer(to) {
 			r.cache.AppendMessage(*result.Sent)
@@ -977,6 +1070,19 @@ func (r *DMRouter) isActivePeer(peer domain.PeerIdentity) bool {
 	return active == peer
 }
 
+// PeerGeneration returns the current removal generation for a peer. It is
+// bumped by RemovePeer, so a caller can capture it before a slow local
+// operation (e.g. a desktop file import) and re-check afterwards: a changed
+// value means the contact was deleted in the meantime and the operation must
+// be abandoned rather than resurrecting the contact.
+func (r *DMRouter) PeerGeneration(peer domain.PeerIdentity) uint64 {
+	peer = normalizePeer(peer)
+	r.mu.RLock()
+	gen := r.peerGen[peer]
+	r.mu.RUnlock()
+	return gen
+}
+
 func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	peerID := r.peerForMessage(event)
 
@@ -1267,8 +1373,7 @@ func (r *DMRouter) resetIdentityState() {
 	r.previewsSeeded = false
 	r.sendStatus = ""
 	r.pendingScrollToEnd = false
-	r.pendingClearEditor = false
-	r.pendingClearReply = false
+	r.pendingComposerRestore = nil
 	r.pendingRecipientText = domain.PeerIdentity{}
 	r.mu.Unlock()
 
