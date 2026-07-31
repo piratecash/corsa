@@ -2,12 +2,19 @@
 export
 
 DIST_DIR ?= dist
+PREFIX ?= /usr/local
 GOCACHE ?= $(CURDIR)/.gocache
 GOMODCACHE ?= $(CURDIR)/.gomodcache
 GOFLAGS ?= -trimpath
 GO_LDFLAGS ?= -s -w
-GO_WINDOWS_GUI_LDFLAGS ?= $(GO_LDFLAGS) -H windowsgui
 GO ?= go
+APP_ID ?= chat.corsa
+APP_NAME ?= Corsa
+DESKTOP_ICON_ICNS ?= assets/icons/app-icon.icns
+DESKTOP_ICON_ICO ?= assets/icons/app-icon.ico
+GO_DESKTOP_LDFLAGS ?= $(GO_LDFLAGS) -X gioui.org/app.ID=$(APP_ID)
+GO_WINDOWS_DESKTOP_LDFLAGS ?= $(GO_DESKTOP_LDFLAGS) -H windowsgui
+RSRC ?= $(GO) tool rsrc
 
 .PHONY: build-dirs
 build-dirs:
@@ -88,23 +95,42 @@ build-node-windows-arm64: build-dirs
 
 .PHONY: build-desktop-macos-arm64
 build-desktop-macos-arm64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-darwin-arm64 ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) CLANG_MODULE_CACHE_PATH=$(GOCACHE)/clang-module-cache CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 $(GO) build -ldflags="$(GO_DESKTOP_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-darwin-arm64 ./cmd/corsa-desktop
+	mkdir -p $(DIST_DIR)/$(APP_NAME)-darwin-arm64.app/Contents/MacOS $(DIST_DIR)/$(APP_NAME)-darwin-arm64.app/Contents/Resources
+	cp $(DIST_DIR)/corsa-desktop-darwin-arm64 $(DIST_DIR)/$(APP_NAME)-darwin-arm64.app/Contents/MacOS/$(APP_NAME)
+	cp packaging/macos/Info.plist $(DIST_DIR)/$(APP_NAME)-darwin-arm64.app/Contents/Info.plist
+	cp $(DESKTOP_ICON_ICNS) $(DIST_DIR)/$(APP_NAME)-darwin-arm64.app/Contents/Resources/app-icon.icns
 
 .PHONY: build-desktop-macos-amd64
 build-desktop-macos-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-darwin-amd64 ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) CLANG_MODULE_CACHE_PATH=$(GOCACHE)/clang-module-cache CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 $(GO) build -ldflags="$(GO_DESKTOP_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-darwin-amd64 ./cmd/corsa-desktop
+	mkdir -p $(DIST_DIR)/$(APP_NAME)-darwin-amd64.app/Contents/MacOS $(DIST_DIR)/$(APP_NAME)-darwin-amd64.app/Contents/Resources
+	cp $(DIST_DIR)/corsa-desktop-darwin-amd64 $(DIST_DIR)/$(APP_NAME)-darwin-amd64.app/Contents/MacOS/$(APP_NAME)
+	cp packaging/macos/Info.plist $(DIST_DIR)/$(APP_NAME)-darwin-amd64.app/Contents/Info.plist
+	cp $(DESKTOP_ICON_ICNS) $(DIST_DIR)/$(APP_NAME)-darwin-amd64.app/Contents/Resources/app-icon.icns
 
 .PHONY: build-desktop-linux-amd64
 build-desktop-linux-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -ldflags="$(GO_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-linux-amd64 ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=linux GOARCH=amd64 $(GO) build -ldflags="$(GO_DESKTOP_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-linux-amd64 ./cmd/corsa-desktop
 
 .PHONY: build-desktop-windows-amd64
 build-desktop-windows-amd64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -ldflags="$(GO_WINDOWS_GUI_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-windows-amd64.exe ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(RSRC) -arch amd64 -ico $(DESKTOP_ICON_ICO) -o cmd/corsa-desktop/corsa-icon_windows_amd64.syso
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=amd64 $(GO) build -ldflags="$(GO_WINDOWS_DESKTOP_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-windows-amd64.exe ./cmd/corsa-desktop
 
 .PHONY: build-desktop-windows-arm64
 build-desktop-windows-arm64: build-dirs
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=arm64 $(GO) build -ldflags="$(GO_WINDOWS_GUI_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-windows-arm64.exe ./cmd/corsa-desktop
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(RSRC) -arch arm64 -ico $(DESKTOP_ICON_ICO) -o cmd/corsa-desktop/corsa-icon_windows_arm64.syso
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=windows GOARCH=arm64 $(GO) build -ldflags="$(GO_WINDOWS_DESKTOP_LDFLAGS)" -o $(DIST_DIR)/corsa-desktop-windows-arm64.exe ./cmd/corsa-desktop
+
+.PHONY: install-desktop-linux
+install-desktop-linux: build-desktop-linux-amd64
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 0755 $(DIST_DIR)/corsa-desktop-linux-amd64 $(DESTDIR)$(PREFIX)/bin/corsa-desktop
+	install -d $(DESTDIR)$(PREFIX)/share/applications
+	install -m 0644 packaging/linux/corsa.desktop $(DESTDIR)$(PREFIX)/share/applications/corsa.desktop
+	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps
+	install -m 0644 assets/icons/png/app-icon-256.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/corsa.png
 
 .PHONY: build-node-all
 build-node-all: build-node-macos-arm64 build-node-macos-amd64 build-node-linux-amd64 build-node-windows-amd64 build-node-windows-arm64

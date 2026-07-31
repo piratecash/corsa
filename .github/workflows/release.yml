@@ -90,10 +90,21 @@ jobs:
       - name: Package Linux artifacts
         shell: bash
         run: |
-          mkdir -p release
-          tar -cjf release/corsa-linux-amd64.tar.bz2 -C dist \
-            corsa-node-linux-amd64 \
-            corsa-desktop-linux-amd64
+          package_dir="release/corsa-linux-amd64"
+          install -d \
+            "${package_dir}/bin" \
+            "${package_dir}/share/applications" \
+            "${package_dir}/share/icons/hicolor/256x256/apps"
+          install -m 0755 dist/corsa-node-linux-amd64 \
+            "${package_dir}/bin/corsa-node"
+          install -m 0755 dist/corsa-desktop-linux-amd64 \
+            "${package_dir}/bin/corsa-desktop"
+          install -m 0644 packaging/linux/corsa.desktop \
+            "${package_dir}/share/applications/corsa.desktop"
+          install -m 0644 assets/icons/png/app-icon-256.png \
+            "${package_dir}/share/icons/hicolor/256x256/apps/corsa.png"
+          tar -cjf release/corsa-linux-amd64.tar.bz2 -C release \
+            corsa-linux-amd64
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -153,11 +164,11 @@ jobs:
           if [ "${{ matrix.name }}" = "macos-arm64" ]; then
             tar -cjf release/corsa-darwin-arm64.tar.bz2 -C dist \
               corsa-node-darwin-arm64 \
-              corsa-desktop-darwin-arm64
+              Corsa-darwin-arm64.app
           else
             tar -cjf release/corsa-darwin-amd64.tar.bz2 -C dist \
               corsa-node-darwin-amd64 \
-              corsa-desktop-darwin-amd64
+              Corsa-darwin-amd64.app
           fi
 
       - name: Package Windows artifacts

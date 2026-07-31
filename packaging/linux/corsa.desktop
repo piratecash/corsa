@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Corsa
+Comment=Decentralized messenger
+Exec=corsa-desktop
+Icon=corsa
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+StartupNotify=true
+StartupWMClass=chat.corsa

@@ -9,3 +9,4 @@ __pycache__/
 dist/
 corsa-desktop
 corsa-desktop.exe
+/cmd/corsa-desktop/*_windows_*.syso

@@ -569,6 +569,10 @@ func (w *Window) loop(window *app.Window) error {
 		case app.DestroyEvent:
 			return e.Err
 		case app.ViewEvent:
+			// Raw macOS executables (including `go run`) have no bundle from
+			// which AppKit could load CFBundleIconFile. Install the embedded
+			// application icon once the native application/window exists.
+			platformSetAppIcon()
 			// The window's native handle is now known: bind it and register
 			// the touch-keyboard Showing/Hiding handler proactively, so a
 			// keyboard the user opens before their first editor tap is tracked.
