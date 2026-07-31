@@ -131,3 +131,59 @@ func TestSnapshotSplit_BeepReusesBothHalves(t *testing.T) {
 		t.Fatal("beep must reuse the cached DM collections")
 	}
 }
+
+// TestSnapshotSplit_DMGenerationTracksDMHalfOnly pins the contract UI caches
+// derived from Peers / PeerOrder / ActiveMessages rely on: DMGeneration moves
+// exactly when the DM half is rebuilt, and stands still for the frequent
+// status and beep notifies that reuse it. A consumer gating on Generation
+// instead re-derives everything two or three times a second — which for the
+// message cache meant re-hashing an unbounded conversation on the UI
+// goroutine.
+func TestSnapshotSplit_DMGenerationTracksDMHalfOnly(t *testing.T) {
+	r := newSnapshotTestRouter(t)
+
+	r.mu.Lock()
+	r.peers[domaintest.ID("peer-1")] = &RouterPeerState{}
+	r.peerOrder = []domain.PeerIdentity{domaintest.ID("peer-1")}
+	r.mu.Unlock()
+	r.notify(UIEventSidebarUpdated)
+	snap1 := r.Snapshot()
+
+	if snap1.DMGeneration == 0 {
+		t.Fatal("a DM notify must publish a non-zero DMGeneration")
+	}
+
+	// Status and beep notifies reuse the DM half, so they must not move it.
+	r.mu.Lock()
+	r.sendStatus = "message sent"
+	r.mu.Unlock()
+	r.notify(UIEventStatusUpdated)
+	r.notify(UIEventBeep)
+	snap2 := r.Snapshot()
+
+	if snap2.Generation <= snap1.Generation {
+		t.Fatal("status/beep must still bump Generation")
+	}
+	if snap2.DMGeneration != snap1.DMGeneration {
+		t.Fatalf("status/beep moved DMGeneration: %d -> %d", snap1.DMGeneration, snap2.DMGeneration)
+	}
+	// The counter and the cache it describes must agree: same DMGeneration
+	// means the very same map, not merely an equal one.
+	if reflect.ValueOf(snap1.Peers).Pointer() != reflect.ValueOf(snap2.Peers).Pointer() {
+		t.Fatal("equal DMGeneration must mean the identical DM collections")
+	}
+
+	// A DM notify rebuilds the half, so the counter must advance with it.
+	r.mu.Lock()
+	r.peers[domaintest.ID("peer-2")] = &RouterPeerState{}
+	r.mu.Unlock()
+	r.notify(UIEventSidebarUpdated)
+	snap3 := r.Snapshot()
+
+	if snap3.DMGeneration <= snap2.DMGeneration {
+		t.Fatalf("DM notify must bump DMGeneration: %d -> %d", snap2.DMGeneration, snap3.DMGeneration)
+	}
+	if reflect.ValueOf(snap2.Peers).Pointer() == reflect.ValueOf(snap3.Peers).Pointer() {
+		t.Fatal("a bumped DMGeneration must mean a rebuilt map")
+	}
+}

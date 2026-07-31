@@ -61,6 +61,18 @@ type RouterSnapshot struct {
 	// single value instead of sampling individual fields — a generation
 	// change guarantees that at least one piece of state differs.
 	Generation uint64
+
+	// DMGeneration counts rebuilds of the DM half only (Peers, PeerOrder,
+	// ActiveMessages). Generation is the wrong gate for a cache derived
+	// from those three: it also advances for resource samples and
+	// peer-health deltas, 2-3 times a second, while this half is reused
+	// byte-for-byte — a UI cache keyed on Generation therefore rebuilds
+	// continuously over an unchanged conversation. Equal DMGeneration
+	// guarantees the three collections are the SAME values (identical
+	// backing arrays, not merely equal), so a consumer may keep anything
+	// derived from them. It does not track the scalars (ActivePeer,
+	// SendStatus, ...), which composeSnapshotLocked reads live.
+	DMGeneration uint64
 }
 
 type DMRouter struct {
@@ -118,6 +130,18 @@ type DMRouter struct {
 	// previous full deep copy on every notify. Guarded by r.mu.
 	cachedDMPart dmSnapshotPart
 	cachedNS     NodeStatus
+
+	// dmGen counts rebuilds of cachedDMPart and is surfaced as
+	// RouterSnapshot.DMGeneration. It is bumped INSIDE buildDMPartLocked
+	// rather than at the two assignment sites, because that function is the
+	// only producer of a DM half: a new half therefore cannot reach
+	// cachedDMPart without moving the counter. The remaining asymmetry is
+	// the harmless one — a buildDMPartLocked result that is discarded would
+	// bump without a content change, costing a consumer one redundant
+	// rebuild, whereas a silent content change would let a consumer keep a
+	// cache describing messages that no longer exist. Guarded by r.mu, like
+	// the cache it describes.
+	dmGen uint64
 
 	uiEvents        chan UIEvent
 	uiOverflowCount atomic.Int64  // number of active retry goroutines in notify()
@@ -2041,8 +2065,11 @@ func (r *DMRouter) setSendStatusNotify(s string) {
 // buildDMPartLocked clones the DM-owned collections into an immutable
 // half. Allocates a fresh peers map (with per-entry *RouterPeerState
 // clones) + peerOrder + activeMessages slices; called only when DM data
-// actually changed.
+// actually changed. Also bumps dmGen: this is the only producer of a DM
+// half, so the revision is moved here rather than at the two assignment
+// sites (see the field).
 func (r *DMRouter) buildDMPartLocked() dmSnapshotPart {
+	r.dmGen++
 	peersCopy := make(map[domain.PeerIdentity]*RouterPeerState, len(r.peers))
 	for k, v := range r.peers {
 		clone := *v
@@ -2074,6 +2101,10 @@ func (r *DMRouter) composeSnapshotLocked(gen uint64) RouterSnapshot {
 	dm := r.cachedDMPart
 	return RouterSnapshot{
 		Generation: gen,
+		// The DM half's own revision, so a consumer whose cache is derived
+		// from Peers / PeerOrder / ActiveMessages can skip the ~2-3 notifies
+		// a second that change neither.
+		DMGeneration: r.dmGen,
 		// Cheap scalars read live under r.mu so a status-only notify
 		// (which refreshes neither half's collections) still reflects a
 		// sendStatus / selection flip.

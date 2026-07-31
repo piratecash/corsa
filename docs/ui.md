@@ -15,7 +15,7 @@ Window (Gio event loop)
   │   ├── Identity search
   │   ├── Recipient list (from router peers)
   │   │   └── Reachable indicator (green/gray dot)
-  │   └── Context menu (copy, alias, delete)
+  │   └── Context menu (right-click, 500 ms long-press, or the card's ⋯ button: copy, alias, delete)
   ├── Chat area
   │   ├── Message list (scrollable)
   │   └── Message bubbles (with delivery status)
@@ -24,7 +24,7 @@ Window (Gio event loop)
   │       │   └── Click scrolls to original message
   │       ├── Message body (selectable text)
   │       ├── Delivery status (sent/delivered/seen)
-  │       └── Context menu (right-click: Reply, Copy)
+  │       └── Context menu (right-click, 500 ms long-press, or the bubble's ⋯ button: Reply, Copy, Delete)
   └── Composer card
       ├── Recipient display
       ├── Reply preview banner (when replying)
@@ -32,6 +32,25 @@ Window (Gio event loop)
       ├── Send button
       └── Status line (send/delete/sync feedback)
 ```
+
+### Touch keyboard (Windows tablets)
+
+Gio's Windows backend never invokes the on-screen keyboard itself, so the
+desktop app drives it explicitly: tapping any editor with a finger shows
+the keyboard (`InputPane.TryShow`, with a legacy TabTip/Toggle fallback on
+old Win10 builds); while a **docked** keyboard is visible the window adds
+bottom padding equal to the keyboard's `OccludedRect` height so the
+composer/console input stays above it. A **floating** keyboard reports no
+occlusion (zero height, per the `OccludedRect` contract) and — like other
+Windows apps — the layout is not reflowed around it; the user moves the
+floating keyboard themselves, and the app keeps tracking the session so
+that re-docking reflows correctly. When every editor of the window loses
+focus — including a tap outside
+the editors — a keyboard that the app itself opened is hidden again
+(`TryHide`), while a keyboard the user opened manually is left alone.
+Ownership of the "app-opened" session follows the active window, so a
+keyboard opened from the main window can be dismissed after switching to
+the console and vice versa.
 
 ### Initialization sequence
 
@@ -378,7 +397,7 @@ Window (Gio event loop)
   │   ├── Поиск identity
   │   ├── Список получателей (из peers роутера)
   │   │   └── Индикатор достижимости (зеленая/серая точка)
-  │   └── Контекстное меню (копировать, псевдоним, удалить)
+  │   └── Контекстное меню (правый клик, долгое удержание 500 мс или кнопка ⋯ на карточке: копировать, псевдоним, удалить)
   ├── Область чата
   │   ├── Список сообщений (скроллируемый)
   │   └── Пузыри сообщений (со статусом доставки)
@@ -387,7 +406,7 @@ Window (Gio event loop)
   │       │   └── Клик прокручивает к оригинальному сообщению
   │       ├── Тело сообщения (выделяемый текст)
   │       ├── Статус доставки (отправлено/доставлено/прочитано)
-  │       └── Контекстное меню (правый клик: Ответить, Копировать)
+  │       └── Контекстное меню (правый клик, долгое удержание 500 мс или кнопка ⋯ на пузыре: Ответить, Копировать, Удалить)
   └── Карточка ввода
       ├── Отображение получателя
       ├── Баннер предпросмотра ответа (при ответе)
@@ -395,6 +414,24 @@ Window (Gio event loop)
       ├── Кнопка отправки
       └── Строка статуса (обратная связь по отправке/удалению/синхронизации)
 ```
+
+### Сенсорная клавиатура (Windows-планшеты)
+
+Windows-бэкенд Gio сам экранную клавиатуру не вызывает, поэтому приложение
+управляет ею явно: тап пальцем в любое поле ввода показывает клавиатуру
+(`InputPane.TryShow`, на старых сборках Win10 — legacy-путь TabTip/Toggle);
+пока видна **пристыкованная** (docked) клавиатура, окно добавляет нижний
+отступ, равный высоте её `OccludedRect`, чтобы поле ввода не перекрывалось.
+**Плавающая** (floating) клавиатура окклюзию не даёт (нулевая высота — так
+определено контрактом `OccludedRect`), и, как и другие приложения Windows,
+компоновка под неё не подстраивается: пользователь двигает плавающую
+клавиатуру сам, а приложение продолжает отслеживать сессию, чтобы
+повторная стыковка снова дала отступ. Когда все редакторы окна теряют фокус —
+включая тап вне полей ввода — клавиатура, открытая самим приложением,
+скрывается (`TryHide`), а открытая пользователем вручную не трогается.
+Владение «приложенческой» сессией следует за активным окном: клавиатуру,
+открытую из главного окна, можно закрыть и после перехода в консоль, и
+наоборот.
 
 ### Последовательность инициализации
 

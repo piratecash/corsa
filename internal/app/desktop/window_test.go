@@ -1,12 +1,19 @@
 package desktop
 
 import (
+	"image"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/service"
+
+	"gioui.org/io/pointer"
+	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/unit"
+	"gioui.org/widget"
 )
 
 func TestMergeRecipientOrder(t *testing.T) {
@@ -518,7 +525,7 @@ func TestRebuildMsgCacheSkipsWhenUnchanged(t *testing.T) {
 
 	now := time.Now()
 	w := &Window{}
-	w.snap.Generation = 1
+	w.snap.DMGeneration = 1
 	w.snap.ActiveMessages = []service.DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("alice"), Timestamp: now},
 		{ID: "msg-2", Body: "world", Sender: domaintest.ID("bob"), Timestamp: now.Add(time.Second)},
@@ -542,8 +549,18 @@ func TestRebuildMsgCacheSkipsWhenUnchanged(t *testing.T) {
 		t.Fatalf("msgCacheGen = %d after no-op call, want 1", w.msgCacheGen)
 	}
 
-	// Bump generation and append a message — cache must rebuild.
-	w.snap.Generation = 2
+	// A status-only notify advances Generation and nothing else: the DM half
+	// is reused byte-for-byte, so the cache must NOT be rebuilt. This is the
+	// whole point of gating on DMGeneration — over a long conversation the
+	// old gate re-hashed every ID two or three times a second.
+	w.snap.Generation = 99
+	w.rebuildMsgCache()
+	if w.msgCacheGen != 1 {
+		t.Fatalf("msgCacheGen = %d after a status-only Generation bump, want 1", w.msgCacheGen)
+	}
+
+	// Bump the DM generation and append a message — cache must rebuild.
+	w.snap.DMGeneration = 2
 	w.snap.ActiveMessages = append(w.snap.ActiveMessages, service.DirectMessage{
 		ID: "msg-3", Body: "new", Sender: domaintest.ID("carol"), Timestamp: now.Add(2 * time.Second),
 	})
@@ -557,15 +574,16 @@ func TestRebuildMsgCacheSkipsWhenUnchanged(t *testing.T) {
 }
 
 // TestRebuildMsgCacheDetectsGenerationChange verifies that the cache
-// is rebuilt when the snapshot generation changes, even if message
+// is rebuilt when the snapshot's DM generation changes, even if message
 // count and IDs remain the same (e.g. receipt status update, body
-// edit, or same-shape conversation reload).
+// edit, or same-shape conversation reload). Those all reach the UI through
+// a DM-typed notify, so they move DMGeneration and are still caught.
 func TestRebuildMsgCacheDetectsGenerationChange(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
 	w := &Window{}
-	w.snap.Generation = 10
+	w.snap.DMGeneration = 10
 	w.snap.ActiveMessages = []service.DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("alice"), Timestamp: now, ReceiptStatus: ""},
 	}
@@ -575,8 +593,9 @@ func TestRebuildMsgCacheDetectsGenerationChange(t *testing.T) {
 		t.Fatalf("msgCacheGen = %d, want 10", w.msgCacheGen)
 	}
 
-	// Simulate receipt arrival: same IDs, new generation.
-	w.snap.Generation = 11
+	// Simulate receipt arrival: same IDs, new DM generation (applyReceiptRepair
+	// notifies UIEventMessagesUpdated, which rebuilds the DM half).
+	w.snap.DMGeneration = 11
 	w.snap.ActiveMessages[0].ReceiptStatus = "delivered"
 	w.rebuildMsgCache()
 	if w.msgCacheGen != 11 {
@@ -587,5 +606,235 @@ func TestRebuildMsgCacheDetectsGenerationChange(t *testing.T) {
 	w.rebuildMsgCache()
 	if w.msgCacheGen != 11 {
 		t.Fatalf("msgCacheGen = %d after no-op, want 11", w.msgCacheGen)
+	}
+}
+
+// TestPressWindowPosRequiresUniqueFrame locks in the rule that a press is
+// resolved by the FRAME it began on (widget.Press carries no PointerID in Gio
+// v0.10) and that an ambiguous frame resolves to nothing rather than to a
+// guess. Lives here rather than in touch_input_test.go because that file is
+// copied into the widget-free harness.
+func TestPressWindowPosRequiresUniqueFrame(t *testing.T) {
+	f1 := time.Unix(0, 1000)
+	f2 := time.Unix(0, 2000)
+	w := &Window{pointerPressPos: map[pointer.ID]pressPoint{
+		3: {pos: image.Pt(40, 60), at: f1},
+		7: {pos: image.Pt(90, 10), at: f2},
+	}}
+	// Each press resolves to its OWN position, never the other pointer's —
+	// however much later that one moved within the same frame.
+	if got, ok := w.pressWindowPos(widget.Press{Start: f1}); !ok || got != image.Pt(40, 60) {
+		t.Fatalf("press on f1 = %v, %v; want (40,60), true", got, ok)
+	}
+	if got, ok := w.pressWindowPos(widget.Press{Start: f2}); !ok || got != image.Pt(90, 10) {
+		t.Fatalf("press on f2 = %v, %v; want (90,10), true", got, ok)
+	}
+	// A frame that recorded no press is not resolvable.
+	if _, ok := w.pressWindowPos(widget.Press{Start: time.Unix(0, 3000)}); ok {
+		t.Fatal("unknown frame must not resolve")
+	}
+	// Two pointers pressed on ONE frame: nothing here distinguishes them, so
+	// report failure instead of picking one. Callers fall back rather than
+	// anchoring a menu under the wrong finger.
+	w.pointerPressPos[7] = pressPoint{pos: image.Pt(90, 10), at: f1}
+	if _, ok := w.pressWindowPos(widget.Press{Start: f1}); ok {
+		t.Fatal("ambiguous frame must report false")
+	}
+}
+
+// A "⋯" rectangle cached from an identity-search row must not outlive the
+// results it was measured in. The hits are sorted by identity, so a new query
+// can put a different peer in a given row while the count, the row heights,
+// both scrollable lists and the window size stay exactly as they were — and
+// these rows carry the ordinary per-contact buttons, so a rectangle that
+// survives opens a REAL menu beside the row that took the old place. See
+// menuRectSig.
+func TestMenuRectCacheDropsWhenIdentitySearchRowsChange(t *testing.T) {
+	const (
+		hexA = "11ab110000000000000000000000000000000000"
+		hexB = "22ab220000000000000000000000000000000000"
+	)
+	status := service.NodeStatus{KnownIDs: []string{hexA, hexB}}
+	w := &Window{menuBtnRects: make(map[*widget.Clickable]image.Rectangle)}
+	btn := new(widget.Clickable)
+	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }
+
+	w.identitySearchEditor.SetText("11")
+	if got := w.resolveIdentitySearchRows(status, nil); len(got) != 1 || got[0] != domain.PeerIdentityFromWire(hexA) {
+		t.Fatalf("query \"11\" gave %v, want exactly [%s]", got, domain.PeerIdentityFromWire(hexA))
+	}
+	w.menuBtnRects[btn] = image.Rect(0, 0, 10, 10)
+
+	// Same query, same row: nothing moved, and the cache is what makes a
+	// keyboard or Narrator menu land on the button instead of the fallback
+	// corner. Clearing it here would be deleting the feature.
+	w.resolveIdentitySearchRows(status, nil)
+	if !cached() {
+		t.Fatal("an unchanged result set moves no row; the rectangle must survive")
+	}
+
+	// One hit swapped for another: same count, same heights, different peer in
+	// the only row there is.
+	w.identitySearchEditor.SetText("22")
+	if got := w.resolveIdentitySearchRows(status, nil); len(got) != 1 || got[0] != domain.PeerIdentityFromWire(hexB) {
+		t.Fatalf("query \"22\" gave %v, want exactly [%s]", got, domain.PeerIdentityFromWire(hexB))
+	}
+	if cached() {
+		t.Fatal("the search row now holds a different peer: a rectangle kept from the old query anchors the menu at a row that is gone")
+	}
+}
+
+// The cap and the digest must describe the SAME rows. Capping after
+// fingerprinting would clear the cache for hits that never had a row; capping
+// somewhere the digest cannot see would let a change inside the visible rows
+// pass unnoticed.
+func TestIdentitySearchCapAndDigestDescribeTheSameRows(t *testing.T) {
+	const (
+		hex0 = "00ab000000000000000000000000000000000000"
+		hex1 = "01ab000000000000000000000000000000000000"
+		hex2 = "02ab000000000000000000000000000000000000"
+		hex3 = "03ab000000000000000000000000000000000000"
+		hex4 = "04ab000000000000000000000000000000000000"
+		hex5 = "05ab000000000000000000000000000000000000"
+	)
+	w := &Window{menuBtnRects: make(map[*widget.Clickable]image.Rectangle)}
+	btn := new(widget.Clickable)
+	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }
+	w.identitySearchEditor.SetText("ab")
+
+	rows := w.resolveIdentitySearchRows(service.NodeStatus{KnownIDs: []string{hex1, hex2, hex3, hex4, hex5}}, nil)
+	if len(rows) != identitySearchMaxRows {
+		t.Fatalf("laid-out rows = %d, want the cap %d", len(rows), identitySearchMaxRows)
+	}
+	if rows[len(rows)-1] != domain.PeerIdentityFromWire(hex4) {
+		t.Fatalf("last row = %s, want %s — the hits are sorted and the tail is cut", rows[len(rows)-1], domain.PeerIdentityFromWire(hex4))
+	}
+	w.menuBtnRects[btn] = image.Rect(0, 0, 10, 10)
+
+	// hex5 was over the cap and never had a row, so losing it moves nothing.
+	w.resolveIdentitySearchRows(service.NodeStatus{KnownIDs: []string{hex1, hex2, hex3, hex4}}, nil)
+	if !cached() {
+		t.Fatal("a hit beyond the cap has no row: dropping it must not cost every cached rectangle")
+	}
+
+	// A hit that sorts ahead of all of them pushes every row down one.
+	w.resolveIdentitySearchRows(service.NodeStatus{KnownIDs: []string{hex0, hex1, hex2, hex3, hex4}}, nil)
+	if cached() {
+		t.Fatal("a new first hit moved every search row down one; the cached rectangle now names the row above")
+	}
+}
+
+// A ⋯ rectangle must not survive the search block MOVING, even when the hits
+// in it are untouched. Every other term of the signature describes content or
+// viewport, and both are blind to a translation: the touch keyboard taking the
+// window header away, or a language change re-wrapping the labels the contacts
+// card carries above its search box, slides every row while the query, the
+// count, the order and the window size stay exactly as they were. See
+// menuRectSig.
+func TestMenuRectCacheDropsWhenSearchRowsSlide(t *testing.T) {
+	w := &Window{menuBtnRects: make(map[*widget.Clickable]image.Rectangle)}
+	btn := new(widget.Clickable)
+	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }
+	gtx := func(availY int) layout.Context {
+		return layout.Context{
+			Ops:         new(op.Ops),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Constraints{Max: image.Pt(320, availY)},
+		}
+	}
+
+	w.recordSearchRowAnchor(gtx(644), 1)
+	w.menuBtnRects[btn] = image.Rect(0, 0, 10, 10)
+
+	// The same frame again: nothing moved, and a clear here would spend a
+	// whole keyboard/Narrator activation for nothing.
+	w.recordSearchRowAnchor(gtx(644), 1)
+	if !cached() {
+		t.Fatal("an unmoved row must keep its rectangle: the cache IS the keyboard/Narrator anchor")
+	}
+
+	// The header yields to the keyboard: the same single hit, 66dp higher.
+	w.recordSearchRowAnchor(gtx(710), 1)
+	if cached() {
+		t.Fatal("the rows rose with the header the keyboard took away; the kept rectangle now names the row's old place")
+	}
+
+	// No hits records no edge, and goes on recording none however the empty
+	// card is sized — there is no row to anchor, so an empty search box
+	// drifting must not cost the contacts and chat rectangles.
+	w.recordSearchRowAnchor(gtx(710), 0)
+	w.menuBtnRects[btn] = image.Rect(0, 0, 10, 10)
+	w.recordSearchRowAnchor(gtx(300), 0)
+	if !cached() {
+		if w.searchAvail != 0 {
+			t.Fatalf("with no hits searchAvail = %d, want 0: an empty block has no top edge to record", w.searchAvail)
+		}
+		t.Fatal("with no hits there is no row to anchor; the empty card's size must not be recorded at all")
+	}
+}
+
+// The same claim through the REAL layout, which is where it has to hold: the
+// number recorded is the space beneath the rows' top edge, so a taller header
+// above the card pushes the block down and changes it — while the hits, and
+// every other term of the signature, stay identical. A test on the recorder
+// alone would pass even if it were called somewhere that cannot see the
+// block move.
+func TestSearchRowAnchorTracksTheBlockAndNotItsContents(t *testing.T) {
+	const (
+		hexA     = "11ab110000000000000000000000000000000000"
+		headerDp = 66
+	)
+	status := service.NodeStatus{KnownIDs: []string{hexA}}
+	w := &Window{
+		theme:               newAppTheme(),
+		recipientButtons:    make(map[domain.PeerIdentity]*widget.Clickable),
+		recipientRightClick: make(map[domain.PeerIdentity]*rightClickState),
+		recipientMenuBtns:   make(map[domain.PeerIdentity]*widget.Clickable),
+		menuBtnRects:        make(map[*widget.Clickable]image.Rectangle),
+	}
+	w.identitySearchEditor.SetText("11")
+	btn := new(widget.Clickable)
+	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }
+
+	// One frame of the sidebar column: a header of the given height, then the
+	// search card under it, both Rigid in a vertical Flex the height of the
+	// window — which is the shape the real card sits in.
+	frame := func(header int) {
+		gtx := layout.Context{
+			Ops:         new(op.Ops),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Constraints{Max: image.Pt(320, 800)},
+		}
+		results := w.resolveIdentitySearchRows(status, nil)
+		if len(results) != 1 {
+			t.Fatalf("hits = %d, want the one identity every frame here matches", len(results))
+		}
+		layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(layout.Spacer{Height: unit.Dp(header)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return w.identitySearchCard(gtx, status, results)
+			}),
+		)
+	}
+
+	frame(headerDp)
+	settled := w.searchAvail
+	if settled == 0 {
+		t.Fatal("a laid-out hit must record where it was laid out")
+	}
+	w.menuBtnRects[btn] = image.Rect(0, 0, 10, 10)
+
+	frame(headerDp)
+	if w.searchAvail != settled || !cached() {
+		t.Fatalf("an identical frame moved nothing: searchAvail %d -> %d, cached = %v", settled, w.searchAvail, cached())
+	}
+
+	// The keyboard came up and the header went away.
+	frame(0)
+	if w.searchAvail != settled+headerDp {
+		t.Fatalf("searchAvail = %d with the header gone, want %d — the rows rise by exactly its height", w.searchAvail, settled+headerDp)
+	}
+	if cached() {
+		t.Fatal("the block slid up while its one row stayed the same peer; a kept rectangle anchors the menu where the row no longer is")
 	}
 }

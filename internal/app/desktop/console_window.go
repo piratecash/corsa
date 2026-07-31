@@ -23,6 +23,7 @@ import (
 	"gioui.org/app"
 	"gioui.org/font"
 	"gioui.org/io/clipboard"
+	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
@@ -98,7 +99,12 @@ type ConsoleWindow struct {
 	ops             op.Ops
 	onClose         func()
 	window          *app.Window
-	closed          chan struct{} // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
+	touchKbdTag     int8               // pointer tag: console editor touch-keyboard area
+	kbdTapTracker   int8               // pointer tag: window-level touch presses (outside-tap detection)
+	lastInputTouch  bool               // the most recent pointer press came from a touch screen
+	lastPressAt     time.Time          // frame time of that press (recency gate)
+	touchKbd        touchKeyboardState // this window's keyboard occlusion state
+	closed          chan struct{}      // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
 	peerList        widget.List
 	peerSectionList widget.List
 	peerSelectables map[string]*peerCardSelectables // keyed by peer address; lazily created
@@ -266,6 +272,9 @@ func (c *ConsoleWindow) Open() {
 		c.mu.Lock()
 		c.window = window
 		c.mu.Unlock()
+		// The occlusion monitor may fire after the console closes;
+		// invalidateWindow is gated on c.closed and safe cross-goroutine.
+		c.touchKbd.setInvalidate(c.invalidateWindow)
 
 		window.Option(
 			app.Title(c.parent.t("console.title")),
@@ -290,6 +299,12 @@ func (c *ConsoleWindow) Open() {
 				// subscriber entries on every open/close cycle.
 				c.unsubscribeConsoleEvents()
 
+				// Unregister the touch-keyboard pane handler: the console
+				// is recreated on every open, and a stale registration
+				// would leak and could route pane callbacks into this dead
+				// window's state if the HWND is reused.
+				platformReleaseKeyboardEvents(&c.touchKbd)
+
 				c.mu.Lock()
 				c.window = nil
 				c.mu.Unlock()
@@ -298,6 +313,11 @@ func (c *ConsoleWindow) Open() {
 					c.onClose()
 				}
 				return
+			case app.ViewEvent:
+				// Native handle known: bind it and register the pane
+				// Showing/Hiding handler proactively, so a keyboard opened
+				// before the first console-editor tap is tracked too.
+				platformBindKeyboardWindow(&c.touchKbd, platformViewHWND(e))
 			case app.FrameEvent:
 				gtx := app.NewContext(&c.ops, e)
 				c.layout(gtx)
@@ -307,19 +327,77 @@ func (c *ConsoleWindow) Open() {
 	}()
 }
 
+// touchDrivenInput mirrors Window.touchDrivenInput for the console.
+func (c *ConsoleWindow) touchDrivenInput(gtx layout.Context) bool {
+	return c.lastInputTouch && gtx.Now.Sub(c.lastPressAt) < touchInputRecency
+}
+
 func (c *ConsoleWindow) layout(gtx layout.Context) layout.Dimensions {
+	// Outside-tap evaluation BEFORE action handlers so a suggestion pick's
+	// explicit FocusCmd (issued below) wins over the dismissal (see
+	// Window.layout).
+	c.touchKbd.dismissOnOutsideTap(gtx)
+
+	// Window-level touch-press recording for outside-tap detection (the
+	// console has no cursor tracker) + symmetric keyboard hide.
+	defer clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops).Pop()
+	event.Op(gtx.Ops, &c.kbdTapTracker)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: &c.kbdTapTracker, Kinds: pointer.Press})
+		if !ok {
+			break
+		}
+		if pe, ok := ev.(pointer.Event); ok && pe.Kind == pointer.Press {
+			c.lastInputTouch = pe.Source == pointer.Touch
+			c.lastPressAt = gtx.Now
+			if pe.Source == pointer.Touch {
+				c.touchKbd.noteWindowTouchPress(pe.PointerID)
+			}
+		}
+	}
+
 	c.handleActions(gtx)
 	fill(gtx, colorBackground())
 	// Tight outer margin matching the main window (window.go layout:
 	// Top/Bottom 4dp, Left/Right 6dp) so the content frame sits a few
 	// pixels from the window edge rather than the previous wide 24dp
 	// border.
-	inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}
+	c.touchKbd.trackEditorFocus(gtx, gtx.Focused(&c.consoleEditor))
+
+	// Same as the main window: publish what this frame measures at its end,
+	// while keyboardYieldingChrome below reads what the previous frame left.
+	defer c.touchKbd.endTailFrame(gtx)
+
+	// Same shape as the main window: the keyboard inset goes on the tab
+	// content rather than on this padding, and the tab strip with its
+	// spacer yields when the free strip cannot hold them and an input row
+	// both. The console leans on the yield even harder than the composer
+	// does — layoutConsoleTab puts the input at the TOP of the tab, so
+	// bottom padding structurally cannot move it and dropping the strip
+	// above it is the only thing that raises it at all. The inset still
+	// earns its place there by keeping the history below the input out from
+	// under the keyboard.
+	inset := layout.Inset{
+		Top:    unit.Dp(4),
+		Bottom: unit.Dp(4),
+		Left:   unit.Dp(6),
+		Right:  unit.Dp(6),
+	}
 	return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(c.layoutTabs),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-			layout.Flexed(1, c.layoutActiveTab),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return keyboardYieldingChrome(gtx, &c.touchKbd, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(c.layoutTabs),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+					)
+				})
+			}),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{
+					Bottom: keyboardInsetDp(gtx, &c.touchKbd),
+				}.Layout(gtx, c.layoutActiveTab)
+			}),
 		)
 	})
 }
@@ -364,6 +442,16 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 		btn := c.suggestionButton(item.Label)
 		for btn.Clicked(gtx) {
 			c.applySuggestion(gtx, item.Insert)
+			// Raise the keyboard ONLY when the suggestion was TAPPED. A focused
+			// suggestion button also activates on Return/Space, which records no
+			// press in History (pointerClickedThisFrame is false) — without this
+			// gate a hardware key within touchInputRecency of an earlier touch
+			// would pop the keyboard while the user types on real keys. The
+			// keyboard-driven picks (Tab/Enter/Escape/RightArrow) reach
+			// applySuggestion & co. through key handlers.
+			if pointerClickedThisFrame(btn, gtx) && c.touchDrivenInput(gtx) {
+				requestTouchKeyboard(&c.touchKbd)
+			}
 		}
 	}
 
@@ -634,12 +722,29 @@ func (c *ConsoleWindow) layoutConsoleTab(gtx layout.Context) layout.Dimensions {
 	rows := []string{
 		c.parent.t("console.help"),
 	}
+	title := c.parent.t("console.title")
 
-	return c.card(gtx, c.parent.t("console.title"), rows, func(gtx layout.Context) layout.Dimensions {
+	// The console input is the FIRST row of this card, so what the keyboard
+	// must not cover is everything from the card's top down through it: the
+	// title and the help line push the input down exactly as a header would.
+	// They are not reachable as a widget from here — card builds them around
+	// whatever content it is handed — so they are measured by laying the same
+	// card out around nothing. That also counts the card's own bottom padding
+	// and the gap it puts before its content, over-stating the tail by those
+	// few dp, in the direction that retires the tab strip slightly early.
+	keyboardMeasureTail(gtx, &c.touchKbd, func(gtx layout.Context) layout.Dimensions {
+		return c.card(gtx, title, rows, func(layout.Context) layout.Dimensions {
+			return layout.Dimensions{}
+		})
+	})
+
+	return c.card(gtx, title, rows, func(gtx layout.Context) layout.Dimensions {
 		return layout.Stack{}.Layout(gtx,
 			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-					layout.Rigid(c.layoutConsoleInput),
+					// The history below scrolls and may shrink to nothing;
+					// this row may not.
+					layout.Rigid(keyboardTailRow(&c.touchKbd, c.layoutConsoleInput)),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 					layout.Flexed(1, c.layoutConsoleHistory),
 				)
@@ -683,7 +788,7 @@ func (c *ConsoleWindow) layoutConsoleInput(gtx layout.Context) layout.Dimensions
 									editor := material.Editor(c.theme, &c.consoleEditor, c.parent.t("console.placeholder"))
 									editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
 									editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
-									return editor.Layout(gtx)
+									return editorTouchKeyboardArea(gtx, &c.touchKbdTag, &c.touchKbd, editor.Layout)
 								})
 							})
 						}),
@@ -1288,6 +1393,7 @@ func (c *ConsoleWindow) commitSuggestionForArguments(gtx layout.Context, suggest
 	c.selectedSuggest = -1
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
+	c.touchKbd.noteExplicitEditorFocus()
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
 	c.invalidateWindow()
 	return true
@@ -1307,6 +1413,7 @@ func (c *ConsoleWindow) cancelSuggestions(gtx layout.Context) bool {
 	c.selectedSuggest = -1
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
+	c.touchKbd.noteExplicitEditorFocus()
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
 	c.invalidateWindow()
 	return true
@@ -1321,6 +1428,7 @@ func (c *ConsoleWindow) applySuggestion(gtx layout.Context, item string) {
 	c.selectedSuggest = -1
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
+	c.touchKbd.noteExplicitEditorFocus()
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
 	c.invalidateWindow()
 }

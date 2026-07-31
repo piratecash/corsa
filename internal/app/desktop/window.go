@@ -27,12 +27,14 @@ import (
 	"github.com/piratecash/corsa/internal/core/service"
 
 	"gioui.org/app"
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/font/gofont"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
+	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -58,26 +60,48 @@ type Window struct {
 	identitySearchEditor widget.Editor
 	messageEditor        widget.Editor
 	focusComposerPending bool
-	contactsList         widget.List
-	chatList             widget.List
-	consoleButton        widget.Clickable
-	updateButton         widget.Clickable
-	sendButton           widget.Clickable
-	copyIdentityButton   widget.Clickable
-	languageToggle       widget.Clickable
-	languageOptions      map[string]*widget.Clickable
-	recipientButtons     map[domain.PeerIdentity]*widget.Clickable
-	recipientRightClick  map[domain.PeerIdentity]*rightClickState
-	messageSelectables   map[string]*widget.Selectable
-	sendStatusSelectable widget.Selectable
-	lastChatPeer         domain.PeerIdentity
-	language             string
-	showLanguageMenu     bool
-	consoleOpen          bool
+	// composerKeyboardPending rides alongside focusComposerPending but is
+	// set ONLY when a touch-driven action wants the on-screen keyboard up
+	// (selecting a contact to type to). On Windows a programmatic FocusCmd
+	// does not raise the keyboard, so the composer would gain focus with no
+	// keyboard. It is deliberately NOT set by the long-press context-menu
+	// path, which focuses the composer but should leave the keyboard down.
+	composerKeyboardPending bool
+	contactsList            widget.List
+	chatList                widget.List
+	consoleButton           widget.Clickable
+	updateButton            widget.Clickable
+	sendButton              widget.Clickable
+	copyIdentityButton      widget.Clickable
+	languageToggle          widget.Clickable
+	languageOptions         map[string]*widget.Clickable
+	recipientButtons        map[domain.PeerIdentity]*widget.Clickable
+	recipientRightClick     map[domain.PeerIdentity]*rightClickState
+	recipientMenuBtns       map[domain.PeerIdentity]*widget.Clickable // per-card "⋯" menu buttons
+	messageSelectables      map[string]*widget.Selectable
+	sendStatusSelectable    widget.Selectable
+	lastChatPeer            domain.PeerIdentity
+	language                string
+	showLanguageMenu        bool
+	consoleOpen             bool
 
 	// Global cursor tracking for context menu positioning.
-	cursorTracker int // tag for window-level pointer events
-	lastCursorPos image.Point
+	cursorTracker   int // tag for window-level pointer events
+	lastCursorPos   image.Point
+	rootSize        image.Point                // window size captured at layout() root (for menu anchors computed inside lists)
+	touchPressPos   map[pointer.ID]image.Point // active TOUCH presses (multi-touch guard)
+	pointerPressPos map[pointer.ID]pressPoint  // press position + press FRAME of ALL pointers (menu anchors)
+	pressCleanup    []pointer.ID               // IDs released this frame; maps cleaned NEXT frame
+	pressCancelAll  bool                       // Cancel seen this frame; maps cleared NEXT frame
+	multiTouchAt    time.Time                  // frame time when a touch press overlapped an already-active touch
+	lastInputTouch  bool                       // the most recent pointer press came from a touch screen
+	lastPressAt     time.Time                  // frame time of that press (recency gate for touchDrivenInput)
+
+	// Touch input: pointer tags for the on-screen keyboard invocation
+	// areas — composer, contact search, alias editor — plus this window's
+	// keyboard occlusion state (see touch_input.go).
+	touchKbdTags [3]int8
+	touchKbd     touchKeyboardState
 
 	// Context menu state for right-click on recipient buttons.
 	contextMenuPeer         domain.PeerIdentity // fingerprint of the peer whose context menu is open
@@ -103,7 +127,96 @@ type Window struct {
 	msgCtxReply   widget.Clickable
 	msgCtxCopy    widget.Clickable
 	msgCtxDelete  widget.Clickable
-	msgRightClick map[string]*rightClickState // keyed by message ID
+	msgRightClick map[string]*rightClickState  // keyed by message ID
+	msgMenuBtns   map[string]*widget.Clickable // per-message "⋯" menu buttons
+
+	// Keyboard/Narrator focus contract of the two context menus above: which
+	// "⋯" button opened one, whether it holds focus, and where focus goes back
+	// to when it closes. See context_menu_focus.go.
+	peerMenuFocus menuFocusState
+	msgMenuFocus  menuFocusState
+
+	// menuBtnRects holds the last known WINDOW-space rectangle of each "⋯"
+	// button, captured during layout on frames where a pointer press lets us
+	// correlate the button's local coordinates with the window cursor. It is
+	// the anchor for a menu opened by a NON-pointer (keyboard/Narrator)
+	// activation, which carries no fresh cursor — far better than a fixed
+	// fraction of the window. Keyed by the button pointer; buttons are few.
+	//
+	// A captured rectangle is only valid while the buttons have not moved, so
+	// menuLayoutSig snapshots the layout state under which the rectangles were
+	// taken — both lists' full scroll Position, the row count and row ORDER each
+	// was laid out with, the identity-search hits (rows belonging to no list at
+	// all) with the position they were laid out at, and the window size (see
+	// menuRectSig, which explains why none of those is optional). When it
+	// changes the whole cache is dropped
+	// (see layout()), and a non-pointer menu falls back to the always-visible
+	// anchor rather than opening at a position the content has invalidated.
+	menuBtnRects   map[*widget.Clickable]image.Rectangle
+	menuLayoutSig  menuRectSig
+	menuRectSigSet bool
+	// Item counts the two scrollable lists are being laid out with this frame.
+	// They live here because the slices are derived deep inside the layout tree
+	// and are not reachable from currentMenuRectSig, and they are folded into
+	// menuLayoutSig so an added or deleted row invalidates the rectangles it
+	// moved even though the scroll offset never changed. Recorded through
+	// setMenuListItems at the top of the owning CARD — above every early return
+	// that lays out no list, and before any row lays out — not at the List call
+	// site itself, which those returns never reach.
+	chatItems     int
+	contactsItems int
+	// Order digests over the row IDENTITIES of the same two lists, in the order
+	// they are laid out. Counts and geometry cannot see a PERMUTATION: rows of
+	// equal height re-ranked by sortSidebarPeers leave layout.Position, the
+	// count and rootSize byte-identical while every "⋯" moves, and menuBtnRects
+	// is keyed by button identity, so its rectangle would then name a different
+	// row. contactsOrder is hashed per frame from the slice handed to the card;
+	// chatOrder rides rebuildMsgCache's existing once-per-generation pass,
+	// because a conversation is unbounded and must not be hashed every frame.
+	chatOrder     uint64
+	contactsOrder uint64
+
+	// Same pair for the identity-search hits, which are neither list. They are
+	// Rigid rows above the contacts list, selected by the search query — so
+	// nothing else recorded here moves when they do, and they carry the SAME
+	// per-contact ⋯ buttons. Written by resolveIdentitySearchRows.
+	searchItems int
+	searchOrder uint64
+	// And WHERE those rows are, which the pair above cannot see: everything
+	// else in the signature is translation-blind, so the whole card sliding up
+	// when the keyboard takes the header away changes none of it. This is the
+	// space left BELOW the rows' top edge — what a vertical Flex hands a Rigid
+	// child — so it moves whenever anything above them does. Written by
+	// recordSearchRowAnchor.
+	searchAvail int
+
+	// Hide generation PLUS ONE that a context menu's last "please go away"
+	// was dispatched with, 0 for "never asked" — see menuOverlayRoom.
+	menuKbdHideAskedGen int64
+
+	// Context menus scroll when taller than the space above the keyboard (in
+	// landscape the keyboard can leave too little height for every row — Delete
+	// / Clear chat, or an alias editor's Save / Cancel — which a fixed layout
+	// would squeeze to nothing). The menu content is one oversized list item; a
+	// List sizes to content when it fits and clamps-with-scroll (drag to scroll)
+	// when it does not. Plain layout.List, not material's — its scrollbar's
+	// default Occupy strategy would reserve a gutter and narrow the menu even
+	// when it fits.
+	ctxMenuList    layout.List
+	msgCtxMenuList layout.List
+	// The scroll position is reset to the top whenever a menu is CLOSED (see
+	// layout()), so every fresh open — including reopening the same peer — starts
+	// at the top instead of mid-scroll. lastCtxMenuMode additionally resets it
+	// when an OPEN recipient menu switches to/from a confirm/alias sub-view, so
+	// the confirmation header can't already be scrolled out of sight.
+	lastCtxMenuMode uint8
+
+	// Dragging is not the only thing that has to move those lists. Keyboard
+	// focus steps from row to row INSIDE the single list item, which by itself
+	// scrolls nothing and walks focus off the bottom edge of the card. These
+	// measure the rows so the overlays can scroll the focused one into view.
+	ctxMenuScroll    menuScroll
+	msgCtxMenuScroll menuScroll
 
 	// Reply state: when the user replies to a message, we remember the
 	// target UUID and show a quote preview above the composer.
@@ -111,12 +224,12 @@ type Window struct {
 	replyCancelButton widget.Clickable
 
 	// msgCacheByID stores message metadata for O(1) lookup when rendering
-	// reply quotes (body, sender, timestamp). Rebuilt when the snapshot
-	// generation changes — this catches every mutation including body
+	// reply quotes (body, sender, timestamp). Rebuilt when the snapshot's
+	// DM generation changes — this catches every mutation including body
 	// edits, ReplyTo updates, and same-shape conversation reloads that
 	// the old count+first/last heuristic missed.
 	msgCacheByID map[string]cachedMsg
-	msgCacheGen  uint64 // snapshot Generation when cache was built
+	msgCacheGen  uint64 // snapshot DMGeneration when cache was built
 
 	// replyQuoteTags maps message IDs to stable pointer event tags for
 	// click-to-scroll behavior on reply quotes.
@@ -178,10 +291,10 @@ type Window struct {
 	// Per-contact composer drafts. When the user switches conversation, the
 	// unsent composer text and the currently selected attachment are stashed
 	// under the peer being left and restored when that peer is reopened. Held
-	// in memory only (lost on app exit). draftPeer is tracked separately from
-	// lastChatPeer because lastChatPeer is updated lazily in messageSelectable()
-	// (only once a bubble renders), so it never converges on empty chats and
-	// would let the swap clobber live input every frame.
+	// in memory only (lost on app exit). draftPeer is kept separate from
+	// lastChatPeer: they change in different places (draft swap vs the
+	// per-message cache reset in resetReplyOnPeerChange) and coupling them
+	// historically let the swap clobber live input.
 	drafts    map[domain.PeerIdentity]composerDraft
 	draftPeer domain.PeerIdentity
 
@@ -326,6 +439,11 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		recipientRightClick: make(map[domain.PeerIdentity]*rightClickState),
 		messageSelectables:  make(map[string]*widget.Selectable),
 		msgRightClick:       make(map[string]*rightClickState),
+		msgMenuBtns:         make(map[string]*widget.Clickable),
+		recipientMenuBtns:   make(map[domain.PeerIdentity]*widget.Clickable),
+		menuBtnRects:        make(map[*widget.Clickable]image.Rectangle),
+		touchPressPos:       make(map[pointer.ID]image.Point),
+		pointerPressPos:     make(map[pointer.ID]pressPoint),
 		drafts:              make(map[domain.PeerIdentity]composerDraft),
 		attachGen:           make(map[domain.PeerIdentity]uint64),
 		peerForgetEpoch:     make(map[domain.PeerIdentity]uint64),
@@ -333,6 +451,8 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		failedShown:         make(map[domain.PeerIdentity]int),
 		pendingFailed:       make(chan pendingFailedMsg, 64),
 		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
+		ctxMenuList:         layout.List{Axis: layout.Vertical},
+		msgCtxMenuList:      layout.List{Axis: layout.Vertical},
 		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
 		// Generously buffered and fully drained each frame so background
 		// producers (file picks, failed-send restores) block-send without
@@ -355,6 +475,8 @@ func (w *Window) Run() error {
 			app.Title(w.t("app.title")+" — "+w.t("app.subtitle")),
 			app.Size(unit.Dp(768), unit.Dp(550)),
 		)
+
+		w.touchKbd.setInvalidate(window.Invalidate)
 
 		w.startPolling(window)
 
@@ -446,6 +568,11 @@ func (w *Window) loop(window *app.Window) error {
 		switch e := e.(type) {
 		case app.DestroyEvent:
 			return e.Err
+		case app.ViewEvent:
+			// The window's native handle is now known: bind it and register
+			// the touch-keyboard Showing/Hiding handler proactively, so a
+			// keyboard the user opens before their first editor tap is tracked.
+			platformBindKeyboardWindow(&w.touchKbd, platformViewHWND(e))
 		case app.FrameEvent:
 			gtx := app.NewContext(&w.ops, e)
 			w.layout(gtx)
@@ -455,43 +582,240 @@ func (w *Window) loop(window *app.Window) error {
 }
 
 func (w *Window) layout(gtx layout.Context) layout.Dimensions {
+	w.rootSize = gtx.Constraints.Max // window size, for anchors computed deep in the tree
+	// Park each closed context menu's scroll at the top so its NEXT open starts
+	// fresh (this runs the frame before/as it opens, since the open is triggered
+	// during event handling below); an open menu's own scroll is left alone.
+	// A menu that closed while it held keyboard focus hands focus back to the
+	// "⋯" button that opened it, here, for the same reason: the close happens
+	// during event handling further down, so the frame after it is the first one
+	// that can see it. restoreOnClose is a no-op for a menu that never held
+	// focus, and yields to anything that has already claimed focus meanwhile.
+	//
+	// The composer is the fallback for a trigger that is no longer drawn — the
+	// "⋯" of a message deleted under its own menu, of a peer the menu just
+	// removed, of a row scrolled out of the list. It is the one focus target
+	// laid out on every frame of this window: layoutMain is the base of the
+	// stack rather than one of several screens, and the composer card inside it
+	// is a Rigid with no condition on it. Handing focus to a widget that is not
+	// in the frame is the same as handing it to nothing, which is the state
+	// restoreOnClose exists to avoid.
+	if w.contextMenuPeer.IsZero() {
+		w.ctxMenuList.Position = layout.Position{}
+		w.lastCtxMenuMode = 0
+		w.peerMenuFocus.restoreOnClose(gtx, &w.messageEditor)
+	}
+	if w.msgContextMsg == nil {
+		w.msgCtxMenuList.Position = layout.Position{}
+		w.msgMenuFocus.restoreOnClose(gtx, &w.messageEditor)
+	}
 	w.snap = w.router.Snapshot()
 	w.rebuildMsgCache()
+	// AFTER the snapshot, and after rebuildMsgCache: the signature carries
+	// chatOrder, which rebuildMsgCache derives from the messages this snapshot
+	// brought. Running above either would compare the PREVIOUS frame's digest
+	// and then record it as current, so the check would permanently trail
+	// reality by one frame here. Nothing between the top of layout and this
+	// line reads menuBtnRects, so the move costs nothing, and the scroll/resize
+	// half of the check still happens before any row lays out.
+	w.invalidateStaleMenuRects() // drop ⋯ rects a reorder, scroll or resize moved
 	w.applyDeferredScroll()
 	w.swapComposerDraftOnPeerChange()
 	w.resetReplyOnPeerChange()
 	w.dropStaleReply()
-	w.handleReplyContextClicks(gtx)
-	w.handlePendingActions()
-	w.handleActions(gtx)
-	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
+	w.dropStaleMsgMenu()
+	// Evaluate LAST frame's outside-tap records BEFORE any action handlers:
+	// a touch outside every editor cancels pending keyboard shows and
+	// clears editor focus (→ blur-driven hide), while handlers below that
+	// intentionally focus an editor issue their FocusCmd afterwards and win.
+	//
+	// That clear is the only time focus is emptied on purpose here, so it also
+	// cancels the menus' pending restore — the hand-back itself as well as the
+	// check on it, since the tap that cleared focus is usually the one on a menu
+	// item and the menu is still open right here (its handler closes it below).
+	// Without this, restoreOnClose would read the empty focus on a later frame as
+	// the close's own doing, hand focus to the trigger and from there to the
+	// composer, and cancel the blur-driven hide in trackEditorFocus below —
+	// leaving up the keyboard the tap asked to dismiss.
+	if w.touchKbd.dismissOnOutsideTap(gtx) {
+		w.peerMenuFocus.abandonRestore()
+		w.msgMenuFocus.abandonRestore()
+	}
 
-	// Track cursor position at window level for accurate context menu placement.
+	// Track cursor position at window level for accurate context menu
+	// placement. Runs BEFORE the action handlers below so that a press and
+	// release landing in one frame still update the input-source flag the
+	// handlers consult (Reply/Alias raising the keyboard).
+	// Press positions are additionally kept per PointerID, for EVERY source
+	// (touch, mouse, pen) and with the frame each press began on:
+	// lastCursorPos ends up holding the LAST event of the frame, which a
+	// same-frame drag, a second finger or a mouse moving after a tap would
+	// move away from the press point a menu must anchor to. The frame stamp
+	// serves the widget.Clickable path, whose Press record carries no
+	// PointerID to look up by (see pressWindowPos).
+	// Deferred cleanup of the ANCHOR map only: card handlers run AFTER
+	// this tracker in the same frame, so a press whose Release arrived in
+	// the same frame must stay resolvable for them — anchor entries are
+	// removed one frame later. The touch ACTIVE set (touchPressPos) is by
+	// contrast updated immediately in the event loop below: keeping a
+	// released finger in it would make the next finger pressed in the
+	// same frame read as multi-touch and instantly cancel its long-press.
+	if w.pressCancelAll {
+		clear(w.pointerPressPos)
+		w.pressCancelAll = false
+		w.pressCleanup = w.pressCleanup[:0]
+	}
+	for _, id := range w.pressCleanup {
+		delete(w.pointerPressPos, id)
+	}
+	w.pressCleanup = w.pressCleanup[:0]
+
 	defer clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops).Pop()
 	event.Op(gtx.Ops, &w.cursorTracker)
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target: &w.cursorTracker,
-			Kinds:  pointer.Move | pointer.Press | pointer.Drag,
+			Kinds:  pointer.Move | pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel,
 		})
 		if !ok {
 			break
 		}
-		if pe, ok := ev.(pointer.Event); ok {
+		pe, ok := ev.(pointer.Event)
+		if !ok {
+			continue
+		}
+		switch pe.Kind {
+		case pointer.Press:
 			w.lastCursorPos = pe.Position.Round()
+			w.lastInputTouch = pe.Source == pointer.Touch
+			w.lastPressAt = gtx.Now
+			w.pointerPressPos[pe.PointerID] = pressPoint{pos: pe.Position.Round(), at: gtx.Now}
+			if pe.Source == pointer.Touch {
+				if len(w.touchPressPos) > 0 {
+					// Second concurrent touch: remember the moment so
+					// long-press guards see it even when this finger
+					// releases within the same frame.
+					w.multiTouchAt = gtx.Now
+				}
+				w.touchPressPos[pe.PointerID] = pe.Position.Round()
+				w.touchKbd.noteWindowTouchPress(pe.PointerID)
+			}
+		case pointer.Move, pointer.Drag:
+			w.lastCursorPos = pe.Position.Round()
+		case pointer.Release:
+			delete(w.touchPressPos, pe.PointerID) // active set: immediate
+			w.pressCleanup = append(w.pressCleanup, pe.PointerID)
+		case pointer.Cancel:
+			// Gio broadcasts Cancel with a zero PointerID on pointer grabs
+			// and WM_CANCELMODE — deleting only pe.PointerID would leave
+			// the real touch IDs stranded in the map, and every later
+			// touch would read as multi-touch, killing long-press. Clear
+			// the whole active-touch set.
+			clear(w.touchPressPos) // active set: immediate
+			w.pressCancelAll = true
 		}
 	}
 
-	inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}
-	return layout.Stack{}.Layout(gtx,
+	w.handleReplyContextClicks(gtx)
+	w.handlePendingActions()
+	w.handleActions(gtx)
+	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
+
+	// Symmetric keyboard hide: when every editor of this window has lost
+	// focus (tap on a button, chat, etc.), ask the keyboard we opened to
+	// hide — Gio's ShowTextInput is a no-op on Windows in both directions.
+	w.touchKbd.trackEditorFocus(gtx,
+		gtx.Focused(&w.messageEditor) ||
+			gtx.Focused(&w.identitySearchEditor) ||
+			gtx.Focused(&w.aliasEditor))
+
+	// Publish what THIS frame measures, at its end — deferred so it happens
+	// however the function returns. The header yields on what the composer and
+	// its label actually came out to; keyboardYieldingChrome below reads the
+	// number the previous frame left, and endTailFrame explains why the frame
+	// that measures a new one has to ask for the frame that uses it.
+	defer w.touchKbd.endTailFrame(gtx)
+
+	// Hand focus to the composer after a contact was picked. This used to sit
+	// inside messageInputCard, which was fine until keyboardTailRow started
+	// laying the composer out a second time to measure it: a one-shot action
+	// performed during layout depends on how many times the layout runs, and
+	// the measuring pass is deliberately unable to complete it (gtx.Execute is
+	// dropped on a disabled source). It belongs to the frame, not to a widget,
+	// so it runs here — once, whatever the layout does. It stays after
+	// trackEditorFocus so noteExplicitEditorFocus still suppresses the NEXT
+	// frame's dismiss evaluation, exactly as it did from inside the composer.
+	//
+	// Focusing a tag before the frame registers it is fine: the router only
+	// drops focus at Frame time for tags the frame never mentioned, and the
+	// composer is laid out below. What is NOT free is the move from the middle
+	// of the frame to the top — see the invalidate at the end of this function.
+	//
+	// A context menu standing over the composer VOIDS the request instead of
+	// postponing it, and does so here rather than at the setters. Here,
+	// because every setter runs from inside a widget laid out BEFORE the menu
+	// opens in the same frame — the row's Clickable completes at the top of
+	// layoutRecipientButton while openMenu runs further down it, and the "⋯"
+	// button is nested inside the row's own Clickable, so both fire — which
+	// leaves the setters no menu to see. Voided rather than deferred, because
+	// a request kept alive until the menu closes would hand focus to the
+	// composer on the very frame restoreOnClose hands it back to the trigger.
+	focusComposer, raiseKeyboard := consumeComposerFocus(w.focusComposerPending, w.composerKeyboardPending, w.contextMenuOpen())
+	w.focusComposerPending = false
+	w.composerKeyboardPending = false
+	if focusComposer {
+		w.touchKbd.noteExplicitEditorFocus()
+		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
+		if raiseKeyboard {
+			// Touch-driven contact selection: FocusCmd alone won't raise the
+			// keyboard on Windows, so ask explicitly.
+			requestTouchKeyboard(&w.touchKbd)
+		}
+	}
+
+	// When the Windows touch keyboard overlaps this window, the keyboard
+	// inset goes on layoutMain — the panel that actually carries the
+	// composer — and not on the window padding here. The header and the
+	// spacer under it yield together once what the keyboard leaves free is
+	// too short to hold them and an input row both; the spacer has to go
+	// with the header, because keeping it spends 6dp of exactly the strip
+	// the composer is short of in the case this is for.
+	//
+	// keyboardYieldingChrome carries the argument for why the padding had
+	// to move and why the yield is the part that does the work.
+	inset := layout.Inset{
+		Top:    unit.Dp(4),
+		Bottom: unit.Dp(4),
+		Left:   unit.Dp(6),
+		Right:  unit.Dp(6),
+	}
+	dims := layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{
 					Axis: layout.Vertical,
 				}.Layout(gtx,
-					layout.Rigid(w.layoutHeader),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-					layout.Flexed(1, w.layoutMain),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return keyboardYieldingChrome(gtx, &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{
+								Axis: layout.Vertical,
+							}.Layout(gtx,
+								layout.Rigid(w.layoutHeader),
+								layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+							)
+						})
+					}),
+					// The inset can never exceed what this child is
+					// given: while the chrome is drawn the yield test
+					// has already established that the free strip holds
+					// it with room to spare, and once it yields this
+					// child gets the whole container, which bounds the
+					// inset anyway.
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{
+							Bottom: keyboardInsetDp(gtx, &w.touchKbd),
+						}.Layout(gtx, w.layoutMain)
+					}),
 				)
 			})
 		}),
@@ -514,6 +838,21 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 			return w.layoutMsgContextMenuOverlay(gtx)
 		}),
 	)
+
+	// Every one of the four places that raises focusComposerPending does it
+	// from inside a widget — a contact tapped in the list — which happens
+	// while this frame is being laid out, long after the block at the top has
+	// run. Handling it therefore waits for the next frame, and nothing else
+	// guarantees there will be one: Gio draws in response to input, and the
+	// tap that set the flag has already been drawn. Ask for that frame, or the
+	// composer would take focus (and on a touch tap raise the keyboard) only
+	// whenever the user happened to move next. While the flag lived inside the
+	// composer this could not arise — it was set and consumed in the same
+	// frame, in list-then-composer order.
+	if w.focusComposerPending {
+		gtx.Execute(op.InvalidateCmd{})
+	}
+	return dims
 }
 
 // composerDraft is the unsent state stashed per conversation: the message
@@ -613,9 +952,21 @@ func (w *Window) resetReplyOnPeerChange() {
 	w.clearReplyQuiet()
 	w.msgContextMsg = nil
 	w.scrollToMsgID = ""
-	// lastChatPeer and per-message widget caches (messageSelectables,
-	// msgRightClick) are updated lazily in messageSelectable() when the
-	// first bubble is rendered, which also handles the non-empty case.
+	// Reset ALL per-message widget caches HERE, at the top of layout,
+	// rather than lazily inside messageSelectable(): the lazy reset ran
+	// mid-frame, AFTER the first bubble had already registered its
+	// rightClickState via event.Op — recreating the map then orphaned
+	// that registered tag, and the first right-click/long-press after a
+	// chat switch was delivered to a state no handler would ever read.
+	w.messageSelectables = make(map[string]*widget.Selectable)
+	w.msgRightClick = make(map[string]*rightClickState)
+	w.replyQuoteTags = make(map[string]*widget.Clickable)
+	w.msgMenuBtns = make(map[string]*widget.Clickable)
+	// The per-message ⋯ buttons just recreated above are new pointers;
+	// drop their cached rectangles so the map cannot accumulate entries
+	// keyed by buttons that no longer exist.
+	w.menuBtnRects = make(map[*widget.Clickable]image.Rectangle)
+	w.lastChatPeer = peer
 }
 
 // dropStaleReply clears the reply context when the quoted message no
@@ -641,6 +992,44 @@ func (w *Window) dropStaleReply() {
 		return
 	}
 	w.clearReplyQuiet()
+}
+
+// dropStaleMsgMenu closes the message context menu when the message it acts on
+// is no longer in the conversation. msgContextMsg holds a COPY taken when the
+// menu opened, so nothing about it goes stale on its own; the row behind it
+// does. An incoming message_delete, a peer-side wipe or a local clear removes
+// the row while the overlay keeps offering actions for it: Reply would quote a
+// message that is gone (focusing the composer and raising the keyboard on the
+// way, only for dropStaleReply to drop the quote a frame later), and Delete
+// would dispatch a delete command for an ID the conversation no longer has.
+//
+// Same mechanism and same gate as dropStaleReply just above, deliberately: one
+// map hit per frame while a menu is open, and CacheReady keeps a transiently
+// empty snapshot mid conversation-load from closing a menu that is still valid.
+// The peer-switch case is already covered by resetReplyOnPeerChange.
+//
+// Called from layout() before every handler that reads msgContextMsg, so the
+// clear is what those handlers see: handleReplyContextClicks and
+// handleMsgContextMenuActions both open with a nil check and return, which is
+// how a click already queued against the vanished row is discarded rather than
+// acted on. The menu's focus contract needs no help — the close happens below
+// layout's own closed-menu check, exactly like every other close, so
+// restoreOnClose picks it up on the next frame, which the Invalidate asks for.
+//
+// The identity menu needs no twin of this. Its subject leaves only through
+// RemovePeer, whose one caller is the confirmation inside that very menu, and
+// that handler closes the menu itself.
+func (w *Window) dropStaleMsgMenu() {
+	if w.msgContextMsg == nil || !w.snap.CacheReady {
+		return
+	}
+	if _, ok := w.msgCacheByID[w.msgContextMsg.ID]; ok {
+		return
+	}
+	w.msgContextMsg = nil
+	if w.window != nil {
+		w.window.Invalidate()
+	}
 }
 
 // Gio widgets are single-threaded — mutations MUST happen on the UI goroutine.
@@ -959,7 +1348,14 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 			existing = w.prefs.Alias(w.contextMenuPeer)
 		}
 		w.aliasEditor.SetText(existing)
+		w.touchKbd.noteExplicitEditorFocus()
 		gtx.Execute(key.FocusCmd{Tag: &w.aliasEditor})
+		if pointerClickedThisFrame(&w.ctxMenuAlias, gtx) && w.touchDrivenInput(gtx) {
+			// The menu item was TAPPED (not activated by Return/Space, which
+			// records no press): focusing alone won't bring the keyboard up on
+			// Windows (and a pending blur-hide may be closing it).
+			requestTouchKeyboard(&w.touchKbd)
+		}
 		if w.window != nil {
 			w.window.Invalidate()
 		}
@@ -1436,7 +1832,14 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{
 				Axis: layout.Vertical,
 			}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				// This label and the composer card are the rows the touch
+				// keyboard must not cover; the chat card between them is free
+				// to shrink to nothing. keyboardTailRow reports how tall they
+				// really came out, which is what lets the window header yield
+				// in time instead of on a guess. The label counts even though
+				// nobody needs to READ it under a keyboard — it sits above the
+				// composer and pushes it down by its full height either way.
+				layout.Rigid(keyboardTailRow(&w.touchKbd, func(gtx layout.Context) layout.Dimensions {
 					recipient := w.snap.ActivePeer
 					if recipient.IsZero() {
 						return layout.Dimensions{}
@@ -1445,17 +1848,35 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 					lbl.Color = color.NRGBA{R: 200, G: 212, B: 228, A: 255}
 					lbl.Font.Weight = 600
 					return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, lbl.Layout)
-				}),
+				})),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return w.layoutChatCard(gtx, status)
 				}),
-				layout.Rigid(w.layoutComposerCard),
+				layout.Rigid(keyboardTailRow(&w.touchKbd, w.layoutComposerCard)),
 			)
 		}),
 	)
 }
 
 func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatus, recipients []domain.PeerIdentity) layout.Dimensions {
+	// Rows the recipients list will be laid out with below — zero takes the
+	// empty-state early return, which lays out no list. Recorded here rather
+	// than at the list itself so that return cannot skip it: see
+	// setMenuListItems. The digest is taken from THIS slice, the one the card
+	// goes on to lay out, rather than re-derived from the snapshot, so it
+	// cannot describe an order other than the one drawn; it is written before
+	// setMenuListItems because that call re-checks the signature.
+	w.contactsOrder = peerOrderDigest(recipients)
+	w.setMenuListItems(&w.contactsItems, len(recipients))
+	// The identity-search hits are the OTHER rows in this card that carry a ⋯
+	// button, and they are resolved HERE, above the card, for the same reason
+	// the count above is: the digest has to describe the rows that get laid
+	// out, and it has to land before the first of them does — a keyboard or
+	// Narrator activation is answered from menuBtnRects while they lay out.
+	// Reading the editor at this point rather than inside the card's content
+	// changes nothing, since both are before the editor lays out and takes this
+	// frame's keystrokes.
+	searchResults := w.resolveIdentitySearchRows(status, recipients)
 	rows := []string{
 		w.t("clients.you", w.snap.MyAddress),
 		w.t("clients.known", len(recipients)),
@@ -1468,8 +1889,6 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 			return btn.Layout(gtx)
 		})
 	}, func(gtx layout.Context) layout.Dimensions {
-		searchResults := searchKnownIdentities(status.KnownIDs, recipients, w.snap.MyAddress, w.identitySearchEditor.Text())
-
 		children := []layout.FlexChild{
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.identitySearchCard(gtx, status, searchResults)
@@ -1496,6 +1915,65 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 	})
 }
 
+// identitySearchMaxRows caps how many search hits get a row. The cap belongs to
+// resolveIdentitySearchRows and not to the card, because it has to be applied to
+// the same slice the digest is taken from: a cap in the card would let the rows
+// actually drawn disagree with the signature guarding their cached rectangles.
+const identitySearchMaxRows = 4
+
+// resolveIdentitySearchRows returns the identity-search hits this frame will lay
+// out, and records them in the menu-rect signature.
+//
+// The recording is the point, and it closes a real hole. searchKnownIdentities
+// sorts its output by identity, so editing the query does not merely lengthen or
+// shorten the list — it can put a different hit in a given row while the count,
+// the row heights, both scroll Positions, the contacts digest and the window
+// size all stay exactly as they were. These rows carry the per-contact ⋯
+// buttons (layoutRecipientButton), whose rectangles menuBtnRects caches by
+// button identity, so without this a keyboard or Narrator activation after a
+// query change would open a real menu at the coordinates of a row that has
+// since moved. See menuRectSig.
+func (w *Window) resolveIdentitySearchRows(status service.NodeStatus, recipients []domain.PeerIdentity) []domain.PeerIdentity {
+	results := searchKnownIdentities(status.KnownIDs, recipients, w.snap.MyAddress, w.identitySearchEditor.Text())
+	if len(results) > identitySearchMaxRows {
+		results = results[:identitySearchMaxRows]
+	}
+	w.searchOrder = peerOrderDigest(results)
+	w.setMenuListItems(&w.searchItems, len(results))
+	return results
+}
+
+// recordSearchRowAnchor notes where this frame is about to put the search hits.
+//
+// Gio hands a Rigid child of a vertical Flex a Max main-axis constraint equal
+// to the space left beneath its top edge, so this number IS that edge, measured
+// up from the bottom of the contacts card. It is the only readback an
+// immediate-mode layout offers here — there is no transform to inspect — and it
+// is enough, because every way the rows can move is a height change somewhere
+// above them, and every such change lands in it. See menuRectSig for what it
+// closes and what it does not.
+//
+// Zero rows records zero rather than the live constraint: with no rows there is
+// no edge, and remembering one would clear the whole cache every time an empty
+// search box drifted for reasons that moved nothing.
+//
+// The invalidation this triggers happens in the middle of the frame, which is
+// safe and has to be: no ⋯ rectangle is captured before this point (the sidebar
+// is the first column laid out, and these are its first rows), while a
+// keyboard or Narrator activation dispatched from the rows below is answered
+// out of menuBtnRects as they lay out.
+func (w *Window) recordSearchRowAnchor(gtx layout.Context, rows int) {
+	avail := 0
+	if rows > 0 {
+		avail = gtx.Constraints.Max.Y
+	}
+	w.searchAvail = avail
+	w.invalidateStaleMenuRects()
+}
+
+// identitySearchCard lays out the search box and one row per hit. Every hit it
+// is handed is laid out: the caller capped the slice and fingerprinted what it
+// capped, and those two must describe the same rows.
 func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatus, results []domain.PeerIdentity) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1523,7 +2001,7 @@ func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatu
 										editor := material.Editor(w.theme, &w.identitySearchEditor, w.t("clients.search_placeholder"))
 										editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
 										editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
-										return editor.Layout(gtx)
+										return editorTouchKeyboardArea(gtx, &w.touchKbdTags[1], &w.touchKbd, editor.Layout)
 									}),
 								)
 							})
@@ -1534,11 +2012,13 @@ func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatu
 		}),
 		layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			// Above the early return and above the first row, like every other
+			// term of the signature: this is where the hits begin, and a
+			// keyboard or Narrator menu opened while they lay out is anchored
+			// from the cache this guards.
+			w.recordSearchRowAnchor(gtx, len(results))
 			if len(results) == 0 {
 				return layout.Dimensions{}
-			}
-			if len(results) > 4 {
-				results = results[:4]
 			}
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, recipientsToChildren(results, func(gtx layout.Context, identity domain.PeerIdentity) layout.Dimensions {
 				return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -1560,16 +2040,55 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 			w.router.SetSendStatus(w.t("status.chat_selected"))
 			w.router.SelectPeer(fingerprint)
 			w.focusComposerPending = true
+			// A touch tap on a contact means "I want to type to them": raise
+			// the keyboard, because the FocusCmd below won't on Windows. A
+			// mouse/keyboard selection leaves it down (touchDrivenInput is a
+			// recency gate on the last touch press).
+			//
+			// EXCEPT after a long-press: the long-press timer opens the
+			// context menu while the finger is still down, then the finger's
+			// Release still completes this outer Clickable — so btn.Clicked
+			// fires a frame LATER, after openMenu's own reset. Guard on the
+			// live menu state instead: if this peer's menu is open right now,
+			// the click is the tail of a long-press and must NOT raise the
+			// keyboard over the menu. A normal tap dismisses any open menu on
+			// Press (clearing contextMenuPeer) before this Release fires, so
+			// it is not caught by this guard.
+			menuOpenForPeer := !w.contextMenuPeer.IsZero() && w.contextMenuPeer.String() == fpStr
+			if pointerClickedThisFrame(btn, gtx) && w.touchDrivenInput(gtx) && !menuOpenForPeer {
+				w.composerKeyboardPending = true
+			}
 		}
 
-		// Detect right-click (secondary button) for context menu.
-		// Position comes from the window-level cursor tracker (lastCursorPos)
-		// because card-local coordinates don't account for scroll offset
-		// and nested layout transforms.
+		// Detect right-click (secondary button) or touch long-press for
+		// the context menu. Position comes from the window-level cursor
+		// tracker (lastCursorPos) because card-local coordinates don't
+		// account for scroll offset and nested layout transforms.
+		openMenu := func(pos image.Point) {
+			w.contextMenuPeer = fingerprint
+			w.contextMenuPos = pos
+			w.showDeleteConfirm = false
+			w.showClearChatConfirm = false
+			w.showAliasEditor = false
+			// Auto-select this identity so the user sees the chat.
+			w.recipientEditor.SetText(fpStr)
+			w.router.SelectPeer(fingerprint)
+			// Focus goes to the MENU's first item, not to the composer.
+			// Focusing the composer (which this used to do) put focus on a
+			// widget hidden under the overlay: Tab kept walking the background,
+			// and the next Enter could send the draft instead of activating the
+			// highlighted menu item. Returned to this row's "⋯" button on close.
+			w.peerMenuFocus.open(w.recipientMenuButton(fingerprint))
+			// Whatever gains focus, opening the menu must NOT raise the
+			// keyboard — the user reached for a menu, not the input. Suppress
+			// any raise a same-frame selection might have set.
+			w.composerKeyboardPending = false
+		}
+		slopPx := float32(gtx.Dp(longPressSlop))
 		for {
 			ev, ok := gtx.Event(pointer.Filter{
 				Target: rc,
-				Kinds:  pointer.Press | pointer.Release,
+				Kinds:  pointer.Press | pointer.Release | pointer.Move | pointer.Drag | pointer.Cancel,
 			})
 			if !ok {
 				break
@@ -1578,21 +2097,31 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 			if !ok {
 				continue
 			}
+			rc.handleTouchLongPress(pe, gtx.Now, slopPx, w.pressAnchor(pe))
 			if pe.Kind == pointer.Press && pe.Buttons.Contain(pointer.ButtonSecondary) {
 				rc.pressed = true
+				rc.pressID = pe.PointerID
+				// Anchor at THIS pointer's press position: lastCursorPos
+				// may already belong to another pointer's later event.
+				rc.pressCursor = w.pressAnchor(pe)
 			}
-			if pe.Kind == pointer.Release && rc.pressed {
+			if pe.Kind == pointer.Cancel {
+				// A grab or WM_CANCELMODE voided this press — a later
+				// Release (possibly of another pointer) must not open the
+				// menu at a stale position.
 				rc.pressed = false
-				w.contextMenuPeer = fingerprint
-				w.contextMenuPos = w.lastCursorPos
-				w.showDeleteConfirm = false
-				w.showClearChatConfirm = false
-				w.showAliasEditor = false
-				// Auto-select this identity so the user sees the chat.
-				w.recipientEditor.SetText(fpStr)
-				w.router.SelectPeer(fingerprint)
-				w.focusComposerPending = true
 			}
+			if pe.Kind == pointer.Release && rc.pressed && pe.PointerID == rc.pressID {
+				// Bound to the pointer that armed the press: on a tablet a
+				// finger releasing concurrently with a mouse/pen right-
+				// click must not open the menu for it.
+				rc.pressed = false
+				openMenu(rc.pressCursor)
+			}
+		}
+		w.cancelLongPressOnMultiTouch(rc)
+		if rc.longPressTriggered(gtx) {
+			openMenu(rc.pressCursor)
 		}
 
 		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
@@ -1607,7 +2136,9 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 			event.Op(gtx.Ops, rc)
 
 			fill(gtx, bg)
-			return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			// Tight padding matching the window-edge inset (Top/Bottom 4,
+			// Left/Right 6) so the card content sits close to its border.
+			return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{
@@ -1636,6 +2167,17 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 								}
 								return w.layoutUnreadBadge(gtx, ps.Unread)
 							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								// "⋯" — always-available touch path to the
+								// contact menu (long-press is limited by
+								// Gio's pointer-grab threshold).
+								mb := w.recipientMenuButton(fingerprint)
+								for mb.Clicked(gtx) {
+									openMenu(w.menuAnchorForClick(mb, gtx))
+								}
+								return w.menuDotsButton(gtx, mb, color.NRGBA{R: 160, G: 175, B: 195, A: 255}, w.t("context.menu_button_contact"))
+							}),
 						)
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
@@ -1657,6 +2199,16 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 
 func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
 	recipient := w.snap.ActivePeer
+	// Rows the conversation list will actually be laid out with below — zero on
+	// every early-return path here, each of which lays out no list at all.
+	// Recorded BEFORE those returns and before any row lays out, so a menu
+	// activated by keyboard/Narrator later in THIS frame already sees the cache
+	// dropped rather than a rectangle the new content moved (see menuRectSig).
+	listRows := len(w.snap.ActiveMessages)
+	if recipient.IsZero() {
+		listRows = 0
+	}
+	w.setMenuListItems(&w.chatItems, listRows)
 	var rows []string
 
 	if recipient.IsZero() {
@@ -1969,11 +2521,6 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 		chromeHeight += gtx.Dp(unit.Dp(40))
 	}
 
-	if w.focusComposerPending {
-		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
-		w.focusComposerPending = false
-	}
-
 	line, _ := w.messageEditor.CaretPos()
 	totalLines := max(line+1, strings.Count(w.messageEditor.Text(), "\n")+1)
 	extraLines := max(0, totalLines-2)
@@ -2098,7 +2645,7 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 												Alignment: layout.Middle,
 											}.Layout(gtx,
 												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-													return editor.Layout(gtx)
+													return editorTouchKeyboardArea(gtx, &w.touchKbdTags[0], &w.touchKbd, editor.Layout)
 												}),
 												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 													if !showScrollbar {
@@ -2984,9 +3531,20 @@ func (w *Window) recipientButton(id domain.PeerIdentity) *widget.Clickable {
 
 // rightClickState is a tag for receiving secondary-button pointer events
 // on a recipient card. Each recipient gets its own tag so Gio routes
-// events correctly.
+// events correctly. It also tracks touch long-press state, which opens
+// the same context menu on touch screens (see touch_input.go).
 type rightClickState struct {
 	pressed bool
+
+	touchDown      bool
+	longPressFired bool
+	matured        bool       // hold reached longPressDuration by EVENT time on Release (frame may be delayed)
+	pressID        pointer.ID // pointer that armed the secondary-button press
+	touchID        pointer.ID
+	touchStart     time.Time     // frame time at press (ongoing frame-time maturation)
+	pressTime      time.Duration // EVENT time at press (release-time maturation, robust to a delayed frame)
+	touchPos       f32.Point
+	pressCursor    image.Point // window-level cursor at press time (menu anchor)
 }
 
 // cachedMsg holds pre-indexed message metadata for O(1) reply quote rendering.
@@ -2995,6 +3553,418 @@ type cachedMsg struct {
 	Sender    domain.PeerIdentity
 	Timestamp time.Time
 	Index     int // position in ActiveMessages slice for scroll-to
+}
+
+// menuAnchorForClick returns the screen anchor for a menu opened by a ⋯
+// button. widget.Clickable fires for a POINTER click (which records a press in
+// History, ended this frame) and for a KEYBOARD/accessibility activation
+// (which records none). For a pointer click the window-level cursor is correct;
+// for a non-pointer one it is stale, so the button's own window rectangle —
+// captured opportunistically during layout (recordMenuButtonRect) — is the
+// anchor, falling back to a fixed visible spot only for a button that has
+// never been pointer-touched.
+// menuRectSig captures the layout state that governs where the "⋯" buttons
+// sit. When any of it changes the buttons have moved, so cached menuBtnRects
+// are stale.
+//
+// Scroll offset and window size are NOT enough, which is the trap this struct
+// used to fall into. A message arriving, a message being deleted, or a card
+// above growing (a quote resolving, a longer body replacing a shorter one)
+// moves every button below it while First, Offset and the window size all stay
+// exactly as they were — and the next keyboard/Narrator activation would then
+// open the menu at coordinates the frame no longer has. So the signature also
+// carries, per list, the WHOLE layout.Position and the item count it was laid
+// out with:
+//
+//   - Position.Length is Gio's total content size (laidOutTotalLength*len/
+//     numLaidOut + gaps), so it moves when a visible card's height moves.
+//   - Position.Count / OffsetLast move when the viewport itself shrinks — a
+//     growing multi-line composer pushes the chat list up without touching
+//     rootSize or the scroll offset.
+//   - the item count is the exact answer for add/remove, which Length only
+//     answers by estimate; an estimate that can in principle round back onto
+//     its old value is not something a cache invariant should rest on.
+//
+// Geometry plus counts still miss REORDERING. sortSidebarPeers re-ranks the
+// contacts list whenever a peer goes online or offline, gains or loses unread,
+// or its preview timestamp moves; with rows of equal height that permutation
+// leaves Position, the count and rootSize all byte-identical while every "⋯"
+// button changes row. menuBtnRects is keyed by button IDENTITY, so the same
+// widget.Clickable now sits somewhere else and its cached rectangle points at
+// whatever moved into the old spot — a mis-placed menu, not a missing one.
+// Chat has its own version: an optimistic local message replaced by the
+// confirmed one carries a new ID and a corrected timestamp, so the count can
+// stay put while the order does not.
+//
+// Hence the two order digests, FNV-1a over the row identities IN ORDER — peer
+// identities for contacts, message IDs for chat. A permutation changes them; so
+// does a swap that leaves the count alone. They are not a substitute for the
+// counts, which stay: the count is an exact, collision-free answer for the
+// add/remove case, and a 64-bit digest is only overwhelmingly likely to be.
+//
+// The identity-search hits get the same pair, and they need it more than either
+// list does, because NOTHING else here can see them move. They are not a list —
+// up to identitySearchMaxRows Rigid rows between the search box and the
+// contacts list — so no layout.Position describes them, the contacts count and
+// digest below them do not change when they do, and the query that selects them
+// appears nowhere in this struct. Editing it re-runs searchKnownIdentities,
+// whose output is sorted by identity: a hit changes row, or the whole set turns
+// over, while the contacts underneath are untouched and the card can come out
+// exactly as tall. And these rows are contacts rows — layoutRecipientButton —
+// so their ⋯ IS the widget.Clickable that peer would use anywhere else, cached
+// under that same key. A rectangle left over from the previous query therefore
+// does not merely go unused: it opens a real menu beside the row that has since
+// moved into the old place.
+//
+// Everything named so far describes CONTENT and VIEWPORT, and both are blind
+// to a pure translation: a card that slides bodily up or down while holding
+// the same rows in the same order changes not one of them. Two things do that
+// on a tablet. The touch keyboard makes keyboardYieldingChrome drop the window
+// header, and everything under it rises by the header's height. A language
+// change re-wraps the labels the contacts card carries above its search box —
+// its title, "you", "known: N", the copy-identity button — and the rows below
+// them move by the difference.
+//
+// Where a list is actually laid out this is caught anyway, though by accident
+// rather than by design: the Flexed list under those rows absorbs the slack,
+// so a translation of the card is also a change of the list's viewport, and
+// layout.Position carries OffsetLast (= viewport - laid-out size) and Count.
+// The accident runs out exactly where it matters. With no contacts the card
+// takes its empty-state early return and lays out no list at all, so
+// contactsList.Position is frozen at whatever the last frame that DID lay it
+// out left — and that is precisely the state in which the identity-search hits
+// are the only rows on screen carrying a ⋯ button. The two lists have no such
+// hole, because for them "not laid out" implies a recorded count of zero,
+// which has already dropped their rectangles.
+//
+// Hence searchAvail, the one positional term: gtx.Constraints.Max.Y as handed
+// to the Rigid child that lays the hits out, which Gio defines as the space
+// remaining beneath that child's top edge. Measured, not enumerated — it
+// answers "did anything above these rows change height", whatever that
+// something was, rather than listing the causes known today. The floor it is
+// measured from is the bottom of the contacts card, which moves only with the
+// window size (already here) and with the keyboard inset; the latter changes
+// only on the same transitions that move the rows anyway, and a clear too many
+// is the safe direction. It also pins the contacts list below: that list's top
+// is this edge plus a block whose height is a function of searchItems.
+//
+// Deliberately NOT snapshot generation, which would be a single compare and
+// exact. RouterSnapshot.Generation bumps on every published snapshot including
+// the 1s resource sample and the 500ms peer-health delta, so the cache would be
+// cleared two or three times a second while nothing moved — and unlike a scroll
+// or a resize, a spurious clear here is NOT free. recordMenuButtonRect captures
+// only on the frame a press BEGINS on that button (that is the one frame where
+// the origin is derivable); nothing re-measures a button that is merely on
+// screen. Clearing on a timer would therefore leave almost every
+// keyboard/Narrator activation falling back to the fixed anchor, which is
+// deleting the feature rather than correcting it. RouterSnapshot.DMGeneration
+// (the message cache's gate) is rejected for the same reason and not merely
+// the same argument: it still advances on every message sent or received and
+// every sidebar refresh, none of which has to move a single ⋯ button, and one
+// spurious clear costs a whole activation. The digests change when the
+// rows change and at no other time.
+//
+// The residual is a sub-pixel-scale height change that survives Length's
+// integer division. It is left uncovered on purpose: it can move a button by
+// about a pixel, which is not a mis-placed menu, and the only exact alternative
+// is re-measuring every button every frame.
+type menuRectSig struct {
+	chat, contacts           layout.Position
+	chatItems, contactsItems int
+	chatOrder, contactsOrder uint64
+	rootW, rootH             int
+
+	// The identity-search hits, which have no list and therefore no Position:
+	// which rows, and where they sit.
+	searchItems int
+	searchOrder uint64
+	searchAvail int
+}
+
+func (w *Window) currentMenuRectSig() menuRectSig {
+	return menuRectSig{
+		chat:          w.chatList.Position,
+		contacts:      w.contactsList.Position,
+		chatItems:     w.chatItems,
+		contactsItems: w.contactsItems,
+		chatOrder:     w.chatOrder,
+		contactsOrder: w.contactsOrder,
+		rootW:         w.rootSize.X,
+		rootH:         w.rootSize.Y,
+		searchItems:   w.searchItems,
+		searchOrder:   w.searchOrder,
+		searchAvail:   w.searchAvail,
+	}
+}
+
+// FNV-1a 64-bit parameters. Chosen over maphash/crc for having no state, no
+// allocation and no import: these run inside layout.
+const (
+	menuDigestOffset uint64 = 14695981039346656037
+	menuDigestPrime  uint64 = 1099511628211
+)
+
+// peerOrderDigest fingerprints the sidebar rows in the order they will be laid
+// out. PeerIdentity is a fixed 20 bytes, so concatenation is unambiguous and no
+// separator is needed. Recomputed every frame rather than cached against a
+// snapshot generation: the sidebar is bounded by the contact count, and the
+// caller already merges and SORTS this very slice on every frame
+// (snapRecipients), so a linear pass over it adds no term the frame did not
+// already pay — and hashing the slice HANDED TO THE CARD, instead of
+// re-deriving it from the snapshot, is what guarantees the digest describes the
+// order actually laid out. A conversation has no such bound, which is why the
+// chat digest rides rebuildMsgCache instead.
+func peerOrderDigest(peers []domain.PeerIdentity) uint64 {
+	h := menuDigestOffset
+	for i := range peers {
+		for _, b := range peers[i] {
+			h ^= uint64(b)
+			h *= menuDigestPrime
+		}
+	}
+	return h
+}
+
+// setMenuListItems records the row count a list is about to be laid out with
+// and re-checks the rect cache immediately. Called from the top of the owning
+// card, not from the List call site.
+//
+// The timing is the whole point, and getting it wrong was a real defect. For the
+// GEOMETRY half of the signature the call in layout() can only ever compare the
+// previous frame against the one before it, because a list's layout.Position
+// does not exist until the list has laid out; for scroll and resize that
+// one-frame lag is unavoidable. For CONTENT it is not: the row count is an
+// INPUT, known before a single row lays out — and a keyboard/Narrator activation
+// is resolved through menuAnchorForClick while those rows lay out, so recording
+// the count ahead of them closes the window entirely instead of leaving the
+// first frame after an insert or delete reading coordinates the new content has
+// already moved. The two order digests are inputs on the same terms: the
+// contacts one is written here, beside the count, from the very slice the card
+// is about to lay out, and the chat one is already current by the time layout()
+// takes the signature, since rebuildMsgCache recomputes it immediately after the
+// snapshot is adopted.
+//
+// Hence the card and not the List: a card can return early on paths that lay
+// out no list at all, and those returns are never far enough down to reach the
+// List. Call it on them too, with zero. "The list is not there this frame"
+// moves the buttons exactly as surely as reordering it, and an early return
+// that simply skips the assignment leaves the stale count in place — which is
+// how a rect could survive the last contact being deleted and still be handed
+// out after one was added back.
+//
+// The identity-search hits go through here too (resolveIdentitySearchRows)
+// although they are not a list. What the name is about is the discipline, not
+// the widget: a set of rows that carries ⋯ buttons, counted and fingerprinted
+// before the first of them lays out.
+//
+// One accepted cost: the signature is global, so the contacts card changing
+// count also clears any chat rect, and the chat card (laid out second) can
+// clear contacts rects captured earlier in the SAME frame. Both directions only
+// ever discard, never fabricate, and a missing rect falls back to the anchor —
+// so the loss is conservatism, not correctness, and it is not worth a per-list
+// cache to recover.
+func (w *Window) setMenuListItems(dst *int, n int) {
+	*dst = n
+	w.invalidateStaleMenuRects()
+}
+
+// invalidateStaleMenuRects drops all cached button rectangles when the layout
+// state that positioned them has changed since capture — a list scrolled, its
+// CONTENT changed or was REORDERED, or the window resized. Idempotent (it
+// compares before it clears), so it is safe to call several times per frame, and
+// it is: once in layout() just after the new snapshot lands, again from
+// setMenuListItems at the head of each card that owns a list, and once from
+// recordSearchRowAnchor as the identity-search hits are about to lay out.
+//
+// The call sites cover different things. Content — the per-list counts and
+// the two order digests — is caught within the frame that changes it: the
+// layout() call takes the chat digest the moment rebuildMsgCache derives it from
+// the new snapshot, and setMenuListItems adds the counts and the contacts digest
+// before the first row of either list lays out, which is before any
+// keyboard/Narrator activation can be resolved through menuAnchorForClick. So is
+// searchAvail, and for a reason worth naming: it is a constraint handed DOWN to
+// the rows, an input known before they lay out, not a measurement read back
+// after — which is why the one positional term in the signature is the one term
+// that does not lag. Scroll offset and viewport can only be caught on the NEXT
+// frame, since they are outputs of the layout being checked; the exposure is
+// therefore the remainder of the frame in which the list actually moved, and
+// only for a non-pointer activation dispatched during it. Closing that too would
+// mean re-measuring every button every frame.
+//
+// The lag also errs the other way — a rect captured on a frame that itself
+// moved the list is dropped on the next one even though it was correct at
+// capture. That direction is harmless: the cache is a convenience for
+// non-pointer activations and its absence falls back to a deterministic
+// on-screen anchor, whereas a surviving stale rect silently mis-places every
+// later keyboard/Narrator menu.
+func (w *Window) invalidateStaleMenuRects() {
+	sig := w.currentMenuRectSig()
+	if !w.menuRectSigSet || sig != w.menuLayoutSig {
+		if len(w.menuBtnRects) > 0 {
+			clear(w.menuBtnRects)
+		}
+		w.menuLayoutSig = sig
+		w.menuRectSigSet = true
+	}
+}
+
+// pointerClickedThisFrame reports whether btn was activated by a POINTER
+// release this frame. widget.Clickable.Clicked also fires for a Return/Space
+// or accessibility (Narrator) activation, which records NO press in History —
+// so a caller that raises the touch keyboard on a click must gate on this,
+// otherwise a hardware Return within touchInputRecency of an unrelated touch
+// (lastInputTouch is not cleared by key events) would wrongly pop the keyboard
+// while the user types on real keys. Same package, so ConsoleWindow uses it too.
+func pointerClickedThisFrame(btn *widget.Clickable, gtx layout.Context) bool {
+	h := btn.History()
+	return len(h) > 0 && h[len(h)-1].End.Equal(gtx.Now)
+}
+
+// pressWindowPos resolves the WINDOW-space position of the pointer press that
+// widget.Clickable recorded as p. It exists because Gio v0.10's widget.Press
+// carries no PointerID: the button knows WHERE it was pressed in its OWN
+// coordinates and WHEN, but not by whom. The frame is the correlation — Gio
+// stamps Press.Start with the gtx.Now of the frame the press began, the same
+// value the root cursor tracker stamps into pointerPressPos — and the map
+// holds each pointer's own press point rather than a single global one.
+//
+// Reports false unless the match is UNIQUE. Two pointers pressing on one frame
+// leaves nothing here to tell them apart, and guessing is precisely the bug
+// this replaces: the menu opening under the wrong finger. Callers fall back to
+// what they did before, which is no worse in that case and correct in every
+// other. (The map still holds a pointer released THIS frame — entries are
+// dropped one frame later — so a click's press is always resolvable, however
+// many frames the press was held.)
+func (w *Window) pressWindowPos(p widget.Press) (image.Point, bool) {
+	var pos image.Point
+	n := 0
+	for _, pp := range w.pointerPressPos {
+		if pp.at.Equal(p.Start) {
+			pos, n = pp.pos, n+1
+		}
+	}
+	return pos, n == 1
+}
+
+func (w *Window) menuAnchorForClick(btn *widget.Clickable, gtx layout.Context) image.Point {
+	if pointerClickedThisFrame(btn, gtx) {
+		// Anchor at THIS click's own press point. lastCursorPos is the last
+		// pointer event of the frame from ANY source, so a second finger, a
+		// mouse or a pen moving after the tap on "⋯" would drop the menu under
+		// it — the same defect the long-press and right-click paths already fix
+		// by going through pressAnchor. Those have a pointer.Event and can look
+		// up by PointerID; a Clickable has only its press record, so resolve by
+		// the frame the press began on instead.
+		h := btn.History()
+		if pos, ok := w.pressWindowPos(h[len(h)-1]); ok {
+			return pos
+		}
+		return w.lastCursorPos // two pointers pressed that frame: nothing better exists
+	}
+	// Keyboard/accessibility: no fresh cursor. Anchor at the button's own
+	// window rectangle if we captured it during a prior pointer interaction
+	// (see menuDotsButton) — drop the menu just below the button's lower-left,
+	// exactly where a real context menu appears. placeMenu flips/clamps it if
+	// there is no room below.
+	if r, ok := w.menuBtnRects[btn]; ok {
+		return image.Pt(r.Min.X, r.Max.Y)
+	}
+	// Never pointer-touched (pure keyboard/Narrator navigation): fall back to
+	// a deterministic, always-visible spot (placeMenu clamps it on-screen).
+	// Use the ROOT window size — gtx here is a list item's nested context whose
+	// Max.Y is near-unbounded, so its quarter would be off-screen.
+	return image.Pt(w.rootSize.X/4, w.rootSize.Y/4)
+}
+
+// recordMenuButtonRect stores btn's window-space rectangle when THIS frame
+// carries a pointer press on it: the press appears in History with local
+// coordinates, and pressWindowPos resolves the SAME press to its window
+// coordinates (by the frame it began on — not via lastCursorPos, which by then
+// may hold a different pointer's later event), so their difference is the
+// button's window origin. This is the only readback
+// Gio's immediate-mode layout allows — there is no transform inspection — so
+// the rectangle is captured opportunistically here and reused by
+// menuAnchorForClick for later non-pointer activations.
+func (w *Window) recordMenuButtonRect(btn *widget.Clickable, gtx layout.Context, dims layout.Dimensions) {
+	h := btn.History()
+	if len(h) == 0 {
+		return
+	}
+	p := h[len(h)-1]
+	if !p.Start.Equal(gtx.Now) {
+		return // capture only on the frame the press BEGAN. The origin is a
+		// DIFFERENCE between two coordinates of one instant: p.Position, this
+		// press in the button's own space, and pressWindowPos(p), the same
+		// press in window space. p.Position is frozen at the press, but the
+		// button is re-laid-out every frame — on a later frame (drag, release)
+		// a scrolling list has moved it, and the difference would name an
+		// origin the button no longer has. Note this is a freshness guard
+		// only: the correlation itself is p.Start, which pressWindowPos
+		// matches against the tracker's press stamps and which stays valid for
+		// as long as the press does.
+	}
+	win, ok := w.pressWindowPos(p)
+	if !ok {
+		// Two pointers pressed this frame, so which window point belongs to
+		// THIS press is unknowable. Record nothing: a wrong rectangle is worse
+		// than none — it would silently mis-place every later keyboard/Narrator
+		// menu, while none falls back to the deterministic on-screen anchor and
+		// the next unambiguous press captures the real one.
+		return
+	}
+	origin := win.Sub(p.Position)
+	w.menuBtnRects[btn] = image.Rectangle{Min: origin, Max: origin.Add(dims.Size)}
+}
+
+// menuDotsButton lays out a "⋯" glyph as a menu button. It uses a PLAIN
+// Clickable (no material ink/hover), so there is no grey press box, and gives
+// the glyph a small symmetric inset for a finger-reachable hit area WITHOUT a
+// fixed 40dp square — that square was taller than the header row it sits in and
+// pushed the timestamp down and the glyph in from the edge. desc is the
+// localized accessibility name (a glyph-only button says nothing to Narrator).
+func (w *Window) menuDotsButton(gtx layout.Context, btn *widget.Clickable, fg color.NRGBA, desc string) layout.Dimensions {
+	dims := btn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// Restore the accessibility role the plain Clickable drops (material's
+		// added it): Narrator needs to know this is an interactive Button, not
+		// just a labelled glyph. This is a semantic op only — no visuals, no ink.
+		semantic.Button.Add(gtx.Ops)
+		semantic.DescriptionOp(desc).Add(gtx.Ops)
+		return layout.Inset{
+			Top: unit.Dp(2), Bottom: unit.Dp(2),
+			Left: unit.Dp(6), Right: unit.Dp(2),
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			lbl := material.Body1(w.theme, "⋯")
+			lbl.Color = fg
+			return lbl.Layout(gtx)
+		})
+	})
+	// Capture this button's window rectangle when a pointer press this frame
+	// makes it derivable, for later keyboard/Narrator activations.
+	w.recordMenuButtonRect(btn, gtx, dims)
+	return dims
+}
+
+// msgMenuButton returns the per-message "⋯" button — a guaranteed touch
+// path to the context menu. Long-press works only while the finger stays
+// within Gio's grab threshold (see handleTouchLongPress); the button works
+// always.
+func (w *Window) msgMenuButton(id string) *widget.Clickable {
+	if b, ok := w.msgMenuBtns[id]; ok {
+		return b
+	}
+	b := new(widget.Clickable)
+	w.msgMenuBtns[id] = b
+	return b
+}
+
+// recipientMenuButton mirrors msgMenuButton for contact cards.
+func (w *Window) recipientMenuButton(id domain.PeerIdentity) *widget.Clickable {
+	if b, ok := w.recipientMenuBtns[id]; ok {
+		return b
+	}
+	b := new(widget.Clickable)
+	w.recipientMenuBtns[id] = b
+	return b
 }
 
 func (w *Window) msgRightClickState(id string) *rightClickState {
@@ -3179,6 +4149,9 @@ func (w *Window) layoutConversation(gtx layout.Context, recipient domain.PeerIde
 		}
 	}
 
+	// The row count behind menuRectSig is recorded in layoutChatCard, above the
+	// early returns that lay out no list — not here, where those paths never
+	// reach it.
 	list := material.List(w.theme, &w.chatList)
 	return list.Layout(gtx, len(conversation), func(gtx layout.Context, index int) layout.Dimensions {
 		message := conversation[index]
@@ -3211,12 +4184,21 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 	}
 	gtx.Constraints.Max.X = maxWidth
 
-	// Read right-click events from the previous frame.
+	// Read right-click / touch long-press events from the previous frame.
 	rc := w.msgRightClickState(message.ID)
+	openMsgMenu := func(pos image.Point) {
+		msgCopy := message
+		w.msgContextMsg = &msgCopy
+		w.msgContextPos = pos
+		// Same contract as the identity menu: the menu takes focus, and hands
+		// it back to this bubble's "⋯" button when it closes.
+		w.msgMenuFocus.open(w.msgMenuButton(message.ID))
+	}
+	slopPx := float32(gtx.Dp(longPressSlop))
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target: rc,
-			Kinds:  pointer.Press,
+			Kinds:  pointer.Press | pointer.Release | pointer.Move | pointer.Drag | pointer.Cancel,
 		})
 		if !ok {
 			break
@@ -3225,11 +4207,15 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 		if !ok {
 			continue
 		}
+		rc.handleTouchLongPress(pe, gtx.Now, slopPx, w.pressAnchor(pe))
 		if pe.Kind == pointer.Press && pe.Buttons.Contain(pointer.ButtonSecondary) {
-			msgCopy := message
-			w.msgContextMsg = &msgCopy
-			w.msgContextPos = w.lastCursorPos
+			// Anchor at THIS pointer's press position (see recipient site).
+			openMsgMenu(w.pressAnchor(pe))
 		}
+	}
+	w.cancelLongPressOnMultiTouch(rc)
+	if rc.longPressTriggered(gtx) {
+		openMsgMenu(rc.pressCursor)
 	}
 
 	borderColor := color.NRGBA{R: 55, G: 68, B: 86, A: 255}
@@ -3260,13 +4246,19 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 
 			children = append(children,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					// Author is Flexed with a single ellipsized line, so a
+					// long alias can never push the timestamp or the "⋯"
+					// button past the clip; the rigid trailing children are
+					// measured first and always keep their space, landing
+					// the button in the bubble's top-right corner.
 					return layout.Flex{
 						Axis:      layout.Horizontal,
 						Alignment: layout.Middle,
 					}.Layout(gtx,
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 							label := material.Caption(w.theme, author)
 							label.Color = authorColor
+							label.MaxLines = 1
 							return label.Layout(gtx)
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
@@ -3274,6 +4266,17 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 							label := material.Caption(w.theme, message.Timestamp.Local().Format("02.01.2006 15:04"))
 							label.Color = color.NRGBA{R: 160, G: 185, B: 220, A: 255}
 							return label.Layout(gtx)
+						}),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							// "⋯" — always-available touch path to the
+							// message menu (long-press is limited by Gio's
+							// pointer-grab threshold).
+							btn := w.msgMenuButton(message.ID)
+							for btn.Clicked(gtx) {
+								openMsgMenu(w.menuAnchorForClick(btn, gtx))
+							}
+							return w.menuDotsButton(gtx, btn, statusColor, w.t("context.menu_button_message"))
 						}),
 					)
 				}),
@@ -3355,16 +4358,11 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 
 // messageSelectable returns a reusable Selectable widget for the given
 // message ID, creating one on first access. This allows users to select
-// and copy message text in the chat view. The cache is cleared when the
-// active conversation changes to prevent unbounded growth across
-// different chat peers.
+// and copy message text in the chat view. All per-message caches
+// (including this one) are reset on conversation change in
+// resetReplyOnPeerChange — early in layout, before any bubble registers
+// event tags — to prevent unbounded growth across chat peers.
 func (w *Window) messageSelectable(id string) *widget.Selectable {
-	if peer := w.snap.ActivePeer; peer != w.lastChatPeer {
-		w.messageSelectables = make(map[string]*widget.Selectable)
-		w.msgRightClick = make(map[string]*rightClickState)
-		w.replyQuoteTags = make(map[string]*widget.Clickable)
-		w.lastChatPeer = peer
-	}
 	sel := w.messageSelectables[id]
 	if sel == nil {
 		sel = &widget.Selectable{}
@@ -3497,9 +4495,13 @@ func (w *Window) peerOnline(identity domain.PeerIdentity) bool {
 //
 // Returns false when no menu is open (msgContextMsg is nil) so
 // callers laying out the disabled visual style fall back to the
-// safe default.
+// safe default. A window with no router answers the same way, for
+// the same reason and to the same standard as peerOnline just
+// above — which this function calls, and which has always guarded
+// the router. Reading MyAddress without that guard made this the
+// one unguarded link in a chain that is otherwise safe end to end.
 func (w *Window) contextMenuDeleteEnabled() bool {
-	if w == nil || w.msgContextMsg == nil {
+	if w == nil || w.msgContextMsg == nil || w.router == nil {
 		return false
 	}
 	msg := *w.msgContextMsg
@@ -3683,6 +4685,103 @@ func (w *Window) layoutLanguageOverlay(gtx layout.Context) layout.Dimensions {
 	return layout.Dimensions{}
 }
 
+// menuMinUsableDp is the smallest height in which drawing a context menu is
+// worth anything: 8+8dp of inset around a Body2 line (~17dp) is 33dp, and the
+// card adds a 1dp border plus a 6dp inset on each side, so 47dp shows exactly
+// one actionable row and the card's List scrolls to the rest.
+//
+// Below it the menu is not drawn SMALLER — it is not drawn at all. Shrinking
+// is what a menu measured against a floored inset does, and it does not help:
+// the floor buys its room by claiming space the keyboard is standing on, so
+// the one row it produces is mostly under the keyboard, which takes the touch.
+//
+// It is also what makes "measured against availH" a real bound rather than a
+// hope. The card's chrome — 1dp border + 6dp inset on each side, 14dp — is
+// FIXED: layout.Inset subtracts it from the constraint, floors that at 0 and
+// then adds it back, so on a constraint below 14dp the card comes out TALLER
+// than it was allowed and placeMenu's final y clamp goes negative and gives
+// up. Refusing under 48dp keeps the scrolling List with 34dp to absorb, which
+// is why menuAvailableHeight may return a degenerate number safely.
+const menuMinUsableDp = 48
+
+// menuAvailableHeight is the window height genuinely above the touch keyboard,
+// used both to MEASURE a context menu (it becomes Constraints.Max.Y) and to
+// place it. Context menus are separate Stacked layers that do NOT receive the
+// main content's bottom keyboard inset, so the number has to describe the
+// physically clear strip — exactly, including 0.
+//
+// keyboardInsetDp is the whole occlusion and reserves nothing for anyone, which
+// is what makes it usable here: a number that had set some strip aside for the
+// composer would be describing content the menu does not have, and a menu
+// measured against it is drawn partly beneath the keyboard. Nothing here rounds
+// the answer UP to keep the layout non-degenerate either — a degenerate answer
+// is the truthful one, and menuOverlayRoom is the single place that decides
+// what to do about it.
+func (w *Window) menuAvailableHeight(gtx layout.Context) int {
+	h := gtx.Constraints.Max.Y
+	occ := gtx.Dp(keyboardInsetDp(gtx, &w.touchKbd))
+	if occ <= 0 {
+		return h
+	}
+	if occ > h {
+		// The inset is already bounded by the window; this only absorbs the
+		// dp→px rounding, and keeps the result from going negative.
+		occ = h
+	}
+	return h - occ
+}
+
+// menuOverlayRoom reports the height a context-menu overlay may occupy and
+// whether that is enough to draw one at all. When it is not, it asks for the
+// keyboard to be taken away, so the room appears within a frame or two and the
+// still-open menu draws itself then. The caller must skip its card — but NOT
+// its dismiss area — on a false, and must not close the menu: the menu is
+// deferred, not cancelled.
+//
+// The ask is throttled by the hide GENERATION it was dispatched with — not by
+// a bool, not by a clock, and no longer by the occlusion it was made for.
+// Occlusion described the keyboard, but what a repeat ask has to know is
+// whether the PREVIOUS ask is still alive, and the two come apart exactly
+// where it matters: every editor tap bumps hideGen, doHide then drops the
+// command, and because the retry ladder re-enqueues the SAME generation the
+// hide is cancelled rather than eventually retried. So after "open menu →
+// close it → tap the editor → open the menu again" the keyboard stands at the
+// same height, an occlusion key calls that the same ask, no new hide is sent
+// and the menu sits open and undrawn for good. hideGen moves on precisely the
+// events that kill an ask, so keying on it needs no clearing rule at any site
+// that closes a menu — and a rule that has to be repeated at N sites is the
+// exact shape that has produced regressions in this file; both writes of this
+// marker are inside this function. A wall-clock deadline would misbehave
+// across the sleep/resume time jumps this tablet actually does.
+//
+// The marker stores the generation PLUS ONE so that 0 can mean "nothing
+// asked": hideGen legitimately starts at 0, and a bare 0 would suppress the
+// first ask of the session. The generation is taken from the dispatch itself
+// instead of being re-read, because the service goroutine bumps hideGen too.
+// An ask that was NOT dispatched stores nothing — no command is in flight, so
+// there is nothing to throttle and the next frame may try again.
+//
+// LIMIT, stated rather than papered over: requestTouchKeyboardHide only hides
+// a keyboard WE opened. If the user raised it themselves we cannot take it
+// away, and on a window this short the menu stays open but undrawn until they
+// lower it — at which point it appears. The dismiss area is live underneath
+// the whole time, so a tap anywhere still clear closes it.
+func (w *Window) menuOverlayRoom(gtx layout.Context) (int, bool) {
+	availH := w.menuAvailableHeight(gtx)
+	if availH >= gtx.Dp(unit.Dp(menuMinUsableDp)) {
+		w.menuKbdHideAskedGen = 0
+		return availH, true
+	}
+	if w.menuKbdHideAskedGen == 0 ||
+		w.touchKbd.hideGen.Load() != w.menuKbdHideAskedGen-1 {
+		w.menuKbdHideAskedGen = 0
+		if gen, sent := requestTouchKeyboardHide(&w.touchKbd); sent {
+			w.menuKbdHideAskedGen = gen + 1
+		}
+	}
+	return availH, false
+}
+
 // layoutContextMenuOverlay renders the right-click context menu for a recipient identity.
 // It shows "Copy identity" and "Delete identity" options. Delete requires a confirmation step.
 func (w *Window) layoutContextMenuOverlay(gtx layout.Context) layout.Dimensions {
@@ -3690,6 +4789,7 @@ func (w *Window) layoutContextMenuOverlay(gtx layout.Context) layout.Dimensions 
 	// We draw a full-screen transparent clickable area behind the menu.
 	dismissArea := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
 	event.Op(gtx.Ops, &w.contextMenuPeer)
+	dismissed := false
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: &w.contextMenuPeer, Kinds: pointer.Press})
 		if !ok {
@@ -3703,42 +4803,100 @@ func (w *Window) layoutContextMenuOverlay(gtx layout.Context) layout.Dimensions 
 			if w.window != nil {
 				w.window.Invalidate()
 			}
+			dismissed = true
+			break
 		}
 	}
 	dismissArea.Pop()
+	// Nothing below this line speaks for a menu that has just been dismissed:
+	// menuOverlayRoom would ask the keyboard to get out of the way of an
+	// overlay that no longer needs the room, drive would run the focus
+	// contract of a closed menu, and the header would draw the zero peer this
+	// handler has just stored. Returning is also what makes the restore
+	// prompt: skipping the card leaves the items out of the frame, so Gio
+	// drops their focus at Frame time and the invalidate above brings a frame
+	// where restoreOnClose sees focus free — rather than one where it spends
+	// its frame of grace and then waits for a frame nothing asked for.
+	if dismissed {
+		return layout.Dimensions{}
+	}
+
+	// Reset scroll to the top when this OPEN menu switches to/from a confirm or
+	// alias sub-view (fresh opens are handled by the closed-reset in layout()).
+	var mode uint8
+	switch {
+	case w.showDeleteConfirm:
+		mode = 1
+	case w.showClearChatConfirm:
+		mode = 2
+	case w.showAliasEditor:
+		mode = 3
+	}
+	if mode != w.lastCtxMenuMode {
+		w.ctxMenuList.Position = layout.Position{}
+		w.lastCtxMenuMode = mode
+	}
 
 	menuWidth := gtx.Dp(unit.Dp(220))
 	windowW := gtx.Constraints.Max.X
-	windowH := gtx.Constraints.Max.Y
+	availH, room := w.menuOverlayRoom(gtx)
+	if !room {
+		// Too little clear height to draw even one row. The menu stays OPEN
+		// (this is a deferred draw, not a dismissal) and menuOverlayRoom has
+		// asked for the keyboard; the dismiss area above is already live.
+		//
+		// Escape must keep working here, or a keyboard user is stuck with a menu
+		// they cannot see and cannot dismiss. Drive with no items: the keys are
+		// still read, and first-item focus stays armed for the frame the room
+		// comes back.
+		if w.peerMenuFocus.drive(gtx, nil, !w.showAliasEditor) {
+			w.escapePeerMenu()
+		}
+		return layout.Dimensions{}
+	}
 
-	// Measure menu height first so we can flip upward when near the bottom.
+	// Keyboard/Narrator: claim focus for the menu, keep Tab inside it, and give
+	// Escape a meaning. Deliberately here — after the room check, since a
+	// deferred draw lays out no item to focus, and before the measure below,
+	// whose disabled source would drop the FocusCmd. Arrow keys are left to the
+	// alias editor's caret while it is on screen.
+	if w.peerMenuFocus.drive(gtx, w.peerMenuItems(), !w.showAliasEditor) {
+		w.escapePeerMenu()
+		if w.contextMenuPeer.IsZero() {
+			// Escape closed the menu outright; drawing a card for a peer that
+			// is no longer selected would show one frame of an empty header.
+			return layout.Dimensions{}
+		}
+		// Escape only stepped back out of a sub-view — draw the item list it
+		// returned to, this frame, so the menu does not blink.
+	}
+
+	// Measure the menu, bounded to the usable height above the keyboard. The
+	// card wraps its rows in a scrolling List, so when the content is taller
+	// than availH it clamps to availH and scrolls (Delete / Clear chat, or an
+	// alias editor's Save / Cancel, stay reachable) instead of squeezing the
+	// bottom rows to nothing; when it fits, the List sizes to the content.
 	measureGTX := gtx
 	measureGTX.Constraints.Min.X = menuWidth
 	measureGTX.Constraints.Max.X = menuWidth
 	measureGTX.Constraints.Min.Y = 0
-	measureGTX.Constraints.Max.Y = windowH
+	measureGTX.Constraints.Max.Y = availH
 	macro := op.Record(measureGTX.Ops)
 	dims := w.contextMenuCard(measureGTX)
 	menuCall := macro.Stop()
 
-	x := w.contextMenuPos.X
-	y := w.contextMenuPos.Y
+	// Now that the rows have been measured, scroll the one keyboard focus was
+	// just placed on into view. Deliberately NOT by measuring a second time:
+	// contextMenuCard drains the alias editor's events and every Clickable's,
+	// and running it twice in one frame would consume them twice. The corrected
+	// offset lands on the next frame instead, which has to be asked for — a
+	// keyboard user waiting on it produces no input that would draw one. Same
+	// reasoning, and the same call, as restoreOnClose.
+	if w.ctxMenuScroll.into(&w.ctxMenuList, w.peerMenuFocus.want) {
+		gtx.Execute(op.InvalidateCmd{})
+	}
 
-	// Flip horizontally if overflows right edge.
-	if x+menuWidth > windowW {
-		x = windowW - menuWidth
-	}
-	if x < 0 {
-		x = 0
-	}
-
-	// Flip vertically if overflows bottom edge.
-	if y+dims.Size.Y > windowH {
-		y = y - dims.Size.Y
-		if y < 0 {
-			y = 0
-		}
-	}
+	x, y := placeMenu(w.contextMenuPos.X, w.contextMenuPos.Y, menuWidth, dims.Size.Y, windowW, availH)
 
 	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
 	menuCall.Add(gtx.Ops)
@@ -3753,20 +4911,32 @@ func (w *Window) contextMenuCard(gtx layout.Context) layout.Dimensions {
 	rr := gtx.Dp(unit.Dp(8))
 	borderWidth := gtx.Dp(unit.Dp(1))
 
-	// Measure content to know the total size.
+	// Measure content to know the total size. The rows go through a vertical
+	// List as a single item so an overflowing menu scrolls within availH rather
+	// than dropping its bottom rows (see ctxMenuList).
 	macro := op.Record(gtx.Ops)
 	dims := layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			if w.showDeleteConfirm {
-				return w.layoutDeleteConfirmMenu(gtx)
-			}
-			if w.showClearChatConfirm {
-				return w.layoutClearChatConfirmMenu(gtx)
-			}
-			if w.showAliasEditor {
-				return w.layoutAliasEditorMenu(gtx)
-			}
-			return w.layoutContextMenuItems(gtx)
+			// List.Layout hands its element an unbounded main axis so the
+			// element can report its natural size, so the viewport height is
+			// only knowable out here — see menuScroll.
+			// Reset here rather than inside the element: a List whose
+			// viewport has collapsed to nothing lays its element out zero
+			// times, and last frame's spans must not outlive the frame that
+			// took them.
+			w.ctxMenuScroll.begin(gtx.Constraints.Max.Y)
+			return w.ctxMenuList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+				if w.showDeleteConfirm {
+					return w.layoutDeleteConfirmMenu(gtx)
+				}
+				if w.showClearChatConfirm {
+					return w.layoutClearChatConfirmMenu(gtx)
+				}
+				if w.showAliasEditor {
+					return w.layoutAliasEditorMenu(gtx)
+				}
+				return w.layoutContextMenuItems(gtx)
+			})
 		})
 	})
 	contentCall := macro.Stop()
@@ -3805,29 +4975,39 @@ func (w *Window) layoutContextMenuItems(gtx layout.Context) layout.Dimensions {
 		aliasLabel = w.t("context.edit_alias")
 	}
 
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+	// The clear-chat row's focus target, and whether it has one at all, follow
+	// exactly the rule the row itself applies below — and the one peerMenuItems
+	// applies, which is what makes the measured spans line up with the tags
+	// focus actually visits.
+	var clearTag event.Tag
+	if w.peerOnline(w.contextMenuPeer) {
+		clearTag = &w.ctxMenuClearChat
+	}
+
+	sc := &w.ctxMenuScroll
+	return sc.flex(gtx,
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuHeader(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuSeparator(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(&w.ctxMenuAlias, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuAlias, aliasLabel,
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(&w.ctxMenuCopy, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuCopy, w.t("context.copy_identity"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(&w.ctxMenuDelete, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuDelete, w.t("context.delete_identity"),
 				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(clearTag, func(gtx layout.Context) layout.Dimensions {
 			// "Delete chat for everyone" (bulk wipe both sides). The
 			// item is direction-symmetric (no sender/receiver split
 			// like for per-message delete) but still needs the peer
@@ -3871,24 +5051,25 @@ func (w *Window) contextMenuSeparator(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) layoutDeleteConfirmMenu(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+	sc := &w.ctxMenuScroll
+	return sc.flex(gtx,
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuHeader(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuSeparator(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			label := material.Caption(w.theme, w.t("context.delete_confirm"))
 			label.Color = color.NRGBA{R: 230, G: 200, B: 140, A: 255}
 			return layout.Inset{Left: unit.Dp(12), Right: unit.Dp(12), Top: unit.Dp(2), Bottom: unit.Dp(6)}.Layout(gtx, label.Layout)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(&w.ctxMenuDeleteConfirm, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuDeleteConfirm, w.t("context.delete_yes"),
 				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(&w.ctxMenuDeleteCancel, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuDeleteCancel, w.t("context.delete_no"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
@@ -3905,24 +5086,25 @@ func (w *Window) layoutDeleteConfirmMenu(gtx layout.Context) layout.Dimensions {
 // would let a stale click event from the per-identity delete path
 // fire the wipe path on the next frame.
 func (w *Window) layoutClearChatConfirmMenu(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+	sc := &w.ctxMenuScroll
+	return sc.flex(gtx,
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuHeader(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuSeparator(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			label := material.Caption(w.theme, w.t("context.clear_chat_confirm"))
 			label.Color = color.NRGBA{R: 230, G: 200, B: 140, A: 255}
 			return layout.Inset{Left: unit.Dp(12), Right: unit.Dp(12), Top: unit.Dp(2), Bottom: unit.Dp(6)}.Layout(gtx, label.Layout)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(&w.ctxMenuClearChatConfirm, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuClearChatConfirm, w.t("context.delete_yes"),
 				color.NRGBA{R: 230, G: 90, B: 90, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(&w.ctxMenuClearChatCancel, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuClearChatCancel, w.t("context.delete_no"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
@@ -3951,14 +5133,15 @@ func (w *Window) layoutAliasEditorMenu(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+	sc := &w.ctxMenuScroll
+	return sc.flex(gtx,
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuHeader(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuSeparator(gtx)
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(&w.aliasEditor, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{
 				Left: unit.Dp(12), Right: unit.Dp(12),
 				Top: unit.Dp(4), Bottom: unit.Dp(6),
@@ -3967,15 +5150,15 @@ func (w *Window) layoutAliasEditorMenu(gtx layout.Context) layout.Dimensions {
 				ed.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 				ed.HintColor = color.NRGBA{R: 120, G: 135, B: 158, A: 255}
 				gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
-				return ed.Layout(gtx)
+				return editorTouchKeyboardArea(gtx, &w.touchKbdTags[2], &w.touchKbd, ed.Layout)
 			})
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(&w.ctxMenuAliasSave, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuAliasSave, w.t("context.alias_save"),
 				color.NRGBA{R: 130, G: 200, B: 130, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(&w.ctxMenuAliasCancel, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.ctxMenuAliasCancel, w.t("context.alias_cancel"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
@@ -4392,7 +5575,13 @@ func (w *Window) handleReplyContextClicks(gtx layout.Context) {
 		msgCopy := *w.msgContextMsg
 		w.setReplyContext(&msgCopy)
 		w.msgContextMsg = nil
+		w.touchKbd.noteExplicitEditorFocus()
 		gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
+		if pointerClickedThisFrame(&w.msgCtxReply, gtx) && w.touchDrivenInput(gtx) {
+			// Reply item TAPPED (not Return/Space): raise the keyboard for the
+			// composer.
+			requestTouchKeyboard(&w.touchKbd)
+		}
 		if w.window != nil {
 			w.window.Invalidate()
 		}
@@ -4412,6 +5601,7 @@ func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensio
 	// Dismiss on click outside.
 	dismissArea := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
 	event.Op(gtx.Ops, w.msgContextMsg)
+	dismissed := false
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: w.msgContextMsg, Kinds: pointer.Press})
 		if !ok {
@@ -4422,38 +5612,55 @@ func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensio
 			if w.window != nil {
 				w.window.Invalidate()
 			}
+			dismissed = true
+			break
 		}
 	}
 	dismissArea.Pop()
+	// See the identity menu. Breaking out matters twice over here: the target
+	// of this filter is the message pointer the handler has just nil'd, so a
+	// second turn of the loop would build a filter for a nil tag.
+	if dismissed {
+		return layout.Dimensions{}
+	}
 
 	menuWidth := gtx.Dp(unit.Dp(180))
 	windowW := gtx.Constraints.Max.X
-	windowH := gtx.Constraints.Max.Y
+	availH, room := w.menuOverlayRoom(gtx)
+	if !room {
+		// See the recipient menu: deferred until the keyboard frees the room,
+		// with Escape kept alive throughout.
+		if w.msgMenuFocus.drive(gtx, nil, true) {
+			w.escapeMsgMenu()
+		}
+		return layout.Dimensions{}
+	}
 
-	// Measure the menu.
+	// Focus contract, as for the identity menu above. This menu has no
+	// sub-views, so Escape always closes it.
+	if w.msgMenuFocus.drive(gtx, w.msgMenuItems(), true) {
+		w.escapeMsgMenu()
+		return layout.Dimensions{}
+	}
+
+	// Measure the menu, bounded to the usable height above the keyboard; the
+	// card's scrolling List clamps-with-scroll on overflow instead of squeezing
+	// the bottom rows (see the recipient menu above).
 	measureGTX := gtx
 	measureGTX.Constraints.Min.X = menuWidth
 	measureGTX.Constraints.Max.X = menuWidth
 	measureGTX.Constraints.Min.Y = 0
-	measureGTX.Constraints.Max.Y = windowH
+	measureGTX.Constraints.Max.Y = availH
 	macro := op.Record(measureGTX.Ops)
 	dims := w.msgContextMenuCard(measureGTX)
 	menuCall := macro.Stop()
 
-	x := w.msgContextPos.X
-	y := w.msgContextPos.Y
-	if x+menuWidth > windowW {
-		x = windowW - menuWidth
+	// Scroll the freshly focused row into view; see the recipient menu above.
+	if w.msgCtxMenuScroll.into(&w.msgCtxMenuList, w.msgMenuFocus.want) {
+		gtx.Execute(op.InvalidateCmd{})
 	}
-	if x < 0 {
-		x = 0
-	}
-	if y+dims.Size.Y > windowH {
-		y = y - dims.Size.Y
-		if y < 0 {
-			y = 0
-		}
-	}
+
+	x, y := placeMenu(w.msgContextPos.X, w.msgContextPos.Y, menuWidth, dims.Size.Y, windowW, availH)
 
 	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
 	menuCall.Add(gtx.Ops)
@@ -4471,7 +5678,12 @@ func (w *Window) msgContextMenuCard(gtx layout.Context) layout.Dimensions {
 	macro := op.Record(gtx.Ops)
 	dims := layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return w.layoutMsgContextMenuItems(gtx)
+			// One list item so an overflowing menu scrolls within availH.
+			// Measured out here for the reason given in contextMenuCard.
+			w.msgCtxMenuScroll.begin(gtx.Constraints.Max.Y)
+			return w.msgCtxMenuList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+				return w.layoutMsgContextMenuItems(gtx)
+			})
 		})
 	})
 	contentCall := macro.Stop()
@@ -4498,18 +5710,26 @@ func (w *Window) msgContextMenuCard(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) layoutMsgContextMenuItems(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+	// As in layoutContextMenuItems: the delete row's tag follows the same
+	// enablement rule the row and msgMenuItems both apply.
+	var deleteTag event.Tag
+	if w.contextMenuDeleteEnabled() {
+		deleteTag = &w.msgCtxDelete
+	}
+
+	sc := &w.msgCtxMenuScroll
+	return sc.flex(gtx,
+		sc.row(&w.msgCtxReply, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.msgCtxReply, w.t("context.reply"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(&w.msgCtxCopy, func(gtx layout.Context) layout.Dimensions {
 			return w.contextMenuItem(gtx, &w.msgCtxCopy, w.t("context.copy_message"),
 				color.NRGBA{R: 245, G: 247, B: 250, A: 255})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
+		sc.row(deleteTag, func(gtx layout.Context) layout.Dimensions {
 			// Delete uses a warning-tinted label so the destructive
 			// nature is visible. The handler in
 			// handleMsgContextMenuActions invokes router.SendMessageDelete
@@ -4726,16 +5946,36 @@ func (w *Window) applyDeferredScroll() {
 // reply quote lookups. Stores body, sender, timestamp and index for
 // scroll-to-original support.
 //
-// The rebuild is skipped when the snapshot generation has not changed.
-// Generation is bumped on every DMRouter state mutation, so any change
-// to message bodies, ReplyTo fields, receipt statuses, or conversation
-// switches is detected — including same-shape reloads that the old
-// count+first/last heuristic missed. O(1) per no-change frame.
+// The rebuild is skipped when the snapshot's DMGeneration has not changed.
+// That counter — NOT Generation — is the gate. Generation is bumped on every
+// DMRouter state mutation including the ones that touch no DM data at all: the
+// 1s resource sample and the 500ms peer-health deltas advance it 2-3 times a
+// second while ActiveMessages is reused byte-for-byte, so gating on it rebuilt
+// the whole map and re-hashed every ID on the UI goroutine several times a
+// second over a conversation that had not changed, unbounded in the length of
+// the conversation. DMGeneration moves only when the router rebuilds the DM
+// half, which is the exact granularity of this cache; every mutation the old
+// comment claimed is still detected, because a change to a body, a ReplyTo, a
+// receipt status or the selected conversation reaches activeMessages through a
+// DM-typed notify (see applyReceiptRepair for the receipt case, which
+// deliberately notifies UIEventMessagesUpdated). O(1) per no-change frame.
+//
+// It also carries chatOrder, the menu-rect signature's fingerprint of the
+// conversation's row order (see menuRectSig). That belongs here and nowhere
+// else: a conversation has no cap — ConversationCache.Messages() returns all of
+// it — so hashing the IDs on every frame is unbounded work, while this loop
+// already visits each message exactly once per DM generation, which is exactly
+// the granularity at which the order can change. The skip path leaves chatOrder
+// alone on purpose: an unchanged DM generation means unchanged messages.
 func (w *Window) rebuildMsgCache() {
-	gen := w.snap.Generation
+	gen := w.snap.DMGeneration
 	msgs := w.snap.ActiveMessages
 
 	if len(msgs) == 0 {
+		// Unconditionally, not inside the nil check: an empty conversation has
+		// an empty order, and leaving a previous conversation's digest behind
+		// here would make the signature claim rows that are not on screen.
+		w.chatOrder = 0
 		if w.msgCacheByID != nil {
 			w.msgCacheByID = nil
 			w.msgCacheGen = 0
@@ -4748,6 +5988,7 @@ func (w *Window) rebuildMsgCache() {
 	}
 
 	m := make(map[string]cachedMsg, len(msgs))
+	order := menuDigestOffset
 	for i := range msgs {
 		m[msgs[i].ID] = cachedMsg{
 			Body:      msgs[i].Body,
@@ -4755,9 +5996,23 @@ func (w *Window) rebuildMsgCache() {
 			Timestamp: msgs[i].Timestamp,
 			Index:     i,
 		}
+		// Message IDs are variable length, unlike PeerIdentity, so the
+		// concatenation is ambiguous on its own: "ab","c" and "a","bc" would
+		// hash alike. Terminated with the LENGTH rather than a separator byte,
+		// because an incoming message carries the sender's ID verbatim off the
+		// wire and nothing on this path promises which bytes it excludes — a
+		// separator would only be unambiguous for IDs that avoid it, whereas a
+		// length is unambiguous for any bytes at all.
+		for _, b := range []byte(msgs[i].ID) {
+			order ^= uint64(b)
+			order *= menuDigestPrime
+		}
+		order ^= uint64(len(msgs[i].ID))
+		order *= menuDigestPrime
 	}
 	w.msgCacheByID = m
 	w.msgCacheGen = gen
+	w.chatOrder = order
 }
 
 // findMessageBody looks up a message body by ID using the per-frame cache.
