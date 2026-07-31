@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -14,6 +15,8 @@ import (
 
 	"gioui.org/app"
 	"gioui.org/op/paint"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // thumbnailMaxWidth and thumbnailMaxHeight define the maximum display size
@@ -23,6 +26,34 @@ const (
 	thumbnailMaxWidth  = 260
 	thumbnailMaxHeight = 200
 )
+
+// replyQuoteThumbDp and composerReplyThumbDp are the square edge sizes
+// (in dp) of the mini image preview inside reply quotes: the quote block
+// rendered in a chat bubble and the "Replying to" banner above the
+// composer respectively. The banner uses a smaller square so it stays
+// compact while the user types.
+const (
+	replyQuoteThumbDp    = 40
+	composerReplyThumbDp = 32
+)
+
+// isImageFileAnnounce reports whether a DM is a file_announce whose
+// payload describes an image the thumbnail pipeline can decode. Reply
+// quotes use this to decide if a mini preview should be rendered next
+// to the quoted text.
+//
+// A payload that fails to parse yields false: the quote then degrades
+// to plain text, mirroring layoutFileCard's "invalid file data" path.
+func isImageFileAnnounce(command domain.DMCommand, commandData string) bool {
+	if command != domain.DMCommandFileAnnounce || commandData == "" {
+		return false
+	}
+	var payload domain.FileAnnouncePayload
+	if err := json.Unmarshal([]byte(commandData), &payload); err != nil {
+		return false
+	}
+	return isImageContentType(payload.ContentType)
+}
 
 // thumbnailState describes the lifecycle of a single cache entry.
 type thumbnailState uint8

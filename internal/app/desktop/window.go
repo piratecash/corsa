@@ -3557,6 +3557,11 @@ type cachedMsg struct {
 	Sender    domain.PeerIdentity
 	Timestamp time.Time
 	Index     int // position in ActiveMessages slice for scroll-to
+	// IsImageFile marks a file_announce DM with an image content type.
+	// Precomputed here so reply quotes never parse the announce JSON on
+	// the frame path — the payload is immutable for a given message ID,
+	// which is exactly the granularity of this cache.
+	IsImageFile bool
 }
 
 // menuAnchorForClick returns the screen anchor for a menu opened by a ⋯
@@ -5788,7 +5793,9 @@ func (w *Window) layoutMsgContextMenuItems(gtx layout.Context) layout.Dimensions
 // original message in the conversation.
 func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, isMine bool) layout.Dimensions {
 	replyToStr := string(replyTo)
-	quotedBody := w.findMessageBody(replyToStr)
+	cm, cmFound := w.findCachedMsg(replyToStr)
+
+	quotedBody := replyBodyForDisplay(cm.Body, cmFound && cm.IsImageFile, w.t)
 	if quotedBody == "" {
 		quotedBody = w.t("chat.reply_unknown")
 	}
@@ -5797,13 +5804,21 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 	// Resolve sender display name and timestamp from cache.
 	var quotedAuthor string
 	var quotedTime string
-	if cm, ok := w.findCachedMsg(replyToStr); ok {
+	if cmFound {
 		if cm.Sender == w.snap.MyAddress {
 			quotedAuthor = w.t("chat.you_label")
 		} else {
 			quotedAuthor = w.peerDisplayName(cm.Sender)
 		}
 		quotedTime = cm.Timestamp.Local().Format("02.01.2006 15:04")
+	}
+
+	// Mini image preview for quoted image files. Nil while the file is
+	// not on disk yet or the decode has not finished — the quote then
+	// renders text-only.
+	var quotedThumb *thumbnailEntry
+	if cmFound && cm.IsImageFile {
+		quotedThumb = w.replyThumb(replyToStr, cm.Sender)
 	}
 
 	barColor := color.NRGBA{R: 100, G: 140, B: 200, A: 255}
@@ -5856,6 +5871,14 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 					return layout.Dimensions{Size: sz}
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if quotedThumb == nil {
+						return layout.Dimensions{}
+					}
+					return layout.Inset{Left: unit.Dp(6), Top: unit.Dp(2), Bottom: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layoutReplyThumb(gtx, quotedThumb, replyQuoteThumbDp)
+					})
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Inset{Left: unit.Dp(6), Top: unit.Dp(2), Bottom: unit.Dp(2), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -5894,6 +5917,52 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 	event.Op(gtx.Ops, tag)
 	quoteCall.Add(gtx.Ops)
 	return dims
+}
+
+// replyBodyForDisplay maps a quoted message body to what the reply UI
+// should show. A quoted image without a user caption carries the
+// FileDMBodySentinel body — the raw sentinel is a wire detail, so it is
+// replaced with the localized "Photo" label next to the mini preview.
+// Every other body (captions, plain text, non-image files) is returned
+// verbatim. tr is the Window's t method, injected so the mapping stays
+// a pure function for tests (and to avoid shadowing the package-level
+// translate).
+func replyBodyForDisplay(body string, isImageFile bool, tr func(string, ...any) string) string {
+	if isImageFile && body == domain.FileDMBodySentinel {
+		return tr("chat.photo_label")
+	}
+	return body
+}
+
+// replyThumb resolves the decoded thumbnail for a quoted image message.
+// Returns nil while the file is absent from disk (e.g. not downloaded
+// yet on the receiver side), the decode is still in flight, or decoding
+// failed permanently — callers render a text-only quote then. When an
+// in-flight decode completes, the decode goroutine invalidates the
+// window, so the preview appears on the next frame without polling.
+func (w *Window) replyThumb(msgID string, sender domain.PeerIdentity) *thumbnailEntry {
+	isSender := sender == w.snap.MyAddress
+	path := w.router.FileBridge().FilePath(domain.FileID(msgID), isSender)
+	if path == "" {
+		return nil
+	}
+	return w.thumbCache.get(path, w.window)
+}
+
+// layoutReplyThumb renders a small square, center-cropped image preview
+// inside a reply quote. Cover fit crops the source to fill the square —
+// the messenger convention for quote previews — so the block height
+// stays fixed regardless of the source aspect ratio.
+func layoutReplyThumb(gtx layout.Context, entry *thumbnailEntry, edge unit.Dp) layout.Dimensions {
+	sz := image.Pt(gtx.Dp(edge), gtx.Dp(edge))
+	defer clip.UniformRRect(image.Rectangle{Max: sz}, gtx.Dp(unit.Dp(4))).Push(gtx.Ops).Pop()
+	imgWidget := widget.Image{
+		Src:      entry.op,
+		Fit:      widget.Cover,
+		Position: layout.Center,
+	}
+	gtx.Constraints = layout.Exact(sz)
+	return imgWidget.Layout(gtx)
 }
 
 // applyDeferredScroll scrolls the chat list so that the target message
@@ -5995,10 +6064,11 @@ func (w *Window) rebuildMsgCache() {
 	order := menuDigestOffset
 	for i := range msgs {
 		m[msgs[i].ID] = cachedMsg{
-			Body:      msgs[i].Body,
-			Sender:    msgs[i].Sender,
-			Timestamp: msgs[i].Timestamp,
-			Index:     i,
+			Body:        msgs[i].Body,
+			Sender:      msgs[i].Sender,
+			Timestamp:   msgs[i].Timestamp,
+			Index:       i,
+			IsImageFile: isImageFileAnnounce(msgs[i].Command, msgs[i].CommandData),
 		}
 		// Message IDs are variable length, unlike PeerIdentity, so the
 		// concatenation is ambiguous on its own: "ab","c" and "a","bc" would
@@ -6146,7 +6216,19 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 		return layout.Dimensions{}
 	}
 
-	quotedBody := ellipsize(w.replyToMsg.Body, 80)
+	// IsImageFile comes from the message cache rather than re-parsing
+	// the announce payload every frame. dropStaleReply guarantees the
+	// quoted ID is present in the cache whenever CacheReady holds; on
+	// the transient not-found frames the banner degrades to text-only.
+	cm, cmFound := w.findCachedMsg(w.replyToMsg.ID)
+	replyIsImage := cmFound && cm.IsImageFile
+
+	var replyThumbEntry *thumbnailEntry
+	if replyIsImage {
+		replyThumbEntry = w.replyThumb(w.replyToMsg.ID, w.replyToMsg.Sender)
+	}
+
+	quotedBody := ellipsize(replyBodyForDisplay(w.replyToMsg.Body, replyIsImage, w.t), 80)
 	bgColor := color.NRGBA{R: 30, G: 40, B: 55, A: 255}
 	barColor := color.NRGBA{R: 100, G: 140, B: 200, A: 255}
 
@@ -6169,6 +6251,14 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 							paint.ColorOp{Color: barColor}.Add(gtx.Ops)
 							paint.PaintOp{}.Add(gtx.Ops)
 							return layout.Dimensions{Size: sz}
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							if replyThumbEntry == nil {
+								return layout.Dimensions{}
+							}
+							return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return layoutReplyThumb(gtx, replyThumbEntry, composerReplyThumbDp)
+							})
 						}),
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 							return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
