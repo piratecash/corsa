@@ -5,9 +5,11 @@ go 1.26.4
 require (
 	gioui.org v0.10.0
 	gioui.org/x v0.10.0
+	git.wow.st/gmp/jni v0.0.0-20210610011705-34026c7e22d0
 	github.com/ebitengine/oto/v3 v3.4.0
 	github.com/gofiber/fiber/v3 v3.3.0
 	github.com/hajimehoshi/go-mp3 v0.3.4
+	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/image v0.41.0
@@ -16,8 +18,8 @@ require (
 )
 
 require (
+	gioui.org/cmd v0.10.0 // indirect
 	gioui.org/shader v1.0.8 // indirect
-	git.wow.st/gmp/jni v0.0.0-20210610011705-34026c7e22d0 // indirect
 	github.com/akavel/rsrc v0.10.1 // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -41,12 +43,18 @@ require (
 	github.com/valyala/fasthttp v1.71.0 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
+	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
 
-tool github.com/akavel/rsrc
+tool (
+	gioui.org/cmd/gogio
+	github.com/akavel/rsrc
+)

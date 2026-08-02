@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 
 	"gioui.org/app"
@@ -20,8 +23,9 @@ import (
 )
 
 // thumbnailMaxWidth and thumbnailMaxHeight define the maximum display size
-// (in logical pixels) for image thumbnails inside file cards. The actual
-// image is decoded at full resolution; Gio scales it during rendering.
+// (in logical pixels) for image thumbnails inside file cards. The cached
+// bitmap is pre-downscaled to thumbnailStoreMaxPx; Gio scales it to the
+// display box during rendering.
 const (
 	thumbnailMaxWidth  = 260
 	thumbnailMaxHeight = 200
@@ -70,9 +74,10 @@ const (
 
 // thumbnailEntry holds a decoded image ready for Gio rendering.
 type thumbnailEntry struct {
-	state  thumbnailState
-	op     paint.ImageOp
-	bounds image.Point // original image dimensions (before scaling)
+	state    thumbnailState
+	op       paint.ImageOp
+	bounds   image.Point // cached bitmap dimensions
+	byteSize int64       // decoded bytes held (0 until ready)
 }
 
 // thumbnailCache is a concurrency-safe cache of decoded image thumbnails.
@@ -85,12 +90,93 @@ type thumbnailEntry struct {
 // calls window.Invalidate() to schedule a redraw. The next layout pass
 // finds the ready entry and renders the thumbnail with zero decode latency.
 //
-// The cache is intentionally unbounded for the lifetime of the Window:
-// each file card has at most one entry, and the number of file cards
-// in a conversation is limited by chat history.
+// The cache is a bounded LRU (thumbnailCacheMaxEntries): before it was
+// unbounded AND held full-resolution decodes, so a long image-heavy
+// conversation pinned hundreds of MB — enough to OOM-kill the Android
+// process. Entries now hold downscaled bitmaps (thumbnailStoreMaxPx)
+// and the least-recently-rendered ones are evicted; a re-scrolled card
+// simply decodes again.
 type thumbnailCache struct {
-	mu      sync.Mutex
-	entries map[string]*thumbnailEntry
+	mu         sync.Mutex
+	entries    map[string]*thumbnailEntry
+	lru        []string // least-recently used first; keys mirror entries
+	totalBytes int64    // decoded bytes held by ready entries
+}
+
+// thumbnailCacheMaxEntries and thumbnailCacheMaxBytes bound the cache:
+// by count AND by the decoded bytes actually held (a downscaled entry
+// is up to ~4MB, so a count cap alone would still allow ~200MB).
+// Eviction runs until both limits hold.
+const (
+	thumbnailCacheMaxEntries = 48
+	thumbnailCacheMaxBytes   = 64 << 20
+)
+
+// Decode admission is BYTE-weighted, not count-based: the real memory
+// peak is the transient full-resolution bitmap, and a fixed count cap
+// mis-sizes it — two 32MP 16-bit decodes are ~512MB, not the ~260MB a
+// "2 at a time" cap would suggest. thumbDecodeBudgetBytes caps the total
+// estimated in-flight decode bytes; small previews still fill
+// concurrently, large ones serialize. A single decode larger than the
+// whole budget is still admitted when nothing else is running (the
+// inFlight>0 guard), so one huge image cannot deadlock the pipeline —
+// it is instead rejected earlier by maxImageDecodeMemBytes.
+const thumbDecodeBudgetBytes = 128 << 20
+
+var (
+	thumbDecodeMu       sync.Mutex
+	thumbDecodeCond     = sync.NewCond(&thumbDecodeMu)
+	thumbDecodeInFlight int64
+)
+
+func thumbDecodeAdmit(est int64) {
+	thumbDecodeMu.Lock()
+	for thumbDecodeInFlight > 0 && thumbDecodeInFlight+est > thumbDecodeBudgetBytes {
+		thumbDecodeCond.Wait()
+	}
+	thumbDecodeInFlight += est
+	thumbDecodeMu.Unlock()
+}
+
+func thumbDecodeRelease(est int64) {
+	thumbDecodeMu.Lock()
+	thumbDecodeInFlight -= est
+	thumbDecodeCond.Broadcast()
+	thumbDecodeMu.Unlock()
+}
+
+// touchLocked moves path to the most-recent end of the LRU order.
+// Caller holds tc.mu.
+func (tc *thumbnailCache) touchLocked(path string) {
+	for i, p := range tc.lru {
+		if p == path {
+			tc.lru = append(tc.lru[:i], tc.lru[i+1:]...)
+			break
+		}
+	}
+	tc.lru = append(tc.lru, path)
+}
+
+// insertLocked adds a fresh entry and evicts beyond the caps. Evicting a
+// PENDING entry is safe: its decode goroutine re-checks entries[path]
+// and discards the result when the entry is gone. Caller holds tc.mu.
+func (tc *thumbnailCache) insertLocked(path string, e *thumbnailEntry) {
+	tc.entries[path] = e
+	tc.touchLocked(path)
+	tc.evictLocked()
+}
+
+// evictLocked drops least-recently-used entries until both the count cap
+// and the byte budget hold. Caller holds tc.mu.
+func (tc *thumbnailCache) evictLocked() {
+	for (len(tc.entries) > thumbnailCacheMaxEntries || tc.totalBytes > thumbnailCacheMaxBytes) && len(tc.lru) > 0 {
+		victim := tc.lru[0]
+		tc.lru = tc.lru[1:]
+		if e := tc.entries[victim]; e != nil {
+			tc.totalBytes -= e.byteSize
+		}
+		delete(tc.entries, victim)
+	}
 }
 
 // thumbnailLookup is the atomic result of resolving a cache entry
@@ -129,6 +215,7 @@ func (tc *thumbnailCache) lookup(path string, window *app.Window) thumbnailLooku
 		tc.entries = make(map[string]*thumbnailEntry)
 	}
 	if entry, ok := tc.entries[path]; ok {
+		tc.touchLocked(path)
 		switch entry.state {
 		case thumbReady:
 			return thumbnailLookup{Entry: entry}
@@ -139,8 +226,8 @@ func (tc *thumbnailCache) lookup(path string, window *app.Window) thumbnailLooku
 		}
 	}
 	entry := &thumbnailEntry{state: thumbPending}
-	tc.entries[path] = entry
-	go tc.decodeInBackground(path, window)
+	tc.insertLocked(path, entry)
+	go tc.decodeInBackground(path, entry, window)
 	return thumbnailLookup{Pending: true}
 }
 
@@ -179,6 +266,7 @@ func (tc *thumbnailCache) get(path string, window *app.Window) *thumbnailEntry {
 	}
 
 	if entry, ok := tc.entries[path]; ok {
+		tc.touchLocked(path)
 		if entry.state == thumbReady {
 			return entry
 		}
@@ -189,9 +277,9 @@ func (tc *thumbnailCache) get(path string, window *app.Window) *thumbnailEntry {
 	// First access for this path — create a pending entry and spawn
 	// background decode.
 	entry := &thumbnailEntry{state: thumbPending}
-	tc.entries[path] = entry
+	tc.insertLocked(path, entry)
 
-	go tc.decodeInBackground(path, window)
+	go tc.decodeInBackground(path, entry, window)
 
 	return nil
 }
@@ -199,13 +287,53 @@ func (tc *thumbnailCache) get(path string, window *app.Window) *thumbnailEntry {
 // decodeInBackground decodes the image at path and updates the cache
 // entry. Calls window.Invalidate() to trigger a redraw regardless of
 // success or failure (the next layout frame will pick up the new state).
-func (tc *thumbnailCache) decodeInBackground(path string, window *app.Window) {
+func (tc *thumbnailCache) decodeInBackground(path string, entry *thumbnailEntry, window *app.Window) {
+	// alive reports whether the SAME entry this goroutine was spawned
+	// for is still the one cached at path. Pointer identity, not key
+	// presence: after an evict+re-add the key exists again but points to
+	// a DIFFERENT entry owned by another decoder. Filling it here would
+	// double-count totalBytes and race two decoders onto one entry.
+	alive := func() bool { return tc.entries[path] == entry }
+
+	// Read the decode cost (DecodeConfig only — no pixel allocation) and
+	// reject bombs before admission.
+	est, err := estimateDecodeBytes(path)
+	if err != nil {
+		tc.mu.Lock()
+		if alive() {
+			entry.state = thumbFailed
+		}
+		tc.mu.Unlock()
+		window.Invalidate()
+		return
+	}
+
+	// Skip everything if the entry was evicted before we even got here.
+	tc.mu.Lock()
+	if !alive() {
+		tc.mu.Unlock()
+		return
+	}
+	tc.mu.Unlock()
+
+	// Byte-weighted admission bounds the transient full-res peak.
+	thumbDecodeAdmit(est)
+	defer thumbDecodeRelease(est)
+
+	// Re-check after the (possibly long) admission wait.
+	tc.mu.Lock()
+	if !alive() {
+		tc.mu.Unlock()
+		return
+	}
+	tc.mu.Unlock()
+
 	img, err := decodeImageFile(path)
 
 	tc.mu.Lock()
-	entry := tc.entries[path]
-	if entry == nil {
-		// Entry was invalidated while we were decoding — discard result.
+	if !alive() {
+		// Evicted (or replaced) while decoding — discard the result and
+		// do not touch totalBytes for a foreign entry.
 		tc.mu.Unlock()
 		return
 	}
@@ -213,8 +341,15 @@ func (tc *thumbnailCache) decodeInBackground(path string, window *app.Window) {
 		entry.state = thumbFailed
 	} else {
 		entry.op = paint.NewImageOp(img)
-		entry.bounds = img.Bounds().Size()
+		sz := img.Bounds().Size()
+		entry.bounds = sz
+		// The stored bitmap is always *image.NRGBA (downscaleForThumbnail
+		// converts even when it does not shrink), so 4 bytes/pixel is
+		// exact, not an assumption.
+		entry.byteSize = int64(sz.X) * int64(sz.Y) * 4
+		tc.totalBytes += entry.byteSize
 		entry.state = thumbReady
+		tc.evictLocked()
 	}
 	tc.mu.Unlock()
 
@@ -244,9 +379,103 @@ func isImageContentType(contentType string) bool {
 // memory usage.
 const maxImageDecodeBytes = 20 * 1024 * 1024 // 20 MB
 
-// decodeImageFile opens a file and decodes it as an image. Returns an
-// error if the file cannot be read, the format is unrecognized, or the
-// file exceeds maxImageDecodeBytes.
+// maxImageDecodeMemBytes caps the DECODED in-memory size, computed from
+// DecodeConfig BEFORE any pixel allocation. A count/pixel limit alone is
+// wrong: a 32MP image is ~128MB at 8bpp (16-bit PNG) but ~128MB is the
+// worst case that must not be exceeded on Android, and a kilobyte-scale
+// decompression bomb can declare enormous dimensions. Estimating bytes
+// (dimensions × the decoded color model's bytes-per-pixel) catches both.
+// Anything larger renders as a plain file card without a preview.
+const maxImageDecodeMemBytes = 96 << 20
+
+// thumbnailStoreMaxPx bounds the long side of the bitmap kept in the
+// cache. The display box is ≤260dp, so 1024px stays crisp on high-DPI
+// while costing exactly 1024×h×4 ≈ ≤4MB per entry.
+const thumbnailStoreMaxPx = 1024
+
+// modelBytesPerPixel is the worst-case bytes/pixel the decoder allocates
+// for cfg.ColorModel. The JPEG and GIF models need care: a JPEG decodes
+// into *image.YCbCr (three planes, 3 bytes/px at 4:4:4 and less when
+// subsampled) and a GIF into *image.Paletted (1 byte/px) — lumping them
+// into the unknown-model fallback made ordinary photos look like 8 bpp
+// and get rejected as "too large" (a 20MP JPEG estimated at 160MB
+// instead of ~60MB). color.Palette is a slice type implementing
+// color.Model, so it needs a type switch rather than an equality case.
+// Genuinely unknown models still fall through to 8 so admission never
+// UNDER-counts the peak.
+func modelBytesPerPixel(m color.Model) int64 {
+	if _, ok := m.(color.Palette); ok {
+		return 1
+	}
+	switch m {
+	case color.GrayModel, color.AlphaModel:
+		return 1
+	case color.Gray16Model, color.Alpha16Model:
+		return 2
+	case color.YCbCrModel:
+		return 3
+	case color.NRGBAModel, color.RGBAModel, color.CMYKModel, color.NYCbCrAModel:
+		return 4
+	case color.NRGBA64Model, color.RGBA64Model:
+		return 8
+	default:
+		return 8
+	}
+}
+
+// thumbnailBytesFor returns the size of the NRGBA thumbnail that
+// downscaleForThumbnail will produce for a WxH source. It is allocated
+// WHILE the full-resolution decode is still alive, so admission has to
+// reserve both — otherwise many cheap sources (e.g. 1 byte/px grayscale)
+// are admitted en masse and then each allocates up to 4MB of output on
+// top of the reservation.
+func thumbnailBytesFor(w, h int) int64 {
+	long := max(w, h)
+	if long > thumbnailStoreMaxPx {
+		scale := float64(thumbnailStoreMaxPx) / float64(long)
+		w = max(1, int(float64(w)*scale))
+		h = max(1, int(float64(h)*scale))
+	}
+	return int64(w) * int64(h) * 4
+}
+
+// estimateDecodeBytes reads only the header (DecodeConfig) and returns
+// the estimated PEAK byte cost of producing a thumbnail (full-resolution
+// decode + the NRGBA output that coexists with it), rejecting files over
+// the size or memory limits without allocating any pixels.
+func estimateDecodeBytes(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if info.Size() > maxImageDecodeBytes {
+		return 0, fmt.Errorf("file too large for thumbnail: %d bytes", info.Size())
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = f.Close() }()
+
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return 0, err
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, fmt.Errorf("invalid image dimensions %dx%d", cfg.Width, cfg.Height)
+	}
+	decoded := int64(cfg.Width) * int64(cfg.Height) * modelBytesPerPixel(cfg.ColorModel)
+	if decoded > maxImageDecodeMemBytes {
+		return 0, fmt.Errorf("image too large for thumbnail: %dx%d (~%dMB decoded)", cfg.Width, cfg.Height, decoded>>20)
+	}
+	// Peak = full-resolution decode + the NRGBA thumbnail built from it
+	// while the former is still referenced.
+	return decoded + thumbnailBytesFor(cfg.Width, cfg.Height), nil
+}
+
+// decodeImageFile decodes the image at path into a cache-sized *image.NRGBA
+// thumbnail. Callers gate the cost first with estimateDecodeBytes; this
+// re-checks the file size but assumes admission already bounded the peak.
 func decodeImageFile(path string) (image.Image, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -266,7 +495,32 @@ func decodeImageFile(path string) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	return img, nil
+	return downscaleForThumbnail(img), nil
+}
+
+// downscaleForThumbnail returns an *image.NRGBA thumbnail whose long side
+// is at most thumbnailStoreMaxPx. It ALWAYS produces NRGBA (4bpp) — even
+// when the source is already small — so the cached byte size is exactly
+// w×h×4 and a 16-bit (8bpp) source never sneaks into the cache at double
+// the accounted cost. The full-resolution decode is released to the GC.
+func downscaleForThumbnail(img image.Image) *image.NRGBA {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	long := max(w, h)
+	if long <= thumbnailStoreMaxPx {
+		if nrgba, ok := img.(*image.NRGBA); ok {
+			return nrgba
+		}
+		dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(dst, dst.Bounds(), img, b.Min, draw.Src)
+		return dst
+	}
+	scale := float64(thumbnailStoreMaxPx) / float64(long)
+	nw := max(1, int(float64(w)*scale))
+	nh := max(1, int(float64(h)*scale))
+	dst := image.NewNRGBA(image.Rect(0, 0, nw, nh))
+	xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
+	return dst
 }
 
 // thumbnailDisplaySize computes the display dimensions that fit the

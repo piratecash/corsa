@@ -1,0 +1,111 @@
+plugins {
+    id "com.android.application"
+}
+
+def propertyValue = { String name, String fallback ->
+    providers.gradleProperty(name).orElse(fallback).get()
+}
+
+// Fallback only for direct ./gradlew runs; the Makefile always passes
+// -PcorsaAppId=$(ANDROID_APPID). Keep both in sync.
+def appId = propertyValue("corsaAppId", "chat.corsa.app")
+def compileSdkLevel = propertyValue("corsaCompileSdk", "36").toInteger()
+def minSdkLevel = propertyValue("corsaMinSdk", "26").toInteger()
+def targetSdkLevel = propertyValue("corsaTargetSdk", "36").toInteger()
+def appVersionCode = propertyValue("corsaVersionCode", "1").toInteger()
+def appVersionName = propertyValue("corsaVersionName", "0.0.0")
+def appName = propertyValue("corsaAppName", "Corsa")
+def adaptiveIconBackground = propertyValue("corsaAdaptiveIconBackground", "#000000")
+def legacyIcon = file(propertyValue(
+    "corsaLegacyIcon",
+    rootProject.file("../../assets/icons/png/app-icon-android-512.png").absolutePath,
+))
+def adaptiveIconForeground = file(propertyValue(
+    "corsaAdaptiveIconForeground",
+    rootProject.file("../../assets/icons/png/app-icon-android-foreground-512.png").absolutePath,
+))
+def gioArchive = file(propertyValue(
+    "corsaGioArchive",
+    rootProject.file("../../dist/corsa-android.aar").absolutePath,
+))
+def generatedIconResources = layout.buildDirectory.dir("generated/corsa-icon-resources").get().asFile
+
+def verifyCorsaInputs = tasks.register("verifyCorsaInputs") {
+    inputs.files(gioArchive, legacyIcon, adaptiveIconForeground)
+    doLast {
+        [
+            "Gio Android archive": gioArchive,
+            "Legacy Android icon": legacyIcon,
+            "Adaptive icon foreground": adaptiveIconForeground,
+        ].each { label, input ->
+            if (!input.isFile()) {
+                throw new GradleException("${label} not found: ${input}")
+            }
+        }
+    }
+}
+
+def generateCorsaIconResources = tasks.register("generateCorsaIconResources", Sync) {
+    dependsOn verifyCorsaInputs
+    into generatedIconResources
+    from(adaptiveIconForeground) {
+        into "drawable-nodpi"
+        rename { "ic_launcher_foreground.png" }
+    }
+    from(legacyIcon) {
+        into "mipmap-xxxhdpi"
+        rename { "ic_launcher.png" }
+    }
+}
+
+android {
+    // The AAR emitted by gogio uses the application ID as its namespace.
+    // The wrapper owns no Java/Kotlin code, so a distinct namespace avoids a
+    // manifest-merger collision without changing the installed package ID.
+    namespace = "${appId}.wrapper"
+    compileSdk = compileSdkLevel
+
+    defaultConfig {
+        applicationId = appId
+        minSdk = minSdkLevel
+        targetSdk = targetSdkLevel
+        versionCode = appVersionCode
+        versionName = appVersionName
+
+        resValue "string", "app_name", appName
+        resValue "color", "ic_launcher_background", adaptiveIconBackground
+    }
+
+    buildFeatures {
+        resValues = true
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled = false
+        }
+        release {
+            minifyEnabled = false
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    sourceSets {
+        main {
+            res.srcDir generatedIconResources
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn generateCorsaIconResources
+}
+
+dependencies {
+    implementation files(gioArchive)
+}

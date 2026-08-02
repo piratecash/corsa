@@ -23,7 +23,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 
 	"github.com/rs/zerolog/log"
-	_ "modernc.org/sqlite"
 )
 
 // Message delivery statuses.
@@ -147,7 +146,10 @@ const (
 // renaming the file and starting fresh is appropriate) from transient I/O
 // errors (where renaming a healthy file would cause data loss).
 func openAndVerify(dbPath string) (*sql.DB, openResult) {
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)")
+	// Driver name and DSN options are platform-selected: see
+	// driver_default.go (modernc, pure Go) and driver_android.go (mattn,
+	// cgo — modernc's libc has no android port).
+	db, err := sql.Open(sqliteDriverName, dbPath+sqliteDSNOptions)
 	if err != nil {
 		log.Error().Err(err).Str("db_path", dbPath).Msg("chatlog sql.Open failed")
 		return nil, openError

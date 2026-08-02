@@ -88,6 +88,35 @@ type DMRouter struct {
 	// exercised without standing up a full node.
 	prepareAndSend func(ctx context.Context, to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload) (*AnnounceResult, error)
 
+	// Shutdown tracking for every router-owned goroutine that can touch
+	// the chatlog: fire-and-forget sends/selects, the startup goroutine,
+	// ebus-triggered reload goroutines and the long-lived retry loops.
+	// beginOp/endOp register work with inflight under opMu; ShutdownDrain
+	// closes the gate (opClosed) so no NEW work can register — closing
+	// the gate and waiting under the same mutex is what keeps
+	// sync.WaitGroup's "no Add concurrent with Wait" contract — then
+	// cancels the retry loops (loopCancel) and drains. The desktop
+	// shutdown path runs this before closing sqlite.
+	// noStartupAutoSelect suppresses opening the first conversation
+	// during startup (initializeFromDB). Desktop wants the auto-open (a
+	// chat pane with nothing in it is dead space); the phone-sized
+	// single-pane layout does not — there the first screen must be the
+	// contact list, and auto-opening would also clear that
+	// conversation's unread badge for a chat the user never looked at.
+	// Negated on purpose so the zero value keeps the historical
+	// behaviour for routers built as struct literals (tests). Set via
+	// SetStartupAutoSelect before Start; read under mu.
+	noStartupAutoSelect bool
+
+	opMu        sync.RWMutex
+	opClosed    bool
+	sendsClosed bool
+	inflight    sync.WaitGroup
+	sendOps     sync.WaitGroup
+	loopOps     sync.WaitGroup
+	loopCtx     context.Context
+	loopCancel  context.CancelFunc
+
 	mu               sync.RWMutex
 	activePeer       domain.PeerIdentity
 	peerClicked      bool
@@ -344,6 +373,161 @@ func (r *DMRouter) AutoSelectPeer(peerAddress domain.PeerIdentity) {
 	r.selectPeerCore(peerAddress, false)
 }
 
+// SetStartupAutoSelect enables or disables opening the first
+// conversation during startup (initializeFromDB). Call before Start.
+// Disabled by the desktop app on Android, whose single-pane layout must
+// come up on the contact list — see noStartupAutoSelect.
+func (r *DMRouter) SetStartupAutoSelect(enabled bool) {
+	r.mu.Lock()
+	r.noStartupAutoSelect = !enabled
+	r.mu.Unlock()
+}
+
+// DeselectPeer clears the active conversation without selecting another
+// one — the compact (single-pane) layout calls it when navigating back
+// from an open chat to the contact list. After it returns no chat is on
+// screen, so peerClicked is reset: incoming messages must accumulate
+// unread badges again instead of being auto-marked seen for a
+// conversation nobody is looking at. No-op when nothing is selected.
+func (r *DMRouter) DeselectPeer() {
+	r.mu.Lock()
+	if r.activePeer.IsZero() {
+		r.mu.Unlock()
+		return
+	}
+	r.activePeer = domain.PeerIdentity{}
+	r.peerClicked = false
+	// Clear the stale conversation immediately so a later frame never
+	// renders the previous peer's messages without its header — same
+	// rule as the peer-switch branch in selectPeerCore.
+	r.activeMessages = nil
+	r.mu.Unlock()
+
+	r.notify(UIEventMessagesUpdated)
+	r.notify(UIEventSidebarUpdated)
+}
+
+// ErrRouterShuttingDown is returned by send entry points once
+// ShutdownDrain has closed the operation gate: the process is exiting
+// and sqlite is about to close, so accepting new sends would either
+// lose them or write to a closed database.
+var ErrRouterShuttingDown = errors.New("dm_router: shutting down")
+
+// beginOp registers a chatlog-touching operation with the shutdown
+// tracker. It returns false once ShutdownDrain has closed the gate — the
+// caller must skip the operation entirely (the app is exiting; sqlite is
+// about to close). The Add happens under opMu so it can never interleave
+// with ShutdownDrain's close-then-Wait sequence.
+func (r *DMRouter) beginOp() bool {
+	r.opMu.RLock()
+	defer r.opMu.RUnlock()
+	if r.opClosed {
+		return false
+	}
+	r.inflight.Add(1)
+	return true
+}
+
+// endOp releases a slot taken by beginOp.
+func (r *DMRouter) endOp() { r.inflight.Done() }
+
+// beginSendOp is beginOp for OUTBOUND sends (text / file announce).
+// Sends have their own earlier gate (sendsClosed) and counter (sendOps)
+// because the shutdown sequence drains them while the node is still up —
+// a send drained after node cancellation could only fail. Registered in
+// both counters so the final ShutdownDrain covers them too.
+func (r *DMRouter) beginSendOp() bool {
+	r.opMu.RLock()
+	defer r.opMu.RUnlock()
+	if r.opClosed || r.sendsClosed {
+		return false
+	}
+	r.inflight.Add(1)
+	r.sendOps.Add(1)
+	return true
+}
+
+// endSendOp releases a slot taken by beginSendOp.
+func (r *DMRouter) endSendOp() {
+	r.sendOps.Done()
+	r.inflight.Done()
+}
+
+// DrainSends closes the send gate (new SendMessage / file announces are
+// refused with ErrRouterShuttingDown) and waits — bounded — for sends
+// already in flight to finish. Called while the node is STILL RUNNING so
+// those sends can reach the wire; the rest of the router keeps working
+// until ShutdownDrain.
+func (r *DMRouter) DrainSends(timeout time.Duration) bool {
+	r.opMu.Lock()
+	r.sendsClosed = true
+	r.opMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		r.sendOps.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// StopLoops cancels the long-lived retry/reaper loops and waits —
+// bounded — for them to exit. Runs BEFORE the event-bus drain in the
+// shutdown sequence: the delete/conversation retry loops publish
+// terminal outcomes to the bus, so cancelling them only later (in
+// ShutdownDrain, after the bus is gone) would silently drop those
+// events. Does not touch the operation gates — the router keeps
+// accepting handler work until ShutdownDrain.
+func (r *DMRouter) StopLoops(timeout time.Duration) bool {
+	if r.loopCancel != nil {
+		r.loopCancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		r.loopOps.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// ShutdownDrain stops the router for process exit: it closes the
+// operation gate (no new tracked work can start), cancels the long-lived
+// retry/reaper loops, and waits — bounded by timeout — for everything
+// already in flight to finish. Reports whether the drain completed.
+// Part of the shutdown ordering documented in desktop.Run: UI-side
+// sends → router drain → ebus shutdown → node stop → chatlog close.
+func (r *DMRouter) ShutdownDrain(timeout time.Duration) bool {
+	r.opMu.Lock()
+	r.opClosed = true
+	r.opMu.Unlock()
+
+	if r.loopCancel != nil {
+		r.loopCancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		r.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // selectPeerCore shares logic for SelectPeer and AutoSelectPeer.
 // Both paths clear the unread badge optimistically and send seen receipts.
 // userClicked affects retry behaviour on same-peer re-selection:
@@ -414,7 +598,11 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 	if !userClicked {
 		label = "AutoSelectPeer"
 	}
+	if !r.beginOp() {
+		return
+	}
 	go func() {
+		defer r.endOp()
 		defer recoverLog(label)
 		if needLoad {
 			if !r.loadConversation(peerAddress) {
@@ -458,7 +646,12 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 
 	r.setSendStatusNotify("sending…")
 
+	if !r.beginSendOp() {
+		r.convDeleteRetry.releaseSend(to)
+		return ErrRouterShuttingDown
+	}
 	go func() {
+		defer r.endSendOp()
 		defer recoverLog("SendMessage")
 		defer r.convDeleteRetry.releaseSend(to)
 
@@ -569,7 +762,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 // is delegated to FileTransferBridge; DMRouter handles only the peerGen
 // stale-send guard and UI state updates.
 func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func()) error {
-	return r.sendFileAnnounceWithBaseline(to, msg, meta, onAsyncFailure, nil)
+	return r.sendFileAnnounceWithBaseline(to, msg, meta, onAsyncFailure, nil, nil)
 }
 
 // SendFileAnnounceFromComposer is like SendFileAnnounce but pins the removal
@@ -579,13 +772,24 @@ func (r *DMRouter) SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingD
 // measured against a freshly captured (already bumped) generation and slip
 // through, re-importing the identity and re-adding it to the sidebar.
 func (r *DMRouter) SendFileAnnounceFromComposer(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func(), baselineGen uint64) error {
-	return r.sendFileAnnounceWithBaseline(to, msg, meta, onAsyncFailure, &baselineGen)
+	return r.sendFileAnnounceWithBaseline(to, msg, meta, onAsyncFailure, nil, &baselineGen)
+}
+
+// SendFileAnnounceFromComposerDone is SendFileAnnounceFromComposer with an
+// additional onAsyncSuccess callback, fired after the announce is fully
+// settled (chatlog written, TopicFileSent published). Exactly one of
+// onAsyncFailure / onAsyncSuccess runs per call that returned nil; a
+// non-nil sync return fires neither. The desktop uses the success hook to
+// release the picker staging copy of the sent file — the failure path must
+// NOT release it because the retry queue re-reads the source path.
+func (r *DMRouter) SendFileAnnounceFromComposerDone(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure, onAsyncSuccess func(), baselineGen uint64) error {
+	return r.sendFileAnnounceWithBaseline(to, msg, meta, onAsyncFailure, onAsyncSuccess, &baselineGen)
 }
 
 // sendFileAnnounceWithBaseline is the shared body. baseline, when non-nil, is
 // the removal generation to guard against (captured by the caller before its
 // own slow work); when nil the current generation is captured here.
-func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func(), baseline *uint64) error {
+func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure, onAsyncSuccess func(), baseline *uint64) error {
 	if r.fileBridge == nil {
 		return fmt.Errorf("file transfer not available")
 	}
@@ -613,7 +817,12 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 
 	r.setSendStatusNotify("sending…")
 
+	if !r.beginSendOp() {
+		r.convDeleteRetry.releaseSend(to)
+		return ErrRouterShuttingDown
+	}
 	go func() {
+		defer r.endSendOp()
 		defer recoverLog("SendFileAnnounce")
 		defer r.convDeleteRetry.releaseSend(to)
 
@@ -743,6 +952,11 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 			To:     to,
 			FileID: result.FileID,
 		})
+		// Success is settled (same ordering rule as the failure paths:
+		// all visible state published before the callback).
+		if onAsyncSuccess != nil {
+			onAsyncSuccess()
+		}
 	}()
 
 	return nil
@@ -910,32 +1124,78 @@ func (r *DMRouter) Start() {
 	// 1. Subscribe to DM-specific ebus events.
 	r.subscribeEvents()
 
+	// Cancellable context for the long-lived loops below; ShutdownDrain
+	// cancels it so the loops exit and release their inflight slots.
+	r.loopCtx, r.loopCancel = context.WithCancel(context.Background())
+
 	// 2. Startup: load previews, auto-select first peer, seed the monitor.
-	go r.runStartup()
+	// Tracked: it reads and writes through the chatlog (previews,
+	// mark-seen via AutoSelectPeer).
+	if r.beginOp() {
+		go func() {
+			defer r.endOp()
+			r.runStartup()
+		}()
+	}
 
 	// 3. Background retry sweeper for pending message_delete control
 	// DMs. Runs for the process lifetime — pending state is in-memory
 	// only, so a process restart starts from a clean slate (see the
 	// note in dm_router_delete.go about JSON persistence as a planned
 	// follow-up).
-	go r.deleteRetryLoop(context.Background())
+	if r.beginOp() {
+		r.loopOps.Add(1)
+		go func() {
+			defer r.loopOps.Done()
+			defer r.endOp()
+			r.deleteRetryLoop(r.loopCtx)
+		}()
+	}
 
 	// 4. Background retry sweeper for pending conversation_delete
 	// control DMs. Same lifetime story as the message_delete loop.
-	go r.conversationDeleteRetryLoop(context.Background())
+	if r.beginOp() {
+		r.loopOps.Add(1)
+		go func() {
+			defer r.loopOps.Done()
+			defer r.endOp()
+			r.conversationDeleteRetryLoop(r.loopCtx)
+		}()
+	}
 
 	// 5. Wipe-tombstone reaper: prunes expired entries from the
 	// in-memory tombstone set so a long-lived process does not
 	// accumulate tombstones for the rest of its lifetime.
-	go r.wipeTombstoneReaperLoop(context.Background())
+	if r.beginOp() {
+		r.loopOps.Add(1)
+		go func() {
+			defer r.loopOps.Done()
+			defer r.endOp()
+			r.wipeTombstoneReaperLoop(r.loopCtx)
+		}()
+	}
 
 	// 6. Inbound conversation_delete cache reaper.
-	go r.inboundConvDeleteCacheReaperLoop(context.Background())
+	if r.beginOp() {
+		r.loopOps.Add(1)
+		go func() {
+			defer r.loopOps.Done()
+			defer r.endOp()
+			r.inboundConvDeleteCacheReaperLoop(r.loopCtx)
+		}()
+	}
 
 	// 7. Inbound conversation_delete long-lived seen-set reaper.
 	// Lives at much coarser cadence than (6) — see
 	// inboundConvDeleteSeenReapPeriod for rationale.
-	go r.inboundConvDeleteSeenReaperLoop(context.Background())
+	if r.beginOp() {
+		r.loopOps.Add(1)
+		go func() {
+			defer r.loopOps.Done()
+			defer r.endOp()
+			r.inboundConvDeleteSeenReaperLoop(r.loopCtx)
+		}()
+	}
 }
 
 // runStartup loads initial data from the database and then replays any
@@ -1130,7 +1390,11 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 			// Inline decrypt failed (missing contact keys, etc.) —
 			// fall back to reading the latest preview from SQLite.
 			isIncoming := event.Sender != r.client.Address().String()
+			if !r.beginOp() {
+				return
+			}
 			go func() {
+				defer r.endOp()
 				defer recoverLog("onNewMessage.nonActive.decryptFail")
 				if !r.updatePreviewFromStore(peerID) {
 					r.evictSeenMessages(event.MessageID)
@@ -1185,7 +1449,11 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		if event.Sender != r.client.Address().String() && !replaying {
 			r.notify(UIEventBeep)
 		}
+		if !r.beginOp() {
+			return
+		}
 		go func() {
+			defer r.endOp()
 			defer recoverLog("onNewMessage.midSwitch")
 			if !r.reloadAndRefreshPreview(peerID, event.MessageID) {
 				// Full reload failed. If we decrypted the message inline
@@ -1234,7 +1502,11 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		if isIncoming && !replaying {
 			r.notify(UIEventBeep)
 		}
+		if !r.beginOp() {
+			return
+		}
 		go func() {
+			defer r.endOp()
 			defer recoverLog("onNewMessage.decryptFail")
 			if !r.reloadAndRefreshPreview(peerID, event.MessageID) {
 				return
@@ -1275,8 +1547,11 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 
 	// The active chat is on screen — mark incoming messages as seen
 	// regardless of how the peer was selected (click or auto-select).
-	if isIncoming {
-		go r.doMarkSeen(peerID)
+	if isIncoming && r.beginOp() {
+		go func() {
+			defer r.endOp()
+			r.doMarkSeen(peerID)
+		}()
 	}
 }
 
@@ -1291,7 +1566,11 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 	if !r.cache.MatchesPeer(receiptPeer) {
 		// Active peer but cache still loading — trigger reload to pick up
 		// the receipt update.
+		if !r.beginOp() {
+			return
+		}
 		go func() {
+			defer r.endOp()
 			r.loadConversation(receiptPeer)
 			r.notify(UIEventMessagesUpdated)
 		}()
@@ -1306,7 +1585,11 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 		r.mu.Unlock()
 		r.notify(UIEventMessagesUpdated)
 	} else if !r.cache.HasMessage(event.MessageID) {
+		if !r.beginOp() {
+			return
+		}
 		go func() {
+			defer r.endOp()
 			r.loadConversation(receiptPeer)
 			r.notify(UIEventMessagesUpdated)
 		}()
@@ -1365,9 +1648,16 @@ func (r *DMRouter) initializeFromDB() {
 
 	r.mu.Lock()
 	var selectedPeer domain.PeerIdentity
-	if strings.TrimSpace(r.activePeer.String()) != "" {
+	switch {
+	case strings.TrimSpace(r.activePeer.String()) != "":
 		selectedPeer = r.activePeer
-	} else {
+	case r.noStartupAutoSelect:
+		// Nothing was open and this build must not open anything (phone
+		// layout): leave the selection empty so the UI shows the contact
+		// list, and do not mark any conversation seen.
+		r.mu.Unlock()
+		return
+	default:
 		selectedPeer = firstPeer
 		r.pendingRecipientText = firstPeer
 	}
@@ -1948,7 +2238,13 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	r.mu.Unlock()
 
 	for peer, ids := range peerMessageIDs {
-		go r.refreshPreviewForPeer(peer, ids)
+		if !r.beginOp() {
+			break
+		}
+		go func(peer domain.PeerIdentity, ids []string) {
+			defer r.endOp()
+			r.refreshPreviewForPeer(peer, ids)
+		}(peer, ids)
 	}
 
 	if hasNew {
@@ -1967,7 +2263,12 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 			r.notify(UIEventMessagesUpdated)
 			// Active chat is on screen — always send seen receipts,
 			// regardless of how the peer was selected.
-			go r.doMarkSeen(selected)
+			if r.beginOp() {
+				go func() {
+					defer r.endOp()
+					r.doMarkSeen(selected)
+				}()
+			}
 		} else {
 			// Reload failed — the new messages are not in activeMessages.
 			// Evict their IDs from seenMessageIDs so the next repair cycle

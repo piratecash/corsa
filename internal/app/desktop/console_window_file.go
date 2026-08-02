@@ -739,7 +739,11 @@ func (c *ConsoleWindow) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg
 		c.parent.fileCancelDownloadBtns[messageID] = cancelBtn
 	}
 	for cancelBtn.Clicked(gtx) {
+		if !c.parent.beginUIOp() {
+			continue
+		}
 		go func() {
+			defer c.parent.endUIOp()
 			defer c.invalidateWindow()
 			if err := c.parent.router.FileBridge().CancelDownload(fileID); err != nil {
 				_ = err
@@ -832,7 +836,11 @@ func (c *ConsoleWindow) dispatchFileTabDownloadAsync(fileID domain.FileID) {
 	if bridge == nil {
 		return
 	}
+	if !c.parent.beginUIOp() {
+		return
+	}
 	go func() {
+		defer c.parent.endUIOp()
 		defer c.invalidateWindow()
 		if err := bridge.StartDownload(fileID); err != nil {
 			// Errors are intentionally swallowed: the row will stay
@@ -855,7 +863,11 @@ func (c *ConsoleWindow) dispatchFileTabRestartAsync(fileID domain.FileID) {
 	if bridge == nil {
 		return
 	}
+	if !c.parent.beginUIOp() {
+		return
+	}
 	go func() {
+		defer c.parent.endUIOp()
 		defer c.invalidateWindow()
 		if err := bridge.RestartDownload(fileID); err != nil {
 			_ = err
@@ -1106,7 +1118,11 @@ func (c *ConsoleWindow) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot)
 	peer := t.Peer
 	target := domain.MessageID(t.FileID)
 	outgoing := t.Direction == "send"
+	if !c.parent.beginUIOp() {
+		return
+	}
 	go func() {
+		defer c.parent.endUIOp()
 		ctx, cancel := context.WithTimeout(context.Background(), fileDeleteTimeout)
 		defer cancel()
 		if err := router.SendMessageDelete(ctx, peer, target); err != nil {

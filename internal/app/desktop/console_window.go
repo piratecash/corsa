@@ -952,7 +952,14 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
 
+	// Registered with the parent window's UI-op gate: console commands
+	// call straight into the CommandTable → router/chatlog, and must be
+	// drained (or refused) on shutdown like every other UI operation.
+	if !c.parent.beginUIOp() {
+		return
+	}
 	go func(command string) {
+		defer c.parent.endUIOp()
 		type cmdResult struct {
 			output string
 			err    error

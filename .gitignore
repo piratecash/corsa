@@ -10,3 +10,6 @@ dist/
 corsa-desktop
 corsa-desktop.exe
 /cmd/corsa-desktop/*_windows_*.syso
+/packaging/android/.gradle/
+/packaging/android/app/build/
+/packaging/android/local.properties

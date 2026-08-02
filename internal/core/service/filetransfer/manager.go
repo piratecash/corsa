@@ -141,6 +141,12 @@ type Manager struct {
 	// to in order to play the download-done audio cue.
 	onReceiverDownloadComplete func(ReceiverDownloadCompletedEvent)
 	stopCh                     chan struct{}
+	// retryDone is closed when retryLoop exits; Stop joins on it so
+	// callers (Service.Run teardown → NodeRuntime.Wait on the desktop
+	// shutdown path) know no transfer-mapping writes or partial-file
+	// operations are still running when they proceed to close storage.
+	retryDone chan struct{}
+	started   bool
 }
 
 // ReceiverDownloadCompletedEvent is the payload of the
@@ -186,6 +192,7 @@ func NewFileTransferManager(cfg Config) *Manager {
 		peerReachable:              cfg.PeerReachable,
 		onReceiverDownloadComplete: cfg.OnReceiverDownloadComplete,
 		stopCh:                     make(chan struct{}),
+		retryDone:                  make(chan struct{}),
 	}
 
 	// Restore persisted state and rebuild FileStore ref counts.
@@ -201,12 +208,23 @@ func NewFileTransferManager(cfg Config) *Manager {
 
 // Start launches background goroutines for periodic maintenance.
 func (m *Manager) Start() {
-	go m.retryLoop()
+	m.started = true
+	go func() {
+		defer close(m.retryDone)
+		m.retryLoop()
+	}()
 }
 
-// Stop terminates background goroutines.
+// Stop terminates background goroutines and waits for them to exit, so
+// the caller can rely on no further transfer-mapping writes or
+// partial-file operations happening after it returns. The join is
+// prompt: retryLoop selects on stopCh. No-op join when Start was never
+// called.
 func (m *Manager) Stop() {
 	close(m.stopCh)
+	if m.started {
+		<-m.retryDone
+	}
 }
 
 // ---------------------------------------------------------------------------

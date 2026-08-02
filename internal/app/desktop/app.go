@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -19,7 +20,27 @@ import (
 
 func Run() error {
 	cfg := config.Default()
-	ctx := context.Background()
+	// cancelNode stops the node service (and every ctx-bound worker:
+	// metrics collector, resource sampler, status notifier) on the
+	// UI-driven shutdown path — see window.SetShutdown below.
+	ctx, cancelNode := context.WithCancel(context.Background())
+	defer cancelNode()
+
+	// Mobile runs as a light client, always: config.Default falls back
+	// to NodeTypeFull (there is no practical way to set CORSA_NODE_TYPE
+	// on Android), which would advertise the "relay" service and open
+	// the inbound listener — transit traffic burns battery/data, and the
+	// advertised port is unreachable behind mobile NAT anyway. Client
+	// mode drops "relay" from ServiceList and disables the listener via
+	// EffectiveListenerEnabled.
+	if isAndroid {
+		cfg.Node.Type = config.NodeTypeClient
+	}
+
+	// Wipe attachment staging copies from previous runs before any UI
+	// (and thus any new pick) exists — the one moment no draft or
+	// failed-send entry can reference them. See file_attach_stream.go.
+	cleanupAttachTmp()
 
 	id, err := identity.LoadOrCreate(cfg.Node.IdentityPath)
 	if err != nil {
@@ -106,6 +127,13 @@ func Run() error {
 	statusMonitor.Start()
 
 	router = service.NewDMRouter(client, fileBridge, eventBus, statusMonitor)
+	if isAndroid {
+		// Phone layout: come up on the contact list. Without this the
+		// router's startup would open the first conversation (and clear
+		// its unread badge) before the user has seen the list — the UI's
+		// own compact-mode guard only covers UI-initiated selection.
+		router.SetStartupAutoSelect(false)
+	}
 
 	// Metrics collector — samples node traffic every second, keeps 1 hour history.
 	// Create it BEFORE runtime.Start and Seed its baseline from the current
@@ -152,7 +180,21 @@ func Run() error {
 	// (CORSA_RPC_USERNAME + CORSA_RPC_PASSWORD). Without auth, the server
 	// is not created — prevents port conflicts when running multiple
 	// instances and avoids exposing an unauthenticated control plane.
-	if cfg.RPC.AuthEnabled() {
+	//
+	// Android never starts it, credentials or not: there is no practical
+	// way to hand env credentials to an Android app process, no CLI to
+	// serve, and an extra listening socket in a mobile app is pure attack
+	// surface.
+	// stopRPC shuts the RPC server down exactly once and reports whether
+	// that shutdown completed cleanly. It exists as a named func because
+	// the UI-driven exit terminates the process via os.Exit, which skips
+	// the defer below — without an explicit call in the shutdown
+	// sequence the server would keep accepting chatlog commands right
+	// through the drain and past the router gates.
+	stopRPC := func() bool { return true }
+	if isAndroid {
+		log.Info().Msg("rpc server disabled on android")
+	} else if cfg.RPC.AuthEnabled() {
 		rpcServer, err := rpc.NewServer(cfg.RPC, cmdTable, nodeService)
 		if err != nil {
 			log.Fatal().Err(err).Msg("rpc server config invalid")
@@ -161,16 +203,122 @@ func Run() error {
 		if err := rpcServer.StartAsync(); err != nil {
 			log.Error().Err(err).Msg("rpc server failed to start")
 		}
-		defer func() {
-			if err := rpcServer.Shutdown(); err != nil {
-				log.Error().Err(err).Msg("rpc server shutdown failed")
-			}
-		}()
+		var rpcOnce sync.Once
+		rpcStopped := true
+		stopRPC = func() bool {
+			rpcOnce.Do(func() {
+				// Bounded: plain Shutdown waits for active connections
+				// with no deadline - a keep-alive client would block
+				// application exit forever. A timeout error means an
+				// in-flight handler may STILL be running (fasthttp does
+				// not abort handlers) — the caller must treat that as
+				// an unclean stage and keep the chatlog open.
+				if err := rpcServer.ShutdownWithTimeout(5 * time.Second); err != nil {
+					log.Error().Err(err).Msg("rpc server shutdown failed")
+					rpcStopped = false
+				}
+			})
+			return rpcStopped
+		}
+		defer stopRPC()
 	} else {
 		log.Info().Msg("rpc server disabled: CORSA_RPC_USERNAME and CORSA_RPC_PASSWORD not set")
 	}
 
 	// Desktop UI gets CommandTable directly — no HTTP round-trip needed.
 	window := NewWindow(client, router, eventBus, cmdTable, runtime, prefs)
+	// The UI exit paths (window closed, Android DestroyEvent) terminate
+	// the process from the event loop; app.Main never returns, so the
+	// defers above never fire there. Mirror the data-integrity part
+	// here: stop the node first (no new chatlog writes), then close the
+	// chatlog — sql.DB.Close waits out in-flight queries, so sqlite
+	// finishes its WAL work instead of dying inside os.Exit. Double
+	// Close on the theoretical normal-return path is harmless.
+	window.SetShutdown(func() {
+		// Shutdown ordering — producers stop before their consumers'
+		// state is torn down, and everything settles before sqlite
+		// closes:
+		//
+		//  1. RPC server — an external client must not inject new
+		//     chatlog commands past the gates below (os.Exit skips the
+		//     defer that normally stops it);
+		//  2. UI-side goroutines (12s bound: their delete/complete
+		//     operations carry 10s contexts);
+		//  3. outbound sends, via the router's send-only gate
+		//     (DrainSends) — while the node is STILL UP, so they can
+		//     reach the wire;
+		//  4. the router's producer loops (they publish terminal
+		//     outcomes), then the node (publishers): cancel and wait
+		//     out Service.Run + its background pool;
+		//  5. the event bus, AFTER publishers stopped: control DMs
+		//     (message_delete / ACKs) are not persisted in the chatlog,
+		//     so an event published after handler teardown would be
+		//     lost forever. Handler-spawned work still registers with
+		//     the router gate, which is why the gate closes after the
+		//     bus. Bounded externally — bus handlers can wait up to 10s
+		//     per event and Bus.Shutdown itself has no timeout;
+		//  6. the router's full gate + remaining in-flight work;
+		//  7. the chatlog. Every wait is bounded; on timeout we still
+		//     close the DB (sql.DB.Close waits out active queries)
+		//     rather than exit with the WAL dangling.
+		// clean starts from the RPC stage: a false return means a
+		// handler may still be running inside fasthttp — it calls
+		// straight into the CommandTable → chatlog.
+		clean := stopRPC()
+		if !window.drainUIOps(12 * time.Second) {
+			log.Warn().Msg("ui goroutines did not finish within 12s")
+			clean = false
+		}
+		if !router.DrainSends(12 * time.Second) {
+			log.Warn().Msg("outbound sends did not drain within 12s")
+			clean = false
+		}
+		// Producer loops stop BEFORE the bus drain: they publish
+		// terminal delete/conversation outcomes, and an event published
+		// after the bus is drained would be dropped.
+		if !router.StopLoops(5 * time.Second) {
+			log.Warn().Msg("router loops did not stop within 5s")
+			clean = false
+		}
+		cancelNode()
+		if !runtime.Wait(5 * time.Second) {
+			log.Warn().Msg("node did not stop within 5s")
+			clean = false
+		}
+		// A timed-out stage means its goroutines may still be running.
+		// Tearing down their dependencies under them (bus, chatlog)
+		// would turn a slow exit into lost control DMs and writes to a
+		// closed database - so once any stage fails to join, further
+		// DESTRUCTIVE teardown is skipped and the process exits with
+		// the chatlog left open: sqlite WAL recovers that state
+		// crash-consistently on the next start, which closing the DB
+		// under active writers would not.
+		if clean {
+			busDone := make(chan struct{})
+			go func() {
+				eventBus.Shutdown()
+				close(busDone)
+			}()
+			select {
+			case <-busDone:
+			case <-time.After(10 * time.Second):
+				log.Warn().Msg("event bus did not drain within 10s")
+				clean = false
+			}
+		}
+		if clean && !router.ShutdownDrain(5*time.Second) {
+			log.Warn().Msg("router did not drain within 5s")
+			clean = false
+		}
+		if clean {
+			if err := client.Close(); err != nil {
+				log.Error().Err(err).Msg("chatlog close failed on ui shutdown")
+			} else {
+				log.Info().Msg("chatlog closed on ui shutdown")
+			}
+		} else {
+			log.Warn().Msg("shutdown incomplete: leaving chatlog open for crash-consistent WAL recovery on next start")
+		}
+	})
 	return window.Run()
 }

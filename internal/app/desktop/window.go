@@ -7,9 +7,7 @@ import (
 	"image"
 	"image/color"
 	"io"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -71,19 +69,34 @@ type Window struct {
 	chatList                widget.List
 	consoleButton           widget.Clickable
 	updateButton            widget.Clickable
+	compactBackBtn          widget.Clickable
 	sendButton              widget.Clickable
 	copyIdentityButton      widget.Clickable
 	languageToggle          widget.Clickable
 	languageOptions         map[string]*widget.Clickable
-	recipientButtons        map[domain.PeerIdentity]*widget.Clickable
-	recipientRightClick     map[domain.PeerIdentity]*rightClickState
-	recipientMenuBtns       map[domain.PeerIdentity]*widget.Clickable // per-card "⋯" menu buttons
-	messageSelectables      map[string]*widget.Selectable
-	sendStatusSelectable    widget.Selectable
-	lastChatPeer            domain.PeerIdentity
-	language                string
-	showLanguageMenu        bool
-	consoleOpen             bool
+	languageMenuList        widget.List
+	shutdown                func()
+	shutdownOnce            sync.Once
+	uiOpMu                  sync.RWMutex
+	uiOpClosed              bool
+	uiStopOnce              sync.Once
+	uiStopCh                chan struct{}
+	// sendWG tracks UI-side goroutines that write through the router /
+	// chatlog: sendFileCore (transmit import + handoff), async message
+	// deletes and conversation-delete completion. The shutdown path
+	// waits for it before the router's own drain — these goroutines
+	// spawn router work and write transmit files, so cutting them off
+	// would leave partial state or lose the operation entirely.
+	sendWG               sync.WaitGroup
+	recipientButtons     map[domain.PeerIdentity]*widget.Clickable
+	recipientRightClick  map[domain.PeerIdentity]*rightClickState
+	recipientMenuBtns    map[domain.PeerIdentity]*widget.Clickable // per-card "⋯" menu buttons
+	messageSelectables   map[string]*widget.Selectable
+	sendStatusSelectable widget.Selectable
+	lastChatPeer         domain.PeerIdentity
+	language             string
+	showLanguageMenu     bool
+	consoleOpen          bool
 
 	// Global cursor tracking for context menu positioning.
 	cursorTracker   int // tag for window-level pointer events
@@ -464,6 +477,123 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 	return w
 }
 
+// SetShutdown registers a teardown callback that runs before the process
+// exits on the UI-driven paths (window closed, Android DestroyEvent).
+// Those paths terminate the process straight from the event-loop
+// goroutine — app.Main never returns — so desktop.Run's defers never
+// fire there; the callback is where the data-integrity part of that
+// teardown (node stop, chatlog close) actually happens. Call before Run.
+func (w *Window) SetShutdown(fn func()) {
+	w.shutdown = fn
+}
+
+// runShutdown invokes the SetShutdown callback exactly once.
+func (w *Window) runShutdown() {
+	w.shutdownOnce.Do(func() {
+		if w.shutdown != nil {
+			w.shutdown()
+		}
+	})
+}
+
+// beginUIOp registers a UI-side goroutine that writes through the
+// router / chatlog / file bridge with the shutdown tracker. Returns
+// false once drainUIOps has closed the gate — the caller must skip the
+// operation (the app is exiting). The Add happens under uiOpMu so it
+// can never interleave with drainUIOps's close-then-Wait sequence.
+// Shared by ALL windows: the console window registers through its
+// parent, so console commands and file operations drain here too.
+func (w *Window) beginUIOp() bool {
+	w.uiOpMu.RLock()
+	defer w.uiOpMu.RUnlock()
+	if w.uiOpClosed {
+		return false
+	}
+	w.sendWG.Add(1)
+	return true
+}
+
+// endUIOp releases a slot taken by beginUIOp.
+func (w *Window) endUIOp() { w.sendWG.Done() }
+
+// uiStop returns the channel closed when drainUIOps begins: cancellable
+// UI operations select on it to abort promptly on shutdown.
+func (w *Window) uiStop() chan struct{} {
+	w.uiStopOnce.Do(func() {
+		w.uiStopCh = make(chan struct{})
+	})
+	return w.uiStopCh
+}
+
+// uiStopping reports whether shutdown has begun. Used by operations that
+// run OUTSIDE the gate (the file-picker phases) to bail out instead of
+// touching a Window/Activity that is being destroyed. Advisory: the gate
+// can close right after the check, so it narrows the window rather than
+// closing it — the authoritative refusal is beginUIOp.
+func (w *Window) uiStopping() bool {
+	select {
+	case <-w.uiStop():
+		return true
+	default:
+		return false
+	}
+}
+
+// pickerAllowed gates the blocking platform file dialogs
+// (explorer.ChooseFile / CreateFile) that run outside the UI-op gate.
+//
+// Why they are outside the gate: both block until the user picks
+// something, which can take minutes. Holding a gate slot across that
+// would make every shutdown with an open dialog exceed drainUIOps's
+// budget and go unclean.
+//
+// What this guard does NOT do: it is a check, not a lock, so it cannot
+// be atomic with the call that follows. Shutdown may begin in between —
+// and on Android that matters, because Gio's Window.Run executes the
+// callback DIRECTLY on the calling goroutine once the driver is gone
+// (app/window.go: `if w.driver == nil { f(); return }`), so the JNI work
+// would run against a stale view rather than being dropped. Fusing check
+// and call would mean holding uiOpMu across the dialog, i.e. blocking
+// drainUIOps for its lifetime — the very thing this design avoids.
+// Closing the gap for real needs a context-aware explorer API upstream
+// in gioui.org/x; until then this narrows the window to a few
+// instructions and every refusal is logged.
+func (w *Window) pickerAllowed(op string) bool {
+	if w.uiStopping() {
+		log.Warn().Str("op", op).Msg("file dialog skipped: shutdown in progress")
+		return false
+	}
+	return true
+}
+
+// drainUIOps closes the UI operation gate (no new tracked goroutines
+// can start, in any window) and waits — bounded — for the ones already
+// running; reports whether they all completed.
+func (w *Window) drainUIOps(timeout time.Duration) bool {
+	w.uiOpMu.Lock()
+	alreadyClosed := w.uiOpClosed
+	w.uiOpClosed = true
+	w.uiOpMu.Unlock()
+	if !alreadyClosed {
+		// Signal cancellable long-running UI operations (SAF export
+		// copy loop) so they stop and close their destinations instead
+		// of being cut off by os.Exit mid-write.
+		close(w.uiStop())
+	}
+
+	done := make(chan struct{})
+	go func() {
+		w.sendWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 func (w *Window) Run() error {
 	go func() {
 		defer crashlog.DeferRecover()
@@ -481,8 +611,16 @@ func (w *Window) Run() error {
 		w.startPolling(window)
 
 		if err := w.loop(window); err != nil {
+			// Run the teardown before crashlog gets the panic: the
+			// chatlog must reach disk consistently even on a UI-loop
+			// failure.
+			w.runShutdown()
 			panic(err)
 		}
+		// Normal exit (window closed / Android activity destroyed):
+		// close the node and the chatlog cleanly instead of letting
+		// os.Exit cut sqlite off mid-write.
+		w.runShutdown()
 		os.Exit(0)
 	}()
 
@@ -926,6 +1064,15 @@ func (w *Window) clearReplyQuiet() {
 // reply) is cleared too. Pending send records for the peer are dropped so a
 // late completion cannot touch a rebuilt slot.
 func (w *Window) forgetPeerComposerState(peer domain.PeerIdentity, wasActive bool) {
+	// The dropped draft and retry entries were the last owners of any
+	// picker staging copies they referenced — release them (no-op for
+	// regular filesystem paths).
+	if d, ok := w.drafts[peer]; ok {
+		releaseStagedAttachment(d.attachedFile)
+	}
+	for _, fs := range w.failedSends[peer] {
+		releaseStagedAttachment(fs.file)
+	}
 	delete(w.drafts, peer)
 	delete(w.attachGen, peer)
 	delete(w.failedSends, peer)
@@ -939,6 +1086,7 @@ func (w *Window) forgetPeerComposerState(peer domain.PeerIdentity, wasActive boo
 	w.peerForgetEpoch[peer]++
 	if wasActive {
 		w.messageEditor.SetText("")
+		releaseStagedAttachment(w.attachedFile)
 		w.attachedFile = ""
 		w.clearReplyQuiet()
 	}
@@ -1064,6 +1212,10 @@ func (w *Window) handlePendingActions() {
 		case m := <-w.pendingFailed:
 			if w.peerForgetEpoch[m.peer] == m.epoch {
 				w.addFailedSend(m.peer, failedSend{body: m.body, replyTo: m.replyTo, file: m.file})
+			} else {
+				// Contact removed while the failure was in flight: the
+				// dropped entry was the last owner of the staged copy.
+				releaseStagedAttachment(m.file)
 			}
 		default:
 			drained = true
@@ -1172,7 +1324,12 @@ func (w *Window) retryFailedSends(peer domain.PeerIdentity) {
 // dismissShownFailedSends clears only the entries the banner showed, keeping
 // any that arrived after the last render (the user has not seen those yet).
 func (w *Window) dismissShownFailedSends(peer domain.PeerIdentity) {
-	_, unseen := w.shownFailedPrefix(peer)
+	shown, unseen := w.shownFailedPrefix(peer)
+	// Dismissal discards the entries for good — release any staged
+	// picker copies they were the last owners of.
+	for _, fs := range shown {
+		releaseStagedAttachment(fs.file)
+	}
 	w.setFailedSends(peer, unseen)
 }
 
@@ -1195,7 +1352,10 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 	// Drop deliveries for a conversation removed since the pick/send started —
 	// otherwise a late file-dialog result would resurrect a deleted contact's
 	// draft. (Non-removed peers keep epoch 0/unchanged, so normal picks pass.)
+	// The rejected delivery was the last owner of its staged copy (a user
+	// pick just materialized it; a restore's retry entry is already gone).
 	if w.peerForgetEpoch[msg.peer] != msg.epoch {
+		releaseStagedAttachment(msg.path)
 		return
 	}
 	if w.attachGen == nil {
@@ -1208,7 +1368,11 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 		}
 		d := w.drafts[msg.peer]
 		if !msg.restore {
-			// User pick: authoritative for its conversation's draft.
+			// User pick: authoritative for its conversation's draft. The
+			// displaced attachment (if any) loses its last owner here.
+			if d.attachedFile != msg.path {
+				releaseStagedAttachment(d.attachedFile)
+			}
 			d.attachedFile = msg.path
 			w.drafts[msg.peer] = d
 			w.attachGen[msg.peer]++
@@ -1218,6 +1382,9 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 			// preserve the caption text (prepend if the draft already has some).
 			if d.attachedFile == "" {
 				d.attachedFile = msg.path
+			} else if d.attachedFile != msg.path {
+				// Slot occupied: the restored file has no owner left.
+				releaseStagedAttachment(msg.path)
 			}
 			if msg.caption != "" {
 				if d.text == "" {
@@ -1227,15 +1394,24 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 				}
 			}
 			w.drafts[msg.peer] = d
+		} else {
+			// Stale restore (a newer pick bumped the generation): its
+			// staged copy has no owner anymore.
+			releaseStagedAttachment(msg.path)
 		}
 		return
 	}
 	if !msg.restore {
+		// The displaced live-composer attachment loses its last owner.
+		if w.attachedFile != msg.path {
+			releaseStagedAttachment(w.attachedFile)
+		}
 		w.attachedFile = msg.path
 		w.attachGen[msg.peer]++
 		return
 	}
 	if msg.generation != w.attachGen[msg.peer] {
+		releaseStagedAttachment(msg.path)
 		return
 	}
 	if w.attachedFile == "" && w.messageEditor.Text() == "" {
@@ -1251,6 +1427,10 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 	// The user is already composing here (text and/or a new attachment). Do NOT
 	// hijack that composition by re-attaching the old file or overwriting the
 	// caption. Preserve the failed caption text losslessly by prepending it.
+	// The restored file itself is dropped — release its staged copy.
+	if w.attachedFile != msg.path {
+		releaseStagedAttachment(msg.path)
+	}
 	if msg.caption != "" {
 		if cur := w.messageEditor.Text(); cur == "" {
 			w.messageEditor.SetText(msg.caption)
@@ -1263,6 +1443,8 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 }
 
 func (w *Window) handleActions(gtx layout.Context) {
+	w.handleBackNavigation(gtx)
+
 	for w.languageToggle.Clicked(gtx) {
 		w.showLanguageMenu = !w.showLanguageMenu
 	}
@@ -1273,6 +1455,13 @@ func (w *Window) handleActions(gtx layout.Context) {
 
 	for w.updateButton.Clicked(gtx) {
 		openBrowser("https://github.com/piratecash/corsa/releases")
+	}
+
+	// Compact (single-pane) layout only: return from an open chat to the
+	// contact list. The button is not laid out in the two-pane mode, so
+	// this never fires there.
+	for w.compactBackBtn.Clicked(gtx) {
+		w.router.DeselectPeer()
 	}
 
 	for w.sendButton.Clicked(gtx) {
@@ -1292,6 +1481,10 @@ func (w *Window) handleActions(gtx layout.Context) {
 	}
 
 	for w.attachCancelBtn.Clicked(gtx) {
+		// Explicit dismissal is the last reference to a staged picker
+		// copy (no draft or retry entry holds it while it sits in the
+		// live composer slot).
+		releaseStagedAttachment(w.attachedFile)
 		w.attachedFile = ""
 		// Bump this conversation's generation so any in-flight attach delivery
 		// is rejected — the user explicitly dismissed the attachment and must
@@ -1613,23 +1806,52 @@ func (w *Window) triggerFileAttach() {
 	pickPeer := w.snap.ActivePeer
 	pickEpoch := w.peerForgetEpoch[pickPeer]
 	go func() {
+		// Same picker-phase rules as exportReceivedFile: outside the
+		// UI-op gate (the dialog is unbounded in time), guarded by
+		// pickerAllowed so a goroutine scheduled after DestroyEvent does
+		// not open a dialog on a dying Activity.
+		if !w.pickerAllowed("attach") {
+			return
+		}
 		rc, err := w.fileExplorer.ChooseFile()
 		if err != nil {
 			// User cancelled or platform error — silently ignore cancel.
 			return
 		}
+		// Picker done — everything below (materializeAttachment copies
+		// the whole stream to disk, then the delivery) is real work that
+		// shutdown must drain, so take a gate slot now. Mirrors the
+		// export path. Refused means the app is exiting: drop the pick
+		// instead of starting a copy that os.Exit would truncate.
+		// Registered before the rc.Close defer so the slot is released
+		// only after the stream is actually closed.
+		if !w.beginUIOp() {
+			_ = rc.Close()
+			log.Warn().Msg("file attach dropped: shutdown in progress")
+			return
+		}
+		defer w.endUIOp()
 		defer func() { _ = rc.Close() }()
 
 		// On desktop platforms the returned io.ReadCloser is *os.File,
 		// which gives us the full path needed for SHA-256 hashing,
-		// filename extraction, and copy to transmit directory.
-		f, ok := rc.(*os.File)
-		if !ok {
-			w.router.SetSendStatus(w.t("file.prepare_failed", "unsupported platform"))
-			if w.window != nil {
-				w.window.Invalidate()
+		// filename extraction, and copy to transmit directory. On
+		// Android (and iOS) the explorer returns a content stream with
+		// no filesystem path — materialize it into a temp file under
+		// the app data dir so the rest of the pipeline sees a real path.
+		var path string
+		if f, ok := rc.(*os.File); ok {
+			path = f.Name()
+		} else {
+			materialized, err := materializeAttachment(rc)
+			if err != nil {
+				w.router.SetSendStatus(w.t("file.prepare_failed", err.Error()))
+				if w.window != nil {
+					w.window.Invalidate()
+				}
+				return
 			}
-			return
+			path = materialized
 		}
 
 		// Deliver the pick to the UI goroutine via the buffered channel. It
@@ -1638,7 +1860,153 @@ func (w *Window) triggerFileAttach() {
 		// when it is drained. The channel is generously buffered and fully
 		// drained each frame, so a blocking send never displaces another
 		// conversation's pending event.
-		w.pendingAttach <- pendingAttachMsg{path: f.Name(), restore: false, peer: pickPeer, epoch: pickEpoch}
+		w.pendingAttach <- pendingAttachMsg{path: path, restore: false, peer: pickPeer, epoch: pickEpoch}
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	}()
+}
+
+// exportReceivedFile copies the stored file at path to a user-chosen
+// destination, offering displayName in the save dialog. The two are
+// separate on purpose: for OUTGOING files the on-disk path is a
+// content-addressed transmit blob (<sha256>.ext), so deriving the name
+// from the path would offer the user "<sha256>.pdf" instead of
+// "report.pdf". Callers pass the announce payload's FileName; an empty
+// displayName falls back to the path's base name.
+//
+// The copy goes through the platform save dialog (explorer.CreateFile
+// — on Android the SAF ACTION_CREATE_DOCUMENT picker). This is the Android substitute for
+// openFile/revealFileInDir: app-private storage is invisible to other
+// apps and gogio ships no FileProvider, so a user-driven export is the
+// supported way to hand a received document to the rest of the system.
+// CreateFile blocks on the dialog — run everything on a background
+// goroutine, mirroring triggerFileAttach.
+func (w *Window) exportReceivedFile(path, displayName string) {
+	if w.fileExplorer == nil || path == "" {
+		return
+	}
+	go func() {
+		// The picker phase runs OUTSIDE the UI-op gate on purpose:
+		// CreateFile blocks until the user chooses a destination, which
+		// can take minutes. Holding a gate slot across it would make
+		// every shutdown with an open picker time out (12s) and go
+		// unclean — while the phase itself touches no chatlog, no
+		// router state and no disk of ours. The gate is taken for the
+		// COPY, which is what must be drained.
+		//
+		// Bail out before doing any work if shutdown already began: this
+		// goroutine may only get scheduled after DestroyEvent.
+		if !w.pickerAllowed("export") {
+			return
+		}
+		src, err := os.Open(path)
+		if err != nil {
+			w.router.SetSendStatus(w.t("file.export_failed", err.Error()))
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+			return
+		}
+		defer func() { _ = src.Close() }()
+
+		// exportFileName is platform-selected: the Android variant asks
+		// the device MimeTypeMap (the registry Gio's exporter actually
+		// uses) and appends ".bin" when the extension does not resolve —
+		// an ACTION_CREATE_DOCUMENT intent without a valid type may find
+		// no handler, and for app-private storage there is no other way
+		// out. See open_android.go.
+		name := strings.TrimSpace(displayName)
+		if base := filepath.Base(name); name == "" || base == "." || base == string(filepath.Separator) {
+			name = filepath.Base(path)
+		} else {
+			// Never let a peer-supplied name escape the picker's file
+			// name field (path separators, traversal).
+			name = base
+		}
+
+		// Last check before handing control to the platform picker; see
+		// pickerAllowed for what this does and does not guarantee.
+		if !w.pickerAllowed("export") {
+			return
+		}
+		dst, err := w.fileExplorer.CreateFile(exportFileName(name))
+		if err != nil {
+			// Dialog dismissed — not an error worth surfacing.
+			if !errors.Is(err, explorer.ErrUserDecline) {
+				w.router.SetSendStatus(w.t("file.export_failed", err.Error()))
+				if w.window != nil {
+					w.window.Invalidate()
+				}
+			}
+			return
+		}
+
+		// Destination chosen — from here on the operation writes bytes
+		// and must be drained on shutdown.
+		if !w.beginUIOp() {
+			// Shutdown started while the picker was open: close the
+			// (empty) destination and skip the copy rather than start
+			// one that cannot finish.
+			_ = dst.Close()
+			log.Warn().Str("path", path).Msg("file export skipped: shutdown in progress")
+			return
+		}
+		defer w.endUIOp()
+
+		// Chunked copy so shutdown can interrupt it BETWEEN chunks: a
+		// plain io.Copy is uncancellable, and exiting the process
+		// mid-copy would leave a silently truncated document. The
+		// gioui.org/x/explorer File is NOT safe for concurrent use, so
+		// there is deliberately no out-of-band Close from another
+		// goroutine — Close racing a Write drops JNI refs the Write is
+		// still touching and can native-crash Gio's Android backend.
+		// The stop check is therefore between chunks only: a Write or
+		// Close BLOCKED inside a slow content provider cannot be
+		// interrupted, and after the 12s drain os.Exit may cut it,
+		// leaving a partial file (SAF exposes no delete-API for the
+		// picked document). On a normal-speed provider the abort is
+		// prompt; either way the destination is Closed on the copy
+		// goroutine and the outcome is logged.
+		stop := w.uiStop()
+		buf := make([]byte, 256<<10)
+		var copyErr error
+		aborted := false
+	copyLoop:
+		for {
+			select {
+			case <-stop:
+				aborted = true
+				break copyLoop
+			default:
+			}
+			n, rerr := src.Read(buf)
+			if n > 0 {
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					copyErr = werr
+					break copyLoop
+				}
+			}
+			if rerr == io.EOF {
+				break copyLoop
+			}
+			if rerr != nil {
+				copyErr = rerr
+				break copyLoop
+			}
+		}
+		closeErr := dst.Close()
+		if copyErr == nil {
+			copyErr = closeErr
+		}
+		switch {
+		case aborted:
+			log.Warn().Str("path", path).Msg("file export aborted by shutdown; destination may be incomplete")
+		case copyErr != nil:
+			w.router.SetSendStatus(w.t("file.export_failed", copyErr.Error()))
+		default:
+			w.router.SetSendStatus(w.t("file.export_done"))
+		}
 		if w.window != nil {
 			w.window.Invalidate()
 		}
@@ -1696,7 +2064,11 @@ func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, r
 		}
 	}
 
+	if !w.beginUIOp() {
+		return
+	}
 	go func() {
+		defer w.endUIOp()
 		result, err := prepareFileForTransmit(
 			w.client.StoreFileForTransmit,
 			w.client.TransmitFileSize,
@@ -1736,6 +2108,10 @@ func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, r
 		// composer state are gone).
 		if w.router.PeerGeneration(to) != sendPeerGen {
 			w.client.RemoveUnreferencedTransmitFile(result.FileHash)
+			// No failedSend entry will be created and the composer slot
+			// was cleared at trigger time — this goroutine held the last
+			// reference to a staged picker copy.
+			releaseStagedAttachment(srcPath)
 			if w.window != nil {
 				w.window.Invalidate()
 			}
@@ -1752,7 +2128,14 @@ func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, r
 		// baseline so the router's own guard measures against it, not against a
 		// freshly captured generation — closing the TOCTOU between the check
 		// above and the router capturing its baseline.
-		if err := w.router.SendFileAnnounceFromComposer(to, outgoing, meta, failFile, sendPeerGen); err != nil {
+		// On settled async success the staged picker copy (if the source
+		// was one) loses its last owner: the transmit store holds its own
+		// blob and no retry entry exists. The failure callback must NOT
+		// release it — the retry queue re-reads the source path.
+		releaseStaged := func() {
+			releaseStagedAttachment(srcPath)
+		}
+		if err := w.router.SendFileAnnounceFromComposerDone(to, outgoing, meta, failFile, releaseStaged, sendPeerGen); err != nil {
 			// SendFileAnnounce failed synchronously (e.g. fileBridge == nil,
 			// or a conversation_delete wipe started while
 			// prepareFileForTransmit was running and tripped the outgoing
@@ -1780,9 +2163,17 @@ func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, r
 }
 
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
-	title := material.Label(w.theme, unit.Sp(24), w.t("app.title"))
+	titleText := w.t("app.title")
+	if w.isCompactLayout(gtx) {
+		// Phone width: the full product name wraps into two lines under
+		// the header buttons; the brand alone is enough there. Literal on
+		// purpose — the brand is not localized.
+		titleText = "Corsa"
+	}
+	title := material.Label(w.theme, unit.Sp(24), titleText)
 	title.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
 	title.Font.Weight = 700
+	title.MaxLines = 1
 
 	return layout.Flex{
 		Axis:      layout.Horizontal,
@@ -1808,10 +2199,77 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 	)
 }
 
+// handleBackNavigation consumes the system Back key (Android hardware /
+// gesture Back; XF86 Back keys on desktops route here too) while there
+// is something in-app to dismiss, top-most first:
+//
+//  1. an open overlay, in REVERSE draw order — the overlays are Stacked
+//     language → identity menu → message menu (see layout()), so the
+//     message menu is the top-most visual layer and closes first, the
+//     identity menu second (backing out of its confirmation / alias
+//     sub-views one step at a time, exactly like Escape — reusing
+//     escapePeerMenu keeps the focus-restore invariants of the menu
+//     machinery intact), and the language dropdown last. The language
+//     overlay does not block interaction underneath, so a context menu
+//     CAN legitimately be open on top of it;
+//  2. in the compact layout, an open chat — Back returns to the contact
+//     list (DeselectPeer).
+//
+// The filter is registered ONLY while such a target exists: an
+// unconsumed Back reaches the platform (Java_org_gioui_GioView_onBack
+// sees processEvent return false) and closes the Activity — the expected
+// behaviour on the contact list with nothing open. Overlay dismissal is
+// not gated on the compact mode: menus overlay both layouts.
+func (w *Window) handleBackNavigation(gtx layout.Context) {
+	backTarget := w.showLanguageMenu ||
+		w.msgContextMsg != nil ||
+		!w.contextMenuPeer.IsZero() ||
+		(w.isCompactLayout(gtx) && !w.snap.ActivePeer.IsZero())
+	if !backTarget {
+		return
+	}
+	for {
+		_, ok := gtx.Event(key.Filter{Name: key.NameBack})
+		if !ok {
+			break
+		}
+		switch {
+		case w.msgContextMsg != nil:
+			w.escapeMsgMenu()
+		case !w.contextMenuPeer.IsZero():
+			w.escapePeerMenu()
+		case w.showLanguageMenu:
+			w.showLanguageMenu = false
+			if w.window != nil {
+				w.window.Invalidate()
+			}
+		case w.isCompactLayout(gtx) && !w.snap.ActivePeer.IsZero():
+			w.router.DeselectPeer()
+		}
+	}
+}
+
+// compactLayoutMaxDp is the width breakpoint for the single-pane layout.
+// Below it the two-pane 30/70 split leaves the sidebar unusably narrow
+// (~100dp on a 360dp phone), so the UI shows either the contact list or
+// the open chat, with an explicit back affordance between them.
+const compactLayoutMaxDp = 600
+
+// isCompactLayout reports whether the available width calls for the
+// single-pane phone layout.
+func (w *Window) isCompactLayout(gtx layout.Context) bool {
+	return gtx.Constraints.Max.X < gtx.Dp(unit.Dp(compactLayoutMaxDp))
+}
+
 func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	status := w.snap.NodeStatus
 	recipients := w.snapRecipients()
-	w.ensureSelectedRecipient(recipients)
+	compact := w.isCompactLayout(gtx)
+	w.ensureSelectedRecipient(recipients, compact)
+
+	if compact {
+		return w.layoutMainCompact(gtx, status, recipients)
+	}
 
 	return layout.Flex{
 		Axis:    layout.Horizontal,
@@ -1860,6 +2318,84 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 	)
+}
+
+// layoutMainCompact is the single-pane phone variant of layoutMain: the
+// contact list when no conversation is active, the open chat otherwise.
+// Navigation back to the list goes through the header button
+// (compactBackBtn → DeselectPeer, handled in handleActions). The
+// keyboardTailRow wrappers mirror the two-pane layout: header and
+// composer are the rows the touch keyboard must not cover.
+func (w *Window) layoutMainCompact(gtx layout.Context, status service.NodeStatus, recipients []domain.PeerIdentity) layout.Dimensions {
+	if w.snap.ActivePeer.IsZero() {
+		return layout.Flex{
+			Axis: layout.Vertical,
+		}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(w.theme, unit.Sp(15), w.t("app.subtitle"))
+				lbl.Color = color.NRGBA{R: 144, G: 156, B: 173, A: 255}
+				return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, lbl.Layout)
+			}),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				return w.layoutContactsCard(gtx, status, recipients)
+			}),
+		)
+	}
+
+	return layout.Flex{
+		Axis: layout.Vertical,
+	}.Layout(gtx,
+		layout.Rigid(keyboardTailRow(&w.touchKbd, w.layoutCompactChatHeader)),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return w.layoutChatCard(gtx, status)
+		}),
+		layout.Rigid(keyboardTailRow(&w.touchKbd, w.layoutComposerCard)),
+	)
+}
+
+// layoutCompactChatHeader replaces the plain "chat with X" label of the
+// two-pane layout with a back-button + status + label row for the
+// single-pane mode. The reachability dot mirrors the contact-list rows:
+// in compact mode the sidebar (and its online/offline indicators) is off
+// screen while a chat is open, so the header is the only place the
+// user can see whether the peer is reachable.
+func (w *Window) layoutCompactChatHeader(gtx layout.Context) layout.Dimensions {
+	recipient := w.snap.ActivePeer
+	if recipient.IsZero() {
+		return layout.Dimensions{}
+	}
+	status := w.snap.NodeStatus
+	return layout.Inset{Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{
+			Axis:      layout.Horizontal,
+			Alignment: layout.Middle,
+		}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				btn := material.Button(w.theme, &w.compactBackBtn, w.t("chat.back"))
+				btn.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
+				btn.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+				btn.Inset = layout.Inset{
+					Top: unit.Dp(3), Bottom: unit.Dp(3),
+					Left: unit.Dp(8), Right: unit.Dp(8),
+				}
+				btn.CornerRadius = unit.Dp(5)
+				btn.TextSize = unit.Sp(12)
+				return btn.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return w.layoutReachableIndicator(gtx, status, recipient)
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				lbl := material.Label(w.theme, unit.Sp(15), w.t("chat.with", w.peerDisplayName(recipient)))
+				lbl.Color = color.NRGBA{R: 200, G: 212, B: 228, A: 255}
+				lbl.Font.Weight = 600
+				lbl.MaxLines = 1
+				return lbl.Layout(gtx)
+			}),
+		)
+	})
 }
 
 func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatus, recipients []domain.PeerIdentity) layout.Dimensions {
@@ -2303,48 +2839,65 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				statusRow := func(gtx layout.Context) layout.Dimensions {
+					return w.layoutNetworkStatus(gtx, status)
+				}
+				sendBtn := func(gtx layout.Context) layout.Dimensions {
+					label := w.t("compose.send")
+					if recipient.IsZero() {
+						label = w.t("compose.select_first")
+					}
+					// Visual + interactive disable while a
+					// conversation_delete is in flight for
+					// the active peer. We render through a
+					// dummy Clickable (not w.sendButton) so
+					// even queued click events from the
+					// active sendButton are ignored — the
+					// service-layer ErrConversationDeleteInflight
+					// gate is still enforced as defence in
+					// depth.
+					pending := !recipient.IsZero() && w.router.IsConversationDeletePending(recipient)
+					if pending {
+						label = w.t("compose.send_blocked_during_wipe")
+					}
+					return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(260)))
+						if pending {
+							var inert widget.Clickable
+							btn := material.Button(w.theme, &inert, label)
+							btn.Background = color.NRGBA{R: 60, G: 60, B: 64, A: 255}
+							btn.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+							return btn.Layout(gtx)
+						}
+						btn := material.Button(w.theme, &w.sendButton, label)
+						return btn.Layout(gtx)
+					})
+				}
+
+				// Narrow (phone) widths: the network pill and the send
+				// button no longer fit side by side — the button would be
+				// squeezed into a wrapped multi-line sliver. Stack them.
+				// 500dp ≈ pill (~280dp) + button (~200dp) + margins.
+				if gtx.Constraints.Max.X < gtx.Dp(unit.Dp(500)) {
+					return layout.Flex{
+						Axis: layout.Vertical,
+					}.Layout(gtx,
+						layout.Rigid(statusRow),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+						layout.Rigid(sendBtn),
+					)
+				}
+
 				return layout.Flex{
 					Axis:      layout.Horizontal,
 					Spacing:   layout.SpaceBetween,
 					Alignment: layout.Middle,
 				}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return w.layoutNetworkStatus(gtx, status)
-					}),
+					layout.Rigid(statusRow),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 						return layout.Dimensions{}
 					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						label := w.t("compose.send")
-						if recipient.IsZero() {
-							label = w.t("compose.select_first")
-						}
-						// Visual + interactive disable while a
-						// conversation_delete is in flight for
-						// the active peer. We render through a
-						// dummy Clickable (not w.sendButton) so
-						// even queued click events from the
-						// active sendButton are ignored — the
-						// service-layer ErrConversationDeleteInflight
-						// gate is still enforced as defence in
-						// depth.
-						pending := !recipient.IsZero() && w.router.IsConversationDeletePending(recipient)
-						if pending {
-							label = w.t("compose.send_blocked_during_wipe")
-						}
-						return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(260)))
-							if pending {
-								var inert widget.Clickable
-								btn := material.Button(w.theme, &inert, label)
-								btn.Background = color.NRGBA{R: 60, G: 60, B: 64, A: 255}
-								btn.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
-								return btn.Layout(gtx)
-							}
-							btn := material.Button(w.theme, &w.sendButton, label)
-							return btn.Layout(gtx)
-						})
-					}),
+					layout.Rigid(sendBtn),
 				)
 			}),
 		)
@@ -2558,39 +3111,57 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 							label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
 							return label.Layout(gtx)
 						}
-						return layout.Flex{
-							Axis:      layout.Horizontal,
-							Alignment: layout.Baseline,
-						}.Layout(gtx,
+						// cardHeight above budgets a FIXED chrome height,
+						// which assumes this header stays on one line. If
+						// it wraps, the editor row is pushed below the
+						// painted card rectangle (visible on narrow phone
+						// widths). Keep the single-line invariant: the name
+						// is Flexed and truncated instead of wrapping, and
+						// the decorative ID chunk is dropped when the row
+						// is too narrow to plausibly hold it.
+						showID := gtx.Constraints.Max.X >= gtx.Dp(unit.Dp(420))
+						children := []layout.FlexChild{
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								label := material.Body2(w.theme, w.t("compose.body_for"))
 								label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
+								label.MaxLines = 1
 								return label.Layout(gtx)
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 								name := w.peerDisplayName(recipient)
 								lbl := material.Body1(w.theme, name)
 								lbl.Font.Weight = font.Bold
 								lbl.TextSize = unit.Sp(17)
 								lbl.Color = color.NRGBA{R: 150, G: 210, B: 255, A: 255}
+								lbl.MaxLines = 1
 								return lbl.Layout(gtx)
 							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Caption(w.theme, w.t("compose.identity_label"))
-								lbl.Color = color.NRGBA{R: 160, G: 170, B: 190, A: 255}
-								return lbl.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								lbl := material.Body1(w.theme, shortFingerprint(recipient.String()))
-								lbl.Font.Weight = font.Bold
-								lbl.TextSize = unit.Sp(15)
-								lbl.Color = color.NRGBA{R: 130, G: 235, B: 190, A: 255}
-								return lbl.Layout(gtx)
-							}),
-						)
+						}
+						if showID {
+							children = append(children,
+								layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Caption(w.theme, w.t("compose.identity_label"))
+									lbl.Color = color.NRGBA{R: 160, G: 170, B: 190, A: 255}
+									lbl.MaxLines = 1
+									return lbl.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									lbl := material.Body1(w.theme, shortFingerprint(recipient.String()))
+									lbl.Font.Weight = font.Bold
+									lbl.TextSize = unit.Sp(15)
+									lbl.Color = color.NRGBA{R: 130, G: 235, B: 190, A: 255}
+									lbl.MaxLines = 1
+									return lbl.Layout(gtx)
+								}),
+							)
+						}
+						return layout.Flex{
+							Axis:      layout.Horizontal,
+							Alignment: layout.Baseline,
+						}.Layout(gtx, children...)
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if w.attachedFile == "" {
@@ -2902,8 +3473,35 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 					}
 				}
 
+				renderThumb := func(gtx layout.Context) layout.Dimensions {
+					dispW, dispH := thumbnailDisplaySize(
+						imgBounds.X, imgBounds.Y,
+						gtx.Dp(unit.Dp(thumbnailMaxWidth)),
+						gtx.Dp(unit.Dp(thumbnailMaxHeight)),
+					)
+
+					// Apply rounded clip before rendering the image.
+					size := image.Pt(dispW, dispH)
+					defer clip.UniformRRect(image.Rectangle{Max: size}, gtx.Dp(unit.Dp(6))).Push(gtx.Ops).Pop()
+
+					imgWidget := widget.Image{
+						Src:      imgOp,
+						Fit:      widget.ScaleDown,
+						Position: layout.NW,
+					}
+					gtx.Constraints = layout.Exact(size)
+					return imgWidget.Layout(gtx)
+				}
+
 				children = append(children,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						// openFile is a stub on Android (no FileProvider —
+						// see open_android.go), so the thumbnail is plain
+						// content there: no Clickable, no hand cursor, no
+						// dead tap target.
+						if runtime.GOOS == "android" {
+							return renderThumb(gtx)
+						}
 						return thumbBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							// Hand cursor on hover so the click
 							// affordance is discoverable — same UX
@@ -2913,24 +3511,7 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 							// layout callback so the cursor area
 							// matches the clickable's hit area.
 							pointer.CursorPointer.Add(gtx.Ops)
-
-							dispW, dispH := thumbnailDisplaySize(
-								imgBounds.X, imgBounds.Y,
-								gtx.Dp(unit.Dp(thumbnailMaxWidth)),
-								gtx.Dp(unit.Dp(thumbnailMaxHeight)),
-							)
-
-							// Apply rounded clip before rendering the image.
-							size := image.Pt(dispW, dispH)
-							defer clip.UniformRRect(image.Rectangle{Max: size}, gtx.Dp(unit.Dp(6))).Push(gtx.Ops).Pop()
-
-							imgWidget := widget.Image{
-								Src:      imgOp,
-								Fit:      widget.ScaleDown,
-								Position: layout.NW,
-							}
-							gtx.Constraints = layout.Exact(size)
-							return imgWidget.Layout(gtx)
+							return renderThumb(gtx)
 						})
 					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
@@ -3062,7 +3643,7 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 			children = append(children,
 				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return w.layoutFileActionButtons(gtx, msgCopy, isMine, revealPath)
+					return w.layoutFileActionButtons(gtx, msgCopy, isMine, revealPath, payload.FileName)
 				}),
 			)
 		}
@@ -3156,7 +3737,11 @@ func (w *Window) layoutReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, 
 
 	for cancelBtn.Clicked(gtx) {
 		fileID := domain.FileID(messageID)
+		if !w.beginUIOp() {
+			continue
+		}
 		go func() {
+			defer w.endUIOp()
 			if err := w.router.FileBridge().CancelDownload(fileID); err != nil {
 				log.Error().Err(err).Str("file_id", messageID).
 					Msg("file_download: CancelFileDownload failed")
@@ -3198,7 +3783,11 @@ func (w *Window) layoutFileDownloadButton(gtx layout.Context, messageID string) 
 
 	for btn.Clicked(gtx) {
 		fileID := domain.FileID(messageID)
+		if !w.beginUIOp() {
+			continue
+		}
 		go func() {
+			defer w.endUIOp()
 			if err := w.router.FileBridge().StartDownload(fileID); err != nil {
 				log.Error().Err(err).Str("file_id", messageID).
 					Msg("file_download: StartFileDownload failed")
@@ -3238,7 +3827,11 @@ func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) l
 
 	for btn.Clicked(gtx) {
 		fileID := domain.FileID(messageID)
+		if !w.beginUIOp() {
+			continue
+		}
 		go func() {
+			defer w.endUIOp()
 			if err := w.router.FileBridge().RestartDownload(fileID); err != nil {
 				log.Error().Err(err).Str("file_id", messageID).
 					Msg("file_download: RestartFileDownload failed")
@@ -3288,7 +3881,7 @@ func (w *Window) layoutFileRestartButton(gtx layout.Context, messageID string) l
 // budget, so the button renders as a static neutral-gray "disabled"
 // pill (no Clickable, no hover ripple) — see
 // layoutFileCardDeleteButton + layoutFileCardDeleteDisabled.
-func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectMessage, isMine bool, filePath string) layout.Dimensions {
+func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectMessage, isMine bool, filePath, exportName string) layout.Dimensions {
 	// Ensure button maps are initialised.
 	if w.fileRevealBtns == nil {
 		w.fileRevealBtns = make(map[string]*widget.Clickable)
@@ -3313,7 +3906,13 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 
 	revealPath := filePath
 	for revealBtn.Clicked(gtx) {
-		go revealFileInDir(revealPath)
+		if runtime.GOOS == "android" {
+			// The reveal slot doubles as the SAF export button on
+			// Android — see the layout branch below.
+			w.exportReceivedFile(revealPath, exportName)
+		} else {
+			go revealFileInDir(revealPath)
+		}
 	}
 	for openBtn.Clicked(gtx) {
 		go openFile(revealPath)
@@ -3327,36 +3926,64 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 	// to the start so the row width grows naturally with the
 	// number of children — outgoing rows have three buttons,
 	// incoming rows have two.
-	children := []layout.FlexChild{
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			matBtn := material.Button(w.theme, revealBtn, w.t("file.show_in_folder"))
-			matBtn.Background = btnBg
-			matBtn.Color = btnFg
-			matBtn.Inset = layout.Inset{
-				Top: unit.Dp(3), Bottom: unit.Dp(3),
-				Left: unit.Dp(8), Right: unit.Dp(8),
-			}
-			matBtn.CornerRadius = unit.Dp(5)
-			matBtn.TextSize = unit.Sp(11)
-			return matBtn.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			matBtn := material.Button(w.theme, openBtn, w.t("file.open_file"))
-			matBtn.Background = btnBg
-			matBtn.Color = btnFg
-			matBtn.Inset = layout.Inset{
-				Top: unit.Dp(3), Bottom: unit.Dp(3),
-				Left: unit.Dp(8), Right: unit.Dp(8),
-			}
-			matBtn.CornerRadius = unit.Dp(5)
-			matBtn.TextSize = unit.Sp(11)
-			return matBtn.Layout(gtx)
-		}),
+	//
+	// Android has neither a file-manager "reveal" nor an external-open
+	// path for app-private files (gogio ships no FileProvider — see
+	// open_android.go). Both buttons are replaced there by a single
+	// [Save as…] button that exports the file through the system
+	// document picker (SAF), reusing the reveal Clickable slot.
+	var children []layout.FlexChild
+	if runtime.GOOS == "android" {
+		children = []layout.FlexChild{
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				matBtn := material.Button(w.theme, revealBtn, w.t("file.export"))
+				matBtn.Background = btnBg
+				matBtn.Color = btnFg
+				matBtn.Inset = layout.Inset{
+					Top: unit.Dp(3), Bottom: unit.Dp(3),
+					Left: unit.Dp(8), Right: unit.Dp(8),
+				}
+				matBtn.CornerRadius = unit.Dp(5)
+				matBtn.TextSize = unit.Sp(11)
+				return matBtn.Layout(gtx)
+			}),
+		}
+	} else {
+		children = []layout.FlexChild{
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				matBtn := material.Button(w.theme, revealBtn, w.t("file.show_in_folder"))
+				matBtn.Background = btnBg
+				matBtn.Color = btnFg
+				matBtn.Inset = layout.Inset{
+					Top: unit.Dp(3), Bottom: unit.Dp(3),
+					Left: unit.Dp(8), Right: unit.Dp(8),
+				}
+				matBtn.CornerRadius = unit.Dp(5)
+				matBtn.TextSize = unit.Sp(11)
+				return matBtn.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				matBtn := material.Button(w.theme, openBtn, w.t("file.open_file"))
+				matBtn.Background = btnBg
+				matBtn.Color = btnFg
+				matBtn.Inset = layout.Inset{
+					Top: unit.Dp(3), Bottom: unit.Dp(3),
+					Left: unit.Dp(8), Right: unit.Dp(8),
+				}
+				matBtn.CornerRadius = unit.Dp(5)
+				matBtn.TextSize = unit.Sp(11)
+				return matBtn.Layout(gtx)
+			}),
+		}
 	}
 	if isMine {
+		if len(children) > 0 {
+			children = append(children,
+				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+			)
+		}
 		children = append(children,
-			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.layoutFileCardDeleteButton(gtx, msg, isMine)
 			}),
@@ -3475,7 +4102,11 @@ func layoutDisabledDeletePill(gtx layout.Context, theme *material.Theme, labelTe
 // the existing handleMessageDeleteOutcome subscriber picks up.
 func (w *Window) dispatchMessageDeleteAsync(peer domain.PeerIdentity, target domain.MessageID) {
 	w.router.SetSendStatus(w.t("status.message_deleting"))
+	if !w.beginUIOp() {
+		return
+	}
 	go func() {
+		defer w.endUIOp()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := w.router.SendMessageDelete(ctx, peer, target); err != nil {
@@ -3994,7 +4625,7 @@ func (w *Window) recipientRightClickState(id domain.PeerIdentity) *rightClickSta
 	return s
 }
 
-func (w *Window) ensureSelectedRecipient(recipients []domain.PeerIdentity) {
+func (w *Window) ensureSelectedRecipient(recipients []domain.PeerIdentity, compact bool) {
 	selected := w.snap.ActivePeer
 
 	if len(recipients) == 0 {
@@ -4015,6 +4646,15 @@ func (w *Window) ensureSelectedRecipient(recipients []domain.PeerIdentity) {
 
 	if strings.TrimSpace(selected.String()) != "" {
 		w.recipientEditor.SetText(selected.String())
+		return
+	}
+
+	// Single-pane layout: an empty selection means "show the contact
+	// list" — never auto-open a conversation. Auto-selecting here would
+	// make the list unreachable (DeselectPeer would be undone on the
+	// next frame) and would auto-mark messages seen for a chat that is
+	// not actually on screen.
+	if compact {
 		return
 	}
 
@@ -4523,6 +5163,12 @@ func (w *Window) contextMenuDeleteEnabled() bool {
 }
 
 func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
+	// Gio supports a single window per Android activity: the console
+	// opens a second app.Window (console_window.go), which never attaches
+	// on Android. Hide the entry point instead of rendering a dead button.
+	if runtime.GOOS == "android" {
+		return layout.Dimensions{}
+	}
 	btn := material.Button(w.theme, &w.consoleButton, w.t("header.console"))
 	btn.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
 	btn.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
@@ -4549,72 +5195,9 @@ func (w *Window) nodeUpdateAvailable() bool {
 	return w.snap.NodeStatus.AggregateStatus.UpdateAvailable
 }
 
-func openBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	_ = cmd.Start()
-}
-
-// openFile opens a local file with the system default application.
-// On macOS: open, on Windows: rundll32, on Linux: xdg-open.
-func openFile(path string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", path)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
-	default:
-		cmd = exec.Command("xdg-open", path)
-	}
-	_ = cmd.Start()
-}
-
-// revealFileInDir opens the system file manager with the file selected
-// (highlighted). On macOS Finder selects the file via "open -R". On
-// Windows Explorer selects via "/select,". On Linux there is no universal
-// "select file" protocol, so we open the containing directory and, as a
-// best-effort, try dbus-based file selection (Nautilus/Dolphin/Thunar)
-// before falling back to xdg-open on the parent directory.
-func revealFileInDir(path string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		// -R = reveal in Finder and select the file.
-		cmd = exec.Command("open", "-R", path)
-	case "windows":
-		// /select, highlights the file in Explorer.
-		cmd = exec.Command("explorer", "/select,", path)
-	default:
-		// Best-effort: try dbus-send to org.freedesktop.FileManager1 which
-		// is supported by Nautilus, Dolphin, Thunar, and other modern file
-		// managers. If it fails, fall back to opening the directory.
-		//
-		// Build a properly escaped file:// URI via net/url so that paths
-		// with spaces, #, %, Cyrillic, and other special characters are
-		// transmitted correctly over D-Bus.
-		fileURI := (&url.URL{Scheme: "file", Path: path}).String()
-		dbusCmd := exec.Command("dbus-send", "--print-reply",
-			"--dest=org.freedesktop.FileManager1",
-			"/org/freedesktop/FileManager1",
-			"org.freedesktop.FileManager1.ShowItems",
-			"array:string:"+fileURI, "string:")
-		if err := dbusCmd.Start(); err == nil {
-			_ = dbusCmd.Wait()
-			return
-		}
-		// Fallback: open the containing directory.
-		cmd = exec.Command("xdg-open", filepath.Dir(path))
-	}
-	_ = cmd.Start()
-}
+// openBrowser, openFile and revealFileInDir are platform-selected:
+// exec-based implementations for desktop OSes live in open_default.go,
+// the Android intent/stub implementations in open_android.go.
 
 func (w *Window) openConsoleWindow() {
 	w.consoleMu.Lock()
@@ -4684,11 +5267,25 @@ func (w *Window) layoutLanguageOverlay(gtx layout.Context) layout.Dimensions {
 	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
 	defer stack.Pop()
 
+	// The nominal height is a cap, not a promise: in phone landscape the
+	// window below the anchor point can be shorter than the full list
+	// (316dp needs ≈398dp of window height), which used to clip the
+	// bottom languages with no way to reach them. Clamp to the height
+	// genuinely available under the anchor (minus the bottom inset) —
+	// the card's List scrolls to whatever does not fit.
+	h := gtx.Dp(unit.Dp(languageMenuHeight))
+	if avail := gtx.Constraints.Max.Y - y - gtx.Dp(unit.Dp(windowInset)); avail < h {
+		h = avail
+	}
+	if h < gtx.Dp(unit.Dp(menuMinUsableDp)) {
+		h = gtx.Dp(unit.Dp(menuMinUsableDp))
+	}
+
 	menuGTX := gtx
 	menuGTX.Constraints.Min.X = gtx.Dp(unit.Dp(languageMenuWidth))
 	menuGTX.Constraints.Max.X = gtx.Dp(unit.Dp(languageMenuWidth))
-	menuGTX.Constraints.Min.Y = gtx.Dp(unit.Dp(languageMenuHeight))
-	menuGTX.Constraints.Max.Y = gtx.Dp(unit.Dp(languageMenuHeight))
+	menuGTX.Constraints.Min.Y = h
+	menuGTX.Constraints.Max.Y = h
 	_ = w.languageMenuCard(menuGTX)
 
 	return layout.Dimensions{}
@@ -5228,37 +5825,38 @@ func (w *Window) languageMenuCard(gtx layout.Context) layout.Dimensions {
 	fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 
 	return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		items := make([]layout.FlexChild, 0, len(supportedLanguages)*2)
-		for i, option := range supportedLanguages {
-			opt := option
+		// A List rather than a fixed column: layoutLanguageOverlay clamps
+		// the menu height to what actually fits under the anchor (phone
+		// landscape), and the tail languages must stay reachable by
+		// scrolling instead of being clipped.
+		w.languageMenuList.Axis = layout.Vertical
+		return material.List(w.theme, &w.languageMenuList).Layout(gtx, len(supportedLanguages), func(gtx layout.Context, i int) layout.Dimensions {
+			opt := supportedLanguages[i]
 			btn := w.languageButton(opt.Code)
-			items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				for btn.Clicked(gtx) {
-					w.language = normalizeLanguage(opt.Code)
-					w.showLanguageMenu = false
-					if w.prefs != nil {
-						w.prefs.Language = w.language
-						_ = w.prefs.Save()
-					}
-					if w.window != nil {
-						w.window.Invalidate()
-					}
+			for btn.Clicked(gtx) {
+				w.language = normalizeLanguage(opt.Code)
+				w.showLanguageMenu = false
+				if w.prefs != nil {
+					w.prefs.Language = w.language
+					_ = w.prefs.Save()
 				}
-
-				style := material.Button(w.theme, btn, opt.Label+" - "+localizedLanguageName(opt.Code))
-				if opt.Code == w.language {
-					style.Background = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
-				} else {
-					style.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
+				if w.window != nil {
+					w.window.Invalidate()
 				}
-				style.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-				return style.Layout(gtx)
-			}))
-			if i < len(supportedLanguages)-1 {
-				items = append(items, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
 			}
-		}
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
+
+			style := material.Button(w.theme, btn, opt.Label+" - "+localizedLanguageName(opt.Code))
+			if opt.Code == w.language {
+				style.Background = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
+			} else {
+				style.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
+			}
+			style.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+			if i == len(supportedLanguages)-1 {
+				return style.Layout(gtx)
+			}
+			return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, style.Layout)
+		})
 	})
 }
 
@@ -5380,7 +5978,11 @@ func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
 		w.msgContextMsg = nil
 		w.router.SetSendStatus(w.t("status.message_deleting"))
 
+		if !w.beginUIOp() {
+			return
+		}
 		go func(peer domain.PeerIdentity, target domain.MessageID, outgoing bool) {
+			defer w.endUIOp()
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := w.router.SendMessageDelete(ctx, peer, target); err != nil {
@@ -5501,7 +6103,11 @@ func (w *Window) dispatchConversationDeleteAsync(peer domain.PeerIdentity) {
 	}
 	dispatching := w.t("status.clear_chat_dispatching")
 	w.router.SetSendStatus(dispatching)
+	if !w.beginUIOp() {
+		return
+	}
 	go func(peer domain.PeerIdentity, requestID domain.ConversationDeleteRequestID, dispatching string) {
+		defer w.endUIOp()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		err := w.router.CompleteConversationDelete(ctx, peer, requestID)

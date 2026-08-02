@@ -21,8 +21,8 @@ Quick links:
   - [Network core extraction](#network-core-extraction-peerconn--netcore)
   - [Pending work for Phase 1](#pending-work-for-phase-1)
 - [Message deletion](#iter-6)
-- [Android app](#iter-7)
 - [Google WSS fallback](#iter-10)
+- [Android background delivery](#iter-25)
 - [Voice calls](#iter-20)
 - [Structured overlay (DHT)](#iter-4)
 - [Second-layer encryption](#iter-8)
@@ -276,17 +276,6 @@ tombstone; если RefCount падает до 0, transmit-файл удаляе
 
 ---
 
-<a id="iter-7"></a>
-### Android app
-
-**Goal:** ship the first mobile client on Android.
-
-**Dependency:** comes after A1-A2 so mobile is not built on obviously rough
-chat UX.
-
-**Done when:** Android can run as a light client with identity, contacts,
-direct messaging, and reliable sync with desktop/full nodes.
-
 <a id="iter-10"></a>
 ### Backup channels via Google WSS
 
@@ -298,6 +287,26 @@ not a standalone headline.
 
 **Done when:** a node can fall back to WSS relay/bootstrap transport without
 breaking existing identity, delivery, or capability semantics.
+
+<a id="iter-25"></a>
+### Android background delivery
+
+**Goal:** reliable message delivery for the Android client while the app is
+backgrounded or closed.
+
+**Problem:** the client is foreground-only today. The Android wrapper currently
+declares no service or push receiver, Doze/App Standby throttle the network
+once the Activity leaves the foreground, and the process may be killed. The
+protocol has no durable mailbox and sender-side delivery retry gives up
+after roughly 3.5 hours (`internal/core/node/delivery_retry.go`), so an
+Android client closed for longer misses those messages permanently.
+
+**Approach:** add a foreground service to the standard Android wrapper so it
+keeps the node alive during an active session, and add a durable-mailbox
+mechanism on the protocol side to cover longer offline windows.
+
+**Done when:** a message sent to an Android device that stays offline for a
+day is delivered on the next app start without manual resync.
 
 <a id="iter-20"></a>
 ### Voice calls

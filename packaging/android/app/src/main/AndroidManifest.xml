@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      android:enableOnBackInvokedCallback="false" keeps the LEGACY back
+      dispatch alive. From targetSdk 36 (Android 16) the predictive-back
+      migration is on by default and Activity.onBackPressed() is no
+      longer called — which is the only path Gio v0.10 uses to deliver
+      key.NameBack (app/os_android.go → GioView.onBack). Without this
+      opt-out the system Back gesture would close the Activity instead of
+      reaching handleBackNavigation, so it would never dismiss a context
+      menu or leave a chat in the compact layout. Remove once Gio adopts
+      OnBackInvokedCallback.
+    -->
+    <application
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true">
+        <activity
+            android:name="org.gioui.GioActivity"
+            android:configChanges="screenSize|screenLayout|smallestScreenSize|orientation|keyboardHidden"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleInstance"
+            android:theme="@style/Theme.GioApp"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

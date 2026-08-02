@@ -139,6 +139,19 @@ func (s *Server) Shutdown() error {
 	return s.app.Shutdown()
 }
 
+// ShutdownWithTimeout gracefully shuts down the RPC server, giving
+// active connections until the deadline and then returning an error.
+// NB: a timeout error does NOT mean in-flight handlers were aborted —
+// fasthttp has no handler cancellation, so a wedged handler may still
+// be executing (and reaching the CommandTable → chatlog) after this
+// returns. Callers on the shutdown path must treat a non-nil result as
+// an unclean stage and refrain from tearing down the handlers'
+// dependencies. The UI-driven desktop shutdown uses this instead of
+// plain Shutdown, which waits for keep-alive connections indefinitely.
+func (s *Server) ShutdownWithTimeout(timeout time.Duration) error {
+	return s.app.ShutdownWithTimeout(timeout)
+}
+
 // handleExec is the universal command dispatcher.
 // POST /rpc/v1/exec {"command": "ping", "args": {...}}
 func (s *Server) handleExec(c fiber.Ctx) error {

@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -56,6 +57,11 @@ func Setup() func() {
 	// (concurrent map writes, SIGSEGV, etc.). Without this, the default
 	// GOTRACEBACK=single only prints the crashing goroutine.
 	debug.SetTraceback("all")
+
+	// Android logs through logcat, not files — see setupLogcat.
+	if runtime.GOOS == "android" {
+		return setupLogcat()
+	}
 
 	// On Windows GUI applications stdout may not exist (invalid handle).
 	// Detect this early so we never pass a broken writer to zerolog.
@@ -179,6 +185,21 @@ func DeferRecover() {
 // recoverAndLog catches a panic, writes a crash log file, then re-panics
 // so the default Go behaviour (print + exit 2) still happens. It must be
 // deferred directly (e.g. `defer recoverAndLog(dir)`) for recover() to fire.
+// HandlePanicValue writes a crash report for an ALREADY-recovered panic
+// value and re-panics. For defers in main functions: recover() only
+// stops an unwinding panic when called directly by the deferred
+// function, so a nested helper (like the closure returned by Setup)
+// sees nil. The correct main-level pattern is:
+//
+//	defer func() {
+//	    if r := recover(); r != nil {
+//	        crashlog.HandlePanicValue(r)
+//	    }
+//	}()
+func HandlePanicValue(r any) {
+	logCrashAndRepanic(logDir(), r)
+}
+
 func recoverAndLog(dir string) {
 	r := recover()
 	if r == nil {

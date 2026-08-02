@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -1588,7 +1589,7 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 // Unread for non-active peers. seedPreviews already set correct counts from
 // SQL — DMHeaders don't carry delivery_status, so incrementing would double-count.
 func TestRepairUnreadFirstSyncDoesNotDoubleCount(t *testing.T) {
-	r := newTestRouter()
+	r := newSyncTestRouter()
 
 	// Simulate seedPreviews having set Unread=2 for peer-1.
 	r.mu.Lock()
@@ -1714,6 +1715,21 @@ func TestEbusBuffersDuringStartup(t *testing.T) {
 		// startupComplete defaults to false — events will be buffered.
 	}
 
+	// Close the router's background-op gate up front, so every event is
+	// handled fully SYNCHRONOUSLY in this test.
+	//
+	// What this test asserts is the buffering/replay contract, which is
+	// synchronous: onNewMessage records the id in seenMessageIDs before
+	// doing anything else. The sidebar-refresh goroutines it would
+	// otherwise spawn are irrelevant here and actively harmful: when
+	// their preview refresh fails they legitimately call
+	// evictSeenMessages (so a later repair cycle rediscovers the
+	// message), which raced the assertion below and made the test flaky
+	// under -race / -count>1 — reporting anything from 0 to 4 ids.
+	// Closing the gate also guarantees no background goroutine is still
+	// querying the chatlog when the deferred db.Close() runs.
+	r.ShutdownDrain(2 * time.Second)
+
 	// Deliver 3 events via onEbusLocalChange BEFORE startup completes.
 	for i := 1; i <= 3; i++ {
 		r.onEbusLocalChange(protocol.LocalChangeEvent{
@@ -1758,17 +1774,18 @@ func TestEbusBuffersDuringStartup(t *testing.T) {
 		MessageID: "msg-4", Sender: "peer1", Recipient: "me",
 	})
 
-	// Poll until all 4 message IDs are in seenMessageIDs.
-	if !pollCondition(2*time.Second, func() bool {
-		r.mu.RLock()
-		n := len(r.seenMessageIDs)
-		r.mu.RUnlock()
-		return n >= 4
-	}) {
-		r.mu.RLock()
-		seen := len(r.seenMessageIDs)
-		r.mu.RUnlock()
-		t.Fatalf("expected 4 seen messages, got %d", seen)
+	// All four events (3 replayed + 1 live) were handled synchronously —
+	// no polling, no background goroutines, no eviction window.
+	r.mu.RLock()
+	seen := len(r.seenMessageIDs)
+	ids := make([]string, 0, seen)
+	for id := range r.seenMessageIDs {
+		ids = append(ids, id)
+	}
+	r.mu.RUnlock()
+	if seen != 4 {
+		sort.Strings(ids)
+		t.Fatalf("expected 4 seen messages, got %d: %v", seen, ids)
 	}
 }
 
@@ -4801,6 +4818,28 @@ func (p *testStatusProvider) Reset() {
 	p.mu.Unlock()
 }
 
+// newSyncTestRouter is newTestRouter with the background-operation gate
+// already closed, so router handlers run FULLY SYNCHRONOUSLY.
+//
+// Several handlers register their id in seenMessageIDs synchronously and
+// then fan out preview refreshes on goroutines; when a refresh fails —
+// and it always does here, since the test router has no chatlog — the
+// goroutine legitimately calls evictSeenMessages so a later repair cycle
+// rediscovers the message. Tests that assert the SYNCHRONOUS bookkeeping
+// therefore race those evictions and fail intermittently under -race /
+// -count>1. Closing the gate removes the asynchrony instead of trying to
+// out-wait it.
+//
+// Do NOT use this for tests that assert the async behaviour itself (e.g.
+// TestRepairUnreadNotClearedOnFailedReload polls for the eviction) or
+// that send messages — a closed gate refuses sends with
+// ErrRouterShuttingDown.
+func newSyncTestRouter() *DMRouter {
+	r := newTestRouter()
+	r.ShutdownDrain(2 * time.Second)
+	return r
+}
+
 func newTestRouter() *DMRouter {
 	done := make(chan struct{})
 	close(done) // pre-closed so tests don't block on startupDone
@@ -5080,7 +5119,7 @@ func TestSnapshotCacheInvalidatedByNotify(t *testing.T) {
 // while the write lock is held only briefly in each phase.
 func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
 	t.Parallel()
-	r := newTestRouter()
+	r := newSyncTestRouter()
 
 	// Pre-seed one message as already seen.
 	r.mu.Lock()

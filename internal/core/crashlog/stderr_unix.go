@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // redirectStderr duplicates file descriptor 2 (stderr) to a log file so that
@@ -28,8 +27,8 @@ func redirectStderr(dir string) *os.File {
 	// Write a separator so consecutive runs are distinguishable.
 	_, _ = fmt.Fprintf(f, "\n--- stderr redirected (pid %d) ---\n", os.Getpid())
 
-	if err := syscall.Dup2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
-		_, _ = fmt.Fprintf(os.Stdout, "crashlog: dup2 stderr failed: %v\n", err)
+	if err := dupFD2(int(f.Fd()), int(os.Stderr.Fd())); err != nil {
+		_, _ = fmt.Fprintf(os.Stdout, "crashlog: dup stderr failed: %v\n", err)
 		_ = f.Close()
 		return nil
 	}
