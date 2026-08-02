@@ -1152,6 +1152,141 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 	return scored
 }
 
+// syncReplySkipBudget bounds how many interleaved frames readSyncReply
+// discards while waiting for the expected reply type on a syncPeer
+// bootstrap connection.
+//
+// After auth_ok the responder's FIFO writer may already hold frames
+// enqueued by auth-time side effects: the inbox backlog replay
+// (pushBacklogToSubscriber fires right after auth_ok — including the
+// very DMs whose unknown sender key triggered this sync dial) and the
+// announce-plane baseline kicked off by trackInboundConnect. All of
+// those land on the wire BEFORE the reply to any request we send next.
+// The auth_ok read has tolerated this interleave since its "skip up to
+// 5 unexpected frames" loop was added, but the get_peers /
+// fetch_contacts reads predated the interleave and read exactly ONE
+// frame — so a single backlog push_message parsed as a frame with an
+// empty Contacts list, the sync reported zero imported contacts
+// (sync_peer_no_new_contacts), and sender-key recovery for relayed DMs
+// from a first-contact sender wedged permanently: every retry redialed
+// the relay, retriggered the backlog replay, and re-read a push frame
+// instead of the contacts reply.
+//
+// The FLOOR budget is sized for the worst DEFAULT pre-reply flood, not
+// for a handful of frames: the backlog replay alone can carry up to
+// maxReceiptBacklogPerRecipient (4096) receipt frames plus the pending
+// ring (default maxPendingFramesPerPeer=200) plus a chunked v3 announce
+// baseline. An undersized budget re-creates the original wedge one
+// level up: the reader gives up before the reply, the sync fails, and
+// the next retry redials into the same (still un-acked, so replayed
+// again) backlog. When the operator raises PendingRingSize the flood
+// scales with it, so the effective budget is computed from the live
+// config (syncReplySkipBudgetFor) rather than pinned here;
+// syncReplyDrainCap and the per-read idle deadline still bound the
+// drain in time regardless.
+const syncReplySkipBudgetFloor = 8192
+
+// syncReplySkipBudgetFor returns the drain frame-budget for this node's
+// current config: the floor, or (receipt backlog + configured pending
+// ring + announce-baseline slack) when a raised PendingRingSize makes
+// the worst legitimate flood exceed the floor. Without this an operator
+// who raised CORSA_PENDING_RING_SIZE past ~4000 could see recovery give
+// up before the contacts reply again.
+func (s *Service) syncReplySkipBudgetFor() int {
+	worst := maxReceiptBacklogPerRecipient + s.pendingRingSize() + 2048
+	if worst < syncReplySkipBudgetFloor {
+		return syncReplySkipBudgetFloor
+	}
+	return worst
+}
+
+// syncReplyDrainCap bounds the total wall time readSyncReply may spend
+// draining interleaved frames for ONE reply. The dial's initial
+// absolute deadline (syncHandshakeTimeout = 1.5s for the whole
+// handshake) is far too small to drain a full receipt backlog over a
+// WAN link, so readSyncReply refreshes the connection deadline before
+// every read (idle bound per frame) and enforces this cap on the
+// total. Long drains are affordable because sender-key recovery no
+// longer blocks any session loop: unknown-sender-key handlers schedule
+// the sync through triggerSenderKeySyncAsync (a background,
+// single-flight goroutine), so the only party waiting on this cap is
+// the recovery goroutine itself.
+const syncReplyDrainCap = 10 * time.Second
+
+// syncRecoveryTimeout bounds one whole background sender-key recovery
+// dial: TCP dial + hello/welcome/auth (each read individually bounded
+// by the syncHandshakeTimeout idle deadline) + up to two
+// syncReplyDrainCap reply drains. It is the ctx budget
+// syncSenderKeys attaches to its fresh-dial fallback; readSyncReply
+// observes the ctx per iteration and the deadline-refresh closure
+// clamps to the ctx deadline, so a cancelled or expired ctx actually
+// stops the socket reads instead of being out-lived by the sliding
+// deadline.
+const syncRecoveryTimeout = 25 * time.Second
+
+// readSyncReply reads frames from a syncPeer bootstrap connection until
+// one with the wanted type — or a terminal "error" frame — arrives,
+// skipping up to syncReplySkipBudget interleaved frames within a
+// syncReplyDrainCap wall budget. refreshDeadline is invoked before
+// every read to extend the connection deadline by one idle interval:
+// steady progress (a backlog flood still arriving) must not be killed
+// by the dial's initial absolute deadline, while a silent peer still
+// times out after a single idle interval. An interleaved line that
+// fails protocol.ParseFrameLine is skipped too (still consuming
+// budget): announce-plane lines are marshalled from their own frame
+// structs and are not guaranteed to round-trip through the generic
+// Frame parser.
+//
+// Discarded interleaved frames are NOT all recoverable, and that is a
+// pre-existing property of the ephemeral sync dial, not of this reader.
+// Interleaved frames are DROPPED, deliberately. The responder treats an
+// authenticated sync dial as a routable node connection and may flush
+// fire-and-forget pending frames into it (deleting them from its own
+// ring at send time), so this drop is a real — but PRE-EXISTING and
+// bounded — loss window: it predates this reader and is what every
+// deployed node already does. Processing them here was tried and
+// reverted: acting on frames before auth_ok requires buffering them,
+// and any buffer either bounds memory (a hostile endpoint can send
+// 8 MiB frames) or avoids dropping — never both. The durable fix is
+// responder-side: do not treat a one-shot recovery dial as a routable
+// node connection (see the follow-up note on syncPeer).
+//
+// Returns the matching frame, or an error when the underlying read
+// fails, either budget is exhausted, or ctx is done. ctx is observed
+// per iteration (and the refreshDeadline closure is expected to clamp
+// the socket deadline to the ctx deadline), so lifecycle cancellation
+// is honoured mid-drain — the sliding deadline must never out-live the
+// owning context (CLAUDE.md: ctx is the cancellation authority). The
+// caller distinguishes the wanted type from "error" via frame.Type.
+func readSyncReply(ctx context.Context, reader *bufio.Reader, wantType string, budget int, refreshDeadline func()) (protocol.Frame, error) {
+	start := time.Now()
+	for skipped := 0; ; skipped++ {
+		if err := ctx.Err(); err != nil {
+			return protocol.Frame{}, fmt.Errorf("sync reply wait for %s aborted: %w", wantType, err)
+		}
+		if skipped >= budget {
+			return protocol.Frame{}, fmt.Errorf("no %s reply within %d frames", wantType, budget)
+		}
+		if time.Since(start) > syncReplyDrainCap {
+			return protocol.Frame{}, fmt.Errorf("no %s reply within %v (drained %d frames)", wantType, syncReplyDrainCap, skipped)
+		}
+		refreshDeadline()
+		line, err := readFrameLine(reader, maxResponseLineBytes)
+		if err != nil {
+			return protocol.Frame{}, err
+		}
+		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
+		if err != nil {
+			log.Debug().Err(err).Str("want", wantType).Int("skipped", skipped+1).Msg("sync_reply_skip_unparseable_frame")
+			continue
+		}
+		if frame.Type == wantType || frame.Type == "error" {
+			return frame, nil
+		}
+		log.Debug().Str("want", wantType).Str("type", frame.Type).Int("skipped", skipped+1).Msg("sync_reply_skip_interleaved_frame")
+	}
+}
+
 // syncPeer opens a fresh TCP connection to the given address, performs
 // a full handshake (hello → welcome → auth if required), optionally
 // requests the peer list (when requestPeers is true), fetches contacts,
@@ -1182,6 +1317,22 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
+	// Per-read idle-deadline refresh for the filtered reply reads
+	// (readSyncReply): each successfully arriving frame proves the peer
+	// is alive and draining its post-auth flood, so the deadline slides
+	// forward by one idle interval per read — but NEVER past the owning
+	// ctx deadline. Without the clamp the sliding refresh would out-live
+	// a cancelled/expired ctx and keep the socket alive for up to the
+	// drain cap, violating the ctx-first cancellation contract. Total
+	// wall time is bounded by syncReplyDrainCap inside readSyncReply.
+	refreshSyncDeadline := func() {
+		deadline := time.Now().Add(syncHandshakeTimeout)
+		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+			deadline = ctxDeadline
+		}
+		_ = conn.SetDeadline(deadline)
+	}
+
 	// Wrap the one-shot conn in a bootstrap NetCore so every write on this
 	// handshake path goes through the managed writer — no raw io.WriteString
 	// remains on this probe. pc.Close() closes conn and waits for the writer
@@ -1192,6 +1343,19 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	pc := netcore.NewBootstrap(conn, syncHandshakeTimeout)
 	defer pc.Close()
 
+	skipBudget := s.syncReplySkipBudgetFor()
+
+	// NOTE (accepted limitation): the responder flushes its pending
+	// fire-and-forget frames and mailbox backlog into this dial once it
+	// authenticates us, and readSyncReply drops them. That loss window
+	// is pre-existing (every deployed node behaves this way) and is NOT
+	// fixable from this side: acting on pre-auth_ok frames needs a
+	// buffer, and no finite buffer both bounds memory against 8 MiB
+	// frames and avoids dropping under a raised PendingRingSize. The
+	// durable fix is responder-side — stop treating a one-shot recovery
+	// dial as a routable node connection (do not install the node-route
+	// subscriber / flush pending for it) — which needs both ends
+	// updated and rides the ProtocolVersion 27 floor raise.
 	if st := pc.SendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != netcore.SendOK {
 		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_hello_write_failed")
 		return 0
@@ -1272,25 +1436,20 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			return 0
 		}
 		// After auth_session the remote may interleave non-auth frames
-		// (e.g., announce_routes triggered by trackInboundConnect) before
-		// the auth_ok reply. Skip up to 5 unexpected frames to tolerate
-		// this race without breaking the handshake.
-		var frame protocol.Frame
-		for skipped := 0; skipped < 5; skipped++ {
-			authReply, err := readFrameLine(reader, maxResponseLineBytes)
-			if err != nil {
-				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_read_failed")
-				return 0
-			}
-			frame, err = protocol.ParseFrameLine(strings.TrimSpace(authReply))
-			if err != nil {
-				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_parse_failed")
-				return 0
-			}
-			if frame.Type == "auth_ok" || frame.Type == "error" {
-				break
-			}
-			log.Debug().Str("peer", string(address)).Str("type", frame.Type).Int("skipped", skipped+1).Msg("sync_peer_auth_skip_interleaved_frame")
+		// BEFORE the auth_ok reply: handleAuthSession runs
+		// trackInboundConnect (which can flush up to a full pending ring
+		// of fire-and-forget frames — default maxPendingFramesPerPeer,
+		// operator-raisable) plus route-sync/announce output before the
+		// caller even enqueues auth_ok. The historical "skip up to 5"
+		// loop broke the recovery dial exactly when it mattered — a
+		// loaded responder with a backlog for us — so the auth wait uses
+		// the same drain-tolerant filtered reader as the contacts/peers
+		// replies (budget syncReplySkipBudget, wall cap
+		// syncReplyDrainCap, ctx-clamped sliding idle deadline).
+		frame, err := readSyncReply(ctx, reader, "auth_ok", skipBudget, refreshSyncDeadline)
+		if err != nil {
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_read_failed")
+			return 0
 		}
 		if frame.Type != "auth_ok" {
 			log.Warn().Str("peer", string(address)).Str("type", frame.Type).Str("code", frame.Code).Msg("sync_peer_auth_rejected")
@@ -1329,13 +1488,16 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 				log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_get_peers_failed")
 				return 0
 			}
-			reply, err := readFrameLine(reader, maxResponseLineBytes)
+			// Frame-type-filtered read: the responder may interleave
+			// backlog/announce frames ahead of the peers reply (see
+			// syncReplySkipBudget). A bare one-line read here would
+			// mistake the first interleaved frame for the reply.
+			frame, err := readSyncReply(ctx, reader, "peers", skipBudget, refreshSyncDeadline)
 			if err != nil {
 				log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_get_peers_read_failed")
 				return 0
 			}
-			frame, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
-			if err == nil {
+			if frame.Type == "peers" {
 				peersImported := 0
 				for _, peer := range frame.Peers {
 					if s.addPeerAddress(domain.PeerAddress(peer), "", domain.PeerIdentity{}) {
@@ -1343,6 +1505,11 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 					}
 				}
 				s.logPeerExchangeExecuted(peerExchangePathLegacyDial, address, len(frame.Peers), peersImported)
+			} else {
+				// Terminal "error" frame from the responder. Keep going:
+				// the contacts fetch below is the actual purpose of the
+				// recovery dial and may still succeed.
+				log.Warn().Str("peer", string(address)).Str("code", frame.Code).Msg("sync_peer_get_peers_rejected")
 			}
 		} else {
 			return 0
@@ -1355,14 +1522,20 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_fetch_contacts_failed")
 			return 0
 		}
-		contactsReply, err := readFrameLine(reader, maxResponseLineBytes)
+		// Frame-type-filtered read. This is the read whose bare one-line
+		// predecessor wedged sender-key recovery for relayed DMs: right
+		// after auth_ok the responder replays the recipient's backlog —
+		// including the undeliverable DMs that triggered this very dial —
+		// and pushes announce baselines, so the first line was virtually
+		// never the contacts reply (see syncReplySkipBudget).
+		frame, err := readSyncReply(ctx, reader, "contacts", skipBudget, refreshSyncDeadline)
 		if err != nil {
 			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_contacts_read_failed")
 			return 0
 		}
-		frame, err := protocol.ParseFrameLine(strings.TrimSpace(contactsReply))
-		if err != nil {
-			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_contacts_parse_failed")
+		if frame.Type != "contacts" {
+			// Terminal "error" frame — the responder refused the fetch.
+			log.Warn().Str("peer", string(address)).Str("code", frame.Code).Msg("sync_peer_contacts_rejected")
 			return 0
 		}
 		for _, contact := range frame.Contacts {
@@ -1578,17 +1751,52 @@ func (s *Service) learnPeerFromFrame(observedAddr string, frame protocol.Frame) 
 	if frame.Address != "" {
 		s.addKnownIdentity(domain.PeerIdentityFromWire(frame.Address))
 	}
-	// When all key fields are present, verify the box key binding before storing.
-	// If verification fails the keys are discarded; if any field is absent the
-	// existing behaviour is preserved for backward compatibility.
-	if frame.Address != "" && frame.PubKey != "" && frame.BoxKey != "" && frame.BoxSig != "" {
-		if identity.VerifyBoxKeyBinding(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig) != nil {
-			return
-		}
+	s.learnWireIdentityKeys(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig)
+}
+
+// learnWireIdentityKeys is the single validated ingest point for key
+// material carried by handshake frames (hello / welcome). Nothing is
+// cached unless it self-certifies:
+//
+//   - the signing key must be present, within the length cap, and
+//     fingerprint-match the address (identity.VerifyPublicKeyFingerprint)
+//     — without this gate a hostile (and, on the welcome path,
+//     still-unauthenticated) frame could both store multi-megabyte
+//     strings under arbitrary addresses AND poison a legitimate
+//     sender's cached pubkey with garbage, wedging that sender's DM
+//     verification;
+//   - the box pair is cached only complete AND binding-valid
+//     (VerifyBoxKeyBinding also enforces the 32-byte X25519 size); a
+//     partial or unverifiable pair is dropped, never stored half-way.
+//
+// The historical "store whatever fields arrived when the triple is
+// incomplete" behaviour is gone deliberately: every deployed peer sends
+// all four identity fields (session auth requires them), so partial
+// frames are either ancient or hostile — and neither may write to the
+// contact plane. Poisoning an EXISTING entry is impossible through
+// here: a fingerprint-matching pubkey is byte-identical to the cached
+// one, and a binding-valid box pair requires the sender's private
+// signing key.
+func (s *Service) learnWireIdentityKeys(address, pubKey, boxKey, boxSig string) {
+	if address == "" || pubKey == "" {
+		return
 	}
-	s.addKnownBoxKey(frame.Address, frame.BoxKey)
-	s.addKnownPubKey(frame.Address, frame.PubKey)
-	s.addKnownBoxSig(frame.Address, frame.BoxSig)
+	if len(pubKey) > maxAttachedKeyFieldLen ||
+		len(boxKey) > maxAttachedKeyFieldLen ||
+		len(boxSig) > maxAttachedKeyFieldLen {
+		log.Warn().Str("address", address).Msg("wire_identity_keys_oversized_dropped")
+		return
+	}
+	if err := identity.VerifyPublicKeyFingerprint(address, pubKey); err != nil {
+		log.Warn().Err(err).Str("address", address).Msg("wire_identity_pubkey_rejected")
+		return
+	}
+	s.addKnownPubKey(address, pubKey)
+	if boxKey != "" && boxSig != "" &&
+		identity.VerifyBoxKeyBinding(address, pubKey, boxKey, boxSig) == nil {
+		s.addKnownBoxKey(address, boxKey)
+		s.addKnownBoxSig(address, boxSig)
+	}
 }
 
 // peerListenAddress extracts the legacy advertised listen address from a
@@ -2421,6 +2629,19 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 // quarantine accounting.
 var errPeerSessionInboxOverflow = errors.New("peer session inbox overflow")
 
+// isUnsolicitedSessionFrame classifies frames that may legitimately
+// land on an outbound session at ANY moment, independent of any
+// request/reply in flight: the fire-and-forget classes plus
+// push_delivery_receipt and announce_peer (dispatcher-handled but not
+// part of isFireAndForgetFrame's SEND-side contract). The request-wait
+// loop dispatches these before its reply match — see the ordering
+// comment there.
+func isUnsolicitedSessionFrame(frameType string) bool {
+	return isFireAndForgetFrame(frameType) ||
+		frameType == "push_delivery_receipt" ||
+		frameType == "announce_peer"
+}
+
 func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame, expectedType string, hello bool) (protocol.Frame, error) {
 	// All outbound writes route through the managed single-writer path on
 	// NetCore so that deadline, back-pressure and ordering match inbound.
@@ -2510,34 +2731,27 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				s.markPeerWrite(session.address, pongFrame)
 				continue
 			}
-			if incoming.Type == "push_message" {
-				s.dispatchPeerSessionFrame(session.address, session, incoming)
-				continue
-			}
-			if incoming.Type == "push_delivery_receipt" {
-				s.dispatchPeerSessionFrame(session.address, session, incoming)
-				continue
-			}
-			if incoming.Type == "push_notice" {
-				s.dispatchPeerSessionFrame(session.address, session, incoming)
-				continue
-			}
-			if incoming.Type == "announce_peer" {
-				s.dispatchPeerSessionFrame(session.address, session, incoming)
-				continue
-			}
-			if incoming.Type == "relay_hop_ack" {
-				s.dispatchPeerSessionFrame(session.address, session, incoming)
-				continue
-			}
-			// Phase 3 route-sync pair is unsolicited and one-way: a digest
-			// or summary that lands while THIS session is waiting on an
-			// unrelated peerSessionRequest reply must be handed to the
-			// dispatcher (→ handleRouteSyncDigest / handleRouteSyncSummary),
-			// not returned as the reply and dropped. Mirrors the
-			// fire-and-forget classification in isFireAndForgetFrame.
-			if incoming.Type == protocol.RouteSyncDigestFrameType ||
-				incoming.Type == protocol.RouteSyncSummaryFrameType {
+			// Unsolicited traffic FIRST — before the reply match. The
+			// order is load-bearing: requests issued with
+			// expectedType == "" (send_message / publish_notice /
+			// ack_delete — expectedReplyType returns "" for every
+			// type) accept "the next reply-class frame" as their
+			// answer, and checking the reply arm first would let the
+			// first stray relay_message or receipt be returned to the
+			// caller as that "reply" and vanish. Classification-based
+			// dispatch keeps every unsolicited type flowing to its
+			// real handler: the historical per-type allowlist silently
+			// dropped whatever it did not enumerate (relay_message —
+			// burning one bounded upstream retry per occurrence, with
+			// a 12s recovery sync in flight enough to exhaust the
+			// budget and lose the DM; relay_delivery_receipt; the
+			// announce-plane trio; poison frames...). Dispatch from
+			// inside the request wait is reentrancy-safe: handlers
+			// only enqueue onto sendCh / other sessions, and the
+			// recovery trigger is asynchronous — nothing here reads
+			// this session's inboxCh. (file_command never reaches this
+			// loop — readPeerSession diverts it before inboxCh.)
+			if isUnsolicitedSessionFrame(incoming.Type) {
 				s.dispatchPeerSessionFrame(session.address, session, incoming)
 				continue
 			}
@@ -2545,6 +2759,12 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 				_ = session.conn.SetReadDeadline(time.Time{})
 				return incoming, nil
 			}
+			// Non-matching reply-class frame (e.g. a stale contacts
+			// reply from an earlier timed-out request while expecting
+			// pong): hand to the dispatcher, whose switch has no cases
+			// for reply types — a deliberate no-op equivalent to the
+			// historical drop, kept as one uniform sink.
+			s.dispatchPeerSessionFrame(session.address, session, incoming)
 			continue
 		}
 	}
@@ -2666,8 +2886,13 @@ func (s *Service) syncSenderKeys(ctx context.Context, senderAddress domain.PeerA
 	}
 
 	// Fall back to a fresh TCP connection. Derive a timeout from the owning
-	// ctx so the dial is bounded but still cancels on lifecycle shutdown.
-	dialCtx, cancel := context.WithTimeout(ctx, syncHandshakeTimeout)
+	// ctx so the whole recovery is bounded but still cancels on lifecycle
+	// shutdown. The budget is syncRecoveryTimeout, not syncHandshakeTimeout:
+	// the dial and each handshake read are individually bounded by the
+	// connection's idle deadline, while the post-auth reply drains
+	// (readSyncReply) legitimately need up to syncReplyDrainCap each —
+	// a 1.5s overall ctx would cancel a healthy drain mid-flight.
+	dialCtx, cancel := context.WithTimeout(ctx, syncRecoveryTimeout)
 	defer cancel()
 	// requestPeers=false: narrow contact/key recovery only. Logged as a
 	// narrow-recovery skip so operators can tell this path apart from a
@@ -2675,6 +2900,352 @@ func (s *Service) syncSenderKeys(ctx context.Context, senderAddress domain.PeerA
 	// docs/peer-discovery-conditional-get-peers.ru.md Step 6.
 	s.logPeerExchangeSkipped(peerExchangePathSenderKeyFreshDial, senderAddress, peerExchangeSkipByNarrowRecovery)
 	return s.syncPeer(dialCtx, senderAddress, false)
+}
+
+// senderKeySyncFanout caps how many ADDITIONAL connected peers (beyond
+// the previous hop) one background recovery pass may query for the
+// target sender's contact. The previous hop is only the best FIRST
+// guess: a pure transit relay never needed the origin's keys to
+// forward (the fast path is crypto-free), and a NATed / inbound-only
+// previous hop may not be fresh-dialable at all — so a recovery scoped
+// to it alone can never terminate. Peers we hold live OUTBOUND
+// sessions to are dialable by construction (we already dialed them),
+// and contact knowledge spreads between full nodes at session setup
+// (syncPeerSession), which makes them genuinely useful second guesses.
+const senderKeySyncFanout = 3
+
+// senderKeySyncCooldown rate-limits recovery passes per SENDER: after a
+// completed pass — successful or not — no new pass starts for this long.
+// Upstream retry cadence would otherwise re-trigger a full fan-out
+// (1 + senderKeySyncFanout dials) every few seconds for a sender whose
+// keys genuinely aren't available anywhere yet.
+const senderKeySyncCooldown = 30 * time.Second
+
+// maxConcurrentSenderKeySyncPasses is the GLOBAL cap on simultaneously
+// running recovery passes. Per-sender single-flight alone does not
+// bound the network cost: DM frames carry an attacker-chosen sender
+// fingerprint, so a burst of frames with DISTINCT fabricated senders
+// would otherwise spawn one pass each — every pass holding a goroutine
+// for up to its 2×syncRecoveryTimeout budget and opening up to
+// 1+senderKeySyncFanout outbound dials. With the cap, excess triggers
+// are dropped outright (not queued): the dropped message's upstream
+// retry re-triggers later, when a slot and the per-sender cooldown
+// allow, so legitimate recovery degrades to "later" while a fabricated
+// flood degrades to "never past 3 concurrent passes".
+const maxConcurrentSenderKeySyncPasses = 3
+
+// triggerSenderKeySyncAsync schedules a background, single-flight
+// contact recovery for ONE sender identity, starting at the previous
+// hop and fanning out to up to senderKeySyncFanout other peers with
+// live outbound sessions until the sender's signing key appears. This
+// is the ONLY way the unknown-sender-key recovery is invoked from
+// frame handlers: running syncSenderKeys inline there blocks the
+// session dispatch loop (dispatchPeerSessionFrame /
+// handleInboundPushMessage) for up to a full recovery budget while the
+// socket reader keeps filling the bounded inboxCh — a large enough
+// backlog then overflows the buffer and tears down a HEALTHY session
+// (inbox overflow is fatal by design, see peer_sessions.go). The
+// message that triggered the recovery is NOT retried here: it is
+// rejected for this attempt and redelivered by the existing retry
+// contours (previous-hop relay retry, sender e2e retry), which find
+// the imported keys on the next attempt.
+//
+// Keying: single-flight AND cooldown are per sender fingerprint — the
+// goal of a pass is "obtain THIS sender's keys", and a burst of
+// undeliverable messages from that sender (the exact wedge scenario)
+// must produce one pass, not one per message. When the caller has no
+// sender identity (defensive), the previous-hop address keys the
+// single-flight instead.
+//
+// ownedSession, when non-nil, is a live OUTBOUND session to the
+// previous hop and is tried FIRST — through the session OWNER
+// (requestOwnedContactSync serialises the fetch_contacts via the serve
+// loop's contactSyncCh), never by reading inboxCh from this goroutine.
+// This is the recovery path for a previous hop we already hold a
+// session to but cannot freshly re-dial (NAT rebinding, unstable or
+// aliased address, listener temporarily unreachable): the existing
+// session is the only wire to it. Calling peerSessionRequest directly
+// from here would race the serve loop for inbox frames — the pre-async
+// inline code that passed syncSession from the inbound dispatch path
+// had exactly that latent race; owner serialisation is the sanctioned
+// replacement. After the owned attempt (or when no session is
+// available) the pass falls back to a fresh dial of the previous hop,
+// then the fan-out.
+//
+// Honest scope note: a peer connected to us ONLY inbound (we hold no
+// outbound session at all) has no recovery wire in this design —
+// deployed peers do not serve fetch_contacts on their outbound-session
+// dispatcher, so a request sent back over the inbound connection would
+// go unanswered. Such recipients rely on the v27 attached keys or the
+// fan-out; serving fetch_contacts on the peer-session dispatcher is a
+// both-ends protocol addition deferred to the floor-raise era.
+func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender string, ownedSession *peerSession) {
+	// Canonical-format gate on the wire-supplied sender string BEFORE it
+	// can become a map key: a keyless DM frame carries an arbitrary
+	// attacker-chosen sender that may approach the 8 MiB frame budget,
+	// and holding such strings in senderKeySyncInFlight/LastRun would be
+	// a memory sink. A non-canonical sender also cannot succeed — no
+	// contact plane entry can ever match it — so it degrades to the
+	// address-keyed pass (the previous hop is still worth syncing).
+	if sender != "" && !identity.IsValidAddress(sender) {
+		log.Debug().Int("sender_len", len(sender)).Str("prev_hop", string(prevHop)).Msg("sender_key_sync_invalid_sender_ignored")
+		sender = ""
+	}
+	if prevHop == "" && sender == "" {
+		return
+	}
+	key := sender
+	if key == "" {
+		key = "addr:" + string(prevHop)
+	}
+	// Fairness-slot key: authenticated identity when known, transport
+	// address otherwise. Resolved BEFORE taking senderKeySyncMu —
+	// viaIdentityForAddress touches peer-domain state under its own
+	// lock, and this mutex must never nest over other domains.
+	hopKey := ""
+	if prevHop != "" {
+		hopKey = "addr:" + string(prevHop)
+		if ownedSession != nil && !ownedSession.peerIdentity.IsZero() {
+			hopKey = "id:" + ownedSession.peerIdentity.String()
+		} else if id := s.viaIdentityForAddress(prevHop); !id.IsZero() {
+			hopKey = "id:" + id.String()
+		}
+	}
+
+	s.senderKeySyncMu.Lock()
+	if s.senderKeySyncInFlight == nil {
+		// Defensive for struct-literal test Services that bypass NewService.
+		s.senderKeySyncInFlight = make(map[string]struct{})
+	}
+	if s.senderKeySyncLastRun == nil {
+		s.senderKeySyncLastRun = make(map[string]time.Time)
+	}
+	if _, busy := s.senderKeySyncInFlight[key]; busy {
+		s.senderKeySyncMu.Unlock()
+		return
+	}
+	if last, ok := s.senderKeySyncLastRun[key]; ok && time.Since(last) < senderKeySyncCooldown {
+		s.senderKeySyncMu.Unlock()
+		return
+	}
+	// Global concurrency cap — per-sender single-flight alone does not
+	// bound a flood of DISTINCT fabricated senders (see the constant
+	// doc). Dropped, not queued: upstream retries re-trigger later.
+	if len(s.senderKeySyncInFlight) >= maxConcurrentSenderKeySyncPasses {
+		s.senderKeySyncMu.Unlock()
+		log.Debug().Str("sender", sender).Str("prev_hop", string(prevHop)).Msg("sender_key_sync_pass_cap_reached")
+		return
+	}
+	// Per-hop fairness slot: ONE concurrent pass per previous hop. A
+	// hostile peer feeding unique well-formed sender fingerprints could
+	// otherwise keep all global slots busy and starve recovery for
+	// messages arriving via other hops. One slot per hop costs
+	// legitimate traffic nothing: a pass runs fetch_contacts against
+	// that hop and imports its WHOLE contact plane, so distinct real
+	// senders behind the same hop are covered by one pass anyway.
+	// The slot keys on the AUTHENTICATED peer identity when resolvable
+	// (owned session first, then the via-identity map) and falls back
+	// to the transport address: one identity holding several
+	// connections under different IPs / advertise ports / dial aliases
+	// must still occupy a single slot, not one per address.
+	if hopKey != "" {
+		if s.senderKeySyncHopInFlight == nil {
+			s.senderKeySyncHopInFlight = make(map[string]struct{})
+		}
+		if _, hopBusy := s.senderKeySyncHopInFlight[hopKey]; hopBusy {
+			s.senderKeySyncMu.Unlock()
+			log.Debug().Str("sender", sender).Str("hop_key", hopKey).Msg("sender_key_sync_hop_slot_busy")
+			return
+		}
+		s.senderKeySyncHopInFlight[hopKey] = struct{}{}
+	}
+	s.senderKeySyncInFlight[key] = struct{}{}
+	s.senderKeySyncMu.Unlock()
+
+	parent := s.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	s.goBackground(func() {
+		defer func() {
+			s.senderKeySyncMu.Lock()
+			delete(s.senderKeySyncInFlight, key)
+			if hopKey != "" {
+				delete(s.senderKeySyncHopInFlight, hopKey)
+			}
+			s.senderKeySyncLastRun[key] = time.Now()
+			s.pruneSenderKeySyncLastRunLocked()
+			s.senderKeySyncMu.Unlock()
+		}()
+		// One overall budget for the whole pass (previous hop + fan-out);
+		// each syncSenderKeys call additionally clamps itself to
+		// syncRecoveryTimeout, so the total is min-bounded twice.
+		ctx, cancel := context.WithTimeout(parent, 2*syncRecoveryTimeout)
+		defer cancel()
+
+		// Owner-serialised sync over the live outbound session to the
+		// previous hop, when the caller had one — the only wire to a
+		// hop that cannot be freshly re-dialed. Bounded by the pass ctx:
+		// lifecycle shutdown must not be held hostage by the request
+		// timers (goBackground → WaitBackground waits for this
+		// goroutine).
+		if ownedSession != nil {
+			imported, ok := s.requestOwnedContactSync(ctx, ownedSession, peerRequestTimeout)
+			log.Info().Str("peer", string(ownedSession.address)).Str("sender", sender).Int("imported", imported).Bool("executed", ok).Msg("sender_key_sync_owned_session_pass")
+			if sender != "" && s.hasSenderPubKey(sender) {
+				log.Info().Str("sender", sender).Msg("sender_key_sync_async_satisfied")
+				return
+			}
+		}
+
+		candidates := make([]domain.PeerAddress, 0, 1+senderKeySyncFanout)
+		if prevHop != "" {
+			candidates = append(candidates, prevHop)
+		}
+		candidates = append(candidates, s.senderKeySyncCandidates(prevHop)...)
+
+		for _, addr := range candidates {
+			if ctx.Err() != nil {
+				return
+			}
+			// Already recovered (by an earlier candidate, a parallel
+			// handshake, or a v27 frame that arrived meanwhile)?
+			if sender != "" && s.hasSenderPubKey(sender) {
+				log.Info().Str("sender", sender).Msg("sender_key_sync_async_satisfied")
+				return
+			}
+			imported := s.syncSenderKeys(ctx, addr, nil)
+			log.Info().Str("peer", string(addr)).Str("sender", sender).Int("imported", imported).Msg("sender_key_sync_async_pass")
+		}
+		if sender != "" && !s.hasSenderPubKey(sender) {
+			log.Warn().Str("sender", sender).Int("candidates", len(candidates)).Msg("sender_key_sync_async_exhausted")
+		}
+	})
+}
+
+// requestOwnedContactSync asks a session's OWNER loop (servePeerSession)
+// to run a fetch_contacts exchange on the caller's behalf and reports
+// the imported-contact count. Returns (0, false) when the request could
+// not be executed: nil session, a manually-built session without the
+// channel, a loop that is dead / too busy to accept within timeout, or
+// a done ctx. ctx is the caller's lifecycle/budget context — both
+// waits observe it so a shutdown (WaitBackground) or an exhausted
+// recovery budget is never held hostage by the request timers. The
+// reply channel is buffered so the owner's response never blocks the
+// serve loop, and contactSyncCh itself is unbuffered so a send
+// succeeds only when a live loop is actually receiving.
+func (s *Service) requestOwnedContactSync(ctx context.Context, session *peerSession, timeout time.Duration) (int, bool) {
+	if session == nil || session.contactSyncCh == nil || ctx.Err() != nil {
+		return 0, false
+	}
+	reply := make(chan int, 1)
+	deliver := time.NewTimer(timeout)
+	defer deliver.Stop()
+	select {
+	case session.contactSyncCh <- reply:
+	case <-deliver.C:
+		return 0, false
+	case <-ctx.Done():
+		return 0, false
+	}
+	// The owner is now committed to answering; its own
+	// peerSessionRequest is bounded by peerRequestTimeout, so wait one
+	// timeout beyond that for the result.
+	wait := time.NewTimer(timeout + peerRequestTimeout)
+	defer wait.Stop()
+	select {
+	case imported := <-reply:
+		return imported, true
+	case <-wait.C:
+		return 0, false
+	case <-ctx.Done():
+		return 0, false
+	}
+}
+
+// maxSenderKeySyncLastRunEntries hard-caps the cooldown-stamp map.
+// Prune runs at PASS COMPLETION (not per trigger — a frame flood must
+// never pay a map scan per frame), and pass completion rate is itself
+// bounded by maxConcurrentSenderKeySyncPasses, so the scan frequency is
+// structurally low. Expired entries go first; if a flood of unique
+// valid senders keeps every stamp younger than the cooldown, arbitrary
+// entries are evicted down to the cap — losing a cooldown stamp only
+// means one extra (globally-capped) recovery pass may run early, which
+// is strictly cheaper than an unbounded map.
+const maxSenderKeySyncLastRunEntries = 1024
+
+// pruneSenderKeySyncLastRunLocked bounds senderKeySyncLastRun. Caller
+// must hold senderKeySyncMu.
+func (s *Service) pruneSenderKeySyncLastRunLocked() {
+	if len(s.senderKeySyncLastRun) <= maxSenderKeySyncLastRunEntries {
+		return
+	}
+	cutoff := time.Now().Add(-senderKeySyncCooldown)
+	for k, ts := range s.senderKeySyncLastRun {
+		if ts.Before(cutoff) {
+			delete(s.senderKeySyncLastRun, k)
+		}
+	}
+	// Still over the cap (flood of young stamps): evict arbitrarily.
+	for k := range s.senderKeySyncLastRun {
+		if len(s.senderKeySyncLastRun) <= maxSenderKeySyncLastRunEntries {
+			break
+		}
+		delete(s.senderKeySyncLastRun, k)
+	}
+}
+
+// hasSenderPubKey reports whether the sender's signing key is present
+// in the knowledge maps — the fan-out's termination condition.
+func (s *Service) hasSenderPubKey(sender string) bool {
+	s.knowledgeMu.RLock()
+	defer s.knowledgeMu.RUnlock()
+	return s.pubKeys[sender] != ""
+}
+
+// senderKeySyncCandidates snapshots up to senderKeySyncFanout addresses
+// of peers with live, connected OUTBOUND sessions, excluding the
+// previous hop (already tried first) AND deduplicating by peer
+// IDENTITY: several sessions to the same identity (reconnect aliases,
+// multi-homed peer) contribute at most one candidate, so the fan-out
+// budget buys senderKeySyncFanout DISTINCT peers to ask rather than
+// three connections to possibly one peer. Outbound addresses are
+// dialable by construction; inbound-only peers are skipped — a fresh
+// dial to an unroutable source address would only burn the pass budget.
+func (s *Service) senderKeySyncCandidates(exclude domain.PeerAddress) []domain.PeerAddress {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	excludeID := domain.PeerIdentity{}
+	if sess := s.sessions[exclude]; sess != nil {
+		excludeID = sess.peerIdentity
+	}
+	seenID := make(map[domain.PeerIdentity]struct{})
+	out := make([]domain.PeerAddress, 0, senderKeySyncFanout)
+	for addr, session := range s.sessions {
+		if session == nil || addr == exclude {
+			continue
+		}
+		if !session.peerIdentity.IsZero() {
+			if session.peerIdentity == excludeID {
+				continue
+			}
+			if _, dup := seenID[session.peerIdentity]; dup {
+				continue
+			}
+		}
+		health := s.health[s.resolveHealthAddress(addr)]
+		if health == nil || !health.Connected {
+			continue
+		}
+		if !session.peerIdentity.IsZero() {
+			seenID[session.peerIdentity] = struct{}{}
+		}
+		out = append(out, addr)
+		if len(out) >= senderKeySyncFanout {
+			break
+		}
+	}
+	return out
 }
 
 // outboundControlFrameLimitKey is the cmdLimiter bucket key used for
@@ -2791,6 +3362,11 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			TTLSeconds: frame.Item.TTLSeconds,
 			Hops:       frame.Item.Hops,
 			Body:       frame.Item.Body,
+			// Attached PUBLIC sender keys ride the top-level frame
+			// fields (see attachKnownSenderKeys); validated on import.
+			PubKey: frame.PubKey,
+			BoxKey: frame.BoxKey,
+			BoxSig: frame.BoxSig,
 		})
 		if err != nil {
 			return
@@ -2824,28 +3400,22 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 
 		stored, _, errCode := s.storeIncomingMessage(msg, true)
 		if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
-			// Pass nil for syncSession: this handler runs on the outbound
-			// session event loop and may be inside peerSessionRequest
-			// (single-reader constraint). syncSenderKeys falls back to a
-			// fresh TCP dial.
-			//
-			// Propagate s.runCtx rather than synthesising context.Background():
-			// dispatchPeerSessionFrame is invoked from servePeerSession which
-			// was started with s.runCtx, so this is the effective incoming
-			// context for this session. Threading ctx through the full
-			// dispatch signature is deferred to a separate task to keep this
-			// change focused on Step 5 policy (see CLAUDE.md: scope).
-			imported := s.syncSenderKeys(s.runCtx, address, nil)
-			stored, _, errCode = s.storeIncomingMessage(msg, true)
-			if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
-				log.Warn().
-					Str("peer", string(address)).
-					Str("id", string(msg.ID)).
-					Str("sender", msg.Sender).
-					Str("recipient", msg.Recipient).
-					Int("keys_imported", imported).
-					Msg("push_message: sender key still unknown after sync — message dropped")
-			}
+			// Legacy keyless frame — schedule a BACKGROUND single-flight
+			// contact sync and reject this attempt. Running the recovery
+			// inline here blocked the session event loop for the whole
+			// dial (up to syncRecoveryTimeout with the drain-tolerant
+			// reader) while the socket reader kept filling the bounded
+			// inboxCh — overflow there is fatal and tore down a healthy
+			// session precisely on the legacy/keyless route. No
+			// ack_delete goes out for this store result, so the sender's
+			// retry redelivers the message once the keys are imported.
+			log.Info().
+				Str("peer", string(address)).
+				Str("id", string(msg.ID)).
+				Str("sender", msg.Sender).
+				Str("recipient", msg.Recipient).
+				Msg("push_message_key_sync_scheduled")
+			s.triggerSenderKeySyncAsync(address, msg.Sender, session)
 		}
 		// Ack policy: see shouldAckOnStoreResult — stored=true OR the
 		// dedup branch (stored=false && errCode=="") both mean "we have
@@ -2984,12 +3554,15 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if admit := admitRelayFrame(s.sessionHasCapability(address, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
-		// Pass nil for syncSession: this handler may be dispatched from
-		// inside peerSessionRequest (e.g., relay_message arriving during
-		// a ping round-trip). Reusing the same session would deadlock on
-		// the single-reader inboxCh. syncSenderKeys falls back to a
-		// fresh TCP connection for key sync.
-		if ackStatus := s.handleRelayMessage(domain.PeerAddress(address), nil, frame); ackStatus != "" {
+		// Passing THIS session is safe post-owner-serialisation: the
+		// recovery goroutine never reads inboxCh — it only enqueues an
+		// owned-sync request on contactSyncCh, which the serve loop
+		// picks up after this dispatch returns (the historical nil was
+		// a guard against the recovery re-entering peerSessionRequest
+		// on the same single-reader inboxCh). For a previous hop whose
+		// address is not freshly dialable, this session IS the wire
+		// key recovery arrives on.
+		if ackStatus := s.handleRelayMessage(domain.PeerAddress(address), session, frame); ackStatus != "" {
 			s.sendRelayHopAck(domain.PeerAddress(address), frame.ID, ackStatus)
 		}
 	case "relay_hop_ack":

@@ -183,6 +183,36 @@ func SignPayload(id *Identity, payload []byte) string {
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(id.PrivateKey, payload))
 }
 
+// VerifyPublicKeyFingerprint checks that publicKeyBase64 decodes to a
+// well-formed Ed25519 public key whose fingerprint equals address. An
+// address IS the fingerprint of its signing key, so PUBLIC key material
+// carried inside transport frames is self-certifying: it can be
+// validated against the claimed sender address with no prior knowledge
+// of that sender. Only public data is involved — the private signing
+// key never appears on the wire.
+func VerifyPublicKeyFingerprint(address, publicKeyBase64 string) error {
+	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	if err != nil {
+		return fmt.Errorf("decode public key: %w", err)
+	}
+	if len(publicKeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid public key size: %d", len(publicKeyBytes))
+	}
+	if Fingerprint(ed25519.PublicKey(publicKeyBytes)) != address {
+		return fmt.Errorf("public key fingerprint mismatch")
+	}
+	return nil
+}
+
+// boxPublicKeySize is the wire size of an X25519 public key (crypto/ecdh
+// X25519 public key bytes). Enforced by VerifyBoxKeyBinding so a signed
+// but oversized "box key" string can never enter a caller's key store: a
+// hostile identity could otherwise sign a multi-megabyte blob with its
+// own valid Ed25519 key — the binding signature would verify (it signs
+// the string, not a decoded key) and every import chokepoint downstream
+// would cache megabytes per identity.
+const boxPublicKeySize = 32
+
 func VerifyBoxKeyBinding(address, publicKeyBase64, boxKeyBase64, signatureBase64 string) error {
 	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
 	if err != nil {
@@ -195,6 +225,17 @@ func VerifyBoxKeyBinding(address, publicKeyBase64, boxKeyBase64, signatureBase64
 	publicKey := ed25519.PublicKey(publicKeyBytes)
 	if Fingerprint(publicKey) != address {
 		return fmt.Errorf("public key fingerprint mismatch")
+	}
+
+	// Structural validation of the box key itself, BEFORE the signature
+	// check: a binding signature only proves the identity vouches for
+	// the string, not that the string is a well-formed X25519 key.
+	boxKeyBytes, err := base64.StdEncoding.DecodeString(boxKeyBase64)
+	if err != nil {
+		return fmt.Errorf("decode box key: %w", err)
+	}
+	if len(boxKeyBytes) != boxPublicKeySize {
+		return fmt.Errorf("invalid box key size: %d", len(boxKeyBytes))
 	}
 
 	signature, err := base64.RawURLEncoding.DecodeString(signatureBase64)

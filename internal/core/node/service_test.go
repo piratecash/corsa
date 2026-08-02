@@ -8812,13 +8812,17 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 	}
 }
 
-// TestRelayDMSyncsUnknownSenderKeyFromPreviousHop verifies that when a
-// relay_message carrying a DM arrives at the final recipient (or an
-// intermediate full node storing for offline delivery), and the sender's
-// public key is not yet known, the node syncs keys from the previous hop
-// (senderAddress) and retries the store — matching the existing push_message
-// behavior. Before the fix, deliverRelayedMessage treated
-// ErrCodeUnknownSenderKey as a terminal rejection.
+// TestRelayDMSyncsUnknownSenderKeyFromPreviousHop verifies the LEGACY
+// keyless recovery contract: when a relay_message carrying a DM arrives
+// at the final recipient without the v27 attached sender keys and the
+// sender's public key is not yet known, the node SCHEDULES a background
+// single-flight key sync from the previous hop (triggerSenderKeySyncAsync)
+// and rejects the current attempt; the upstream retry then finds the
+// imported keys and delivers. The recovery deliberately no longer runs
+// inline — a blocking dial on the session dispatch path let the socket
+// reader overflow the bounded inboxCh and kill a healthy session — so
+// the FIRST attempt must return "" (no ack → upstream retries) and only
+// the retry returns "delivered".
 func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	t.Parallel()
 
@@ -8861,17 +8865,20 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 	// Now register sender keys on nodeA — after the initial peer sync,
 	// so nodeB has not yet learned them. The relay delivery path will
 	// trigger syncPeer to fetch these keys on demand.
-	nodeA.peerMu.Lock()
+	// pubKeys/boxKeys/boxSigs/known are knowledgeMu-domain state (see
+	// docs/locking.md) — peerMu guards the peer/session domain and does
+	// not protect these maps.
+	nodeA.knowledgeMu.Lock()
 	nodeA.pubKeys[senderID.Address] = identity.PublicKeyBase64(senderID.PublicKey)
 	nodeA.boxKeys[senderID.Address] = identity.BoxPublicKeyBase64(senderID.BoxPublicKey)
 	nodeA.boxSigs[senderID.Address] = identity.SignBoxKeyBinding(senderID)
 	nodeA.known.Add(senderID.Address)
-	nodeA.peerMu.Unlock()
+	nodeA.knowledgeMu.Unlock()
 
 	// Verify nodeB does NOT know the sender's key yet.
-	nodeB.peerMu.RLock()
+	nodeB.knowledgeMu.RLock()
 	_, hasSenderKey := nodeB.pubKeys[senderID.Address]
-	nodeB.peerMu.RUnlock()
+	nodeB.knowledgeMu.RUnlock()
 	if hasSenderKey {
 		t.Fatal("precondition failed: nodeB should not know sender key before relay")
 	}
@@ -8911,16 +8918,31 @@ func TestRelayDMSyncsUnknownSenderKeyFromPreviousHop(t *testing.T) {
 		nodeB.Address(), frame.Recipient, nodeB.Address() == frame.Recipient)
 	t.Logf("senderAddress=%s, senderID.Address=%s", normalizeAddress(addressA), senderID.Address)
 
+	// First attempt: keys unknown, no attached triple → rejected, and a
+	// background sync against the previous hop is scheduled.
 	status := nodeB.handleRelayMessage(domain.PeerAddress(normalizeAddress(addressA)), nil, frame)
+	if status != "" {
+		t.Fatalf("first keyless attempt must be rejected while the async sync runs, got %q", status)
+	}
+
+	// The background single-flight sync dials nodeA and imports the
+	// sender contact from its fetch_contacts reply.
+	waitForCondition(t, 8*time.Second, func() bool {
+		nodeB.knowledgeMu.RLock()
+		defer nodeB.knowledgeMu.RUnlock()
+		return nodeB.pubKeys[senderID.Address] != ""
+	})
+
+	// Upstream retry (the previous hop received no hop-ack): now the
+	// keys are present and the delivery succeeds.
+	status = nodeB.handleRelayMessage(domain.PeerAddress(normalizeAddress(addressA)), nil, frame)
 	if status != "delivered" {
-		// Dump nodeB state for diagnostics.
-		nodeB.peerMu.RLock()
+		nodeB.knowledgeMu.RLock()
 		hasPub := nodeB.pubKeys[senderID.Address] != ""
 		hasBox := nodeB.boxKeys[senderID.Address] != ""
-		nodeB.peerMu.RUnlock()
-		t.Logf("post-relay nodeB state: hasPubKey=%v, hasBoxKey=%v", hasPub, hasBox)
-		t.Fatalf("expected \"delivered\" after key sync from previous hop, got %q — "+
-			"deliverRelayedMessage should sync unknown sender keys before rejecting", status)
+		nodeB.knowledgeMu.RUnlock()
+		t.Logf("post-sync nodeB state: hasPubKey=%v, hasBoxKey=%v", hasPub, hasBox)
+		t.Fatalf("expected \"delivered\" on retry after async key sync, got %q", status)
 	}
 }
 

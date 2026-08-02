@@ -647,6 +647,9 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 			MaxHops:     defaultMaxHops,
 			PreviousHop: s.identity.Address,
 		}
+		// v27 sender-key attachment — symmetric with the outbound
+		// sendRelayMessage{,WithOrigin} builders.
+		s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 		if !s.writeFrameToInbound(ctx, address, frame) {
 			return false
 		}
@@ -729,6 +732,10 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.P
 	// call, so only the *MessageFrame is shared, and it is never mutated on any
 	// send path (session marshal, queue store, inbound write are all reads).
 	frame := gossipPushFrame(msg)
+	// v27 sender-key attachment (DM-class topics only — the helper
+	// no-ops for broadcast gossip). Done once here, before the fan-out
+	// shares the frame read-only across the send goroutines.
+	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 	msgID := string(msg.ID)
 	recipient := msg.Recipient
 	for _, address := range targets {

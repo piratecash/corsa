@@ -733,7 +733,18 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 
 	newHopCount := hopCount + 1
 
-	// Build the forwarded frame.
+	// Build the forwarded frame. The origin sender's attached PUBLIC key
+	// triple is copied through verbatim — stripping it here would break
+	// first-contact verification on the final recipient (v27, see
+	// config.ProtocolVersionDMSenderKeys). Verbatim copy, not
+	// re-validation: transit hops stay crypto-free on the fast path, the
+	// recipient validates before import (validateAttachedSenderPubKey /
+	// importVerifiedSenderKeys). The ONE transit-side check is the cheap
+	// length cap below: without it a hostile origin could stuff
+	// megabytes into the key fields — bypassing the Body-size admission
+	// cap — and have every hop amplify them across the mesh; oversized
+	// fields can never validate on the recipient anyway, so they are
+	// dropped here (the recipient falls back to the legacy sync path).
 	forwardFrame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          messageID,
@@ -747,6 +758,21 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		HopCount:    newHopCount,
 		MaxHops:     maxHops,
 		PreviousHop: string(s.identity.Address),
+	}
+	if len(frame.PubKey) <= maxAttachedKeyFieldLen &&
+		len(frame.BoxKey) <= maxAttachedKeyFieldLen &&
+		len(frame.BoxSig) <= maxAttachedKeyFieldLen {
+		forwardFrame.PubKey = frame.PubKey
+		forwardFrame.BoxKey = frame.BoxKey
+		forwardFrame.BoxSig = frame.BoxSig
+	}
+	// Mixed-network backfill: a pre-v27 previous hop (or origin) sends
+	// the frame keyless. If THIS node happens to know the origin's keys
+	// (e.g. the origin is a direct neighbour whose handshake we cached),
+	// attach them so the downstream recipient still gets the
+	// first-contact fast path.
+	if forwardFrame.PubKey == "" {
+		s.attachKnownSenderKeys(&forwardFrame, forwardFrame.Topic, originSender)
 	}
 
 	// Try direct peer first — is the recipient directly connected?
@@ -885,23 +911,30 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 // deduplication, persistence, and UI notification logic.
 //
 // senderAddress is the transport address of the previous relay hop. When
-// storeIncomingMessage rejects the DM with ErrCodeUnknownSenderKey, this
-// function syncs keys from the previous hop (which likely knows the
-// sender's keys, since it already processed the message) and retries —
-// matching the existing push_message behavior.
+// storeIncomingMessage rejects the DM with ErrCodeUnknownSenderKey (legacy
+// keyless frame — a v27 frame carries the sender's self-certifying key
+// triple and never reaches that reject), this function SCHEDULES a
+// background single-flight contact sync from the previous hop
+// (triggerSenderKeySyncAsync) and rejects the current attempt; the
+// previous hop's relay retry redelivers and succeeds once the keys are
+// imported. The sync is never run inline here — this function executes on
+// session dispatch loops, and a blocking recovery dial would let the
+// socket reader overflow the bounded inboxCh and kill a healthy session.
 //
-// Returns true if the message was accepted (stored locally), false if it was
-// rejected (parse error, invalid signature, unknown key after sync, etc.).
-// The caller uses this to decide the hop-ack status: a rejected message must
-// NOT be reported as "delivered" or "stored" to the previous hop.
-// deliverRelayedMessage stores a relayed message locally. When the message
-// sender's keys are unknown, it attempts on-demand key sync from the
-// previous hop.
+// Returns true if the message was accepted (stored locally), false if it
+// was rejected (parse error, invalid signature, unknown sender key, etc.).
+// The caller uses this to decide the hop-ack status: a rejected message
+// must NOT be reported as "delivered" or "stored" to the previous hop.
 //
-// syncSession is an optional outbound session to the relay peer that can be
-// reused for fetch_contacts without opening a new TCP connection. Pass nil
-// when the caller is inside a peerSessionRequest read loop on the same
-// session (single-reader constraint on inboxCh would deadlock).
+// syncSession is the live outbound session to the previous hop, when the
+// caller has one (the inbound relay dispatch resolves it via
+// activePeerSession; the outbound session dispatch passes its own
+// session). The recovery pass uses it exclusively through the session
+// OWNER (requestOwnedContactSync → serve-loop contactSyncCh) — never by
+// reading inboxCh from the recovery goroutine, which would race the
+// serve loop for frames. A previous hop connected ONLY inbound (no
+// outbound session exists) has no recovery wire — see the honest-scope
+// note on triggerSenderKeySyncAsync.
 func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSession *peerSession, frame protocol.Frame) bool {
 	msg, err := incomingMessageFromFrame(protocol.Frame{
 		ID:         frame.ID,
@@ -912,6 +945,13 @@ func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSe
 		CreatedAt:  frame.CreatedAt,
 		TTLSeconds: frame.TTLSeconds,
 		Body:       frame.Body,
+		// Attached PUBLIC sender keys (v27): validated by
+		// importAttachedSenderKeys before entering the knowledge maps —
+		// this is what makes a first-contact relay DM verifiable without
+		// the on-demand sync below.
+		PubKey: frame.PubKey,
+		BoxKey: frame.BoxKey,
+		BoxSig: frame.BoxSig,
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("id", frame.ID).Msg("relay_deliver_parse_error")
@@ -932,22 +972,24 @@ func (s *Service) deliverRelayedMessage(senderAddress domain.PeerAddress, syncSe
 	msg.Hops = relayChainGossipBudget(frame.HopCount, frame.MaxHops)
 	stored, _, errCode := s.storeIncomingMessage(msg, false)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey && senderAddress != "" {
-		log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_start")
-		// Use s.runCtx as the owning lifecycle ctx for the narrow key sync.
-		// Threading ctx through handleRelayMessage/deliverRelayedMessage is
-		// out of scope for Step 5 (would touch 25+ call sites in tests); the
-		// service-run context still provides cancellation on shutdown, which
-		// is the property CLAUDE.md protects.
-		imported := s.syncSenderKeys(s.runCtx, senderAddress, syncSession)
-		if imported == 0 {
-			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_no_contacts_imported")
-		}
-		stored, _, errCode = s.storeIncomingMessage(msg, false)
-		if stored {
-			log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Int("imported", imported).Msg("relay_deliver_after_key_sync")
-		} else {
-			log.Warn().Str("id", frame.ID).Str("sender", frame.Address).Str("code", errCode).Int("imported", imported).Msg("relay_key_sync_retry_failed")
-		}
+		// Legacy keyless path (pre-v27 origin or a legacy hop stripped
+		// the attached keys): schedule a BACKGROUND single-flight
+		// contact sync against the previous hop and reject this
+		// attempt. The sync must NOT run inline: deliverRelayedMessage
+		// executes on session dispatch loops, and a synchronous
+		// recovery dial (drains of the responder's post-auth backlog
+		// take up to syncReplyDrainCap each) would stall the loop while
+		// the socket reader fills the bounded inboxCh — overflow there
+		// tears down a healthy session. The rejected message is
+		// redelivered by the previous hop's relay retry (no hop-ack is
+		// sent for a rejected delivery), which finds the imported keys
+		// on the next attempt. syncSession (the live outbound session to
+		// the previous hop, when the caller had one) is handed to the
+		// recovery pass, which uses it ONLY through the session owner
+		// (requestOwnedContactSync) — the wire that still reaches a
+		// NATed / inbound-only previous hop a fresh dial cannot.
+		log.Info().Str("id", frame.ID).Str("sender", frame.Address).Str("synced_from", string(senderAddress)).Msg("relay_key_sync_scheduled")
+		s.triggerSenderKeySyncAsync(senderAddress, msg.Sender, syncSession)
 	}
 	if !stored && errCode != "" {
 		log.Warn().Str("id", frame.ID).Str("code", errCode).Msg("relay_deliver_rejected")
@@ -1327,6 +1369,12 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 		MaxHops:     defaultMaxHops,
 		PreviousHop: s.identity.Address,
 	}
+	// v27: attach the sender's self-certifying PUBLIC key triple so a
+	// first-contact recipient can verify without a network round-trip.
+	// For own envelopes msg.Sender == s.identity and the triple comes
+	// from the self contact seeded at NewService (box key absent under
+	// the relay-only DM opt-out — signing key only, by design).
+	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
 	sent := s.enqueuePeerFrame(address, frame)
 	if !sent {
@@ -1417,6 +1465,8 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 		MaxHops:     defaultMaxHops,
 		PreviousHop: s.identity.Address,
 	}
+	// v27 sender-key attachment — same contract as sendRelayMessage.
+	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
 	sent := s.enqueuePeerFrame(address, frame)
 	if !sent {

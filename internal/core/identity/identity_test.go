@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"os"
 	"path/filepath"
@@ -248,5 +249,48 @@ func TestFingerprintProducesValidAddress(t *testing.T) {
 		if err := ValidateAddress(addr); err != nil {
 			t.Errorf("Fingerprint produced invalid address %q: %v", addr, err)
 		}
+	}
+}
+
+// TestVerifyBoxKeyBindingRejectsMalformedBoxKey pins the structural
+// validation of the box key itself: a binding signature only proves the
+// identity vouches for the STRING, not that the string is a well-formed
+// X25519 key. Without the size check a hostile identity could sign a
+// multi-megabyte blob with its own valid Ed25519 key and have every
+// import chokepoint cache megabytes per identity (memory DoS via the
+// v27 attached-key path, fetch_contacts, or handshake key exchange).
+func TestVerifyBoxKeyBindingRejectsMalformedBoxKey(t *testing.T) {
+	id, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	pub := PublicKeyBase64(id.PublicKey)
+
+	sign := func(boxKeyBase64 string) string {
+		return base64.RawURLEncoding.EncodeToString(
+			ed25519.Sign(id.PrivateKey, boxKeyBindingPayload(id.Address, boxKeyBase64)))
+	}
+
+	// Oversized (but validly signed) blob: 1 MiB of zeros.
+	huge := base64.StdEncoding.EncodeToString(make([]byte, 1<<20))
+	if err := VerifyBoxKeyBinding(id.Address, pub, huge, sign(huge)); err == nil {
+		t.Fatalf("signed 1MiB box key must be rejected by size validation")
+	}
+
+	// Undersized key.
+	tiny := base64.StdEncoding.EncodeToString(make([]byte, 8))
+	if err := VerifyBoxKeyBinding(id.Address, pub, tiny, sign(tiny)); err == nil {
+		t.Fatalf("signed 8-byte box key must be rejected by size validation")
+	}
+
+	// Not base64 at all.
+	if err := VerifyBoxKeyBinding(id.Address, pub, "***", sign("***")); err == nil {
+		t.Fatalf("non-base64 box key must be rejected")
+	}
+
+	// Control: the genuine 32-byte key still verifies.
+	genuine := BoxPublicKeyBase64(id.BoxPublicKey)
+	if err := VerifyBoxKeyBinding(id.Address, pub, genuine, SignBoxKeyBinding(id)); err != nil {
+		t.Fatalf("genuine box key rejected: %v", err)
 	}
 }

@@ -269,6 +269,9 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		sendCh:       make(chan protocol.Frame, peerSessionSendBuffer),
 		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
 		errCh:        make(chan error, 1),
+		// Owner-serialised contact sync (sender-key recovery). Unbuffered:
+		// see the peerSession field doc.
+		contactSyncCh: make(chan chan int),
 	}
 	s.attachOutboundNetCore(session)
 	go s.readPeerSession(reader, session)
@@ -444,6 +447,35 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		case frame := <-session.inboxCh:
 			s.markPeerRead(session.address, frame)
 			s.dispatchPeerSessionFrame(session.address, session, frame)
+		case reply := <-session.contactSyncCh:
+			// Owner-serialised contact sync (sender-key recovery,
+			// requestOwnedContactSync): the serve loop is the single
+			// legal reader of inboxCh, so the fetch_contacts
+			// request/reply runs HERE, on the loop, never in the
+			// recovery goroutine. While peerSessionRequest waits for
+			// the contacts reply it keeps consuming inbox frames
+			// (dispatching fire-and-forget types), so the inbox cannot
+			// overflow — same posture as the heartbeat ping below. The
+			// reply channel is buffered (1) by the requester, so this
+			// send never blocks the loop.
+			imported, err := s.syncContactsViaSession(session)
+			if err != nil {
+				// A peerSessionRequest error is fatal for the session —
+				// identical to the heartbeat contract below. In
+				// particular a reply timeout means readPeerSession hit
+				// the read deadline, pushed its single error and
+				// EXITED: continuing the loop here would leave a zombie
+				// session whose next heartbeat blocks forever (the
+				// errCh error was already consumed, no reader remains
+				// to produce another, and peerSessionRequest has no ctx
+				// branch). Answer the requester first (buffered chan —
+				// never blocks), then tear the session down.
+				reply <- 0
+				log.Warn().Str("peer", string(session.address)).Err(err).Msg("owned_contact_sync_failed, tearing down session")
+				s.markPeerDisconnected(session.address, err)
+				return err
+			}
+			reply <- imported
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
 				log.Warn().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
@@ -812,6 +844,9 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		sendCh:       make(chan protocol.Frame, peerSessionSendBuffer),
 		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
 		errCh:        make(chan error, 1),
+		// Owner-serialised contact sync (sender-key recovery). Unbuffered:
+		// see the peerSession field doc.
+		contactSyncCh: make(chan chan int),
 	}
 	s.attachOutboundNetCore(session)
 

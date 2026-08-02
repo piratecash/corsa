@@ -415,7 +415,17 @@ const (
 	// relay_delivery_receipt). Additive: pre-v23 binaries reject the unknown
 	// status at parse time and drop the frame; the seen-sender's bounded
 	// retry absorbs that until both ends are v23+.
-	ProtocolVersion        = 26
+	// v27: self-certifying sender keys on DM transport frames —
+	// relay_message / push_message carry the origin sender's PUBLIC key
+	// triple (pubkey/boxkey/boxsig, reusing the existing hello-frame
+	// fields), letting a first-contact recipient verify the envelope
+	// without an on-demand contact sync to hops that may not know the
+	// sender. Additive both ways: pre-v27 receivers ignore the extra
+	// fields, pre-v27 relays strip them in transit (their forward-frame
+	// builder does not copy the fields) and the receiver falls back to
+	// the legacy sync path. No emission gate is needed — unlike
+	// seen_ack, unknown JSON fields are silently ignored, not rejected.
+	ProtocolVersion        = 27
 	MinimumProtocolVersion = 22
 	// ProtocolVersionSeenAck is the version that introduced
 	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
@@ -425,8 +435,18 @@ const (
 	// internal/core/node (sendReceiptToPeer, pushReceiptToSubscribers) once
 	// MinimumProtocolVersion reaches ProtocolVersionSeenAck.
 	ProtocolVersionSeenAck = 23
-	DefaultOutgoingPeers   = 8
-	DefaultPeerPort        = "64646"
+	// ProtocolVersionDMSenderKeys is the version that introduced the
+	// attached sender-key triple on DM transport frames. Not used as an
+	// emission gate (the fields are additive); it exists so the floor
+	// raise that eventually assumes "keys always attached, transit never
+	// strips them" — enabling removal of the on-demand sender-key sync
+	// fallback (syncSenderKeys) — has a documented anchor.
+	// TODO(dm-sender-keys-floor): once MinimumProtocolVersion reaches
+	// this value, the fallback sync in deliverRelayedMessage /
+	// handleInboundPushMessage becomes dead code for DM topics.
+	ProtocolVersionDMSenderKeys = 27
+	DefaultOutgoingPeers        = 8
+	DefaultPeerPort             = "64646"
 )
 
 // CorsaVersion is the canonical release version string ("MAJOR.MINOR.BUILD").

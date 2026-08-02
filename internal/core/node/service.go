@@ -171,16 +171,16 @@ type Service struct {
 	//   • receipts      — recipient → persisted DeliveryReceipt batches
 	//   • upstream      — peer address → upstream-subscription marker; set of
 	//                     peers that have subscribed to our outbox
-	deliveryMu        sync.RWMutex
-	pending           map[domain.PeerAddress][]pendingFrame
-	pendingKeys       map[pendingKey]struct{}
-	outbound          map[string]outboundDelivery
+	deliveryMu  sync.RWMutex
+	pending     map[domain.PeerAddress][]pendingFrame
+	pendingKeys map[pendingKey]struct{}
+	outbound    map[string]outboundDelivery
 	// lastOutboundTerminalSweep throttles sweepTerminalOutbound (guarded
 	// by deliveryMu like the map it sweeps).
 	lastOutboundTerminalSweep time.Time
-	relayRetry        map[string]relayAttempt
-	awaitingDelivered map[protocol.MessageID]*deliveryRetryEntry
-	awaitingSeenAck   map[protocol.MessageID]*seenAckRetryEntry
+	relayRetry                map[string]relayAttempt
+	awaitingDelivered         map[protocol.MessageID]*deliveryRetryEntry
+	awaitingSeenAck           map[protocol.MessageID]*seenAckRetryEntry
 	// sentDMIDs is a bounded LRU of message IDs this node has originated as
 	// DMs (populated when registering the end-to-end delivery retry). It is
 	// the "did we send this?" signal storeDeliveryReceipt uses to reject
@@ -444,6 +444,10 @@ type Service struct {
 	probeRegistry                  *probeRegistry                               // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
 	queryRateLimit                 *queryRateLimit                              // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
 	queryIDCounter                 atomic.Uint64                                // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
+	senderKeySyncMu                sync.Mutex                                   // guards senderKeySyncInFlight + senderKeySyncHopInFlight + senderKeySyncLastRun (own tiny domain — never held across I/O)
+	senderKeySyncInFlight          map[string]struct{}                          // single-flight set for background sender-key recovery passes, keyed by sender fingerprint; see triggerSenderKeySyncAsync
+	senderKeySyncHopInFlight       map[string]struct{}                          // per-previous-hop fairness slots (1 pass per hop, keyed by authenticated identity with address fallback) — a hostile hop cannot starve the global pass cap
+	senderKeySyncLastRun           map[string]time.Time                         // per-sender cooldown stamps for recovery passes (senderKeySyncCooldown)
 	relayShapingHint               atomic.Uint64                                // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
 	identitySessions               map[domain.PeerIdentity]int                  // peer identity → active session count (multi-session awareness)
 	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
@@ -856,6 +860,21 @@ type peerSession struct {
 	// they need no lock.
 	ffDropsSinceWarn int
 	ffLastDropWarnAt time.Time
+
+	// contactSyncCh serialises on-demand contact syncs through the
+	// session's OWNER (the servePeerSession loop): a recovery goroutine
+	// sends a reply channel here, the serve loop — the single legal
+	// reader of inboxCh — runs fetch_contacts itself and reports the
+	// imported count back. This is the ONLY sanctioned way to run a
+	// fetch_contacts over a live session from outside the loop:
+	// calling peerSessionRequest from another goroutine would race the
+	// loop for inbox frames. Unbuffered by design — a send succeeds
+	// only when the loop is alive and idle enough to take the request,
+	// so a dead or torn-down session simply times the sender out
+	// (requestOwnedContactSync). nil in unit tests that build a
+	// peerSession manually; a nil channel makes both the serve-loop
+	// select arm and the request helper inert.
+	contactSyncCh chan chan int
 }
 
 // peerWelcomeMeta holds welcome-frame data deferred until CM activation.
@@ -1098,6 +1117,21 @@ type incomingMessage struct {
 	// when known — see protocol.Envelope.ViaIdentity for why address
 	// comparison alone cannot cover inbound-only next-hops.
 	ViaIdentity domain.PeerIdentity
+
+	// SenderPubKey/SenderBoxKey/SenderBoxSig carry the origin sender's
+	// PUBLIC key material attached to the transport frame (relay_message
+	// / push_message, DM-class topics only). All three are
+	// self-certifying against the Sender address — the address is the
+	// fingerprint of the signing key — and are validated by
+	// importAttachedSenderKeys before any of them enters the knowledge
+	// maps. Empty when the sender (or an intermediate legacy hop that
+	// stripped the fields) did not attach them; storeIncomingMessage
+	// then falls back to the on-demand contact sync. This is what lets
+	// a FIRST-CONTACT DM delivered over relay hops that never met the
+	// sender verify without a network round-trip.
+	SenderPubKey string
+	SenderBoxKey string
+	SenderBoxSig string
 }
 
 func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
@@ -1274,62 +1308,65 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// unit tests that drive the Service without calling Run, and
 		// matches the moment the in-memory state machine first became
 		// live.
-		startedAt:               time.Now().UTC(),
-		cfg:                     cfg,
-		eventBus:                eventBus,
-		selfBoxKey:              selfBoxKey,
-		selfBoxSig:              selfBoxSig,
-		trust:                   trust,
-		peers:                   peers,
-		peersStatePath:          peersStatePath,
-		persistedMeta:           persistedByAddr,
-		known:                   known,
-		boxKeys:                 boxKeys,
-		pubKeys:                 pubKeys,
-		boxSigs:                 boxSigs,
-		topics:                  topics,
-		receipts:                receipts,
-		notices:                 make(map[string]gazeta.Notice),
-		seen:                    seen,
-		seenReceipts:            seenReceipts,
-		subs:                    make(map[string]map[string]*subscriber),
-		sessions:                make(map[domain.PeerAddress]*peerSession),
-		health:                  restoredHealth,
-		peerTypes:               make(map[domain.PeerAddress]domain.NodeType),
-		peerIDs:                 make(map[domain.PeerAddress]domain.PeerIdentity),
-		peerVersions:            restoredVersions,
-		peerBuilds:              make(map[domain.PeerAddress]int),
-		pending:                 pending,
-		pendingKeys:             pendingKeys,
-		relayRetry:              relayRetry,
-		relayDeliveredTo:        make(map[protocol.MessageID]map[domain.PeerIdentity]struct{}),
-		outbound:                make(map[string]outboundDelivery),
-		awaitingDelivered:       make(map[protocol.MessageID]*deliveryRetryEntry),
-		awaitingSeenAck:         make(map[protocol.MessageID]*seenAckRetryEntry),
-		sentDMIDs:               newBoundedKnownIdentities(maxSentDMIDs),
-		upstream:                make(map[domain.PeerAddress]struct{}),
-		dialOrigin:              make(map[domain.PeerAddress]domain.PeerAddress),
-		observedAddrs:           make(map[domain.PeerIdentity]string),
-		observedIPHistoryByPeer: make(map[domain.PeerAddress][]domain.PeerIP),
-		reachableGroups:         computeReachableGroups(cfg),
-		inboundHealthRefs:       make(map[domain.PeerAddress]int),
-		conns:                   make(map[netcore.ConnID]*connEntry),
-		connIDByNetConn:         make(map[net.Conn]netcore.ConnID),
-		bans:                    make(map[string]banEntry),
-		events:                  make(map[chan protocol.LocalChangeEvent]struct{}),
-		identitySessions:        make(map[domain.PeerIdentity]int),
-		identityRelaySessions:   make(map[domain.PeerIdentity]int),
-		pendingWithdrawals:      make(map[domain.PeerIdentity]*pendingWithdrawal),
-		peerQuarantine:          make(map[domain.PeerIdentity]routeQuarantineEntry),
-		peerDisconnectHistory:   make(map[domain.PeerIdentity][]time.Time),
-		peerAnnounceHistory:     make(map[domain.PeerIdentity][]time.Time),
-		lastResyncAccepted:      make(map[domain.PeerIdentity]time.Time),
-		bannedIPSet:             make(map[string]domain.BannedIPEntry),
-		remoteBannedIPs:         make(map[string]remoteIPBanEntry),
-		remoteIPBanOffenders:    make(map[string]map[domain.PeerAddress]time.Time),
-		setupFailures:           make(map[domain.PeerAddress]*setupFailureEntry),
-		aggregateStatus:         domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
-		done:                    make(chan struct{}),
+		startedAt:                time.Now().UTC(),
+		cfg:                      cfg,
+		eventBus:                 eventBus,
+		selfBoxKey:               selfBoxKey,
+		selfBoxSig:               selfBoxSig,
+		trust:                    trust,
+		peers:                    peers,
+		peersStatePath:           peersStatePath,
+		persistedMeta:            persistedByAddr,
+		known:                    known,
+		boxKeys:                  boxKeys,
+		pubKeys:                  pubKeys,
+		boxSigs:                  boxSigs,
+		topics:                   topics,
+		receipts:                 receipts,
+		notices:                  make(map[string]gazeta.Notice),
+		seen:                     seen,
+		seenReceipts:             seenReceipts,
+		subs:                     make(map[string]map[string]*subscriber),
+		sessions:                 make(map[domain.PeerAddress]*peerSession),
+		health:                   restoredHealth,
+		peerTypes:                make(map[domain.PeerAddress]domain.NodeType),
+		peerIDs:                  make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerVersions:             restoredVersions,
+		peerBuilds:               make(map[domain.PeerAddress]int),
+		pending:                  pending,
+		pendingKeys:              pendingKeys,
+		relayRetry:               relayRetry,
+		relayDeliveredTo:         make(map[protocol.MessageID]map[domain.PeerIdentity]struct{}),
+		outbound:                 make(map[string]outboundDelivery),
+		awaitingDelivered:        make(map[protocol.MessageID]*deliveryRetryEntry),
+		awaitingSeenAck:          make(map[protocol.MessageID]*seenAckRetryEntry),
+		sentDMIDs:                newBoundedKnownIdentities(maxSentDMIDs),
+		senderKeySyncInFlight:    make(map[string]struct{}),
+		senderKeySyncHopInFlight: make(map[string]struct{}),
+		senderKeySyncLastRun:     make(map[string]time.Time),
+		upstream:                 make(map[domain.PeerAddress]struct{}),
+		dialOrigin:               make(map[domain.PeerAddress]domain.PeerAddress),
+		observedAddrs:            make(map[domain.PeerIdentity]string),
+		observedIPHistoryByPeer:  make(map[domain.PeerAddress][]domain.PeerIP),
+		reachableGroups:          computeReachableGroups(cfg),
+		inboundHealthRefs:        make(map[domain.PeerAddress]int),
+		conns:                    make(map[netcore.ConnID]*connEntry),
+		connIDByNetConn:          make(map[net.Conn]netcore.ConnID),
+		bans:                     make(map[string]banEntry),
+		events:                   make(map[chan protocol.LocalChangeEvent]struct{}),
+		identitySessions:         make(map[domain.PeerIdentity]int),
+		identityRelaySessions:    make(map[domain.PeerIdentity]int),
+		pendingWithdrawals:       make(map[domain.PeerIdentity]*pendingWithdrawal),
+		peerQuarantine:           make(map[domain.PeerIdentity]routeQuarantineEntry),
+		peerDisconnectHistory:    make(map[domain.PeerIdentity][]time.Time),
+		peerAnnounceHistory:      make(map[domain.PeerIdentity][]time.Time),
+		lastResyncAccepted:       make(map[domain.PeerIdentity]time.Time),
+		bannedIPSet:              make(map[string]domain.BannedIPEntry),
+		remoteBannedIPs:          make(map[string]remoteIPBanEntry),
+		remoteIPBanOffenders:     make(map[string]map[domain.PeerAddress]time.Time),
+		setupFailures:            make(map[domain.PeerAddress]*setupFailureEntry),
+		aggregateStatus:          domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
+		done:                     make(chan struct{}),
 	}
 
 	// Initialize PeerProvider (Stage 3: connection management integration).
@@ -5179,19 +5216,68 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		senderBoxKey := s.boxKeys[msg.Sender]
 		senderBoxSig := s.boxSigs[msg.Sender]
 		s.knowledgeMu.RUnlock()
+		// First-contact path: the sender is unknown locally, but the
+		// transport frame carried the sender's self-certifying PUBLIC
+		// key triple. USE the attached signing key for verification
+		// WITHOUT importing anything yet — no state (knowledge maps,
+		// bounded known set, IdentityAdded events) may change before
+		// the envelope signature proves the message is genuine,
+		// otherwise a flood of valid-fingerprint-but-forged-envelope
+		// frames would churn the shared LRU and evict real cached
+		// contacts. Import happens after VerifyEnvelope below.
+		// Steady-state cost is zero: this branch runs only when the
+		// pubkey is missing.
+		if senderPubKey == "" && msg.SenderPubKey != "" {
+			if err := validateAttachedSenderPubKey(msg); err != nil {
+				log.Warn().Err(err).Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("sender", msg.Sender).Msg("attached_sender_key_rejected")
+			} else {
+				senderPubKey = msg.SenderPubKey
+				// The attached box pair participates in verification
+				// only when its binding verifies (VerifyBoxKeyBinding
+				// also enforces the 32-byte X25519 size — a signed
+				// oversized blob is structurally invalid). A broken
+				// half degrades to signing-key-only.
+				senderBoxKey, senderBoxSig = "", ""
+				if msg.SenderBoxKey != "" && msg.SenderBoxSig != "" &&
+					identity.VerifyBoxKeyBinding(msg.Sender, msg.SenderPubKey, msg.SenderBoxKey, msg.SenderBoxSig) == nil {
+					senderBoxKey, senderBoxSig = msg.SenderBoxKey, msg.SenderBoxSig
+				}
+			}
+		}
 		if senderPubKey == "" {
 			log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Msg("storeIncomingMessage: unknown sender key")
 			return false, 0, protocol.ErrCodeUnknownSenderKey
 		}
-		// Verify boxkey binding signature at ingest as required by encryption.md.
+		// Boxkey binding at ingest as required by encryption.md, with a
+		// self-healing twist: a CACHED pair that fails the binding (or
+		// is half-cached — key without signature) is superseded by a
+		// binding-valid attached pair from the frame instead of wedging
+		// the sender behind ErrCodeInvalidDirectMessageSig forever —
+		// the frame's pair is authenticated by the same signing key, so
+		// it is at least as trustworthy as the cache it replaces
+		// (importVerifiedSenderKeys persists the replacement below).
+		// Only when a complete cached pair fails AND no valid
+		// replacement is attached does the original reject stand.
 		if senderBoxKey != "" && senderBoxSig != "" {
 			if err := identity.VerifyBoxKeyBinding(msg.Sender, senderPubKey, senderBoxKey, senderBoxSig); err != nil {
-				return false, 0, protocol.ErrCodeInvalidDirectMessageSig
+				if !attachedBoxPairValid(msg, senderPubKey) {
+					return false, 0, protocol.ErrCodeInvalidDirectMessageSig
+				}
+				log.Warn().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("sender", msg.Sender).Msg("cached_boxkey_binding_invalid_superseded_by_attached")
 			}
 		}
 		if err := directmsg.VerifyEnvelope(msg.Sender, senderPubKey, msg.Recipient, msg.Body); err != nil {
 			return false, 0, protocol.ErrCodeInvalidDirectMessageSig
 		}
+		// The envelope signature verified — NOW the attached material
+		// is proven to belong to a sender that authored a genuine
+		// message, so persist whatever the knowledge maps are missing
+		// or hold in a broken state (signing key for a first contact;
+		// box pair for a contact whose pubkey was known but whose box
+		// pair never arrived, arrived half, or fails its binding — the
+		// recipient could otherwise read but never reply, and the
+		// fallback sync no longer triggers once the pubkey exists).
+		s.importVerifiedSenderKeys(msg)
 	}
 
 	s.cleanupExpiredMessages()
@@ -6483,6 +6569,10 @@ func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscr
 			return &item
 		}(),
 	}
+	// Node-route subscribers run storeIncomingMessage on their side: a
+	// recipient that never met the sender needs the self-certifying key
+	// triple to verify a first-contact DM (see attachKnownSenderKeys).
+	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
 	for _, sub := range subs {
 		s.goBackground(func() { s.writePushFrame(sub, frame) })
@@ -6533,12 +6623,18 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 			continue
 		}
 		msgFrame := item
-		s.writePushFrame(sub, protocol.Frame{
+		replay := protocol.Frame{
 			Type:      "push_message",
 			Topic:     "dm",
 			Recipient: sub.recipient,
 			Item:      &msgFrame,
-		})
+		}
+		// Backlog replay is the primary delivery path for a recipient
+		// that reconnects after the original relay/push attempt — a
+		// first-contact recipient needs the sender's self-certifying
+		// key triple here just as on the live push path.
+		s.attachKnownSenderKeys(&replay, "dm", msgFrame.Sender)
+		s.writePushFrame(sub, replay)
 	}
 
 	receipts := s.fetchDeliveryReceiptsFrame(sub.recipient)
@@ -6702,15 +6798,11 @@ func (s *Service) learnIdentityFromWelcome(frame protocol.Frame, dialAddress dom
 	if frame.Address != "" {
 		s.addKnownIdentity(domain.PeerIdentityFromWire(frame.Address))
 	}
-	// When all key fields are present, verify the box key binding before storing.
-	if frame.Address != "" && frame.PubKey != "" && frame.BoxKey != "" && frame.BoxSig != "" {
-		if identity.VerifyBoxKeyBinding(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig) != nil {
-			return
-		}
-	}
-	s.addKnownBoxKey(frame.Address, frame.BoxKey)
-	s.addKnownPubKey(frame.Address, frame.PubKey)
-	s.addKnownBoxSig(frame.Address, frame.BoxSig)
+	// Validated ingest: the welcome is NOT authenticated at this point, so
+	// key material is cached only when it self-certifies — see
+	// learnWireIdentityKeys for the fingerprint/binding/length gates that
+	// close the pre-auth poisoning and oversized-blob paths.
+	s.learnWireIdentityKeys(frame.Address, frame.PubKey, frame.BoxKey, frame.BoxSig)
 }
 
 // addPeerFrame handles the local "add_peer" console command.
@@ -6844,6 +6936,179 @@ func (s *Service) addKnownBoxSig(address, boxSig string) {
 	// Same bounded-set registration as addKnownBoxKey — see NewService.
 	s.known.Add(address)
 	s.boxSigs[address] = boxSig
+}
+
+// attachKnownSenderKeys stamps the DM sender's PUBLIC key triple
+// (Ed25519 signing key, X25519 box key, box-key binding signature) onto
+// an outgoing DM transport frame (relay_message / push_message). The
+// receiver validates the triple against the sender address — the
+// address IS the signing key's fingerprint — and imports it via
+// importAttachedSenderKeys, which is what lets a first-contact DM
+// verify on a node that has never met the sender and whose relay hops
+// do not know the sender either (the on-demand fetch_contacts recovery
+// only reaches the previous hop, which a transit relay path does not
+// oblige to hold the origin's keys).
+//
+// Best-effort by design: fields are left empty when the sender's
+// signing key is unknown locally (a transit forwarder that stored the
+// envelope had the key at store time, but LRU eviction may have dropped
+// it since) — the receiver then falls back to the legacy sync path.
+// The box key pair is attached only when BOTH box fields are present:
+// an unmatched half cannot pass VerifyBoxKeyBinding on the receiver and
+// would only waste wire bytes. For this node's OWN identity under the
+// relay-only DM opt-out the box key is absent from s.boxKeys by
+// construction (NewService seeds the self contact keyless), so an
+// opt-out sender ships only its signing key — recipients can verify its
+// envelopes but still cannot compose a DM back, preserving the opt-out
+// contract. Only PUBLIC material is ever attached; private keys do not
+// enter frames.
+//
+// No-op for non-DM topics: broadcast gossip has no envelope signature
+// to verify, and stamping keys there would bloat every fan-out frame.
+func (s *Service) attachKnownSenderKeys(frame *protocol.Frame, topic, sender string) {
+	if !protocol.IsDMTopic(topic) || sender == "" {
+		return
+	}
+	s.knowledgeMu.RLock()
+	pubKey := s.pubKeys[sender]
+	boxKey := s.boxKeys[sender]
+	boxSig := s.boxSigs[sender]
+	s.knowledgeMu.RUnlock()
+	if pubKey == "" {
+		return
+	}
+	frame.PubKey = pubKey
+	if boxKey != "" && boxSig != "" {
+		frame.BoxKey = boxKey
+		frame.BoxSig = boxSig
+	}
+}
+
+// maxAttachedKeyFieldLen caps each attached sender-key field on the
+// wire. Real values are tiny (base64 of a 32-byte key = 44 chars,
+// base64url of a 64-byte signature = 86 chars); the generous cap
+// exists purely as a cheap pre-crypto DoS guard — an oversized field
+// is rejected by length comparison alone, before any base64 decode or
+// signature verification, and (on the transit path) is never copied
+// into a forwarded frame, so a hostile origin cannot use the key
+// fields as a wire-amplification channel that bypasses the body-size
+// admission cap.
+const maxAttachedKeyFieldLen = 256
+
+// validateAttachedSenderPubKey performs the cheap structural +
+// self-certification checks on a frame-attached signing key: length
+// caps on all three fields first (pure comparisons — no allocation, no
+// crypto), then the fingerprint match (identity.
+// VerifyPublicKeyFingerprint; forging it requires a SHA-256 preimage).
+// It deliberately performs NO imports and touches NO Service state —
+// the caller uses the validated key for envelope verification and
+// persists it only after the envelope signature proves the message
+// genuine (importVerifiedSenderKeys).
+func validateAttachedSenderPubKey(msg incomingMessage) error {
+	if msg.Sender == "" || msg.SenderPubKey == "" {
+		return fmt.Errorf("no attached sender key")
+	}
+	if len(msg.SenderPubKey) > maxAttachedKeyFieldLen ||
+		len(msg.SenderBoxKey) > maxAttachedKeyFieldLen ||
+		len(msg.SenderBoxSig) > maxAttachedKeyFieldLen {
+		return fmt.Errorf("attached key field exceeds %d bytes", maxAttachedKeyFieldLen)
+	}
+	return identity.VerifyPublicKeyFingerprint(msg.Sender, msg.SenderPubKey)
+}
+
+// attachedBoxPairValid reports whether the frame carried a COMPLETE
+// box pair whose binding verifies under the given (already
+// fingerprint-validated) signing key. Pure check, no state. Length
+// caps run first so an oversized blob costs a comparison, not a
+// signature verification.
+func attachedBoxPairValid(msg incomingMessage, senderPubKey string) bool {
+	if msg.SenderBoxKey == "" || msg.SenderBoxSig == "" {
+		return false
+	}
+	if len(msg.SenderBoxKey) > maxAttachedKeyFieldLen || len(msg.SenderBoxSig) > maxAttachedKeyFieldLen {
+		return false
+	}
+	return identity.VerifyBoxKeyBinding(msg.Sender, senderPubKey, msg.SenderBoxKey, msg.SenderBoxSig) == nil
+}
+
+// importVerifiedSenderKeys persists frame-attached sender key material
+// AFTER storeIncomingMessage has fully verified the DM envelope with
+// it. Caller contract: the envelope signature verified against a
+// signing key that fingerprint-matches msg.Sender — so writing here
+// can only ever happen on behalf of a sender that authored a genuine,
+// correctly-signed message. That ordering is what keeps the shared
+// bounded LRU (s.known + key maps) safe from churn by
+// valid-fingerprint-but-forged-envelope floods: a forged envelope is
+// rejected before any state changes or IdentityAdded events fire.
+//
+// Write policy:
+//   - signing key: written only when absent (first contact). A cached
+//     pubkey is never overwritten — a fingerprint-matching key is
+//     byte-identical anyway. addKnownIdentity runs FIRST: the
+//     addKnown* key chokepoints register the raw address in s.known as
+//     part of their bounded-set invariant, and doing that before
+//     addKnownIdentity would make the first-sight check see the
+//     identity as already known and swallow the IdentityAdded event —
+//     leaving realtime known-ID consumers stale.
+//   - box pair: written when the attached pair is binding-valid AND
+//     the cached state is not a healthy pair — absent, half-cached
+//     (key without signature or vice versa), or failing its binding.
+//     A contact whose pubkey arrived earlier without a usable box pair
+//     would otherwise stay reply-incapable forever: the
+//     unknown-sender fallback sync never triggers once the pubkey
+//     exists. The replacement is safe — the attached pair is
+//     authenticated by the sender's own signing key.
+//
+// Imports funnel through the addKnown* chokepoints (bounded known set,
+// relay-only self-box-key suppression).
+func (s *Service) importVerifiedSenderKeys(msg incomingMessage) {
+	if msg.Sender == "" || msg.SenderPubKey == "" {
+		return
+	}
+	if validateAttachedSenderPubKey(msg) != nil {
+		return
+	}
+	s.knowledgeMu.RLock()
+	havePub := s.pubKeys[msg.Sender] != ""
+	cachedBoxKey := s.boxKeys[msg.Sender]
+	cachedBoxSig := s.boxSigs[msg.Sender]
+	s.knowledgeMu.RUnlock()
+
+	imported := false
+	if !havePub {
+		// Identity registration BEFORE the key write — see the doc
+		// comment for why the reverse order swallows IdentityAdded.
+		s.addKnownIdentity(domain.PeerIdentityFromWire(msg.Sender))
+		s.addKnownPubKey(msg.Sender, msg.SenderPubKey)
+		imported = true
+	}
+	// Steady-state fast path: a cached pair byte-identical to the
+	// attached one was verified when it was imported — skip the
+	// per-message signature check and only pay for it when the cache
+	// actually diverges from the frame.
+	cachedPairHealthy := cachedBoxKey != "" && cachedBoxSig != "" &&
+		((cachedBoxKey == msg.SenderBoxKey && cachedBoxSig == msg.SenderBoxSig) ||
+			identity.VerifyBoxKeyBinding(msg.Sender, msg.SenderPubKey, cachedBoxKey, cachedBoxSig) == nil)
+	if !cachedPairHealthy && msg.SenderBoxKey != "" && msg.SenderBoxSig != "" {
+		if attachedBoxPairValid(msg, msg.SenderPubKey) {
+			s.addKnownBoxKey(msg.Sender, msg.SenderBoxKey)
+			s.addKnownBoxSig(msg.Sender, msg.SenderBoxSig)
+			imported = true
+		} else {
+			log.Warn().
+				Str("node", s.identity.Address).
+				Str("id", string(msg.ID)).
+				Str("sender", msg.Sender).
+				Msg("attached_sender_boxkey_binding_rejected")
+		}
+	}
+	if imported {
+		log.Info().
+			Str("node", s.identity.Address).
+			Str("id", string(msg.ID)).
+			Str("sender", msg.Sender).
+			Msg("attached_sender_keys_imported")
+	}
 }
 
 func (s *Service) emitLocalChange(event protocol.LocalChangeEvent) {
@@ -7003,6 +7268,11 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 		TTLSeconds: frame.Item.TTLSeconds,
 		Hops:       frame.Item.Hops,
 		Body:       frame.Item.Body,
+		// Attached PUBLIC sender keys ride the top-level frame fields
+		// (see attachKnownSenderKeys); validated on import.
+		PubKey: frame.PubKey,
+		BoxKey: frame.BoxKey,
+		BoxSig: frame.BoxSig,
 	})
 	if err != nil {
 		return
@@ -7036,23 +7306,31 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 	stored, _, errCode := s.storeIncomingMessage(msg, true)
 	if !stored && errCode == protocol.ErrCodeUnknownSenderKey {
 		if peerAddr != "" {
-			// Narrow sender-key recovery: only contact/key sync, no peer
-			// exchange. See docs/peer-discovery-conditional-get-peers.ru.md
-			// Step 5: a private error (unknown sender key) must not turn into
-			// eager peer exchange.
-			//
-			// Use s.runCtx as the parent: this handler runs on the inbound
-			// read loop started by handleConn, which is itself bounded by
-			// the service lifecycle. Synthesising context.Background() here
-			// would discard shutdown cancellation — forbidden by CLAUDE.md.
-			refreshCtx, cancel := context.WithTimeout(s.runCtx, 1500*time.Millisecond)
-			// Narrow recovery: always skip peer exchange. Logged so this path
-			// is visible in observability alongside the other skip sites.
-			// See docs/peer-discovery-conditional-get-peers.ru.md Step 6.
+			// Legacy keyless frame — schedule a BACKGROUND single-flight
+			// contact sync (narrow recovery: contact/key sync only, no
+			// peer exchange — see docs/peer-discovery-conditional-get-
+			// peers.ru.md Step 5) and reject this attempt. Running the
+			// recovery inline blocked the inbound read loop for the
+			// whole dial while frames piled up behind it; the async
+			// trigger keeps the loop responsive. No ack_delete goes out
+			// for this result, so the pushing hop redelivers and
+			// succeeds once the keys are imported.
+			log.Info().
+				Str("peer", string(peerAddr)).
+				Str("id", string(msg.ID)).
+				Str("sender", msg.Sender).
+				Str("recipient", msg.Recipient).
+				Msg("push_message_key_sync_scheduled")
+			// Observability: keep this recovery visible in the
+			// peer_exchange_skipped stream under its own path label,
+			// exactly as the previous inline recovery did.
 			s.logPeerExchangeSkipped(peerExchangePathUnknownSenderRecovery, peerAddr, peerExchangeSkipByNarrowRecovery)
-			s.syncPeer(refreshCtx, peerAddr, false)
-			cancel()
-			stored, _, _ = s.storeIncomingMessage(msg, true)
+			// activePeerSession resolves fallback-port aliases
+			// (resolveSessionLocked) and checks health — a bare
+			// s.sessions[peerAddr] lookup would miss a session stored
+			// under the alias address.
+			ownedSession, _ := s.activePeerSession(peerAddr)
+			s.triggerSenderKeySyncAsync(peerAddr, msg.Sender, ownedSession)
 		}
 	}
 	if shouldAckOnStoreResult(stored, errCode) && msg.Topic == "dm" {
@@ -7732,6 +8010,12 @@ func incomingMessageFromFrame(frame protocol.Frame) (incomingMessage, error) {
 		TTLSeconds: frame.TTLSeconds,
 		Hops:       frame.Hops,
 		Body:       strings.TrimSpace(frame.Body),
+		// Attached PUBLIC sender key material (optional, DM transport
+		// frames only) — validated later by importAttachedSenderKeys,
+		// never trusted as-is.
+		SenderPubKey: strings.TrimSpace(frame.PubKey),
+		SenderBoxKey: strings.TrimSpace(frame.BoxKey),
+		SenderBoxSig: strings.TrimSpace(frame.BoxSig),
 	}
 
 	if msg.Topic == "" || msg.Sender == "" || msg.Recipient == "" || msg.Body == "" || msg.ID == "" || !msg.Flag.Valid() {

@@ -339,6 +339,14 @@ Relay and transit are unaffected: the node keeps relaying DMs between
 other parties, and broadcast/global topics are stored and gossiped as
 usual.
 
+**Interaction with attached sender keys (ProtocolVersion 27).** DM
+transport frames carry the origin sender's self-certifying public key
+triple (see relay.md, "Self-certifying sender keys"). An opt-out node
+attaches only its Ed25519 signing key to its own outgoing DMs — the box
+pair is absent from its contact plane by construction — so recipients
+can verify its envelopes while still being unable to compose a DM back.
+The opt-out contract is unchanged.
+
 ---
 
 ## Message Flags
@@ -732,6 +740,15 @@ Delivery receipt не отправляется — end-to-end ретрай от�
 Relay и транзит не затронуты: нода продолжает релеить DM между другими
 сторонами, а broadcast/глобальные темы сохраняются и госсипятся как
 обычно.
+
+**Взаимодействие с вложенными ключами отправителя (ProtocolVersion
+27).** DM-транспортные фреймы несут самоцертифицируемую публичную
+ключевую тройку исходного отправителя (см. relay.md,
+«Самоцертифицируемые ключи отправителя»). Opt-out-нода вкладывает в свои
+исходящие DM только Ed25519-ключ подписи — box-пары в её
+contact-плоскости нет по построению — поэтому получатели могут проверять
+её конверты, но по-прежнему не могут составить DM в ответ. Контракт
+opt-out не меняется.
 
 ---
 

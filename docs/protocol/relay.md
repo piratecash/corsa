@@ -30,7 +30,10 @@ Hop-by-hop relay frame. Sent only to peers with `mesh_relay_v1` capability.
   "ttl_seconds": 3600,
   "hop_count": 3,
   "max_hops": 10,
-  "previous_hop": "10.0.0.5:64646"
+  "previous_hop": "10.0.0.5:64646",
+  "pubkey": "<base64 ed25519 public key>",
+  "boxkey": "<base64 x25519 public key>",
+  "boxsig": "<base64 box-key binding signature>"
 }
 ```
 
@@ -50,8 +53,13 @@ Hop-by-hop relay frame. Sent only to peers with `mesh_relay_v1` capability.
 | `hop_count` | int | Yes | Number of hops traversed so far (incremented at each node) |
 | `max_hops` | int | Yes | Maximum allowed hops (default: 10). Message dropped when `hop_count >= max_hops` |
 | `previous_hop` | string | Yes | Address of the node that sent this relay frame |
+| `pubkey` | string | Optional | Origin sender's Ed25519 public key, base64 (v27, see below) |
+| `boxkey` | string | Optional | Origin sender's X25519 box public key, base64 (v27) |
+| `boxsig` | string | Optional | Box-key binding signature, base64url (v27; only meaningful together with `pubkey` + `boxkey`) |
 
 **Capability gate:** `relay_message` is only sent to peers whose session has `"mesh_relay_v1"` in the negotiated capability set. For peers without the capability, the node falls back to `send_message` + gossip.
+
+**Self-certifying sender keys (ProtocolVersion 27):** the origin attaches its PUBLIC key triple to every DM-class `relay_message` (and `push_message`), so a first-contact recipient can verify the envelope without a network round-trip. The sender address is the SHA-256 fingerprint of the Ed25519 public key, which makes the attachment self-certifying: the recipient validates `fingerprint(pubkey) == address` (plus the box-key binding signature and the 32-byte X25519 size when the box pair is present — a signed but malformed/oversized "box key" string is structurally invalid), verifies the envelope signature WITH the attached key, and only after the envelope proves genuine imports the parts its knowledge maps are missing. Nothing is persisted before envelope verification — a forged key cannot pass the fingerprint check, a merely fingerprint-correct key cannot authenticate a forged envelope, and a forged envelope leaves no trace in the bounded contact cache. Intermediate hops copy the three fields through verbatim (transit stays crypto-free, except a cheap length cap that strips oversized fields so they cannot be used as a wire-amplification channel); a hop that receives a keyless frame from a pre-v27 origin backfills the fields from its own knowledge maps when it happens to know the origin (best effort). Under the relay-only DM opt-out the origin attaches only `pubkey` — the box pair stays unpublished by design. Pre-v27 receivers ignore the extra fields; pre-v27 transit hops strip them, in which case the recipient schedules a background `fetch_contacts` recovery pass — the live outbound session to the previous hop first (serialised through the session owner — reaches a hop that cannot be freshly re-dialed; a hop connected only inbound, with no outbound session at all, has no recovery wire and relies on the attached keys or the fan-out), then a fresh dial of the previous hop, then a bounded fan-out over other peers with live outbound sessions (a pure transit hop is not obliged to know the origin's keys) — and the message is delivered on the upstream retry. Recovery passes are single-flight and rate-limited per sender. Only public material is ever attached — private keys never appear on the wire.
 
 **Sender semantics:** `relay_message` and `relay_hop_ack` are fire-and-forget on the wire. The sender writes the frame without waiting for a synchronous response. The receiver may send a `relay_hop_ack` asynchronously but the sender must not block the session waiting for it. This prevents a 12-second stall when the receiver has no outbound session to ack through.
 
@@ -439,7 +447,10 @@ All handshake and session timeouts are defined as named constants in `admission.
   "ttl_seconds": 3600,
   "hop_count": 3,
   "max_hops": 10,
-  "previous_hop": "10.0.0.5:64646"
+  "previous_hop": "10.0.0.5:64646",
+  "pubkey": "<base64 ed25519 public key>",
+  "boxkey": "<base64 x25519 public key>",
+  "boxsig": "<base64 подпись-привязка box-ключа>"
 }
 ```
 
@@ -459,8 +470,13 @@ All handshake and session timeouts are defined as named constants in `admission.
 | `hop_count` | int | Да | Количество уже пройденных хопов (увеличивается на каждом узле) |
 | `max_hops` | int | Да | Максимально допустимое количество хопов (по умолчанию: 10). Сообщение отбрасывается при `hop_count >= max_hops` |
 | `previous_hop` | string | Да | Адрес узла, который отправил этот relay-фрейм |
+| `pubkey` | string | Нет | Публичный Ed25519-ключ исходного отправителя, base64 (v27, см. ниже) |
+| `boxkey` | string | Нет | Публичный X25519 box-ключ исходного отправителя, base64 (v27) |
+| `boxsig` | string | Нет | Подпись-привязка box-ключа, base64url (v27; осмысленна только вместе с `pubkey` + `boxkey`) |
 
 **Гейт capability:** `relay_message` отправляется только пирам, у которых в согласованном наборе capabilities есть `"mesh_relay_v1"`. Для пиров без capability узел использует `send_message` + gossip.
+
+**Самоцертифицируемые ключи отправителя (ProtocolVersion 27):** отправитель-источник вкладывает свою ПУБЛИЧНУЮ ключевую тройку в каждый DM-`relay_message` (и `push_message`), чтобы получатель-первоконтакт мог проверить конверт без сетевого запроса. Адрес отправителя — это SHA-256-fingerprint публичного Ed25519-ключа, поэтому вложение самоцертифицируемо: получатель проверяет `fingerprint(pubkey) == address` (плюс подпись-привязку box-ключа и его 32-байтовый X25519-размер, когда box-пара присутствует — подписанная, но малформированная/раздутая строка «box-ключа» структурно невалидна), верифицирует подпись конверта ВЛОЖЕННЫМ ключом и только после того, как конверт доказан подлинным, импортирует недостающие части в knowledge-карты. До верификации конверта ничего не персистится: подделать ключ нельзя (fingerprint не сойдётся), «правильный по fingerprint» ключ не аутентифицирует поддельный конверт, а поддельный конверт не оставляет следов в ограниченном кэше контактов. Промежуточные хопы копируют три поля без изменений (транзит без криптографии, кроме дешёвого лимита длины, срезающего раздутые поля — их нельзя использовать как канал усиления трафика); хоп, получивший фрейм без ключей от pre-v27-источника, дозаполняет поля из собственных knowledge-карт, если знает источник (best-effort). При relay-only DM opt-out источник вкладывает только `pubkey` — box-пара по дизайну не публикуется. Pre-v27-получатели игнорируют лишние поля; pre-v27-хопы срезают их при транзите — тогда получатель планирует фоновый recovery-проход `fetch_contacts`: сначала живая ИСХОДЯЩАЯ сессия к предыдущему хопу (сериализуется через владельца сессии — достаёт хоп, который нельзя передозвонить; хоп, подключённый только inbound, без исходящей сессии вовсе, recovery-канала не имеет и полагается на вложенные ключи либо fan-out), затем fresh-dial предыдущего хопа, затем ограниченный fan-out по пирам с живыми исходящими сессиями (транзитный хоп не обязан знать ключи источника) — и сообщение доставляется на ретрае от upstream. Recovery-проходы single-flight и rate-limited per-sender. На провод попадает только публичный материал — приватные ключи никогда не передаются.
 
 **Семантика отправки:** `relay_message` и `relay_hop_ack` — fire-and-forget на проводе. Отправитель записывает фрейм без ожидания синхронного ответа. Получатель может отправить `relay_hop_ack` асинхронно, но отправитель не должен блокировать сессию в ожидании — это предотвращает 12-секундный stall при отсутствии обратной outbound-сессии.
 

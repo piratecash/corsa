@@ -652,3 +652,261 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 		t.Fatalf("trusted_advertise_port: got %q want %q", pm.TrustedAdvertisePort, wantPort)
 	}
 }
+
+// interleavedSyncPeerMockServer simulates the production responder whose
+// FIFO writer already holds auth-side-effect frames when the sync reply
+// is requested: right after the welcome it answers every get_peers /
+// fetch_contacts request by FIRST writing a burst of interleaved frames
+// (backlog push_message replay, receipt-backlog frames, announce_routes
+// baseline chunks, and one deliberately Frame-unparseable raw line) and
+// only THEN the real reply. interleaveCount sets the burst size per
+// reply; the worst-case caller uses a burst larger than the full
+// receipt backlog (maxReceiptBacklogPerRecipient) to lock the skip
+// budget against regressions back toward a "handful of frames" value.
+//
+// This is the regression shape for the unknown-sender-key wedge: the
+// pre-fix syncPeer read exactly one line per reply, so the first
+// interleaved push_message frame was mistaken for the contacts reply,
+// imported stayed 0 (sync_peer_no_new_contacts), and sender-key recovery
+// for relayed DMs never succeeded.
+// authID, when non-nil, makes the mock issue an auth challenge in its
+// welcome (production shape: every deployed responder authenticates) and
+// interleave a burst BEFORE auth_ok too — reproducing the
+// trackInboundConnect flood (pending-ring flush + route sync) that the
+// responder enqueues before the auth reply.
+func interleavedSyncPeerMockServer(t *testing.T, ln net.Listener, interleaveCount int, authID *identity.Identity, respondPeers []string, respondContacts []protocol.ContactFrame) {
+	t.Helper()
+	conn, err := ln.Accept()
+	if err != nil {
+		t.Errorf("mock server accept failed: %v", err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	// Read hello, reply with a challenge-less welcome.
+	if _, err := reader.ReadString('\n'); err != nil {
+		t.Errorf("mock server: failed to read hello: %v", err)
+		return
+	}
+	welcomeFrame := protocol.Frame{Type: "welcome"}
+	if authID != nil {
+		welcomeFrame.Challenge = "interleave-auth-challenge"
+		welcomeFrame.Address = authID.Address
+	}
+	welcome, _ := protocol.MarshalFrameLine(welcomeFrame)
+	if _, err := conn.Write([]byte(welcome)); err != nil {
+		t.Errorf("mock server: failed to write welcome: %v", err)
+		return
+	}
+
+	writeInterleaved := func() {
+		push, _ := protocol.MarshalFrameLine(protocol.Frame{
+			Type:  "push_message",
+			Topic: "dm",
+			Item: &protocol.MessageFrame{
+				ID:        "backlog-msg",
+				Sender:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Recipient: "test-node-address",
+				Body:      "opaque",
+			},
+		})
+		receipt, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "push_delivery_receipt"})
+		announce, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "announce_routes"})
+		// Buffer the burst: thousands of one-line conn.Write calls make
+		// the mock, not the code under test, the slow party.
+		w := bufio.NewWriterSize(conn, 1<<16)
+		for i := 0; i < interleaveCount; i++ {
+			switch i % 3 {
+			case 0:
+				_, _ = w.Write([]byte(push))
+			case 1:
+				_, _ = w.Write([]byte(receipt))
+			default:
+				_, _ = w.Write([]byte(announce))
+			}
+		}
+		// One line that is not a parseable Frame at all — mimics
+		// announce-plane wire lines marshalled from their own structs.
+		_, _ = w.Write([]byte("{\"type\":[\"not-a-frame\"]}\n"))
+		_ = w.Flush()
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		frame, err := protocol.ParseFrameLine(strings.TrimSpace(line))
+		if err != nil {
+			continue
+		}
+		switch frame.Type {
+		case "auth_session":
+			// Production ordering: the responder's auth-time side
+			// effects (pending-ring flush, route sync) hit the FIFO
+			// writer BEFORE the auth_ok reply.
+			writeInterleaved()
+			authOK, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "auth_ok"})
+			_, _ = conn.Write([]byte(authOK))
+		case "get_peers":
+			writeInterleaved()
+			resp, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "peers", Peers: respondPeers})
+			_, _ = conn.Write([]byte(resp))
+		case "fetch_contacts":
+			writeInterleaved()
+			resp, _ := protocol.MarshalFrameLine(protocol.Frame{Type: "contacts", Contacts: respondContacts})
+			_, _ = conn.Write([]byte(resp))
+		}
+	}
+}
+
+// TestSyncPeer_ContactsReply_SkipsInterleavedFrames is the regression
+// lock for the unknown-sender-key recovery wedge ("нашли ID, но
+// сообщения не приходят"): the responder interleaves backlog
+// push_message / receipt / announce frames ahead of both the peers and
+// the contacts replies, and syncPeer must still import the advertised
+// contact instead of mistaking the first interleaved frame for an empty
+// reply.
+//
+// The burst is deliberately LARGER than maxReceiptBacklogPerRecipient
+// (4096) plus the default pending ring: the receipt backlog replayed
+// right after auth_ok is the worst-case legitimate flood, and an
+// undersized skip budget would reproduce the wedge one level up (give
+// up before the reply, fail the sync, meet the same un-acked backlog on
+// the next dial). This locks syncReplySkipBudget against regressing
+// back toward a "handful of frames" value.
+func TestSyncPeer_ContactsReply_SkipsInterleavedFrames(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// A real identity so the contact passes VerifyBoxKeyBinding on import.
+	senderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	contact := protocol.ContactFrame{
+		Address: senderID.Address,
+		PubKey:  identity.PublicKeyBase64(senderID.PublicKey),
+		BoxKey:  identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+		BoxSig:  identity.SignBoxKeyBinding(senderID),
+	}
+
+	svc := newSyncPeerTestService(domain.NetworkStatusOffline)
+	peerAddr := domain.PeerAddress(ln.Addr().String())
+
+	// Worst-case legitimate flood per reply: full receipt backlog +
+	// pending ring + announce chunks.
+	interleaveCount := maxReceiptBacklogPerRecipient + maxPendingFramesPerPeer + 100
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		interleavedSyncPeerMockServer(t, ln, interleaveCount, nil, []string{"10.0.0.77:9000"}, []protocol.ContactFrame{contact})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	imported := svc.syncPeer(ctx, peerAddr, true)
+
+	_ = ln.Close()
+	<-done
+
+	if imported != 1 {
+		t.Fatalf("expected 1 imported contact despite interleaved frames, got %d", imported)
+	}
+
+	// The whole point of the recovery dial: the sender's pubkey must now
+	// be present so storeIncomingMessage can verify the DM envelope.
+	svc.knowledgeMu.RLock()
+	pubKey := svc.pubKeys[senderID.Address]
+	boxKey := svc.boxKeys[senderID.Address]
+	svc.knowledgeMu.RUnlock()
+	if pubKey == "" {
+		t.Errorf("sender pubkey not imported — unknown-sender-key would persist")
+	}
+	if boxKey == "" {
+		t.Errorf("sender boxkey not imported")
+	}
+
+	// The peers reply behind the interleave must be found too.
+	svc.peerMu.RLock()
+	peerCount := len(svc.peers)
+	svc.peerMu.RUnlock()
+	if peerCount != 1 {
+		t.Errorf("expected 1 peer imported despite interleaved frames, got %d", peerCount)
+	}
+}
+
+// TestSyncPeer_AuthReply_SkipsInterleavedFrames locks the AUTH-phase
+// interleave tolerance on the recovery dial. Production responders
+// always challenge, and handleAuthSession runs trackInboundConnect —
+// which can flush a full pending ring of fire-and-forget frames plus
+// route-sync output — BEFORE the caller enqueues auth_ok on the FIFO
+// writer. The historical "skip up to 5 frames" auth wait broke the
+// recovery exactly when it mattered (a loaded responder holding a
+// backlog for us); the auth wait must survive a pending-ring-sized
+// flood, same as the contacts wait.
+func TestSyncPeer_AuthReply_SkipsInterleavedFrames(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	// Real identities: the client must sign auth_session, the responder
+	// must present a non-self identity, and the served contact must pass
+	// VerifyBoxKeyBinding.
+	svc := newTestService(t, config.NodeTypeFull)
+	responderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate (responder): %v", err)
+	}
+	senderID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate (sender): %v", err)
+	}
+	contact := protocol.ContactFrame{
+		Address: senderID.Address,
+		PubKey:  identity.PublicKeyBase64(senderID.PublicKey),
+		BoxKey:  identity.BoxPublicKeyBase64(senderID.BoxPublicKey),
+		BoxSig:  identity.SignBoxKeyBinding(senderID),
+	}
+
+	// Pending-ring-sized flood before auth_ok AND before each reply.
+	interleaveCount := maxPendingFramesPerPeer + 100
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		interleavedSyncPeerMockServer(t, ln, interleaveCount, responderID, nil, []protocol.ContactFrame{contact})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	imported := svc.syncPeer(ctx, domain.PeerAddress(ln.Addr().String()), false)
+
+	_ = ln.Close()
+	<-done
+
+	if imported != 1 {
+		t.Fatalf("expected 1 imported contact through the auth-phase flood, got %d", imported)
+	}
+	svc.knowledgeMu.RLock()
+	gotPub := svc.pubKeys[senderID.Address]
+	svc.knowledgeMu.RUnlock()
+	if gotPub == "" {
+		t.Errorf("sender pubkey not imported through auth-phase interleave")
+	}
+}

@@ -85,7 +85,10 @@ sequenceDiagram
     "sender": "<sender-fingerprint>",
     "recipient": "<recipient-fingerprint>",
     "body": "<ciphertext-base64url>"
-  }
+  },
+  "pubkey": "<base64 ed25519 public key>",
+  "boxkey": "<base64 x25519 public key>",
+  "boxsig": "<base64 box-key binding signature>"
 }
 ```
 
@@ -100,6 +103,7 @@ sequenceDiagram
 - `item.sender` - Fingerprint of message sender
 - `item.recipient` - Fingerprint of message recipient
 - `item.body` - End-to-end encrypted message content (base64url encoded)
+- `pubkey` / `boxkey` / `boxsig` - Optional (ProtocolVersion 27): the origin sender's self-certifying PUBLIC key triple, attached to DM-class pushes (live push, backlog replay, mesh gossip fan-out) so a first-contact receiver can verify the envelope without a contact sync round-trip. Validation and trust model are documented in [relay.md](relay.md) ("Self-certifying sender keys"); the fields are ignored by pre-v27 receivers.
 
 **Sending triggers:**
 - New message arrives at the serving node for a subscribed recipient
@@ -425,7 +429,10 @@ sequenceDiagram
     "sender": "<отпечаток-отправителя>",
     "recipient": "<отпечаток-получателя>",
     "body": "<шифротекст-base64url>"
-  }
+  },
+  "pubkey": "<base64 публичный ed25519-ключ>",
+  "boxkey": "<base64 публичный x25519-ключ>",
+  "boxsig": "<base64 подпись-привязка box-ключа>"
 }
 ```
 
@@ -440,6 +447,7 @@ sequenceDiagram
 - `item.sender` - Отпечаток отправителя сообщения
 - `item.recipient` - Отпечаток получателя сообщения
 - `item.body` - Зашифрованное сквозным шифрованием содержимое сообщения (base64url кодирование)
+- `pubkey` / `boxkey` / `boxsig` - Необязательные (ProtocolVersion 27): самоцертифицируемая ПУБЛИЧНАЯ ключевая тройка исходного отправителя, вкладывается в DM-пуши (живой push, replay истории, gossip-рассылка), чтобы получатель-первоконтакт мог проверить конверт без сетевого запроса контактов. Модель проверки и доверия описана в [relay.md](relay.md) («Самоцертифицируемые ключи отправителя»); pre-v27-получатели игнорируют эти поля.
 
 **Триггеры отправки:**
 - Новое сообщение прибывает на обслуживающий узел для подписанного получателя
