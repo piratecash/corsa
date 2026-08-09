@@ -2325,7 +2325,10 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 // Navigation back to the list goes through the header button
 // (compactBackBtn → DeselectPeer, handled in handleActions). The
 // keyboardTailRow wrappers mirror the two-pane layout: header and
-// composer are the rows the touch keyboard must not cover.
+// composer are the rows the touch keyboard must not cover. The contact-list
+// pane also keeps the aggregate network badge pinned at the bottom: without
+// the composer visible, compact layouts would otherwise hide the connection
+// count entirely.
 func (w *Window) layoutMainCompact(gtx layout.Context, status service.NodeStatus, recipients []domain.PeerIdentity) layout.Dimensions {
 	if w.snap.ActivePeer.IsZero() {
 		return layout.Flex{
@@ -2338,6 +2341,12 @@ func (w *Window) layoutMainCompact(gtx layout.Context, status service.NodeStatus
 			}),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				return w.layoutContactsCard(gtx, status, recipients)
+			}),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return w.layoutNetworkStatus(gtx, status)
+				})
 			}),
 		)
 	}

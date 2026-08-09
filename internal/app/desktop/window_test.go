@@ -9,6 +9,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/service"
 
+	"gioui.org/io/input"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -383,6 +384,41 @@ func TestNetworkStatusSummary_FallbackWhenAggregateStatusNil(t *testing.T) {
 	if gotPending != 3 {
 		t.Errorf("pending: got %d, want %d", gotPending, 3)
 	}
+}
+
+func TestCompactContactsPaneShowsNetworkStatus(t *testing.T) {
+	t.Parallel()
+
+	var router input.Router
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Source:      router.Source(),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Exact(image.Pt(360, 720)),
+	}
+	w := &Window{
+		theme:        newAppTheme(),
+		contactsList: widget.List{List: layout.List{Axis: layout.Vertical}},
+		snap: service.RouterSnapshot{NodeStatus: service.NodeStatus{
+			AggregateStatus: &service.AggregateStatus{
+				Status:          "healthy",
+				ConnectedPeers:  2,
+				TotalPeers:      4,
+				PendingMessages: 3,
+			},
+		}},
+	}
+
+	w.layoutMainCompact(gtx, w.snap.NodeStatus, nil)
+	router.Frame(gtx.Ops)
+
+	want := "NET HEALTHY | 2/4 peers | 3 pending"
+	for _, node := range router.AppendSemantics(nil) {
+		if node.Desc.Label == want {
+			return
+		}
+	}
+	t.Fatalf("compact contacts pane does not expose network status %q", want)
 }
 
 func TestFindMessageBody(t *testing.T) {
