@@ -223,6 +223,31 @@ const (
 	// mixed-version safe: an emitter sends v2 only to peers advertising this
 	// cap and falls back to per-identity v1 for the rest.
 	CapMeshPoisonReverseV2 Capability = "mesh_poison_reverse_v2"
+
+	// CapMeshDatagramV1 gates the datagram transport layer as an
+	// ENDPOINT: the node understands the `datagram` envelope, accepts
+	// datagrams addressed to it and sends its own
+	// (docs/refactoring/datagram-transport.md §6). Datagrams travel only
+	// into sessions that negotiated it — an older peer does not have the
+	// command at all and would answer unknown_command and close.
+	//
+	// Deliberately NOT tied to CapMeshRelayV1 or CapMeshRoutingV1:
+	// mesh_relay_v1 means "I support relay_message", mesh_routing_v1
+	// means "I speak today's distance-vector control plane". Neither
+	// equals "I speak the datagram envelope", and binding the new layer
+	// to a control plane that is scheduled for replacement would make
+	// the layer inherit that replacement.
+	CapMeshDatagramV1 Capability = "mesh_datagram_v1"
+
+	// CapMeshDatagramTransitV1 gates FORWARDING other nodes' datagrams
+	// (§6). It is a strictly separate advertisement from
+	// CapMeshDatagramV1: an endpoint-only client must be able to receive
+	// what is addressed to it without ever claiming to relay, and a
+	// transit candidate must prove it really forwards. The distinction
+	// outlives any future MinimumProtocolVersion bump — once v28 is the
+	// floor the endpoint check becomes trivial, but "endpoint versus
+	// transit" stays a real difference between node roles.
+	CapMeshDatagramTransitV1 Capability = "mesh_datagram_transit_v1"
 )
 
 // String returns the stable string label for the capability.
@@ -234,7 +259,7 @@ func (c Capability) String() string { return string(c) }
 func ParseCapability(s string) (Capability, bool) {
 	c := Capability(strings.ToLower(s))
 	switch c {
-	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1, CapMeshPoisonReverseV2:
+	case CapMeshRelayV1, CapMeshRoutingV1, CapMeshRoutingV2, CapFileTransferV1, CapMeshRouteProbeV1, CapMeshRouteQueryV1, CapMeshRouteSyncV1, CapMeshRoutingV3, CapMeshAttestedLinksV1, CapMeshPoisonReverseV1, CapMeshPoisonReverseV2, CapMeshDatagramV1, CapMeshDatagramTransitV1:
 		return c, true
 	default:
 		return "", false

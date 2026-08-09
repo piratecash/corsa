@@ -49,11 +49,14 @@ func makeRelayFrameLine(t *testing.T, messageID string, recipient domain.PeerIde
 // matches, with mesh_relay_v1 + mesh_routing_v1 capabilities and a
 // buffered sendCh so sendFrameToAddress can enqueue without blocking.
 // A peerHealth entry with Connected=true is required for the address
-// resolver to count the session as reachable.
-func installRelayCapableSession(t *testing.T, svc *Service, address domain.PeerAddress, peerID domain.PeerIdentity) chan protocol.Frame {
+// resolver to count the session as reachable, and the session must carry
+// the address it is registered under: the queue admission asks the peer
+// state of session.address, exactly as production bring-up sets it.
+func installRelayCapableSession(t *testing.T, svc *Service, address domain.PeerAddress, peerID domain.PeerIdentity) chan peerSendItem {
 	t.Helper()
-	sendCh := make(chan protocol.Frame, 16)
+	sendCh := make(chan peerSendItem, 16)
 	svc.sessions[address] = &peerSession{
+		address:      address,
 		peerIdentity: peerID,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 		sendCh:       sendCh,

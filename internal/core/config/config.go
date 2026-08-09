@@ -308,6 +308,35 @@ type Node struct {
 	// docs/cluster-mesh/phase-4-compact-wire-signed.md §7.
 	EnableMeshRoutingV3 bool
 
+	// EnableDatagramV1 controls whether this node runs the datagram transport
+	// layer (env: CORSA_ENABLE_DATAGRAM_V1, default TRUE): the capabilities of
+	// §6, the `dtypes` handshake field, the conveyor and its background loops.
+	// Operators opt out via CORSA_ENABLE_DATAGRAM_V1=0 (or false/no/off).
+	//
+	// The two capabilities are gated differently BELOW this flag, and neither
+	// of them reads the type registry (datagramPlaneCapability):
+	//
+	//   - the endpoint capability (mesh_datagram_v1) follows the flag and
+	//     nothing else. §6 makes it exactly one statement — this node
+	//     understands the envelope — which is true the moment the layer is
+	//     wired, whatever the registry holds. WHICH types it can terminate is
+	//     stated by `dtypes` alone (§6.1), and an empty registry states that
+	//     there as an explicitly empty set;
+	//   - the transit capability (mesh_datagram_transit_v1) additionally
+	//     requires a full node: forwarding is what a client node does not do.
+	//
+	// Tying the endpoint half to the registry is what used to leave the plane
+	// unable to carry anything: the candidate filter demands mesh_datagram_v1
+	// from every candidate, transit included, so a network of nodes with empty
+	// registries had no admissible next hop for anybody's frame.
+	//
+	// The zero value is FALSE, so a config.Node built by struct literal (test
+	// fixtures, embedders) stays off unless it says otherwise; the default
+	// lives in Default() via enableDatagramV1FromEnv, not in the type. Same
+	// split as EnableMeshRoutingV3. See docs/refactoring/datagram-transport.md
+	// §6 and §10.
+	EnableDatagramV1 bool
+
 	// DisableDirectMessages opts this node out of direct messages
 	// (topics "dm" / "dm-control") addressed to its own identity.
 	//
@@ -479,6 +508,7 @@ func Default() Config {
 	announceInterval := announceIntervalFromEnv()
 	overloadGoroutineThreshold := overloadGoroutineThresholdFromEnv()
 	enableMeshRoutingV3 := enableMeshRoutingV3FromEnv()
+	enableDatagramV1 := enableDatagramV1FromEnv()
 	pendingRingSize := pendingRingSizeFromEnv()
 	deliveryRetryMaxAttempts := deliveryRetryMaxAttemptsFromEnv()
 	holdDMUntilReachable := holdDMUntilReachableFromEnv()
@@ -533,6 +563,7 @@ func Default() Config {
 			AnnounceInterval:           announceInterval,
 			OverloadGoroutineThreshold: overloadGoroutineThreshold,
 			EnableMeshRoutingV3:        enableMeshRoutingV3,
+			EnableDatagramV1:           enableDatagramV1,
 			PprofAddr:                  envOrDefault("CORSA_PPROF_ADDR", ""),
 			RecordAllTraffic:           recordAllTrafficFromEnv(),
 			RecordTrafficFormat:        envOrDefault("CORSA_RECORD_TRAFFIC_FORMAT", ""),
@@ -1092,6 +1123,35 @@ func positiveHoursFromEnv(key string) time.Duration {
 func enableMeshRoutingV3FromEnv() bool {
 	raw := strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENABLE_MESH_ROUTING_V3")))
 	switch raw {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		// Unset, empty, truthy, or unrecognised → enabled (the new default).
+		return true
+	}
+}
+
+// enableDatagramV1FromEnv reads CORSA_ENABLE_DATAGRAM_V1 and returns whether
+// this node runs the datagram transport layer at all: the two capabilities of
+// §6, the `dtypes` handshake field, the conveyor and every background loop
+// that serves it.
+//
+// Same polarity as enableMeshRoutingV3FromEnv — default ON with an escape
+// hatch. The layer is wanted in the network now rather than after the first
+// type ships: the transit substrate has to soak BEFORE anything rides on it,
+// and §11 leaves the limit numbers to be set from telemetry that a plane
+// nobody advertises never produces. Only the explicit falsey set — "0",
+// "false", "no", "off" after trimming and lower-casing — turns it off.
+//
+// Reading an unrecognised value as ON is safe in a way it would not have been
+// while the layer was half-built, because the capability and the type set are
+// two separate statements (§6, §6.1): mesh_datagram_v1 promises only that the
+// envelope is understood, while a build with an empty registry declares an
+// explicitly empty `dtypes` — so it relays, and is relayed through, without
+// ever promising a handler it does not have. See
+// docs/refactoring/datagram-transport.md §6 and §10.
+func enableDatagramV1FromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENABLE_DATAGRAM_V1"))) {
 	case "0", "false", "no", "off":
 		return false
 	default:

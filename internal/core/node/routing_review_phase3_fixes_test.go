@@ -51,7 +51,9 @@ func TestDispatchPeerSessionFrame_RouteSyncSummary_ArmsSuppression(t *testing.T)
 
 	// Install a relay+routing+routesync-capable outbound session
 	// so the dispatch switch's capability gate accepts the
-	// summary frame.
+	// summary frame. authOK is part of that: a negotiated set is
+	// only in force once the handshake completed
+	// (sessionHasCapability).
 	address := domain.PeerAddress("outbound-addr-A")
 	session := &peerSession{
 		peerIdentity: idPeerA,
@@ -61,6 +63,7 @@ func TestDispatchPeerSessionFrame_RouteSyncSummary_ArmsSuppression(t *testing.T)
 			domain.CapMeshRoutingV1,
 			domain.CapMeshRouteSyncV1,
 		},
+		authOK: true,
 	}
 	svc.sessions[address] = session
 	svc.peerMu.Lock()
@@ -112,11 +115,14 @@ func TestDispatchPeerSessionFrame_RouteSyncSummary_CapabilityGate(t *testing.T) 
 	session := &peerSession{
 		peerIdentity: idPeerA,
 		address:      address,
-		// Deliberately missing CapMeshRouteSyncV1.
+		// Deliberately missing CapMeshRouteSyncV1. The handshake IS
+		// complete, so the refusal below can only come from the
+		// missing capability and not from the handshake gate.
 		capabilities: []domain.Capability{
 			domain.CapMeshRelayV1,
 			domain.CapMeshRoutingV1,
 		},
+		authOK: true,
 	}
 	svc.sessions[address] = session
 

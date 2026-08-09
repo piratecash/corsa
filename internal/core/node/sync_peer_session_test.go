@@ -103,7 +103,7 @@ func TestSyncPeerSession_RequestPeersTrue(t *testing.T) {
 		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
-		sendCh:  make(chan protocol.Frame, 16),
+		sendCh:  make(chan peerSendItem, 16),
 	}
 	attachTestNetCore(svc, session)
 
@@ -177,7 +177,7 @@ func TestSyncPeerSession_RequestPeersFalse(t *testing.T) {
 		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
-		sendCh:  make(chan protocol.Frame, 16),
+		sendCh:  make(chan peerSendItem, 16),
 	}
 	attachTestNetCore(svc, session)
 
@@ -249,7 +249,7 @@ func TestSyncPeerSession_SkipDoesNotEmitNewPeersDiscovered(t *testing.T) {
 		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
-		sendCh:  make(chan protocol.Frame, 16),
+		sendCh:  make(chan peerSendItem, 16),
 	}
 	attachTestNetCore(svc, session)
 
@@ -313,7 +313,7 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
-		sendCh:  make(chan protocol.Frame, 16),
+		sendCh:  make(chan peerSendItem, 16),
 	}
 	attachTestNetCore(svc, session)
 

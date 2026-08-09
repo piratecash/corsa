@@ -211,6 +211,55 @@ type ConnectionDiagnosticProvider interface {
 	ActiveConnectionsJSON() (json.RawMessage, error)
 }
 
+// DatagramProvider exposes the read-only surfaces of the datagram transport
+// layer (docs/refactoring/datagram-transport.md §4.3, §5, §10). When the node
+// does not implement it the commands are registered as unavailable, exactly
+// like the routing group.
+//
+// Every method is a PURE READ: none of them reserves a replay slot, rotates
+// the explore counter, dials anything or spends a cryptographic budget. That
+// is a contract of the layer, not an implementation detail — the probe is what
+// an artifact owner puts on a periodic ticker, and a diagnostic with side
+// effects on that path is a diagnostic that changes what it measures.
+type DatagramProvider interface {
+	// FetchDatagramSummary returns the JSON diagnostic of the local plane:
+	// the conveyor's decision counters, the per-neighbour admission budget,
+	// the weighted class queue and the §5 numbers all three run on. Returns
+	// an error when the layer is not enabled — "off" and "idle" are
+	// different facts and an operator needs to tell them apart.
+	FetchDatagramSummary() (json.RawMessage, error)
+
+	// DatagramReachable reports whether a datagram of this type would find a
+	// first hop to dst right now.
+	//
+	// The guarantee is one-way: unreachable means a send performed at the
+	// same moment would NOT have been queued — no_route, or a gate's
+	// rejected, the last-hop dtype gate included. Reachable promises
+	// nothing, because the probe is TOCTOU by construction.
+	//
+	// It answers with the layer's own JSON rather than a bool because the
+	// two negatives are different facts: a destination that declared no
+	// handler for the type is refused by a gate, while one that is off the
+	// routing table is not, and §6.1 reacts to only one of them.
+	DatagramReachable(
+		ctx context.Context,
+		dst domain.PeerIdentity,
+		dtype domain.DType,
+	) (json.RawMessage, error)
+
+	// ExplainDatagramRoute returns the JSON ranked next-hop plan a real send
+	// would build. Under route_policy=explore the plan reports the
+	// comparator order and says so through first_candidate_guaranteed=false:
+	// the rotation counter advances on a send, and a read-only plan must
+	// neither move nor reserve it.
+	ExplainDatagramRoute(
+		ctx context.Context,
+		dst domain.PeerIdentity,
+		dtype domain.DType,
+		policy domain.RoutePolicy,
+	) (json.RawMessage, error)
+}
+
 // CaptureProvider abstracts access to the traffic capture subsystem.
 // When nil (capture not available), commands are registered as unavailable.
 type CaptureProvider interface {

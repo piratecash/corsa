@@ -10,12 +10,12 @@ import (
 )
 
 // TestLocalCapabilities_OptOutExcludesV3 pins the opt-out shape:
-// localCapabilities(false) is what an operator who set
+// localCapabilities(false, …) is what an operator who set
 // CORSA_ENABLE_MESH_ROUTING_V3=0 advertises. Since the env flag now defaults
 // to ON, false is the explicit opt-out config, not the default — the v3 and
 // poison-reverse caps must be absent here.
 func TestLocalCapabilities_OptOutExcludesV3(t *testing.T) {
-	caps := localCapabilities(false)
+	caps := localCapabilities(false, datagramAdvertise{})
 	expected := []domain.Capability{
 		domain.CapMeshRelayV1,
 		domain.CapMeshRoutingV1,
@@ -51,7 +51,7 @@ func TestLocalCapabilities_OptOutExcludesV3(t *testing.T) {
 // rationale and docs/protocol/attested_links.md "Production
 // advertisement status".
 func TestLocalCapabilities_EnabledAppendsV3(t *testing.T) {
-	caps := localCapabilities(true)
+	caps := localCapabilities(true, datagramAdvertise{})
 	want := []domain.Capability{
 		domain.CapMeshRelayV1,
 		domain.CapMeshRoutingV1,
@@ -80,7 +80,7 @@ func TestLocalCapabilities_EnabledAppendsV3(t *testing.T) {
 // fail this test before re-introducing the dishonest cap.
 func TestLocalCapabilities_DoesNotAdvertiseAttestedLinks(t *testing.T) {
 	for _, v3 := range []bool{false, true} {
-		for _, c := range localCapabilities(v3) {
+		for _, c := range localCapabilities(v3, datagramAdvertise{}) {
 			if c == domain.CapMeshAttestedLinksV1 {
 				t.Fatalf("localCapabilities(%v) advertised mesh_attested_links_v1 — emit path produces no real signatures; re-enable only when the self-attestation entry stream lands (capabilities.go)", v3)
 			}
@@ -89,7 +89,7 @@ func TestLocalCapabilities_DoesNotAdvertiseAttestedLinks(t *testing.T) {
 }
 
 func TestLocalCapabilityStrings_OptOutExcludesV3(t *testing.T) {
-	strs := localCapabilityStrings(false)
+	strs := localCapabilityStrings(false, datagramAdvertise{})
 	expected := []string{
 		"mesh_relay_v1",
 		"mesh_routing_v1",
@@ -111,7 +111,7 @@ func TestLocalCapabilityStrings_OptOutExcludesV3(t *testing.T) {
 }
 
 func TestLocalCapabilityStrings_EnabledIncludesV3(t *testing.T) {
-	strs := localCapabilityStrings(true)
+	strs := localCapabilityStrings(true, datagramAdvertise{})
 	if len(strs) < 2 {
 		t.Fatalf("localCapabilityStrings(true) must include Phase 4 tail (v3 + poison-reverse); got %v", strs)
 	}
@@ -197,7 +197,45 @@ func TestIntersectCapabilities(t *testing.T) {
 	}
 }
 
+// TestSessionHasCapability covers the SET half of the helper. Both sessions
+// declare a completed handshake because that is the only state in which the set
+// is in force at all — the moment between applyWelcomeMetadata and auth_ok is
+// its own contract and lives in
+// TestSessionCapabilityRequiresACompletedHandshake.
 func TestSessionHasCapability(t *testing.T) {
+	peerA := &peerSession{
+		address:      "peer-a",
+		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+		authOK:       true,
+	}
+	peerB := &peerSession{address: "peer-b", capabilities: nil, authOK: true}
+	svc := &Service{
+		sessions: map[domain.PeerAddress]*peerSession{"peer-a": peerA, "peer-b": peerB},
+	}
+
+	if !svc.sessionHasCapability(peerA, domain.CapMeshRelayV1) {
+		t.Fatal("peer-a should have mesh_relay_v1")
+	}
+	if !svc.sessionHasCapability(peerA, domain.CapMeshRoutingV1) {
+		t.Fatal("peer-a should have mesh_routing_v1")
+	}
+	if svc.sessionHasCapability(peerA, domain.Capability("mesh_dht_v1")) {
+		t.Fatal("peer-a should not have mesh_dht_v1")
+	}
+	if svc.sessionHasCapability(peerB, domain.CapMeshRelayV1) {
+		t.Fatal("peer-b has nil capabilities, should not match")
+	}
+	// A nil session is the "no connection carried this frame" case every
+	// receive-path caller has to survive; it must never be capable.
+	if svc.sessionHasCapability(nil, domain.CapMeshRelayV1) {
+		t.Fatal("a nil session must never report a capability")
+	}
+}
+
+// TestSendTargetHasCapability covers the OTHER question of the split: the
+// send side legitimately holds only an address and asks about whichever
+// session would carry the frame right now.
+func TestSendTargetHasCapability(t *testing.T) {
 	svc := &Service{
 		sessions: map[domain.PeerAddress]*peerSession{
 			"peer-a": {
@@ -211,19 +249,16 @@ func TestSessionHasCapability(t *testing.T) {
 		},
 	}
 
-	if !svc.sessionHasCapability(domain.PeerAddress("peer-a"), domain.CapMeshRelayV1) {
+	if !svc.sendTargetHasCapability(domain.PeerAddress("peer-a"), domain.CapMeshRelayV1) {
 		t.Fatal("peer-a should have mesh_relay_v1")
 	}
-	if !svc.sessionHasCapability(domain.PeerAddress("peer-a"), domain.CapMeshRoutingV1) {
-		t.Fatal("peer-a should have mesh_routing_v1")
-	}
-	if svc.sessionHasCapability(domain.PeerAddress("peer-a"), domain.Capability("mesh_dht_v1")) {
+	if svc.sendTargetHasCapability(domain.PeerAddress("peer-a"), domain.Capability("mesh_dht_v1")) {
 		t.Fatal("peer-a should not have mesh_dht_v1")
 	}
-	if svc.sessionHasCapability(domain.PeerAddress("peer-b"), domain.CapMeshRelayV1) {
+	if svc.sendTargetHasCapability(domain.PeerAddress("peer-b"), domain.CapMeshRelayV1) {
 		t.Fatal("peer-b has nil capabilities, should not match")
 	}
-	if svc.sessionHasCapability(domain.PeerAddress("unknown-peer"), domain.CapMeshRelayV1) {
+	if svc.sendTargetHasCapability(domain.PeerAddress("unknown-peer"), domain.CapMeshRelayV1) {
 		t.Fatal("unknown peer should not match")
 	}
 }

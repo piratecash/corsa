@@ -35,7 +35,7 @@ func TestSendRoutePoison_EmitsRawLineFrameWithSenderSig(t *testing.T) {
 	svc, id := newTestServiceWithIdentity(t)
 
 	senderAddr := domain.PeerAddress("addr-peerB-poison")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -82,7 +82,7 @@ func TestSendRoutePoison_RefusesPeerWithoutCapability(t *testing.T) {
 	svc, _ := newTestServiceWithIdentity(t)
 
 	senderAddr := domain.PeerAddress("addr-peerB-nopoison")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,

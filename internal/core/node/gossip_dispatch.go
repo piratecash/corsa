@@ -74,9 +74,24 @@ const (
 
 // startGossipDispatch launches both worker lanes. Called once from Run
 // before bootstrapLoop starts (the first retryRelayDeliveries tick must
-// find the pool up). Workers are goBackground-tracked and exit on ctx
-// cancellation; jobs still queued at shutdown are abandoned, which is
-// safe for fire-and-forget traffic.
+// find the pool up). Jobs still queued at shutdown are abandoned, which
+// is safe for fire-and-forget traffic.
+//
+// The workers and the shutdown supervisor are LIFECYCLE goroutines, not
+// fire-and-forget ones: they live for the whole of Run and stop on its
+// context. They used to be tracked by backgroundWg, which Run does not
+// wait on — so Run could return while a gossip job was inside a dial, a
+// handshake or a socket write, with the runtime free to close those
+// underneath it. They are tracked by runLoopsWg instead, which
+// stopRunLifecycle joins.
+//
+// Joining them is bounded, and the bound is the point: a worker refuses
+// to START a job once the context is done (it re-checks after drawing
+// one), so the join waits at most for the jobs already running — and a
+// gossip send is bounded by the dial timeout (2 s), the handshake
+// timeout and the socket write deadline netcore sets on every write.
+// What the join adds is the guarantee that those bounded calls have
+// FINISHED, not merely been asked to stop.
 func (s *Service) startGossipDispatch(ctx context.Context) {
 	s.gossipJobs = make(chan func(), gossipSendQueueCap)
 	s.gossipNoticeJobs = make(chan func(), gossipNoticeQueueCap)
@@ -93,7 +108,7 @@ func (s *Service) startGossipDispatch(ctx context.Context) {
 	// shutdown=false has finished its enqueue before the drain starts,
 	// and every dispatcher arriving after the Lock observes
 	// shutdown=true and drops. No closure can be parked post-drain.
-	s.goBackground(func() {
+	s.goRunLoop(func() {
 		<-ctx.Done()
 		s.gossipPoolMu.Lock()
 		defer s.gossipPoolMu.Unlock()
@@ -112,7 +127,7 @@ func (s *Service) startGossipDispatch(ctx context.Context) {
 // ctx is cancelled.
 func (s *Service) startGossipWorkers(ctx context.Context, n int, jobs <-chan func()) {
 	for i := 0; i < n; i++ {
-		s.goBackground(func() {
+		s.goRunLoop(func() {
 			for {
 				// Shutdown takes priority over more work: a bare
 				// two-case select picks RANDOMLY when both cases are
@@ -209,6 +224,9 @@ func (s *Service) dispatchGossipNoticeSend(job func()) {
 // backgroundWg, reported as gossipEnqueued). Always non-blocking.
 func (s *Service) tryEnqueueGossipJob(lane chan func(), job func()) gossipEnqueueResult {
 	if !s.gossipPoolUp.Load() {
+		// lifecycle: fire-and-forget by design. This is the fallback taken
+		// when the pool is not up: ONE queued closure, not a loop, run on
+		// backgroundWg exactly as it would have been inside a worker.
 		s.goBackground(job)
 		return gossipEnqueued
 	}

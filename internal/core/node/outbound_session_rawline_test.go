@@ -154,7 +154,7 @@ func TestOutboundSessionReader_PopulatesRawLineForV3(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.eventBus = newStormBus(t)
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -182,7 +182,7 @@ func TestOutboundSessionReader_DropsV3WhenRawLineEmpty(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.eventBus = newStormBus(t)
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -234,7 +234,7 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 	}
 
 	senderAddr := domain.PeerAddress("addr-peerB-poison")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -399,7 +399,7 @@ func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 		peerIdentity: idPeerB,
 		connID:       connID,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	svc.health = map[domain.PeerAddress]*peerHealth{senderAddr: {Connected: true}}
@@ -471,7 +471,7 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 		peerIdentity: domain.PeerIdentityFromWire(peer.Address),
 		connID:       connID,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	if svc.health == nil {

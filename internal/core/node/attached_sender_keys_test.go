@@ -164,7 +164,7 @@ func TestRelayForwardPreservesAttachedSenderKeys(t *testing.T) {
 
 	// Direct session to the recipient so the forward takes the
 	// direct-peer path and the frame is capturable from sendCh.
-	forwarded := make(chan protocol.Frame, 1)
+	forwarded := make(chan peerSendItem, 1)
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress("addr-fwd")] = &peerSession{
 		address:      "addr-fwd",
@@ -222,7 +222,7 @@ func TestRelayForwardBackfillsKnownSenderKeys(t *testing.T) {
 		t.Fatalf("identity.Generate (recipient): %v", err)
 	}
 
-	forwarded := make(chan protocol.Frame, 1)
+	forwarded := make(chan peerSendItem, 1)
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress("addr-backfill")] = &peerSession{
 		address:      "addr-backfill",
@@ -428,7 +428,7 @@ func TestRelayForwardDropsOversizedAttachedKeys(t *testing.T) {
 		t.Fatalf("identity.Generate (recipient): %v", err)
 	}
 
-	forwarded := make(chan protocol.Frame, 1)
+	forwarded := make(chan peerSendItem, 1)
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress("addr-oversize")] = &peerSession{
 		address:      "addr-oversize",
@@ -781,7 +781,7 @@ func TestOwnedContactSyncFailureTearsDownSession(t *testing.T) {
 	session := &peerSession{
 		address:       peerAddr,
 		conn:          local,
-		sendCh:        make(chan protocol.Frame, 4),
+		sendCh:        make(chan peerSendItem, 4),
 		inboxCh:       make(chan protocol.Frame, 4),
 		errCh:         make(chan error, 1),
 		contactSyncCh: make(chan chan int),
@@ -910,11 +910,16 @@ func TestRelayMessageDispatchedDuringOwnedSync(t *testing.T) {
 	session := &peerSession{
 		address:       peerAddr,
 		conn:          local,
-		sendCh:        make(chan protocol.Frame, 4),
+		sendCh:        make(chan peerSendItem, 4),
 		inboxCh:       make(chan protocol.Frame, 4),
 		errCh:         make(chan error, 1),
 		contactSyncCh: make(chan chan int),
 		capabilities:  []domain.Capability{domain.CapMeshRelayV1},
+		// A capability is NEGOTIATED on the welcome and IN FORCE only once
+		// auth_ok has landed, so a fixture that declares one without reaching
+		// that point models a session production never produces — and every
+		// capability gate of the receive path refuses it.
+		authOK: true,
 	}
 	attachTestNetCore(svc, session)
 

@@ -26,9 +26,9 @@ func registerSelfKey(t *testing.T, svc *Service) {
 // attachCapableRelayPeer registers a connected mesh_relay_v1 peer whose
 // outbound frames land on the returned channel, so a test can observe what
 // storeIncomingMessage re-propagates.
-func attachCapableRelayPeer(t *testing.T, svc *Service, addr string, peerIdentity domain.PeerIdentity) chan protocol.Frame {
+func attachCapableRelayPeer(t *testing.T, svc *Service, addr string, peerIdentity domain.PeerIdentity) chan peerSendItem {
 	t.Helper()
-	sendCh := make(chan protocol.Frame, 32)
+	sendCh := make(chan peerSendItem, 32)
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(addr)] = &peerSession{
 		address:      domain.PeerAddress(addr),
@@ -45,7 +45,7 @@ func attachCapableRelayPeer(t *testing.T, svc *Service, addr string, peerIdentit
 	return sendCh
 }
 
-func drainForRepropagation(sendCh chan protocol.Frame, id string) bool {
+func drainForRepropagation(sendCh chan peerSendItem, id string) bool {
 	for {
 		select {
 		case f := <-sendCh:

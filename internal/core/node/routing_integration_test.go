@@ -1569,19 +1569,23 @@ func TestOutboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 	}
 
 	// Create a session for peer-B with relay-only capability (no routing).
+	// authOK: the negotiated set is only in force on a session whose handshake
+	// completed (sessionHasCapability), and a full sync is only ever attempted
+	// on such a session.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
+		authOK:       true,
 	}
 
 	// Verify the capability gate returns false.
-	if svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRoutingV1) {
+	if svc.sessionHasCapability(svc.sessions[domain.PeerAddress("addr-B")], domain.CapMeshRoutingV1) {
 		t.Fatal("peer-B should NOT have mesh_routing_v1")
 	}
 
 	// The code under test: outbound full-sync is skipped because peer-B
 	// lacks mesh_routing_v1. We verify by checking that AnnounceTo would
-	// have produced routes (the table is non-empty) but sessionHasCapability
+	// have produced routes (the table is non-empty) but the capability gate
 	// blocks the send path.
 	routes := svc.routingTable.AnnounceTo(idPeerB)
 	if len(routes) == 0 {
@@ -1598,13 +1602,15 @@ func TestOutboundFullSyncSentWithRoutingCap(t *testing.T) {
 		t.Fatalf("AddDirectPeer failed: %v", err)
 	}
 
-	// Create a session for peer-B with routing capability.
+	// Create a session for peer-B with routing capability. See the authOK note
+	// in TestOutboundFullSyncSkippedWithoutRoutingCap.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
+		authOK:       true,
 	}
 
-	if !svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRoutingV1) {
+	if !svc.sessionHasCapability(svc.sessions[domain.PeerAddress("addr-B")], domain.CapMeshRoutingV1) {
 		t.Fatal("peer-B should have mesh_routing_v1")
 	}
 
@@ -1648,8 +1654,12 @@ func TestInboundFullSyncSkippedWithoutRoutingCap(t *testing.T) {
 		t.Fatal("inbound peer should NOT have mesh_routing_v1")
 	}
 
-	// trackInboundConnect should NOT send anything because the gate blocks it.
-	svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
+	// trackInboundConnect should hand back NOTHING to send: the gate blocks it.
+	// The sync is returned rather than spawned so the caller can order it
+	// behind auth_ok, so "sends nothing" now reads as "hands back nil".
+	if fullSync := svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB); fullSync.due {
+		t.Fatal("a peer without mesh_routing_v1 must not be handed a full sync to send")
+	}
 
 	// Verify nothing was written by attempting a read with a short timeout.
 	readDone := make(chan int, 1)
@@ -1713,8 +1723,13 @@ func TestInboundFullSyncSentWithRoutingCap(t *testing.T) {
 		}
 	}()
 
-	// trackInboundConnect should call sendFullTableSyncToInbound.
-	svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
+	// trackInboundConnect hands the full sync back; the production caller runs
+	// it after auth_ok is enqueued, and here the test is that caller.
+	fullSync := svc.trackInboundConnect(connID, domain.PeerAddress(idPeerB.String()), idPeerB)
+	if !fullSync.due {
+		t.Fatal("a routing- and relay-capable peer must be handed a full sync to send")
+	}
+	go svc.sendFullTableSyncToInbound(context.Background(), connID, fullSync.peer)
 
 	select {
 	case data := <-received:
@@ -1747,16 +1762,18 @@ func TestOutboundFullSyncSkippedForRoutingOnlyPeer(t *testing.T) {
 	}
 
 	// Create a session for peer-B with routing-only capability (no relay).
+	// See the authOK note in TestOutboundFullSyncSkippedWithoutRoutingCap.
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
 		peerIdentity: idPeerB,
 		capabilities: []domain.Capability{domain.CapMeshRoutingV1},
+		authOK:       true,
 	}
 
 	// Peer has routing but not relay.
-	if !svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRoutingV1) {
+	if !svc.sessionHasCapability(svc.sessions[domain.PeerAddress("addr-B")], domain.CapMeshRoutingV1) {
 		t.Fatal("peer-B should have mesh_routing_v1")
 	}
-	if svc.sessionHasCapability(domain.PeerAddress("addr-B"), domain.CapMeshRelayV1) {
+	if svc.sessionHasCapability(svc.sessions[domain.PeerAddress("addr-B")], domain.CapMeshRelayV1) {
 		t.Fatal("peer-B should NOT have mesh_relay_v1")
 	}
 
@@ -2109,8 +2126,9 @@ func TestTryForwardViaRoutingTablePlumbsRouteOrigin(t *testing.T) {
 	}
 
 	// peer-C needs both caps (transit, hops=2) and a functioning send channel.
-	sendCh := make(chan protocol.Frame, 10)
+	sendCh := make(chan peerSendItem, 10)
 	svc.sessions[domain.PeerAddress("addr-C")] = &peerSession{
+		address:      domain.PeerAddress("addr-C"),
 		peerIdentity: idPeerC,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 		sendCh:       sendCh,
@@ -2324,9 +2342,15 @@ func TestInboundFullSyncUsesIdentityNotAddress(t *testing.T) {
 		}
 	}()
 
-	// trackInboundConnect must pass peerIdentity (idPeerB), not address.
+	// trackInboundConnect must pass peerIdentity (idPeerB), not address. The
+	// sync it hands back is run here, the way the production caller runs it
+	// once auth_ok is on the writer.
 	connID, _ := svc.connIDFor(conn)
-	svc.trackInboundConnect(connID, natListenAddr, idPeerB)
+	fullSync := svc.trackInboundConnect(connID, natListenAddr, idPeerB)
+	if !fullSync.due {
+		t.Fatal("a routing- and relay-capable peer must be handed a full sync to send")
+	}
+	go svc.sendFullTableSyncToInbound(context.Background(), connID, fullSync.peer)
 
 	select {
 	case data := <-received:
@@ -2455,7 +2479,7 @@ func TestDrainPendingForIdentities_SendMessageDrained(t *testing.T) {
 
 	// Set up peer-B with a relay-capable session so the router can find it.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	sendCh := make(chan protocol.Frame, 10)
+	sendCh := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
@@ -2605,7 +2629,7 @@ func TestDrainPendingForIdentities_SkipsRelayMessage(t *testing.T) {
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
-		sendCh:       make(chan protocol.Frame, 10),
+		sendCh:       make(chan peerSendItem, 10),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
@@ -2714,7 +2738,7 @@ func TestDrainPendingForIdentities_ExpiredFrameRemoved(t *testing.T) {
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
 		peerIdentity: idPeerB,
-		sendCh:       make(chan protocol.Frame, 10),
+		sendCh:       make(chan peerSendItem, 10),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	}
 	svc.health[addrB] = &peerHealth{Address: addrB, Connected: true, State: peerStateHealthy}
@@ -3101,7 +3125,7 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 
 	// Set up peer-B with a session and route.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	sendCh := make(chan protocol.Frame, 20)
+	sendCh := make(chan peerSendItem, 20)
 	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
@@ -3151,11 +3175,22 @@ func TestDrainPendingForIdentities_ConcurrentDrainNoDuplicate(t *testing.T) {
 	<-done
 
 	// Count relay_message frames on peer-B's sendCh — must be exactly 1.
-	close(sendCh)
+	// Drained non-blockingly instead of closed: sendCh has many producers on
+	// arbitrary goroutines, so it is never closed anywhere on this path (see
+	// closeSendQueue and docs/locking.md, "peerSession.sendMu — the outbound
+	// queue fence"), and a test that closes it teaches the next reader the one
+	// move the fence exists to forbid. Both drains joined above, so whatever
+	// is in the buffer now is the whole of what they produced.
 	var count int
-	for f := range sendCh {
-		if f.Type == "relay_message" && f.ID == "msg-concurrent" {
-			count++
+drained:
+	for {
+		select {
+		case f := <-sendCh:
+			if f.Type == "relay_message" && f.ID == "msg-concurrent" {
+				count++
+			}
+		default:
+			break drained
 		}
 	}
 	if count != 1 {
@@ -3200,7 +3235,7 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	sendCh := make(chan protocol.Frame, 10)
+	sendCh := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
@@ -3265,7 +3300,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 
 	// Set up peer-C with a relay session (the backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
-	sendChC := make(chan protocol.Frame, 10)
+	sendChC := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrC] = &peerSession{
 		address:      addrC,
@@ -3407,7 +3442,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 
 	// Set up peer-C with a relay session (backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
-	sendChC := make(chan protocol.Frame, 10)
+	sendChC := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrC] = &peerSession{
 		address:      addrC,
@@ -3604,7 +3639,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 
 	// Set up peer-B with a relay session (primary route goes through B).
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	sendChB := make(chan protocol.Frame, 10)
+	sendChB := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
@@ -3618,7 +3653,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 
 	// Set up peer-C with a relay session (backup route goes through C).
 	addrC := domain.PeerAddress("10.0.0.3:9000")
-	sendChC := make(chan protocol.Frame, 10)
+	sendChC := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrC] = &peerSession{
 		address:      addrC,
@@ -3713,7 +3748,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 
 	// Set up peer-B with a relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	sendChB := make(chan protocol.Frame, 10)
+	sendChB := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
@@ -3775,7 +3810,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	sendChB := make(chan protocol.Frame, 10)
+	sendChB := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,
@@ -3855,7 +3890,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 
 	// Set up peer-B with relay session.
 	addrB := domain.PeerAddress("10.0.0.2:9000")
-	sendChB := make(chan protocol.Frame, 10)
+	sendChB := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[addrB] = &peerSession{
 		address:      addrB,

@@ -140,8 +140,8 @@ func (s *Service) sendFrameViaNetwork(ctx context.Context, id domain.ConnID, fra
 		// Slow-peer eviction — same operational response as the legacy
 		// enqueueFrameByID branch for SendBufferFull. Close goes through
 		// the Network surface so the seam is preserved; the bridge maps
-		// this to NetCore.Close() which closes the raw socket and
-		// sendCh exactly like the legacy pc.Close() call.
+		// this to NetCore.Close(), which shuts the send gate and closes
+		// the raw socket exactly like the legacy pc.Close() call.
 		// The sentinel is returned: strict callers need to see the drop.
 		// Fire-and-forget callers swallow it under `_`.
 		_ = network.Close(ctx, id)

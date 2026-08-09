@@ -254,7 +254,7 @@ func TestHandleRoutesUpdate_BeforeBaseline_EmitsRequestResync(t *testing.T) {
 	// route the reply through enqueuePeerFrame. health.Connected==true is
 	// required by activePeerSession.
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -309,7 +309,7 @@ func TestHandleRoutesUpdate_AfterBaseline_AppliesEntries(t *testing.T) {
 	registry.GetOrCreate(idPeerB).MarkBaselineReceived()
 
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -407,7 +407,7 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 	// Wire a session so a SendRequestResync, if it slipped through,
 	// would land observably on the send channel.
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -600,7 +600,7 @@ func TestSendRoutesUpdate_NoV2OnLiveSession_SkipsWire(t *testing.T) {
 	// at cycle start, then closed and replaced by a v1-only session at
 	// the same address before the per-peer goroutine called SendRoutesUpdate.
 	addr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
@@ -639,7 +639,7 @@ func TestSendRoutesUpdate_V2OnLiveSession_SendsFrame(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	addr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
@@ -714,7 +714,7 @@ func TestSendRoutesUpdate_NarrowReplacementSession_SkipsWire(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := newTestServiceWithRouting(t, idNodeA)
 			addr := domain.PeerAddress("addr-peerB")
-			sendCh := make(chan protocol.Frame, 4)
+			sendCh := make(chan peerSendItem, 4)
 			svc.peerMu.Lock()
 			svc.sessions[addr] = &peerSession{
 				address:      addr,
@@ -760,7 +760,7 @@ func TestSendRequestResync_V2OnlyOnLiveSession_SendsFrame(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	addr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,
@@ -800,7 +800,7 @@ func TestSendRequestResync_NoV2OnLiveSession_SkipsWire(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	addr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[addr] = &peerSession{
 		address:      addr,

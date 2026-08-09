@@ -108,6 +108,35 @@ type Frame struct {
 	TrafficHistory  *TrafficHistoryFrame  `json:"traffic_history,omitempty"`
 	Capabilities    []string              `json:"capabilities,omitempty"`
 
+	// DTypes is the datagram type set the peer declares on hello/welcome
+	// (docs/refactoring/datagram-transport.md §6.1). The wire contract is
+	// closed and is enforced on the receive side by
+	// domain.ParseDeclaredDTypesField: the field IS the set, so a non-empty
+	// array means exactly the names it carries, an explicitly EMPTY array
+	// means the node speaks the envelope and has a handler for no type, and
+	// an ABSENT field names nothing at all — the peer is an endpoint for no
+	// type, and nothing is implied on its behalf. Order is insignificant,
+	// duplicates collapse, and a bounds breach (more than 64 names, or a name
+	// outside `[a-z0-9_]{1,64}`) drops the whole field back to the absent
+	// form WITHOUT tearing the handshake down. The set is fixed for the
+	// lifetime of the session — changing it means a new build, hence a
+	// restart, hence new sessions.
+	//
+	// It is a POINTER to the slice so the two STATEMENTS stay distinguishable
+	// on the wire: a plain []string with omitempty cannot put `"dtypes": []`
+	// there, so "I speak the envelope and handle nothing" and "I said
+	// nothing" would be the same bytes. Both currently lead a reader to the
+	// same routing decision, and they are still kept apart because they are
+	// different facts and the diagnostics report them as such. It costs
+	// nothing on the receive side: a peer that predates the field ignores it,
+	// and a peer that predates the amendment reads `[]` the way it always
+	// read an empty list.
+	//
+	// omitempty is what makes the absent form expressible: only a node that
+	// does not speak the envelope emits no field, and its handshake stays
+	// wire-identical to the legacy one.
+	DTypes *[]string `json:"dtypes,omitempty"`
+
 	// Relay fields (Iteration 1 — hop-by-hop relay)
 	HopCount    int    `json:"hop_count,omitempty"`
 	MaxHops     int    `json:"max_hops,omitempty"`

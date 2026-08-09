@@ -2,6 +2,7 @@ package node
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -307,6 +308,62 @@ func TestMaxFrameLineBytesValue(t *testing.T) {
 	if maxCommandLineBytes != 128*1024 {
 		t.Fatalf("maxCommandLineBytes = %d, want %d", maxCommandLineBytes, 128*1024)
 	}
+}
+
+// TestDiscardFrameLineRemainderBoundsTheResyncWindow pins the ONE question the
+// resynchronisation window answers: how far past a refused line this node keeps
+// reading before the peer stops being a misbehaving frame and becomes an
+// unterminated stream.
+//
+// The two cases are the two sides of that boundary, and both are needed: a
+// discard that always tore the connection down would satisfy the first on its
+// own while destroying the resynchronisation the window exists for.
+//
+// The trap is that the delimiter arrives INSIDE a chunk, and the chunk carrying
+// it can be the very one that crosses the window. Honouring it there would let a
+// sender place its newline a byte past the boundary and buy the whole overshoot
+// — an unbounded read behind a terminator, which is the stream the bound refuses.
+func TestDiscardFrameLineRemainderBoundsTheResyncWindow(t *testing.T) {
+	t.Parallel()
+
+	const window = 64
+	const nextLine = `{"type":"ping"}` + "\n"
+
+	t.Run("delimiter_past_the_window_is_a_stream", func(t *testing.T) {
+		t.Parallel()
+
+		reader := bufio.NewReader(strings.NewReader(strings.Repeat("A", window+1) + "\n" + nextLine))
+
+		discarded, err := discardFrameLineRemainder(reader, window)
+		if !errors.Is(err, errFrameTooLarge) {
+			t.Fatalf("discard = (%d, %v), want errFrameTooLarge: the window is %d bytes and a newline BEHIND it does not pay for the bytes in front of it",
+				discarded, err, window)
+		}
+	})
+
+	t.Run("delimiter_inside_the_window_resynchronises", func(t *testing.T) {
+		t.Parallel()
+
+		remainder := strings.Repeat("A", window/2) + "\n"
+		reader := bufio.NewReader(strings.NewReader(remainder + nextLine))
+
+		discarded, err := discardFrameLineRemainder(reader, window)
+		if err != nil {
+			t.Fatalf("discard = (%d, %v), want success: a line that terminates inside the window is a refused frame, not a stream",
+				discarded, err)
+		}
+		if discarded != len(remainder) {
+			t.Fatalf("discarded = %d, want %d — the count is what was READ", discarded, len(remainder))
+		}
+
+		line, err := readFrameLine(reader, maxCommandLineBytes)
+		if err != nil {
+			t.Fatalf("the reader did not resynchronise after the discard: %v", err)
+		}
+		if line != nextLine {
+			t.Fatalf("next line = %q, want %q", line, nextLine)
+		}
+	})
 }
 
 // --- Split limit regression tests ---
@@ -647,16 +704,22 @@ func TestPeekFrameType_MissingOrMalformed(t *testing.T) {
 	}
 }
 
-func TestPeekFrameType_FileCommandExemptionMatch(t *testing.T) {
+// TestPeekFrameType_AttributionUsesTheProtocolConstant pins the one job
+// peekFrameType still has: naming, for a log line or a drop counter, the type a
+// refused line CLAIMED. The value has to be the protocol constant itself, or the
+// refusal lands on the wrong plane's ledger.
+//
+// It is NOT an exemption test any more. The rate-limiter exemption is decided by
+// frameLineExemptFromCommandLimit from the top-level classification — see
+// TestCommandLimitExemptionRefusesDecoyTopLevelTypes for why a peeked type may
+// not decide it.
+func TestPeekFrameType_AttributionUsesTheProtocolConstant(t *testing.T) {
 	t.Parallel()
 
-	// Verify that peekFrameType output matches the constant used in the
-	// rate limiter exemption check, ensuring file_command frames are
-	// correctly identified.
 	line := `{"type":"file_command","sub":"chunk_response","hash":"abc123","offset":0,"data":"..."}`
 	got := peekFrameType(line)
 	if got != protocol.FileCommandFrameType {
-		t.Errorf("peekFrameType returned %q, want %q — file transfer frames would not be exempt from rate limiting",
+		t.Errorf("peekFrameType returned %q, want %q — a refused file transfer frame would be attributed to the wrong type",
 			got, protocol.FileCommandFrameType)
 	}
 }
@@ -674,16 +737,16 @@ func TestPeekFrameType_FileCommandExemptionMatch(t *testing.T) {
 // NOT close TCP" holds. (Full baselines are bounded by the route
 // bucket; chatty targets delta churn — see recordInboundAnnounceAndMaybeArm.)
 //
-// The exemption logic in service.go inbound read loop is:
+// The exemption logic in the service.go inbound read loop is:
 //
-//	frameType := peekFrameType(line)
-//	if frameType != protocol.FileCommandFrameType &&
-//	    !isAnnouncePlaneBulkFrameType(frameType) &&
-//	    !s.cmdLimiter.allowCommand(connKey) { close }
+//	if !s.admitInboundCommandLine(connID, connKey, line) { close }
 //
-// We pin the wire-level part of that decision by feeding raw JSON
-// lines through peekFrameType + isAnnouncePlaneBulkFrameType and
-// asserting the exemption holds.
+// whose exemption half is frameLineExemptFromCommandLimit.
+//
+// We pin it by feeding raw JSON lines to that DECISION itself. Composing
+// its halves here instead — the classification and the type policy — would
+// leave the composition untested, and the composition is where a widened
+// exemption would live.
 func TestCmdLimiterExemption_BulkAnnounceFramesExempt(t *testing.T) {
 	t.Parallel()
 
@@ -700,11 +763,13 @@ func TestCmdLimiterExemption_BulkAnnounceFramesExempt(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ft := peekFrameType(tt.line)
-			if ft == "" {
-				t.Fatalf("peekFrameType(%q) failed to parse a known bulk announce line", tt.line)
-			}
-			if !isAnnouncePlaneBulkFrameType(ft) {
+			// The DECISION, not its halves: composing the classifier and
+			// the type policy by hand here would leave the composition
+			// itself — the thing the read loop actually runs — untested.
+			// A zero Service is the honest fixture: the datagram half of
+			// the decision reads an atomic pointer that is nil without a
+			// layer, and an announce line never reaches it anyway.
+			if !new(Service).frameLineExemptFromCommandLimit(unregisteredConnID, tt.line) {
 				// Two distinct reasons the exemption matters, depending
 				// on frame kind:
 				//   - baseline (announce_routes, v3 kind="full"): the cmd
@@ -713,7 +778,7 @@ func TestCmdLimiterExemption_BulkAnnounceFramesExempt(t *testing.T) {
 				//   - delta (routes_update, v3 kind="delta"): the cmd limiter
 				//     would close the TCP before a delta flood can reach the
 				//     chatty_routes threshold that is meant to own it.
-				t.Fatalf("isAnnouncePlaneBulkFrameType(%q) = false; cmd limiter would either truncate a legitimate full-sync burst (baseline) or close inbound TCP before chatty_routes can arm on a delta flood", ft)
+				t.Fatalf("%q is not exempt from the command limiter; it would either truncate a legitimate full-sync burst (baseline) or close inbound TCP before chatty_routes can arm on a delta flood", tt.line)
 			}
 		})
 	}
@@ -724,9 +789,8 @@ func TestCmdLimiterExemption_BulkAnnounceFramesExempt(t *testing.T) {
 		`{"type":"ping"}`,
 		`{"type":"hello","version":1}`,
 	} {
-		ft := peekFrameType(line)
-		if isAnnouncePlaneBulkFrameType(ft) {
-			t.Errorf("non-announce frame %q reported as bulk announce — over-broad exemption", ft)
+		if new(Service).frameLineExemptFromCommandLimit(unregisteredConnID, line) {
+			t.Errorf("non-announce line %q reported as exempt — over-broad exemption", line)
 		}
 	}
 }
@@ -763,18 +827,20 @@ func TestCmdLimiterExemption_ControlAnnounceFramesNOTExempt(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ft := peekFrameType(tt.line)
-			if ft == "" {
-				t.Fatalf("peekFrameType(%q) failed to parse a known control line", tt.line)
+			ft, named := topLevelFrameType(tt.line)
+			if !named {
+				t.Fatalf("topLevelFrameType(%q) failed to name a known control line", tt.line)
 			}
 			// Sanity: control frames ARE announce-plane for the
 			// size-budget enforcement path (peer_management.go).
 			if !isAnnouncePlaneFrameType(ft) {
 				t.Fatalf("isAnnouncePlaneFrameType(%q) = false; size-budget enforcement would no longer cover this control frame", ft)
 			}
-			// Contract: but NOT bulk → cmd limiter still applies.
-			if isAnnouncePlaneBulkFrameType(ft) {
-				t.Fatalf("isAnnouncePlaneBulkFrameType(%q) = true; control frame wrongly exempted from cmd limiter — only the loose 200/s route bucket would remain as per-peer defence, and chatty_routes does NOT count control frames", ft)
+			// Contract: but NOT bulk → the cmd limiter still applies. Asked
+			// of the DECISION, so that the exemption cannot widen underneath
+			// a test that only ever consulted one of its halves.
+			if new(Service).frameLineExemptFromCommandLimit(unregisteredConnID, tt.line) {
+				t.Fatalf("control line %q is exempt from the cmd limiter — only the loose 200/s route bucket would remain as per-peer defence, and chatty_routes does NOT count control frames", tt.line)
 			}
 		})
 	}
@@ -806,11 +872,13 @@ func TestCmdLimiterExemption_InboundBulkFloodReachesChattyThreshold(t *testing.T
 	const floodFrames = chattyAnnounceThreshold + 100 // headroom past the trigger
 
 	closed := 0
+	svc := new(Service)
 	for i := 0; i < floodFrames; i++ {
-		ft := peekFrameType(line)
-		// Exact predicate the inbound read loop uses to decide
-		// whether to even call cmdLimiter.allowCommand.
-		if ft != protocol.FileCommandFrameType && !isAnnouncePlaneBulkFrameType(ft) {
+		// The DECISION the inbound read loop makes before it even calls
+		// cmdLimiter.allowCommand. A zero Service is enough: the datagram
+		// half of the decision reads a nil layer pointer, and an
+		// announce-plane line never reaches it.
+		if !svc.frameLineExemptFromCommandLimit(unregisteredConnID, line) {
 			// In the real loop the next step is allowCommand;
 			// after burst exhaustion it returns false → close.
 			// For bulk announce-plane the branch never gets here,
@@ -822,5 +890,88 @@ func TestCmdLimiterExemption_InboundBulkFloodReachesChattyThreshold(t *testing.T
 	if closed > 0 {
 		t.Fatalf("bulk routes_update delta flood would be closed by cmd limiter %d/%d times; bulk exemption broken — inbound chatty peer never reaches chatty_routes quarantine",
 			closed, floodFrames)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The exemption DECISION, not the peek
+// ---------------------------------------------------------------------------
+
+// TestCommandLimitExemptionRefusesDecoyTopLevelTypes is the regression for the
+// command-limiter bypass.
+//
+// The exemption used to be decided from peekFrameType, which returns the FIRST
+// `"type"` found anywhere in the line — nested objects included — while
+// encoding/json binds the LAST TOP-LEVEL one. A sender therefore chose which
+// reader got which answer: `{"a":{"type":"file_command"},"type":"ping"}` left
+// the limiter as a file_command and was then executed as a `ping`, a
+// handshake command that needs no session, so any socket could hold this node
+// at line rate for free.
+//
+// The assertion is on the DECISION function the read loop calls, not on
+// classifyFrameLine: the classifier already answered these lines correctly
+// while the read loop went on asking the peek, so a test one level lower would
+// have been green throughout the defect.
+//
+// Positive controls sit in the same table on purpose. Without them the test
+// would also pass for an implementation that exempts nothing at all, which
+// would silently reinstate the chunked full-sync truncation and throttle the
+// file data plane to the control-plane rate.
+func TestCommandLimitExemptionRefusesDecoyTopLevelTypes(t *testing.T) {
+	t.Parallel()
+
+	svc := newDatagramLayerService(t, true)
+
+	cases := []struct {
+		name   string
+		line   string
+		exempt bool
+	}{
+		// Decoys — the peek and the parser name two different types.
+		{"nested_file_command_top_level_ping", `{"a":{"type":"file_command"},"type":"ping"}`, false},
+		{"nested_bulk_announce_top_level_ping", `{"a":{"type":"routes_update"},"type":"ping"}`, false},
+		{"nested_datagram_top_level_ping", `{"a":{"type":"datagram"},"type":"ping"}`, false},
+		{"duplicate_file_command_then_ping", `{"type":"file_command","type":"ping"}`, false},
+		{"duplicate_ping_then_file_command", `{"type":"ping","type":"file_command"}`, false},
+		{"case_variant_type_key", `{"TYPE":"file_command"}`, false},
+		{"non_string_type_then_file_command", `{"type":null,"type":"file_command"}`, false},
+		{"not_an_object", `"file_command"`, false},
+
+		// Positive controls — the exemptions that must survive the fix.
+		{"real_file_command", `{"type":"file_command","sub":"chunk_request"}`, true},
+		{"real_announce_routes", `{"type":"announce_routes","routes":[]}`, true},
+		{"real_routes_update", `{"type":"routes_update","routes":[]}`, true},
+		{"real_route_announce_v3", `{"type":"` + protocol.RouteAnnounceV3FrameType + `","kind":"full","epoch":1,"entries":[]}`, true},
+
+		// Negative controls — ordinary and announce-plane CONTROL frames keep
+		// paying the limiter.
+		{"real_ping", `{"type":"ping"}`, false},
+		{"real_send_message", `{"type":"send_message","to":"abc"}`, false},
+		{"real_request_resync", `{"type":"request_resync"}`, false},
+		{"real_route_poison_v1", `{"type":"` + protocol.RoutePoisonFrameType + `","identity":"x","sig":"y"}`, false},
+	}
+
+	// Every question below is asked of an AUTHENTICATED connection, which is
+	// the only state where the datagram exemption can be granted at all — so a
+	// decoy answered "not exempt" here was refused for its shape and not for
+	// the connection it arrived on.
+	authenticated := registerDatagramCommandConn(t, svc, domain.ConnID(8831), true)
+
+	// The third exempt class needs a real frame rather than a fixture literal.
+	// A genuine datagram must keep its exemption: the layer's §5 budget REPLACES
+	// the command limiter for this plane, and a datagram left inside the limiter
+	// would be throttled to a control-plane rate its bulk chunks never fit.
+	if !svc.frameLineExemptFromCommandLimit(authenticated, mustDatagramLine(t, newNodeDatagram(t, nil))) {
+		t.Fatal("a real datagram lost its exemption although the layer charges its own budget")
+	}
+
+	for _, tt := range cases {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := svc.frameLineExemptFromCommandLimit(authenticated, tt.line+"\n"); got != tt.exempt {
+				t.Fatalf("frameLineExemptFromCommandLimit(%s) = %v, want %v", tt.line, got, tt.exempt)
+			}
+		})
 	}
 }

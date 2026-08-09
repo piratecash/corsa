@@ -62,7 +62,7 @@ func newScenarioSession(
 		metered: netcore.NewMeteredConn(local),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
-		sendCh:  make(chan protocol.Frame, 16),
+		sendCh:  make(chan peerSendItem, 16),
 	}
 	// syncPeerSession routes only through session.netCore.sendRawSyncBlocking,
 	// never through writeJSONFrame, so the NetCore does not need to be

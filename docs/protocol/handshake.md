@@ -70,6 +70,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `pubkey` | string | optional | Ed25519 public key in base64. Used for message signature verification |
 | `boxkey` | string | optional | X25519 public key in base64. Used for message encryption. Node-to-node hellos always include it even on a relay-only node (headless `corsa-node` without `CORSA_ACCEPT_DM=1`): responders issue the session-auth challenge only when all four identity fields (`address`, `pubkey`, `boxkey`, `boxsig`) are present. A relay-only node limits the key to this handshake plane — it never redistributes it via `fetch_contacts` — and drops any DM addressed to itself (see `docs/protocol/messaging.md` "DM Opt-Out") |
 | `boxsig` | string | optional | Ed25519 signature (base64url) of boxkey binding. Signature payload: `corsa-boxkey-v1|<address>|<boxkey-base64>` |
+| `dtypes` | array | optional | Datagram types this node handles as an endpoint (`docs/refactoring/datagram-transport.md` §6.1). The field IS the set: a non-empty array means exactly those names, an explicitly empty array `[]` means the envelope is understood and no type is handled, and an absent field names no type at all — nothing is implied on a silent peer's behalf. Order is insignificant, duplicates collapse, bounds are ≤ 64 names of `[a-z0-9_]{1,64}`, and a bounds breach drops the whole field back to the absent form WITHOUT tearing the handshake down. Fixed for the lifetime of the session. See [dtypes (datagram type set)](#dtypes-datagram-type-set) |
 
 ### welcome (responder → initiator)
 
@@ -118,6 +119,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `pubkey` | string | Responder's Ed25519 public key |
 | `boxkey` | string | Responder's X25519 public key. Always included, same as in `hello` — required for the four-field identity check on session auth; a relay-only responder still sends it but never redistributes it via `fetch_contacts` |
 | `boxsig` | string | Signature of responder's boxkey binding |
+| `dtypes` | array | Same as in `hello` — the responder's datagram type set, with the identical closed contract |
 | `observed_address` | string | Initiator's IP address (no port) as seen by responder. Used by the dialer's `recordObservedAddress` as **NAT-detection telemetry only**: votes per peer identity feed a single "NAT detected" warning when the consensus IP disagrees with the local bind host (`cfg.ListenAddress`). It is NOT consumed for peer discovery, address learning, or any authoritative self-advertise decision under the v12 cleanup baseline |
 
 ### auth_session (initiator → responder)
@@ -411,6 +413,8 @@ The `capabilities` field enables additive feature negotiation without incrementi
 
 Capability tokens gate new frame types and behaviors. A peer must not send a capability-gated frame type unless the session has that capability in its negotiated set. This allows mixed-version networks: legacy nodes without the `capabilities` field are treated as having an empty set — they never receive unknown frame types.
 
+**The negotiated set belongs to a connection, not to a peer address.** A set is fixed by the handshake of one session and never changes inside it, but a reconnect registers a replacement session under the SAME dial address while the previous session's reader is still delivering frames. A receive-side gate must therefore be answered by the connection the frame ARRIVED on — resolving the address instead judges an arriving frame by a set it was never sent under, which either accepts a frame behind a capability the peer never declared on that connection or drops a legitimate one. In the node this is enforced by the parameter type: `sessionHasCapability` takes the session, and the address-keyed `sendTargetHasCapability` answers the different, send-side question of "is the socket a frame would leave over right now capable" (`internal/core/node/capabilities.go`). The same rule holds on the inbound direction, where the connection id is the key and is never reused.
+
 Currently defined tokens:
 
 - `"mesh_relay_v1"` — hop-by-hop relay via `relay_message` and `relay_delivery_receipt` frames.
@@ -418,6 +422,48 @@ Currently defined tokens:
 - `"mesh_routing_v2"` — opt-in refinement of `mesh_routing_v1` that enables incremental delta updates as `routes_update` frames and the `request_resync` control frame. v2 picks up only when the negotiated set contains the FULL v2 triplet `mesh_routing_v1` + `mesh_routing_v2` + `mesh_relay_v1` (see `classifyDeltaMode` / `hasCapV2Triplet` in `internal/core/routing/announce.go`). Relay is part of the triplet because the send-side dispatch in `dispatchAnnouncePlaneFrameWithCaps` gates `SendRoutesUpdate` on it — a relay-less v2 classification would route to a sender that refuses the frame with no legacy fallback. v1 is the floor: a peer that advertises v2 without v1 is treated as v1-only, because the first sync (baseline) always travels as the legacy `announce_routes` frame (or the Phase 4 `route_announce_v3` `kind="full"` frame for v3-triplet peers) and thus requires v1 on the receive side. Mode selection is driven by the per-cycle `AnnounceTarget.Capabilities` snapshot taken from the session selected by the announce loop; the persistent peer-state capability record is reconciled to that snapshot at the start of each per-peer goroutine, so the selection reads a single derived view of the chosen session's caps. See `docs/routing.md` "Persistent caps as a derived view of the chosen target" and "Announce delta mode selection" for the full contract.
 - `"mesh_routing_v3"` — Phase 4 compact-announce wire frame `route_announce_v3` (plus signed announcements and the explicit single-hop poison-reverse signal carried as `mesh_poison_reverse_v1`). Like v2 it engages only when the negotiated set contains the FULL triplet `mesh_routing_v1` + `mesh_routing_v3` + `mesh_relay_v1`; the baseline/full sync to a v3-triplet peer travels as the `route_announce_v3` `kind="full"` frame, and peers missing any leg keep receiving legacy `announce_routes` / `routes_update` unchanged. **Advertised by default** — the env flag `CORSA_ENABLE_MESH_ROUTING_V3` defaults to on after its soak; operators opt out with `=0` (or `false`/`no`/`off`), which drops the node back to the legacy v1/v2 wire path. Because negotiation uses the intersection, a default-on node still talks legacy to opted-out or older peers. See `docs/routing.md` "Phase 4" and `docs/cluster-mesh/phase-4-compact-wire-signed.md` §7.
 - `"file_transfer_v1"` — gates file transfer commands (`FileCommandFrame` traffic). The out-of-band `file_announce` DM is not gated.
+- `"mesh_datagram_v1"` — the datagram transport layer as an **endpoint at the transport level**: the node understands the `datagram` envelope, accepts datagrams addressed to it and sends its own, rather than answering `unknown_command` and closing. The token says nothing about which datagram TYPES the node can handle — that is what `dtypes` is for (see below) — so it is advertised by every node with the layer enabled, whatever its type registry holds. A datagram is only ever written into a session whose negotiated set contains this token, and the requirement covers every candidate including a purely transit one, which is why the token must mean the envelope and nothing more. Advertised behind `config.Node.EnableDatagramV1` **and behind nothing else**: the plane keeps no durable state, so there is no recovery barrier to open, no fail-closed withdrawal and no run-time condition under which the token disappears. It used to be withheld while a recovery barrier was shut and while a build handled an identity dtype without an identity publisher registered; both conditions went with the durable half of the layer. See `docs/protocol/datagram.md` §6.
+- `"mesh_datagram_transit_v1"` — willingness to **forward other nodes' datagrams**. Advertised only by nodes that really forward, which in practice means full nodes: a client node advertises `mesh_datagram_v1` alone, so an honest neighbour never picks it as a relay while it can still receive what is addressed to it. The split is deliberate and permanent — a transit candidate must advertise both tokens, the last hop needs only `mesh_datagram_v1`, and a later `MinimumProtocolVersion` raise makes the endpoint check trivial without erasing the endpoint/transit distinction. Neither token is tied to `mesh_relay_v1` or `mesh_routing_v1`: those gate `relay_message` and today's distance-vector control plane, and neither is the same statement as "I speak the datagram envelope". **Neither token is ever withdrawn at run time**, so no connection is ever torn down to retract one: the transitions that did that belonged to the profile machinery, which no longer exists.
+
+- **There are no profile capability tokens.** A registry of `mesh_datagram_*_v1` profile names used to put additional tokens on the wire, so that a `req_caps` list could demand them of a path. The envelope field, the registry and the withdrawal transition are all gone (`docs/protocol/datagram.md` §2.3), and the datagram plane advertises exactly the two role tokens above.
+
+### Raw advertised capability set
+
+Beside the typed, compile-time capability set, every session also keeps the **validated raw set of advertised names**. It exists because the typed intersection drops every name the local build does not know, and the datagram role gate (`docs/protocol/datagram.md` §6) has to be able to compare a name this build does not know as a plain string.
+
+Rules:
+
+- bounds are **≤ 64 names, each `[a-z0-9_]` and ≤ 40 characters**;
+- **a bounds breach empties the WHOLE raw set**, not just the offending name. The reaction is fixed because "drop one" and "drop the set" behave differently in mixed implementations; the consequence is that the peer loses the datagram role gate, which reads this set;
+- **the session is never torn down** over the raw set, and **the typed capability set is untouched** by anything that happens to it;
+- the raw set is used **only** by the datagram role gate. Frame dispatch and every pre-existing decision keep running on the typed set.
+
+The set is stored on the connection itself (`netcore.NetCore`, the single source of truth for live connection state), with a mirror on the outbound `peerSession` — the same shape the typed capability set already uses, because the outbound dispatcher is addressed by peer address and has no connection id.
+
+### dtypes (datagram type set)
+
+`hello` and `welcome` may carry an additional `dtypes` array: the set of datagram types the sender can handle as an **endpoint**. It answers, for directly connected peers, the question every mandatory migration must answer before it sends anything — "does the other side have a handler for this type?".
+
+The wire contract is closed:
+
+| Rule | Behaviour |
+|------|-----------|
+| Field non-empty | Means **exactly those names**, read literally: a name it does not carry is unsupported |
+| Field empty (`[]`) | Means the **empty set**: the sender understands the envelope and handles no type at all. This is a statement, not a missing field |
+| Field absent | Names **no type**. Nothing is implied on behalf of a peer that said nothing — unproven support equals no support. The wire still tells this form from the empty one, and the diagnostics report which arrived, but both lead to the same routing decision |
+| Order | Not significant |
+| Duplicates | Collapse — this is a set, not a list |
+| Bounds | ≤ 64 elements, each `[a-z0-9_]` and ≤ 64 characters |
+| Bounds breach | The whole field is ignored and read as **absent**, hence as no declared type. **The handshake is NOT torn down** — refusing a connection over an extensible field would defeat the purpose of the layer, and degrading to "this peer is no endpoint" is the conservative direction |
+| Lifetime | Fixed for the session. Changing the set means a new build, hence a restart, hence new sessions |
+
+There is **no implied set**. An earlier draft of this contract reserved an absent field for a closed baseline of `get_identity`, `post_identity`, `cached_identity`, `push_identity`; that reading was withdrawn before any of those types shipped, because it made every peer advertising `mesh_datagram_v1` an endpoint for four handlers no build implements, and the last-hop gate then acted on that promise.
+
+An **endpoint always emits the field**, in full, empty included. A node with no handler for any type emits `[]`: it still advertises `mesh_datagram_v1`, because it does understand the envelope and will accept and forward frames — the endpoint promise about TYPES lives in this field, not in the capability name. A node with the datagram layer disabled emits nothing, because it does not speak the envelope at all. There is no third case: the plane has no recovery barrier to fail, so a node either has a layer and emits the field, or has none and emits nothing.
+
+Declaring nothing is what makes the last-hop gate honest: a send **to** such a node is refused with `rejected(unsupported_dtype)` for any type rather than silently dropped at the destination, while the node stays a perfectly good relay for everybody else's frames.
+
+When a peer's handshake and its signed identity record disagree about `dtypes`, **the handshake wins**: it is fresh by construction, while a record can outlive a rollback to a build without the type.
 
 ---
 
@@ -570,6 +616,7 @@ stateDiagram-v2
 | `pubkey` | string | опционально | Ed25519 публичный ключ в base64. Используется для проверки подписей сообщений |
 | `boxkey` | string | опционально | X25519 публичный ключ в base64. Используется для шифрования сообщений. Node-to-node hello всегда включает его, даже на relay-only ноде (headless `corsa-node` без `CORSA_ACCEPT_DM=1`): ответчик выдаёт session-auth challenge только при наличии всех четырёх identity-полей (`address`, `pubkey`, `boxkey`, `boxsig`). Relay-only нода ограничивает ключ handshake-плоскостью — никогда не раздаёт его через `fetch_contacts` — и дропает любой DM, адресованный ей самой (см. `docs/protocol/messaging.md`, «Отказ от приёма DM») |
 | `boxsig` | string | опционально | Ed25519 подпись (base64url) связи boxkey. Полезная нагрузка подписи: `corsa-boxkey-v1|<address>|<boxkey-base64>` |
+| `dtypes` | array | опционально | Типы датаграмм, которые узел обрабатывает как конечная точка (`docs/refactoring/datagram-transport.md` §6.1). Поле И ЕСТЬ набор: непустой массив означает ровно перечисленные имена, явный пустой массив `[]` означает, что конверт понимается и ни один тип не обрабатывается, а отсутствие поля не называет ни одного типа — за молчащего пира ничего не домысливается. Порядок не значим, дубликаты схлопываются, границы — ≤ 64 имён вида `[a-z0-9_]{1,64}`, нарушение границ роняет поле целиком к отсутствующей форме и НЕ рвёт рукопожатие. Набор фиксирован на время сессии. См. «dtypes (набор типов датаграмм)» |
 
 ### welcome (ответчик → инициатор)
 
@@ -618,6 +665,7 @@ stateDiagram-v2
 | `pubkey` | string | Ed25519 публичный ключ ответчика |
 | `boxkey` | string | X25519 публичный ключ ответчика. Всегда включён, как и в `hello` — нужен для четырёхполевой identity-проверки при session auth; relay-only ответчик его шлёт, но никогда не раздаёт через `fetch_contacts` |
 | `boxsig` | string | Подпись связи boxkey ответчика |
+| `dtypes` | array | То же, что в `hello` — набор типов датаграмм ответчика, с тем же закрытым контрактом |
 | `observed_address` | string | IP-адрес инициатора (без порта) как видит ответчик. Используется дайлером в `recordObservedAddress` **только как NAT-detection telemetry**: голоса per peer identity порождают единственное предупреждение «NAT detected», когда консенсусный IP расходится с host-частью локального `cfg.ListenAddress`. Под v12-baseline поле НЕ потребляется ни для peer discovery, ни для address learning, ни для каких-либо authoritative self-advertise решений |
 
 ### auth_session (инициатор → ответчик)
@@ -911,6 +959,8 @@ triple, и их состояние разошлось бы с managed-путём
 
 Capability-токены гейтят новые типы фреймов и поведения. Пир не должен отправлять capability-gated тип фрейма, если в согласованном наборе сессии нет соответствующей capability. Это позволяет работать сетям со смешанными версиями: legacy-ноды без поля `capabilities` считаются с пустым набором — они никогда не получат неизвестные типы фреймов.
 
+**Согласованный набор принадлежит соединению, а не адресу пира.** Набор фиксируется рукопожатием одной сессии и внутри неё не меняется, но переподключение регистрирует сессию-замену под ТЕМ ЖЕ адресом дозвона, пока читатель предыдущей сессии ещё доставляет кадры. Поэтому гейт на приёме обязан отвечать по тому соединению, по которому кадр ПРИШЁЛ: разрешение по адресу судит пришедший кадр по набору, под которым его не отправляли, и это либо пропускает кадр за возможностью, которую пир на этом соединении не объявлял, либо дропает законный. В коде это закреплено типом параметра: `sessionHasCapability` принимает сессию, а адресный `sendTargetHasCapability` отвечает на другой вопрос — вопрос отправки: «способен ли сокет, по которому кадр уйдёт прямо сейчас» (`internal/core/node/capabilities.go`). На входящем направлении правило то же, но ключом служит id соединения, который не переиспользуется.
+
 Текущие определённые токены:
 
 - `"mesh_relay_v1"` — hop-by-hop relay через фреймы `relay_message` и `relay_delivery_receipt`.
@@ -918,6 +968,48 @@ Capability-токены гейтят новые типы фреймов и по�
 - `"mesh_routing_v2"` — опциональное расширение `mesh_routing_v1`, включающее инкрементальные delta-обновления через фреймы `routes_update` и управляющий фрейм `request_resync`. v2 включается только когда negotiated-set содержит ПОЛНЫЙ v2-triplet `mesh_routing_v1` + `mesh_routing_v2` + `mesh_relay_v1` (см. `classifyDeltaMode` / `hasCapV2Triplet` в `internal/core/routing/announce.go`). Relay часть triplet'а, потому что send-side dispatch в `dispatchAnnouncePlaneFrameWithCaps` гейтит `SendRoutesUpdate` на тот же triplet — relay-less v2-классификация увела бы фрейм к sender'у, который его отвергнет, без legacy-fallback'а. v1 — базовый уровень: пир, который объявил v2 без v1, трактуется как v1-only, потому что первый sync (baseline) всегда идёт через legacy-фрейм `announce_routes` (или Phase 4 `route_announce_v3` с `kind="full"` для v3-triplet peer'ов) и, следовательно, требует v1 на приёмной стороне. Режим выбирается per-cycle снапшотом `AnnounceTarget.Capabilities`, взятым у сессии, которую выбрал announce loop; персистентная capability-запись peer-state реконсилируется к этому снапшоту в самом начале каждой per-peer goroutine, так что классификация читает единый derived-view caps выбранной сессии. Полный контракт см. в `docs/routing.md`: «Persistent caps как производная вьюха выбранного target-а» и «Выбор режима для announce delta».
 - `"mesh_routing_v3"` — Phase 4 компактный announce wire-фрейм `route_announce_v3` (плюс signed-анонсы и explicit single-hop poison-reverse сигнал, который несётся как `mesh_poison_reverse_v1`). Как и v2, включается только когда negotiated-set содержит ПОЛНЫЙ triplet `mesh_routing_v1` + `mesh_routing_v3` + `mesh_relay_v1`; baseline/full sync к v3-triplet пиру идёт через `route_announce_v3` с `kind="full"`, а пиры без любого из трёх продолжают получать legacy `announce_routes` / `routes_update` без изменений. **Анонсируется по умолчанию** — env-флаг `CORSA_ENABLE_MESH_ROUTING_V3` по умолчанию включён после soak'а; оператор отключает через `=0` (или `false`/`no`/`off`), что возвращает ноду на legacy v1/v2 wire-путь. Поскольку переговоры используют пересечение, default-on нода всё равно говорит legacy с opted-out и старыми пирами. См. `docs/routing.md` «Phase 4» и `docs/cluster-mesh/phase-4-compact-wire-signed.md` §7.
 - `"file_transfer_v1"` — гейт команд file transfer (трафик `FileCommandFrame`). Out-of-band DM `file_announce` не гейтится.
+- `"mesh_datagram_v1"` — слой транспорта датаграмм в роли **конечной точки на транспортном уровне**: узел понимает конверт `datagram`, принимает адресованные ему датаграммы и отправляет свои, вместо того чтобы ответить `unknown_command` и закрыть соединение. О том, какие ТИПЫ датаграмм узел умеет обработать, токен не говорит ничего — для этого есть `dtypes` (см. ниже), — поэтому его объявляет любой узел с включённым слоем, каким бы ни был его реестр типов. Датаграмма пишется только в сессию, в согласованном наборе которой есть этот токен, причём требование распространяется на любого кандидата, включая чисто транзитного, — оттого токен и обязан означать ровно понимание конверта. Анонсируется за `config.Node.EnableDatagramV1` **и больше ни за чем**: durable-состояния у плоскости нет, поэтому нет ни барьера восстановления, который надо открывать, ни fail-closed-снятия, ни какого-либо рантайм-условия, при котором токен исчезает. Раньше он не выпускался при закрытом барьере и при обработке identity-типа без зарегистрированного издателя; оба условия ушли вместе с durable-половиной слоя. См. `docs/protocol/datagram.md` §6.
+- `"mesh_datagram_transit_v1"` — готовность **пересылать чужие датаграммы**. Анонсируется только теми, кто действительно форвардит, то есть на практике full-нодами: клиентская нода объявляет один `mesh_datagram_v1`, поэтому честный сосед никогда не выберет её транзитом, но она по-прежнему принимает адресованное ей. Разделение принципиально и постоянно: транзитный кандидат обязан объявить оба токена, последнему хопу достаточно `mesh_datagram_v1`, а будущее повышение `MinimumProtocolVersion` делает проверку endpoint-а тривиальной, не стирая различия «конечная точка против транзита». Ни один из токенов не привязан к `mesh_relay_v1` или `mesh_routing_v1`: те гейтят `relay_message` и сегодняшнюю distance-vector плоскость, и ни то, ни другое не равно «я понимаю конверт датаграммы». **Ни один из токенов не снимается в рантайме**, поэтому ни одно соединение ради их отзыва не рвётся: переходы, которые это делали, принадлежали профильной машинерии, которой больше нет.
+
+- **Профильных capability-токенов нет.** Реестр профильных имён `mesh_datagram_*_v1` когда-то выводил на провод дополнительные токены, чтобы список `req_caps` мог потребовать их от пути. И поле конверта, и реестр, и переход снятия убраны (`docs/protocol/datagram.md` §2.3); плоскость датаграмм объявляет ровно два ролевых токена выше.
+
+### Сырой набор объявленных возможностей
+
+Рядом с типизированным compile-time набором каждая сессия хранит **валидированный сырой набор объявленных имён**. Он нужен потому, что типизированное пересечение выбрасывает всякое имя, которого не знает локальная сборка, а ролевой гейт датаграмм (`docs/protocol/datagram.md` §6) обязан уметь сравнить незнакомое имя как строку.
+
+Правила:
+
+- границы — **≤ 64 имён, каждое `[a-z0-9_]` длиной ≤ 40 символов**;
+- **нарушение границ обнуляет ВЕСЬ сырой набор**, а не отдельное нарушившее имя. Реакция зафиксирована, потому что «отбросить одно» и «отбросить набор» дают разное поведение в смешанных реализациях; следствие одно — пир теряет ролевой гейт датаграмм, который этот набор и читает;
+- **сессия из-за сырого набора не рвётся**, и **типизированный набор ничем происходящим с ним не затрагивается**;
+- сырой набор используется **только** ролевым гейтом датаграмм. Диспетчеризация кадров и все существующие решения продолжают работать на типизированном наборе.
+
+Набор хранится на самом соединении (`netcore.NetCore` — единый источник истины для live-connection state) с зеркалом в исходящем `peerSession`: ровно та же схема, что уже используется для типизированного набора, потому что исходящий диспетчер адресуется по адресу пира и не имеет connection id.
+
+### dtypes (набор типов датаграмм)
+
+`hello` и `welcome` могут нести дополнительное поле `dtypes` — набор типов датаграмм, которые отправитель умеет обрабатывать как **конечная точка**. Для непосредственных соседей оно отвечает на вопрос, который обязательная миграция должна решить до первой отправки: «есть ли у той стороны обработчик этого типа?».
+
+Wire-контракт закрыт целиком:
+
+| Правило | Поведение |
+|---------|-----------|
+| Поле непустое | Означает **ровно перечисленные имена** и читается буквально: имени в списке нет — тип не поддержан |
+| Поле пустое (`[]`) | Означает **пустое множество**: отправитель понимает конверт и не обрабатывает ни одного типа. Это утверждение, а не отсутствие поля |
+| Поле отсутствует | Не называет **ни одного типа**. За пира, который ничего не сказал, ничего не домысливается — недоказанная поддержка равна отсутствию поддержки. На проводе эта форма по-прежнему отличима от пустой, и диагностика сообщает, какая пришла, но маршрутное решение у них одно |
+| Порядок | Не значим |
+| Дубликаты | Схлопываются — это множество, а не список |
+| Границы | ≤ 64 элементов, каждый `[a-z0-9_]` длиной ≤ 64 символов |
+| Нарушение границ | Поле целиком игнорируется и читается как **отсутствующее**, то есть не объявляющее ни одного типа. **Рукопожатие НЕ рвётся** — разрыв соединения из-за расширяемого поля противоречил бы самой идее слоя, а деградация к «этот пир не конечная точка» — консервативное направление |
+| Время жизни | Набор фиксирован на время сессии. Смена набора означает новую сборку, то есть рестарт и новые сессии |
+
+**Подразумеваемого набора нет.** Ранний черновик этого контракта резервировал за отсутствующим полем закрытый baseline-набор: `get_identity`, `post_identity`, `cached_identity`, `push_identity`. Это чтение снято до того, как хоть один из этих типов вышел: оно делало любого пира с `mesh_datagram_v1` конечной точкой для четырёх обработчиков, которых нет ни в одной сборке, а last-hop-гейт действовал по этому обещанию.
+
+**Конечная точка всегда выпускает поле** — целиком, включая пустое. Узел, **у которого нет обработчика ни для одного типа**, выпускает `[]` — и по-прежнему объявляет `mesh_datagram_v1`, потому что конверт он понимает, кадры принимает и пересылает: обещание конечной точки про ТИПЫ живёт в этом поле, а не в имени возможности. Узел с выключенным слоем датаграмм не выпускает ничего: он вообще не говорит на этом конверте. Третьего случая нет: барьера восстановления, который мог бы не открыться, у плоскости больше не существует, поэтому узел либо имеет слой и выпускает поле, либо не имеет и не выпускает ничего.
+
+Именно отсутствие объявленных типов делает last-hop-гейт честным: отправка **на** такой узел отвергается с `rejected(unsupported_dtype)` для любого типа, а не дропается молча у адресата, при этом сам узел остаётся полноценным релеем для чужих кадров.
+
+При расхождении рукопожатия и подписанной identity-записи по `dtypes` **побеждает рукопожатие**: оно свежо по построению, тогда как запись переживает откат на сборку без типа.
 
 ---
 

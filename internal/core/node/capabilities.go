@@ -56,7 +56,13 @@ import (
 //     constructed with v3 disabled never accidentally advertises v3
 //     because some other Service in the same process flipped a global.
 //     See docs/cluster-mesh/phase-4-compact-wire-signed.md §7.
-func localCapabilities(enableV3 bool) []domain.Capability {
+//   - mesh_datagram_v1 / mesh_datagram_transit_v1: the datagram transport
+//     layer, gated by datagrams (see datagramAdvertise). Threaded as a
+//     parameter for the same reason enableV3 is: the advertise must be a
+//     property of THIS Service, not of a package global some other Service
+//     in the process flipped. See
+//     docs/refactoring/datagram-transport.md §6.
+func localCapabilities(enableV3 bool, datagrams datagramAdvertise) []domain.Capability {
 	caps := []domain.Capability{
 		domain.CapMeshRelayV1,
 		domain.CapMeshRoutingV1,
@@ -112,15 +118,27 @@ func localCapabilities(enableV3 bool) []domain.Capability {
 		// falls back to per-identity v1 otherwise (poisonReverseToOtherPeers).
 		caps = append(caps, domain.CapMeshPoisonReverseV2)
 	}
+	// The two datagram capabilities are advertised INDEPENDENTLY of each
+	// other and of every routing capability (§6). Endpoint support says
+	// "datagrams addressed to me are welcome"; transit support says "I
+	// will carry other people's". A client node advertises the first and
+	// never the second, so an honest neighbour never picks it as a relay.
+	if datagrams.Endpoint {
+		caps = append(caps, domain.CapMeshDatagramV1)
+	}
+	if datagrams.Transit {
+		caps = append(caps, domain.CapMeshDatagramTransitV1)
+	}
 	return caps
 }
 
 // localCapabilityStrings returns the wire-format string list for the hello/
 // welcome frame. Used at the protocol boundary where Frame.Capabilities
-// is []string. The enableV3 flag is threaded through to localCapabilities
-// — see that function's doc for the opt-in contract.
-func localCapabilityStrings(enableV3 bool) []string {
-	return domain.CapabilityStrings(localCapabilities(enableV3))
+// is []string. The enableV3 flag and the datagram advertise are threaded
+// through to localCapabilities — see that function's doc for both opt-in
+// contracts.
+func localCapabilityStrings(enableV3 bool, datagrams datagramAdvertise) []string {
+	return domain.CapabilityStrings(localCapabilities(enableV3, datagrams))
 }
 
 // intersectCapabilities returns the intersection of two capability slices.
@@ -143,21 +161,120 @@ func intersectCapabilities(local []domain.Capability, remote []string) []domain.
 	return result
 }
 
-// sessionHasCapability returns true when the outbound peer session for the
-// given address has the specified capability in its negotiated set.
-func (s *Service) sessionHasCapability(address domain.PeerAddress, capability domain.Capability) bool {
+// sessionHasCapability returns true when THIS outbound peer session — the one
+// that actually carried the frame — negotiated the capability during ITS
+// handshake.
+//
+// It takes the session and not its address because on a receive path those are
+// two different questions and only one of them is the right one. A reconnect
+// registers a replacement session under the SAME dial address while the
+// previous session's goroutines are still unwinding (the ownedCleanup block in
+// onCMSessionEstablished exists precisely for that overlap), so an
+// address-keyed lookup taken from a frame that arrived on the old session
+// answers about the new one — and both directions of that answer are wrong: a
+// frame behind a capability the peer never declared on THIS connection gets
+// accepted, or a legitimate frame gets dropped because an unrelated socket
+// handshook differently.
+//
+// The address-keyed form is sendTargetHasCapability, which asks the other
+// question — see its doc. Splitting them by PARAMETER TYPE rather than by
+// discipline is deliberate: a receive path can no longer reach the wrong one by
+// accident, because a domain.PeerAddress does not compile here.
+//
+// peerMu is what makes reading the fields ordered rather than merely plausible:
+// applyWelcomeMetadata writes session.capabilities and
+// markSessionHandshakeComplete writes session.authOK, both under peerMu
+// (peer_sessions.go), and readPeerSession — one of this helper's callers — is
+// started BEFORE either of them, so a peer that pipelines a frame behind its own
+// welcome has the reader here while the handshake goroutine is still assigning.
+//
+// A capability is NEGOTIATED only once the handshake has COMPLETED, and that is
+// a different question from whether the set has been assigned. Conflating them
+// left a real window on the wire: applyWelcomeMetadata publishes the
+// intersection the moment the welcome validates, while auth_ok — the last step
+// of this direction's handshake — arrives one round trip later, and the reader
+// is dispatching throughout. A `datagram` or a `file_command` pipelined into
+// that window therefore reached the datagram pipeline and the file router on a
+// connection whose handshake had not finished, and the announce-plane arms of
+// dispatchPeerSessionFrame were reachable the same way. Requiring authOK here
+// closes all of them at the one point they already ask the question, and states
+// the same rule the INBOUND direction enforces a layer higher, where
+// dispatchNetworkFrame answers auth_required to every p2pWireCommand arriving on
+// an unauthenticated connection.
+//
+// The refusal drops the frame rather than deferring it, and that costs nothing
+// legitimate. No conforming peer may put plane traffic in this window — its own
+// inbound reader refuses ours identically — so a frame landing here is one the
+// sender was never entitled to send; and holding the window's frames back would
+// mean a per-session queue whose size the neighbour alone decides. §2 already
+// makes every refusal of the datagram plane a silent drop, and the announce
+// plane self-heals through the forced periodic full sync and route TTL.
+//
+// The address-keyed siblings (sendTargetHasCapability, peerSupportsRoutingV3,
+// peerSupportsAttestedLinks, sessionDeclarations) need no such gate: they resolve
+// through s.sessions, and both outbound paths register a session there only after
+// authenticatePeerSession has returned — openPeerSession inline, the CM path in
+// the onCMSessionEstablished goroutine.
+func (s *Service) sessionHasCapability(session *peerSession, capability domain.Capability) bool {
+	if session == nil {
+		return false
+	}
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	if !session.authOK {
+		return false
+	}
+	return capsContain(session.capabilities, capability)
+}
+
+// sendTargetHasCapability returns true when a frame handed to address RIGHT NOW
+// would leave over an outbound session that negotiated the capability.
+//
+// This is the SEND-side question and the only one an address can answer: the
+// caller holds a routing decision, not a connection, and what it needs to know
+// is whether the socket the send will pick is capable. Resolving the address is
+// therefore not a defect here — it IS the question, and the gate and the send
+// agree because both key on the same address (see tryForwardToDirectPeer, which
+// gates and then enqueues on one address).
+//
+// Never use it to judge a frame that has ALREADY arrived: there the delivering
+// session is in hand and sessionHasCapability is the helper.
+func (s *Service) sendTargetHasCapability(address domain.PeerAddress, capability domain.Capability) bool {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
 	session := s.resolveSessionLocked(address)
 	if session == nil {
 		return false
 	}
-	for _, c := range session.capabilities {
-		if c == capability {
-			return true
-		}
+	return capsContain(session.capabilities, capability)
+}
+
+// sessionPeerIdentity returns the authenticated neighbour behind THIS session —
+// the identity every budget, ban and metric of a received frame is charged to.
+//
+// It exists for the same ordering reason sessionHasCapability takes peerMu:
+// peerIdentity is written by applyWelcomeMetadata (under peerMu) AFTER
+// readPeerSession is already running, so the receive path must not read the
+// field straight off the struct. A session that has not reached that write
+// answers the zero identity, which every caller already treats as
+// "unauthenticated, refuse".
+//
+// It deliberately does NOT carry the completed-handshake requirement
+// sessionHasCapability grew. The two answer different questions: the capability
+// is a NEGOTIATION, and a negotiation is not in force until the handshake ends,
+// while the identity is a CLAIM the welcome carried and is no truer after
+// auth_ok than before it (nothing on the dialled direction proves it — see the
+// datagramNeighbour doc). Gating it too would only relabel a refusal the
+// capability gate has already made, and it would relabel it wrongly: a frame
+// refused for arriving off the plane would be counted as one from a peer that
+// named no identity.
+func (s *Service) sessionPeerIdentity(session *peerSession) domain.PeerIdentity {
+	if session == nil {
+		return domain.PeerIdentity{}
 	}
-	return false
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	return session.peerIdentity
 }
 
 // connHasCapability returns true when the inbound connection has the specified

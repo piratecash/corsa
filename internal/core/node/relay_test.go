@@ -373,7 +373,7 @@ func TestCapMeshRelayV1Constant(t *testing.T) {
 
 // --- Capability gating tests ---
 
-func TestSessionHasCapabilityForRelay(t *testing.T) {
+func TestSendTargetHasCapabilityForRelay(t *testing.T) {
 	svc := &Service{
 		sessions: map[domain.PeerAddress]*peerSession{
 			"new-peer": {
@@ -387,19 +387,19 @@ func TestSessionHasCapabilityForRelay(t *testing.T) {
 		},
 	}
 
-	if !svc.sessionHasCapability(domain.PeerAddress("new-peer"), domain.CapMeshRelayV1) {
+	if !svc.sendTargetHasCapability(domain.PeerAddress("new-peer"), domain.CapMeshRelayV1) {
 		t.Fatal("new-peer should have mesh_relay_v1")
 	}
-	if svc.sessionHasCapability(domain.PeerAddress("legacy-peer"), domain.CapMeshRelayV1) {
+	if svc.sendTargetHasCapability(domain.PeerAddress("legacy-peer"), domain.CapMeshRelayV1) {
 		t.Fatal("legacy-peer should NOT have mesh_relay_v1")
 	}
-	if svc.sessionHasCapability(domain.PeerAddress("unknown"), domain.CapMeshRelayV1) {
+	if svc.sendTargetHasCapability(domain.PeerAddress("unknown"), domain.CapMeshRelayV1) {
 		t.Fatal("unknown peer should NOT have mesh_relay_v1")
 	}
 }
 
 func TestLocalCapabilitiesIncludesRelay(t *testing.T) {
-	caps := localCapabilities(false)
+	caps := localCapabilities(false, datagramAdvertise{})
 	found := false
 	for _, c := range caps {
 		if c == domain.CapMeshRelayV1 {
@@ -413,7 +413,7 @@ func TestLocalCapabilitiesIncludesRelay(t *testing.T) {
 }
 
 func TestIntersectCapabilitiesWithRelay(t *testing.T) {
-	local := localCapabilities(false)
+	local := localCapabilities(false, datagramAdvertise{})
 	remote := []string{"mesh_relay_v1", "mesh_routing_v1"}
 	result := intersectCapabilities(local, remote)
 
@@ -428,7 +428,7 @@ func TestIntersectCapabilitiesWithRelay(t *testing.T) {
 }
 
 func TestIntersectCapabilitiesLegacyPeer(t *testing.T) {
-	local := localCapabilities(false)
+	local := localCapabilities(false, datagramAdvertise{})
 	var remote []string // legacy peer sends no capabilities
 	result := intersectCapabilities(local, remote)
 
@@ -1186,7 +1186,7 @@ func TestHandleRelayReceiptPropagatesSendResult(t *testing.T) {
 	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 		address:      domain.PeerAddress(peerAddr),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame),
+		sendCh:       make(chan peerSendItem),
 	}
 	svc.peerMu.Unlock()
 
@@ -1381,7 +1381,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			address:      domain.PeerAddress(peerAddr),
 			peerIdentity: domaintest.ID(peerID),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-			sendCh:       make(chan protocol.Frame),
+			sendCh:       make(chan peerSendItem),
 		}
 		pc := netcore.New(netcore.ConnID(2), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress(peerAddr),
@@ -1422,7 +1422,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			address:      "outbound-peer",
 			peerIdentity: domaintest.ID("outbound-id"),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-			sendCh:       make(chan protocol.Frame),
+			sendCh:       make(chan peerSendItem),
 		}
 		pc := netcore.New(netcore.ConnID(3), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-peer-2"),
@@ -1473,7 +1473,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			address:      "outbound-addr-X",
 			peerIdentity: domaintest.ID(sharedID),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-			sendCh:       make(chan protocol.Frame),
+			sendCh:       make(chan peerSendItem),
 		}
 		pc := netcore.New(netcore.ConnID(4), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
@@ -1526,7 +1526,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			address:      "outbound-preactivation",
 			peerIdentity: domaintest.ID("preactivation-id-1"),
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
-			sendCh:       make(chan protocol.Frame),
+			sendCh:       make(chan peerSendItem),
 		}
 		pc := netcore.New(netcore.ConnID(5), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-preactivation"),
@@ -1593,7 +1593,7 @@ func TestRetryRelayDeliveriesCallsTryRelay(t *testing.T) {
 
 	// Register a peer session with mesh_relay_v1 capability.
 	peerAddr := "relay-full-node-1"
-	sendCh := make(chan protocol.Frame, 10)
+	sendCh := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 		address:      domain.PeerAddress(peerAddr),
@@ -1641,14 +1641,14 @@ func TestDirectPeerFastPathTriesAllSessions(t *testing.T) {
 	// Register two sessions for the same recipient identity.
 	// Session A: NO mesh_relay_v1 capability (stale reconnect).
 	// Session B: HAS mesh_relay_v1 capability (healthy path).
-	capableCh := make(chan protocol.Frame, 100)
+	capableCh := make(chan peerSendItem, 100)
 
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress("addr-A")] = &peerSession{
 		address:      "addr-A",
 		peerIdentity: domain.PeerIdentityFromWire(recipientID.Address),
 		capabilities: []domain.Capability{}, // no relay capability
-		sendCh:       make(chan protocol.Frame, 10),
+		sendCh:       make(chan peerSendItem, 10),
 	}
 	svc.health[domain.PeerAddress("addr-A")] = &peerHealth{Connected: true}
 	svc.sessions[domain.PeerAddress("addr-B")] = &peerSession{
@@ -1703,7 +1703,7 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 	defer func() { _ = local.Close() }()
 
 	peerAddr := "10.0.0.50:64646"
-	sendCh := make(chan protocol.Frame, 1)
+	sendCh := make(chan peerSendItem, 1)
 	inboxCh := make(chan protocol.Frame, 1)
 	errCh := make(chan error, 1)
 
@@ -1733,10 +1733,10 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 	}()
 
 	// Enqueue a fire-and-forget relay_message frame.
-	sendCh <- protocol.Frame{
+	sendCh <- legacyPeerSendItem(protocol.Frame{
 		Type: "relay_message",
 		ID:   "ff-write-fail-1",
-	}
+	})
 
 	select {
 	case err := <-done:
@@ -1773,7 +1773,7 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 	defer func() { _ = local.Close() }()
 
 	peerAddr := "10.0.0.51:64646"
-	sendCh := make(chan protocol.Frame, 1)
+	sendCh := make(chan peerSendItem, 1)
 	inboxCh := make(chan protocol.Frame, 1)
 	errCh := make(chan error, 1)
 
@@ -1799,11 +1799,11 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 		done <- svc.servePeerSession(context.Background(), session)
 	}()
 
-	sendCh <- protocol.Frame{
+	sendCh <- legacyPeerSendItem(protocol.Frame{
 		Type:   "relay_hop_ack",
 		ID:     "ff-ack-fail-1",
 		Status: "forwarded",
-	}
+	})
 
 	select {
 	case err := <-done:
@@ -1831,7 +1831,7 @@ func TestRetryRelayReceiptTriesRelayChainFirst(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 
 	peerAddr := "relay-hop-back"
-	sendCh := make(chan protocol.Frame, 10)
+	sendCh := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = &peerSession{
 		address:      domain.PeerAddress(peerAddr),

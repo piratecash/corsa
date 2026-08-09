@@ -1,0 +1,10 @@
+{
+  "description": "corsa datagram transport golden vector, header v2, base auth profile (av=1). The v1 envelope carried req_caps and ext; both are gone, and with them four transcript segments. Reference: docs/refactoring/datagram-transport.md 3.2.",
+  "frame": "{\"type\":\"datagram\",\"v\":2,\"mode\":\"routed\",\"class\":\"control\",\"src\":\"56475aa75463474c0285df5dbf2bcab73da65135\",\"dst\":\"00f39d89f345eb1613bb2fa02ee883a214a6a697\",\"ttl\":10,\"route_policy\":\"best\",\"dtype\":\"delivery_receipt\",\"payload\":\"EBESExQVFhcYGRobHB0eHw\",\"auth\":{\"av\":1,\"pubkey\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"salt\":\"oKGio6SlpqeoqaqrrK2urw\",\"max_ttl\":10,\"time\":1780000000,\"sig\":\"Sfr2Hw9RmWy0DnmS33ow61vwZP4RMz3z1ummTq3ZQkLPA_si-_KWVCwG9q6xxZ1L9hg1ehr1Xw2WFFa6T37XCA\"}}",
+  "network": "gazeta-devnet",
+  "pubkey_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "replay_key_hex": "3c02e70a010a6f190c02fc4aa951e776638b7fb16436228a2397ee1a2796f2a6",
+  "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "sig_b64url": "Sfr2Hw9RmWy0DnmS33ow61vwZP4RMz3z1ummTq3ZQkLPA_si-_KWVCwG9q6xxZ1L9hg1ehr1Xw2WFFa6T37XCA",
+  "transcript_hex": "636f7273612d646174616772616d2d617574682d76310000000001010000000d67617a6574612d6465766e6574000000010200000006726f7574656400000007636f6e74726f6c00000004626573740000001456475aa75463474c0285df5dbf2bcab73da651350000001400f39d89f345eb1613bb2fa02ee883a214a6a6970000001064656c69766572795f72656365697074000000010a00000008000000006a18a50000000010a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0000002003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b800000010101112131415161718191a1b1c1d1e1f"
+}

@@ -80,9 +80,11 @@ type Network interface {
 	Enumerate(ctx context.Context, dir Direction, fn func(domain.ConnID) bool)
 
 	// Close initiates graceful shutdown of the connection identified by id
-	// by delegating to *NetCore.Close (rawConn.Close → close(sendCh) →
-	// wait for the writer goroutine to drain). It is idempotent. Returns
-	// ErrUnknownConn if id is not registered.
+	// by delegating to *NetCore.Close (shut the send gate → rawConn.Close
+	// → signal the writer → wait for it to release the queue residue). It
+	// is idempotent, and it is safe to call while other goroutines still
+	// hold the connection and are sending on it — they are answered
+	// ErrSendChanClosed. Returns ErrUnknownConn if id is not registered.
 	Close(ctx context.Context, id domain.ConnID) error
 
 	// RemoteAddr is a lightweight accessor for logging and ban tracking.
@@ -115,9 +117,11 @@ var (
 	// sync paths.
 	ErrSendTimeout = errors.New("netcore: sync flush timeout")
 
-	// ErrSendChanClosed — sendCh was closed while the send was in
-	// progress. The connection is shutting down; orderly teardown owns
-	// the socket. Callers must not Close() the connection in response.
+	// ErrSendChanClosed — Close() has shut the send queue. The connection
+	// is shutting down; orderly teardown owns the socket. Callers must not
+	// Close() the connection in response. The queue itself is never closed
+	// as a Go channel — see NetCore.Close for why the gate is a state and
+	// not a close.
 	ErrSendChanClosed = errors.New("netcore: send channel closed")
 
 	// ErrSendMarshalError — the caller-supplied frame could not be

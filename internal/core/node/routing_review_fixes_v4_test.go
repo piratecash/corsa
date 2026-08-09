@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -54,7 +53,7 @@ func TestReview_v4_P2_1_SendProbe_CancelsOnSendFail(t *testing.T) {
 		// Unbuffered channel with NO consumer — non-blocking send
 		// inside tryEnqueuePeerSessionFrame falls through to the
 		// default arm and returns false.
-		sendCh: make(chan protocol.Frame),
+		sendCh: make(chan peerSendItem),
 	}
 	svc.health = map[domain.PeerAddress]*peerHealth{
 		addr: {

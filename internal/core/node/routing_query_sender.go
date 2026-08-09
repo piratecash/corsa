@@ -479,14 +479,7 @@ func (s *Service) peerSessionSendableLocked(sess *peerSession, now time.Time) bo
 	if sess == nil {
 		return false
 	}
-	health := s.health[s.resolveHealthAddress(sess.address)]
-	if health == nil || !health.Connected {
-		return false
-	}
-	if s.computePeerStateAtLocked(health, now) == peerStateStalled {
-		return false
-	}
-	return true
+	return s.peerHealthAcceptsOutboundFramesLocked(s.health[s.resolveHealthAddress(sess.address)], now)
 }
 
 // inboundConnSendableLocked is the inbound-side counterpart of
@@ -494,14 +487,7 @@ func (s *Service) peerSessionSendableLocked(sess *peerSession, now time.Time) bo
 // own address — inbound entries do not run through dialOrigin
 // remapping, so the lookup is direct.
 func (s *Service) inboundConnSendableLocked(info connInfo, now time.Time) bool {
-	health := s.health[s.resolveHealthAddress(info.address)]
-	if health == nil || !health.Connected {
-		return false
-	}
-	if s.computePeerStateAtLocked(health, now) == peerStateStalled {
-		return false
-	}
-	return true
+	return s.peerHealthAcceptsOutboundFramesLocked(s.health[s.resolveHealthAddress(info.address)], now)
 }
 
 // hasAnyPeerWithRouteQueryCap is the early-exit companion to

@@ -19,6 +19,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -951,6 +952,10 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 		s.deliveryMu.Unlock()
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released").Str("address", string(candidate.address)).Msg("peer_mu_writer")
+		// lifecycle: per-DIAL goroutine, owned by the session it opens. It ends
+		// when that session's serve loop ends, and Run joins those through
+		// connWg and the ConnectionManager's own dial group — one goroutine,
+		// one owner.
 		go func(c peerDialCandidate) {
 			defer func() {
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_wait").Str("address", string(c.address)).Msg("peer_mu_writer")
@@ -1538,20 +1543,49 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 			log.Warn().Str("peer", string(address)).Str("code", frame.Code).Msg("sync_peer_contacts_rejected")
 			return 0
 		}
-		for _, contact := range frame.Contacts {
-			// Verify box key binding before accepting peer-advertised contacts.
-			if contact.Address == "" || contact.PubKey == "" || contact.BoxKey == "" || contact.BoxSig == "" {
-				continue
-			}
-			if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
-				continue
-			}
-			s.addKnownIdentity(domain.PeerIdentityFromWire(contact.Address))
-			s.addKnownBoxKey(contact.Address, contact.BoxKey)
-			s.addKnownPubKey(contact.Address, contact.PubKey)
-			s.addKnownBoxSig(contact.Address, contact.BoxSig)
-			imported++
+		// Same two-stage admission as the session path, against the SAME
+		// per-remote bucket — the reader here is readSyncReply, which accepts
+		// maxResponseLineBytes just like the session reader does, so an
+		// uncapped loop would be the identical hole on a connection that has no
+		// admission ledger at all.
+		//
+		// The budget is node-scoped and keyed on this connection's endpoint
+		// (contact_verify_budget.go), never on the dial: this dial is scheduled
+		// by an attacker-supplied `sender` fingerprint, and the three gates
+		// around it (per-sender cooldown, per-hop slot,
+		// maxConcurrentSenderKeySyncPasses) bound CONCURRENCY, not the total —
+		// so a per-dial budget was one the remote could re-buy at will.
+		//
+		// There is no ledger to score against and no ban surface on an outbound
+		// dial (addBanScore keys on the IP of an ACCEPTED connection), so the
+		// punishment is the refusal itself: the reply is dropped, the dial
+		// returns nothing, and the connection closes.
+		budget := s.contactVerifyBudgetFor(contactVerifyKeyFromEndpoint(pc.RemoteAddr(), address))
+		report := s.importAdvertisedContacts(budget, frame.Contacts)
+		switch report.Outcome {
+		case contactImportRefusedCountCap:
+			log.Warn().
+				Str("peer", string(address)).
+				Int("contacts", report.Offered).
+				Int("cap", maxContactsPerResponse).
+				Msg("sync_peer_contacts_count_cap_exceeded")
+			return 0
+		case contactImportBudgetExhausted:
+			// NOT a violation, and the same disposition the session path
+			// makes: the verified prefix is kept — the entries this node paid
+			// for are the entries it gets — and the rest arrives on a later
+			// pass, once the remote's bucket has refilled. Logged because on
+			// THIS path it is also the signal an operator needs to see a
+			// recovery flood: a remote that keeps arriving here is one whose
+			// dials are being scheduled faster than its budget refills.
+			log.Warn().
+				Str("peer", string(address)).
+				Int("offered", report.Offered).
+				Int("verified", report.Verified).
+				Int("imported", report.Imported).
+				Msg("sync_peer_contact_verification_budget_exhausted")
 		}
+		imported = report.Imported
 	}
 
 	if imported > 0 {
@@ -1911,10 +1945,9 @@ func (s *Service) announcePeerToSessions(peerAddress, nodeType string) {
 		NodeType: nodeType,
 	}
 	for _, session := range sessions {
-		select {
-		case session.sendCh <- frame:
-		default:
-			// sendCh full — queue for delivery after drain.
+		if !s.enqueueSessionSendItem(session, legacyPeerSendItem(frame)) {
+			// Refused at the admission — peer gone, sendCh full or queue
+			// already fenced. Queue for delivery after the next drain.
 			s.queuePeerFrame(session.address, frame)
 		}
 	}
@@ -2520,7 +2553,27 @@ func (s *Service) peerIsClientNode(address domain.PeerAddress) bool {
 func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 	defer crashlog.DeferRecover()
 	for {
-		line, err := readFrameLine(reader, maxResponseLineBytes)
+		// The RAW per-neighbour budget is applied AROUND this read, not after
+		// it: readAdmittedSessionLine stops at protocol.MaxFrameLine unless the
+		// line's claim, its entitlement and the neighbour's remaining budget
+		// have earned more, and charges the bytes and the frame before anything
+		// is classified or parsed. Reading first and judging afterwards — what
+		// this loop used to do with a flat maxResponseLineBytes — meant eight
+		// megabytes were read and copied before the node could say it never
+		// wanted them.
+		//
+		// ONE type is returned UNCHARGED: a datagram is metered by the §5
+		// per-neighbour budget of its own plane instead, charged on these same
+		// bytes at the diversion below. The two budgets replace each other rather
+		// than stack, so a datagram stream cannot empty the bucket the other
+		// planes on this session are paying from.
+		line, err := s.readAdmittedSessionLine(reader, session)
+		if errors.Is(err, errPeerSessionLineRefused) {
+			// One line consumed and dropped on admission grounds. The violation
+			// is already recorded and logged; the session survives, because a
+			// single violation must cost the peer a frame and not a reconnect.
+			continue
+		}
 		if err != nil {
 			if err == io.EOF {
 				log.Debug().Str("peer", string(session.address)).
@@ -2546,9 +2599,58 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// whitespace is part of the wire payload for diagnostics.
 		s.captureOutboundRecv(session.connID, strings.TrimRight(line, "\r\n"))
 
+		// ADMISSION FIRST (§4.1 step 1). The line is classified by
+		// classifyFrameLine — a single bounded scan that never builds a JSON
+		// value — and BOTH a line that has not earned the wide
+		// maxResponseLineBytes budget and a line whose type the scan cannot
+		// resolve are refused BEFORE protocol.ParseFrameLine gets to copy and
+		// decode it. The order is the whole point on this reader: it accepts up
+		// to 8 MiB, so a gate that only ran below the parser would let a peer
+		// make this node unmarshal eight megabytes of JSON per frame and only
+		// then be told the frame was never admissible.
+		dropped, fatal := s.refuseUnadmissibleFrameLine(session, line)
+		if fatal != nil {
+			select {
+			case session.errCh <- fatal:
+			default:
+			}
+			return
+		}
+		if dropped {
+			continue
+		}
+
+		// A DATAGRAM NEVER REACHES protocol.ParseFrameLine. §4.1 step 1 charges
+		// the neighbour's byte and frame budget "before any decoding", and the
+		// universal parser is decoding: running it first let a neighbour impose
+		// a full JSON unmarshal of every datagram-shaped line for free, and the
+		// layer only found out afterwards. Diverting here — the same shape
+		// file_command already uses below — puts the budget first and skips the
+		// universal parse entirely, because the strict parser of §3.4 has to
+		// read the ORIGINAL bytes anyway.
+		//
+		// This is also the ONLY meter such a line meets on this reader: the
+		// response-plane budget above admitted it without charging, on the same
+		// classification this predicate answers from
+		// (sessionDatagramPaysItsOwnBudget), so the §5 charge inside the ingress
+		// is what makes the line cost its sender anything at all. The two
+		// predicates are one call for exactly that reason.
+		if isDatagramWireLine(line) {
+			s.dispatchSessionDatagramLine(session, line)
+			continue
+		}
+
 		trimmed := strings.TrimSpace(line)
 		frame, err := protocol.ParseFrameLine(trimmed)
 		if err != nil {
+			continue
+		}
+
+		// The authoritative half of the budget gate. The pre-parse scan
+		// declines to classify a line that names its type ambiguously, so such
+		// a line reaches this point with the strict budget unapplied; here the
+		// type is the parsed one and no classification trick survives.
+		if s.refuseOversizeFrameLine(session.address, frame.Type, line) {
 			continue
 		}
 
@@ -2564,30 +2666,7 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// one direction of the wire. See isRawLineBackedFrameType for
 		// the explicit list of types that use the bypass.
 		if isRawLineBackedFrameType(frame.Type) {
-			frame.RawLine = trimmed
-		}
-
-		// Announce-plane receive guard: announce_routes / routes_update /
-		// request_resync are dispatched through the same code path as the
-		// inbound TCP plane on the remote side, so any peer must respect
-		// the strict 128 KiB MaxFrameLine budget for them — even though
-		// the peer-session read loop itself accepts up to 8 MiB. Without
-		// this guard a buggy or hostile peer could push a multi-megabyte
-		// announce_routes frame through the wider response-plane reader,
-		// have it accepted into the local routing table, and then have
-		// our own size-aware sender silently drop the same route on
-		// re-announce — sender and receiver would diverge on which routes
-		// the peer "knows about". `len(line)` includes the trailing
-		// newline so it matches the writer-side `MarshalFrameLineWithLimit`
-		// budget byte-for-byte.
-		if isAnnouncePlaneFrameType(frame.Type) && len(line) > protocol.MaxFrameLine {
-			log.Warn().
-				Str("peer", string(session.address)).
-				Str("type", frame.Type).
-				Int("size", len(line)).
-				Int("limit", protocol.MaxFrameLine).
-				Msg("announce_plane_frame_too_large_dropped")
-			continue
+			frame.RawLine = rawLineForDispatch(frame.Type, line, trimmed)
 		}
 
 		// file_command frames use their own wire format (FileCommandFrame)
@@ -2595,14 +2674,26 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 		// directly to the file router instead of going through the
 		// inboxCh → dispatchPeerSessionFrame path, which only has access to
 		// the parsed protocol.Frame (missing src/dst/payload fields).
-		if frame.Type == "file_command" {
+		//
+		// The gate reads the capabilities of THIS session — the reader owns the
+		// object the line came off, and an address-keyed lookup would answer
+		// about a reconnect's replacement session instead (sessionHasCapability).
+		//
+		// The type is compared against the constant, not a literal, because the
+		// budget one gate earlier decides the file plane's exemption from the
+		// SAME name (sessionFileCommandIsAdmissible): a line exempted there and
+		// not dispatched here would be metered by nobody.
+		if frame.Type == protocol.FileCommandFrameType {
 			s.markPeerRead(session.address, frame)
 			s.markPeerUsefulReceive(session.address)
-			if s.sessionHasCapability(session.address, domain.CapFileTransferV1) {
+			if s.sessionHasCapability(session, domain.CapFileTransferV1) {
 				// Outbound session carries the peer identity directly;
 				// pass it so the file router can split-horizon forward
 				// and never reflect the frame back to this same peer.
-				s.handleFileCommandFrame(json.RawMessage(trimmed), session.peerIdentity)
+				// Read through the accessor for the same ordering reason
+				// the gate is: this loop is running before the handshake
+				// writes the field.
+				s.handleFileCommandFrame(json.RawMessage(trimmed), s.sessionPeerIdentity(session))
 			}
 			continue
 		}
@@ -2617,6 +2708,187 @@ func (s *Service) readPeerSession(reader *bufio.Reader, session *peerSession) {
 			return
 		}
 	}
+}
+
+// refuseUnadmissibleFrameLine is admission (§4.1 step 1) on the peer-session
+// reader: it runs on the CLASSIFICATION, before anything is parsed, and reports
+// whether the line was dropped.
+//
+// See admitFrameLinePreParse for the rule. The two refusals are separate calls
+// rather than one because they are different facts about the neighbour and an
+// operator has to be able to tell them apart: one peer sent a frame too large
+// for its type, the other sent a line whose type cannot be read at all.
+// It reports the drop and, separately, the error that ENDS the session: a
+// refusal is one dropped frame, but a neighbour that keeps producing them has
+// discovered that violations are free, and the second return value is where
+// that stops (peerSessionViolationBudget).
+//
+// Both refusals here stay scored, and neither carries the datagram carve-out —
+// deliberately, and for different reasons:
+//
+//   - an AMBIGUOUS line names no plane at all (§3.4 refuses a duplicate
+//     top-level key on this one outright), so it is not a frame of the datagram
+//     plane whose rules could apply to it;
+//   - the OVER-BUDGET verdict is unreachable for a datagram. The wide response
+//     budget is bought at the read, from the line's first bytes, and `datagram`
+//     is not a type that can buy it (hasWideFrameLineBudget) — so a line this
+//     branch sees as a datagram would have had to be stopped mid-read, where
+//     refuseOverBudgetSessionLine applies the plane's own silent-drop rule. What
+//     reaches here is a line that bought the wide budget under another name, and
+//     that decoy is the sender's own doing.
+func (s *Service) refuseUnadmissibleFrameLine(session *peerSession, line string) (bool, error) {
+	claimed, verdict := admitFrameLinePreParse(line)
+	switch verdict {
+	case preParseRefuseAmbiguous:
+		// The dial address, not session.peerIdentity: it is the key this
+		// direction can defend (datagram.AdmissionKeySpace), and it is also the
+		// one field of the session this reader may read without peerMu — it is
+		// assigned in the struct literal and never written again, while
+		// peerIdentity is written by the handshake goroutine after this loop has
+		// already started.
+		s.dropAmbiguousFrameLine(datagram.DialedAddressKey(session.address), string(session.address), line)
+		return true, sessionAdmissionFatal(s.punishSessionAdmission(session, "frame_line_ambiguous", claimed, wireLineBudget(line)))
+	case preParseRefuseOverBudget:
+		s.dropOversizeFrameLine(session.address, oversizeRefusalAttribution(claimed, line), line)
+		return true, sessionAdmissionFatal(s.punishSessionAdmission(session, "strict_budget_exceeded", claimed, wireLineBudget(line)))
+	}
+	// A reply nobody asked for is refused here rather than one gate earlier,
+	// because at this point the type is the CLASSIFIED one and the check costs
+	// nothing: the classification has already been computed for the budget.
+	if s.refuseUnsolicitedReplyLine(session, claimed) {
+		return true, nil
+	}
+	// preParseAdmit, and every verdict a future revision forgets to handle:
+	// falling through to the refusals would be the safer default only if the
+	// classification could not admit, and it can.
+	return false, nil
+}
+
+// sessionAdmissionFatal maps the verdict of punishSessionAdmission to the
+// "session is over" half of the caller's contract: the ordinary drop sentinel
+// is not an error to propagate, everything else is.
+func sessionAdmissionFatal(err error) error {
+	if errors.Is(err, errPeerSessionLineRefused) {
+		return nil
+	}
+	return err
+}
+
+// oversizeRefusalAttribution picks the type name an oversize refusal is
+// REPORTED under.
+//
+// The DECISION belongs to the classification, which is why it is not this
+// function's business; the ATTRIBUTION is best-effort and falls back to
+// peekFrameType, because a line refused without ever naming itself still has to
+// land on the drop counter of the plane it CLAIMED to belong to, or §10's
+// "dropped by reason" ledger loses exactly the refusals the widest reader on
+// this node produces.
+func oversizeRefusalAttribution(claimed, line string) string {
+	if claimed != "" {
+		return claimed
+	}
+	return peekFrameType(line)
+}
+
+// refuseOversizeFrameLine is the AUTHORITATIVE half: a peer-session line that
+// breaches the budget for the type it really parsed as.
+//
+// The refusal is silent on the wire and does NOT tear the session down:
+// announce_routes / routes_update / request_resync and `datagram` are all
+// dispatched through the same code path the remote's inbound TCP plane uses,
+// so any peer must respect MaxFrameLine for them, even though this reader
+// itself accepts up to maxResponseLineBytes (8 MiB). Without the gate a buggy
+// or hostile peer pushes a multi-megabyte announce_routes frame through the
+// wider response-plane reader, has it accepted into the local routing table,
+// and then watches our own size-aware sender silently drop the same route on
+// re-announce — sender and receiver diverging on which routes the peer "knows
+// about". For a datagram the same hole would make "a frame is smaller than
+// 128 KiB" stop being a property of reception (§2.3).
+//
+// It is DEFENCE IN DEPTH now rather than a second decision: admission refuses
+// every oversize line whose type is not frameLineNamed-and-entitled, and a
+// frameLineNamed line yields the same type to protocol.ParseFrameLine by
+// construction. It stays because the equivalence is an argument about two
+// scanners, and a gate that costs one integer comparison is the cheapest place
+// to keep that argument honest.
+func (s *Service) refuseOversizeFrameLine(address domain.PeerAddress, frameType, line string) bool {
+	if !exceedsStrictFrameLineBudget(frameType, line) {
+		return false
+	}
+	return s.dropOversizeFrameLine(address, frameType, line)
+}
+
+// dropOversizeFrameLine logs and counts one refused line. Both gates funnel
+// through it so a violation is reported identically whichever of them caught
+// it — two log shapes for one drop reason is how a "dropped by reason" ledger
+// stops adding up.
+func (s *Service) dropOversizeFrameLine(address domain.PeerAddress, frameType, line string) bool {
+	log.Warn().
+		Str("peer", string(address)).
+		Str("type", frameType).
+		Int("size", wireLineBudget(line)).
+		Int("limit", protocol.MaxFrameLine).
+		Msg("strict_frame_budget_frame_too_large_dropped")
+	s.countOversizeDatagramRefusal(frameType)
+	return true
+}
+
+// dropAmbiguousFrameLine refuses a line whose type this node cannot resolve
+// without parsing it, and charges the neighbour for the bytes it made this node
+// scan. It always reports true — the line is dropped, whichever way the charge
+// went.
+//
+// # Why the neighbour is charged for a refusal
+//
+// §4.1 step 1 puts admission before any decoding, and an unmetered refusal is a
+// free load channel: the cheapest verdict this reader has would also be its only
+// uncharged one, so a peer would hold the node at line rate for nothing by
+// sending garbage that refuses to name itself. The same argument is already
+// recorded on the closed-barrier branch of handleDatagramFrame, which charges
+// before refusing for exactly this reason. The charge decides nothing here —
+// the line is refused either way — it only makes the refusal cost the sender
+// what it cost the receiver.
+//
+// # Why the DATAGRAM budget is the one charged
+//
+// Because it is the only per-NEIGHBOUR byte budget this node has (§5): the
+// announce plane counts routes, the command limiter counts frames per socket and
+// does not run on this reader at all. Charging it is not a claim that the line
+// was a datagram — it cannot be, since the whole point is that nothing can say
+// what it was — it is the node billing the neighbour that sent the bytes. With no
+// layer there is nothing to charge, and the line is simply dropped; that is
+// strictly what happened before this gate existed.
+//
+// # Why a KEY and not an identity
+//
+// Because this helper serves both readers, and the two prove different things
+// about the neighbour: the key is what each of them can defend (see
+// datagram.AdmissionKeySpace). Taking the key rather than deriving it here also
+// keeps the charge on THIS bucket identical to the one the ingress takes, which
+// is the only way one neighbour cannot end up with two budgets.
+//
+// # How it is counted
+//
+// Through countAmbiguousDatagramRefusal, on the same best-effort attribution
+// every other pre-parse refusal on this reader uses: a line the peek calls a
+// datagram lands on DropMalformed, which is the verdict the strict parser of
+// §3.4 would have reached one step later for a duplicate top-level key. The
+// Warn line carries the peeked type for every other case and says plainly that
+// it is a hint.
+func (s *Service) dropAmbiguousFrameLine(budgetKey datagram.AdmissionKey, peerLabel, line string) bool {
+	if layer := s.datagramLayer(); layer != nil {
+		// The verdict is ignored deliberately: over budget or inside it, the
+		// line is refused. What the call is here for is the charge. A zero key
+		// is refused inside Admit — nobody to bill, nothing charged.
+		_ = layer.admission.Admit(budgetKey, len(line))
+	}
+	s.countAmbiguousDatagramRefusal(line)
+	log.Warn().
+		Str("peer", peerLabel).
+		Str("peeked_type_hint", peekFrameType(line)).
+		Int("size", wireLineBudget(line)).
+		Msg("frame_line_type_ambiguous_dropped")
+	return true
 }
 
 // errPeerSessionInboxOverflow marks a session teardown initiated by the
@@ -2650,6 +2922,15 @@ func (s *Service) peerSessionRequest(session *peerSession, frame protocol.Frame,
 	// for reply" contract the request loop relies on.
 	if session.netCore == nil {
 		return protocol.Frame{}, fmt.Errorf("peerSessionRequest: outbound session missing NetCore")
+	}
+	if expectedType != "" {
+		// The ONLY record that a reply is outstanding, and it has to be shared
+		// state rather than a local: the reader goroutine — not this one — is
+		// what decides whether an arriving `contacts` is a reply it may spend
+		// eight megabytes on or an unsolicited frame it must refuse before
+		// reading (grantFrameLineExtension). Registered BEFORE the write, so a
+		// reply that overtakes the return of SendRawSyncBlocking still finds it.
+		defer session.admission.expectReply(expectedType)()
 	}
 	var payload []byte
 	if hello {
@@ -2822,15 +3103,140 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	imported := 0
-	for _, contact := range contactsFrame.Contacts {
-		// Verify box key binding before accepting keys from third-party contacts
-		// advertised by peers (encryption.md: signed box-key advertisement).
-		// Network-discovered contacts are stored in-memory only and are NOT
-		// written to the trust store; that distinction is preserved by fetch_trusted_contacts.
+	// The verification budget is the REMOTE's, not the session's: a bucket that
+	// lived on peerSessionAdmission was born full with every reconnect, which is
+	// the same reset the fresh-dial path used to hand out. Both importers charge
+	// one node-scoped bucket keyed on the connection's endpoint, so the two
+	// paths cannot be alternated for two budgets (contact_verify_budget.go).
+	report := s.importAdvertisedContacts(
+		s.contactVerifyBudgetFor(sessionContactVerifyKey(session)),
+		contactsFrame.Contacts,
+	)
+	switch report.Outcome {
+	case contactImportRefusedCountCap:
+		return 0, s.refuseOversizeContactsReply(session, report.Offered)
+	case contactImportBudgetExhausted:
+		// NOT a violation. This is the neighbour answering more replies than the
+		// sustained budget covers, which a legitimate peer reaches only when this
+		// node itself asked for several syncs in quick succession. The verified
+		// prefix is kept — the entries this node paid for are the entries it
+		// gets — and the rest comes back on the next pass.
+		log.Warn().
+			Str("peer", string(session.address)).
+			Int("offered", report.Offered).
+			Int("verified", report.Verified).
+			Int("imported", report.Imported).
+			Msg("contact_verification_budget_exhausted")
+	}
+	return report.Imported, nil
+}
+
+// contactImportOutcome says how a `contacts` reply was disposed of. It is an
+// enumeration rather than a pair of bools because the three answers are mutually
+// exclusive and each one is a different decision at the call site.
+type contactImportOutcome uint8
+
+const (
+	// contactImportCompleted means every entry was walked.
+	contactImportCompleted contactImportOutcome = iota + 1
+	// contactImportRefusedCountCap means the reply carried more entries than
+	// maxContactsPerResponse and NOTHING was verified or imported.
+	contactImportRefusedCountCap
+	// contactImportBudgetExhausted means the neighbour's verification budget
+	// ran out part-way; the verified prefix was imported.
+	contactImportBudgetExhausted
+)
+
+// String returns the outcome name used in logs.
+func (o contactImportOutcome) String() string {
+	switch o {
+	case contactImportCompleted:
+		return "completed"
+	case contactImportRefusedCountCap:
+		return "refused_count_cap"
+	case contactImportBudgetExhausted:
+		return "budget_exhausted"
+	default:
+		return "invalid"
+	}
+}
+
+// contactImportReport is what one `contacts` reply produced.
+type contactImportReport struct {
+	// Offered is how many entries the reply carried.
+	Offered int
+	// Verified counts the entries that reached identity.VerifyBoxKeyBinding —
+	// the work the budget exists to bound, whatever the verdict was.
+	Verified int
+	// Imported counts the entries whose binding verified and entered the
+	// knowledge maps.
+	Imported int
+	Outcome  contactImportOutcome
+}
+
+// contactVerificationBudget is the WORK budget one `contacts` reply is verified
+// against: one token per signature check, taken immediately before the check.
+//
+// It is an interface so importAdvertisedContacts states what it needs and
+// nothing else — the production implementation is one node-scoped, per-remote
+// refilling bucket shared by BOTH import paths (contact_verify_budget.go), and
+// tests substitute a counter. There is deliberately no per-connection
+// implementation any more: the fresh recovery dial used to build its own
+// non-refilling budget per dial, on the argument that the connection carries
+// exactly one reply — but the dial is scheduled by a wire field the remote
+// writes, so "one budget per connection" meant "as many budgets as the remote
+// cares to ask for".
+type contactVerificationBudget interface {
+	// ChargeContactVerify takes one token and reports whether the caller may
+	// perform the verification. False means the entry must be skipped WITHOUT
+	// verifying it.
+	ChargeContactVerify() bool
+}
+
+// importAdvertisedContacts is the ONE place a peer-advertised contact list is
+// verified and imported, and the two-stage admission of §5 applied to it.
+//
+// # Why it is metered at all
+//
+// Every entry costs one identity.VerifyBoxKeyBinding — an Ed25519 verification,
+// ~50 µs — and the array is attacker-sized. The response plane meters the BYTES
+// a neighbour makes this node read, but bytes are not what this loop spends: at
+// ~approximateContactWireBytes per entry a single maximum-size reply is tens of
+// thousands of signature checks, and the byte burst admits two of them back to
+// back. So the count is capped first, and what survives the cap is charged
+// against a budget one token at a time.
+//
+// # The order of the two stages
+//
+// The count cap is read from len() BEFORE the walk, so a reply past it costs
+// zero verifications — refusing entry by entry would still let the reply buy a
+// full budget's worth of crypto. The token is then charged immediately before
+// each check and after the structural test, which is where §5 puts it: an
+// incomplete entry never reaches a signature check, so it must not spend a token
+// either, or an attacker would drain the budget with entries that are free to
+// refuse and starve the entries behind them.
+//
+// Network-discovered contacts are stored in memory only and are NOT written to
+// the trust store; that distinction is preserved by fetch_trusted_contacts
+// (encryption.md: signed box-key advertisement).
+func (s *Service) importAdvertisedContacts(
+	budget contactVerificationBudget,
+	contacts []protocol.ContactFrame,
+) contactImportReport {
+	report := contactImportReport{Offered: len(contacts), Outcome: contactImportCompleted}
+	if len(contacts) > maxContactsPerResponse {
+		report.Outcome = contactImportRefusedCountCap
+		return report
+	}
+	for _, contact := range contacts {
 		if contact.Address == "" || contact.PubKey == "" || contact.BoxKey == "" || contact.BoxSig == "" {
 			continue
 		}
+		if !budget.ChargeContactVerify() {
+			report.Outcome = contactImportBudgetExhausted
+			return report
+		}
+		report.Verified++
 		if identity.VerifyBoxKeyBinding(contact.Address, contact.PubKey, contact.BoxKey, contact.BoxSig) != nil {
 			continue
 		}
@@ -2838,9 +3244,9 @@ func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 		s.addKnownBoxKey(contact.Address, contact.BoxKey)
 		s.addKnownPubKey(contact.Address, contact.PubKey)
 		s.addKnownBoxSig(contact.Address, contact.BoxSig)
-		imported++
+		report.Imported++
 	}
-	return imported, nil
+	return report
 }
 
 // syncSenderKeys imports unknown sender keys from the peer at senderAddress.
@@ -3066,6 +3472,8 @@ func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender s
 	if parent == nil {
 		parent = context.Background()
 	}
+	// lifecycle: fire-and-forget. One sender-key sync exchange, bounded by the
+	// dial and handshake timeouts of the send it performs, not a loop.
 	s.goBackground(func() {
 		defer func() {
 			s.senderKeySyncMu.Lock()
@@ -3551,7 +3959,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			s.connManager.EmitHint(NewPeersDiscovered{Count: added})
 		}
 	case "relay_message":
-		if admit := admitRelayFrame(s.sessionHasCapability(address, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.sessionHasCapability(session, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
 		// Passing THIS session is safe post-owner-serialisation: the
@@ -3566,22 +3974,19 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			s.sendRelayHopAck(domain.PeerAddress(address), frame.ID, ackStatus)
 		}
 	case "relay_hop_ack":
-		if admit := admitRelayFrame(s.sessionHasCapability(address, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
+		if admit := admitRelayFrame(s.sessionHasCapability(session, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
 		s.handleRelayHopAck(domain.PeerAddress(address), frame)
 	case "announce_routes":
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV1) {
 			return
 		}
 		// Routing-only peer (no mesh_relay_v1) — routes through it are
 		// data-plane unusable. See inbound dispatch for full rationale.
-		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRelayV1) {
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
 		if session != nil {
 			s.handleAnnounceRoutes(session.peerIdentity, frame)
 		}
@@ -3592,18 +3997,15 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// collapses the delta into silent drop — the peer MUST NOT have
 		// sent this frame in the first place (v2 is per-session opt-in),
 		// so arriving here means the peer misread its own capability set.
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV1) {
 			return
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV2) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV2) {
 			return
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRelayV1) {
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
 		if session != nil {
 			s.handleRoutesUpdate(session.peerIdentity, address, frame)
 		}
@@ -3612,12 +4014,9 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// No payload, no capability beyond v2 required: the arrival is
 		// the signal to clear per-peer announce state and let the next
 		// cycle re-issue a legacy baseline.
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV2) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV2) {
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
 		if session == nil {
 			return
 		}
@@ -3642,7 +4041,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// Without an explicit case the summary would be silently
 		// dropped and the digest match would almost never arm
 		// AnnounceLoop suppression on the production path.
-		if !s.sessionHasCapability(address, domain.CapMeshRouteSyncV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRouteSyncV1) {
 			return
 		}
 		digestFrame, err := protocol.UnmarshalRouteSyncDigestFrame([]byte(frame.RawLine))
@@ -3653,9 +4052,6 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("peer_session: route_sync_digest parse failed")
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
 		if session == nil {
 			return
 		}
@@ -3701,7 +4097,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// outbound session (the common case: we initiated the digest
 		// from the session-open hook). Without this case Match=true
 		// summaries are dropped and the suppression is never armed.
-		if !s.sessionHasCapability(address, domain.CapMeshRouteSyncV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRouteSyncV1) {
 			return
 		}
 		summaryFrame, err := protocol.UnmarshalRouteSyncSummaryFrame([]byte(frame.RawLine))
@@ -3712,9 +4108,6 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("peer_session: route_sync_summary parse failed")
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
 		if session != nil {
 			s.handleRouteSyncSummary(session.peerIdentity, summaryFrame)
 		}
@@ -3722,15 +4115,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// Phase 4 single-hop poison-reverse arriving on an outbound
 		// session. Same capability pair (v1 + poison_reverse) and
 		// RawLine parse pattern as the inbound dispatcher.
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV1) {
 			return
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshPoisonReverseV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshPoisonReverseV1) {
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
 		if session == nil {
 			return
 		}
@@ -3760,19 +4150,16 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 	case "route_poison_v2":
 		// Batched poison-reverse on an outbound session. Same cap pair as v1
 		// but with mesh_poison_reverse_v2, same per-session cmd-rate gate.
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV1) {
 			return
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshPoisonReverseV2) {
+		if !s.sessionHasCapability(session, domain.CapMeshPoisonReverseV2) {
 			return
 		}
-		s.peerMu.RLock()
-		sessionV2 := s.sessions[address]
-		s.peerMu.RUnlock()
-		if sessionV2 == nil {
+		if session == nil {
 			return
 		}
-		if !s.outboundControlFrameAllowed(sessionV2) {
+		if !s.outboundControlFrameAllowed(session) {
 			log.Debug().Str("peer", string(address)).Str("frame_type", "route_poison_v2").Msg("outbound_session: control frame cmd rate limit exceeded")
 			return
 		}
@@ -3781,18 +4168,18 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			log.Debug().Err(err).Str("peer", string(address)).Msg("peer_session: route_poison_v2 parse failed")
 			return
 		}
-		s.handleRoutePoisonV2(sessionV2.peerIdentity, poisonBatch)
+		s.handleRoutePoisonV2(session.peerIdentity, poisonBatch)
 	case "route_announce_v3":
 		// Phase 4 compact announce arriving on an outbound session. Same
 		// capability triplet as the inbound dispatcher (v1 + v3 + relay)
 		// and the same parse-from-RawLine pattern as the route_sync frames.
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV1) {
 			return
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshRoutingV3) {
+		if !s.sessionHasCapability(session, domain.CapMeshRoutingV3) {
 			return
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+		if !s.sessionHasCapability(session, domain.CapMeshRelayV1) {
 			return
 		}
 		v3, err := protocol.UnmarshalRouteAnnounceV3Frame([]byte(frame.RawLine))
@@ -3803,12 +4190,21 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("peer_session: route_announce_v3 parse failed")
 			return
 		}
-		s.peerMu.RLock()
-		session := s.sessions[address]
-		s.peerMu.RUnlock()
 		if session != nil {
 			s.handleRouteAnnounceV3(session.peerIdentity, address, v3)
 		}
+	case "datagram":
+		// UNREACHABLE, and kept as the assertion of that fact. readPeerSession
+		// classifies every line before the parser runs: a line classifyFrameLine
+		// names `datagram` is diverted straight to the ingress, and a line it
+		// cannot resolve is refused unparsed (§4.1 step 1). What used to arrive
+		// here — a duplicate or case-variant `type` key the parser resolved and
+		// the scan could not — no longer reaches protocol.ParseFrameLine at all,
+		// so a frame in this branch means the two readers disagree on a line
+		// neither refused. That is a classifier bug, not a delivery decision,
+		// and delivering it would put the universal parse back in front of the
+		// neighbour's budget.
+		s.reportDatagramResidueUnreachable("outbound_session", string(address))
 	case "error":
 		// Remote sent an explicit error frame before closing the connection.
 		// Log at Warn so it stands out from the subsequent EOF line that
@@ -3864,19 +4260,28 @@ func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string
 // is registered in s.sessions (Phase 2). Using sendAckDeleteToPeer in
 // that window silently drops the ack because peerSession(address)
 // returns nil.
+//
+// It is the ONE outbound-session enqueue that deliberately does NOT go through
+// enqueueSessionSendItem, and the exception is the same bring-up window: the
+// peer-state gate refuses a session whose peer is not yet marked connected, and
+// during Phase 1 no peer is. The gate would be answering about the ADDRESS
+// while this frame is an ack on the very socket that just delivered the message
+// — a socket whose reader is provably alive, because it is the one that handed
+// us the frame being acked. The queue's own fence still applies through
+// enqueueSend, so a session that died is still refused and still falls through
+// to the pending queue below.
 func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain.PeerAddress, ackType string, id protocol.MessageID, status string) {
 	if session == nil {
 		return
 	}
 	frame := s.buildAckDeleteFrame(ackType, id, status)
-	select {
-	case session.sendCh <- frame:
+	if session.enqueueSend(legacyPeerSendItem(frame)) {
 		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session_direct").Msg("ack_delete_send")
-	default:
-		// sendCh full — fall back to pending queue for later drain.
-		if s.queuePeerFrame(address, frame) {
-			log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
-		}
+		return
+	}
+	// sendCh full or already fenced — fall back to pending queue for later drain.
+	if s.queuePeerFrame(address, frame) {
+		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
 	}
 }
 
@@ -4726,6 +5131,56 @@ func (s *Service) computePeerStateLocked(health *peerHealth) string {
 	return s.computePeerStateAtLocked(health, time.Now().UTC())
 }
 
+// peerHealthAcceptsOutboundFramesLocked is THE predicate behind "may this
+// connection still be handed a frame". Every send path that picks a connection
+// and every queue that admits one asks it and nothing else, so the selection
+// and the hand-over cannot disagree about which sockets are alive.
+//
+// It is a WHITELIST of the states that may be sent to, and that shape is the
+// whole finding it fixes rather than a stylistic preference. The blacklist it
+// replaces named peerStateStalled and only that, while a session that just died
+// leaves its peer in peerStateReconnecting: markPeerDisconnected flips the
+// health entry and servePeerSession fences the queue one deferred call LATER,
+// so in that window the frame passed the gate, landed in a queue nobody would
+// ever drain to the socket, and the producer read the acceptance as a delivery
+// — the datagram emitter stops its candidate walk on it, so the frame was lost
+// INSTEAD of going to the peer's next connection. A state added later refuses
+// by default instead of repeating that.
+//
+// A missing health entry refuses for the reason the outbound tier of
+// peerSendableConnectionsLocked already documents: bring-up inserts the session
+// into s.sessions BEFORE markPeerConnected, and in that window the session is
+// not authoritative for sends.
+//
+// Caller must hold s.peerMu (read or write).
+func (s *Service) peerHealthAcceptsOutboundFramesLocked(health *peerHealth, now time.Time) bool {
+	if health == nil {
+		return false
+	}
+	switch s.computePeerStateAtLocked(health, now) {
+	case peerStateHealthy, peerStateDegraded:
+		return true
+	default:
+		// peerStateReconnecting (health.Connected == false) and
+		// peerStateStalled both mean the socket behind this address is not
+		// carrying traffic any more.
+		return false
+	}
+}
+
+// peerAcceptsOutboundFrames asks the same question of an ADDRESS, resolving it
+// to its canonical health entry first.
+//
+// Takes s.peerMu.RLock itself, so callers must hold no domain mutex — every
+// call site is a queue admission, which by the rule in docs/locking.md happens
+// outside every domain mutex anyway.
+func (s *Service) peerAcceptsOutboundFrames(address domain.PeerAddress) bool {
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	health := s.health[s.resolveHealthAddress(address)]
+	return s.peerHealthAcceptsOutboundFramesLocked(health, time.Now().UTC())
+}
+
 func formatTime(ts time.Time) string {
 	if ts.IsZero() {
 		return ""
@@ -4734,23 +5189,151 @@ func formatTime(ts time.Time) string {
 }
 
 func (s *Service) enqueuePeerFrame(address domain.PeerAddress, frame protocol.Frame) bool {
+	return s.enqueuePeerSendItem(address, legacyPeerSendItem(frame))
+}
+
+// enqueuePeerSendItem is the admission point into the upper outbound queue for
+// a caller that knows only the peer's ADDRESS: it resolves the address to the
+// session currently registered under it and hands the item on. A caller that
+// already holds the session must go straight to enqueueSessionSendItem — see
+// the contract there for why.
+func (s *Service) enqueuePeerSendItem(address domain.PeerAddress, item peerSendItem) bool {
 	session, ok := s.activePeerSession(address)
-	if !ok {
+	if !ok || session == nil {
 		return false
 	}
-	if s.peerState(address) == peerStateStalled {
-		return false
-	}
+	return s.enqueueSessionSendItem(session, item)
+}
+
+// enqueueSessionSendItem is the admission into the upper outbound queue of ONE
+// session, and it is the whole of that admission: the peer-state gate and the
+// queue fence stay in this one place for EVERY entry point. Anything that puts
+// a frame on an outbound session goes through here — the address-keyed helper
+// above, the tracked senders below, the announce fan-out, the pending-ring
+// flush and the identity-addressed walk — so a state that must not be sent to
+// is refused once rather than in each of them.
+//
+// The two gates answer different questions and both are needed. The peer-state
+// gate (peerAcceptsOutboundFrames) says the PEER is no longer carrying traffic;
+// the fence inside enqueueSend says THIS SESSION's queue is dead. Neither
+// implies the other: a peer whose session died is disconnected for a whole
+// window before the serve loop runs its deferred closeSendQueue, and a session
+// retired by a reconnect sits under an address whose health has meanwhile gone
+// back to connected.
+//
+// It takes the SESSION and not the address because the two stop naming the same
+// socket the moment the peer reconnects: s.sessions[address] is rebound to a
+// fresh peerSession with a fresh ConnID, and a caller that picked its
+// connection earlier — the datagram emitter picks one per frame, after gating
+// its handshake — would silently have its frame delivered over the successor.
+// A session that died in the meantime refuses through its own fence
+// (enqueueSend), which is the answer such a caller wants: the walk moves on to
+// the next connection instead of being handed a substitute.
+func (s *Service) enqueueSessionSendItem(session *peerSession, item peerSendItem) bool {
 	if session == nil {
 		return false
 	}
-
-	select {
-	case session.sendCh <- frame:
-		return true
-	default:
+	// peerAcceptsOutboundFrames resolves a dial address onto its canonical
+	// primary, so asking with the session's own address reaches the same health
+	// entry the address-keyed caller above would have reached.
+	if !s.peerAcceptsOutboundFrames(session.address) {
 		return false
 	}
+	s.runSendAdmissionBarrier()
+	return session.enqueueSend(item)
+}
+
+// runSendAdmissionBarrier fires the test-only synchronisation point described
+// on the sendAdmissionBarrier field. Both tiers call it at the same point of
+// their admission — after the peer-state gate answered, before the frame is
+// offered to a queue — because that is the one window in which a teardown can
+// still turn a queue that would have sent the frame into one that discards it.
+func (s *Service) runSendAdmissionBarrier() {
+	if s.sendAdmissionBarrier != nil {
+		s.sendAdmissionBarrier()
+	}
+}
+
+// runPeerTeardownBarrier fires the test-only synchronisation point described on
+// the peerTeardownBarrier field. Both teardowns that own a queue call it at the
+// same point — between the fence and the disconnect publication — because that
+// is the only place from which the ORDER of those two is observable at all.
+func (s *Service) runPeerTeardownBarrier() {
+	if s.peerTeardownBarrier != nil {
+		s.peerTeardownBarrier()
+	}
+}
+
+// sendTrackedFrameToSession enqueues frame on the upper outbound queue of THIS
+// session with an outbound contract attached: a send deadline re-checked by
+// the writer immediately before the socket write, and a per-frame write grace.
+//
+// The ticket is MINTED BY THE CALLER, and that is the contract: one ticket
+// belongs to one queue element, so a caller that offers the same frame to
+// several connections mints one per offer. A nil ticket is the legacy,
+// untracked frame.
+//
+// Returns false when the frame was refused (fenced queue, a peer that no
+// longer accepts outbound frames, saturated queue). The frame provably never
+// started a write in that case, so the caller is free to try another
+// connection.
+func (s *Service) sendTrackedFrameToSession(
+	session *peerSession,
+	frame protocol.Frame,
+	ticket *netcore.WriteTicket,
+) bool {
+	return s.enqueueSessionSendItem(session, peerSendItem{Frame: frame, ticket: ticket})
+}
+
+// sendTrackedFrameToConn is the accepted-connection twin of
+// sendTrackedFrameToSession: it attaches the same outbound contract to a frame
+// destined for the connection registered under id.
+//
+// The inbound direction has NO peerSession and therefore only ONE queue — the
+// NetCore writer's. That asymmetry is the whole reason the contract travels
+// with the queue element instead of living in a peerSession-side table: the
+// same ticket type has to work where the upper queue does not exist at all.
+//
+// It is keyed on the ConnID for the same reason the outbound twin is keyed on
+// the session object. The remote ADDRESS of an accepted connection outlives the
+// connection — a peer reconnecting from the same host:port produces a second
+// one under the same key — so resolving the write address by it would hand the
+// frame to the successor of the socket the caller chose.
+//
+// The ticket is minted by the caller for the same reason as in
+// sendTrackedFrameToSession: one ticket, one queue element.
+//
+// The peer-state gate is the SAME one the outbound twin applies, and it is here
+// for the same reason: peerSendableConnectionsLocked judged this connection
+// under peerMu, the lock was released before the hand-over, and a peer that went
+// away in between must send the caller on to its next candidate rather than
+// have the frame accepted by a queue whose socket is finished. Asking exactly
+// what the selection asked — and not a second, stricter question of this tier's
+// own — is what keeps "the metadata describes the connection the send will try"
+// true across the gap.
+//
+// Returns false when the connection is unknown, when its peer no longer accepts
+// outbound frames, or when its queue answered anything other than SendOK.
+// Unlike the outbound twin above, that false is not a proof: the outbound queue
+// refuses at the door, while this one also answers a frame that is already in it
+// and read a shut gate — a frame written just before a LATER frame killed the
+// link lands there. The caller walks on to the next connection of the same peer,
+// so the cost of the imprecise half is a duplicate the receiving side drops, not
+// a lost frame.
+func (s *Service) sendTrackedFrameToConn(
+	id domain.ConnID,
+	frame protocol.Frame,
+	ticket *netcore.WriteTicket,
+) bool {
+	core := s.netCoreForID(id)
+	if core == nil {
+		return false
+	}
+	if !s.peerAcceptsOutboundFrames(core.Address()) {
+		return false
+	}
+	s.runSendAdmissionBarrier()
+	return core.SendTracked(frame, ticket) == netcore.SendOK
 }
 
 // pendingRingSize resolves the per-peer pending ring capacity: the operator
@@ -5051,18 +5634,17 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 			s.markOutboundTerminal(item.Frame, "expired", "pending queue expired")
 			continue
 		}
-		select {
-		case session.sendCh <- item.Frame:
+		if s.enqueueSessionSendItem(session, legacyPeerSendItem(item.Frame)) {
 			s.clearOutboundQueued(item.Frame.ID)
-		default:
-			item.Retries++
-			if item.Retries >= maxPendingFrameRetries {
-				s.markOutboundTerminal(item.Frame, "failed", "max retries exceeded")
-				continue
-			}
-			s.markOutboundRetrying(item.Frame, item.QueuedAt, item.Retries, "retry queued delivery")
-			remaining = append(remaining, item)
+			continue
 		}
+		item.Retries++
+		if item.Retries >= maxPendingFrameRetries {
+			s.markOutboundTerminal(item.Frame, "failed", "max retries exceeded")
+			continue
+		}
+		s.markOutboundRetrying(item.Frame, item.QueuedAt, item.Retries, "retry queued delivery")
+		remaining = append(remaining, item)
 	}
 	if len(remaining) == 0 {
 		// refreshAggregatePendingLocked reads s.pending (deliveryMu)
@@ -5226,15 +5808,18 @@ func (s *Service) activePeerSession(address domain.PeerAddress) (*peerSession, b
 	return session, true
 }
 
-func (s *Service) peerState(address domain.PeerAddress) string {
-	s.peerMu.RLock()
-	defer s.peerMu.RUnlock()
-	health := s.health[s.resolveHealthAddress(address)]
-	if health == nil {
-		return peerStateReconnecting
+// heartbeatDuration is the interval this Service pings inbound peers at, with
+// the production schedule standing in for the zero override.
+//
+// It is a field rather than the bare function for the same reason the datagram
+// maintenance cadence is: the JOIN this loop now takes part in cannot be
+// observed by a test that has to wait out a thirty-second first tick, and a
+// contract nobody can enter is a contract nobody checks.
+func (s *Service) heartbeatDuration() time.Duration {
+	if s.heartbeatIntervalOverride > 0 {
+		return s.heartbeatIntervalOverride
 	}
-	now := time.Now().UTC()
-	return s.computePeerStateAtLocked(health, now)
+	return nextHeartbeatDuration()
 }
 
 func nextHeartbeatDuration() time.Duration {
@@ -5248,7 +5833,7 @@ func nextHeartbeatDuration() time.Duration {
 // connection is closed — same semantics as outbound session heartbeats.
 func (s *Service) inboundHeartbeat(id domain.ConnID, address domain.PeerAddress, stop <-chan struct{}) {
 	defer crashlog.DeferRecover()
-	timer := time.NewTimer(nextHeartbeatDuration())
+	timer := time.NewTimer(s.heartbeatDuration())
 	defer timer.Stop()
 
 	for {

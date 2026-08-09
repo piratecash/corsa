@@ -630,11 +630,13 @@ sequenceDiagram
     end
 
     Note over Reader: connection closed or error
-    Reader->>Reader: unregisterInboundConn()
-    Reader->>SendCh: close(sendCh)
-    Note over Writer: sendCh closed → Writer drains remaining frames
-    Writer->>Reader: close(writerDone)
-    Note over Reader: TCP connection closed after writer finishes
+    Reader->>Reader: unregisterInboundConn() → NetCore.Close()
+    Reader->>SendCh: shut the send gate — every later producer<br/>is answered SendChanClosed
+    Reader->>Socket: rawConn.Close() — unblocks a writer parked in Write
+    Reader->>Writer: close(closing) — the writer's exit signal
+    Note over Writer: releases the queue residue without writing it;<br/>sendCh itself is NEVER closed as a channel
+    Writer->>Reader: close(writerExited)
+    Note over Reader: registry entry is removed only after the writer returned
 ```
 *Diagram — Inbound connection lifecycle*
 
@@ -1376,11 +1378,13 @@ sequenceDiagram
     end
 
     Note over Reader: соединение закрыто или ошибка
-    Reader->>Reader: unregisterInboundConn()
-    Reader->>SendCh: close(sendCh)
-    Note over Writer: sendCh закрыт → Writer дочитывает оставшиеся фреймы
-    Writer->>Reader: close(writerDone)
-    Note over Reader: TCP соединение закрывается после завершения writer
+    Reader->>Reader: unregisterInboundConn() → NetCore.Close()
+    Reader->>SendCh: взводит send gate — любой следующий продюсер<br/>получает SendChanClosed
+    Reader->>Socket: rawConn.Close() — разблокирует writer'а, стоящего в Write
+    Reader->>Writer: close(closing) — сигнал выхода writer'у
+    Note over Writer: отпускает остаток очереди, не записывая его;<br/>сам sendCh как канал НИКОГДА не закрывается
+    Writer->>Reader: close(writerExited)
+    Note over Reader: запись реестра снимается только после возврата writer'а
 ```
 *Диаграмма — Жизненный цикл входящего соединения*
 

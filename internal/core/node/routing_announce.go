@@ -165,16 +165,207 @@ func isAnnouncePlaneBulkFrameType(frameType string) bool {
 // (and only these) right after ParseFrameLine in the session reader
 // closes the gap without changing the marshal short-circuit semantic
 // for frames that don't use the bypass.
+//
+// The datagram type is on this list for a stricter reason than the announce
+// frames: §3.4 requires its STRICT parser to work on the original bytes.
+// ParseFrameLine collapses duplicate keys, drops unknown fields and keeps no
+// copy of the input, so a datagram that reaches dispatch as a Frame can no
+// longer honour a single promise of that section. The entry is the top-level
+// `type`, never the inner `dtype` — dispatch keys on type, and dtype is a
+// datagram-internal field the universal Frame never sees.
 func isRawLineBackedFrameType(frameType string) bool {
 	switch frameType {
 	case "route_sync_digest_v1", "route_sync_summary_v1",
 		protocol.RouteAnnounceV3FrameType,
 		protocol.RoutePoisonFrameType,
-		protocol.RoutePoisonV2FrameType:
+		protocol.RoutePoisonV2FrameType,
+		protocol.DatagramFrameType:
 		return true
 	default:
 		return false
 	}
+}
+
+// rawLineForDispatch picks which form of the wire line a RawLine-backed
+// dispatch receives: the line exactly as it came off the socket, or the
+// whitespace-trimmed one protocol.ParseFrameLine was given.
+//
+// A DATAGRAM gets the untrimmed line, and that is a correctness requirement,
+// not a preference. Two promises depend on it and both are byte-exact:
+//
+//   - §5 charges the neighbour's inbound byte budget on the RAW bytes, before
+//     anything is decoded (Pipeline.HandleInbound counts len(Line)). Handing
+//     the trimmed line over lets a peer pad a frame with outside whitespace up
+//     to MaxFrameLine and have almost none of it charged — the budget is spent
+//     on the wire, so it has to be counted on the wire;
+//   - §3.4 requires the STRICT parser to see the same line the budget was
+//     counted on. "The layer counts and parses the same bytes" stops being
+//     true the moment the two differ, and it is precisely the bytes outside
+//     the JSON that ParseFrameLine discards without a trace.
+//
+// The announce-plane types keep the TRIMMED line, and the divergence is
+// deliberate rather than an omission. Their dispatch is a plain
+// Unmarshal*Frame, which is whitespace-agnostic, so the raw line would buy
+// them nothing; they carry no per-neighbour byte budget that the choice could
+// distort; and trimmed is what the inbound TCP dispatcher already hands them,
+// so keeping it here is what holds the two directions identical for every type
+// this task did not have a reason to move.
+func rawLineForDispatch(frameType, wire, trimmed string) string {
+	if frameType == protocol.DatagramFrameType {
+		return wire
+	}
+	return trimmed
+}
+
+// hasWideFrameLineBudget is the CLOSED set of frame types that may legitimately
+// exceed protocol.MaxFrameLine on the peer-session reader, whose own limit is
+// maxResponseLineBytes (8 MiB).
+//
+// # Why the entitled set is the closed one
+//
+// The rule used to be stated the other way round: a fixed strict set (the
+// announce plane plus `datagram`) capped at 128 KiB, and its COMPLEMENT — every
+// other type, known or not — entitled to 8 MiB. That inversion is what let an
+// authenticated peer make this node decode a multi-megabyte JSON line over and
+// over by naming a type nobody had ever heard of. A budget is a bound on work a
+// neighbour can impose, so the set that BUYS the work has to be the enumerable
+// one; the set that is merely capped does not need enumerating at all.
+//
+// # Why each member is here
+//
+//   - `contacts` — the reply to `fetch_contacts`, built from every address in
+//     s.boxKeys and written to the socket through the unguarded marshal of
+//     sendHandshakeReplyViaNetwork. One ContactFrame is an address plus three
+//     hex keys, so the line passes 128 KiB somewhere around four hundred
+//     contacts. This is the batching reply protocol.MaxResponseLine was
+//     introduced for. The OUTGOING form is trimmed to maxContactsPerResponse by
+//     contactsFrameForNetwork, but that cap bounds the CRYPTO the reply buys on
+//     the receiver, not its line width — 4096 contacts are about a megabyte, so
+//     the wide-budget entitlement here is unchanged;
+//   - `push_message` — one DM, and the reason is not the DM's size but this
+//     node's OWN admission cap on it: dispatchPeerSessionFrame accepts
+//     frame.Item.Body up to maxPeerCommandBodyBytes, which IS 128 KiB, so a body
+//     at the largest size this node will accept necessarily produces a wire line
+//     larger than MaxFrameLine. Capping the line at 128 KiB while accepting a
+//     128 KiB body would make the two limits contradict each other, and the
+//     casualty would be a delivered DM. It reaches this reader only in one
+//     direction — a subscriber reads pushes off the session it dialled — which
+//     is why the inbound command reader's own 128 KiB limit does not already
+//     cover it.
+//
+// # What is deliberately NOT here, and the risk that carries
+//
+// `messages` and `inbox` are the other two batching replies both budget
+// constants name, and they are left out because the code says they cannot arrive
+// here: `fetch_messages` / `fetch_inbox` are not in p2pWireCommands, they have no
+// case in dispatchNetworkFrame, and neither reply is an expectedType of
+// peerSessionRequest or a case of dispatchPeerSessionFrame. They are local/RPC
+// frames. Listing them would buy an attacker one 8 MiB decode per frame for a
+// reply this node would then drop unhandled.
+//
+// Everything else is capped because the code caps it: the announce plane chunks
+// to MaxFrameLine (chunkAnnounceEntriesBySize) and route_sync_digest_v1 drops its
+// version vector rather than exceed it (buildRouteSyncDigestWire); `peers` is
+// trimmed to maxAnnouncePeers (64); `relay_message` carries at most
+// maxRelayBodyBytes (64 KiB); a `file_command` chunk is 16 KiB raw
+// (domain.DefaultChunkSize) and about 29 KiB on the wire; and every type that
+// also arrives over the inbound TCP plane is already bound by
+// maxCommandLineBytes, which IS MaxFrameLine.
+//
+// THE RISK IS NAMED RATHER THAN AVOIDED: an older peer that legitimately sends a
+// large reply of a type this list forgets now has that frame dropped instead of
+// parsed. The refusal is loud — dropOversizeFrameLine logs the type and the size
+// at Warn — so the omission is diagnosable from one log line, and adding a name
+// here is a one-line change. The trade is deliberate and is the one §4.1 step 1
+// asks for: dropping one frame of a forgotten type is recoverable, while
+// decoding 8 MiB on demand for any authenticated peer is not.
+func hasWideFrameLineBudget(frameType string) bool {
+	switch frameType {
+	case "contacts", "push_message":
+		return true
+	default:
+		return false
+	}
+}
+
+// exceedsStrictFrameLineBudget reports whether a wire line breaches the budget
+// of the type it is judged as.
+//
+// The size is wireLineBudget, not len(line): the sender capped the frame at
+// MaxFrameLine INCLUDING the newline it wrote, so counting without it would
+// let a line through that the writer on the other end would have refused —
+// a one-byte disagreement that only ever shows up at the boundary, which is
+// exactly where a budget is tested.
+//
+// frameType is a parameter rather than something derived here because it is
+// the AUTHORITATIVE classification — protocol.Frame.Type, read off the parsed
+// frame. Admission answers the same question one step earlier and from a
+// strictly narrower source; see admitFrameLinePreParse.
+func exceedsStrictFrameLineBudget(frameType, line string) bool {
+	return !hasWideFrameLineBudget(frameType) && wireLineBudget(line) > protocol.MaxFrameLine
+}
+
+// preParseFrameLineVerdict is what admission decides about one wire line before
+// anything is parsed (§4.1 step 1, spec line 417).
+type preParseFrameLineVerdict uint8
+
+const (
+	// preParseAdmit lets the line continue to the classification-driven
+	// dispatch and, for everything that is not a datagram, to the parser.
+	preParseAdmit preParseFrameLineVerdict = iota
+
+	// preParseRefuseAmbiguous is a line whose type this node cannot resolve
+	// without parsing it — and therefore must not parse.
+	preParseRefuseAmbiguous
+
+	// preParseRefuseOverBudget is a line past MaxFrameLine that did not name a
+	// type entitled to the wide response budget.
+	preParseRefuseOverBudget
+)
+
+// admitFrameLinePreParse is the admission rule of §4.1 step 1 on the
+// peer-session reader and on the inbound command plane, judged BEFORE anything
+// is parsed.
+//
+// # The ambiguity half
+//
+// A line that will not name its type unambiguously is refused OUTRIGHT, at any
+// size, and that is the half that removes the residue rather than shrinking it.
+// Before this, such a line went through protocol.ParseFrameLine and was
+// dispatched on the type the PARSER resolved — so a duplicate `type` key whose
+// last value was `datagram` reached the layer only after a full universal
+// unmarshal nobody had charged for, which is precisely the order §4.1 step 1
+// forbids. The line cannot be classified before the parse, so it cannot be
+// routed before the parse; there is no third option in which the order holds.
+//
+// Nothing legal is lost by refusing it. Every frame this node and its peers put
+// on the wire is marshalled by encoding/json from a struct with one `type` tag,
+// so it names its type exactly once, literally, as a plain string. §3.4 already
+// rejects a duplicate top-level key on a datagram outright, and for every other
+// type the shape is a pathology no builder in this tree can produce.
+//
+// # The budget half
+//
+// A line past MaxFrameLine must NAME a type the wide maxResponseLineBytes budget
+// really belongs to (hasWideFrameLineBudget), and name it as frameLineNamed. A
+// line inside MaxFrameLine is bounded work by definition and is admitted
+// whatever it names.
+//
+// The returned type is the classification, not a guess: callers use it for the
+// drop attribution, and an unnamed line reports the empty string rather than a
+// peeked one.
+func admitFrameLinePreParse(line string) (string, preParseFrameLineVerdict) {
+	claimed, class := classifyFrameLine(line)
+	if class == frameLineAmbiguous {
+		return "", preParseRefuseAmbiguous
+	}
+	if wireLineBudget(line) <= protocol.MaxFrameLine {
+		return claimed, preParseAdmit
+	}
+	if class == frameLineNamed && hasWideFrameLineBudget(claimed) {
+		return claimed, preParseAdmit
+	}
+	return claimed, preParseRefuseOverBudget
 }
 
 // maxRoutesPerAnnounceFrame is the Phase 4 13.5 hard cap on the
@@ -1487,22 +1678,22 @@ func (s *Service) dispatchInboundAnnouncePlaneFrameWithCaps(
 }
 
 // dispatchOutboundAnnouncePlaneFrameWithCaps captures the outbound
-// session sendCh under one peerMu RLock together with cap validation,
-// health, and stalled-state checks, then enqueues to the captured
-// channel outside the lock. peerSession.sendCh is owned by exactly one
-// session — even if a replacement session at the same address opens
-// after our capture, its sendCh is a different channel and does not
-// receive our frame. The non-blocking select with default mirrors the
-// existing enqueuePeerFrame contract.
+// session under one peerMu RLock together with cap validation, then enqueues on
+// the captured session outside the lock. The queue is owned by exactly one
+// session — even if a replacement session at the same address opens after our
+// capture, it has its own queue and does not receive our frame.
+//
+// The peer-state gate is NOT repeated here: enqueueSessionSendItem is the single
+// admission into that queue and asks it for every producer. Repeating it under
+// this RLock is what the finding on the session admission was made of — the copy
+// here knew that a disconnected peer is not sendable while the copy at the
+// admission knew only about stalled, and two spellings of one rule drift.
 func (s *Service) dispatchOutboundAnnouncePlaneFrameWithCaps(
 	address domain.PeerAddress,
 	frame protocol.Frame,
 	requiredCaps []domain.Capability,
 ) bool {
-	var (
-		sendCh chan protocol.Frame
-		ok     bool
-	)
+	var target *peerSession
 	s.peerMu.RLock()
 	session := s.resolveSessionLocked(address)
 	if session != nil {
@@ -1521,24 +1712,14 @@ func (s *Service) dispatchOutboundAnnouncePlaneFrameWithCaps(
 			}
 		}
 		if allMatch {
-			health := s.health[s.resolveHealthAddress(address)]
-			if health != nil && health.Connected &&
-				s.computePeerStateAtLocked(health, time.Now().UTC()) != peerStateStalled {
-				sendCh = session.sendCh
-				ok = true
-			}
+			target = session
 		}
 	}
 	s.peerMu.RUnlock()
-	if !ok {
+	if target == nil {
 		return false
 	}
-	select {
-	case sendCh <- frame:
-		return true
-	default:
-		return false
-	}
+	return s.enqueueSessionSendItem(target, legacyPeerSendItem(frame))
 }
 
 // routingCapablePeers returns all peers (outbound sessions AND inbound

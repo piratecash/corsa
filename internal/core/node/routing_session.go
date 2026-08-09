@@ -318,6 +318,18 @@ func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity,
 		s.recordPeerDigestOnSessionClose(peerIdentity)
 	}
 
+	// Datagram admission buckets (§5). Dropped only on the LAST total
+	// session, because the budget is per NEIGHBOUR, not per socket: a peer
+	// with a second live connection is still the same neighbour and must
+	// keep spending the same budget. Forget does not forgive what was spent
+	// — it releases the memory of a peer that is gone — so the call is safe
+	// exactly here and would be wrong one transition earlier.
+	//
+	// Outside every domain mutex, like the other close-path side effects.
+	if isLastTotal {
+		s.forgetDatagramPeer(peerIdentity)
+	}
+
 	if !lastRelay {
 		// No relay sessions left (or never had one). If this is also the
 		// last total session, invalidate any transit routes learned through
@@ -411,8 +423,9 @@ func (s *Service) poisonReverseToOtherPeers(ctx context.Context, lostUplink doma
 			continue
 		}
 		// Capability is read from the AnnounceTarget snapshot (works for BOTH
-		// inbound and outbound peers) — sessionHasCapability only sees outbound
-		// sessions, so an inbound v2 peer would otherwise wrongly fall to v1.
+		// inbound and outbound peers) — sendTargetHasCapability only sees
+		// outbound sessions, so an inbound v2 peer would otherwise wrongly
+		// fall to v1.
 		if batch && announceTargetHasCapability(peer.Capabilities, domain.CapMeshPoisonReverseV2) {
 			s.fanPoisonReverseBatched(ctx, peer.Address, idents)
 			continue
@@ -454,8 +467,8 @@ func (s *Service) fanPoisonReverseBatched(ctx context.Context, peerAddress domai
 
 // announceTargetHasCapability reports whether the peer's negotiated capability
 // snapshot (from routingCapablePeers / AnnounceTarget) includes c. Used in
-// preference to sessionHasCapability so the check is correct for inbound peers
-// too (PeerCapability is a domain.Capability alias, compared directly).
+// preference to sendTargetHasCapability so the check is correct for inbound
+// peers too (PeerCapability is a domain.Capability alias, compared directly).
 func announceTargetHasCapability(caps []routing.PeerCapability, c domain.Capability) bool {
 	for _, pc := range caps {
 		if pc == c {

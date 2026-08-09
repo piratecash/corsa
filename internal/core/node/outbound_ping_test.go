@@ -32,7 +32,7 @@ func TestDispatchPeerSessionFrame_PingRespondsPong(t *testing.T) {
 		conn:    local,
 		inboxCh: make(chan protocol.Frame, 8),
 		errCh:   make(chan error, 1),
-		sendCh:  make(chan protocol.Frame, 8),
+		sendCh:  make(chan peerSendItem, 8),
 	}
 	attachTestNetCore(svc, session)
 	svc.peerMu.Lock()
@@ -87,7 +87,7 @@ func TestPeerSessionRequest_PingDuringWaitRespondsPong(t *testing.T) {
 		conn:    local,
 		inboxCh: make(chan protocol.Frame, 8),
 		errCh:   make(chan error, 1),
-		sendCh:  make(chan protocol.Frame, 8),
+		sendCh:  make(chan peerSendItem, 8),
 	}
 	attachTestNetCore(svc, session)
 	svc.peerMu.Lock()

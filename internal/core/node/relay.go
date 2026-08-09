@@ -857,7 +857,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// Update the reservation placeholder with full forwarding state.
 	// ReceiptForwardTo uses the transport address (senderAddress), not the
 	// identity fingerprint from frame.PreviousHop. This is critical:
-	// sessionHasCapability() and sendReceiptToPeer() look up sessions by
+	// sendTargetHasCapability() and sendReceiptToPeer() look up sessions by
 	// transport address, not by identity.
 	//
 	// Phase 3 PR 12.2 — arm the hop-ack budget. ForwardedTo is non-empty
@@ -1149,7 +1149,7 @@ func (s *Service) tryForwardToDirectPeer(recipient domain.PeerIdentity, frame pr
 	s.peerMu.RUnlock()
 
 	for _, address := range candidates {
-		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+		if !s.sendTargetHasCapability(address, domain.CapMeshRelayV1) {
 			continue
 		}
 		if s.enqueuePeerFrame(address, frame) {
@@ -1189,7 +1189,7 @@ func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.Pee
 		if excludeAddress != "" && s.sameCanonicalAddress(address, excludeAddress) {
 			continue
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+		if !s.sendTargetHasCapability(address, domain.CapMeshRelayV1) {
 			continue
 		}
 		if !s.relayLimiter.allow(address) {
@@ -1233,7 +1233,7 @@ func (s *Service) handleRelayReceipt(receipt protocol.DeliveryReceipt) bool {
 	// Forward the receipt one hop along its direction: delivered/seen go
 	// BACK toward the original sender, seen_ack goes FORWARD toward the
 	// seen-sender (see relayHopForReceipt).
-	if s.sessionHasCapability(forwardTo, domain.CapMeshRelayV1) {
+	if s.sendTargetHasCapability(forwardTo, domain.CapMeshRelayV1) {
 		if s.sendReceiptToPeer(forwardTo, receipt) {
 			log.Debug().
 				Str("message_id", string(receipt.MessageID)).
@@ -1267,7 +1267,7 @@ func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []do
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		if !s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+		if !s.sendTargetHasCapability(address, domain.CapMeshRelayV1) {
 			continue
 		}
 		if s.peerIsClientNode(address) {

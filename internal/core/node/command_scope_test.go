@@ -141,6 +141,15 @@ var requiredP2PWireCommands = map[string]bool{
 	// route_poison_v2 carries a LIST of lost identities in one frame — same
 	// auth/scope as v1, added to collapse the per-disconnect fan-out burst.
 	"route_poison_v2": true,
+
+	// Datagram transport layer (mesh_datagram_v1 capability gate). The
+	// `datagram` envelope is raw-line-backed on BOTH directions: the
+	// inbound case hands the original wire bytes to the strict parser,
+	// because duplicate keys, unknown fields and canonical encodings are
+	// unobservable once a line has been through the universal Frame. See
+	// docs/refactoring/datagram-transport.md §3.4 and §6, and
+	// docs/protocol/handshake.md for the capability contract.
+	"datagram": true,
 }
 
 // extractSwitchCasesFromFunc parses service.go via go/ast and returns every

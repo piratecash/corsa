@@ -16,8 +16,14 @@ package node
 //     OnDialFailed) — authoritative contract for the CM callbacks
 //     implemented in this file.
 //   - docs/locking.md — lock ordering for markPeerConnected /
-//     markPeerDisconnected (peerMu -> ipStateMu -> statusMu) and the
-//     rule that side-effects run after domain mutexes are released.
+//     markPeerDisconnected (peerMu -> ipStateMu -> statusMu), the rule
+//     that side-effects run after domain mutexes are released, and the
+//     "peerSession.sendMu — the outbound queue fence" section, which
+//     names per death path who finalises which of the two outbound
+//     queues.
+//   - peer_send_queue.go — the upper outbound queue whose sole consumer
+//     is this file's serve loop. servePeerSession fences and drains it
+//     from one defer, so a newly added return site cannot leak frames.
 
 import (
 	"bufio"
@@ -59,10 +65,24 @@ import (
 // outbound path (legacy openPeerSession vs CM openPeerSessionForCM)
 // decides separately when to run those side-effects because the CM path
 // defers them until the generation check passes.
-func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3 bool) {
+//
+// What it publishes is NEGOTIATED but not yet IN FORCE. auth_ok has not
+// arrived when this runs — both call sites invoke it one round trip earlier —
+// and readPeerSession has been dispatching since before the welcome. The
+// receive path therefore asks sessionHasCapability, which additionally requires
+// the completed handshake (markSessionHandshakeComplete); see its doc for the
+// window that would otherwise stay open between this write and auth_ok.
+func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3 bool, datagrams datagramAdvertise) {
 	session.version = welcome.Version
 	session.peerIdentity = domain.PeerIdentityFromWire(welcome.Address)
-	session.capabilities = intersectCapabilities(localCapabilities(enableV3), welcome.Capabilities)
+	session.capabilities = intersectCapabilities(localCapabilities(enableV3, datagrams), welcome.Capabilities)
+	// The raw declarations (§2.2 raw capability names, §6.1 dtypes) are
+	// mirrored beside the typed set, derived from the SAME welcome frame,
+	// for the same reason the typed set is mirrored at all: the outbound
+	// dispatcher is addressed by PeerAddress and has no ConnID with which to
+	// reach NetCore. Deriving both here, in one pass, is what stops the two
+	// views of one handshake from ever disagreeing.
+	session.declarations = declarationsFromHandshake(welcome)
 	if session.netCore == nil {
 		return
 	}
@@ -82,6 +102,7 @@ func applyWelcomeMetadata(session *peerSession, welcome protocol.Frame, enableV3
 	session.netCore.SetAddress(advertised)
 	session.netCore.SetIdentity(session.peerIdentity)
 	session.netCore.SetCapabilities(session.capabilities)
+	session.netCore.SetDeclarations(session.declarations)
 	// Mirror the negotiated protocol version onto the outbound NetCore
 	// for symmetry with the rest of the welcome-derived metadata
 	// (Address / Identity / Capabilities). The file router does NOT
@@ -266,7 +287,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		connID:       cid,
 		conn:         conn,
 		metered:      conn,
-		sendCh:       make(chan protocol.Frame, peerSessionSendBuffer),
+		sendCh:       make(chan peerSendItem, peerSessionSendBuffer),
 		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
 		errCh:        make(chan error, 1),
 		// Owner-serialised contact sync (sender-key recovery). Unbuffered:
@@ -313,7 +334,18 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 			Msg("outbound_self_identity_rejected")
 		return false, s.newSelfIdentityError(address, welcome.Listen)
 	}
-	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3)
+	// peerMu around the metadata write, not just around the map insert below:
+	// readPeerSession is already running (it delivered the welcome that got us
+	// here) and reads the same fields on its capability gates, so a peer that
+	// pipelines a frame behind its own welcome puts a reader on
+	// session.capabilities at the instant this line assigns it. The field doc
+	// on peerSession already declares peerMu as its guard — this is the write
+	// side honouring it. The advertise is resolved BEFORE the lock: it consults
+	// the datagram layer, and no domain mutex is held across that.
+	advertise := s.localDatagramAdvertise()
+	s.peerMu.Lock()
+	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3, advertise)
+	s.peerMu.Unlock()
 	s.learnIdentityFromWelcome(welcome, address)
 	// learnIdentityFromWelcome stores version/build keyed by the dial
 	// address (the only trusted host:port for the outbound side under
@@ -375,7 +407,7 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	// Both capabilities required: mesh_routing_v1 (understands announce_routes)
 	// and mesh_relay_v1 (can carry relay traffic). A routing-only peer would
 	// learn routes it cannot deliver on the data plane.
-	if !session.peerIdentity.IsZero() && s.sessionHasCapability(address, domain.CapMeshRoutingV1) && s.sessionHasCapability(address, domain.CapMeshRelayV1) {
+	if !session.peerIdentity.IsZero() && s.sessionHasCapability(session, domain.CapMeshRoutingV1) && s.sessionHasCapability(session, domain.CapMeshRelayV1) {
 		s.sendOutboundFullTableSync(ctx, session.peerIdentity, address)
 	}
 
@@ -384,6 +416,14 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 
 func (s *Service) servePeerSession(ctx context.Context, session *peerSession) error {
 	log.Debug().Str("node", s.identity.Address).Str("peer", string(session.address)).Int("inbox_buffered", len(session.inboxCh)).Msg("servePeerSession: entering Phase 3 main loop")
+
+	// The serve loop is the only consumer of the upper outbound queue, so
+	// its exit — for ANY reason: ctx cancel, writer death, peer error,
+	// heartbeat stall — is the moment nothing will ever move those frames
+	// to NetCore again. Fence the queue and finalise the residue here
+	// rather than at each return site: there are eight of them and a new
+	// one would silently leak.
+	defer session.closeSendQueue()
 
 	// Event-driven pending queue drain: a direct route was added by
 	// onPeerSessionEstablished before we entered the main loop. Now that
@@ -438,11 +478,11 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				return nil
 			}
 			writeErr := fmt.Errorf("managed writer exited (socket write failed)")
-			s.markPeerDisconnected(session.address, writeErr)
+			s.retirePeerSession(session, writeErr)
 			return writeErr
 		case err := <-session.errCh:
 			log.Info().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("upstream subscription closed")
-			s.markPeerDisconnected(session.address, err)
+			s.retirePeerSession(session, err)
 			return err
 		case frame := <-session.inboxCh:
 			s.markPeerRead(session.address, frame)
@@ -472,19 +512,24 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				// never blocks), then tear the session down.
 				reply <- 0
 				log.Warn().Str("peer", string(session.address)).Err(err).Msg("owned_contact_sync_failed, tearing down session")
-				s.markPeerDisconnected(session.address, err)
+				s.retirePeerSession(session, err)
 				return err
 			}
 			reply <- imported
 		case <-pingTimer.C:
 			if _, err := s.peerSessionRequest(session, protocol.Frame{Type: "ping"}, "pong", false); err != nil {
 				log.Warn().Str("peer", string(session.address)).Str("recipient", s.identity.Address).Err(err).Msg("heartbeat failed, peer stalled")
-				s.markPeerDisconnected(session.address, err)
+				s.retirePeerSession(session, err)
 				return err
 			}
 			pingTimer.Reset(nextHeartbeatDuration())
-		case outbound := <-session.sendCh:
-			if isFireAndForgetFrame(outbound.Type) {
+		case item := <-session.sendCh:
+			outbound := item.Frame
+			// A tracked item always takes the managed writer path: it
+			// carries a send deadline and expects no reply, while the
+			// request/reply path below would hold this loop waiting for an
+			// answer that is never coming.
+			if item.tracked() || isFireAndForgetFrame(outbound.Type) {
 				// Fire-and-forget frames (relay_message, relay_hop_ack) are
 				// enqueued on the managed writer without waiting for a reply.
 				// Buffer-full drops the frame and keeps the session — see
@@ -492,7 +537,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				if session.netCore == nil {
 					return fmt.Errorf("fire_and_forget: outbound session missing NetCore")
 				}
-				switch st := session.netCore.Send(outbound); st {
+				switch st := session.netCore.SendTracked(outbound, item.ticket); st {
 				case netcore.SendOK:
 					// Enqueued. Account the write only now: a frame
 					// rejected by the queue never reaches the wire, so
@@ -524,7 +569,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					continue
 				case netcore.SendChanClosed, netcore.SendWriterDone:
 					writeErr := fmt.Errorf("fire_and_forget: connection closing (%s)", st.String())
-					s.markPeerDisconnected(session.address, writeErr)
+					s.retirePeerSession(session, writeErr)
 					return writeErr
 				case netcore.SendMarshalError:
 					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Msg("fire_and_forget_marshal_error")
@@ -532,7 +577,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				default:
 					writeErr := fmt.Errorf("fire_and_forget: unexpected send status %s", st.String())
 					log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Str("status", st.String()).Msg("fire_and_forget_unexpected_status")
-					s.markPeerDisconnected(session.address, writeErr)
+					s.retirePeerSession(session, writeErr)
 					return writeErr
 				}
 			} else if _, err := s.peerSessionRequest(session, outbound, expectedReplyType(outbound.Type), false); err != nil {
@@ -550,7 +595,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					continue
 				}
 				log.Error().Str("peer", string(session.address)).Str("type", outbound.Type).Err(err).Msg("peer session send failed")
-				s.markPeerDisconnected(session.address, err)
+				s.retirePeerSession(session, err)
 				return err
 			}
 			s.clearRelayRetryForOutbound(outbound)
@@ -604,13 +649,33 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 	if reply.Type != "auth_ok" {
 		return protocol.ErrAuthRequired
 	}
-	session.authOK = true
+	s.markSessionHandshakeComplete(session)
 	var remoteAddr string
 	if session.netCore != nil {
 		remoteAddr = session.netCore.RemoteAddr()
 	}
 	s.recordOutboundAuthSuccess(session.address, remoteAddr)
 	return nil
+}
+
+// markSessionHandshakeComplete records that auth_ok arrived: everything the
+// welcome negotiated on this outbound session is from now on IN FORCE, and the
+// receive path may act on it (sessionHasCapability).
+//
+// peerMu is the publication and not decoration. readPeerSession has been running
+// since before the welcome — it is the goroutine that delivered it — and it
+// consults this flag on every capability-gated frame it dispatches, so an
+// unsynchronised write here races that reader as well as leaving it unordered.
+// The peerSession field doc names peerMu as the guard of every session field
+// that outlives the handshake; this is the write side honouring it, exactly as
+// applyWelcomeMetadata's call sites do for the capability set.
+//
+// It stays a one-way transition: the handshake completes once per session, and a
+// session that has to renegotiate is a new session with a new socket.
+func (s *Service) markSessionHandshakeComplete(session *peerSession) {
+	s.peerMu.Lock()
+	defer s.peerMu.Unlock()
+	session.authOK = true
 }
 
 func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain.PeerDirection) {
@@ -723,6 +788,59 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 	ebus.PublishPeerConnected(s.eventBus, address, peerID)
 }
 
+// retirePeerSession is the teardown of ONE outbound session that still owns a
+// live upper queue, and it is the only shape in which a session-holding caller
+// may publish its peer as disconnected.
+//
+// It exists because the two facts a producer reads are published by different
+// objects and only their ORDER makes the pair honest. A producer is admitted by
+// the peer-state gate (peerAcceptsOutboundFrames) and then hands its frame to
+// the session's queue; the frame is discarded by closeSendQueue. Publishing
+// "disconnected" first left a window in which a producer that had just been
+// admitted still deposited its frame into a queue about to be drained, and the
+// emitter read that acceptance as a delivery and STOPPED walking the peer's
+// remaining connections — so the frame reached neither this socket nor the next
+// candidate.
+//
+// Fencing first inverts the pair: once the disconnect is visible, the queue has
+// provably already stopped accepting, so a producer that passed the gate on
+// stale health is refused at the door and walks on. It does not — and cannot —
+// promise that an ACCEPTED frame is written: a session may die right after a
+// successful enqueue, which is the ordinary asynchronous case the receiving
+// side's anti-replay covers. What it removes is the case where the queue
+// answers "accepted" for a frame the same teardown has already condemned.
+//
+// Takes no domain mutex: closeSendQueue holds only the session's leaf sendMu
+// and markPeerDisconnected takes peerMu afterwards, so the two sections are
+// sequential and the fence stays outside the canonical lock order
+// (docs/locking.md, "peerSession.sendMu — the outbound queue fence"). The
+// test-only peerTeardownBarrier sits BETWEEN the two publications and is the
+// only place the order is observable from; it must stay there, and it must stay
+// outside both locks.
+func (s *Service) retirePeerSession(session *peerSession, err error) {
+	if session == nil {
+		return
+	}
+	session.closeSendQueue()
+	s.runPeerTeardownBarrier()
+	s.markPeerDisconnected(session.address, err)
+}
+
+// markPeerDisconnected publishes the peer at address as no longer carrying
+// traffic: it is the write behind peerAcceptsOutboundFrames, the gate every
+// producer passes before it hands a frame to a queue.
+//
+// ORDERING CONTRACT for callers that are tearing a connection down: the
+// connection's queue must have STOPPED ACCEPTING before this is called, never
+// after. A producer reads this publication and the queue's own answer as one
+// decision, and only the fence-first order makes the pair honest — otherwise a
+// producer admitted a moment before the publication still deposits its frame
+// into a queue the same teardown discards, and its "accepted" ends the caller's
+// walk over the peer's remaining connections. The two teardowns that own a
+// queue do it: retirePeerSession above (closeSendQueue) on the dialled tier and
+// trackInboundDisconnect (NetCore.ShutSendQueue) on the accepted one. Callers
+// with NO live queue behind the address — a failed dial, a self-identity
+// cooldown — have nothing to fence and call this directly.
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -841,7 +959,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		connID:       cid,
 		conn:         conn,
 		metered:      conn,
-		sendCh:       make(chan protocol.Frame, peerSessionSendBuffer),
+		sendCh:       make(chan peerSendItem, peerSessionSendBuffer),
 		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
 		errCh:        make(chan error, 1),
 		// Owner-serialised contact sync (sender-key recovery). Unbuffered:
@@ -894,7 +1012,18 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 			Msg("outbound_self_identity_rejected")
 		return nil, s.newSelfIdentityError(address, welcome.Listen)
 	}
-	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3)
+	// peerMu around the metadata write, not just around the map insert below:
+	// readPeerSession is already running (it delivered the welcome that got us
+	// here) and reads the same fields on its capability gates, so a peer that
+	// pipelines a frame behind its own welcome puts a reader on
+	// session.capabilities at the instant this line assigns it. The field doc
+	// on peerSession already declares peerMu as its guard — this is the write
+	// side honouring it. The advertise is resolved BEFORE the lock: it consults
+	// the datagram layer, and no domain mutex is held across that.
+	advertise := s.localDatagramAdvertise()
+	s.peerMu.Lock()
+	applyWelcomeMetadata(session, welcome, s.cfg.EnableMeshRoutingV3, advertise)
+	s.peerMu.Unlock()
 
 	// Stash welcome metadata for deferred application in
 	// onCMSessionEstablished after the generation check passes.
@@ -1079,7 +1208,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		s.onPeerSessionEstablished(session.peerIdentity, session.capabilities)
 
 		// Send full table sync to the new peer (Phase 1.2).
-		if !session.peerIdentity.IsZero() && s.sessionHasCapability(dialAddress, domain.CapMeshRoutingV1) && s.sessionHasCapability(dialAddress, domain.CapMeshRelayV1) {
+		if !session.peerIdentity.IsZero() && s.sessionHasCapability(session, domain.CapMeshRoutingV1) && s.sessionHasCapability(session, domain.CapMeshRelayV1) {
 			s.sendOutboundFullTableSync(s.runCtx, session.peerIdentity, dialAddress)
 		}
 

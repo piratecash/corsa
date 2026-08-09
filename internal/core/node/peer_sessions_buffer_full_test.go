@@ -41,7 +41,7 @@ func TestFireAndForgetBufferFullDropsFrameKeepsSession(t *testing.T) {
 	session := &peerSession{
 		address:      peerAddr,
 		conn:         remote,
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		inboxCh:      make(chan protocol.Frame, 4),
 		errCh:        make(chan error, 1),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
@@ -53,21 +53,7 @@ func TestFireAndForgetBufferFullDropsFrameKeepsSession(t *testing.T) {
 	svc.health[peerAddr] = &peerHealth{Connected: true}
 	svc.peerMu.Unlock()
 
-	// Saturate the write queue. Nobody reads from `local`, so the writer
-	// goroutine blocks inside its first rawConn.Write and every further
-	// Send lands in the queue until it reports SendBufferFull. The loop
-	// bound is a safety net only — saturation needs queue-depth+1 sends.
-	filler := protocol.Frame{Type: "push_message", ID: "filler"}
-	saturated := false
-	for i := 0; i < 100000; i++ {
-		if st := session.netCore.Send(filler); st == netcore.SendBufferFull {
-			saturated = true
-			break
-		}
-	}
-	if !saturated {
-		t.Fatal("could not saturate the netcore send queue")
-	}
+	saturateSessionWriteQueue(t, session)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -78,7 +64,7 @@ func TestFireAndForgetBufferFullDropsFrameKeepsSession(t *testing.T) {
 
 	// Deliver a fire-and-forget frame into the saturated session. The
 	// serve loop must drop it and keep running.
-	session.sendCh <- protocol.Frame{Type: "push_message", ID: "dropped-on-full-queue"}
+	session.sendCh <- legacyPeerSendItem(protocol.Frame{Type: "push_message", ID: "dropped-on-full-queue"})
 
 	// The assertion window must stay well under the netcore per-write
 	// deadline (sessionWriteTimeout, 3s): once the blocked Write times
@@ -133,7 +119,7 @@ func TestFireAndForgetBufferFullDoesNotFeedDisconnectHistory(t *testing.T) {
 		address:      peerAddr,
 		peerIdentity: peerID,
 		conn:         remote,
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		inboxCh:      make(chan protocol.Frame, 4),
 		errCh:        make(chan error, 1),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
@@ -145,17 +131,7 @@ func TestFireAndForgetBufferFullDoesNotFeedDisconnectHistory(t *testing.T) {
 	svc.health[peerAddr] = &peerHealth{Connected: true}
 	svc.peerMu.Unlock()
 
-	filler := protocol.Frame{Type: "push_message", ID: "filler"}
-	saturated := false
-	for i := 0; i < 100000; i++ {
-		if st := session.netCore.Send(filler); st == netcore.SendBufferFull {
-			saturated = true
-			break
-		}
-	}
-	if !saturated {
-		t.Fatal("could not saturate the netcore send queue")
-	}
+	saturateSessionWriteQueue(t, session)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -164,8 +140,8 @@ func TestFireAndForgetBufferFullDoesNotFeedDisconnectHistory(t *testing.T) {
 		done <- svc.servePeerSession(ctx, session)
 	}()
 
-	session.sendCh <- protocol.Frame{Type: "push_message", ID: "dropped-1"}
-	session.sendCh <- protocol.Frame{Type: "push_message", ID: "dropped-2"}
+	session.sendCh <- legacyPeerSendItem(protocol.Frame{Type: "push_message", ID: "dropped-1"})
+	session.sendCh <- legacyPeerSendItem(protocol.Frame{Type: "push_message", ID: "dropped-2"})
 
 	select {
 	case err := <-done:
@@ -186,4 +162,41 @@ func TestFireAndForgetBufferFullDoesNotFeedDisconnectHistory(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("servePeerSession did not exit on context cancellation")
 	}
+}
+
+// saturateSessionWriteQueue fills the session's NetCore write queue and
+// leaves it full with the writer goroutine parked inside a blocked socket
+// write.
+//
+// Filling until the first SendBufferFull is NOT enough, and the difference
+// is a real flake: the writer goroutine may not have been scheduled at all
+// by then, so the queue is full only because nothing has been consumed yet.
+// The moment the writer does run it pulls one item off and blocks on the
+// socket — freeing exactly one slot, which is enough for the frame under
+// test to be ACCEPTED and accounted as a useful write, the opposite of what
+// these tests assert. Re-filling until a send still fails after a full
+// scheduling pause pins the writer in its blocked write with a full queue.
+func saturateSessionWriteQueue(t *testing.T, session *peerSession) {
+	t.Helper()
+	filler := protocol.Frame{Type: "push_message", ID: "filler"}
+	fill := func() bool {
+		// The bound is a safety net only — saturation needs queue-depth+1
+		// sends, and nobody reads the far end of the pipe.
+		for i := 0; i < 100000; i++ {
+			if st := session.netCore.Send(filler); st == netcore.SendBufferFull {
+				return true
+			}
+		}
+		return false
+	}
+	for attempt := 0; attempt < 200; attempt++ {
+		if !fill() {
+			t.Fatal("could not saturate the netcore send queue")
+		}
+		time.Sleep(10 * time.Millisecond)
+		if session.netCore.Send(filler) == netcore.SendBufferFull {
+			return
+		}
+	}
+	t.Fatal("netcore send queue never stayed saturated")
 }

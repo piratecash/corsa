@@ -233,7 +233,7 @@ func installCapableUplinkForTest(t *testing.T, svc *Service, identity domain.Pee
 		peerIdentity: identity,
 		capabilities: []domain.Capability{cap},
 		conn:         clientConn,
-		sendCh:       make(chan protocol.Frame, 8), // buffered so non-blocking enqueue succeeds
+		sendCh:       make(chan peerSendItem, 8), // buffered so non-blocking enqueue succeeds
 	}
 	if svc.health == nil {
 		svc.health = make(map[domain.PeerAddress]*peerHealth)

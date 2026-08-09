@@ -884,10 +884,7 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 			continue
 		}
 		health := s.health[primaryAddr]
-		if health == nil || !health.Connected {
-			continue
-		}
-		if s.computePeerStateAtLocked(health, now) == peerStateStalled {
+		if !s.peerHealthAcceptsOutboundFramesLocked(health, now) {
 			continue
 		}
 		scored = append(scored, scoredTarget{

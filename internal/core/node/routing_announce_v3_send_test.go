@@ -278,7 +278,7 @@ func TestSendRouteAnnounceV3_EmitsRawLineFrameOverCapableSession(t *testing.T) {
 	svc.eventBus = newStormBus(t)
 
 	senderAddr := domain.PeerAddress("addr-peerB-v3")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,
@@ -322,7 +322,7 @@ func TestSendRouteAnnounceV3_DropsAndReturnsFalseWhenPeerLacksV3Cap(t *testing.T
 	svc.eventBus = newStormBus(t)
 
 	senderAddr := domain.PeerAddress("addr-peerB-novthree")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,

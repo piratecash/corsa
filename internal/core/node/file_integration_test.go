@@ -1119,8 +1119,8 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 	defer func() { _ = outLocal.Close() }()
 	defer func() { _ = outRemote.Close() }()
 
-	outboundSendCh := make(chan protocol.Frame, 1)
-	outboundSendCh <- protocol.Frame{Type: "pre-filled"}
+	outboundSendCh := make(chan peerSendItem, 1)
+	outboundSendCh <- legacyPeerSendItem(protocol.Frame{Type: "pre-filled"})
 	svc.sessions[domain.PeerAddress("addr-out")] = &peerSession{
 		address:      domain.PeerAddress("addr-out"),
 		peerIdentity: idPeerB,
@@ -1172,7 +1172,10 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 	}
 }
 
-func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *testing.T) {
+// The outbound queue is retired through closeSendQueue (the ownership
+// fence), not by closing the channel: peerSession.sendCh is never closed,
+// so a producer racing teardown gets a refusal instead of a panic.
+func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendQueueClosed(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeA)
@@ -1182,16 +1185,16 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 	defer func() { _ = outLocal.Close() }()
 	defer func() { _ = outRemote.Close() }()
 
-	outboundSendCh := make(chan protocol.Frame, 1)
-	close(outboundSendCh)
-	svc.sessions[domain.PeerAddress("addr-out-closed")] = &peerSession{
+	closedSession := &peerSession{
 		address:      domain.PeerAddress("addr-out-closed"),
 		peerIdentity: idPeerB,
 		version:      12,
 		conn:         outLocal,
-		sendCh:       outboundSendCh,
+		sendCh:       make(chan peerSendItem, 1),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
+	closedSession.closeSendQueue()
+	svc.sessions[domain.PeerAddress("addr-out-closed")] = closedSession
 	svc.health[domain.PeerAddress("addr-out-closed")] = &peerHealth{
 		Connected:           true,
 		LastConnectedAt:     now.Add(-2 * time.Minute),
@@ -1218,7 +1221,7 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendChannelClosed(t *t
 
 	frame := protocol.Frame{Type: "ping"}
 	if !svc.sendFrameToIdentity(idPeerB, frame, domain.CapFileTransferV1) {
-		t.Fatal("expected inbound fallback to succeed when outbound sendCh is closed")
+		t.Fatal("expected inbound fallback to succeed when outbound send queue is closed")
 	}
 
 	reader := bufio.NewReader(inRemote)
@@ -1258,7 +1261,7 @@ func TestSendFrameToIdentityRejectsOutboundBeforeActivation(t *testing.T) {
 		peerIdentity: idPeerB,
 		version:      12,
 		conn:         outLocal,
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 	}
 

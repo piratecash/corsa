@@ -54,6 +54,9 @@ var canonicalNames = map[string]string{
 	"fetchroutetable":       "fetchRouteTable",
 	"fetchroutesummary":     "fetchRouteSummary",
 	"fetchroutelookup":      "fetchRouteLookup",
+	"fetchdatagramsummary":  "fetchDatagramSummary",
+	"datagramreachable":     "datagramReachable",
+	"explaindatagramroute":  "explainDatagramRoute",
 	// snake_case input (already lowercase) → canonical camelCase.
 	"get_peers":                "getPeers",
 	"fetch_peer_health":        "fetchPeerHealth",
@@ -96,6 +99,9 @@ var canonicalNames = map[string]string{
 	"fetch_route_table":        "fetchRouteTable",
 	"fetch_route_summary":      "fetchRouteSummary",
 	"fetch_route_lookup":       "fetchRouteLookup",
+	"fetch_datagram_summary":   "fetchDatagramSummary",
+	"datagram_reachable":       "datagramReachable",
+	"explain_datagram_route":   "explainDatagramRoute",
 	// Traffic capture commands — camelCase (lowered) aliases.
 	"recordpeertrafficbyconnid": "recordPeerTrafficByConnID",
 	"recordpeertrafficbyip":     "recordPeerTrafficByIP",
@@ -357,7 +363,7 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		"fetchidentities": true, "fetchcontacts": true, "fetchtrustedcontacts": true,
 		"fetchnotices": true, "fetchchatlogpreviews": true, "fetchconversations": true,
 		"fetchdmheaders": true, "fetchrelaystatus": true,
-		"fetchroutetable": true, "fetchroutesummary": true,
+		"fetchroutetable": true, "fetchroutesummary": true, "fetchdatagramsummary": true,
 		"fetchtraffichistory": true, "fetchreachableids": true,
 		// PIP-0001 integration probe — both spellings recognised.
 		"getnodestatus": true, "nodestatus": true,
@@ -366,7 +372,7 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		"fetch_identities": true, "fetch_contacts": true, "fetch_trusted_contacts": true,
 		"fetch_notices": true, "fetch_chatlog_previews": true, "fetch_conversations": true,
 		"fetch_dm_headers": true, "fetch_relay_status": true,
-		"fetch_route_table": true, "fetch_route_summary": true,
+		"fetch_route_table": true, "fetch_route_summary": true, "fetch_datagram_summary": true,
 		"fetch_traffic_history": true, "fetch_reachable_ids": true,
 		"node_status": true, "get_node_status": true,
 		// recordAllPeerTraffic with no args uses default format.
@@ -466,6 +472,40 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 			return nil, fmt.Errorf("explainFileRoute takes exactly one argument")
 		}
 		return map[string]interface{}{"identity": args[0]}, nil
+
+	// The two datagram read-only surfaces take the SAME positional shape as
+	// each other, and one more argument than explainFileRoute: the last-hop
+	// gate they answer for depends on dtype (§4.3), so a probe without it
+	// would describe "some" datagram rather than the one about to be sent.
+	//
+	// The parser stays permissive about WHICH positions are filled: dtype is
+	// mandatory, but that refusal belongs to the handler, where the reason can
+	// be named instead of arriving as a parse failure the user cannot act on.
+	// This only pins how many positions exist.
+	case "datagramreachable", "datagram_reachable":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("datagramReachable requires identity argument")
+		}
+		if len(args) > 2 {
+			return nil, fmt.Errorf("datagramReachable takes at most two arguments: <identity> <dtype>")
+		}
+		return map[string]interface{}{
+			"identity": args[0],
+			"dtype":    stringArgOrDefault(args, 1, ""),
+		}, nil
+
+	case "explaindatagramroute", "explain_datagram_route":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("explainDatagramRoute requires identity argument")
+		}
+		if len(args) > 3 {
+			return nil, fmt.Errorf("explainDatagramRoute takes at most three arguments: <identity> <dtype> [route_policy]")
+		}
+		return map[string]interface{}{
+			"identity":     args[0],
+			"dtype":        stringArgOrDefault(args, 1, ""),
+			"route_policy": stringArgOrDefault(args, 2, ""),
+		}, nil
 	}
 
 	// Unknown command — pass through with no args, let CommandTable handle the error

@@ -20,9 +20,9 @@ import (
 // peerSessionFixture wires a single outbound session keyed by
 // senderAddr with the requested cap set and returns the sendCh the
 // test inspects.
-func peerSessionFixture(t *testing.T, svc *Service, senderAddr domain.PeerAddress, peer domain.PeerIdentity, caps []domain.Capability) chan protocol.Frame {
+func peerSessionFixture(t *testing.T, svc *Service, senderAddr domain.PeerAddress, peer domain.PeerIdentity, caps []domain.Capability) chan peerSendItem {
 	t.Helper()
-	sendCh := make(chan protocol.Frame, 16)
+	sendCh := make(chan peerSendItem, 16)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,

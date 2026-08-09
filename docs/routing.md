@@ -567,10 +567,12 @@ Under writer pressure on `t.mu` the publisher itself may stall, but every consum
 
 **Direct routing-table reads — `routing.Table.Lookup` and `routing.Table.Snapshot`.** Code that needs strictly fresh state calls the underlying table directly; that path is not exposed over RPC. Two shapes are used:
 
-- `routing.Table.Lookup(peer)` — per-destination O(K) slice scan over only the routes for one identity (typically 1–10 entries), filtering withdrawn and expired against the table's own clock. Three production consumers share this fresh oracle:
+- `routing.Table.Lookup(peer)` — per-destination O(K) slice scan over only the routes for one identity (typically 1–10 entries), filtering withdrawn and expired against the table's own clock. Four production consumers share this fresh oracle:
   - `file_integration.isPeerReachable` — gates user-initiated file transfers and `file_announce` ingestion. A route added microseconds before the call (e.g. just-completed handshake) must be visible immediately, otherwise the UI flashes "peer unreachable" for ~1–1.5 s (the cached routing snapshot's coalescing floor plus a refresh tick) after a successful connect. The same callback is dispatched by the periodic `FileTransferManager` tick for every active transfer under `m.mu`, so paying full-table snapshot cost per call would be O(transfers × routes) under the file-transfer lock — `Lookup` keeps the cost flat. The function still respects the lock discipline: the peer-domain probe (direct-session check, file-capable peer set, localID) runs under a short `s.peerMu.RLock` that is released BEFORE `Lookup` is called, so the two reads are sequential, not nested.
   - `filerouter.Router.SendFileCommand` (locally-originated send path) — wired through `RouterConfig.RouteLookup`, the same fresh oracle. A route accepted right before the user clicks "send file" must be visible immediately on the very next pipeline step. Without the fresh path the user would observe a 0–1.5 s window (routingSnapshotMinInterval's 1 s coalescing floor plus the next refresh tick) where `isPeerReachable` reports the destination as reachable but `SendFileCommand` returns "no route to <dst>" because the cached snapshot has not yet republished after the dirty-flag CAS.
   - `filerouter.Router.ExplainRoute` (diagnostic surface) — uses the same `RouteLookup` so the planner output mirrors what the live `SendFileCommand` would actually do. If the diagnostic and the live send read different sources, an operator staring at `explainFileRoute` output during the cached snapshot's republish window would see a path the live send cannot use (or vice versa).
+  - `node.datagramRouteResolver.FreshRoutes` — the datagram transport layer's candidate source for LOCALLY ORIGINATED sends, the reachability probe (`DatagramReachable`) and the route plan (`ExplainDatagramRoute`). The split is the same one the file router makes and exists for the same reason: reading the cached snapshot here would reproduce the regression where the probe answers "reachable" and the very next send returns `no_route` because the snapshot has not republished. The transit path uses `CachedRoutes`, which reads the cached snapshot — a frame in flight carries its own hop budget, and a full table copy per forwarded frame would not be affordable. Both convert `routing.RouteEntry` into the layer's `datagram.RouteHint`, translating `Hops >= HopsInfinity` into an explicit `Withdrawn` flag and carrying `ExpiresAt` as an ABSOLUTE deadline, so the layer judges expiry against the clock at selection time rather than against the moment a snapshot was published. The layer is deliberately shielded from this package: it asks a `RouteResolver` interface, so replacing distance-vector with a DHT structure later changes only this adapter.
+
 - `routing.Table.Snapshot()` — full deep copy of the routing table under `t.mu.RLock`. Used by integration tests in `internal/core/node` and `internal/core/routing` that mutate the table and immediately verify the result. Production code should prefer `Lookup` whenever the question is "what does the table say about peer X right now"; only call `Snapshot` when the consumer genuinely needs the full table, and never on a hot per-decision path.
 
 The `RouteSnap` callback handed to the file router still uses the cached path, but only for the **transit** forwarding inside `HandleInbound`: an in-flight frame already carries its own metadata, the router consults the table on every relay decision, and paying full snapshot cost per call would dominate transit latency. The router's transit decision is best-effort: TTL, split-horizon and capability filters are applied during candidate collection (`collectRouteCandidates`) before the send attempt; the send loop itself only calls `sessionSend` and does not re-read the table on the socket-write path. The locally-originated counterpart (`collectFreshRouteCandidates`) feeds the same filter+rank kernel from `RouteLookup`, so transit and locally-originated paths agree on the comparator/dedup contract for any given input set — they only differ in where the per-destination route slice comes from.
@@ -858,6 +860,17 @@ internal/core/node/
                                    drainPendingForIdentities (extract-attempt-return pattern),
                                    drainSendMessage
     routing_provider.go          — RoutingProvider implementation on node.Service
+    datagram_resolver.go         — the datagram layer's view of this package: datagramRouteResolver
+                                   (FreshRoutes = routing.Table.Lookup, CachedRoutes = the cached
+                                   snapshot), datagramPeerMetadata / datagramDirectSession (both
+                                   answering from peerSendableConnectionsLocked so the plan and the
+                                   send agree on the socket), datagramNodeSecret and the
+                                   datagramFrameEmitter that writes the layer's already-serialized
+                                   line with a per-class write grace
+    datagram_layer.go            — construction and schedules of the plane: newDatagramLayer,
+                                   the outbound pump, the queue-expiry sweep, the reverse-state
+                                   sweep and the replay-cache maintenance pass
+    datagram_diagnostics.go      — FetchDatagramSummary / DatagramReachable / ExplainDatagramRoute
     table_router_test.go         — unit tests for TableRouter
     routing_integration_test.go  — integration tests covering routing_announce / routing_relay /
                                    routing_resolver / routing_session / routing_hop_ack /
@@ -866,6 +879,8 @@ internal/core/node/
 
 internal/core/rpc/
     routing_commands.go          — RegisterRoutingCommands: fetch_route_table, fetch_route_summary, fetch_route_lookup
+    datagram_commands.go         — RegisterDatagramCommands: fetch_datagram_summary,
+                                   datagram_reachable, explain_datagram_route
     handler_routing_test.go      — unit tests for routing RPC commands
 ```
 
@@ -1318,10 +1333,12 @@ Wire-**content** при этом может отличаться между cap'
 
 **Прямые чтения таблицы — `routing.Table.Lookup` и `routing.Table.Snapshot`.** Код, которому нужно строго свежее состояние, вызывает таблицу напрямую; этот путь не экспонируется по RPC. Используются две разные формы:
 
-- `routing.Table.Lookup(peer)` — per-destination O(K) скан записей только для одного identity (типично 1-10 entries), с фильтрацией withdrawn и expired против собственных часов таблицы. Три production-консумера разделяют эту fresh-оракулу:
+- `routing.Table.Lookup(peer)` — per-destination O(K) скан записей только для одного identity (типично 1-10 entries), с фильтрацией withdrawn и expired против собственных часов таблицы. Четыре production-консумера разделяют эту fresh-оракулу:
   - `file_integration.isPeerReachable` — гейтит пользовательские file-transfer'ы и приём `file_announce`. Маршрут, добавленный за микросекунды до вызова (например, только что завершившийся handshake), обязан быть виден немедленно — иначе UI на ~1–1.5 с (1с-порог coalescing'а кэшированного снапшота плюс refresh-тик) показывает «peer unreachable» сразу после успешного коннекта. Тот же callback дёргается periodic-тиком `FileTransferManager` для каждого активного transfer'а под `m.mu`, поэтому платить полную стоимость snapshot'а за вызов было бы O(transfers × routes) под file-transfer lock — `Lookup` удерживает стоимость плоской. Функция всё равно соблюдает lock discipline: peer-domain probe (direct-session check, file-capable peer set, localID) живёт под коротким `s.peerMu.RLock`, который освобождается ДО вызова `Lookup`, так что два чтения последовательны, не вложены.
   - `filerouter.Router.SendFileCommand` (locally-originated путь отправки) — wired через `RouterConfig.RouteLookup`, то есть та же fresh-оракула. Маршрут, принятый прямо перед тем как пользователь нажал «отправить файл», обязан быть виден немедленно на следующем шаге пайплайна. Без fresh-пути пользователь наблюдал бы 0-1.5 с окно (1с-порог coalescing'а routingSnapshotMinInterval плюс ближайший refresh-тик), где `isPeerReachable` рапортует destination как reachable, а `SendFileCommand` тут же возвращает «no route to <dst>» потому, что cached snapshot ещё не был republished после dirty-flag CAS.
   - `filerouter.Router.ExplainRoute` (диагностический surface) — использует тот же `RouteLookup`, чтобы вывод planner'а зеркалил то, что live-`SendFileCommand` действительно сделал бы. Если diagnostic и live-send читали бы из разных источников, оператор, смотрящий на `explainFileRoute` в окне republish'а cached snapshot'а, видел бы путь, который live-send не сможет выполнить (или наоборот).
+  - `node.datagramRouteResolver.FreshRoutes` — источник кандидатов слоя транспорта датаграмм для ЛОКАЛЬНО СОЗДАННЫХ отправок, пробы достижимости (`DatagramReachable`) и плана маршрута (`ExplainDatagramRoute`). Разделение то же, что у файлового роутера, и по той же причине: чтение кэшированного снапшота здесь воспроизвело бы регрессию, когда проба отвечает «достижим», а следующая же отправка возвращает `no_route`, потому что снапшот ещё не переиздан. Транзитный путь использует `CachedRoutes` и читает кэшированный снапшот — кадр в полёте несёт собственный бюджет хопов, а полная копия таблицы на каждый пересылаемый кадр непозволительна. Оба конвертируют `routing.RouteEntry` в `datagram.RouteHint` слоя, переводя `Hops >= HopsInfinity` в явный флаг `Withdrawn` и передавая `ExpiresAt` как АБСОЛЮТНЫЙ дедлайн, чтобы слой оценивал просроченность по часам в момент отбора, а не по моменту публикации снапшота. Слой сознательно отгорожен от этого пакета: он спрашивает интерфейс `RouteResolver`, поэтому замена distance-vector на структуру из DHT затронет только этот адаптер.
+
 - `routing.Table.Snapshot()` — полная глубокая копия таблицы маршрутизации под `t.mu.RLock`. Используется интеграционными тестами в `internal/core/node` и `internal/core/routing`, которые мутируют таблицу и сразу проверяют результат. Production-код должен предпочитать `Lookup` всегда, когда вопрос звучит как «что таблица говорит про peer X прямо сейчас»; `Snapshot` зовётся только когда консумеру реально нужна вся таблица, и никогда не на hot per-decision path.
 
 Callback `RouteSnap`, отдаваемый в file router, всё ещё идёт по cached-пути, но только для **transit**-форварда внутри `HandleInbound`: in-flight frame несёт собственные metadata, router дёргает callback на каждое relay-решение, и платить полную стоимость снапшота на каждый вызов означало бы доминировать в transit-latency. Transit-решение роутера best-effort: TTL, split-horizon и capability фильтруются на этапе сбора кандидатов (`collectRouteCandidates`) до попытки отправки; сам send-loop только вызывает `sessionSend` и не перечитывает таблицу на socket-write пути. Locally-originated counterpart (`collectFreshRouteCandidates`) кормит тот же filter+rank kernel из `RouteLookup`, так что transit и locally-originated пути соглашаются на comparator/dedup контракте для одного и того же input set'а — они различаются только тем, откуда берётся per-destination route slice.
@@ -1612,6 +1629,17 @@ internal/core/node/
     routing_drain.go             — Event-driven дрейн pending queue: recipientFromPendingFrame,
                                    drainPendingForIdentities (extract-attempt-return), drainSendMessage
     routing_provider.go          — Реализация RoutingProvider на node.Service
+    datagram_resolver.go         — взгляд слоя датаграмм на этот пакет: datagramRouteResolver
+                                   (FreshRoutes = routing.Table.Lookup, CachedRoutes = кэшированный
+                                   снапшот), datagramPeerMetadata / datagramDirectSession (оба
+                                   отвечают из peerSendableConnectionsLocked, чтобы план и отправка
+                                   сходились в выборе сокета), datagramNodeSecret и
+                                   datagramFrameEmitter, пишущий уже сериализованную слоем строку
+                                   с write-грейсом по классу
+    datagram_layer.go            — конструирование и расписания плоскости: newDatagramLayer,
+                                   насос исходящей очереди, сборка мусора очереди, сборка
+                                   reverse-состояния и проход обслуживания кэша реплея
+    datagram_diagnostics.go      — FetchDatagramSummary / DatagramReachable / ExplainDatagramRoute
     table_router_test.go         — юнит-тесты TableRouter
     routing_integration_test.go  — интеграционные тесты, покрывающие routing_announce /
                                    routing_relay / routing_resolver / routing_session /
@@ -1621,6 +1649,8 @@ internal/core/node/
 
 internal/core/rpc/
     routing_commands.go          — RegisterRoutingCommands: fetch_route_table, fetch_route_summary, fetch_route_lookup
+    datagram_commands.go         — RegisterDatagramCommands: fetch_datagram_summary,
+                                   datagram_reachable, explain_datagram_route
     handler_routing_test.go      — юнит-тесты RPC-команд маршрутизации
 
 internal/core/service/

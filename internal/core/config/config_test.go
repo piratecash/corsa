@@ -97,6 +97,32 @@ func TestEnableMeshRoutingV3FromEnv(t *testing.T) {
 	}
 }
 
+// TestEnableDatagramV1FromEnv pins default-ON with a kill switch, the same
+// polarity as mesh routing v3: unset, empty, truthy OR unrecognised all mean
+// on, and only the explicit falsey set turns the plane off.
+//
+// Reading an unrecognised value as ON is the load-bearing half here, and it is
+// the opposite of what the flag pinned while the layer was being built: the
+// network is meant to carry datagrams by default, so a typo in a deployment
+// template must not silently drop a node out of the transit substrate. What
+// keeps that safe is the SECOND gate, not this one — the endpoint capability
+// is additionally gated on the baseline types being registered, which
+// TestNodeWithAnEmptyRegistryDeclaresNothing covers.
+func TestEnableDatagramV1FromEnv(t *testing.T) {
+	for _, v := range []string{"0", "false", "no", "off", "OFF", " False "} {
+		t.Setenv("CORSA_ENABLE_DATAGRAM_V1", v)
+		if enableDatagramV1FromEnv() {
+			t.Fatalf("CORSA_ENABLE_DATAGRAM_V1=%q: want false (kill switch)", v)
+		}
+	}
+	for _, v := range []string{"", "  ", "1", "true", "yes", "on", "ON", " True ", "wat", "2"} {
+		t.Setenv("CORSA_ENABLE_DATAGRAM_V1", v)
+		if !enableDatagramV1FromEnv() {
+			t.Fatalf("CORSA_ENABLE_DATAGRAM_V1=%q: want true (default on)", v)
+		}
+	}
+}
+
 // TestHoldDMUntilReachableFromEnv pins the default-ON / kill-switch semantics
 // for the reachability gate: unset/empty/truthy/unrecognised → true (the storm
 // cure is on by default); only the explicit falsey set restores the legacy

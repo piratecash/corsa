@@ -175,7 +175,11 @@ func TestGossipDispatch_ShutdownAbandonsQueuedJobsAndDrains(t *testing.T) {
 
 	exited := make(chan struct{})
 	go func() {
-		svc.backgroundWg.Wait()
+		// The pool's workers and its shutdown supervisor are LIFECYCLE
+		// goroutines — Run joins them, because a job in flight can be inside a
+		// dial or a socket write — so the join point is WaitBackground, which
+		// covers every group this Service owns, not backgroundWg alone.
+		svc.WaitBackground()
 		close(exited)
 	}()
 	select {

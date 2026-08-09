@@ -17,6 +17,7 @@ packages:
       RoutingProvider: {}
       ConnectionDiagnosticProvider: {}
       CaptureProvider: {}
+      DatagramProvider: {}
       DiagnosticProvider: {}
   # --- Metrics collector ---
   github.com/piratecash/corsa/internal/core/metrics:

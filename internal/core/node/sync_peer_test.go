@@ -460,8 +460,9 @@ func TestSyncSenderKeys_FreshDialFallback_RespectsCtxCancel(t *testing.T) {
 //
 // This is the regression lock on the syncPeer bootstrap path: if a future
 // refactor replaces pc.Close() with a raw conn.Close() or forgets the
-// defer, sendCh never closes, writerLoop never exits, and this test
-// catches it deterministically.
+// defer, the writer is never told to stop — `closing` is its only exit
+// signal, the queue itself is never closed — so writerLoop stays parked on
+// sendCh for ever, and this test catches it deterministically.
 func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
 	// Intentionally not t.Parallel — goroutine counting is a global signal.
 
@@ -497,8 +498,8 @@ func TestSyncPeer_BootstrapNetCoreDoesNotLeakWriterGoroutine(t *testing.T) {
 		<-done
 	}
 
-	// Allow any in-flight writerLoop goroutines to observe close(sendCh)
-	// and exit. pc.Close() already waits on writerDone, so this is a
+	// Allow any in-flight writerLoop goroutines to observe `closing` and
+	// exit. pc.Close() already waits on writerExited, so this is a
 	// belt-and-braces settle window against accept goroutines etc.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {

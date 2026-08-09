@@ -146,8 +146,10 @@ func (b *networkBridge) Enumerate(ctx context.Context, dir netcore.Direction, fn
 }
 
 // Close triggers graceful shutdown of the connection by id. The actual
-// teardown protocol lives on *NetCore.Close(): it closes the raw socket,
-// closes sendCh and waits for the writer goroutine to drain. Registry
+// teardown protocol lives on *NetCore.Close(): it shuts the send gate, closes
+// the raw socket, signals the writer and waits for it to release the whole
+// queue residue. The queue itself is NEVER closed as a Go channel — see
+// docs/protocol/network_core.md, "Queue ownership". Registry
 // eviction is a separate concern owned by the lifecycle helpers
 // (unregisterConnLocked) and is not performed here — Close() signals
 // the transport to stop, registry cleanup follows the existing teardown

@@ -18,9 +18,9 @@ import (
 // v3PeerSession wires an outbound session keyed by senderAddr so the
 // handler's request_resync replies route through enqueuePeerFrame, and
 // returns the send channel the test inspects.
-func v3PeerSession(t *testing.T, svc *Service, senderAddr domain.PeerAddress, peer domain.PeerIdentity) chan protocol.Frame {
+func v3PeerSession(t *testing.T, svc *Service, senderAddr domain.PeerAddress, peer domain.PeerIdentity) chan peerSendItem {
 	t.Helper()
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,

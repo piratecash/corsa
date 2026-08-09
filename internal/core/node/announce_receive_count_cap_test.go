@@ -139,7 +139,7 @@ func TestHandleRoutesUpdate_OverCapFrameDroppedWhole(t *testing.T) {
 	registry.GetOrCreate(idPeerB).MarkBaselineReceived()
 
 	senderAddr := domain.PeerAddress("addr-peerB")
-	sendCh := make(chan protocol.Frame, 4)
+	sendCh := make(chan peerSendItem, 4)
 	svc.peerMu.Lock()
 	svc.sessions[senderAddr] = &peerSession{
 		address:      senderAddr,

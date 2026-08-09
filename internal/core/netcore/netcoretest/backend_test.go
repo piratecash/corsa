@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -244,7 +245,7 @@ func TestBackend_Inject_UnknownConn(t *testing.T) {
 	b := netcoretest.New()
 	defer b.Shutdown()
 
-	err := b.Inject(domain.ConnID(404), []byte("x"))
+	err := b.Inject(context.Background(), domain.ConnID(404), []byte("x"))
 	if !errors.Is(err, netcore.ErrUnknownConn) {
 		t.Fatalf("expected ErrUnknownConn from Inject, got %v", err)
 	}
@@ -261,10 +262,10 @@ func TestBackend_Inject_DeliversOnInbound(t *testing.T) {
 	id := domain.ConnID(12)
 	b.Register(id, netcore.Inbound, "10.1.2.3:9000")
 
-	if err := b.Inject(id, []byte("one")); err != nil {
+	if err := b.Inject(context.Background(), id, []byte("one")); err != nil {
 		t.Fatalf("Inject one: %v", err)
 	}
-	if err := b.Inject(id, []byte("two")); err != nil {
+	if err := b.Inject(context.Background(), id, []byte("two")); err != nil {
 		t.Fatalf("Inject two: %v", err)
 	}
 
@@ -279,5 +280,58 @@ func TestBackend_Inject_DeliversOnInbound(t *testing.T) {
 	}
 	if string(got[0]) != "one" || string(got[1]) != "two" {
 		t.Fatalf("inbound ordering violated: %q %q", got[0], got[1])
+	}
+}
+
+// TestBackend_SendRacingShutdownNeverPanics pins the registry fence: a
+// lookup is not a licence to send. Shutdown and Unregister close the very
+// channels a resolved slot points at, so a sender that resolved the slot
+// and then released the registry lock would be sending into a closed
+// channel — a panic in the middle of a test run, and a reported race under
+// -race, instead of the ErrSendChanClosed / ErrUnknownConn the contract
+// promises.
+func TestBackend_SendRacingShutdownNeverPanics(t *testing.T) {
+	const (
+		rounds  = 40
+		senders = 4
+		frames  = 32
+	)
+
+	for round := 0; round < rounds; round++ {
+		b := netcoretest.New()
+		id := domain.ConnID(100 + round)
+		b.Register(id, netcore.Outbound, "203.0.113.9:9999")
+		// A drained queue keeps the senders moving instead of parking on
+		// ErrSendBufferFull, which is what makes the overlap real.
+		out := b.Outbound(id)
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for range out {
+			}
+		}()
+
+		warm := make(chan struct{})
+		var warmOnce sync.Once
+		done := make(chan struct{}, senders)
+		for s := 0; s < senders; s++ {
+			go func() {
+				defer func() { done <- struct{}{} }()
+				for i := 0; i < frames; i++ {
+					// Errors are the point of the contract, not of this
+					// test: any sentinel is acceptable, a panic is not.
+					_ = b.Network().SendFrame(context.Background(), id, []byte("frame"))
+					_ = b.Inject(context.Background(), id, []byte("frame"))
+					warmOnce.Do(func() { close(warm) })
+				}
+			}()
+		}
+
+		<-warm
+		b.Shutdown()
+		for s := 0; s < senders; s++ {
+			<-done
+		}
+		<-drained
 	}
 }

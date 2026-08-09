@@ -292,6 +292,12 @@ func RegisterAllCommands(t *CommandTable, node NodeProvider, chatlog ChatlogProv
 	}
 	RegisterCaptureCommands(t, cp)
 
+	var dp DatagramProvider
+	if d, ok := node.(DatagramProvider); ok {
+		dp = d
+	}
+	RegisterDatagramCommands(t, dp)
+
 	registerSnakeCaseAliases(t)
 }
 
@@ -343,6 +349,9 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"fetch_route_table":              "fetchRouteTable",
 		"fetch_route_summary":            "fetchRouteSummary",
 		"fetch_route_lookup":             "fetchRouteLookup",
+		"fetch_datagram_summary":         "fetchDatagramSummary",
+		"datagram_reachable":             "datagramReachable",
+		"explain_datagram_route":         "explainDatagramRoute",
 		"get_active_peers":               "getActivePeers",
 		"get_active_connections":         "getActiveConnections",
 		"list_peers":                     "listPeers",

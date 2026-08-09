@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -177,6 +178,45 @@ func (s *Service) handleFileCommandFrame(raw json.RawMessage, incomingPeer domai
 	}
 
 	router.HandleInbound(raw, incomingPeer)
+}
+
+// fileCommandHasConsumer reports whether this node has a file router to hand a
+// file_command to, which is the same condition handleFileCommandFrame drops on
+// one step later.
+//
+// It exists so an ADMISSION path can ask the question before the frame is
+// dispatched: a node with the subsystem off drops every file_command, so a rule
+// that spared such a line from a budget would be sparing a line with no consumer
+// at all. It is the file plane's form of "no layer, no exemption"
+// (datagramCarriesOwnBudget).
+func (s *Service) fileCommandHasConsumer() bool {
+	// fileMu, not s.peerMu: fileRouter lives in the file domain.
+	s.fileMu.RLock()
+	defer s.fileMu.RUnlock()
+	return s.fileRouter != nil
+}
+
+// isFileCommandWireLine reports whether a raw wire line IS a file command, from
+// the same authoritative classification the read loops dispatch on
+// (topLevelFrameType, which protocol.ParseFrameLine is guaranteed to agree with
+// on a frameLineNamed line).
+//
+// It is the file plane's twin of isDatagramWireLine, including the cheap
+// substring pre-test: the scan itself allocates nothing but walks the whole
+// line, and this predicate runs on every line of the busiest reader on the node,
+// where the overwhelming majority never mention the type at all.
+//
+// The PRE-READ claim (claimedFrameTypeFromPrefix) must never be used for this
+// question. That claim answers on the first top-level candidate a prefix
+// contains, so a line naming its type twice reads as a file_command here and as
+// something else to the parser — and a decision that a claim can flip is a
+// decision the sender makes.
+func isFileCommandWireLine(line string) bool {
+	if !strings.Contains(line, protocol.FileCommandFrameType) {
+		return false
+	}
+	claimed, named := topLevelFrameType(line)
+	return named && claimed == protocol.FileCommandFrameType
 }
 
 // handleLocalFileCommand decrypts and dispatches a file command that arrived

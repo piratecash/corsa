@@ -25,6 +25,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/gazeta"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -111,6 +112,125 @@ type Service struct {
 	// surface (see docs/rpc/system.md → /rpc/v1/system/node_status).
 	// Immutable after construction — no synchronisation required.
 	startedAt time.Time
+
+	// datagramMetrics counts every decision the datagram ingress makes
+	// (docs/refactoring/datagram-transport.md §10). Deliberately OUTSIDE
+	// the seven-domain mutex scheme: the pointer is assigned once by
+	// NewService and never replaced, and datagram.Metrics is a set of
+	// atomic counters with its own synchronisation — taking a domain mutex
+	// to bump a counter on the receive path would put the whole plane
+	// behind peerMu for nothing. Every method is nil-safe, so the many test
+	// fixtures that build a Service by struct literal keep working. When
+	// the pipeline lands it receives THIS pointer, so the wire-level
+	// refusals counted here and the pipeline's own verdicts stay one
+	// series. See docs/locking.md.
+	datagramMetrics *datagram.Metrics
+
+	// datagramLayer is the assembled datagram transport plane: the conveyor
+	// of §4.1, the scheduler of §4.3, the §5 budgets and queues, and the
+	// components the node drives on a schedule (datagram_layer.go). nil
+	// whenever cfg.EnableDatagramV1 is false, which is the whole feature
+	// flag: every path that touches the plane is one nil check away from the
+	// pre-datagram behaviour.
+	//
+	// OUTSIDE the seven-domain mutex scheme, for the same reason as
+	// datagramMetrics above: every component behind it carries its own
+	// synchronisation (the replay cache's mutex, the reverse table's mutex, the
+	// queue's mutex, the type registry's atomic snapshot), so no domain mutex is
+	// taken to reach it and it adds no edge to the canonical lock order. See
+	// docs/locking.md.
+	//
+	// It is an atomic pointer rather than a plain field because the receive
+	// path reads it concurrently with the single store NewService performs, and
+	// because the handle it publishes is immutable: a reader takes it once
+	// through datagramLayer() and works off that snapshot for the whole of its
+	// decision.
+	datagramPlane atomic.Pointer[datagramLayer]
+
+	// faultDuringRunStartup is a TEST-ONLY fault injector, nil in production,
+	// called once per Run at the LATEST point of its startup: every subsystem
+	// defer is registered, the ordered lifecycle teardown is armed and every
+	// loop is running.
+	//
+	// It exists because the shutdown ORDER is only observable by unwinding
+	// through it, and nothing in Run's own startup panics on demand — every step
+	// there is driven by constants or by node state, not by an injectable
+	// dependency. A panic raised here must still join the lifecycle loops BEFORE
+	// any subsystem they call into is stopped, which is what
+	// TestAPanicDuringRunStartupStillJoinsTheLifecycleLoopsFirst pins.
+	faultDuringRunStartup func()
+
+	// heartbeatIntervalOverride replaces the inbound heartbeat's production
+	// schedule. Zero means nextHeartbeatDuration(); it exists so a test can
+	// enter the window where the heartbeat is INSIDE its ping send, which is
+	// the state the connection's join was added for.
+	heartbeatIntervalOverride time.Duration
+
+	// sendAdmissionBarrier is a TEST-ONLY synchronisation point, nil in
+	// production, run by BOTH send tiers between the peer-state gate and the
+	// hand-over to a queue (runSendAdmissionBarrier, peer_management.go). One
+	// hook rather than one per tier because the two tiers defend the same
+	// window and a seam that only one of them has is a window only one of them
+	// is ever tested in.
+	//
+	// It exists because that window lives entirely between two statements of
+	// one function and has no observable edge from outside: a test that
+	// approximated it with a sleep would pin the scheduler rather than the
+	// teardown order. Same shape and same reason as
+	// netcore.NetCore.enqueueBarrier and datagramFrameEmitter.selectionBarrier.
+	//
+	// It is HALF of an interleaving and proves nothing on its own. Parking the
+	// producer here says only "a teardown may now run"; it does not say WHERE in
+	// that teardown the producer resumes, so a teardown driven from inside this
+	// barrier runs to completion and shows the producer the same world whichever
+	// order its two publications are written in. The other half —
+	// peerTeardownBarrier below — is what places the resume point between them.
+	//
+	// Installed before the first send on this Service and never changed
+	// afterwards, so it takes part in no domain and adds no edge to the
+	// canonical lock order.
+	sendAdmissionBarrier func()
+
+	// peerTeardownBarrier is the TEARDOWN half of the same window, nil in
+	// production, run by BOTH teardowns that own a queue (retirePeerSession on
+	// the dialled tier, trackInboundDisconnect on the accepted one) BETWEEN
+	// their two publications — after the queue was fenced, before the peer is
+	// published as disconnected (runPeerTeardownBarrier, peer_management.go).
+	// One hook for both tiers, for the same reason sendAdmissionBarrier is one:
+	// the two tiers defend the same invariant, and a seam only one of them has
+	// is an invariant only one of them is ever tested for.
+	//
+	// It exists because the ORDER of those two publications is what the
+	// invariant is, and a teardown that runs to completion inside the producer's
+	// barrier makes that order unobservable: whichever way round the two
+	// statements are written, the producer resumes after both have happened and
+	// sees the same world. Parking the teardown HERE — in its own goroutine,
+	// between its own two statements — is what turns the order into an
+	// observable: at this point the correct order has the queue already fenced
+	// and the disconnect not yet published, and the reversed order has the
+	// disconnect published and the queue still accepting.
+	//
+	// It is called with NO domain mutex and no leaf mutex held, at both sites.
+	// That is a requirement rather than an accident: the producer this seam
+	// releases goes on to take peerMu for its next candidate's gate, so a
+	// barrier fired under a lock would park the teardown on top of it and
+	// deadlock the very interleaving it exists to produce.
+	//
+	// Installed before the first teardown on this Service and never changed
+	// afterwards, so it takes part in no domain and adds no edge to the
+	// canonical lock order.
+	peerTeardownBarrier func()
+
+	// runLoopsWg tracks EVERY loop Run starts that stops on the lifecycle
+	// context — the ConnectionManager event loop, bootstrapLoop,
+	// hotReadsRefreshLoop, the announce loop, the routing TTL ticker, the probe
+	// sender, the listener closer, the gossip dispatch pool AND the datagram
+	// plane's four schedules. A wait group rather than done-channels because
+	// a group is correct for a loop that was NEVER STARTED — a panic during
+	// startup leaves the counter where it was, while a channel nobody will ever
+	// close makes the teardown wait for ever. That difference is what lets the
+	// whole lifecycle teardown be armed once, before any of them exists.
+	runLoopsWg sync.WaitGroup
 
 	// relayDeliveredTo records, per message id, the peer identities that
 	// confirmed (via ack_delete) they already hold the message, so the
@@ -448,6 +568,7 @@ type Service struct {
 	senderKeySyncInFlight          map[string]struct{}                          // single-flight set for background sender-key recovery passes, keyed by sender fingerprint; see triggerSenderKeySyncAsync
 	senderKeySyncHopInFlight       map[string]struct{}                          // per-previous-hop fairness slots (1 pass per hop, keyed by authenticated identity with address fallback) — a hostile hop cannot starve the global pass cap
 	senderKeySyncLastRun           map[string]time.Time                         // per-sender cooldown stamps for recovery passes (senderKeySyncCooldown)
+	contactVerifyBudgets           contactVerifyRegistry                        // per-remote `contacts` verification budget, SHARED by the session and fresh-dial importers and persisted across connections (contact_verify_budget.go). Own leaf mutex, zero value is live — see docs/locking.md
 	relayShapingHint               atomic.Uint64                                // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
 	identitySessions               map[domain.PeerIdentity]int                  // peer identity → active session count (multi-session awareness)
 	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
@@ -822,12 +943,42 @@ type peerSession struct {
 	connID       domain.ConnID       // monotonic connection ID for diagnostics
 	conn         net.Conn
 	metered      *netcore.MeteredConn // tracks bytes for this session; nil when conn is not metered
-	sendCh       chan protocol.Frame
-	inboxCh      chan protocol.Frame
-	errCh        chan error
+
+	// sendCh is the UPPER of the two outbound queues: producers put frames
+	// here and the servePeerSession loop moves them into the NetCore writer
+	// queue. The channel is NEVER closed — ownership is expressed through
+	// sendMu / sendClosed instead. See enqueueSend and closeSendQueue in
+	// peer_send_queue.go for the protocol and why closing would be wrong.
+	sendCh     chan peerSendItem
+	sendMu     sync.Mutex
+	sendClosed bool
+
+	inboxCh chan protocol.Frame
+	errCh   chan error
+
+	// admission is the response-plane per-neighbour budget, entitlement state
+	// and violation ledger this session's reader applies to every line BEFORE
+	// it is parsed (peer_session_admission.go).
+	//
+	// It carries its OWN mutex and is therefore outside the seven domain
+	// mutexes on purpose — see docs/locking.md, "peerSession.admission". It is
+	// held BY VALUE because its zero value is a live controller with full
+	// buckets: no construction site has to remember to build one, and a
+	// forgotten one can never silently mean "this neighbour has no budget".
+	admission peerSessionAdmission
+
 	version      int
 	authOK       bool
 	capabilities []domain.Capability // intersection of local and remote capabilities negotiated during handshake
+
+	// declarations mirrors the peer's RAW handshake self-description — the
+	// validated raw capability names of §2.2 and the declared dtype set of
+	// §6.1 — from the same welcome frame that produced capabilities above.
+	// NetCore owns the authoritative copy (applyWelcomeMetadata writes
+	// both); this mirror exists because the outbound dispatcher is
+	// addressed by PeerAddress and never sees a ConnID. Guarded by peerMu,
+	// like every other field of peerSession that outlives the handshake.
+	declarations netcore.HandshakeDeclarations
 
 	// netCore owns the outbound connection and is the single writer to the
 	// socket. Set at construction by openPeerSession / openPeerSessionForCM
@@ -887,8 +1038,12 @@ type peerWelcomeMeta struct {
 
 // Close shuts down the session. When netCore is set, teardown runs in this
 // order:
-//  1. netCore.Close() — closes the raw socket, closes sendCh, waits for the
-//     writer goroutine to drain and exit.
+//  1. netCore.Close() — shuts the send gate, closes the raw socket, signals
+//     the writer and waits for it to drain the queue residue and exit.
+//     Neither queue on this path is closed as a Go channel: both have many
+//     producers on arbitrary goroutines, and a close racing a producer's send
+//     is a panic rather than a status. See closeSendQueue for the upper queue
+//     and docs/protocol/network_core.md, "Queue ownership", for the lower one.
 //  2. onClose() — removes the NetCore registration from s.conns.
 //
 // The order matters for the single-writer invariant. While writerLoop is
@@ -898,8 +1053,8 @@ type peerWelcomeMeta struct {
 // netCoreForID to return nil and the writeJSONFrameByID fallback would then call
 // conn.Write / io.WriteString directly — a second writer racing with a
 // still-live writerLoop. Only after netCore.Close() has returned is it
-// safe to remove the map entry: the socket is closed, sendCh is closed,
-// and the writer goroutine has exited.
+// safe to remove the map entry: the socket is closed, the send gate refuses
+// every later producer, and the writer goroutine has exited.
 //
 // Concurrent-safe and idempotent via sync.Once (mirrors NetCore.closeOnce).
 // The first caller performs the teardown; subsequent callers observe the
@@ -909,6 +1064,12 @@ func (ps *peerSession) Close() error {
 		return nil
 	}
 	ps.closeOnce.Do(func() {
+		// Fence and finalise the upper queue BEFORE the transport goes
+		// away. Sessions that die before servePeerSession ever runs (failed
+		// handshake, CM generation mismatch) have no serve-loop exit to
+		// hang the drain on, and frames enqueued during initPeerSession
+		// would otherwise vanish without a terminal.
+		ps.closeSendQueue()
 		if ps.netCore != nil {
 			ps.netCore.Close()
 			if ps.onClose != nil {
@@ -1309,6 +1470,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// matches the moment the in-memory state machine first became
 		// live.
 		startedAt:                time.Now().UTC(),
+		datagramMetrics:          datagram.NewMetrics(),
 		cfg:                      cfg,
 		eventBus:                 eventBus,
 		selfBoxKey:               selfBoxKey,
@@ -1632,6 +1794,23 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// (overview §7.5, docs/protocol/route_health.md).
 	svc.queryRateLimit = newQueryRateLimit(nil, 0, 0)
 
+	// Datagram transport layer (docs/refactoring/datagram-transport.md).
+	// Built after the routing table, because the scheduler's resolver reads
+	// it, and before anything can dispatch a frame.
+	//
+	// A construction failure opts the node OUT rather than aborting startup:
+	// the two capabilities and the conveyor are one statement, and a node
+	// that advertises "send me datagrams" while having nothing to process
+	// them with would attract exactly the traffic it cannot serve. Clearing
+	// the flag is what keeps the advertisement and the reality in one place —
+	// localDatagramAdvertise reads cfg, and cfg now says no.
+	if layer, err := newDatagramLayer(svc, svc.datagramMetrics); err != nil {
+		log.Error().Err(err).Msg("datagram_layer_disabled_construction_failed")
+		svc.cfg.EnableDatagramV1 = false
+	} else {
+		svc.datagramPlane.Store(layer)
+	}
+
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter()
 	svc.announceLimiter = newAnnounceRateLimiter()
@@ -1688,10 +1867,113 @@ func (s *Service) RegisterMessageStore(store MessageStore) {
 	s.messageStore = store
 }
 
+// goRunLoop starts one of the loops that live for the whole of Run and stop on
+// the lifecycle context, tracked by runLoopsWg so stopRunLifecycle can wait for
+// it whether or not it ever got as far as being started.
+//
+// # It is the ONLY way Run may start a long-lived goroutine
+//
+// Cancellation only ASKS a loop to finish. A loop that is merely cancelled can
+// still be inside a network send, a TTL drain or an event publication when Run
+// returns, and Run returning is what the runtime treats as permission to close
+// the stores and sockets underneath it. Four lifecycle findings in four rounds
+// were all this same gap in a different place, so the rule is no longer a
+// convention: TestRunStartsNoUnjoinedGoroutine parses this file, walks Run's
+// body for `go` statements and fails on any that is not carrying an explicit
+// `lifecycle:` justification. A future loop added with a bare `go` turns red
+// with a message naming this function; it cannot be forgotten, only refused on
+// purpose and in writing.
+func (s *Service) goRunLoop(fn func()) {
+	s.runLoopsWg.Add(1)
+	go func() {
+		defer s.runLoopsWg.Done()
+		defer crashlog.DeferRecover()
+		fn()
+	}()
+}
+
+// stopRunLifecycle is the ONE ordered teardown of everything Run started: ASK
+// every lifecycle loop to stop, then WAIT for all of them.
+//
+// It is armed before the first loop exists, so it holds on EVERY exit: an
+// ordinary return, an error return, and a panic unwinding from anywhere below.
+// Three rounds of shutdown defects came from a teardown that was ordered
+// correctly only from the point it happened to be registered; this one has no
+// such point.
+//
+// The two steps are both load-bearing and neither may be reordered:
+//
+//  1. CANCEL. Every loop on runLoopsWg stops on the lifecycle context and on
+//     nothing else, so the wait below cannot finish until it is cancelled.
+//     Joining without cancelling first is a deadlock, not a slow shutdown;
+//  2. WAIT. Cancellation only ASKS: a loop already inside a call runs until that
+//     call returns, and what those calls reach is owned by subsystems whose
+//     defers sit ABOVE this one and therefore run AFTER it — the file-transfer
+//     manager, the relay states, the capture manager and `s.done`. The datagram
+//     plane's outbound pump hands frames to the network writer and
+//     bootstrapLoop writes peers.json on its way out; a caller entitled to
+//     delete the data directory must not be handed control — or a panic —
+//     before both have finished.
+//
+// # The inbound-connection drain is NOT on that list, and runs BEFORE the join
+//
+// Its defer sits BELOW this one, so LIFO runs `closeAllInboundConns` +
+// `connWg.Wait` FIRST, with every lifecycle loop still live. That is the right
+// way round rather than an oversight, and it is pinned by
+// TestTheInboundDrainRunsBeforeTheLifecycleJoin:
+//
+//   - the drain STOPS NO SUBSYSTEM a loop calls into, which is the whole hazard
+//     this join exists to prevent. It closes sockets and clears per-connection
+//     rows — the conn registry, the subscribers, the conn auth, the inbound
+//     health refs. A loop reaches a connection only through the netcore
+//     registry, which answers "unknown conn" for a closed ConnID instead of
+//     handing out a freed handle, and an absent per-connection row is the
+//     ordinary state every peer disconnect already produces;
+//   - the dependency that IS load-bearing runs the other way. The connection
+//     handlers are PRODUCERS into what the loops consume — the CM event loop
+//     (`EmitSlot`), the gossip lanes, the announce plane — and their teardown
+//     path produces its last work as it exits: `trackInboundDisconnect` →
+//     `markPeerDisconnected`, `removeSubscriberConnID`, the session-closed
+//     routing bookkeeping. Joining the handlers while those consumers are still
+//     alive is the order in which that work can still be absorbed; the reverse
+//     leaves producers running against consumers joined a moment earlier;
+//   - the drain must in any case precede
+//     `cancelAllPendingWithdrawalsForShutdown`, whose defer sits between the
+//     two, so it cannot be moved below this one on its own.
+//
+// One group and one wait, not a sequence of per-subsystem joins: every loop is
+// asked to stop by the same cancel, so `wait(A); wait(B)` and `wait(A ∪ B)`
+// release the caller at exactly the same instant, and a sequence invites the
+// reader to believe in an ordering it does not have.
+func (s *Service) stopRunLifecycle(cancel context.CancelFunc) {
+	cancel()
+	s.runLoopsWg.Wait()
+}
+
 func (s *Service) Run(ctx context.Context) error {
+	// The Service lifecycle context is DERIVED from the caller's and cancelled
+	// on ANY exit from Run, not only on the caller cancelling.
+	//
+	// Storing the caller's context here made "the Service is running" and "the
+	// context is live" two different facts. Every error return — a listen that
+	// fails because the address is already bound is the ordinary one — handed
+	// the caller an error while the background work Run had already started
+	// kept running under a context nobody would ever cancel. The datagram plane
+	// is the case that bites: its outbound pump keeps writing to sockets, and a
+	// caller that has been given an error is entitled to close them.
+	//
+	// The two defers below are the FIRST ones registered, so they run LAST and
+	// no return path, and no panic, can skip them: cancel, then join the work
+	// whose external effects must not outlive Run.
+	runCtx, runCancel := context.WithCancel(ctx)
 	// Store context so CM callbacks can start goroutines bound to the
 	// Service lifecycle (see onCMSessionEstablished).
-	s.runCtx = ctx
+	s.runCtx = runCtx
+	// The BACKSTOP, for a panic raised before the ordered shutdown sequence
+	// below is registered. It is idempotent, so on every ordinary path the
+	// sequence has already done it and this is a no-op.
+	defer runCancel()
+	ctx = runCtx
 
 	log.Info().
 		Int("pid", os.Getpid()).
@@ -1725,29 +2007,38 @@ func (s *Service) Run(ctx context.Context) error {
 	s.initFileTransfer()
 	defer s.stopFileTransfer()
 
+	// THE ORDERED TEARDOWN, armed BEFORE the first lifecycle loop exists so it
+	// holds on every exit — an ordinary return, an error, or a panic unwinding
+	// from anywhere below. Registering it HERE, immediately after the subsystem
+	// defers above and before every `go` below, is what makes `defer`'s LIFO
+	// order put the JOIN ahead of `stopFileTransfer`, `relayStates.stop`,
+	// `captureManager.Close` and `close(s.done)`: a loop inside a call into one
+	// of those must not have it stopped underneath it. It is correct for loops
+	// that were never started, which is why it can be armed before any of them
+	// is (see the runLoopsWg field comment).
+	//
+	// The two defers registered BELOW — the pending-withdrawal cancel and the
+	// inbound-connection drain — therefore run BEFORE this join, by design and
+	// not by accident; stopRunLifecycle's own comment carries the argument.
+	defer s.stopRunLifecycle(runCancel)
+
+	// Datagram transport schedules (datagram_layer.go). No-op — and no
+	// goroutine — when the plane is not wired. They are ordinary lifecycle
+	// loops: they stop on ctx.Done and are joined by the teardown just armed.
+	s.startDatagramLayer(ctx)
+
 	// Start routing table TTL ticker and announce loop (Phase 1.2).
 	routingCtx, routingCancel := context.WithCancel(ctx)
 	defer routingCancel()
 
-	go func() {
-		defer crashlog.DeferRecover()
-		s.announceLoop.Run(routingCtx)
-	}()
-
-	go func() {
-		defer crashlog.DeferRecover()
-		s.routingTableTTLLoop(routingCtx)
-	}()
-
+	s.goRunLoop(func() { s.announceLoop.Run(routingCtx) })
+	s.goRunLoop(func() { s.routingTableTTLLoop(routingCtx) })
 	// Phase 2 probe sender (PR 11.3c). Walks Questionable
 	// (Identity, Uplink) pairs every HealthProbeInterval and emits
 	// route_probe_v1; the outstanding-probe registry arms a
 	// HealthProbeTimeout watcher that converts no-ack outcomes into
 	// MarkProbeFailure. Honours the Phase 0 overload gate.
-	go func() {
-		defer crashlog.DeferRecover()
-		s.probeLoop(routingCtx)
-	}()
+	s.goRunLoop(func() { s.probeLoop(routingCtx) })
 
 	// On shutdown: cancel any pending route-withdrawal probation
 	// timers AFTER the closeAllInboundConns + connWg.Wait deferred
@@ -1764,6 +2055,12 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// On shutdown: close all inbound connections so handleConn goroutines
 	// exit, wait for them to finish.
+	//
+	// Registered BELOW `defer s.stopRunLifecycle`, so LIFO runs this drain
+	// FIRST, while every lifecycle loop is still live. The handlers are
+	// producers into what those loops consume, and the drain stops nothing the
+	// loops call into — see stopRunLifecycle for the whole argument, and
+	// TestTheInboundDrainRunsBeforeTheLifecycleJoin for the pin.
 	defer func() {
 		s.closeAllInboundConns()
 		log.Info().Msg("waiting for inbound connections to finish")
@@ -1771,19 +2068,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	// Start ConnectionManager event loop (Stage 3).
-	cmDone := make(chan struct{})
-	go func() {
-		defer crashlog.DeferRecover()
-		s.connManager.Run(ctx)
-		close(cmDone)
-	}()
-	// Ensure the CM event loop has fully drained before Run returns —
-	// needed for clean goroutine teardown. In-memory pending/relay state is
-	// intentionally NOT recovered across a restart; the sender retries
-	// end-to-end.
-	// This defer is a no-op in the listener-disabled branch because that
-	// branch already awaits cmDone synchronously before returning.
-	defer func() { <-cmDone }()
+	s.goRunLoop(func() { s.connManager.Run(ctx) })
 	// Wait for CM event loop to be ready before starting bootstrap.
 	<-s.connManager.Ready()
 	if s.primeBootstrapOnRun {
@@ -1800,12 +2085,7 @@ func (s *Service) Run(ctx context.Context) error {
 	// fallback path.
 	s.startGossipDispatch(ctx)
 
-	bootstrapDone := make(chan struct{})
-	go func() {
-		defer crashlog.DeferRecover()
-		s.bootstrapLoop(ctx)
-		close(bootstrapDone)
-	}()
+	s.goRunLoop(func() { s.bootstrapLoop(ctx) })
 
 	// Prime the atomic snapshots consumed by the hot local RPC paths
 	// (fetch_network_stats, fetch_peer_health, get_peers) synchronously on
@@ -1822,18 +2102,19 @@ func (s *Service) Run(ctx context.Context) error {
 	// (s.peerMu writer storm) delays the next refresh tick without
 	// affecting any other loop; RPC readers keep serving the last good
 	// snapshot.  See hot_reads_refresh.go for the contract.
-	hotReadsDone := make(chan struct{})
-	go func() {
-		defer crashlog.DeferRecover()
-		defer close(hotReadsDone)
-		s.hotReadsRefreshLoop(ctx)
-	}()
+	s.goRunLoop(func() { s.hotReadsRefreshLoop(ctx) })
+
+	// A fault injected at the LATEST point of Run's startup, where every
+	// subsystem defer is registered and every loop is running. Nothing in Run's
+	// own startup panics on demand, so the shutdown-ordering contract — the
+	// lifecycle join runs BEFORE the subsystem teardowns registered above it —
+	// is checked by unwinding from here; nil in production.
+	if s.faultDuringRunStartup != nil {
+		s.faultDuringRunStartup()
+	}
 
 	if !s.cfg.EffectiveListenerEnabled() {
 		<-ctx.Done()
-		<-bootstrapDone
-		<-hotReadsDone
-		<-cmDone
 		return nil
 	}
 
@@ -1850,19 +2131,19 @@ func (s *Service) Run(ctx context.Context) error {
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "Run_setListener").Str("phase", "lock_released").Msg("peer_mu_writer")
 
-	go func() {
+	// Joined like every other lifecycle goroutine: it ends the moment the
+	// context is cancelled, which stopRunLifecycle does before it waits, so
+	// joining it costs nothing and keeps Run's rule free of exceptions.
+	s.goRunLoop(func() {
 		<-ctx.Done()
 		_ = listener.Close()
-	}()
+	})
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				<-bootstrapDone
-				<-hotReadsDone
-				<-cmDone
 				return nil
 			default:
 			}
@@ -1894,6 +2175,12 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 
 		s.connWg.Add(1)
+		// lifecycle: joined by connWg, not runLoopsWg. A connection handler is
+		// per-CONNECTION rather than per-Run: it ends when its socket closes,
+		// and the teardown that owns it is the closeAllInboundConns +
+		// connWg.Wait defer above, which must run at its own point in the
+		// order. Tracking it in the lifecycle group as well would give one
+		// goroutine two owners.
 		go func(c net.Conn, cip string) {
 			defer s.connWg.Done()
 			defer crashlog.DeferRecover()
@@ -1930,11 +2217,19 @@ func (s *Service) Address() string {
 	return s.identity.Address
 }
 
-// WaitBackground blocks until all fire-and-forget goroutines tracked by
-// backgroundWg have finished. Tests call this before TempDir cleanup to
-// avoid "directory not empty" races caused by async disk writes.
+// WaitBackground blocks until every goroutine this Service owns has finished:
+// the fire-and-forget jobs tracked by backgroundWg and the lifecycle loops
+// tracked by runLoopsWg. Tests call this before TempDir cleanup to avoid
+// "directory not empty" races caused by async disk writes.
+//
+// The two groups stay apart because RUN may only join one of them: backgroundWg
+// tracks fire-and-forget jobs across the whole Service, some of them started
+// during the very teardown Run is performing, so joining it from inside Run
+// would trade a use-after-teardown for a shutdown deadlock. This function is
+// the one place callers see both.
 func (s *Service) WaitBackground() {
 	s.backgroundWg.Wait()
+	s.runLoopsWg.Wait()
 }
 
 // goBackground runs fn in a new goroutine that is tracked by
@@ -1961,6 +2256,16 @@ func (s *Service) SubscriberCount(recipient string) int {
 	return len(s.subs[recipient])
 }
 
+// SubscribeLocalChanges registers a local-change inbox and returns it with
+// the cancel that unregisters and closes it.
+//
+// The returned cancel closes ch, which is only safe because s.gossipMu
+// fences the publisher: emitLocalChange holds gossipMu.RLock across its
+// offers, so the Lock below waits out every publisher already inside one and
+// refuses every later one (the map entry is gone). Snapshotting the
+// subscriber set and offering after the unlock — which is how the publisher
+// used to work — makes the same close land on a live sender, and a send on a
+// closed channel is a panic in the middle of an unrelated goroutine.
 func (s *Service) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, func()) {
 	ch := make(chan protocol.LocalChangeEvent, 16)
 
@@ -2050,10 +2355,20 @@ func (s *Service) handleConn(conn net.Conn) {
 	conn = metered
 
 	var heartbeatStop chan struct{}
+	// The heartbeat is joined to THIS handler, and closing its stop channel is
+	// not the join. Closing only ASKS: the loop can be inside a ping send or
+	// between its two selects, and it touches the Network and peerMu after
+	// that. Without the wait, connWg — and therefore Run — could complete while
+	// a heartbeat was still writing to a socket the runtime is entitled to have
+	// closed. The wait is bounded: every branch of the loop selects on stop,
+	// and the one call that is not a select is a frame write under netcore's
+	// per-write deadline.
+	var heartbeatDone sync.WaitGroup
 	defer func() {
 		if heartbeatStop != nil {
 			close(heartbeatStop)
 		}
+		heartbeatDone.Wait()
 	}()
 
 	reader := bufio.NewReader(conn)
@@ -2069,22 +2384,14 @@ func (s *Service) handleConn(conn net.Conn) {
 			_ = tc.SetReadDeadline(time.Now().Add(inboundReadTimeout))
 		}
 
-		line, err := readFrameLine(reader, maxCommandLineBytes)
+		line, err := s.readInboundCommandLine(reader, connID)
+		if errors.Is(err, errInboundLineDropped) {
+			// One line consumed and dropped by admission; the connection lives
+			// on and the next line is read from where that one ended.
+			continue
+		}
 		if err != nil {
-			if errors.Is(err, errFrameTooLarge) {
-				// Capture frame-too-large as a diagnostic event before closing.
-				s.captureInboundRecvFrameTooLarge(connID)
-				log.Debug().Str("addr", conn.RemoteAddr().String()).
-					Msg("inbound_read_loop: closing connection — frame exceeds max size")
-				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
-			} else if err != io.EOF {
-				log.Debug().Err(err).Str("addr", conn.RemoteAddr().String()).
-					Msg("inbound_read_loop: closing connection — read error")
-				_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
-			} else {
-				log.Debug().Str("addr", conn.RemoteAddr().String()).
-					Msg("inbound_read_loop: peer closed connection (EOF)")
-			}
+			s.endInboundReadLoop(connID, conn.RemoteAddr().String(), err)
 			return
 		}
 
@@ -2094,53 +2401,10 @@ func (s *Service) handleConn(conn net.Conn) {
 		s.captureInboundRecv(connID, strings.TrimRight(line, "\r\n"))
 
 		// Per-connection command rate limiting — prevents a single peer
-		// from flooding with valid commands to exhaust CPU.
-		//
-		// EXEMPT classes:
-		//
-		//  1. file_command — high-throughput data-plane (chunk_request /
-		//     chunk_response) that easily exceeds the control-plane rate
-		//     (30 cmd/s). Gated behind auth + file_transfer_v1 capability
-		//     in dispatchNetworkFrame, so the attack surface is limited
-		//     to authenticated peers.
-		//
-		//  2. announce-plane BULK frames (announce_routes / routes_update /
-		//     route_announce_v3) — chunked route batches. A legitimate
-		//     full-sync of N routes ships as ceil(N/100) frames in a tight
-		//     burst, which the cmd limiter (100 burst, 30/s) would
-		//     silently truncate. These have their own per-peer route-based
-		//     budget in announceLimiter (10,000-route burst, 200 routes/s
-		//     refill, ALL bulk frames). DELTA frames (routes_update / v3
-		//     kind="delta") additionally feed the chatty_routes quarantine
-		//     trigger (50 frames/s × 10s = 500); full baselines do NOT —
-		//     a baseline is idempotent and bounded by the route bucket,
-		//     while chatty targets delta churn (see
-		//     recordInboundAnnounceAndMaybeArm). Together those bound CPU
-		//     AND let quarantine — not TCP close — own the response to a
-		//     misbehaving delta sender, honouring the design contract
-		//     ("quarantine does NOT close TCP").
-		//
-		// NOT exempt (intentional, even though they ARE announce-plane):
-		// request_resync, route_poison_v1 and route_poison_v2. Those are
-		// control frames whose natural per-peer rate is well under 1/s
-		// (request_resync: bounded by reconnect cycles; the poison frames:
-		// bounded by route lifecycle). The cmd limiter (100 burst /
-		// 30 cmd/s) is the right defence — exempting them would leave
-		// only the loose 200-token-per-second route bucket, which permits
-		// 200 control frames/s sustained, and chatty_routes does NOT
-		// count control frames in its trigger window (it is wired only
-		// into the bulk handlers). For these types, "high-rate flood" is
-		// protocol misbehaviour rather than chattiness, and a TCP close
-		// is the appropriate response.
-		//
-		// See isAnnouncePlaneBulkFrameType (routing_announce.go) for
-		// the predicate boundary and the wider isAnnouncePlaneFrameType
-		// for the size-budget enforcement that still covers control
-		// frames.
-		frameType := peekFrameType(line)
-		if frameType != protocol.FileCommandFrameType &&
-			!isAnnouncePlaneBulkFrameType(frameType) &&
-			!s.cmdLimiter.allowCommand(connKey) {
+		// from flooding with valid commands to exhaust CPU. WHICH lines skip
+		// it, and why the question is asked of the whole line rather than of a
+		// peeked type, is frameLineExemptFromCommandLimit.
+		if !s.admitInboundCommandLine(connID, connKey, line) {
 			log.Debug().Str("addr", conn.RemoteAddr().String()).
 				Msg("inbound_read_loop: closing connection — command rate limit exceeded")
 			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRateLimited})
@@ -2148,7 +2412,14 @@ func (s *Service) handleConn(conn net.Conn) {
 			return
 		}
 
-		if !s.handleCommand(connID, strings.TrimSpace(line)) {
+		// The line goes down UNTRIMMED. Trimming is a parser convenience and
+		// dispatchNetworkFrame does it for itself; doing it here instead would
+		// destroy the only copy of the wire bytes, and the datagram plane
+		// needs exactly those — §5 charges the neighbour's byte budget on the
+		// raw line and §3.4 requires the strict parser to read the same one
+		// (see rawLineForDispatch for the full argument and for why the
+		// announce-plane types stay on the trimmed form).
+		if !s.handleCommand(connID, line) {
 			return
 		}
 
@@ -2167,11 +2438,225 @@ func (s *Service) handleConn(conn net.Conn) {
 				// previous *netcore.NetCore nil-guard.
 				if s.Network().RemoteAddr(connID) != "" {
 					heartbeatStop = make(chan struct{})
-					go s.inboundHeartbeat(connID, addr, heartbeatStop)
+					heartbeatDone.Add(1)
+					// lifecycle: joined by THIS connection's handler, which
+					// waits on heartbeatDone before returning; the handler is
+					// itself tracked by connWg, which Run's teardown joins. A
+					// per-connection goroutine belongs to its connection, not
+					// to runLoopsWg — one goroutine, one owner.
+					go func() {
+						defer heartbeatDone.Done()
+						s.inboundHeartbeat(connID, addr, heartbeatStop)
+					}()
 				}
 			}
 		}
 	}
+}
+
+// admitInboundCommandLine is the read loop's whole rate decision for ONE
+// inbound line: a line whose plane carries its own budget passes for free,
+// every other line spends a token of the per-connection command limiter.
+//
+// It exists as a function so the composition can be tested. Its two halves are
+// individually harmless — an exemption that never charges, a limiter that never
+// exempts — and every defect this decision has had lived in how they were put
+// together.
+func (s *Service) admitInboundCommandLine(id domain.ConnID, connKey string, line string) bool {
+	if s.frameLineExemptFromCommandLimit(id, line) {
+		return true
+	}
+	return s.cmdLimiter.allowCommand(connKey)
+}
+
+// frameLineExemptFromCommandLimit reports whether an inbound command line may
+// skip the per-connection command limiter. It is the WHOLE of that decision:
+// the read loop asks this and nothing else.
+//
+// # Why the LINE and not a peeked type
+//
+// The exemption used to be taken from peekFrameType, which returns the FIRST
+// `"type"` found anywhere in the line — nested objects included — while
+// encoding/json binds the LAST TOP-LEVEL one. That gap is not a mismatch but a
+// bypass, because the SENDER picks which reader gets which answer:
+// `{"a":{"type":"file_command"},"type":"ping"}` left the limiter as a
+// file_command and was then dispatched as a `ping`, which is a handshake
+// command that needs no session — so any socket could hold this node at line
+// rate for free. The exemption is therefore decided by the same classification
+// the pre-parse diversion and the peer-session admission already decide on
+// (classifyFrameLine, through topLevelFrameType), and by nothing else.
+//
+// # Why an unreadable type pays
+//
+// FAIL-CLOSED: an exemption is sound only while this scan and the parser name
+// the same type, so a line that does not name itself unambiguously is charged
+// and the dispatcher below is left to decide what it was. Nothing legitimate is
+// charged twice by that rule — every frame this node's peers marshal names its
+// type once, literally, as a plain string.
+//
+// # The exempt classes
+//
+//  1. file_command — high-throughput data plane (chunk_request /
+//     chunk_response) that easily exceeds the control-plane rate (30 cmd/s).
+//     Gated behind auth + file_transfer_v1 capability in dispatchNetworkFrame,
+//     so the attack surface is limited to authenticated peers.
+//
+//  2. announce-plane BULK frames — see exemptFrameTypeFromCommandLimit for the
+//     boundary and for the control frames deliberately left inside the limiter.
+//
+//  3. `datagram`, and only while a layer exists to charge the §5 budget that
+//     replaces the limiter — datagramCarriesOwnBudget owns that condition, and
+//     it is the reason this decision needs the ConnID: the replacement budget
+//     is charged on the identity the neighbour PROVED, so before `auth_ok`
+//     there is nobody to bill and an exemption would be a free channel rather
+//     than a budget swap.
+//
+// Class 3 is the only one whose answer depends on the CONNECTION rather than
+// on the line, and resolving its key is a registry read — so the question is
+// asked for a `datagram` and for nothing else. The two branches are disjoint:
+// no member of the classes above is a datagram.
+func (s *Service) frameLineExemptFromCommandLimit(id domain.ConnID, line string) bool {
+	claimed, named := topLevelFrameType(line)
+	if !named {
+		return false
+	}
+	if claimed != protocol.DatagramFrameType {
+		return exemptFrameTypeFromCommandLimit(claimed)
+	}
+	return s.datagramCarriesOwnBudget(claimed, s.inboundDatagramBudgetKey(id))
+}
+
+// errInboundLineDropped reports that the inbound reader consumed and dropped
+// ONE line and the connection survives. It never leaves handleConn's loop.
+var errInboundLineDropped = errors.New("inbound command line dropped by admission")
+
+// readInboundCommandLine reads ONE line of the inbound command plane under the
+// strict budget of §2.3 — maxCommandLineBytes, which IS protocol.MaxFrameLine —
+// and decides what a line that breaches it costs.
+//
+// The staged reader is used for its GATE and not for an extension: no type on
+// this reader is entitled to more than the strict budget, so the callback always
+// answers zero. What it is there for is the CLAIM in the line's first bytes,
+// which is the only name an over-long line will ever have — the rest of it is
+// never read, and nothing downstream will classify it.
+func (s *Service) readInboundCommandLine(reader *bufio.Reader, connID domain.ConnID) (string, error) {
+	claimed := ""
+	read, err := readFrameLineStaged(reader, maxCommandLineBytes, func(prefix string) int {
+		claimed, _ = claimedFrameTypeFromPrefix(prefix)
+		return 0
+	})
+	if !errors.Is(err, errFrameTooLarge) {
+		return read.line, err
+	}
+	return "", s.refuseOversizeInboundLine(reader, connID, claimed, read)
+}
+
+// refuseOversizeInboundLine decides what an over-long inbound line costs, and
+// the answer is one of exactly two:
+//
+//   - a line claiming `datagram` is the datagram plane's business. §2.3 is a
+//     verdict about the LINE, and the neighbour that relayed the frame inside it
+//     did not write it, so the refusal is silent: the bytes go to that plane's
+//     own §5 per-neighbour budget, the drop is counted, the remainder is skipped
+//     so it cannot be read as frames of its own, and the CONNECTION LIVES. That
+//     rule is stated once, in refuseOversizeDatagramClaim, and is the same one
+//     the peer-session reader applies;
+//   - everything else ends the connection with a frame-too-large error, exactly
+//     as this reader has always answered it.
+//
+// The claim buys nothing but that: it cannot make a line be processed, only
+// refused more quietly and on a narrower budget. With no layer to charge, or a
+// neighbour with no billable key — an unauthenticated socket has proven no
+// identity — it buys nothing at all and the connection goes.
+//
+// What the surviving connection is billed is what the two stages REPORT having
+// read, not the limit plus the discard: each stops on a buffer fill and so ends
+// somewhere past its limit, and a size reconstructed from the constants
+// under-charges every refusal by that overshoot — which on this path is the
+// only cost the neighbour bears at all.
+func (s *Service) refuseOversizeInboundLine(
+	reader *bufio.Reader,
+	connID domain.ConnID,
+	claimed string,
+	read frameLineRead,
+) error {
+	key := s.inboundDatagramBudgetKey(connID)
+	discarded, discardErr := 0, error(nil)
+	if !read.delimited && claimed == protocol.DatagramFrameType {
+		// Skipping the remainder is what makes "the connection lives" possible
+		// at all; it is bounded by one further frame, past which the peer is
+		// streaming rather than framing and the connection goes as before.
+		discarded, discardErr = discardFrameLineRemainder(reader, oversizeDatagramResyncBytes)
+	}
+	if discardErr != nil {
+		return errFrameTooLarge
+	}
+	if !s.refuseOversizeDatagramClaim(datagramInbound, claimed, key, read.consumed+discarded) {
+		return errFrameTooLarge
+	}
+	return errInboundLineDropped
+}
+
+// endInboundReadLoop reports why handleConn's read loop is stopping and answers
+// the peer where the protocol says to.
+//
+// The three cases are the three ways a read ends, and they are separated
+// because only the first two say anything on the wire: a size breach and a
+// transport failure each get their error code, while an EOF is the peer closing
+// a connection there is nobody left to answer on.
+func (s *Service) endInboundReadLoop(connID domain.ConnID, addr string, err error) {
+	switch {
+	case errors.Is(err, errFrameTooLarge):
+		// Capture frame-too-large as a diagnostic event before closing.
+		s.captureInboundRecvFrameTooLarge(connID)
+		log.Debug().Str("addr", addr).
+			Msg("inbound_read_loop: closing connection — frame exceeds max size")
+		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeFrameTooLarge})
+	case !errors.Is(err, io.EOF):
+		log.Debug().Err(err).Str("addr", addr).
+			Msg("inbound_read_loop: closing connection — read error")
+		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeRead})
+	default:
+		log.Debug().Str("addr", addr).
+			Msg("inbound_read_loop: peer closed connection (EOF)")
+	}
+}
+
+// exemptFrameTypeFromCommandLimit is the type-level half of the exemption: the
+// two classes whose per-peer budget is owned by another limiter on this node.
+// It takes a TOP-LEVEL type, resolved as frameLineNamed by its caller — a
+// peeked type must never be handed to it.
+//
+// Bulk announce frames (announce_routes / routes_update / route_announce_v3)
+// chunk route batches: a legitimate full-sync of N routes ships as ceil(N/100)
+// frames in a tight burst, which the cmd limiter (100 burst, 30/s) would
+// silently truncate. They have their own per-peer route-based budget in
+// announceLimiter (10,000-route burst, 200 routes/s refill, ALL bulk frames).
+// DELTA frames (routes_update / v3 kind="delta") additionally feed the
+// chatty_routes quarantine trigger (50 frames/s × 10s = 500); full baselines do
+// NOT — a baseline is idempotent and bounded by the route bucket, while chatty
+// targets delta churn (see recordInboundAnnounceAndMaybeArm). Together those
+// bound CPU AND let quarantine — not TCP close — own the response to a
+// misbehaving delta sender, honouring the design contract ("quarantine does NOT
+// close TCP").
+//
+// NOT exempt (intentional, even though they ARE announce-plane): request_resync,
+// route_poison_v1 and route_poison_v2. Those are control frames whose natural
+// per-peer rate is well under 1/s (request_resync: bounded by reconnect cycles;
+// the poison frames: bounded by route lifecycle). The cmd limiter (100 burst /
+// 30 cmd/s) is the right defence — exempting them would leave only the loose
+// 200-token-per-second route bucket, which permits 200 control frames/s
+// sustained, and chatty_routes does NOT count control frames in its trigger
+// window (it is wired only into the bulk handlers). For these types, "high-rate
+// flood" is protocol misbehaviour rather than chattiness, and a TCP close is the
+// appropriate response.
+//
+// See isAnnouncePlaneBulkFrameType (routing_announce.go) for the predicate
+// boundary and the wider isAnnouncePlaneFrameType for the size-budget
+// enforcement that still covers control frames.
+func exemptFrameTypeFromCommandLimit(frameType string) bool {
+	return frameType == protocol.FileCommandFrameType ||
+		isAnnouncePlaneBulkFrameType(frameType)
 }
 
 // handleCommand validates that the incoming line is JSON framing and then
@@ -2179,8 +2664,12 @@ func (s *Service) handleConn(conn net.Conn) {
 // (writeJSONFrameByID, touchConnActivity, addBanScore, …) is reached by
 // ConnID; the remote-address string used for protocol_trace logging is
 // resolved on demand via the netcore.Network registry.
-func (s *Service) handleCommand(connID domain.ConnID, line string) bool {
-	if !protocol.IsJSONLine(line) {
+//
+// `wire` is the line as the reader produced it, terminating newline and all.
+// It is passed on untouched — protocol.IsJSONLine trims for itself — because
+// the datagram plane is defined on those exact bytes (rawLineForDispatch).
+func (s *Service) handleCommand(connID domain.ConnID, wire string) bool {
+	if !protocol.IsJSONLine(wire) {
 		addr := s.Network().RemoteAddr(connID)
 		log.Debug().
 			Str("protocol", "json/tcp").
@@ -2192,7 +2681,7 @@ func (s *Service) handleCommand(connID domain.ConnID, line string) bool {
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidJSON})
 		return false
 	}
-	return s.dispatchNetworkFrame(connID, line)
+	return s.dispatchNetworkFrame(connID, wire)
 }
 
 // dispatchNetworkFrame parses and dispatches an inbound wire frame.
@@ -2203,12 +2692,46 @@ func (s *Service) handleCommand(connID domain.ConnID, line string) bool {
 // now resolved through the netcore.Network registry once up-front. An empty
 // RemoteAddr means the connection has already been unregistered (race with
 // teardown) and dispatch fails closed without consulting the registry per-branch.
-func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
+//
+// `wire` is the line as read from the socket; `line` below is its trimmed form
+// and is what every handler except the datagram one is given, exactly as
+// before. Only the datagram case reads `wire`, and rawLineForDispatch — the
+// same split the outbound peer-session reader applies — says why.
+func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 	addr := s.Network().RemoteAddr(connID)
 	if addr == "" {
 		return false
 	}
 
+	// A DATAGRAM NEVER REACHES protocol.ParseFrameLine. §4.1 step 1 charges the
+	// neighbour's byte and frame budget "before any decoding", and the
+	// universal parser is decoding: leaving it above the layer let a neighbour
+	// impose a full JSON unmarshal of every datagram-shaped line for free, and
+	// the budget only found out afterwards. The diversion runs before the parse
+	// and skips it entirely — the strict parser of §3.4 needs the original
+	// bytes anyway.
+	if isDatagramWireLine(wire) {
+		return s.dispatchInboundDatagramWire(connID, addr, wire)
+	}
+
+	// AMBIGUITY IS REFUSED UNPARSED, on this path for the same reason as on the
+	// peer-session reader (admitFrameLinePreParse): a line whose type only
+	// protocol.ParseFrameLine could resolve used to be dispatched on the type
+	// the PARSER produced, so a duplicate `type` key ending in `datagram`
+	// reached the layer only after the universal unmarshal — the order §4.1
+	// step 1 forbids. The reader's own maxCommandLineBytes bounds the decode
+	// here, which is why the BUDGET half of admission is not repeated on this
+	// path; the ordering half is not about size.
+	//
+	// The connection survives: this is a drop, not a protocol error, because
+	// nothing on the wire proves what the sender meant. Answering invalid_json
+	// would name a verdict this node deliberately did not reach.
+	if _, verdict := admitFrameLinePreParse(wire); verdict == preParseRefuseAmbiguous {
+		s.dropAmbiguousFrameLine(s.inboundDatagramBudgetKey(connID), addr, wire)
+		return true
+	}
+
+	line := strings.TrimSpace(wire)
 	frame, err := protocol.ParseFrameLine(line)
 	if err != nil {
 		log.Debug().
@@ -2445,7 +2968,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 					Str("remote_client", frame.Client).
 					Msg("localhost_peer_foreign_identity")
 			}
-			_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame(authState.Challenge, remoteIPFromString(addr)))
+			s.sendWelcomeFrame(connID, authState.Challenge, remoteIPFromString(addr))
 			return true
 		}
 		// No identity fields → unauthenticated peer. It stays
@@ -2459,10 +2982,10 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 			Str("client", frame.Client).
 			Str("addr", addr).
 			Msg("hello_without_identity_fields")
-		_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame("", remoteIPFromString(addr)))
+		s.sendWelcomeFrame(connID, "", remoteIPFromString(addr))
 		return true
 	case "auth_session":
-		reply, ok, backlogSub := s.handleAuthSession(connID, frame)
+		reply, ok, backlogSub, fullSync := s.handleAuthSession(connID, frame)
 		if !ok {
 			accepted = false
 			_ = s.sendFrameViaNetworkSync(s.runCtx, connID, reply)
@@ -2530,6 +3053,23 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// auth_ok on the connection. Fire-and-forget.
 		if backlogSub != nil {
 			s.goBackground(func() { s.pushBacklogToSubscriber(backlogSub) })
+		}
+		// The connect-time route table, ordered behind auth_ok for the same
+		// reason and by the same rule: the dialler counts a capability as
+		// negotiated only once auth_ok has landed, so a full sync that
+		// overtakes it is a full sync the peer refuses and never asks for
+		// again until its own periodic sweep.
+		if fullSync.due {
+			// s.runCtx bounds the write so that shutdown can abort a
+			// half-flushed inbound send instead of waiting out the full
+			// syncFlushTimeout on a stuck hairpin socket.
+			s.goBackground(func() {
+				// The crash report the original spawn carried: goBackground
+				// does not recover, and a panic in a full sync is a crash the
+				// operator has to be able to read afterwards.
+				defer crashlog.DeferRecover()
+				s.sendFullTableSyncToInbound(s.runCtx, connID, fullSync.peer)
+			})
 		}
 		return true
 
@@ -2600,7 +3140,11 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		// P2P contact sync: authenticated peers fetch the contact list
 		// for key material synchronization (syncPeer, syncContactsViaSession).
 		// Session-setup phase — use the no-eviction handshake-reply path.
-		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, s.contactsFrame())
+		// contactsFrameForNetwork and not contactsFrame: the receiver verifies a
+		// signature per entry and refuses a reply past maxContactsPerResponse,
+		// so the wire form is BUILT bounded to the number both ends agree on —
+		// the walk stops at the cap rather than being cut down to it.
+		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, s.contactsFrameForNetwork())
 		return true
 	case "ack_delete":
 		reply, ok := s.handleAckDeleteFrame(connID, frame)
@@ -2946,6 +3490,25 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, line string) bool {
 		}
 		s.handleRouteAnnounceV3(s.inboundPeerIdentity(connID), s.inboundConnKeyForID(connID), v3)
 		return true
+	case "datagram":
+		// UNREACHABLE, and kept as the assertion of that fact — and as the
+		// declaration the command_scope_test AST inspector reads, because
+		// `datagram` IS a P2P wire command of this port; it is simply dispatched
+		// above the parser rather than in this switch. Type string stays the raw
+		// literal (kept in sync with protocol.DatagramFrameType) so that
+		// inspector, which only reads string-literal case labels, sees it — same
+		// rationale as route_probe_v1 above.
+		//
+		// dispatchNetworkFrame classifies every line before the parser runs: one
+		// classifyFrameLine names `datagram` is diverted to the ingress with the
+		// RAW wire bytes (§3.4, §5), and one it cannot resolve is refused
+		// unparsed (§4.1 step 1). A frame arriving here would mean the scan and
+		// encoding/json disagree on a line neither refused, which is a classifier
+		// bug — and delivering it would put the universal parse back in front of
+		// the neighbour's budget, which is the finding this branch used to be.
+		accepted = false
+		s.reportDatagramResidueUnreachable("inbound", addr)
+		return true
 	default:
 		accepted = false
 		_ = s.sendFrameViaNetworkSync(s.runCtx, connID, protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand})
@@ -3002,6 +3565,12 @@ var p2pWireCommands = map[string]bool{
 	// Batched poison-reverse (mesh_poison_reverse_v2, additive): one frame
 	// carries a list of lost identities — same auth/scope as v1.
 	"route_poison_v2": true,
+	// Datagram transport layer (mesh_datagram_v1 capability gate). Listed
+	// here so an UNAUTHENTICATED peer gets auth_required rather than
+	// unknown_command: the command exists on this port, it just needs a
+	// completed auth_session first. Same string-literal pattern as the
+	// frames above so command_scope_test stays happy.
+	"datagram": true,
 }
 
 // isP2PWireCommand returns true if the command name belongs to the
@@ -3230,13 +3799,18 @@ func (s *Service) enqueueFrameByID(id domain.ConnID, data []byte) enqueueResult 
 	case netcore.SendOK:
 		return enqueueSent
 	case netcore.SendBufferFull:
-		// Peer too slow — evict by closing the NetCore (closes raw socket
-		// + sendCh and waits for writer to drain).
+		// Peer too slow — evict by closing the NetCore (shuts the send gate,
+		// closes the raw socket and waits for the writer to drain).
 		log.Warn().Str("addr", addr).Msg("send buffer full, disconnecting slow peer")
 		pc.Close()
 		return enqueueDropped
-	case netcore.SendChanClosed:
-		// Connection already shutting down, don't close again.
+	case netcore.SendChanClosed, netcore.SendWriterDone:
+		// The link is already finished: the channel is closed, or the writer
+		// shut the queue the instant a socket write failed. Both are ordinary
+		// outcomes on a dying connection, not programming errors — an ERROR
+		// line per fire-and-forget frame would be a log storm exactly when the
+		// log has to stay readable, and Close() would be a second teardown of
+		// a connection that is already tearing itself down.
 		return enqueueDropped
 	default:
 		// netcore.SendStatusInvalid or any unexpected value — programming error.
@@ -3361,7 +3935,7 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 			continue
 		}
 		health := s.health[s.resolveHealthAddress(sess.address)]
-		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+		if !s.peerHealthAcceptsOutboundFramesLocked(health, now) {
 			continue
 		}
 		outbound = append(outbound, peerSendableConnection{
@@ -3385,7 +3959,7 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 			return true
 		}
 		health := s.health[s.resolveHealthAddress(info.address)]
-		if health == nil || !health.Connected || s.computePeerStateAtLocked(health, now) == peerStateStalled {
+		if !s.peerHealthAcceptsOutboundFramesLocked(health, now) {
 			return true
 		}
 		inbound = append(inbound, peerSendableConnection{
@@ -3471,7 +4045,7 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 			if c.outbound.conn == nil {
 				continue
 			}
-			if tryEnqueuePeerSessionFrame(c.outbound, frame) {
+			if s.enqueueSessionSendItem(c.outbound, legacyPeerSendItem(frame)) {
 				return true
 			}
 			continue
@@ -3509,24 +4083,6 @@ func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Fr
 		}
 	}
 	return false
-}
-
-// tryEnqueuePeerSessionFrame performs a non-blocking send to an outbound
-// session queue. It recovers from send-on-closed-channel so callers can
-// safely race with future teardown changes.
-func tryEnqueuePeerSessionFrame(sess *peerSession, frame protocol.Frame) (accepted bool) {
-	defer func() {
-		if recover() != nil {
-			accepted = false
-		}
-	}()
-
-	select {
-	case sess.sendCh <- frame:
-		return true
-	default:
-		return false
-	}
 }
 
 // writeJSONFrameByID marshals the frame and enqueues it on the NetCore
@@ -3590,7 +4146,10 @@ func (s *Service) enqueueSessionFrame(session *peerSession, data []byte) enqueue
 			_ = session.conn.Close()
 		}
 		return enqueueDropped
-	case netcore.SendChanClosed:
+	case netcore.SendChanClosed, netcore.SendWriterDone:
+		// Same rule as enqueueFrameByID: the connection is already finished,
+		// so the frame is dropped quietly instead of producing one ERROR line
+		// per frame and a second teardown.
 		return enqueueDropped
 	default:
 		addr := "unknown"
@@ -3694,6 +4253,12 @@ func logUnregisteredWrite(addr string, frame protocol.Frame, origin string) {
 		Msg("unregistered_write: conn missing NetCore — single-writer invariant violation, frame dropped")
 }
 
+// sendWelcomeFrame answers a peer's hello.
+func (s *Service) sendWelcomeFrame(connID domain.ConnID, challenge string, observedAddr string) {
+	_ = s.sendFrameViaNetwork(s.runCtx, connID, s.welcomeFrame(challenge, observedAddr))
+}
+
+// welcomeFrame builds the welcome this node answers a hello with.
 func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.Frame {
 	// v12 cleanup: welcome no longer carries the local advertise host
 	// in Listen — host is no longer a wire concept. The Listener flag
@@ -3709,6 +4274,8 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 	if s.cfg.EffectiveListenerEnabled() {
 		advertisePort = s.cfg.EffectiveAdvertisePort()
 	}
+	datagrams := s.localDatagramAdvertise()
+	advertised := s.localHandshakeCapabilityNames()
 	return protocol.Frame{
 		Type:                   "welcome",
 		Version:                config.ProtocolVersion,
@@ -3727,7 +4294,8 @@ func (s *Service) welcomeFrame(challenge string, observedAddr string) protocol.F
 		BoxSig:                 s.selfBoxSig,
 		ObservedAddress:        observedAddr,
 		Challenge:              challenge,
-		Capabilities:           localCapabilityStrings(s.cfg.EnableMeshRoutingV3),
+		Capabilities:           localHandshakeCapabilityStrings(advertised),
+		DTypes:                 s.localDTypeStrings(datagrams),
 	}
 }
 
@@ -3783,10 +4351,19 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 // initiator treats auth_ok as the handshake boundary (it no longer waits for a
 // subscribed frame), so a backlog frame arriving first would break its
 // post-handshake framing expectations.
-func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (protocol.Frame, bool, *subscriber) {
+// Two pieces of work are RETURNED rather than done here, and for one reason:
+// both write onto this connection, and both must follow the auth_ok that makes
+// the peer treat the connection as negotiated. The backlog replay is the older
+// of the two; the connect-time full sync joined it after a round in which the
+// dialler, having started refusing capability-gated frames until auth_ok, began
+// dropping the very route table this call sends.
+func (s *Service) handleAuthSession(
+	id domain.ConnID,
+	frame protocol.Frame,
+) (reply protocol.Frame, ok bool, backlogSub *subscriber, fullSync connectFullSync) {
 	// Trace checkpoints along this function share conn_id as the
 	// correlation key so the inbound-auth arc can be reconstructed from
-	// interleaved goroutine logs (announce + full-sync are spawned async).
+	// interleaved goroutine logs (announce is spawned async).
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_begin")
 
 	state := s.connAuthStateByID(id)
@@ -3796,12 +4373,12 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 			s.addBanScore(id, banIncrementInvalidSig)
 		}
 		log.Trace().Uint64("conn_id", uint64(id)).Str("reply_code", reply.Code).Msg("handle_auth_session_verify_failed")
-		return reply, false, nil
+		return reply, false, nil, connectFullSync{}
 	}
 	// Already verified — idempotent re-auth returns success immediately.
 	if state != nil && state.Verified {
 		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_idempotent")
-		return reply, true, nil
+		return reply, true, nil, connectFullSync{}
 	}
 
 	s.setConnAuthStateByID(id, verified)
@@ -3827,7 +4404,7 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	// We do NOT spawn the replay here: it is returned to the caller, which runs
 	// it strictly AFTER the auth_ok reply is enqueued, so backlog frames cannot
 	// race ahead of auth_ok on the writer (see the function doc).
-	backlogSub := helloSub
+	backlogSub = helloSub
 
 	// Announce the newly authenticated peer to all active outbound sessions.
 	// Only direct neighbors are notified (no recursive relay) and local
@@ -3867,7 +4444,7 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 		}
 		s.addPeerID(addr, domain.PeerIdentityFromWire(verified.Hello.Address))
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_begin")
-		s.trackInboundConnect(id, addr, domain.PeerIdentityFromWire(verified.Hello.Address))
+		fullSync = s.trackInboundConnect(id, addr, domain.PeerIdentityFromWire(verified.Hello.Address))
 		log.Trace().Uint64("conn_id", uint64(id)).Str("inbound_addr", string(addr)).Msg("handle_auth_session_track_end")
 		s.addPeerVersion(addr, verified.Hello.ClientVersion)
 		s.addPeerBuild(addr, verified.Hello.ClientBuild)
@@ -3894,7 +4471,7 @@ func (s *Service) handleAuthSession(id domain.ConnID, frame protocol.Frame) (pro
 	}
 
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_end")
-	return reply, true, backlogSub
+	return reply, true, backlogSub, fullSync
 }
 
 // authenticatedAddressForConn returns the verified hello frame for a
@@ -4011,13 +4588,19 @@ func (s *Service) rememberConnPeerAddr(id domain.ConnID, hello protocol.Frame, t
 	if pc == nil {
 		return
 	}
+	// The raw declarations ride the SAME ApplyOpts call as the typed caps so
+	// both land on the NetCore atomically: a session whose typed set came
+	// from one hello and whose raw set came from another would be two
+	// conflicting views of one handshake.
+	declarations := declarationsFromHandshake(hello)
 	pc.ApplyOpts(netcore.Options{
 		Address:         domain.PeerAddress(addr),
 		Identity:        domain.PeerIdentityFromWire(strings.TrimSpace(hello.Address)),
 		LastActivity:    time.Now().UTC(),
 		Networks:        domain.ParseNetGroups(hello.Networks),
-		Caps:            intersectCapabilities(localCapabilities(s.cfg.EnableMeshRoutingV3), hello.Capabilities),
+		Caps:            intersectCapabilities(localCapabilities(s.cfg.EnableMeshRoutingV3, s.localDatagramAdvertise()), hello.Capabilities),
 		ProtocolVersion: domain.ProtocolVersion(hello.Version),
+		Declarations:    &declarations,
 	})
 }
 
@@ -4053,7 +4636,30 @@ func (s *Service) trackedInboundPeerAddress(id domain.ConnID) domain.PeerAddress
 // connection for that address. peerIdentity is the Ed25519 fingerprint
 // from the hello/auth frame — used for routing table registration instead
 // of the transport address.
-func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddress, peerIdentity domain.PeerIdentity) {
+// connectFullSync is the connect-time route table this call decided to send,
+// described rather than performed.
+//
+// DATA and not a closure, and the difference is enforced rather than stylistic:
+// the lifecycle guard classifies a goroutine by reading the AST at its start,
+// so a `goBackground` handed an opaque function value is a goroutine nobody —
+// neither the guard nor a reviewer — can tell waits from one that does not. The
+// caller builds the literal, and what runs inside it stays visible at the line
+// that starts it.
+type connectFullSync struct {
+	// peer is whose table this is, by the identity the handshake proved.
+	peer domain.PeerIdentity
+	// due is false when the capability gate refused or the call was a repeat.
+	due bool
+}
+
+// The connect-time full sync is DESCRIBED rather than sent: it must not reach
+// the wire before the auth_ok that makes the peer treat this connection as
+// negotiated.
+func (s *Service) trackInboundConnect(
+	id domain.ConnID,
+	address domain.PeerAddress,
+	peerIdentity domain.PeerIdentity,
+) (fullSync connectFullSync) {
 	log.Trace().Uint64("conn_id", uint64(id)).Str("address", string(address)).Str("peer_identity", peerIdentity.String()).Msg("track_inbound_connect_begin")
 
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_before_lock")
@@ -4119,17 +4725,15 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	// on the same conn. AnnouncePeerState is thread-safe and sendCacheFn
 	// already guards cache mutation with its own mutex.
 	if s.connHasCapability(id, domain.CapMeshRoutingV1) && s.connHasCapability(id, domain.CapMeshRelayV1) {
-		log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_full_sync_spawn")
-		go func() {
-			defer crashlog.DeferRecover()
-			log.Trace().Uint64("conn_id", uint64(id)).Msg("full_sync_goroutine_begin")
-			// s.runCtx bounds the spawned full-sync goroutine so that
-			// service shutdown can abort a half-flushed inbound write
-			// instead of waiting the full syncFlushTimeout on a stuck
-			// hairpin socket.
-			s.sendFullTableSyncToInbound(s.runCtx, id, peerIdentity)
-			log.Trace().Uint64("conn_id", uint64(id)).Msg("full_sync_goroutine_end")
-		}()
+		log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_full_sync_deferred")
+		// RETURNED, not spawned. The caller runs it strictly AFTER auth_ok has
+		// been enqueued, for the same reason the backlog replay is deferred:
+		// this write goes onto the same connection, and the dialler treats a
+		// capability as negotiated only once auth_ok has landed. A goroutine
+		// started here races the auth_ok it must follow, and the race it can
+		// win costs the peer the whole connect-time route table — silently,
+		// because on the dialler this frame arrives before its own gate opens.
+		fullSync = connectFullSync{peer: peerIdentity, due: true}
 	} else {
 		log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_full_sync_skipped")
 	}
@@ -4143,6 +4747,7 @@ func (s *Service) trackInboundConnect(id domain.ConnID, address domain.PeerAddre
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_before_flush_ff")
 	s.flushPendingFireAndForget(id, resolved)
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_end")
+	return fullSync
 }
 
 // trackInboundDisconnect decrements the inbound connection reference count
@@ -4160,6 +4765,7 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 	var (
 		wasTracked   bool
 		peerIdentity domain.PeerIdentity
+		core         *netcore.NetCore
 	)
 	if entry := s.connEntryByIDLocked(id); entry != nil {
 		wasTracked = entry.tracked
@@ -4179,6 +4785,10 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 		// the surrounding block so the only nil case left for the helper is
 		// a missing core, which the fallback handles.
 		peerIdentity = s.connIdentityByIDLocked(id)
+		// coreForIDLocked is the single carve-out for the live handle, so the
+		// queue fence after the unlock reaches it the same way every other
+		// production read of a NetCore does (docs/netcore-migration.md scope (v)).
+		core = s.coreForIDLocked(id)
 	}
 	resolved := s.resolveHealthAddress(address)
 	if peerIdentity.IsZero() {
@@ -4194,6 +4804,30 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "trackInboundDisconnect").Str("phase", "lock_released").Uint64("conn_id", uint64(id)).Bool("last", last).Msg("peer_mu_writer")
+
+	// Stop the queue accepting BEFORE the peer is published as gone, and
+	// unconditionally: this connection is being torn down whether or not it was
+	// the last reference holding the health row up. Published first, the
+	// disconnect let a sender that had just passed the peer-state gate deposit a
+	// frame into a queue the teardown below discards, and read SendOK for it —
+	// so the datagram emitter counted a delivery and stopped walking the peer's
+	// remaining connections. The socket and the writer are left alone; the
+	// transport is closed by the caller's own teardown a few statements later
+	// (handleConn's defer), which is also where the registry entry this function
+	// still needs is removed.
+	//
+	// Outside peerMu on purpose. Not because an atomic gate raise would be
+	// unsafe under it, but because the rule that keeps this file readable is
+	// "side effects after the domain mutexes are released" (docs/locking.md) —
+	// and the ordering that matters here is against markPeerDisconnected below,
+	// which cannot run until this returns.
+	if core != nil {
+		core.ShutSendQueue()
+	}
+
+	// Between the two publications, and outside every lock: the only point from
+	// which their order is observable. See the peerTeardownBarrier field.
+	s.runPeerTeardownBarrier()
 
 	if last {
 		s.markPeerDisconnected(resolved, nil)
@@ -4550,22 +5184,41 @@ func (s *Service) identitiesFrame() protocol.Frame {
 	}
 }
 
+// contactsUnbounded is the limit that means "every contact this node holds",
+// and it is what the LOCAL answer asks for: dm_crypto looks a recipient's box
+// key up in that list, so a missing entry is a failed lookup rather than a
+// smaller reply.
+const contactsUnbounded = 0
+
 func (s *Service) contactsFrame() protocol.Frame {
+	return s.contactsFrameLimited(contactsUnbounded)
+}
+
+// contactsFrameLimited serialises at most `limit` of the known contacts, with
+// contactsUnbounded asking for all of them.
+//
+// The limit is applied DURING the walk, not to its result, and that is the
+// point of the parameter existing. A `fetch_contacts` frame costs the requester
+// four bytes; answering it by materialising all of s.boxKeys — bounded only by
+// maxKnownIdentities plus the pinned trust store — and then cutting the array to
+// the wire cap made the responder pay for its whole knowledge base, under
+// knowledgeMu.RLock, for a request that paid for a few thousand entries. The
+// bounded walk stops at the cap, so the reply costs what the reply is.
+//
+// The critical section holds no I/O and no callback and builds the wire frames
+// in place: the snapshot-then-format shape it replaced copied the same four
+// strings twice for every contact, so formatting outside the lock bought a
+// second full-size array rather than a shorter lock window.
+func (s *Service) contactsFrameLimited(limit int) protocol.Frame {
 	s.refreshKnowledgeFromPeers()
 
-	// Short critical section: snapshot map data under lock, format outside.
-	// Prevents writer starvation on s.knowledgeMu (see peerHealthFrames
-	// comment for the same pattern applied to s.peerMu).
-	type contactSnap struct {
-		Address string
-		PubKey  string
-		BoxKey  string
-		BoxSig  string
-	}
 	s.knowledgeMu.RLock()
-	snaps := make([]contactSnap, 0, len(s.boxKeys))
+	contacts := make([]protocol.ContactFrame, 0, contactsCapacityFor(limit, len(s.boxKeys)))
 	for address, boxKey := range s.boxKeys {
-		snaps = append(snaps, contactSnap{
+		if limit != contactsUnbounded && len(contacts) >= limit {
+			break
+		}
+		contacts = append(contacts, protocol.ContactFrame{
 			Address: address,
 			PubKey:  s.pubKeys[address],
 			BoxKey:  boxKey,
@@ -4574,21 +5227,53 @@ func (s *Service) contactsFrame() protocol.Frame {
 	}
 	s.knowledgeMu.RUnlock()
 
-	contacts := make([]protocol.ContactFrame, len(snaps))
-	for i, snap := range snaps {
-		contacts[i] = protocol.ContactFrame{
-			Address: snap.Address,
-			PubKey:  snap.PubKey,
-			BoxKey:  snap.BoxKey,
-			BoxSig:  snap.BoxSig,
-		}
-	}
-
 	return protocol.Frame{
 		Type:     "contacts",
 		Count:    len(contacts),
 		Contacts: contacts,
 	}
+}
+
+// contactsCapacityFor sizes the reply array so a bounded walk never allocates
+// for entries it will not visit, and an unbounded one still allocates once.
+func contactsCapacityFor(limit, held int) int {
+	if limit == contactsUnbounded || limit > held {
+		return held
+	}
+	return limit
+}
+
+// contactsFrameForNetwork is the `contacts` reply as it goes ON THE WIRE: the
+// same walk as the local answer, stopped at maxContactsPerResponse.
+//
+// The local builder has no count cap and must not grow one. It answers the RPC
+// where dm_crypto looks a recipient's box key up in the list; a trimmed local
+// answer would make key lookup fail on a node with many correspondents, for no
+// security gain — no wire, no parser and no verification loop is involved there.
+//
+// On the wire the same list is what the receiver pays a signature verification
+// per element for, so it is bounded by the number the receiver accepts. Capping
+// HERE rather than only refusing THERE is what keeps the cap from cutting a
+// legitimate exchange: a node whose s.boxKeys legitimately exceeds the cap —
+// possible up to maxKnownIdentities (50 000) plus the pinned trust store — would
+// otherwise have every one of its replies refused by every updated peer.
+//
+// The cap is spent DURING the walk and not on its result. Building the whole
+// array first and slicing it afterwards returned the same bytes but let a
+// four-byte request buy a full pass over the responder's knowledge base and two
+// arrays sized by it — an amplification of the same class the solicited-reply
+// budgets exist to close, and paid under knowledgeMu.RLock.
+//
+// Which entries survive is decided by Go's randomised map iteration, exactly as
+// before: successive fetches from the same peer sample different subsets, so a
+// requester converges on the whole set over several passes instead of being
+// pinned to one prefix forever. Making the bounded walk deterministic — sorting
+// the addresses and taking the first 4096 — was rejected for that reason: it is
+// the same cost and it makes the tail of a large node's contact set permanently
+// unreachable through this reply. There is no ranking here worth preserving; a
+// contact is not more relevant for having been learned earlier.
+func (s *Service) contactsFrameForNetwork() protocol.Frame {
+	return s.contactsFrameLimited(maxContactsPerResponse)
 }
 
 func (s *Service) trustedContactsFrame() protocol.Frame {
@@ -6495,9 +7180,15 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	// netcore.Network surface BEFORE unregister so the bridge can still
 	// look the entry up. NetCore.Close() handles the full shutdown
 	// sequence:
-	//   1. rawConn.Close() — unblocks writer stuck in conn.Write
-	//   2. close(sendCh) — signals writer to drain and exit
-	//   3. <-writerDone — waits for drain to complete
+	//   1. shut the send gate — every producer still holding the NetCore
+	//      is answered SendChanClosed instead of racing the teardown
+	//   2. rawConn.Close() — unblocks writer stuck in conn.Write
+	//   3. signal closing — writer releases the queue residue and returns
+	//   4. <-writerExited — waits for that to complete
+	//
+	// Step 1 is why the ordering here (Close, then unregister) is not a
+	// bug: the registry is not a lease, a sender may hold the NetCore
+	// across the whole teardown, and Close is what refuses it.
 	//
 	// Note: handleConn calls metered.Close() before unregisterInboundConn,
 	// which is now redundant (NetCore.Close does it). The double Close on
@@ -6700,6 +7391,8 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 	return protocol.Frame{Type: "notices", Count: len(items), Notices: items}
 }
 
+// nodeHelloJSONLine builds the marshalled hello line this node opens a session
+// with.
 func (s *Service) nodeHelloJSONLine() string {
 	// v12 cleanup: hello no longer carries the local advertise host in
 	// Listen — host is no longer a wire concept and is learned by the
@@ -6713,6 +7406,7 @@ func (s *Service) nodeHelloJSONLine() string {
 	if s.cfg.EffectiveListenerEnabled() {
 		advertisePort = s.cfg.EffectiveAdvertisePort()
 	}
+	datagrams := s.localDatagramAdvertise()
 	// reachableGroups is startup-immutable (see ipStateMu field doc); the
 	// read is intentionally lock-free.
 	line, err := protocol.MarshalFrameLine(protocol.Frame{
@@ -6730,7 +7424,8 @@ func (s *Service) nodeHelloJSONLine() string {
 		PubKey:        identity.PublicKeyBase64(s.identity.PublicKey),
 		BoxKey:        s.selfBoxKey,
 		BoxSig:        s.selfBoxSig,
-		Capabilities:  localCapabilityStrings(s.cfg.EnableMeshRoutingV3),
+		Capabilities:  localHandshakeCapabilityStrings(s.localHandshakeCapabilityNames()),
+		DTypes:        s.localDTypeStrings(datagrams),
 	})
 	if err != nil {
 		return ""
@@ -7111,21 +7806,49 @@ func (s *Service) importVerifiedSenderKeys(msg incomingMessage) {
 	}
 }
 
+// emitLocalChange offers event to every registered local-change inbox.
+//
+// The offers run UNDER gossipMu.RLock, which is the fence that lets the
+// cancel returned by SubscribeLocalChanges close its channel: the closer
+// takes gossipMu with write intent, so it cannot run while a publisher is
+// inside an offer. A snapshot taken under the lock and used after it is
+// released is not a licence to send — the entry it names may be closed by
+// then, and the send panics.
+//
+// Holding a domain mutex over the offers does not break the "no I/O under a
+// lock" rule: every offer is non-blocking, so the section is bounded by the
+// number of subscribers and contains no call that can re-enter Service. The
+// warn line is the side effect and stays outside, per the cross-domain rule
+// in docs/locking.md.
 func (s *Service) emitLocalChange(event protocol.LocalChangeEvent) {
-	s.gossipMu.RLock()
-	subs := make([]chan protocol.LocalChangeEvent, 0, len(s.events))
-	for ch := range s.events {
-		subs = append(subs, ch)
+	dropped := s.offerLocalChangeToSubscribers(event)
+	if dropped == 0 {
+		return
 	}
-	s.gossipMu.RUnlock()
+	log.Warn().
+		Str("type", string(event.Type)).
+		Str("message_id", event.MessageID).
+		Int("dropped_subscribers", dropped).
+		Msg("local change event dropped (channel full)")
+}
 
-	for _, ch := range subs {
+// offerLocalChangeToSubscribers performs the fenced offers and reports how
+// many inboxes were full. It takes s.gossipMu itself — the name carries no
+// *Locked suffix for exactly that reason — and exists as its own function so
+// the lock is held for the offers and for nothing else.
+func (s *Service) offerLocalChangeToSubscribers(event protocol.LocalChangeEvent) int {
+	s.gossipMu.RLock()
+	defer s.gossipMu.RUnlock()
+
+	dropped := 0
+	for ch := range s.events {
 		select {
 		case ch <- event:
 		default:
-			log.Warn().Str("type", string(event.Type)).Str("message_id", event.MessageID).Msg("local change event dropped (channel full)")
+			dropped++
 		}
 	}
+	return dropped
 }
 
 func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
@@ -7581,12 +8304,21 @@ func expectedReplyType(requestType string) string {
 // the outbound path. Both directions are therefore fire-and-forget; the
 // session loop additionally dispatches an inbound route_sync frame that
 // lands mid-peerSessionRequest (see peer_management.go).
+//
+// datagram is fire-and-forget by the layer's own definition: the transport is
+// best-effort and a datagram has no synchronous reply on the session
+// (docs/refactoring/datagram-transport.md §2). An answer to a request-mode
+// datagram, where one exists at all, arrives later as its own unsolicited
+// inbound frame. Routing it through peerSessionRequest would make the session
+// wait with expectedReplyType("") and swallow whatever unrelated frame came
+// next as the "reply".
 func isFireAndForgetFrame(frameType string) bool {
 	switch frameType {
 	case "announce_routes", "routes_update", "request_resync",
 		protocol.RouteAnnounceV3FrameType, protocol.RoutePoisonFrameType,
 		"push_message", "push_notice", "relay_delivery_receipt",
-		protocol.RouteSyncDigestFrameType, protocol.RouteSyncSummaryFrameType:
+		protocol.RouteSyncDigestFrameType, protocol.RouteSyncSummaryFrameType,
+		protocol.DatagramFrameType:
 		return true
 	default:
 		return isRelayFrame(frameType) || frameType == protocol.FileCommandFrameType

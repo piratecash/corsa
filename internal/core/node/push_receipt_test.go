@@ -252,7 +252,7 @@ func TestRelayDeliveryReceiptGossipsFallbackForUnrelatedRecipient(t *testing.T) 
 	svc.sessions[gossipTarget] = &peerSession{
 		address:      gossipTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	svc.health[gossipTarget] = &peerHealth{
@@ -331,7 +331,7 @@ func TestRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	svc.sessions[forwardTarget] = &peerSession{
 		address:      forwardTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 1),
+		sendCh:       make(chan peerSendItem, 1),
 		authOK:       true,
 	}
 	// activePeerSession requires Connected health with a recent pong
@@ -410,7 +410,7 @@ func TestSessionRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	svc.sessions[forwardTarget] = &peerSession{
 		address:      forwardTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 1),
+		sendCh:       make(chan peerSendItem, 1),
 		authOK:       true,
 	}
 	svc.health[forwardTarget] = &peerHealth{
@@ -422,7 +422,7 @@ func TestSessionRelayDeliveryReceiptForwardsTransitReceipt(t *testing.T) {
 	senderAddr := domain.PeerAddress("relay-hop-peer")
 	senderSession := &peerSession{
 		address: senderAddr,
-		sendCh:  make(chan protocol.Frame, 1),
+		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
 	}
 
@@ -481,7 +481,7 @@ func TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown(t *testing.T) {
 	svc.sessions[gossipTarget] = &peerSession{
 		address:      gossipTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	svc.health[gossipTarget] = &peerHealth{
@@ -492,7 +492,7 @@ func TestSessionRelayDeliveryReceiptGossipsFallbackForUnknown(t *testing.T) {
 	senderAddr := domain.PeerAddress("some-peer")
 	senderSession := &peerSession{
 		address: senderAddr,
-		sendCh:  make(chan protocol.Frame, 1),
+		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
 	}
 
@@ -554,7 +554,7 @@ func TestRelayDeliveryReceiptDedupeGossipInbound(t *testing.T) {
 	svc.sessions[gossipTarget] = &peerSession{
 		address:      gossipTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 8),
+		sendCh:       make(chan peerSendItem, 8),
 		authOK:       true,
 	}
 	svc.health[gossipTarget] = &peerHealth{
@@ -618,7 +618,7 @@ func TestRelayDeliveryReceiptDedupeForwardInbound(t *testing.T) {
 	svc.sessions[forwardTarget] = &peerSession{
 		address:      forwardTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	svc.health[forwardTarget] = &peerHealth{
@@ -678,7 +678,7 @@ func TestSessionRelayDeliveryReceiptDedupeGossip(t *testing.T) {
 	svc.sessions[gossipTarget] = &peerSession{
 		address:      gossipTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 8),
+		sendCh:       make(chan peerSendItem, 8),
 		authOK:       true,
 	}
 	svc.health[gossipTarget] = &peerHealth{
@@ -689,7 +689,7 @@ func TestSessionRelayDeliveryReceiptDedupeGossip(t *testing.T) {
 	senderAddr := domain.PeerAddress("dedupe-sender-peer")
 	senderSession := &peerSession{
 		address: senderAddr,
-		sendCh:  make(chan protocol.Frame, 1),
+		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
 	}
 
@@ -745,7 +745,7 @@ func TestSessionRelayDeliveryReceiptDedupeForward(t *testing.T) {
 	svc.sessions[forwardTarget] = &peerSession{
 		address:      forwardTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	svc.health[forwardTarget] = &peerHealth{
@@ -756,7 +756,7 @@ func TestSessionRelayDeliveryReceiptDedupeForward(t *testing.T) {
 	senderAddr := domain.PeerAddress("dedupe-sess-sender")
 	senderSession := &peerSession{
 		address: senderAddr,
-		sendCh:  make(chan protocol.Frame, 1),
+		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
 	}
 
@@ -840,7 +840,7 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 	svc.sessions[gossipTarget] = &peerSession{
 		address:      gossipTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	svc.health[gossipTarget] = &peerHealth{
@@ -882,7 +882,7 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	senderAddr := domain.PeerAddress("recovery-sender-peer")
 	senderSession := &peerSession{
 		address: senderAddr,
-		sendCh:  make(chan protocol.Frame, 1),
+		sendCh:  make(chan peerSendItem, 1),
 		authOK:  true,
 	}
 
@@ -926,7 +926,7 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	svc.sessions[gossipTarget] = &peerSession{
 		address:      gossipTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
-		sendCh:       make(chan protocol.Frame, 4),
+		sendCh:       make(chan peerSendItem, 4),
 		authOK:       true,
 	}
 	svc.health[gossipTarget] = &peerHealth{
@@ -984,8 +984,8 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 	// the next non-blocking send fails. Also saturate the GLOBAL pending
 	// ceiling so queuePeerFrame's fallback also fails (see below).
 	gossipTarget := domain.PeerAddress("sendfail-gossip-target:9999")
-	fullCh := make(chan protocol.Frame, 1)
-	fullCh <- protocol.Frame{Type: "filler"}
+	fullCh := make(chan peerSendItem, 1)
+	fullCh <- legacyPeerSendItem(protocol.Frame{Type: "filler"})
 	svc.sessions[gossipTarget] = &peerSession{
 		address:      gossipTarget,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},

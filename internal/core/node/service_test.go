@@ -2230,6 +2230,25 @@ func deriveTestAdvertisePort(cfg config.Node) config.Node {
 
 func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	t.Helper()
+	return startTestNodeWithSetup(t, cfg, nil)
+}
+
+// startTestNodeWithSetup builds the node startTestNode builds and hands it to
+// `setup` while it is still a plain object — BEFORE Run takes ownership of it.
+//
+// That window is the whole point. The moment Run is called the Service belongs
+// to its own goroutines: the config is read by the listener branch, the
+// connection manager by bootstrapLoop, and every domain map by the sweepers.
+// A fixture that assigns to one of those fields on the RETURNED service is a
+// data race, not a shortcut — and the race detector charges it to whichever
+// test happens to be running at that instant, so one such fixture fails a
+// dozen unrelated parallel tests and hides its own cause.
+//
+// Fields that live behind a domain mutex may still be set afterwards, under
+// that mutex, exactly as production code does it. `setup` is for the ones that
+// have no mutex because nothing was ever expected to write them twice.
+func startTestNodeWithSetup(t *testing.T, cfg config.Node, setup func(*Service)) (*Service, func()) {
+	t.Helper()
 
 	// Isolate peer state so tests never load leftover files from a
 	// previous run that happened to bind the same port.
@@ -2238,8 +2257,8 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 		cfg.PeersStatePath = filepath.Join(tmpDir, "peers.json")
 	}
 	// Allow private/loopback IPs as peer addresses in tests.
-	// Tests that explicitly verify forbidden-IP filtering should
-	// override this on the returned service after construction.
+	// Tests that explicitly verify forbidden-IP filtering turn this back off
+	// through `setup`, while the service is still theirs to write to.
 	cfg.AllowPrivatePeers = true
 	cfg = deriveTestAdvertisePort(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2250,6 +2269,9 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 	svc := NewService(cfg, id, nil)
 	svc.disableRateLimiting = true
 	svc.markPeerStateIntervalTest = -1
+	if setup != nil {
+		setup(svc)
+	}
 	return startTestService(t, ctx, cancel, svc)
 }
 
@@ -2968,7 +2990,7 @@ func TestFlushPendingPeerFramesExpiresDirectMessageByTTL(t *testing.T) {
 	// Canonical order: s.peerMu OUTER, s.deliveryMu INNER.
 	svc.peerMu.Lock()
 	svc.deliveryMu.Lock()
-	svc.sessions[address] = &peerSession{address: address, sendCh: make(chan protocol.Frame)}
+	svc.sessions[address] = &peerSession{address: address, sendCh: make(chan peerSendItem)}
 	svc.health[address] = &peerHealth{Address: address, Connected: true, State: peerStateHealthy}
 	svc.pending[address] = []pendingFrame{{
 		Frame: protocol.Frame{
@@ -4633,7 +4655,7 @@ func TestPendingQueueFallbackFlushedOnPrimary(t *testing.T) {
 	}
 
 	// Now create a session on the PRIMARY address and flush.
-	sendCh := make(chan protocol.Frame, 10)
+	sendCh := make(chan peerSendItem, 10)
 	svc.peerMu.Lock()
 	svc.sessions[primaryAddr] = &peerSession{address: primaryAddr, sendCh: sendCh}
 	svc.health[primaryAddr] = &peerHealth{Address: primaryAddr, Connected: true, State: peerStateHealthy}
@@ -5287,15 +5309,17 @@ func TestAddPeerFrameForbiddenIPError(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	// Restore strict filtering — this test verifies forbidden IPs are rejected.
+	// It is applied before Run: cfg is read by the run loop, so writing it on a
+	// started service races the listener branch.
+	svc, stop := startTestNodeWithSetup(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
+	}, func(svc *Service) {
+		svc.cfg.AllowPrivatePeers = false
 	})
 	defer stop()
-
-	// Restore strict filtering — this test verifies forbidden IPs are rejected.
-	svc.cfg.AllowPrivatePeers = false
 
 	// Link-local (169.254/16) is structurally undialable: it is forbidden by
 	// shouldSkipDialAddress and is NOT a manually-addable LAN address, so it
@@ -5330,17 +5354,18 @@ func TestAddPeerFrameAllowsLocalPrivatePeer(t *testing.T) {
 
 	peersPath := filepath.Join(t.TempDir(), "peers.json")
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	// Strict mode: private LAN peers are NOT auto-dialed, yet the operator
+	// may still add one by hand as a runtime-only dial intent. Applied before
+	// Run, which reads cfg from its own goroutine.
+	svc, stop := startTestNodeWithSetup(t, config.Node{
 		ListenAddress:  address,
 		PeersStatePath: peersPath,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
+	}, func(svc *Service) {
+		svc.cfg.AllowPrivatePeers = false
 	})
 	defer stop()
-
-	// Strict mode: private LAN peers are NOT auto-dialed, yet the operator
-	// may still add one by hand as a runtime-only dial intent.
-	svc.cfg.AllowPrivatePeers = false
 
 	for _, local := range locals {
 		local := local
@@ -7961,6 +7986,49 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	}
 }
 
+// newInboundTeardownFixture builds an UNSTARTED node whose connection manager
+// has its emit gate open and no event loop running, so a hint emitted by the
+// teardown path sits in hintEvents until the test drains it.
+//
+// Unstarted is the contract, not a shortcut. Run takes ownership of
+// s.connManager on its first turn — bootstrapLoop calls NotifyBootstrapReady —
+// so swapping a manager into a started service is a data race, and the race
+// detector charges it to whichever parallel test is running at that instant.
+// Starting the node and then swapping would also defeat the fixture's purpose:
+// Run starts the event loop of whatever manager it finds, and that loop drains
+// the very channel these tests read.
+//
+// The teardown path itself needs no run loop: registerInboundConn,
+// trackInboundConnect and trackInboundDisconnect work on the registry and the
+// peer domain, both of which NewService fully initialises.
+func newInboundTeardownFixture(t *testing.T) (*Service, *ConnectionManager) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate test identity: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:     "127.0.0.1:64646",
+		BootstrapPeers:    []string{},
+		AllowPrivatePeers: true,
+		PeersStatePath:    filepath.Join(tmpDir, "peers.json"),
+		TrustStorePath:    filepath.Join(tmpDir, "trust.json"),
+	}, id, nil)
+	svc.disableRateLimiting = true
+	svc.markPeerStateIntervalTest = -1
+	t.Cleanup(svc.WaitBackground)
+
+	cm := NewConnectionManager(ConnectionManagerConfig{
+		MaxSlotsFn: func() int { return 4 },
+		NowFn:      func() time.Time { return time.Now() },
+	})
+	cm.accepting.Store(1)
+	svc.connManager = cm
+	return svc, cm
+}
+
 // TestTrackInboundDisconnect_PrefersNetCoreIdentity pins the identity
 // source-of-truth precedence on the teardown path. When both the NetCore
 // mirror (set via core.SetIdentity on the connEntry in conn_registry.go)
@@ -7973,21 +8041,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	t.Parallel()
 
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	// Attach a CM with the emit gate open but no event loop running so the
-	// hint sits in hintEvents until the test drains it.
-	cm := NewConnectionManager(ConnectionManagerConfig{
-		MaxSlotsFn: func() int { return 4 },
-		NowFn:      func() time.Time { return time.Now() },
-	})
-	cm.accepting.Store(1)
-	svc.connManager = cm
+	svc, cm := newInboundTeardownFixture(t)
 
 	peer := domain.PeerAddress("10.0.0.7:64646")
 
@@ -8042,19 +8096,7 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	t.Parallel()
 
-	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
-		ListenAddress:  address,
-		BootstrapPeers: []string{},
-	})
-	defer stop()
-
-	cm := NewConnectionManager(ConnectionManagerConfig{
-		MaxSlotsFn: func() int { return 4 },
-		NowFn:      func() time.Time { return time.Now() },
-	})
-	cm.accepting.Store(1)
-	svc.connManager = cm
+	svc, cm := newInboundTeardownFixture(t)
 
 	peer := domain.PeerAddress("10.0.0.8:64646")
 
@@ -9246,7 +9288,7 @@ func TestHasOutboundSessionForInbound(t *testing.T) {
 
 	// Register an outbound session.
 	svc.peerMu.Lock()
-	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan protocol.Frame)}
+	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan peerSendItem)}
 	svc.peerMu.Unlock()
 
 	// Now should return true.
@@ -9289,7 +9331,7 @@ func TestHasOutboundSessionForInboundResolvesDialOrigin(t *testing.T) {
 	// Simulate production: outbound session dialed via fallback port,
 	// dialOrigin maps fallback → primary (the real production direction).
 	svc.peerMu.Lock()
-	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr, sendCh: make(chan protocol.Frame)}
+	svc.sessions[fallbackAddr] = &peerSession{address: fallbackAddr, sendCh: make(chan peerSendItem)}
 	svc.dialOrigin[fallbackAddr] = primaryAddr
 	svc.peerMu.Unlock()
 
@@ -9328,7 +9370,7 @@ func TestDuplicateInboundConnectionAllowed(t *testing.T) {
 
 	// Simulate an existing outbound session.
 	svc.peerMu.Lock()
-	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan protocol.Frame)}
+	svc.sessions[peerAddr] = &peerSession{address: peerAddr, sendCh: make(chan peerSendItem)}
 	svc.peerMu.Unlock()
 	svc.markPeerConnected(peerAddr, peerDirectionOutbound)
 
@@ -9383,7 +9425,7 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	svc.sessions[peerAddr] = &peerSession{
 		address: peerAddr,
 		connID:  42,
-		sendCh:  make(chan protocol.Frame),
+		sendCh:  make(chan peerSendItem),
 	}
 	svc.peerMu.Unlock()
 	svc.markPeerConnected(peerAddr, peerDirectionOutbound)
