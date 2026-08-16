@@ -247,7 +247,7 @@ func newDatagramResponseFrame(t *testing.T) protocol.DatagramFrame {
 		Src:     subject,
 		Dst:     label,
 		TTL:     9,
-		DType:   domain.DType("cached_identity"),
+		DType:   domain.DType("fixture_alt_response"),
 		Payload: []byte{0x01, 0x02, 0x03},
 	}
 }

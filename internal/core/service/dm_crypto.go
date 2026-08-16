@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -45,6 +46,88 @@ type DMCrypto struct {
 	rpc     *LocalRPCClient
 	chatlog *ChatlogGateway
 	id      *identity.Identity
+	// onDecryptFailure is the §4.10 single entry point: every decrypt path
+	// (live, previews, batch) reports through it. Optional — nil means no
+	// recovery subsystem is wired (SDK consumers). Set once at wiring time
+	// by the DMRouter, before any decrypt path can run.
+	onDecryptFailure func(DecryptFailure)
+
+	// onDecryptSuccess is the §4.10 receiver-side qualifying chokepoint:
+	// EVERY successfully decrypted incoming DM flows through it — the live
+	// event path, the history load and the previews alike — because both
+	// the established fact and the retry_of acceptance must not depend on
+	// which chat the UI happens to have open when the message arrives.
+	onDecryptSuccess func(*DirectMessage)
+
+	// onSendSuccess is the sender-side qualifying chokepoint: EVERY
+	// accepted user-authored outgoing DM flows through it — the composer,
+	// the RPC send, the file-transfer bridge — because the established
+	// fact must not depend on WHICH surface the user sent from.
+	onSendSuccess func(peer string)
+}
+
+// DecryptFailureClass separates the §4.10 outcome classes: only the
+// CONFIRMED crypto-fail (authenticated envelope, unreadable sealed parts)
+// leads to a notice; a missing sender key leads to a key lookup and a
+// local retry; everything else is not a recovery matter at all.
+type DecryptFailureClass uint8
+
+const (
+	// DecryptFailureMissingSenderKey — the sender's public key is unknown,
+	// verification could not even start.
+	DecryptFailureMissingSenderKey DecryptFailureClass = iota + 1
+	// DecryptFailureSealedUnreadable — the envelope authenticated but no
+	// sealed part opened with the current keys.
+	DecryptFailureSealedUnreadable
+)
+
+// DecryptFailure describes one failed decrypt of a stored DM row.
+type DecryptFailure struct {
+	MessageID string
+	Sender    string
+	Recipient string
+	Class     DecryptFailureClass
+}
+
+// noteDecryptFailure funnels a failed decrypt into the recovery hook,
+// applying the §4.10 entry condition: only rows addressed TO this node
+// FROM somebody else qualify — a failed decrypt of one's own outgoing row
+// is a manual-fallback case, never a network recovery.
+func (d *DMCrypto) noteDecryptFailure(class DecryptFailureClass, messageID, sender, recipient string) {
+	if d.onDecryptFailure == nil || messageID == "" {
+		return
+	}
+	if recipient != d.id.Address || sender == d.id.Address {
+		return
+	}
+	d.onDecryptFailure(DecryptFailure{MessageID: messageID, Sender: sender, Recipient: recipient, Class: class})
+}
+
+// noteDecryptSuccess funnels a decrypted message into the success hook
+// under the same entry condition as the failure side: incoming only.
+func (d *DMCrypto) noteDecryptSuccess(msg *DirectMessage) {
+	if d.onDecryptSuccess == nil || msg == nil {
+		return
+	}
+	if msg.Recipient.String() != d.id.Address || msg.Sender.String() == d.id.Address {
+		return
+	}
+	d.onDecryptSuccess(msg)
+}
+
+// notePreviewDecryptSuccess adapts a preview-path decrypt for the success
+// hook: previews are a first-read surface like any other — a replacement
+// first seen in the sidebar after a restart must close recovery, and a
+// decrypted incoming DM must establish the peer, whether or not the chat
+// ever opens.
+func (d *DMCrypto) notePreviewDecryptSuccess(entry *chatlog.Entry, plain *directmsg.PlainMessage) {
+	d.noteDecryptSuccess(&DirectMessage{
+		ID:        entry.ID,
+		Sender:    domain.PeerIdentityFromWire(entry.Sender),
+		Recipient: domain.PeerIdentityFromWire(entry.Recipient),
+		Body:      plain.Body,
+		RetryOf:   sanitizedRetryOf(plain.RetryOf),
+	})
 }
 
 // NewDMCrypto wires the three dependencies that the DM crypto path needs.
@@ -78,6 +161,9 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 	}
 	if !msg.ReplyTo.IsValidOrEmpty() {
 		return nil, fmt.Errorf("reply_to must be a valid message ID (UUID v4)")
+	}
+	if !msg.PresetID.IsValidOrEmpty() {
+		return nil, fmt.Errorf("preset id must be a valid message ID (UUID v4)")
 	}
 
 	contact, err := d.ensureRecipientContact(ctx, to.String())
@@ -121,9 +207,12 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		return nil, err
 	}
 
-	messageID, err := protocol.NewMessageID()
-	if err != nil {
-		return nil, err
+	messageID := protocol.MessageID(msg.PresetID)
+	if messageID == "" {
+		messageID, err = protocol.NewMessageID()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	now := time.Now().UTC()
@@ -148,6 +237,9 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		return nil, fmt.Errorf("unexpected send reply: %s", reply.Type)
 	}
 
+	if d.onSendSuccess != nil {
+		d.onSendSuccess(to.String())
+	}
 	return &DirectMessage{
 		ID:            string(messageID),
 		Sender:        domain.PeerIdentityFromWire(d.id.Address),
@@ -173,11 +265,20 @@ func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *Dire
 
 	senderPubKey, ok := d.resolveSenderPubKey(event.Sender)
 	if !ok {
+		// The §4.10 missing_sender_key class: the row stays undecrypted
+		// until a key lookup lands, then re-decrypts locally on the next
+		// read — no notice.
+		d.noteDecryptFailure(DecryptFailureMissingSenderKey, event.MessageID, event.Sender, event.Recipient)
 		return nil
 	}
 
 	msg, err := directmsg.DecryptForIdentity(d.id, event.Sender, senderPubKey, event.Recipient, event.Body)
 	if err != nil {
+		if errors.Is(err, directmsg.ErrSealedUnreadable) {
+			// The CONFIRMED crypto-fail class: envelope authenticated, keys
+			// rotated underneath it — the one case the notice exists for.
+			d.noteDecryptFailure(DecryptFailureSealedUnreadable, event.MessageID, event.Sender, event.Recipient)
+		}
 		return nil
 	}
 
@@ -206,17 +307,30 @@ func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *Dire
 		}
 	}
 
-	return &DirectMessage{
+	decrypted := &DirectMessage{
 		ID:            event.MessageID,
 		Sender:        domain.PeerIdentityFromWire(event.Sender),
 		Recipient:     domain.PeerIdentityFromWire(event.Recipient),
 		Body:          msg.Body,
 		ReplyTo:       replyTo,
+		RetryOf:       sanitizedRetryOf(msg.RetryOf),
 		Command:       domain.DMCommand(msg.Command),
 		CommandData:   msg.CommandData,
 		Timestamp:     ts,
 		ReceiptStatus: status,
 	}
+	d.noteDecryptSuccess(decrypted)
+	return decrypted
+}
+
+// sanitizedRetryOf mirrors the ReplyTo treatment: a malformed id degrades
+// to "no link" rather than poisoning downstream consumers.
+func sanitizedRetryOf(raw string) domain.MessageID {
+	retryOf := domain.MessageID(raw)
+	if retryOf != "" && !retryOf.IsValid() {
+		return ""
+	}
+	return retryOf
 }
 
 // SyncDirectMessagesFromPeers walks a list of peer addresses, pulls any
@@ -377,7 +491,7 @@ func (d *DMCrypto) FetchConversation(ctx context.Context, peerAddress domain.Pee
 		})
 	}
 
-	messages := decryptDirectMessages(d.id, decryptContacts, records, deliveryReceipts, pendingMessages)
+	messages := decryptDirectMessagesReporting(d.id, decryptContacts, records, deliveryReceipts, pendingMessages, d.onDecryptFailure, d.onDecryptSuccess)
 	sanitizeReplyReferences(messages, store, d.id.Address)
 	return messages, nil
 }
@@ -427,6 +541,10 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 		} else {
 			contact, ok := decryptContacts[senderRaw]
 			if !ok || contact.PubKey == "" {
+				// The sidebar render is one of the §4.10 entry points:
+				// without this report, recovery for a never-opened chat
+				// would not start at all.
+				d.noteDecryptFailure(DecryptFailureMissingSenderKey, entry.ID, entry.Sender, entry.Recipient)
 				ts, _ := parseTimestamp(entry.CreatedAt)
 				out = append(out, ConversationPreview{
 					PeerAddress: peer,
@@ -442,6 +560,9 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 
 		message, decryptErr := directmsg.DecryptForIdentity(d.id, senderRaw, senderPubKey, entry.Recipient, entry.Body)
 		if decryptErr != nil {
+			if errors.Is(decryptErr, directmsg.ErrSealedUnreadable) {
+				d.noteDecryptFailure(DecryptFailureSealedUnreadable, entry.ID, entry.Sender, entry.Recipient)
+			}
 			ts, _ := parseTimestamp(entry.CreatedAt)
 			out = append(out, ConversationPreview{
 				PeerAddress: peer,
@@ -453,6 +574,7 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 			continue
 		}
 
+		d.notePreviewDecryptSuccess(&entry, message)
 		ts, _ := parseTimestamp(entry.CreatedAt)
 		out = append(out, ConversationPreview{
 			PeerAddress: peer,
@@ -498,6 +620,7 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 	} else {
 		contact, ok := contacts[senderRaw]
 		if !ok || contact.PubKey == "" {
+			d.noteDecryptFailure(DecryptFailureMissingSenderKey, entry.ID, entry.Sender, entry.Recipient)
 			ts, _ := parseTimestamp(entry.CreatedAt)
 			return &ConversationPreview{
 				PeerAddress: peerAddress,
@@ -513,6 +636,9 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 
 	message, decryptErr := directmsg.DecryptForIdentity(d.id, senderRaw, senderPubKey, entry.Recipient, entry.Body)
 	if decryptErr != nil {
+		if errors.Is(decryptErr, directmsg.ErrSealedUnreadable) {
+			d.noteDecryptFailure(DecryptFailureSealedUnreadable, entry.ID, entry.Sender, entry.Recipient)
+		}
 		return &ConversationPreview{
 			PeerAddress: peerAddress,
 			Sender:      sender,
@@ -521,6 +647,7 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 		}, nil
 	}
 
+	d.notePreviewDecryptSuccess(entry, message)
 	return &ConversationPreview{
 		PeerAddress: peerAddress,
 		Sender:      sender,
@@ -573,6 +700,13 @@ func (d *DMCrypto) MarkConversationSeen(ctx context.Context, counterparty domain
 	return firstErr
 }
 
+// ErrRecipientKeysUnknown is the typed "cannot encrypt yet" failure: the
+// recipient's box key has not reached this node through any channel. A
+// distinguishable sentinel rather than error text, so the UI can show a
+// human explanation ("keys not received yet — key lookup is running") and
+// the send path can gate on it instead of string-matching.
+var ErrRecipientKeysUnknown = errors.New("recipient's encryption keys are not known yet — waiting for key discovery")
+
 // ensureRecipientContact makes sure the local trust store has an entry for
 // recipient before encryption. Falls back to the wider fetch_contacts set
 // and triggers a one-shot import when only network contacts know the key
@@ -594,7 +728,7 @@ func (d *DMCrypto) ensureRecipientContact(ctx context.Context, recipient string)
 	networkContacts := contactsFromFrame(networkReply)
 	contact, ok := networkContacts[recipient]
 	if !ok || contact.BoxKey == "" {
-		return Contact{}, fmt.Errorf("recipient box key is unknown")
+		return Contact{}, ErrRecipientKeysUnknown
 	}
 	if contact.PubKey == "" || contact.BoxSignature == "" {
 		return Contact{}, fmt.Errorf("recipient trust data is incomplete")
@@ -623,7 +757,7 @@ func (d *DMCrypto) ensureRecipientContact(ctx context.Context, recipient string)
 	trustedContacts = contactsFromFrame(trustedReply)
 	contact, ok = trustedContacts[recipient]
 	if !ok || contact.BoxKey == "" {
-		return Contact{}, fmt.Errorf("recipient box key is unknown")
+		return Contact{}, ErrRecipientKeysUnknown
 	}
 	return contact, nil
 }

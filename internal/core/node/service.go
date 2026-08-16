@@ -95,6 +95,20 @@ type Service struct {
 	externalListenCached atomic.Pointer[string]
 	eventBus             *ebus.Bus
 	trust                *trustStore
+	// identityResolver is the identity lookup engine (identity_resolver.go).
+	// Immutable after NewService; all mutable state lives behind the
+	// resolver's own mutex, so the field sits outside the domain-mutex
+	// scheme (docs/locking.md "fields outside").
+	identityResolver *identityResolver
+	// identityFileMu serialises the identity_backup / identity_restore
+	// RPC pair: both funnel secrets through one predictable <path>.tmp
+	// (identity.Save for restore, writeSecretFile for backup), so two
+	// concurrent calls could delete or rename each other's temp file and
+	// acknowledge content another call actually wrote. A leaf mutex
+	// outside the domain scheme (docs/locking.md "fields outside"): held
+	// only inside the two frame handlers around file I/O, takes no domain
+	// mutex and no domain mutex ever takes it.
+	identityFileMu sync.Mutex
 	// trustMutationMu serialises the {trust-store mutation, pin update}
 	// PAIRS in trustContact (remember → Pin) and deleteTrustedContactFrame
 	// (forget → Unpin). The two halves live in different lock domains
@@ -362,11 +376,21 @@ type Service struct {
 	//   • boxSigs  — address → boxkey-binding signature that ties boxKey
 	//                to the ed25519 identity; stored for re-verification
 	//                and for re-gossip to peers that are missing it
-	knowledgeMu sync.RWMutex
-	known       *boundedKnownIdentities
-	boxKeys     map[string]string
-	pubKeys     map[string]string
-	boxSigs     map[string]string
+	//   • selfRecord / selfRecordBody — the node's OWN signed identity
+	//                record (docs/protocol/identity-lookup.md §4.1): the
+	//                only artifact this node may answer a get_identity
+	//                with and the payload of every push_identity. Issued
+	//                once in NewService (after the persist has succeeded —
+	//                see self_record.go for the ordering contract) and
+	//                re-issued only by the seq-bump paths, all of which
+	//                write under this mutex.
+	knowledgeMu    sync.RWMutex
+	known          *boundedKnownIdentities
+	boxKeys        map[string]string
+	pubKeys        map[string]string
+	boxSigs        map[string]string
+	selfRecord     protocol.SignedIdentityRecord
+	selfRecordBody protocol.IdentityRecordBody
 
 	// gossipMu guards the "mesh-propagation" domain: the per-topic message
 	// backlog, its dedup set, the subscriber fan-out, ephemeral notices,
@@ -1367,6 +1391,18 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	boxKeys := map[string]string{}
 	pubKeys := map[string]string{}
 	boxSigs := map[string]string{}
+	// LRU eviction cascades into the key maps, which is what bounds THEM:
+	// every addKnownBoxKey/addKnownPubKey/addKnownBoxSig insert registers
+	// its address in `known` under the same knowledgeMu hold, so the key
+	// maps stay subsets of known ∪ pinned (≤ maxKnownIdentities + trust
+	// store size). The hook is installed BEFORE the seed loops below: a
+	// trust store holding more records than the bound must evict key-map
+	// entries during the seed too, or the maps start life over the limit.
+	known.onEvict = func(address string) {
+		delete(boxKeys, address)
+		delete(pubKeys, address)
+		delete(boxSigs, address)
+	}
 	// Trusted contacts are PINNED: their key knowledge must survive
 	// transit-identity churn (see boundedKnownIdentities.pinned).
 	for address, contact := range trust.trustedContacts() {
@@ -1375,18 +1411,26 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		pubKeys[address] = contact.PubKey
 		boxSigs[address] = contact.BoxSignature
 	}
-	// LRU eviction cascades into the key maps, which is what bounds THEM:
-	// every addKnownBoxKey/addKnownPubKey/addKnownBoxSig insert registers
-	// its address in `known` under the same knowledgeMu hold, so the key
-	// maps stay subsets of known ∪ pinned (≤ maxKnownIdentities + trust
-	// store size). Before this hook the three maps grew monotonically —
-	// one entry per identity ever seen on the network, never deleted.
-	known.onEvict = func(address string) {
-		delete(boxKeys, address)
-		delete(pubKeys, address)
-		delete(boxSigs, address)
+	// Persisted signed records reseed the key maps too (they were verified
+	// at import and re-verified at load): without this a restart would
+	// leave a resolved identity "known on disk" yet unusable for DM — and
+	// a repeat lookup would merge as duplicate without ever refilling the
+	// maps. Trusted-contact entries above stay authoritative for overlaps.
+	for _, body := range trust.recordBodies(networkName) {
+		address := body.Address.String()
+		if address == id.Address {
+			continue
+		}
+		known.Add(address)
+		if _, pinnedContact := pubKeys[address]; pinnedContact {
+			continue
+		}
+		pubKeys[address] = string(body.PubKey)
+		if body.DM {
+			boxKeys[address] = string(body.BoxKey)
+			boxSigs[address] = string(body.BoxSig)
+		}
 	}
-
 	// Delivery state (pending rings, outbound tracking, relay retry, receipts)
 	// is in-memory only: nothing survives a restart, recovery is sender-side
 	// end-to-end retry (docs/protocol/relay.md INV-8).
@@ -1811,6 +1855,36 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		svc.datagramPlane.Store(layer)
 	}
 
+	// The node's own signed identity record (docs/protocol/identity-lookup.md
+	// §4.1). Issued AFTER the datagram layer so the declared dtypes mirror
+	// the handshake declaration exactly (localDTypeStrings): absent while the
+	// plane is down, the registry's explicit set otherwise. A binary upgrade
+	// or rollback that changed the set re-issues with a bumped seq here.
+	// A failure is the same class as a trust-store load failure — the node
+	// must not run half-identified — hence the same panic.
+	selfRecordNetwork, err := domain.ParseNetworkID(networkName)
+	if err != nil {
+		panic(fmt.Errorf("parse network id %q: %w", networkName, err))
+	}
+	selfDTypes := domain.AbsentDTypes()
+	if svc.localDatagramAdvertise().Endpoint {
+		selfDTypes = domain.ExplicitDTypes(svc.localDatagramDTypes())
+	}
+	selfRecord, selfRecordBody, err := ensureSelfIdentityRecord(svc.trust, id, selfRecordSpec{
+		network: selfRecordNetwork,
+		dm:      !cfg.DisableDirectMessages,
+		dtypes:  selfDTypes,
+	}, time.Now())
+	if err != nil {
+		panic(fmt.Errorf("ensure self identity record: %w", err))
+	}
+	svc.selfRecord = selfRecord
+	svc.selfRecordBody = selfRecordBody
+
+	// Identity lookup engine: constructed after the self-record so the
+	// datagram handlers registered above observe a fully identified node.
+	svc.identityResolver = newIdentityResolver(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork)
+
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter()
 	svc.announceLimiter = newAnnounceRateLimiter()
@@ -2026,6 +2100,14 @@ func (s *Service) Run(ctx context.Context) error {
 	// goroutine — when the plane is not wired. They are ordinary lifecycle
 	// loops: they stop on ctx.Done and are joined by the teardown just armed.
 	s.startDatagramLayer(ctx)
+
+	// Identity lookup engine (identity_resolver.go). Reseeds the background
+	// phase from durable intents and then serves StartResolution calls; a
+	// node without the datagram plane keeps the loop — the routing gate
+	// refuses sends until a plane exists.
+	if s.identityResolver != nil {
+		s.goRunLoop(func() { s.identityResolver.run(ctx) })
+	}
 
 	// Start routing table TTL ticker and announce loop (Phase 1.2).
 	routingCtx, routingCancel := context.WithCancel(ctx)
@@ -3047,6 +3129,18 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// buffer would be wasted work the peer never reads.
 			return true
 		}
+		// Mandatory initial push_identity (identity-discovery layer), ordered
+		// behind auth_ok for the same reason as the backlog below. The proven
+		// inbound identity is the push's addressee; the send path skips peers
+		// without the plane and closes the connection on an enqueue fault.
+		if pushPeer := s.provenInboundPeerIdentity(connID); !pushPeer.IsZero() {
+			// lifecycle: joined by backgroundWg (WaitBackground). One bounded
+			// SendLocal enqueue; the close callback is a NetCore close, not a
+			// goroutine.
+			s.goBackground(func() {
+				s.sendInitialIdentityPush(s.runCtx, pushPeer, func() { _ = s.Network().Close(s.runCtx, connID) })
+			})
+		}
 		// Auto-subscribe backlog replay — strictly AFTER auth_ok has been
 		// enqueued into the writer (sendHandshakeReplyViaNetwork returned nil),
 		// so push_message/push_delivery_receipt frames are ordered behind
@@ -3139,6 +3233,9 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 	case "fetch_contacts":
 		// P2P contact sync: authenticated peers fetch the contact list
 		// for key material synchronization (syncPeer, syncContactsViaSession).
+		// Deprecated wire surface: superseded by the get_identity datagram
+		// lookup; served unchanged as the epidemic bridge for peers without
+		// the layer. TODO(fetch-contacts-floor): retire with the bridge.
 		// Session-setup phase — use the no-eviction handshake-reply path.
 		// contactsFrameForNetwork and not contactsFrame: the receiver verifies a
 		// signature per entry and refuses a reply past maxContactsPerResponse,
@@ -3690,6 +3787,14 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.relayStatusFrame()
 	case "fetch_reachable_ids":
 		return s.reachableIDsFrame()
+	case "resolve_identity":
+		return s.resolveIdentityFrame(frame)
+	case "resolve_identity_status":
+		return s.resolveIdentityStatusFrame(frame)
+	case "identity_backup":
+		return s.identityBackupFrame(frame)
+	case "identity_restore":
+		return s.identityRestoreFrame(frame)
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeUnknownCommand}
 	}
@@ -7633,6 +7738,25 @@ func (s *Service) addKnownBoxSig(address, boxSig string) {
 	s.boxSigs[address] = boxSig
 }
 
+// forgetKnownBoxKey drops the box-key half of an identity's knowledge —
+// the enforcement arm of an authoritative dm:false record: leaving the
+// old key in the maps would let fetch_contacts and the direct-send paths
+// keep encrypting to a key its owner has revoked.
+func (s *Service) forgetKnownBoxKey(address string) {
+	if address == "" {
+		return
+	}
+	log.Trace().Str("site", "forgetKnownBoxKey").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
+	s.knowledgeMu.Lock()
+	log.Trace().Str("site", "forgetKnownBoxKey").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
+	defer func() {
+		s.knowledgeMu.Unlock()
+		log.Trace().Str("site", "forgetKnownBoxKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
+	}()
+	delete(s.boxKeys, address)
+	delete(s.boxSigs, address)
+}
+
 // attachKnownSenderKeys stamps the DM sender's PUBLIC key triple
 // (Ed25519 signing key, X25519 box key, box-key binding signature) onto
 // an outgoing DM transport frame (relay_message / push_message). The
@@ -7798,6 +7922,7 @@ func (s *Service) importVerifiedSenderKeys(msg incomingMessage) {
 		}
 	}
 	if imported {
+		s.notifyIdentityKeysImported(msg.Sender)
 		log.Info().
 			Str("node", s.identity.Address).
 			Str("id", string(msg.ID)).
@@ -7923,6 +8048,7 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 
 	s.addKnownBoxKey(address, boxKey)
 	s.addKnownPubKey(address, pubKey)
+	s.notifyIdentityKeysImported(address)
 	if !existed {
 		log.Info().Str("address", address).Str("source", source).Msg("trusted new contact")
 	}

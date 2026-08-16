@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"image"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ func TestSearchKnownIdentities(t *testing.T) {
 	recipients := []domain.PeerIdentity{domain.PeerIdentityFromWire(listedHex)} // already listed
 	self := domain.PeerIdentityFromWire(selfHex)
 
-	results := searchKnownIdentities(knownIDs, recipients, self, "abc")
+	results := searchKnownIdentities(knownIDs, nil, recipients, self, "abc")
 
 	// listedHex is already listed → excluded.
 	// matchHex matches query → included.
@@ -66,9 +67,60 @@ func TestSearchKnownIdentities(t *testing.T) {
 }
 
 func TestSearchKnownIdentitiesEmptyQuery(t *testing.T) {
-	results := searchKnownIdentities([]string{"a", "b"}, nil, domaintest.ID("self"), "")
+	results := searchKnownIdentities([]string{"a", "b"}, nil, nil, domaintest.ID("self"), "")
 	if results != nil {
 		t.Fatalf("expected nil for empty query, got %v", results)
+	}
+}
+
+// TestSearchUnionIncludesReachable is the §4.9 search fix: an identity with
+// a live route but no observed keys must be findable — the routing table
+// learns about a fresh node seconds after it joins, the epidemic contact
+// plane only much later.
+func TestSearchUnionIncludesReachable(t *testing.T) {
+	const routedHex = "00abcf0000000000000000000000000000000000"
+	routed := domain.PeerIdentityFromWire(routedHex)
+	reachable := map[domain.PeerIdentity]bool{
+		routed:               true,
+		domaintest.ID("off"): false, // a dead route is not a search hit
+	}
+
+	results := searchKnownIdentities(nil, reachable, nil, domaintest.ID("self"), "abc")
+	if len(results) != 1 || results[0] != routed {
+		t.Fatalf("expected the routed identity, got %v", results)
+	}
+
+	// The same identity in both sets stays a single row.
+	results = searchKnownIdentities([]string{routedHex}, reachable, nil, domaintest.ID("self"), "abc")
+	if len(results) != 1 {
+		t.Fatalf("union produced duplicates: %v", results)
+	}
+}
+
+// TestSearchFullAddressCandidateRow: a complete valid 40-hex absent from
+// BOTH sets yields a selectable candidate row — absence from ReachableIDs
+// does not prove absence of a route, and opening the chat is what starts
+// key discovery.
+func TestSearchFullAddressCandidateRow(t *testing.T) {
+	const strangerHex = "aabbccddeeff00112233445566778899aabbccdd"
+
+	results := searchKnownIdentities(nil, nil, nil, domaintest.ID("self"), strangerHex)
+	if len(results) != 1 || results[0] != domain.PeerIdentityFromWire(strangerHex) {
+		t.Fatalf("expected the candidate row, got %v", results)
+	}
+
+	// The search normalises case, so an uppercase paste still resolves to
+	// the same candidate; a partial prefix never fabricates one.
+	if got := searchKnownIdentities(nil, nil, nil, domaintest.ID("self"), strings.ToUpper(strangerHex)); len(got) != 1 {
+		t.Fatalf("uppercase paste lost the candidate: %v", got)
+	}
+	if got := searchKnownIdentities(nil, nil, nil, domaintest.ID("self"), strangerHex[:39]); len(got) != 0 {
+		t.Fatalf("partial query fabricated a candidate: %v", got)
+	}
+
+	// A candidate equal to self stays hidden.
+	if got := searchKnownIdentities(nil, nil, nil, domain.PeerIdentityFromWire(strangerHex), strangerHex); len(got) != 0 {
+		t.Fatalf("self appeared as its own candidate: %v", got)
 	}
 }
 

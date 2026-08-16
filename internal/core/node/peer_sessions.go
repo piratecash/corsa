@@ -655,6 +655,19 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 		remoteAddr = session.netCore.RemoteAddr()
 	}
 	s.recordOutboundAuthSuccess(session.address, remoteAddr)
+
+	// Mandatory initial push_identity of the identity-discovery layer: right
+	// after auth each side of a datagram-capable session hands the other its
+	// own signed record. Fire-and-forget — the send path itself decides
+	// between "peer without the plane, skip" and "enqueue fault, close".
+	if peerID := s.sessionPeerIdentity(session); !peerID.IsZero() {
+		// lifecycle: joined by backgroundWg (WaitBackground). The push is one
+		// bounded SendLocal enqueue — milliseconds, no retry loop — and its
+		// session-close callback owns no goroutine of its own.
+		s.goBackground(func() {
+			s.sendInitialIdentityPush(s.runCtx, peerID, func() { _ = session.Close() })
+		})
+	}
 	return nil
 }
 

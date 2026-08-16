@@ -18,6 +18,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/contactlink"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
@@ -72,15 +73,22 @@ type Window struct {
 	compactBackBtn          widget.Clickable
 	sendButton              widget.Clickable
 	copyIdentityButton      widget.Clickable
-	languageToggle          widget.Clickable
-	languageOptions         map[string]*widget.Clickable
-	languageMenuList        widget.List
-	shutdown                func()
-	shutdownOnce            sync.Once
-	uiOpMu                  sync.RWMutex
-	uiOpClosed              bool
-	uiStopOnce              sync.Once
-	uiStopCh                chan struct{}
+	shareContactButton      widget.Clickable
+	// shareQRVisible / shareQRImage carry the §4.8 "share contact" QR
+	// panel; lastContactLinkTried edge-triggers the search-paste import
+	// (contact_share.go).
+	shareQRVisible       bool
+	shareQRImage         widget.Image
+	lastContactLinkTried string
+	languageToggle       widget.Clickable
+	languageOptions      map[string]*widget.Clickable
+	languageMenuList     widget.List
+	shutdown             func()
+	shutdownOnce         sync.Once
+	uiOpMu               sync.RWMutex
+	uiOpClosed           bool
+	uiStopOnce           sync.Once
+	uiStopCh             chan struct{}
 	// sendWG tracks UI-side goroutines that write through the router /
 	// chatlog: sendFileCore (transmit import + handoff), async message
 	// deletes and conversation-delete completion. The shutdown path
@@ -668,6 +676,11 @@ func (w *Window) startPolling(window *app.Window) {
 		w.eventBus.Subscribe(ebus.TopicFileDownloadCompleted, func(_ ebus.FileDownloadCompletedResult) {
 			go playDownloadDone()
 		})
+		// Identity lookup progress (§4.9): the axes arrive as full-state
+		// events; the UI surfaces the ones a user can act on.
+		w.eventBus.Subscribe(ebus.TopicIdentityResolutionChanged, func(state ebus.IdentityResolutionState) {
+			w.handleIdentityResolutionState(state)
+		})
 	}
 
 	go func() {
@@ -1042,6 +1055,26 @@ func (w *Window) swapComposerDraftOnPeerChange() {
 	// whose only "staleness" was the user switching away and back.
 
 	w.draftPeer = peer
+	w.maybeResolveIdentityKeys(peer)
+}
+
+// maybeResolveIdentityKeys starts the on-demand key lookup for a freshly
+// opened conversation whose partner has no usable box key yet (§4.9:
+// opening the chat is what starts key discovery). The resolver itself is
+// single-flight with a cooldown, so a repeated open costs nothing. The RPC
+// persists a durable intent (disk), hence the goroutine.
+func (w *Window) maybeResolveIdentityKeys(peer domain.PeerIdentity) {
+	if peer.IsZero() || w.router == nil {
+		return
+	}
+	if contact, ok := w.snap.NodeStatus.Contacts[peer.String()]; ok && contact.BoxKey != "" {
+		return
+	}
+	go func() {
+		if _, err := w.router.ResolveIdentity(peer); err != nil {
+			log.Debug().Err(err).Str("peer", peer.String()).Msg("identity_resolve_kick_failed")
+		}
+	}()
 }
 
 // setReplyContext sets (or, with nil, clears) the reply quote. Kept as a single
@@ -1314,7 +1347,11 @@ func (w *Window) retryFailedSends(peer domain.PeerIdentity) {
 		if err := w.router.SendMessage(peer, outgoing); err != nil {
 			// Immediate rejection: keep it in the list to retry later.
 			w.setFailedSends(peer, append(w.failedSends[peer], fs))
-			if !errors.Is(err, service.ErrConversationDeleteInflight) {
+			switch {
+			case errors.Is(err, service.ErrConversationDeleteInflight):
+			case errors.Is(err, service.ErrRecipientKeysUnknown):
+				w.router.SetSendStatus(w.t("status.recipient_keys_unknown"))
+			default:
 				w.router.SetSendStatus(w.t("status.send_failed", err.Error()))
 			}
 		}
@@ -1510,6 +1547,8 @@ func (w *Window) handleActions(gtx layout.Context) {
 			w.window.Invalidate()
 		}
 	}
+	w.handleShareContact(gtx)
+	w.handleContactLinkPaste()
 
 	w.handleContextMenuActions(gtx)
 	w.handleMsgContextMenuActions(gtx)
@@ -1763,6 +1802,14 @@ func (w *Window) triggerSend() {
 	if body == "" {
 		return
 	}
+	// A corsa: link in the composer is a contact hand-over, not a message:
+	// import it (§4.8) instead of sending the keys as chat text.
+	if contactlink.IsContactLink(body) {
+		if w.importContactLink(body) {
+			w.messageEditor.SetText("")
+		}
+		return
+	}
 	outgoing := domain.OutgoingDM{Body: body, FromComposer: true, ComposerEpoch: w.peerForgetEpoch[to]}
 	if w.replyToMsg != nil {
 		outgoing.ReplyTo = domain.MessageID(w.replyToMsg.ID)
@@ -1774,6 +1821,12 @@ func (w *Window) triggerSend() {
 		// intentionally blocked until the wipe terminates.
 		if errors.Is(err, service.ErrConversationDeleteInflight) {
 			w.router.SetSendStatus(w.t("status.compose_blocked_during_wipe"))
+			return
+		}
+		// A keyless recipient is a waiting state, not a failure: the message
+		// text survives in the composer and key discovery runs on its own.
+		if errors.Is(err, service.ErrRecipientKeysUnknown) {
+			w.router.SetSendStatus(w.t("status.recipient_keys_unknown"))
 			return
 		}
 		w.router.SetSendStatus(w.t("status.send_failed", err.Error()))
@@ -2433,17 +2486,43 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 
 	return w.card(gtx, w.t("clients.title"), rows, func(gtx layout.Context) layout.Dimensions {
 		return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(220)))
-			btn := material.Button(w.theme, &w.copyIdentityButton, w.t("clients.copy_identity"))
-			return btn.Layout(gtx)
+			// Stacked vertically: the sidebar is too narrow for two buttons
+			// side by side — a Rigid squeezed past its text width wraps the
+			// label one letter per line. Min.X is pinned to the same value
+			// as the cap, so both buttons render at ONE width regardless of
+			// how long their labels are in the active language.
+			buttonWidth := func(gtx layout.Context) layout.Context {
+				width := min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(220)))
+				gtx.Constraints.Min.X = width
+				gtx.Constraints.Max.X = width
+				return gtx
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(w.theme, &w.copyIdentityButton, w.t("clients.copy_identity"))
+					return btn.Layout(buttonWidth(gtx))
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					btn := material.Button(w.theme, &w.shareContactButton, w.t("clients.share_contact"))
+					return btn.Layout(buttonWidth(gtx))
+				}),
+			)
 		})
 	}, func(gtx layout.Context) layout.Dimensions {
-		children := []layout.FlexChild{
+		children := []layout.FlexChild{}
+		if w.shareQRVisible {
+			children = append(children,
+				layout.Rigid(w.layoutShareContactQR),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+			)
+		}
+		children = append(children,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.identitySearchCard(gtx, status, searchResults)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-		}
+		)
 
 		if len(recipients) == 0 {
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -2483,7 +2562,7 @@ const identitySearchMaxRows = 4
 // query change would open a real menu at the coordinates of a row that has
 // since moved. See menuRectSig.
 func (w *Window) resolveIdentitySearchRows(status service.NodeStatus, recipients []domain.PeerIdentity) []domain.PeerIdentity {
-	results := searchKnownIdentities(status.KnownIDs, recipients, w.snap.MyAddress, w.identitySearchEditor.Text())
+	results := searchKnownIdentities(status.KnownIDs, status.ReachableIDs, recipients, w.snap.MyAddress, w.identitySearchEditor.Text())
 	if len(results) > identitySearchMaxRows {
 		results = results[:identitySearchMaxRows]
 	}
@@ -5029,7 +5108,19 @@ func (w *Window) messageSelectable(id string) *widget.Selectable {
 	return sel
 }
 
-func searchKnownIdentities(knownIDs []string, recipients []domain.PeerIdentity, self domain.PeerIdentity, query string) []domain.PeerIdentity {
+// searchKnownIdentities matches the query against the UNION of the observed
+// identities (KnownIDs) and the routed ones (ReachableIDs). The two sets
+// answer different questions — "whose keys have I seen" and "whom can I
+// reach" — and a freshly announced node lives in the second long before it
+// reaches the first, which is exactly the row the search used to lose
+// (docs/protocol/identity-lookup.md).
+//
+// A full, valid 40-hex query absent from BOTH sets still yields a candidate
+// row: absence from ReachableIDs does not prove absence of a route — a nil
+// map means "state unknown", the snapshot has lawful staleness, and in the
+// DHT era no full reachable set will exist at all. "No route" is only ever
+// stated by the resolver's outcome, never by this filter.
+func searchKnownIdentities(knownIDs []string, reachable map[domain.PeerIdentity]bool, recipients []domain.PeerIdentity, self domain.PeerIdentity, query string) []domain.PeerIdentity {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if query == "" {
 		return nil
@@ -5041,24 +5132,38 @@ func searchKnownIdentities(knownIDs []string, recipients []domain.PeerIdentity, 
 	}
 
 	results := make([]domain.PeerIdentity, 0, len(knownIDs))
-	seen := make(map[domain.PeerIdentity]struct{}, len(knownIDs))
-	for _, raw := range knownIDs {
-		raw = strings.TrimSpace(raw)
-		if raw == "" || domain.PeerIdentityFromWire(raw) == self {
-			continue
+	seen := make(map[domain.PeerIdentity]struct{}, len(knownIDs)+len(reachable))
+	admit := func(raw string, id domain.PeerIdentity) {
+		if raw == "" || id == self || id.IsZero() {
+			return
 		}
-		id := domain.PeerIdentityFromWire(raw)
 		if _, ok := seen[id]; ok {
-			continue
+			return
 		}
 		seen[id] = struct{}{}
 		if _, ok := alreadyListed[id]; ok {
-			continue
+			return
 		}
 		if !strings.Contains(strings.ToLower(raw), query) {
-			continue
+			return
 		}
 		results = append(results, id)
+	}
+	for _, raw := range knownIDs {
+		raw = strings.TrimSpace(raw)
+		admit(raw, domain.PeerIdentityFromWire(raw))
+	}
+	for id, hasRoute := range reachable {
+		if hasRoute {
+			admit(id.String(), id)
+		}
+	}
+
+	// The candidate row: the user pasted a complete address nobody here has
+	// heard of yet. It must be selectable — opening the chat is what starts
+	// the key discovery.
+	if candidate, err := domain.ParsePeerIdentity(query); err == nil && !candidate.IsZero() {
+		admit(candidate.String(), candidate)
 	}
 
 	sort.Slice(results, func(i, j int) bool { return results[i].Compare(results[j]) < 0 })
@@ -6039,6 +6144,37 @@ func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
 // Status messages are intentionally short and non-modal: they go
 // through the same status bar the chat send path uses, so they get
 // replaced naturally when the next user action takes place.
+// handleIdentityResolutionState surfaces the actionable identity-lookup
+// states in the status line (§4.9): the interactive timeout with its
+// corsa:-link hint, success, exhaustion without keys, the no-route flag and
+// an authoritative DM opt-out. Runs on the subscriber goroutine — it only
+// touches the thread-safe router surface.
+func (w *Window) handleIdentityResolutionState(state ebus.IdentityResolutionState) {
+	if w.router == nil {
+		return
+	}
+	short := shortFingerprint(state.Target.String())
+	var msg string
+	switch {
+	case state.DMAvailable == domain.DMAvailabilityNo:
+		msg = w.t("status.identity_lookup_dm_disabled", short)
+	case state.Lifecycle == domain.IdentityResolutionSucceeded:
+		msg = w.t("status.identity_lookup_succeeded", short)
+	case state.Lifecycle == domain.IdentityResolutionExhausted && !state.Usable:
+		msg = w.t("status.identity_lookup_exhausted", short)
+	case state.InteractiveTimeout && !state.Usable && !state.Lifecycle.Terminal():
+		msg = w.t("status.identity_lookup_timeout", short)
+	case state.NoRoute && !state.Usable && !state.Lifecycle.Terminal():
+		msg = w.t("status.identity_lookup_no_route", short)
+	default:
+		return
+	}
+	w.router.SetSendStatus(msg)
+	if w.window != nil {
+		w.window.Invalidate()
+	}
+}
+
 func (w *Window) handleMessageDeleteOutcome(outcome ebus.MessageDeleteOutcome) {
 	if w.router == nil {
 		return

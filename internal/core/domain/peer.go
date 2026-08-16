@@ -295,6 +295,12 @@ const (
 	RouteChangeAnnouncement       RouteChangeReason = "announcement"
 	RouteChangeTransitInvalidated RouteChangeReason = "transit_invalidated"
 	RouteChangeTTLExpired         RouteChangeReason = "ttl_expired"
+	// RouteChangeSnapshot is published AFTER a fresh routing snapshot has
+	// been stored. Unlike the mutation-time reasons above — which fire while
+	// the cached snapshot is still stale — this one guarantees that
+	// RoutingSnapshot() already reflects the change, so reachability
+	// consumers reconcile on it and on nothing else.
+	RouteChangeSnapshot RouteChangeReason = "snapshot"
 )
 
 // InboundPeerRef describes a live inbound connection that has completed

@@ -473,6 +473,29 @@ func incomingContactsToTrust(self string, trustedContacts, decryptContacts map[s
 //  5. Clear any ReplyTo that fails UUID validation. Full cross-thread
 //     validation is the caller's job (sanitizeReplyReferences).
 func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingItems []PendingMessage) []DirectMessage {
+	return decryptDirectMessagesReporting(id, contacts, messages, receipts, pendingItems, nil, nil)
+}
+
+// decryptDirectMessagesReporting is the batch decrypt with the §4.10
+// failure hook: history loads are one of the three entry points that must
+// start recovery for rows they cannot open.
+func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]Contact, messages []MessageRecord, receipts []DeliveryReceipt, pendingItems []PendingMessage, report func(DecryptFailure), reportSuccess func(*DirectMessage)) []DirectMessage {
+	note := func(class DecryptFailureClass, messageID, sender, recipient string) {
+		if report == nil || messageID == "" || recipient != id.Address || sender == id.Address {
+			return
+		}
+		report(DecryptFailure{MessageID: messageID, Sender: sender, Recipient: recipient, Class: class})
+	}
+	noteSuccess := func(msg *DirectMessage) {
+		// The same incoming-only entry condition as the failure side: the
+		// §4.10 established fact and the retry_of acceptance must fire on
+		// a HISTORY load too — a replacement read after a restart, or in a
+		// background chat, closes recovery exactly like a live one.
+		if reportSuccess == nil || msg.Recipient.String() != id.Address || msg.Sender.String() == id.Address {
+			return
+		}
+		reportSuccess(msg)
+	}
 	receiptsByMessageID := make(map[string]DeliveryReceipt, len(receipts))
 	for _, receipt := range receipts {
 		existing, ok := receiptsByMessageID[receipt.MessageID]
@@ -501,6 +524,7 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 		} else {
 			contact, ok := contacts[sender]
 			if !ok || contact.PubKey == "" {
+				note(DecryptFailureMissingSenderKey, item.ID, sender, recipient)
 				continue
 			}
 			senderPubKey = contact.PubKey
@@ -508,6 +532,9 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 
 		message, err := directmsg.DecryptForIdentity(id, sender, senderPubKey, recipient, ciphertext)
 		if err != nil {
+			if errors.Is(err, directmsg.ErrSealedUnreadable) {
+				note(DecryptFailureSealedUnreadable, item.ID, sender, recipient)
+			}
 			continue
 		}
 
@@ -553,12 +580,14 @@ func decryptDirectMessages(id *identity.Identity, contacts map[string]Contact, m
 			Recipient:     domain.PeerIdentityFromWire(recipient),
 			Body:          message.Body,
 			ReplyTo:       replyTo,
+			RetryOf:       sanitizedRetryOf(message.RetryOf),
 			Command:       domain.DMCommand(message.Command),
 			CommandData:   message.CommandData,
 			Timestamp:     item.Timestamp,
 			ReceiptStatus: receiptStatus,
 			DeliveredAt:   deliveredAt,
 		})
+		noteSuccess(&out[len(out)-1])
 	}
 
 	return out

@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -497,5 +499,59 @@ func TestPrimeHotReadSnapshotsCoversRouting(t *testing.T) {
 
 	if svc.routingSnap.Load() == nil {
 		t.Fatal("primeHotReadSnapshots did not publish the routing snapshot")
+	}
+}
+
+// TestRoutingSnapshotEventOrdersReachability is the §1.2 regression test of
+// docs/refactoring/identity-discovery-lookup.md: after a table mutation, the
+// snapshot-reason TopicRouteTableChanged event must arrive strictly AFTER the
+// fresh snapshot is readable — a subscriber that reconciles reachability on
+// this event observes the mutated route, never the previous generation.
+func TestRoutingSnapshotEventOrdersReachability(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	bus := ebus.New()
+	svc.eventBus = bus
+
+	alice := domaintest.ID("alice")
+	observed := make(chan bool, 8)
+	bus.Subscribe(ebus.TopicRouteTableChanged, func(change ebus.RouteTableChange) {
+		if change.Reason != domain.RouteChangeSnapshot {
+			return
+		}
+		// Read through the same accessor a reachability consumer uses: the
+		// event's contract is that this read is already fresh.
+		best := svc.RoutingSnapshot().BestRoute(alice)
+		observed <- best != nil && best.Source != routing.RouteSourceLocal
+	})
+
+	// Prime: publishes the first snapshot event over an empty table.
+	svc.rebuildRoutingSnapshot()
+	select {
+	case reachable := <-observed:
+		if reachable {
+			t.Fatal("empty table reported alice reachable")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("prime rebuild published no snapshot event")
+	}
+
+	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: alice, Origin: domaintest.ID("bob"), NextHop: domaintest.ID("charlie"),
+		Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement,
+	}); err != nil {
+		t.Fatalf("UpdateRoute: %v", err)
+	}
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+
+	select {
+	case reachable := <-observed:
+		if !reachable {
+			t.Fatal("the snapshot event fired but the snapshot did not carry the mutation: the ordering guarantee is broken")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("post-mutation rebuild published no snapshot event")
 	}
 }

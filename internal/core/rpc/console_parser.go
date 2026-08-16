@@ -19,6 +19,10 @@ var canonicalNames = map[string]string{
 	"addpeer":               "addPeer",
 	"connectonly":           "connectOnly",
 	"fetchreachableids":     "fetchReachableIds",
+	"resolveidentity":       "resolveIdentity",
+	"resolveidentitystatus": "resolveIdentityStatus",
+	"identitybackup":        "identityBackup",
+	"identityrestore":       "identityRestore",
 	"fetchrelaystatus":      "fetchRelayStatus",
 	"fetchidentities":       "fetchIdentities",
 	"fetchcontacts":         "fetchContacts",
@@ -64,6 +68,10 @@ var canonicalNames = map[string]string{
 	"add_peer":                 "addPeer",
 	"connect_only":             "connectOnly",
 	"fetch_reachable_ids":      "fetchReachableIds",
+	"resolve_identity":         "resolveIdentity",
+	"resolve_identity_status":  "resolveIdentityStatus",
+	"identity_backup":          "identityBackup",
+	"identity_restore":         "identityRestore",
 	"fetch_relay_status":       "fetchRelayStatus",
 	"fetch_identities":         "fetchIdentities",
 	"fetch_contacts":           "fetchContacts",
@@ -398,6 +406,30 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 			return nil, fmt.Errorf("deleteTrustedContact requires address argument")
 		}
 		return map[string]interface{}{"address": args[0]}, nil
+
+	case "resolveidentity", "resolve_identity":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("resolveIdentity requires address argument")
+		}
+		return map[string]interface{}{"address": args[0]}, nil
+
+	case "resolveidentitystatus", "resolve_identity_status":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("resolveIdentityStatus requires resolution_id argument")
+		}
+		return map[string]interface{}{"resolution_id": args[0]}, nil
+
+	case "identitybackup", "identity_backup":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("identityBackup requires a file path argument")
+		}
+		return map[string]interface{}{"backup_path": args[0]}, nil
+
+	case "identityrestore", "identity_restore":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("identityRestore requires a file path argument")
+		}
+		return map[string]interface{}{"backup_path": args[0]}, nil
 
 	case "connectonly", "connect_only":
 		// Optional single argument: an address pins egress to that peer; no

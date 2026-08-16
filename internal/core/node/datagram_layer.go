@@ -159,13 +159,16 @@ func newDatagramPlaneParts(svc *Service, metrics *datagram.Metrics) (datagramPla
 	limits := datagram.DefaultLimits().Normalized()
 	clock := func() time.Time { return time.Now().UTC() }
 
-	// The registry is EMPTY in PR-0: no dtype ships yet, and the handshake
-	// says so with an explicitly empty `dtypes` field. Nothing is asserted
-	// about a FUTURE release's set here — the invariant that used to stand at
-	// this line checked a version this build never claims, so it could only
-	// ever pass, while the set it named made a silent peer count as an
-	// endpoint for four types nobody implements (§6.1).
+	// The registry starts with the identity-discovery kit
+	// (docs/protocol/identity-lookup.md): get_identity / post_identity /
+	// push_identity. Registration happens HERE — before any handshake can
+	// run — because §6.1 fixes the declared dtype set for the lifetime of a
+	// session, and the self identity record issued later in NewService
+	// declares this very set.
 	types := datagram.NewTypeRegistry()
+	if err := registerIdentityDiscoveryTypes(types, svc, network); err != nil {
+		return datagramPlaneParts{}, err
+	}
 
 	scheduler, err := datagram.NewScheduler(datagram.SchedulerConfig{
 		Routes:               datagramRouteResolver{service: svc},

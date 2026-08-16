@@ -234,6 +234,12 @@ const (
 	// summary so subscribers can decide whether to refresh their view.
 	// For full table state, subscribers call RoutingSnapshot().
 	//
+	// The mutation-time reasons fire while the cached routing snapshot is
+	// still the PREVIOUS generation. A subscriber that reads
+	// RoutingSnapshot() must reconcile on Reason == RouteChangeSnapshot —
+	// emitted strictly after the fresh snapshot is stored — and on nothing
+	// else, or it caches stale data until the next unrelated route event.
+	//
 	// Handler signature:
 	//   func(summary ebus.RouteTableChange)
 	TopicRouteTableChanged = "route.table.changed"
@@ -284,4 +290,17 @@ const (
 	// Handler signature:
 	//   func(ev ebus.CaptureSessionStopped)
 	TopicCaptureSessionStopped = "capture.session.stopped"
+)
+
+const (
+	// TopicIdentityResolutionChanged is emitted by the identity lookup
+	// engine on every state change of a resolution: lifecycle transitions,
+	// the interactive_timeout / no_route progress flags, authority and
+	// usable flips. Carries the full state; the node additionally retains
+	// the last state per resolution for resolve_identity_status, so a lost
+	// event is recoverable by polling.
+	//
+	// Handler signature:
+	//   func(state ebus.IdentityResolutionState)
+	TopicIdentityResolutionChanged = "identity.resolution.changed"
 )

@@ -321,3 +321,30 @@ type CaptureSessionStopped struct {
 	Error         string
 	DroppedEvents int64
 }
+
+// IdentityResolutionState is the payload for TopicIdentityResolutionChanged:
+// the four §4.9 axes of one identity lookup plus its progress flags. Every
+// event carries the FULL state — subscribers reconcile, they do not diff.
+type IdentityResolutionState struct {
+	// ResolutionID is the stable operation id RPC callers poll by.
+	ResolutionID string
+	Target       domain.PeerIdentity
+	Lifecycle    domain.IdentityResolutionLifecycle
+	Authority    domain.IdentityRecordAuthority
+	DMAvailable  domain.DMAvailability
+	// Usable — "keys applicable right now": flipped by the FIRST
+	// provisional source, unblocks sending, terminates nothing.
+	Usable bool
+	// InteractiveTimeout / NoRoute are progress flags, not terminals.
+	InteractiveTimeout bool
+	NoRoute            bool
+	// AnswerAttemptGen is the resolver's monotonic generation of the
+	// ATTEMPT whose proven answer terminated the resolution (zero for
+	// every other state). The DM recovery gate compares it against the
+	// watermark it recorded when arming: a lookup the recovery merely
+	// joined may have asked its question BEFORE the decrypt failure
+	// existed, and a proof for that question says nothing about the keys
+	// after it. A counter, not a timestamp — wall-clock steps must never
+	// re-validate an old question or wedge new ones.
+	AnswerAttemptGen uint64
+}

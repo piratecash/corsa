@@ -62,8 +62,17 @@ const (
 )
 
 type consoleEntry struct {
-	Command    string
-	Output     string
+	Command string
+	// Output is the DISPLAY text: capped in bytes and lines before any
+	// widget sees it (console_output.go). The complete output, when it
+	// exceeded the caps, lives in the overflow file.
+	Output string
+	// OverflowPath is the temp file carrying the full output; empty when
+	// Output is complete. Deleted when the entry is evicted and when the
+	// console window closes.
+	OverflowPath string
+	// FullBytes is the size of the full output, shown in the marker.
+	FullBytes  int
 	Failed     bool
 	CreatedAt  time.Time
 	OutputText widget.Selectable
@@ -208,6 +217,9 @@ type ConsoleWindow struct {
 	donateLink          widget.Selectable
 	donateLinkButton    widget.Clickable
 	stopRecordingButton widget.Clickable
+	// overflow owns the temp files carrying full command outputs whose
+	// display text was capped (console_output.go).
+	overflow            *consoleOverflowStore
 	ebusSubscriptions   []ebus.SubscriptionID // cleaned up on close to prevent handler leak
 	uptimeInvalidating  int32                 // atomic flag; coalesces uptime redraw requests
 	fileTabInvalidating int32                 // atomic flag; coalesces file-tab redraw requests during active transfers
@@ -246,6 +258,7 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 		suggestButtons:      make(map[string]*widget.Clickable),
 		selectedSuggest:     -1,
 		donateEntries:       newConsoleDonateEntries(),
+		overflow:            newConsoleOverflowStore(),
 	}
 	window.consoleEditor.SingleLine = true
 	window.donateLink.SetText(consoleDonateURL)
@@ -294,6 +307,10 @@ func (c *ConsoleWindow) Open() {
 				// Signal all cross-goroutine callers (ticker, command goroutine)
 				// to stop touching the window BEFORE the native handle is freed.
 				close(c.closed)
+
+				// The overflow files live exactly as long as the window that
+				// can show their entries.
+				c.overflow.removeAll()
 
 				// Remove ebus handlers so dead console doesn't accumulate
 				// subscriber entries on every open/close cycle.
@@ -894,9 +911,11 @@ func (c *ConsoleWindow) layoutConsoleHistoryCard(gtx layout.Context, entry *cons
 		fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
 		return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			for entry.CopyButton.Clicked(gtx) {
+				// Copy hands over the COMPLETE output: the display text was
+				// capped before layout, the overflow file was not.
 				gtx.Execute(clipboard.WriteCmd{
 					Type: "text/plain",
-					Data: io.NopCloser(strings.NewReader(entry.Output)),
+					Data: io.NopCloser(strings.NewReader(c.fullConsoleOutput(entry))),
 				})
 			}
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -984,25 +1003,24 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 			timedOut = true
 		}
 
-		entry := newConsoleEntry(consoleEntry{
+		full := output
+		failed := false
+		if err != nil {
+			full = err.Error()
+			failed = true
+		}
+		c.appendConsoleEntry(c.composeConsoleEntry(consoleEntry{
 			Command:   command,
 			CreatedAt: time.Now(),
-		})
-		if err != nil {
-			entry.Output = err.Error()
-			entry.Failed = true
-		} else {
-			entry.Output = output
-		}
-		entry.OutputText.SetText(entry.Output)
+			Failed:    failed,
+		}, full))
 
-		c.mu.Lock()
-		c.consoleEntries = append([]consoleEntry{entry}, c.consoleEntries...)
 		if !timedOut {
 			// Command completed normally — release the busy guard.
+			c.mu.Lock()
 			c.consoleBusy = false
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 		c.invalidateWindow()
 
 		if timedOut {
@@ -1013,20 +1031,19 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 			// wedging the console permanently.
 			select {
 			case r := <-ch:
-				lateEntry := newConsoleEntry(consoleEntry{
+				lateFull := r.output
+				lateFailed := false
+				if r.err != nil {
+					lateFull = r.err.Error()
+					lateFailed = true
+				}
+				c.appendConsoleEntry(c.composeConsoleEntry(consoleEntry{
 					Command:   command + " (late result)",
 					CreatedAt: time.Now(),
-				})
-				if r.err != nil {
-					lateEntry.Output = r.err.Error()
-					lateEntry.Failed = true
-				} else {
-					lateEntry.Output = r.output
-				}
-				lateEntry.OutputText.SetText(lateEntry.Output)
+					Failed:    lateFailed,
+				}, lateFull))
 
 				c.mu.Lock()
-				c.consoleEntries = append([]consoleEntry{lateEntry}, c.consoleEntries...)
 				c.consoleBusy = false
 				c.mu.Unlock()
 				c.invalidateWindow()
@@ -1039,16 +1056,13 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 				// has already retried the same command.
 				cancel()
 
-				abandonEntry := newConsoleEntry(consoleEntry{
+				c.appendConsoleEntry(c.composeConsoleEntry(consoleEntry{
 					Command:   command + " (abandoned)",
 					CreatedAt: time.Now(),
-				})
-				abandonEntry.Output = "command did not complete within 2m30s — console unlocked (command may still finish in background)"
-				abandonEntry.Failed = true
-				abandonEntry.OutputText.SetText(abandonEntry.Output)
+					Failed:    true,
+				}, "command did not complete within 2m30s — console unlocked (command may still finish in background)"))
 
 				c.mu.Lock()
-				c.consoleEntries = append([]consoleEntry{abandonEntry}, c.consoleEntries...)
 				c.consoleBusy = false
 				c.mu.Unlock()
 				c.invalidateWindow()

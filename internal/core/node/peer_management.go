@@ -1312,6 +1312,11 @@ func readSyncReply(ctx context.Context, reader *bufio.Reader, wantType string, b
 // syncPeerSession → peerSessionRequest on the same inboxCh, consuming
 // frames meant for the outer caller and causing a 12-second stall
 // (peerRequestTimeout).
+//
+// The contacts leg of this dial is deprecated: superseded by the
+// get_identity datagram lookup, kept as the epidemic bridge for peers
+// without the layer. TODO(fetch-contacts-floor): remove the leg when
+// nothing is left to bridge — see docs/protocol/identity-lookup.md.
 func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requestPeers bool) int {
 	conn, err := s.dialPeer(ctx, address, syncHandshakeTimeout)
 	if err != nil {
@@ -1831,6 +1836,7 @@ func (s *Service) learnWireIdentityKeys(address, pubKey, boxKey, boxSig string) 
 		s.addKnownBoxKey(address, boxKey)
 		s.addKnownBoxSig(address, boxSig)
 	}
+	s.notifyIdentityKeysImported(address)
 }
 
 // peerListenAddress extracts the legacy advertised listen address from a
@@ -3098,6 +3104,11 @@ func (s *Service) syncPeerSession(session *peerSession, requestPeers bool, path 
 //
 // Caller must ensure the session is not currently busy with another
 // peerSessionRequest (single-reader constraint on inboxCh).
+//
+// Deprecated: superseded by the get_identity datagram lookup and the initial
+// push_identity of the identity-discovery layer; kept as the epidemic bridge
+// for peers without the layer. TODO(fetch-contacts-floor): remove when
+// nothing is left to bridge — see docs/protocol/identity-lookup.md.
 func (s *Service) syncContactsViaSession(session *peerSession) (int, error) {
 	contactsFrame, err := s.peerSessionRequest(session, protocol.Frame{Type: "fetch_contacts"}, "contacts", false)
 	if err != nil {
@@ -3244,6 +3255,7 @@ func (s *Service) importAdvertisedContacts(
 		s.addKnownBoxKey(contact.Address, contact.BoxKey)
 		s.addKnownPubKey(contact.Address, contact.PubKey)
 		s.addKnownBoxSig(contact.Address, contact.BoxSig)
+		s.notifyIdentityKeysImported(contact.Address)
 		report.Imported++
 	}
 	return report
@@ -3271,6 +3283,10 @@ func (s *Service) importAdvertisedContacts(
 // session is currently inside a peerSessionRequest read loop (e.g.,
 // dispatchPeerSessionFrame dispatched during a ping), because the
 // single-reader constraint on inboxCh would cause a deadlock.
+// Deprecated: superseded by the get_identity datagram lookup; kept as the
+// epidemic bridge for peers without the layer.
+// TODO(fetch-contacts-floor): remove the fan-out when nothing is left to
+// bridge — see docs/protocol/identity-lookup.md.
 func (s *Service) syncSenderKeys(ctx context.Context, senderAddress domain.PeerAddress, syncSession *peerSession) int {
 	if syncSession != nil {
 		// Narrow contact/key recovery over an existing authenticated session:

@@ -190,6 +190,11 @@ type DMRouter struct {
 	// CompleteConversationDelete. See dm_router_conversation_delete.go.
 	convDeleteRetry *conversationDeleteRetryState
 
+	// recovery is the §4.10 decrypt-recovery subsystem
+	// (dm_router_recovery.go). Immutable after NewDMRouter; its mutable
+	// state sits behind the manager's own mutex and the chatlog.
+	recovery *recoveryManager
+
 	// wipeTombstones records message IDs the bulk wipe just removed
 	// from chatlog so a delayed re-delivery of the same encrypted
 	// envelope cannot resurrect a row the user thought they had wiped.
@@ -311,6 +316,15 @@ func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus
 		wipeTombstones:         newWipeTombstoneSet(),
 		inboundConvDeleteCache: newInboundConversationDeleteCache(),
 		inboundConvDeleteSeen:  newInboundConversationDeleteSeenSet(),
+	}
+	// The §4.10 decrypt-recovery subsystem: the manager owns the durable
+	// jobs, and every DMCrypto decrypt path reports through the hook. Set
+	// before Start(), so no decrypt can race the wiring.
+	r.recovery = newRecoveryManager(r)
+	if client != nil && client.dm != nil {
+		client.dm.onDecryptFailure = r.recovery.Report
+		client.dm.onDecryptSuccess = r.recovery.noteDecryptedIncoming
+		client.dm.onSendSuccess = r.recovery.noteOutgoingSent
 	}
 	// Seed snapCache so Snapshot() returns a valid (though minimal) state
 	// immediately. Without this, the first frames after Start() render an
@@ -697,6 +711,9 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 			cancel()
 		}
 
+		// The §4.10 established fact fires inside SendDirectMessage via the
+		// onSendSuccess chokepoint — every send surface shares it, so no
+		// per-caller marking here.
 		r.mu.Lock()
 		if r.peerGen[to] != gen {
 			// Peer was removed while the send was in flight. Do not
@@ -1016,6 +1033,31 @@ func (r *DMRouter) MyAddress() domain.PeerIdentity {
 	return r.client.Address()
 }
 
+// BuildContactLink renders this node's own corsa: contact link (§4.8).
+func (r *DMRouter) BuildContactLink() (string, error) {
+	return r.client.BuildContactLink()
+}
+
+// ResolveIdentity starts (or joins) the on-demand key lookup for target and
+// returns its resolution id. Never blocks on the network: progress arrives
+// via ebus.TopicIdentityResolutionChanged.
+func (r *DMRouter) ResolveIdentity(target domain.PeerIdentity) (string, error) {
+	reply, err := r.client.rpc.LocalRequestFrame(protocol.Frame{Type: "resolve_identity", Address: target.String()})
+	if err != nil {
+		return "", err
+	}
+	if reply.Type == "error" || reply.Resolution == nil {
+		return "", fmt.Errorf("resolve_identity: %s", reply.Error)
+	}
+	return reply.Resolution.ResolutionID, nil
+}
+
+// ImportContactLink verifies and imports a pasted corsa: link, returning
+// the imported identity.
+func (r *DMRouter) ImportContactLink(raw string) (domain.PeerIdentity, error) {
+	return r.client.ImportContactLink(raw)
+}
+
 func (r *DMRouter) SetSendStatus(s string) {
 	r.setSendStatusNotify(s)
 }
@@ -1150,6 +1192,25 @@ func (r *DMRouter) Start() {
 			defer r.endOp()
 			r.deleteRetryLoop(r.loopCtx)
 		}()
+	}
+
+	// 3b. The §4.10 decrypt-recovery scheduler: durable jobs live in the
+	// chatlog, so a restart resumes notice retries instead of restarting
+	// lookups. Same lifetime as the delete sweepers.
+	if r.recovery != nil && r.beginOp() {
+		r.loopOps.Add(1)
+		go func() {
+			defer r.loopOps.Done()
+			defer r.endOp()
+			r.recovery.run(r.loopCtx)
+		}()
+	}
+	// Resolution completions feed the proof gate of both recovery legs; an
+	// authoritative result also unblocks queued sender-side re-sends.
+	if r.recovery != nil && r.eventBus != nil {
+		r.eventBus.Subscribe(ebus.TopicIdentityResolutionChanged, func(state ebus.IdentityResolutionState) {
+			r.recovery.noteResolution(state)
+		})
 	}
 
 	// 4. Background retry sweeper for pending conversation_delete
@@ -1520,6 +1581,10 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		return
 	}
 
+	// The §4.10 receiver-side qualifying work (established fact, retry_of
+	// acceptance) fired inside DecryptIncomingMessage via the
+	// onDecryptSuccess chokepoint — every decrypt path shares it, so no
+	// per-branch handling here.
 	r.tryRegisterFileReceive(msg)
 	r.cache.AppendMessage(*msg)
 	r.mu.Lock()

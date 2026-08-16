@@ -137,6 +137,24 @@ type Frame struct {
 	// wire-identical to the legacy one.
 	DTypes *[]string `json:"dtypes,omitempty"`
 
+	// ResolutionID / Resolution / ResolutionReason carry the
+	// resolve_identity RPC pair (docs/protocol/identity-lookup.md §4.9):
+	// the request names an operation by id, the reply carries the full
+	// axis state; ResolutionReason selects the durable intent class
+	// ("recovery" with Frame.ID as the reason id; default is the UI-chat
+	// reason). Local RPC surface only — never dispatched on the P2P wire.
+	ResolutionID     string                   `json:"resolution_id,omitempty"`
+	ResolutionReason string                   `json:"resolution_reason,omitempty"`
+	Resolution       *IdentityResolutionFrame `json:"resolution,omitempty"`
+
+	// BackupPath / IdentityBackup carry the identity_backup /
+	// identity_restore local RPC pair (docs/protocol/identity-lookup.md
+	// §5): the request names a file on the node's own disk, the reply
+	// reports what was written — key material never crosses the RPC
+	// boundary. Local RPC surface only — never dispatched on the P2P wire.
+	BackupPath     string               `json:"backup_path,omitempty"`
+	IdentityBackup *IdentityBackupFrame `json:"identity_backup,omitempty"`
+
 	// Relay fields (Iteration 1 — hop-by-hop relay)
 	HopCount    int    `json:"hop_count,omitempty"`
 	MaxHops     int    `json:"max_hops,omitempty"`
@@ -342,6 +360,43 @@ type ResourceUsageFrame struct {
 }
 
 // TrafficHistoryFrame holds a rolling window of per-second traffic samples.
+// IdentityResolutionFrame is the RPC projection of one identity lookup's
+// §4.9 state: the four axes plus the progress flags.
+type IdentityResolutionFrame struct {
+	ResolutionID       string `json:"resolution_id"`
+	Target             string `json:"target"`
+	Lifecycle          string `json:"lifecycle"`
+	Authority          string `json:"authority"`
+	DMAvailable        string `json:"dm_available"`
+	Usable             bool   `json:"usable"`
+	InteractiveTimeout bool   `json:"interactive_timeout,omitempty"`
+	NoRoute            bool   `json:"no_route,omitempty"`
+	// AnswerAttemptGen (zero unless terminal-succeeded) is the resolver's
+	// monotonic generation of the attempt whose proven answer terminated
+	// the resolution; AttemptGenWatermark is the counter's value at reply
+	// time. Together they are the recovery gate's question-freshness
+	// anchor: an answer proves a question asked after the arm exactly
+	// when its generation exceeds the watermark recorded at arm time.
+	AnswerAttemptGen    uint64 `json:"answer_attempt_gen,omitempty"`
+	AttemptGenWatermark uint64 `json:"attempt_gen_watermark,omitempty"`
+}
+
+// IdentityBackupFrame is the local-RPC result of identity_backup /
+// identity_restore (docs/protocol/identity-lookup.md §5): the file path
+// involved, the identity it carries and the caveats the caller is obliged
+// to surface — never the key material itself.
+type IdentityBackupFrame struct {
+	Path      string `json:"path"`
+	Address   string `json:"address"`
+	RecordSeq uint64 `json:"record_seq,omitempty"`
+	// BoxKeyDerived marks the legacy Ed25519-only import branch: the
+	// address is preserved, the encryption key is derived and may differ
+	// from the original — Warning spells that out for the user.
+	BoxKeyDerived   bool   `json:"box_key_derived,omitempty"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
+	Warning         string `json:"warning,omitempty"`
+}
+
 type TrafficHistoryFrame struct {
 	IntervalSeconds int                  `json:"interval_seconds"`
 	Capacity        int                  `json:"capacity"`

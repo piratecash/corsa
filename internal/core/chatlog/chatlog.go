@@ -126,10 +126,14 @@ func NewStore(dir string, identity domain.PeerIdentity, listenAddress domain.Lis
 		return &Store{identityAddr: identityAddr}
 	}
 
-	return &Store{
+	store := &Store{
 		db:           db,
 		identityAddr: identityAddr,
 	}
+	if err := store.backfillEstablishedFromHistory(); err != nil {
+		log.Warn().Err(err).Msg("chatlog established backfill failed")
+	}
+	return store
 }
 
 // openResult describes the outcome of openAndVerify.
@@ -251,8 +255,13 @@ func initSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_messages_ttl
 		ON messages(flag, created_at) WHERE flag = 'auto-delete-ttl';
 	`
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	// The §4.10 decrypt-recovery tables (recovery.go). New TABLES are safe
+	// on an existing database — unlike new columns, which this store
+	// deliberately avoids in favour of the metadata JSON column.
+	return initRecoverySchema(db)
 }
 
 func (s *Store) Close() error {
@@ -445,12 +454,22 @@ func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity, since time.Time) (
 		return nil, nil
 	}
 
+	// A recovery-superseded original must never re-enter the ordinary
+	// retry path: its replacement is already in flight under a new id, and
+	// re-sending the OLD ciphertext would race the replacement with the
+	// very payload the receiver could not read. The exclusion reads the
+	// JSON field itself (json_extract), mirroring decodeRecoveryMarks: a
+	// null value, a non-object blob or the key nested inside some other
+	// value all count as NOT superseded — a LIKE substring test would
+	// wrongly drop those rows.
 	rows, err := s.db.Query(
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages
 		 WHERE topic = 'dm' AND sender = ? AND delivery_status = ?
 		   AND created_at >= ?
 		   AND id NOT IN (SELECT id FROM delivery_failed)
+		   AND (metadata IS NULL OR NOT json_valid(metadata)
+		        OR COALESCE(json_extract(metadata, '$.superseded_by'), '') = '')
 		 ORDER BY created_at ASC`,
 		self.String(), StatusSent, since.UTC().Format(time.RFC3339Nano))
 	if err != nil {

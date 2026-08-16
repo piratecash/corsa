@@ -312,6 +312,10 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"add_peer":                       "addPeer",
 		"connect_only":                   "connectOnly",
 		"fetch_reachable_ids":            "fetchReachableIds",
+		"resolve_identity":               "resolveIdentity",
+		"resolve_identity_status":        "resolveIdentityStatus",
+		"identity_backup":                "identityBackup",
+		"identity_restore":               "identityRestore",
 		"fetch_aggregate_status":         "fetchAggregateStatus",
 		"fetch_relay_status":             "fetchRelayStatus",
 		"fetch_identities":               "fetchIdentities",
@@ -469,6 +473,43 @@ func unavailableError(err error) CommandResponse {
 // (and between) expensive operations so that abandoned console commands
 // stop as early as possible without requiring deep context threading
 // through HandleLocalFrame and its callees.
+// waitForResolution polls resolve_identity_status until the resolution
+// reaches a terminal lifecycle, flips usable, or the console budget runs
+// out — whichever is first. The console is the ONE surface allowed to wait
+// synchronously on a lookup; every other caller consumes the async events.
+func waitForResolution(ctx context.Context, node NodeProvider, started protocol.Frame) protocol.Frame {
+	const (
+		waitBudget   = 8 * time.Second
+		pollInterval = 300 * time.Millisecond
+	)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deadline := time.Now().Add(waitBudget)
+	latest := started
+	for time.Now().Before(deadline) {
+		if latest.Resolution != nil {
+			lifecycle := domain.IdentityResolutionLifecycle(latest.Resolution.Lifecycle)
+			if lifecycle.Terminal() || latest.Resolution.Usable {
+				return latest
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return latest
+		case <-time.After(pollInterval):
+		}
+		next := node.HandleLocalFrame(protocol.Frame{Type: "resolve_identity_status", ResolutionID: started.Resolution.ResolutionID})
+		if next.Type == "error" {
+			// The retained state expired mid-poll; the started reply is
+			// still the honest answer.
+			return latest
+		}
+		latest = next
+	}
+	return latest
+}
+
 func ctxDone(req CommandRequest) (CommandResponse, bool) {
 	if req.Ctx == nil {
 		return CommandResponse{}, false
@@ -703,6 +744,69 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 				return r
 			}
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"}))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "resolveIdentity", Description: "Resolve an identity's keys via the mesh lookup (waits briefly for a terminal state)", Category: "identity", Usage: "<address>"},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			address, _ := req.Args["address"].(string)
+			if strings.TrimSpace(address) == "" {
+				return validationError(fmt.Errorf("address is required"))
+			}
+			started := node.HandleLocalFrame(protocol.Frame{Type: "resolve_identity", Address: strings.TrimSpace(address)})
+			if started.Type == "error" || started.Resolution == nil {
+				return frameResponse(started)
+			}
+			// The console is the ONE place a synchronous wait is allowed
+			// (docs/protocol/identity-lookup.md §4.9): poll the status until a
+			// terminal, the usable flip or the deadline, whichever is first.
+			return frameResponse(waitForResolution(req.Ctx, node, started))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "identityBackup", Description: "Write a versioned full identity backup (both private keys and the record seq) to a file on the node's disk", Category: "identity", Usage: "<file>"},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			path, _ := req.Args["backup_path"].(string)
+			if strings.TrimSpace(path) == "" {
+				return validationError(fmt.Errorf("backup file path is required"))
+			}
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "identity_backup", BackupPath: strings.TrimSpace(path)}))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "identityRestore", Description: "Restore the identity file from a backup (versioned JSON or legacy Ed25519 key); requires an app restart to take effect", Category: "identity", Usage: "<file>"},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			path, _ := req.Args["backup_path"].(string)
+			if strings.TrimSpace(path) == "" {
+				return validationError(fmt.Errorf("backup file path is required"))
+			}
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "identity_restore", BackupPath: strings.TrimSpace(path)}))
+		},
+	)
+
+	t.Register(
+		CommandInfo{Name: "resolveIdentityStatus", Description: "Read the state of a running or recently finished identity resolution", Category: "identity", Usage: "<resolution_id>"},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			id, _ := req.Args["resolution_id"].(string)
+			if strings.TrimSpace(id) == "" {
+				return validationError(fmt.Errorf("resolution_id is required"))
+			}
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "resolve_identity_status", ResolutionID: strings.TrimSpace(id)}))
 		},
 	)
 

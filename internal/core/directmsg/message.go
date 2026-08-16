@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,7 +20,34 @@ type PlainMessage struct {
 	ReplyTo     string    `json:"reply_to,omitempty"`
 	Command     string    `json:"command,omitempty"`      // e.g. "file_announce"; empty for regular DMs
 	CommandData string    `json:"command_data,omitempty"` // JSON-encoded payload; empty for regular DMs
+	// RetryOf is the original message id this envelope re-sends after a
+	// decrypt-failure recovery (docs/protocol/identity-lookup.md §4.10).
+	// Inside the encrypted part, like ReplyTo, and for the same privacy
+	// reason: the relation between two ciphertexts is nobody's business
+	// but the two endpoints'.
+	RetryOf string `json:"retry_of,omitempty"`
 }
+
+// Decrypt failures are three DIFFERENT situations with three different
+// recoveries, and the §4.10 machinery may only ever act on the last one:
+// malformed bytes and a failed authentication carry no proof of who sent
+// them (no notice — it would be spendable slander), while an AUTHENTICATED
+// envelope whose sealed parts will not open proves the counterparty's key
+// changed — the one case worth a decrypt_failed notice.
+var (
+	// ErrEnvelopeMalformed — the bytes are not a well-formed dm-v1
+	// envelope: base64/JSON breakage or an unknown version.
+	ErrEnvelopeMalformed = errors.New("direct message: malformed envelope")
+
+	// ErrEnvelopeAuth — structure is fine but authentication failed: the
+	// addresses do not match or the signature does not verify.
+	ErrEnvelopeAuth = errors.New("direct message: envelope authentication failed")
+
+	// ErrSealedUnreadable — the envelope IS authentic (signature and both
+	// addresses verified) but neither sealed part opens with this
+	// identity's keys: the confirmed crypto-fail class of §4.10.
+	ErrSealedUnreadable = errors.New("direct message: sealed payload unreadable with current keys")
+)
 
 type sealedEnvelope struct {
 	Version   string     `json:"version"`
@@ -54,6 +82,7 @@ func EncryptForParticipants(sender *identity.Identity, recipient domain.DMRecipi
 		ReplyTo:     string(msg.ReplyTo),
 		Command:     string(msg.Command),
 		CommandData: msg.CommandData,
+		RetryOf:     string(msg.RetryOf),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal direct message: %w", err)
@@ -112,7 +141,9 @@ func DecryptForIdentity(id *identity.Identity, senderAddress, senderPublicKeyBas
 		}
 	}
 
-	return nil, fmt.Errorf("decrypt direct message: no readable payload")
+	// The envelope authenticated above; only the sealed halves refused the
+	// current keys — the typed class the recovery machinery keys on.
+	return nil, ErrSealedUnreadable
 }
 
 func VerifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, encoded string) error {
@@ -123,22 +154,22 @@ func VerifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, enco
 func verifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, encoded string) (sealedEnvelope, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return sealedEnvelope{}, fmt.Errorf("decode direct envelope: %w", err)
+		return sealedEnvelope{}, fmt.Errorf("%w: decode: %w", ErrEnvelopeMalformed, err)
 	}
 
 	var envelope sealedEnvelope
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return sealedEnvelope{}, fmt.Errorf("unmarshal direct envelope: %w", err)
+		return sealedEnvelope{}, fmt.Errorf("%w: unmarshal: %w", ErrEnvelopeMalformed, err)
 	}
 
 	if envelope.Version != "dm-v1" {
-		return sealedEnvelope{}, fmt.Errorf("unsupported direct message version: %s", envelope.Version)
+		return sealedEnvelope{}, fmt.Errorf("%w: unsupported version %s", ErrEnvelopeMalformed, envelope.Version)
 	}
 	if envelope.From != senderAddress {
-		return sealedEnvelope{}, fmt.Errorf("sender mismatch in envelope")
+		return sealedEnvelope{}, fmt.Errorf("%w: sender mismatch", ErrEnvelopeAuth)
 	}
 	if envelope.To != recipientAddress {
-		return sealedEnvelope{}, fmt.Errorf("recipient mismatch in envelope")
+		return sealedEnvelope{}, fmt.Errorf("%w: recipient mismatch", ErrEnvelopeAuth)
 	}
 
 	senderPublicKey, err := decodeSenderPublicKey(senderAddress, senderPublicKeyBase64)
@@ -148,7 +179,7 @@ func verifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, enco
 
 	signature, err := base64.RawURLEncoding.DecodeString(envelope.Signature)
 	if err != nil {
-		return sealedEnvelope{}, fmt.Errorf("decode signature: %w", err)
+		return sealedEnvelope{}, fmt.Errorf("%w: decode signature: %w", ErrEnvelopeMalformed, err)
 	}
 
 	unsignedBytes, err := marshalUnsignedEnvelope(sealedEnvelope{
@@ -163,7 +194,7 @@ func verifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, enco
 	}
 
 	if !ed25519.Verify(senderPublicKey, unsignedBytes, signature) {
-		return sealedEnvelope{}, fmt.Errorf("invalid direct message signature")
+		return sealedEnvelope{}, fmt.Errorf("%w: invalid signature", ErrEnvelopeAuth)
 	}
 
 	return envelope, nil

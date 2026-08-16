@@ -531,6 +531,8 @@ func (r *DMRouter) onControlMessage(event protocol.LocalChangeEvent) {
 	}
 
 	switch cmd {
+	case domain.DMCommandDecryptFailed:
+		r.handleInboundDecryptFailed(sender.String(), payload)
 	case domain.DMCommandMessageDelete:
 		r.handleInboundMessageDelete(sender, payload)
 	case domain.DMCommandMessageDeleteAck:

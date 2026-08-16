@@ -42,6 +42,11 @@ func Run() error {
 	// failed-send entry can reference them. See file_attach_stream.go.
 	cleanupAttachTmp()
 
+	// Sweep console overflow directories orphaned by crashed processes
+	// (console_output.go) — same moment, same reasoning: no console window
+	// exists yet, so nothing can reference them.
+	cleanupOrphanedConsoleOverflow(time.Now())
+
 	id, err := identity.LoadOrCreate(cfg.Node.IdentityPath)
 	if err != nil {
 		return err

@@ -18,7 +18,7 @@ Every previously-`s.mu`-protected field moves to exactly one of the following mu
 |---|---|
 | `peerMu` | `sessions`, `health`, `peerIDs`, `peerTypes`, `peerVersions`, `peerBuilds`, `inboundHealthRefs`, `identitySessions`, `identityRelaySessions`, `peers`, `conns`, `connIDByNetConn`, `connIDCounter`, `dialOrigin`, `persistedMeta`, `peerStateDirty` |
 | `deliveryMu` | `pending`, `pendingKeys`, `outbound`, `relayRetry`, `awaitingDelivered`, `awaitingSeenAck`, `sentDMIDs`, `seenReceipts`, `receipts`, `upstream` |
-| `knowledgeMu` | `known`, `boxKeys`, `pubKeys`, `boxSigs` |
+| `knowledgeMu` | `known`, `boxKeys`, `pubKeys`, `boxSigs`, `selfRecord`, `selfRecordBody` |
 | `gossipMu` | `topics`, `seen`, `subs`, `notices`, `events`, `lastExpiredCleanup` |
 | `ipStateMu` | `bans`, `inboundByIP`, `observedAddrs`, `observedIPHistoryByPeer`, `bannedIPSet`, `remoteBannedIPs`, `remoteIPBanOffenders` |
 | `fileMu` | `fileStore`, `fileTransfer`, `fileRouter` |
@@ -28,6 +28,9 @@ Fields that remain outside this scheme:
 
 - `listener` — written exactly once inside `Run` before `Accept`. Keeps its existing single writer discipline; readers observe it via `loadListener` if needed.
 - `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers — already have their own synchronisation (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Not covered by the domain split.
+- `identityResolver` — immutable after `NewService`; every mutable field of the identity lookup engine lives behind the resolver's own mutex (`identity_resolver.go`), and its disk I/O (the durable intent table) runs outside any domain mutex.
+- `identityFileMu` — a leaf mutex serialising the `identity_backup` / `identity_restore` local RPC pair: both funnel secrets through one predictable `<path>.tmp` (`identity.Save`, `writeSecretFile`), so two concurrent calls could interleave write-then-rename — or remove each other's temp — and acknowledge content another call wrote. Held only inside the two frame handlers around the file I/O; it takes no domain mutex, no domain mutex takes it, and it adds no edge to the canonical order.
+- The two snapshot-persisted stores (`trustStore`, `identityIntentStore`) share one write discipline: a mutator takes the store's own state mutex, advances a **snapshot generation counter**, copies the state and releases the mutex BEFORE any disk I/O. The write itself runs under the store's dedicated `saveMu` (they share one `.tmp` path), and a snapshot whose generation is ≤ the last persisted one is dropped — two mutators racing to the disk can land in either order, and the generation, not scheduling luck, decides what the file holds. `saveMu` is never taken with the state mutex held and no domain mutex is anywhere near either lock.
 - `messageStore`, `seenAckJournal`, `deliveryFailureJournal` — registered once before `Run` (RegisterMessageStore / RegisterDeliveryOutbox) and immutable afterwards, so reads need no mutex; their SQLite I/O never runs under a domain mutex. The failure-journal write is synchronous after lock release (it is the durable boundary of retry abandonment — shutdown does not wait for backgroundWg before the chatlog closes); MarkSeenConfirmed may run on the background pool, losing it only costs one redundant idempotent seen re-send.
 - `lastPeerSave`, `lastPeerEvict`, `lastSync` — peer-lifetime timestamps; move with `peerMu`.
 - `peerStateDirty` — moves with `peerMu`. Set by `markPeerStateDirty` on every path that mutates persisted peer state outside the periodic catch-all — add_peer, remote-ban record (`handlePeerBannedNotice`) and remote-ban clear (`clearRemoteBansOnAuth`) — instead of a synchronous `flushPeerState` per event; `maybeSavePeerState` (the 2s `bootstrapLoop` tick) coalesces the marked changes into one debounced flush after `peerStateDebounceSeconds`, and `flushPeerState` clears the flag under `peerMu.Lock` at snapshot time (a mutation landing during the disk write re-marks it). See the `flushPeerState` section below.
@@ -77,7 +80,7 @@ The order places the most-contended domain first so that less-contended domains 
 
 1. **peerMu** — every connect / disconnect / markPeerConnected / markPeerDisconnected mutates it; reconnect storms hit it hardest.
 2. **deliveryMu** — every inbound / outbound message, every relay retry.
-3. **knowledgeMu** — writes only during handshake and when a new identity binding is learned.
+3. **knowledgeMu** — writes only during handshake and when a new identity binding is learned. Also owns the node's own signed identity record (`selfRecord` / `selfRecordBody`): the record is built and PERSISTED (trust-store file I/O) strictly outside the mutex, and only the field swap happens under `knowledgeMu.Lock` — the reserve → persist → publish order of `self_record.go`.
 4. **gossipMu** — writes on topic publish / subscribe; reads on every `fetch_messages`.
 5. **ipStateMu** — writes on ban events and observed-IP convergence; reads on every accept.
 6. **fileMu** — writes only during active transfers; cold outside that.
@@ -283,6 +286,9 @@ Every migration step must keep the existing node test suite green. Targeted regr
 
 - `listener` — пишется один раз в `Run` до `Accept`. Существующая дисциплина «один writer» сохраняется.
 - `runCtx`, `done`, `connWg`, `backgroundWg`, `peerActivityNanos`, `trafficMu` / `lastTrafficSnap`, `*Snap` atomic pointers — уже имеют собственную синхронизацию (ctx/chan, WaitGroup, sync.Map, `sync.Mutex`, `atomic.Pointer`). Не входят в доменное разделение.
+- `identityResolver` — иммутабелен после `NewService`; всё мутабельное состояние движка identity lookup живёт за собственным мьютексом резолвера (`identity_resolver.go`), а его дисковый I/O (durable-таблица намерений) выполняется вне любых доменных мьютексов.
+- `identityFileMu` — leaf-мьютекс, сериализующий пару локальных RPC `identity_backup` / `identity_restore`: обе гонят секреты через один предсказуемый `<path>.tmp` (`identity.Save`, `writeSecretFile`), и два конкурентных вызова могли бы перемешать write-then-rename — или удалить чужой temp — и подтвердить содержимое, которое записал другой вызов. Держится только внутри двух frame-хендлеров вокруг файлового I/O; доменных мьютексов не берёт, доменные его не берут, ребра в канонический порядок не добавляет.
+- Два snapshot-персистируемых стора (`trustStore`, `identityIntentStore`) делят одну дисциплину записи: мутатор берёт собственный state-мьютекс стора, продвигает **счётчик поколений снапшота**, копирует состояние и отпускает мьютекс ДО любого дискового I/O. Сама запись идёт под выделенным `saveMu` стора (они делят один `.tmp`-путь), и снапшот с поколением ≤ последнего персистированного отбрасывается — два мутатора могут добежать до диска в любом порядке, и что лежит в файле, решает поколение, а не удача планировщика. `saveMu` никогда не берётся при удерживаемом state-мьютексе, и ни один доменный мьютекс рядом с этими локами не участвует.
 - `messageStore`, `seenAckJournal`, `deliveryFailureJournal` — регистрируются один раз до `Run` (RegisterMessageStore / RegisterDeliveryOutbox) и далее иммутабельны, поэтому чтения не требуют мьютекса; их SQLite I/O никогда не выполняется под доменным мьютексом. Запись failure-журнала — синхронная после освобождения локов (это durable-граница отказа от ретраев — shutdown не ждёт backgroundWg перед закрытием chatlog); MarkSeenConfirmed может идти через background-пул: его потеря стоит лишь одного избыточного идемпотентного повтора seen.
 - `lastPeerSave`, `lastPeerEvict`, `lastSync` — peer-lifetime timestamps; едут с `peerMu`.
 - `reachableGroups` — заполняется ровно один раз функцией `computeReachableGroups` при `New` и считается иммутабельным на весь runtime `Service`. Конкурентные чтения немутировавшейся карты безопасны без lock-а, поэтому мьютекс не назначается. Если в будущем появится runtime-запись, в том же коммите необходимо добавить синхронизацию (либо перевести поле под `ipStateMu` с захватом на каждом читателе, либо дать собственную синхронизацию) — иначе writer гонится со всеми нынешними читателями.
@@ -327,7 +333,7 @@ peerMu → deliveryMu → knowledgeMu → gossipMu → ipStateMu → fileMu → 
 
 1. **peerMu** — каждое connect/disconnect/mark* пишет сюда; шторма переподключений бьют сильнее всего.
 2. **deliveryMu** — каждое входящее/исходящее сообщение, каждый relay-retry.
-3. **knowledgeMu** — пишет только при handshake и при обучении нового identity binding.
+3. **knowledgeMu** — пишет только при handshake и при обучении нового identity binding. Также владеет собственной подписанной записью узла (`selfRecord` / `selfRecordBody`): запись строится и ПЕРСИСТИТСЯ (файловый I/O trust store) строго вне мьютекса, под `knowledgeMu.Lock` происходит только подмена полей — порядок reserve → persist → publish из `self_record.go`.
 4. **gossipMu** — пишет на publish/subscribe; читает каждый `fetch_messages`.
 5. **ipStateMu** — пишет на ban events и observed-IP convergence; читает каждый accept.
 6. **fileMu** — пишет только при активных трансферах; холодный вне этого.

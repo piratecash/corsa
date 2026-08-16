@@ -33,8 +33,10 @@ import (
 // A third topology, A → C → B with an EMPTY registry on C, covers the state
 // PR-0 really ships: no handler for any type, and still a lawful relay.
 
-// datagramE2EDType is the type the handler under test is registered for.
-const datagramE2EDType = domain.DType("push_identity")
+// datagramE2EDType is the type the handler under test is registered for. A
+// name of its own: the discovery kit (push_identity et al.) is registered
+// by production wiring now, so the sink must not collide with it.
+const datagramE2EDType = domain.DType("e2e_sink")
 
 // registerDatagramSink registers a handler for datagramE2EDType on the node
 // and returns a channel that receives the payload of every delivered frame.
@@ -247,6 +249,12 @@ func TestDatagramDeliveredThroughTransit(t *testing.T) {
 		return datagramReachableNow(t, nodeA, dst, datagramE2EDType)
 	})
 
+	// Baseline AFTER convergence: by now the initial push_identity frames of
+	// the discovery kit — legitimately addressed to C — have been delivered
+	// at C, so only a DELTA during the transit hop would be a violation.
+	deliveredAtRelayBefore := nodeC.datagramMetrics.Snapshot().Delivered
+	forwardedBefore := nodeC.datagramMetrics.Snapshot().Forwarded
+
 	outcome := sendDatagramTo(t, nodeA, dst, "transit-hop-payload")
 	if outcome.Kind() != datagram.SendQueued {
 		t.Fatalf("SendLocal outcome = %s, want queued", outcome)
@@ -267,10 +275,10 @@ func TestDatagramDeliveredThroughTransit(t *testing.T) {
 	// C must have counted a FORWARD, not a delivery: it is not the
 	// destination and it has no handler for the type.
 	waitForCondition(t, 5*time.Second, func() bool {
-		return nodeC.datagramMetrics.Snapshot().Forwarded > 0
+		return nodeC.datagramMetrics.Snapshot().Forwarded > forwardedBefore
 	})
-	if nodeC.datagramMetrics.Snapshot().Delivered != 0 {
-		t.Fatal("the relay delivered a datagram addressed to somebody else")
+	if got := nodeC.datagramMetrics.Snapshot().Delivered; got != deliveredAtRelayBefore {
+		t.Fatalf("the relay delivered a datagram addressed to somebody else (delivered %d → %d)", deliveredAtRelayBefore, got)
 	}
 }
 
@@ -301,21 +309,27 @@ func TestEmptyRegistryRelayCarriesSomebodyElsesDatagram(t *testing.T) {
 	nodeB, delivered, stopB := startDatagramNode(t, addrB, normalizeAddress(addrC))
 	defer stopB()
 
-	// The relay really is in the state under test: both capabilities, and an
-	// explicitly empty dtype set.
+	// The relay really is in the state under test: both capabilities, and no
+	// handler for the type it is about to carry (its declared set is the
+	// production discovery kit and nothing else — the sink type is absent).
 	advertise := nodeC.localDatagramAdvertise()
 	if !advertise.Endpoint || !advertise.Transit {
-		t.Fatalf("the relay advertises %+v, want both capabilities with an empty registry", advertise)
+		t.Fatalf("the relay advertises %+v, want both capabilities", advertise)
 	}
 	field := nodeC.localDTypeStrings(advertise)
-	if field == nil || len(*field) != 0 {
-		t.Fatalf("the relay declares %v, want the explicitly empty set", field)
+	if field == nil || containsString(*field, datagramE2EDType.String()) {
+		t.Fatalf("the relay declares %v, want a set without %s", field, datagramE2EDType)
 	}
 
 	dst := domain.PeerIdentityFromWire(nodeB.Address())
 	waitForCondition(t, 25*time.Second, func() bool {
 		return datagramReachableNow(t, nodeA, dst, datagramE2EDType)
 	})
+
+	// Baseline AFTER convergence: the initial push_identity frames addressed
+	// to C are legitimate deliveries; the transit hop below must add none.
+	deliveredAtRelayBefore := nodeC.datagramMetrics.Snapshot().Delivered
+	forwardedBefore := nodeC.datagramMetrics.Snapshot().Forwarded
 
 	outcome := sendDatagramTo(t, nodeA, dst, "empty-registry-relay-payload")
 	if outcome.Kind() != datagram.SendQueued {
@@ -331,13 +345,13 @@ func TestEmptyRegistryRelayCarriesSomebodyElsesDatagram(t *testing.T) {
 
 	waitForDatagram(t, delivered, "empty-registry-relay-payload", 20*time.Second)
 
-	// The relay forwarded and delivered nothing: it has no handler for any
-	// type, and it was never the destination.
+	// The relay forwarded the sink frame and delivered nothing new: it has
+	// no handler for the carried type, and it was not the destination.
 	waitForCondition(t, 5*time.Second, func() bool {
-		return nodeC.datagramMetrics.Snapshot().Forwarded > 0
+		return nodeC.datagramMetrics.Snapshot().Forwarded > forwardedBefore
 	})
-	if nodeC.datagramMetrics.Snapshot().Delivered != 0 {
-		t.Fatal("a node with an empty registry delivered a datagram to a handler it does not have")
+	if got := nodeC.datagramMetrics.Snapshot().Delivered; got != deliveredAtRelayBefore {
+		t.Fatalf("a relay without the type delivered somebody else's datagram (delivered %d → %d)", deliveredAtRelayBefore, got)
 	}
 }
 

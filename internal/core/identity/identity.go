@@ -44,11 +44,20 @@ type Identity struct {
 	BoxPrivateKey *ecdh.PrivateKey
 	BoxPublicKey  []byte
 	Address       string
+	// RecordSeqFloor is the identity-record seq carried back by a restored
+	// backup (docs/protocol/identity-lookup.md): the next self-record must
+	// be issued ABOVE it, or peers holding the pre-backup record would
+	// reject the fresh one as stale. Zero for identities that never went
+	// through a restore.
+	RecordSeqFloor uint64
 }
 
 type storedIdentity struct {
 	PrivateKey    string `json:"private_key"`
 	BoxPrivateKey string `json:"box_private_key,omitempty"`
+	// RecordSeqFloor persists the restored-backup seq floor; see
+	// Identity.RecordSeqFloor.
+	RecordSeqFloor uint64 `json:"record_seq_floor,omitempty"`
 }
 
 // Load reads an existing identity file at path. Unlike LoadOrCreate, it
@@ -290,15 +299,24 @@ func save(path string, id *Identity) error {
 	}
 
 	payload, err := json.MarshalIndent(storedIdentity{
-		PrivateKey:    base64.StdEncoding.EncodeToString(id.PrivateKey),
-		BoxPrivateKey: base64.StdEncoding.EncodeToString(id.BoxPrivateKey.Bytes()),
+		PrivateKey:     base64.StdEncoding.EncodeToString(id.PrivateKey),
+		BoxPrivateKey:  base64.StdEncoding.EncodeToString(id.BoxPrivateKey.Bytes()),
+		RecordSeqFloor: id.RecordSeqFloor,
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal identity: %w", err)
 	}
 
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
+	// Write-temp-then-rename: a crash or a full disk mid-write must never
+	// leave a truncated key file — a torn identity file is an unrecoverable
+	// loss of the address, not a retryable error.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
 		return fmt.Errorf("write identity: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace identity file: %w", err)
 	}
 
 	return nil
@@ -344,11 +362,12 @@ func decodeIdentity(data []byte) (*Identity, error) {
 	}
 
 	return &Identity{
-		PrivateKey:    ed25519.PrivateKey(privateKey),
-		PublicKey:     pub,
-		BoxPrivateKey: boxPrivate,
-		BoxPublicKey:  boxPublic,
-		Address:       Fingerprint(pub),
+		PrivateKey:     ed25519.PrivateKey(privateKey),
+		PublicKey:      pub,
+		BoxPrivateKey:  boxPrivate,
+		BoxPublicKey:   boxPublic,
+		Address:        Fingerprint(pub),
+		RecordSeqFloor: stored.RecordSeqFloor,
 	}, nil
 }
 

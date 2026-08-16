@@ -1,6 +1,9 @@
 package domain
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+)
 
 // DMCommand identifies a control or data action attached to a direct
 // message. It is carried inside the encrypted DM envelope (so transit
@@ -50,6 +53,16 @@ const (
 	// MessageDeleteAckPayload. Also a control DM and not stored.
 	DMCommandMessageDeleteAck DMCommand = "message_delete_ack"
 
+	// DMCommandDecryptFailed is the control DM a recipient sends after a
+	// CONFIRMED crypto-fail (docs/protocol/identity-lookup.md §4.10): the
+	// envelope authenticated — signature and both addresses verified — but
+	// neither sealed part opened with the recipient's current keys, i.e.
+	// the sender encrypted to a box key the recipient no longer holds.
+	// Carries DecryptFailedPayload. Sent only AFTER a fresh
+	// target_proof lookup of the sender, so the notice itself is encrypted
+	// to keys that are provably current. Control DM, never stored.
+	DMCommandDecryptFailed DMCommand = "decrypt_failed"
+
 	// DMCommandConversationDelete is the control DM that asks the
 	// recipient to wipe the entire conversation with the requester.
 	// It is the bulk counterpart of DMCommandMessageDelete: instead
@@ -93,7 +106,8 @@ func (c DMCommand) Valid() bool {
 		DMCommandMessageDelete,
 		DMCommandMessageDeleteAck,
 		DMCommandConversationDelete,
-		DMCommandConversationDeleteAck:
+		DMCommandConversationDeleteAck,
+		DMCommandDecryptFailed:
 		return true
 	default:
 		return false
@@ -110,11 +124,35 @@ func (c DMCommand) IsControl() bool {
 	case DMCommandMessageDelete,
 		DMCommandMessageDeleteAck,
 		DMCommandConversationDelete,
-		DMCommandConversationDeleteAck:
+		DMCommandConversationDeleteAck,
+		DMCommandDecryptFailed:
 		return true
 	default:
 		return false
 	}
+}
+
+// DecryptFailedPayload is the body of a DMCommandDecryptFailed notice: the
+// id of the message the recipient could not open. The re-send recipient is
+// NEVER taken from here — the sender re-reads it from its own chatlog row,
+// or a crafted notice could redirect somebody else's plaintext.
+type DecryptFailedPayload struct {
+	MessageID MessageID `json:"message_id"`
+}
+
+// Valid enforces the payload contract.
+func (p DecryptFailedPayload) Valid() bool { return p.MessageID.IsValid() }
+
+// MarshalDecryptFailedPayload renders the payload for CommandData.
+func MarshalDecryptFailedPayload(p DecryptFailedPayload) (string, error) {
+	if !p.Valid() {
+		return "", errors.New("decrypt_failed payload: invalid message id")
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // MessageDeletePayload is the JSON-encoded body of OutgoingDM.CommandData

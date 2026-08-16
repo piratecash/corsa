@@ -108,34 +108,38 @@ func TestNodeWithAnEmptyRegistryAdvertisesTheEnvelopeAndDeclaresTheEmptySet(t *t
 	if svc.datagramLayer() == nil {
 		t.Fatal("the fixture must build the layer")
 	}
-	if len(svc.datagramLayer().types.DTypes()) != 0 {
-		t.Fatal("PR-0 ships an empty registry; this test is about exactly that state")
+	// The production registry ships the identity-discovery kit; the declared
+	// set is exactly the registry contents — no more, no less.
+	registered := svc.datagramLayer().types.DTypes()
+	if len(registered) == 0 {
+		t.Fatal("the production registry ships the discovery kit; an empty set means the wiring lost it")
 	}
 
 	advertise := svc.localDatagramAdvertise()
 	if !advertise.Endpoint {
 		t.Fatal("a node with the layer wired must advertise mesh_datagram_v1: it does understand the envelope, and without the name no peer may even relay through it")
 	}
-	if got := svc.localDatagramDTypes(); len(got) != 0 {
-		t.Fatalf("localDatagramDTypes = %v, want the (empty) registry contents", got)
-	}
 	field := svc.localDTypeStrings(advertise)
 	if field == nil {
-		t.Fatal("an empty registry emitted no dtypes field: an endpoint states its set, and \"said it handles nothing\" is a different fact about a peer than \"said nothing\"")
+		t.Fatal("an endpoint states its set; no field is the statement of a node without the plane")
 	}
-	if len(*field) != 0 {
-		t.Fatalf("declared dtypes = %v, want the explicitly empty set", *field)
+	if len(*field) != len(registered) {
+		t.Fatalf("declared dtypes = %v, want exactly the registry contents %v", *field, registered)
 	}
 	// The capability really reaches the wire list.
 	if !capsContain(localCapabilities(false, advertise), domain.CapMeshDatagramV1) {
 		t.Fatal("mesh_datagram_v1 missing from the capability list of a node that speaks the envelope")
 	}
-	// And a neighbour reads that field as "no types".
+	// And a neighbour reads the field literally in both directions: the
+	// discovery kit is supported, a name outside it is not.
 	declared := datagramDeclaredDTypes(declarationsFromHandshake(protocol.Frame{DTypes: field}))
-	for _, dtype := range fixtureDatagramTypes() {
-		if declared.Supports(dtype) {
-			t.Fatalf("a peer read the explicitly empty set as supporting %q", dtype)
+	for _, dtype := range []domain.DType{domain.DTypeGetIdentity, domain.DTypePostIdentity, domain.DTypePushIdentity} {
+		if !declared.Supports(dtype) {
+			t.Fatalf("a peer read the declared set as NOT supporting %q", dtype)
 		}
+	}
+	if declared.Supports("never_declared") {
+		t.Fatal("a peer read an undeclared name as supported")
 	}
 
 	// A registry with types in it emits them, in full — an endpoint never
@@ -173,10 +177,10 @@ func newDatagramServiceWithTypes(t *testing.T, nodeType domain.NodeType) *Servic
 // listed (§6.1). The four names are kept because they cover all three modes
 // plus the request/response pairing the registry validates.
 var fixtureDatagramTypeModes = map[domain.DType]domain.DatagramMode{
-	"get_identity":    domain.DatagramModeRequest,
-	"post_identity":   domain.DatagramModeResponse,
-	"cached_identity": domain.DatagramModeResponse,
-	"push_identity":   domain.DatagramModeRouted,
+	"get_identity":         domain.DatagramModeRequest,
+	"post_identity":        domain.DatagramModeResponse,
+	"fixture_alt_response": domain.DatagramModeResponse,
+	"push_identity":        domain.DatagramModeRouted,
 }
 
 // fixtureDatagramTypes lists the kit in a stable order.
@@ -206,7 +210,7 @@ func registerFixtureDatagramTypes(t *testing.T, svc *Service) {
 // they answer; the registry refuses a `response` type that names none.
 func fixtureAnswersTo(dtype domain.DType) []domain.DType {
 	switch dtype {
-	case "cached_identity", "post_identity":
+	case "fixture_alt_response", "post_identity":
 		return []domain.DType{"get_identity"}
 	default:
 		return nil
@@ -449,8 +453,9 @@ func TestHandshakeFramesCarryDTypes(t *testing.T) {
 }
 
 // TestHandshakeFramesCarryTheEmptySetOfAnEmptyRegistry is the wire half of the
-// amendment: PR-0's own state — the plane on, the registry empty — has to
-// reach the peer as `"dtypes": []` on BOTH handshake frames.
+// declaration contract: the registry contents — today the discovery kit —
+// have to reach the peer as an explicit `"dtypes"` list on BOTH handshake
+// frames.
 //
 // It goes through MarshalFrameLine rather than through the struct, because
 // this is exactly where the old shape lost the statement: a []string with
@@ -459,8 +464,8 @@ func TestHandshakeFramesCarryTheEmptySetOfAnEmptyRegistry(t *testing.T) {
 	t.Parallel()
 
 	svc := newDatagramLayerService(t, true)
-	if len(svc.localDatagramDTypes()) != 0 {
-		t.Fatal("the fixture must ship the empty PR-0 registry")
+	if len(svc.localDatagramDTypes()) == 0 {
+		t.Fatal("the production registry ships the discovery kit; an empty set means the wiring lost it")
 	}
 
 	welcome := svc.welcomeFrame("challenge", "10.0.0.1")
@@ -470,8 +475,8 @@ func TestHandshakeFramesCarryTheEmptySetOfAnEmptyRegistry(t *testing.T) {
 	}
 	hello := svc.nodeHelloJSONLine()
 	for name, frameLine := range map[string]string{"welcome": line, "hello": hello} {
-		if !strings.Contains(frameLine, `"dtypes":[]`) {
-			t.Fatalf("%s line does not carry the explicitly empty set: %s", name, frameLine)
+		if !strings.Contains(frameLine, `"dtypes":[`) || !strings.Contains(frameLine, `"push_identity"`) {
+			t.Fatalf("%s line does not carry the declared discovery kit: %s", name, frameLine)
 		}
 		parsed, err := protocol.ParseFrameLine(strings.TrimSpace(frameLine))
 		if err != nil {
@@ -481,10 +486,13 @@ func TestHandshakeFramesCarryTheEmptySetOfAnEmptyRegistry(t *testing.T) {
 			t.Fatalf("%s: the receiver read the empty array as %s, not as a field that was sent", name, got)
 		}
 		declared := datagramDeclaredDTypes(declarationsFromHandshake(parsed))
-		for _, dtype := range fixtureDatagramTypes() {
-			if declared.Supports(dtype) {
-				t.Fatalf("%s: the receiver read the empty array as supporting %q", name, dtype)
+		for _, dtype := range []domain.DType{domain.DTypeGetIdentity, domain.DTypePostIdentity, domain.DTypePushIdentity} {
+			if !declared.Supports(dtype) {
+				t.Fatalf("%s: the receiver read the declared list as NOT supporting %q", name, dtype)
 			}
+		}
+		if declared.Supports("never_declared") {
+			t.Fatalf("%s: the receiver read an undeclared name as supported", name)
 		}
 	}
 }

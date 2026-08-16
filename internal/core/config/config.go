@@ -47,10 +47,14 @@ type Node struct {
 	BootstrapPeers []string
 	IdentityPath   string
 	TrustStorePath string
-	PeersStatePath string
-	ChatLogDir     string // directory for chatlog/state files
-	DownloadDir    string // directory for downloaded files (defaults to "<DataDir>/downloads")
-	ProxyAddress   string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
+	// IdentityIntentsPath is the durable identity-resolution intent table
+	// (env: CORSA_IDENTITY_INTENTS_PATH): the reasons a background identity
+	// lookup keeps running across restarts (docs/protocol/identity-lookup.md).
+	IdentityIntentsPath string
+	PeersStatePath      string
+	ChatLogDir          string // directory for chatlog/state files
+	DownloadDir         string // directory for downloaded files (defaults to "<DataDir>/downloads")
+	ProxyAddress        string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
 
 	// ConnectOnly pins outbound dialing to a single peer address. When set
 	// (env: CORSA_CONNECT_ONLY), the node drops every other outbound
@@ -337,6 +341,11 @@ type Node struct {
 	// §6 and §10.
 	EnableDatagramV1 bool
 
+	// IdentityLookupBGAttempts caps the background-phase attempts of one
+	// identity resolution (env: CORSA_IDENTITY_LOOKUP_BG_ATTEMPTS, default
+	// 20). Zero or negative collapses to the default at the consumer.
+	IdentityLookupBGAttempts int
+
 	// DisableDirectMessages opts this node out of direct messages
 	// (topics "dm" / "dm-control") addressed to its own identity.
 	//
@@ -493,6 +502,7 @@ func Default() Config {
 	bootstrapPeers := bootstrapPeersFromEnv(listenAddress)
 	identityPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_PATH", defaultIdentityPath(listenAddress)))
 	trustStorePath := resolveStartupPath(envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress)))
+	identityIntentsPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_INTENTS_PATH", defaultIdentityIntentsPath(listenAddress)))
 	peersStatePath := resolveStartupPath(envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress)))
 	chatLogDir := resolveStartupPath(envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir()))
 	downloadDir := resolveStartupPath(envOrDefault("CORSA_DOWNLOAD_DIR", ""))
@@ -534,6 +544,8 @@ func Default() Config {
 			BootstrapPeers:             bootstrapPeers,
 			IdentityPath:               identityPath,
 			TrustStorePath:             trustStorePath,
+			IdentityIntentsPath:        identityIntentsPath,
+			IdentityLookupBGAttempts:   identityLookupBGAttemptsFromEnv(),
 			PeersStatePath:             peersStatePath,
 			ChatLogDir:                 chatLogDir,
 			DownloadDir:                downloadDir,
@@ -715,6 +727,12 @@ func defaultTrustStorePath(listenAddress string) string {
 	port := portSuffix(listenAddress)
 
 	return filepath.Join(defaultChatLogDir(), "trust-"+port+".json")
+}
+
+func defaultIdentityIntentsPath(listenAddress string) string {
+	port := portSuffix(listenAddress)
+
+	return filepath.Join(defaultChatLogDir(), "identity-intents-"+port+".json")
 }
 
 func defaultPeersStatePath(listenAddress string) string {
@@ -1226,6 +1244,18 @@ func pendingRingSizeFromEnv() int {
 // non-positive values select the node-package default.
 func deliveryRetryMaxAttemptsFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv("CORSA_DELIVERY_RETRY_MAX_ATTEMPTS"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func identityLookupBGAttemptsFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_IDENTITY_LOOKUP_BG_ATTEMPTS"))
 	if raw == "" {
 		return 0
 	}

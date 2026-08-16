@@ -53,8 +53,17 @@ type DMRecipient struct {
 // SendControlMessage) — submitting a control DM through the regular
 // SendDirectMessage path would persist it like a data DM.
 type OutgoingDM struct {
-	Body        string
-	ReplyTo     MessageID
+	Body    string
+	ReplyTo MessageID
+	// RetryOf marks a §4.10 recovery re-send: the id of the original
+	// message this envelope replaces. Travels INSIDE the encrypted part.
+	RetryOf MessageID
+	// PresetID, when set, is used as the outgoing message id instead of a
+	// freshly minted one. Recovery re-sends pre-mint the id so the durable
+	// resend intent can name the replacement BEFORE the send exists —
+	// reconciliation after a crash then checks one known row instead of
+	// searching. Empty for every ordinary send.
+	PresetID    MessageID
 	Command     DMCommand // e.g. DMCommandFileAnnounce; empty for regular DMs
 	CommandData string    // JSON-encoded payload (e.g. FileAnnouncePayload); empty for regular DMs
 	// FromComposer marks a send originated by the desktop composer (not RPC).

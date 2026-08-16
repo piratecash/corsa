@@ -6,6 +6,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -208,6 +210,17 @@ func (s *Service) rebuildRoutingSnapshot() {
 	if wasFull {
 		s.lastRoutingFullSnapAtNanos.Store(now.UnixNano())
 	}
+	// Published AFTER the Store above, which is the whole point of the
+	// snapshot reason: the mutation-time TopicRouteTableChanged events fire
+	// while the cached snapshot is still the old generation, so a
+	// subscriber rebuilding ReachableIDs off them reads stale data and
+	// keeps it until the next unrelated route event. This event is the one
+	// with the ordering guarantee — a subscriber that reconciles on it
+	// reads a snapshot at least as fresh as the change that made the table
+	// dirty (docs/refactoring/identity-discovery-lookup.md §1.2).
+	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
+		Reason: domain.RouteChangeSnapshot,
+	})
 	log.Trace().
 		Int("total", snap.TotalEntries).
 		Int("active", snap.ActiveEntries).

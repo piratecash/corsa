@@ -431,10 +431,19 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 	})
 
 	// Routing table changed — rebuild ReachableIDs from the authoritative
-	// routing snapshot. This fires for direct-peer add/remove, announcement
-	// acceptance, and transit invalidation — all cases that affect which
-	// identities have at least one live route.
+	// routing snapshot, but ONLY on the snapshot-published reason. The
+	// mutation-time reasons (direct peer add/remove, announcement, transit
+	// invalidation) fire while the cached snapshot is still the previous
+	// generation: rebuilding on them read stale data and, worse, could
+	// overwrite a fresh set with a stale one when handlers interleave. The
+	// snapshot reason is emitted strictly AFTER routingSnap.Store, so a
+	// reconcile on it is fresh by construction; its worst-case latency is
+	// the refresher cadence (~2.5 s), which the mutation events never
+	// improved on anyway — they only pretended to.
 	m.eventBus.Subscribe(ebus.TopicRouteTableChanged, func(summary ebus.RouteTableChange) {
+		if summary.Reason != domain.RouteChangeSnapshot {
+			return
+		}
 		fresh := m.client.BuildReachableIDs()
 		m.mu.Lock()
 		m.status.ReachableIDs = fresh

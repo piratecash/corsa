@@ -132,3 +132,12 @@ func PublishFileDownloadCompleted(bus *Bus, result FileDownloadCompletedResult) 
 	}
 	bus.Publish(TopicFileDownloadCompleted, result)
 }
+
+// PublishIdentityResolutionChanged emits TopicIdentityResolutionChanged with
+// a typed full-state snapshot.
+func PublishIdentityResolutionChanged(bus *Bus, state IdentityResolutionState) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicIdentityResolutionChanged, state)
+}
