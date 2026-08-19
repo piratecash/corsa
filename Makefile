@@ -143,12 +143,20 @@ vuln:
 test:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -timeout=15m ./...
 
+# The storage tests against the cgo SQLite driver. That driver ships on Android
+# only, and no CI runner runs Android, so without this target its DSN handling,
+# WAL behaviour and transaction semantics were never exercised — a divergence
+# would have surfaced in an Android build.
+.PHONY: test-cgo
+test-cgo:
+	CGO_ENABLED=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -tags sqlite_cgo -timeout=15m ./internal/core/storage/... ./internal/core/chatlog/...
+
 .PHONY: test-v
 test-v:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) test -v -count=1 -timeout=15m ./...
 
 .PHONY: test-all
-test-all: lint enforce-netcore-boundary test-v
+test-all: lint enforce-netcore-boundary test-v test-cgo
 
 # enforce-netcore-boundary runs the §2.9 grep-gate from
 # docs/netcore-migration.md: asserts that forbidden patterns (direct

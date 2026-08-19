@@ -3,6 +3,7 @@ package chatlog
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,14 +16,13 @@ func newRecoveryTestStore(t *testing.T) (*Store, domain.PeerIdentity, domain.Pee
 	t.Helper()
 	self := domaintest.ID("self")
 	peer := domaintest.ID("peer")
-	store := NewStore(t.TempDir(), self, ":0")
-	t.Cleanup(func() { _ = store.Close() })
+	store := newTestStore(t, self)
 	return store, self, peer
 }
 
 func appendIncomingRow(t *testing.T, store *Store, self, peer domain.PeerIdentity, id, metadata string) {
 	t.Helper()
-	err := store.Append("dm", self, Entry{
+	err := store.Append(context.Background(), "dm", self, Entry{
 		ID:        id,
 		Sender:    peer.String(),
 		Recipient: self.String(),
@@ -44,16 +44,16 @@ func TestRecoveryMarksLifecycle(t *testing.T) {
 	const rowID = "0b7d81f2-9c48-4a6e-9d10-000000000001"
 	appendIncomingRow(t, store, self, peer, rowID, `{"foreign_key":"kept"}`)
 
-	changed, err := store.MarkDecryptFailed(rowID)
+	changed, err := store.MarkDecryptFailed(context.Background(), rowID)
 	if err != nil || !changed {
 		t.Fatalf("first flag: changed=%v err=%v", changed, err)
 	}
-	changed, err = store.MarkDecryptFailed(rowID)
+	changed, err = store.MarkDecryptFailed(context.Background(), rowID)
 	if err != nil || changed {
 		t.Fatalf("second flag must be the idempotent no-op: changed=%v err=%v", changed, err)
 	}
 
-	marks, exists, err := store.EntryRecoveryMarks(rowID)
+	marks, exists, err := store.EntryRecoveryMarks(context.Background(), rowID)
 	if err != nil || !exists {
 		t.Fatalf("read marks: exists=%v err=%v", exists, err)
 	}
@@ -61,16 +61,16 @@ func TestRecoveryMarksLifecycle(t *testing.T) {
 		t.Fatalf("marks = %+v", marks)
 	}
 
-	unreadBefore, err := store.UnreadCountFor(peer)
+	unreadBefore, err := store.UnreadCountFor(context.Background(), peer)
 	if err != nil || unreadBefore != 1 {
 		t.Fatalf("unread before = %d err=%v, want 1", unreadBefore, err)
 	}
 
 	const replacementID = "0b7d81f2-9c48-4a6e-9d10-000000000002"
-	if applied, err := store.MarkSupersededCollapsing(rowID, replacementID, rowID); err != nil || !applied {
+	if applied, err := store.MarkSupersededCollapsing(context.Background(), rowID, replacementID, rowID); err != nil || !applied {
 		t.Fatalf("supersede: %v", err)
 	}
-	marks, _, err = store.EntryRecoveryMarks(rowID)
+	marks, _, err = store.EntryRecoveryMarks(context.Background(), rowID)
 	if err != nil {
 		t.Fatalf("read marks after supersede: %v", err)
 	}
@@ -80,13 +80,13 @@ func TestRecoveryMarksLifecycle(t *testing.T) {
 	}
 
 	// The unread collapse: the unreadable original no longer counts.
-	unreadAfter, err := store.UnreadCountFor(peer)
+	unreadAfter, err := store.UnreadCountFor(context.Background(), peer)
 	if err != nil || unreadAfter != 0 {
 		t.Fatalf("unread after = %d err=%v, want 0 (collapse failed)", unreadAfter, err)
 	}
 
 	// Foreign metadata survived every merge.
-	entry, found, err := store.EntryByID(domain.MessageID(rowID))
+	entry, found, err := store.EntryByID(context.Background(), domain.MessageID(rowID))
 	if err != nil || !found {
 		t.Fatalf("read row: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSenderResendTerminal(t *testing.T) {
 	const replacementID = "0b7d81f2-9c48-4a6e-9d10-000000000004"
 	// OUTGOING rows: self → peer (the original and its re-send).
 	for _, id := range []string{rowID, replacementID} {
-		if err := store.Append("dm", self, Entry{
+		if err := store.Append(context.Background(), "dm", self, Entry{
 			ID: id, Sender: self.String(), Recipient: peer.String(),
 			Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
@@ -116,32 +116,32 @@ func TestSenderResendTerminal(t *testing.T) {
 		}
 	}
 
-	if err := store.MarkResendTerminal(rowID, "0b7d81f2-9c48-4a6e-9d10-00000000dead", rowID); err == nil {
+	if err := store.MarkResendTerminal(context.Background(), rowID, "0b7d81f2-9c48-4a6e-9d10-00000000dead", rowID); err == nil {
 		t.Fatal("a terminal naming a missing replacement committed")
 	}
-	if marks, _, _ := store.EntryRecoveryMarks(rowID); marks.SupersededBy != "" {
+	if marks, _, _ := store.EntryRecoveryMarks(context.Background(), rowID); marks.SupersededBy != "" {
 		t.Fatal("a failed terminal left a half-written supersede link")
 	}
 
-	if err := store.MarkResendTerminal(rowID, replacementID, rowID); err != nil {
+	if err := store.MarkResendTerminal(context.Background(), rowID, replacementID, rowID); err != nil {
 		t.Fatalf("terminal: %v", err)
 	}
-	entry, found, err := store.EntryByID(rowID)
+	entry, found, err := store.EntryByID(context.Background(), rowID)
 	if err != nil || !found {
 		t.Fatalf("read: %v", err)
 	}
 	if entry.DeliveryStatus != StatusSent {
 		t.Fatalf("delivery_status = %s — the sender-side terminal forged a confirmation", entry.DeliveryStatus)
 	}
-	marks, _, err := store.EntryRecoveryMarks(rowID)
+	marks, _, err := store.EntryRecoveryMarks(context.Background(), rowID)
 	if err != nil || marks.SupersededBy != replacementID {
 		t.Fatalf("metadata link missing: %+v err=%v", marks, err)
 	}
-	replacementMarks, _, err := store.EntryRecoveryMarks(replacementID)
+	replacementMarks, _, err := store.EntryRecoveryMarks(context.Background(), replacementID)
 	if err != nil || replacementMarks.RetryRootID != rowID {
 		t.Fatalf("replacement chain stamp missing: %+v err=%v", replacementMarks, err)
 	}
-	if count, err := store.CountRetryChain(rowID); err != nil || count != 2 {
+	if count, err := store.CountRetryChain(context.Background(), rowID); err != nil || count != 2 {
 		t.Fatalf("chain count = %d err=%v, want original + replacement", count, err)
 	}
 }
@@ -158,7 +158,7 @@ func TestAdmitRecoveryJobBacklogBound(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		peer := fmt.Sprintf("sybil-%02d", i)
-		admitted, victim, err := store.AdmitRecoveryJob(peer, now.Add(time.Duration(i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
+		admitted, victim, err := store.AdmitRecoveryJob(context.Background(), peer, now.Add(time.Duration(i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
 		if err != nil || !admitted || !victim.None() {
 			t.Fatalf("admit %s: %v victim=%+v %v", peer, admitted, victim, err)
 		}
@@ -166,7 +166,7 @@ func TestAdmitRecoveryJobBacklogBound(t *testing.T) {
 	// The unknown share (3) is full: a fourth unknown rotates the oldest
 	// unknown out even though the global cap still has room — Sybil rows
 	// can never grow past their half.
-	admitted, victim, err := store.AdmitRecoveryJob("sybil-03", now.Add(3*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
+	admitted, victim, err := store.AdmitRecoveryJob(context.Background(), "sybil-03", now.Add(3*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
 	if err != nil || !admitted {
 		t.Fatalf("admit sybil-03: %v %v", admitted, err)
 	}
@@ -176,10 +176,10 @@ func TestAdmitRecoveryJobBacklogBound(t *testing.T) {
 
 	// Established peers fill the rest without touching anyone.
 	for i, peer := range []string{"friend-a", "friend-b", "friend-c"} {
-		if err := store.MarkEstablished(peer, EstablishedReasonOutgoing, now); err != nil {
+		if err := store.MarkEstablished(context.Background(), peer, EstablishedReasonOutgoing, now); err != nil {
 			t.Fatalf("mark established: %v", err)
 		}
-		admitted, victim, err := store.AdmitRecoveryJob(peer, now.Add(time.Duration(10+i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
+		admitted, victim, err := store.AdmitRecoveryJob(context.Background(), peer, now.Add(time.Duration(10+i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
 		if err != nil || !admitted || !victim.None() {
 			t.Fatalf("admit %s: %v victim=%+v %v", peer, admitted, victim, err)
 		}
@@ -188,10 +188,10 @@ func TestAdmitRecoveryJobBacklogBound(t *testing.T) {
 	// The pool is full (3 unknown + 3 established): an established
 	// newcomer evicts the oldest unknown; unknowns never displace an
 	// established row.
-	if err := store.MarkEstablished("friend-d", EstablishedReasonOutgoing, now); err != nil {
+	if err := store.MarkEstablished(context.Background(), "friend-d", EstablishedReasonOutgoing, now); err != nil {
 		t.Fatalf("mark established: %v", err)
 	}
-	admitted, victim, err = store.AdmitRecoveryJob("friend-d", now.Add(time.Hour), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
+	admitted, victim, err = store.AdmitRecoveryJob(context.Background(), "friend-d", now.Add(time.Hour), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
 	if err != nil || !admitted || !victim.Job || victim.Key != "sybil-01" {
 		t.Fatalf("established newcomer: admitted=%v victim=%+v err=%v, want eviction of sybil-01", admitted, victim, err)
 	}
@@ -199,19 +199,19 @@ func TestAdmitRecoveryJobBacklogBound(t *testing.T) {
 	// Fill the backlog with established rows only: an unknown newcomer is
 	// refused — established rows never leave for it.
 	for _, peer := range []string{"sybil-02", "sybil-03"} {
-		if err := store.DeleteRecoveryJob(peer); err != nil {
+		if err := store.DeleteRecoveryJob(context.Background(), peer); err != nil {
 			t.Fatalf("clear %s: %v", peer, err)
 		}
 	}
 	for i, peer := range []string{"friend-e", "friend-f"} {
-		if err := store.MarkEstablished(peer, EstablishedReasonOutgoing, now); err != nil {
+		if err := store.MarkEstablished(context.Background(), peer, EstablishedReasonOutgoing, now); err != nil {
 			t.Fatalf("mark established: %v", err)
 		}
-		if admitted, _, err := store.AdmitRecoveryJob(peer, now.Add(time.Duration(20+i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted {
+		if admitted, _, err := store.AdmitRecoveryJob(context.Background(), peer, now.Add(time.Duration(20+i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted {
 			t.Fatalf("admit %s: %v %v", peer, admitted, err)
 		}
 	}
-	admitted, victim, err = store.AdmitRecoveryJob("late-sybil", now.Add(2*time.Hour), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
+	admitted, victim, err = store.AdmitRecoveryJob(context.Background(), "late-sybil", now.Add(2*time.Hour), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -232,24 +232,24 @@ func TestRecoveryBacklogSharedAcrossLegs(t *testing.T) {
 
 	markEstablished := func(t *testing.T, peer string) {
 		t.Helper()
-		if err := store.MarkEstablished(peer, EstablishedReasonOutgoing, now); err != nil {
+		if err := store.MarkEstablished(context.Background(), peer, EstablishedReasonOutgoing, now); err != nil {
 			t.Fatalf("mark established %s: %v", peer, err)
 		}
 	}
 
 	// Two unknown rows — one per table — then established rows to the cap.
-	if _, admitted, _, err := store.AdmitResendIntent(ResendIntent{
+	if _, admitted, _, err := store.AdmitResendIntent(context.Background(), ResendIntent{
 		Root: "root-b", OriginalID: "orig-b", Peer: "peer-b",
 		ReplacementID: "repl-b", CreatedAt: now,
 	}, 3, limit, RecoveryProtectedWork{}); err != nil || !admitted {
 		t.Fatalf("admit root-b: %v %v", admitted, err)
 	}
-	if admitted, victim, err := store.AdmitRecoveryJob("job-a", now.Add(time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted || !victim.None() {
+	if admitted, victim, err := store.AdmitRecoveryJob(context.Background(), "job-a", now.Add(time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted || !victim.None() {
 		t.Fatalf("admit job-a: %v victim=%+v err=%v", admitted, victim, err)
 	}
 	for i, peer := range []string{"job-c", "job-d", "job-e"} {
 		markEstablished(t, peer)
-		if admitted, victim, err := store.AdmitRecoveryJob(peer, now.Add(time.Duration(2+i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted || !victim.None() {
+		if admitted, victim, err := store.AdmitRecoveryJob(context.Background(), peer, now.Add(time.Duration(2+i)*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted || !victim.None() {
 			t.Fatalf("admit %s: %v victim=%+v err=%v", peer, admitted, victim, err)
 		}
 	}
@@ -259,7 +259,7 @@ func TestRecoveryBacklogSharedAcrossLegs(t *testing.T) {
 	// in-flight send must keep its crash insurance — and takes the
 	// next-oldest unknown across the table boundary: the job.
 	markEstablished(t, "job-f")
-	admitted, victim, err := store.AdmitRecoveryJob("job-f", now.Add(10*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{ResendRoots: []string{"root-b"}})
+	admitted, victim, err := store.AdmitRecoveryJob(context.Background(), "job-f", now.Add(10*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{ResendRoots: []string{"root-b"}})
 	if err != nil || !admitted {
 		t.Fatalf("admit job-f: %v %v", admitted, err)
 	}
@@ -270,7 +270,7 @@ func TestRecoveryBacklogSharedAcrossLegs(t *testing.T) {
 	// Without protection the intent is the oldest unknown row: a JOB
 	// admission evicts a RESEND intent — one backlog, both tables.
 	markEstablished(t, "job-g")
-	admitted, victim, err = store.AdmitRecoveryJob("job-g", now.Add(11*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
+	admitted, victim, err = store.AdmitRecoveryJob(context.Background(), "job-g", now.Add(11*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{})
 	if err != nil || !admitted {
 		t.Fatalf("admit job-g: %v %v", admitted, err)
 	}
@@ -280,7 +280,7 @@ func TestRecoveryBacklogSharedAcrossLegs(t *testing.T) {
 
 	// Established rows only now: an unknown newcomer of either kind is
 	// refused — the pool never displaces established for unknown.
-	_, admitted2, victim, err := store.AdmitResendIntent(ResendIntent{
+	_, admitted2, victim, err := store.AdmitResendIntent(context.Background(), ResendIntent{
 		Root: "root-h", OriginalID: "orig-h", Peer: "peer-h",
 		ReplacementID: "repl-h", CreatedAt: now.Add(12 * time.Second),
 	}, 3, limit, RecoveryProtectedWork{})
@@ -295,14 +295,14 @@ func TestRecoveryBacklogSharedAcrossLegs(t *testing.T) {
 	// in-flight resend root is: seed one unknown job back, then evict with
 	// its peer protected — the eviction must fall through to nothing
 	// (job-x is the only unknown row) and refuse.
-	if err := store.DeleteRecoveryJob("job-c"); err != nil {
+	if err := store.DeleteRecoveryJob(context.Background(), "job-c"); err != nil {
 		t.Fatalf("free a slot: %v", err)
 	}
-	if admitted, _, err := store.AdmitRecoveryJob("job-x", now.Add(20*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted {
+	if admitted, _, err := store.AdmitRecoveryJob(context.Background(), "job-x", now.Add(20*time.Second), now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil || !admitted {
 		t.Fatalf("admit job-x: %v %v", admitted, err)
 	}
 	markEstablished(t, "job-y")
-	admitted, victim, err = store.AdmitRecoveryJob("job-y", now.Add(21*time.Second), now.Add(24*time.Hour), 3, limit,
+	admitted, victim, err = store.AdmitRecoveryJob(context.Background(), "job-y", now.Add(21*time.Second), now.Add(24*time.Hour), 3, limit,
 		RecoveryProtectedWork{JobPeers: []string{"job-x"}})
 	if err != nil {
 		t.Fatalf("admit job-y: %v", err)
@@ -318,15 +318,15 @@ func TestRecoveryBacklogSharedAcrossLegs(t *testing.T) {
 // long-standing real contacts never start as Sybil-evictable unknowns.
 func TestEstablishedBackfillFromHistory(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	self := domaintest.ID("self")
 	oldFriend := domaintest.ID("old-friend")
 	strangerSender := domaintest.ID("stranger")
 
-	store := NewStore(dir, self, ":0")
+	storePath := filepath.Join(t.TempDir(), "state.db")
+	store := newTestStoreAt(t, storePath, self)
 	// Pre-feature history: an outgoing message to a friend, an incoming
 	// row from a stranger (receipt alone must NOT establish).
-	if err := store.Append("dm", self, Entry{
+	if err := store.Append(context.Background(), "dm", self, Entry{
 		ID: "0b7d81f2-9c48-4a6e-9d10-0000000000b0", Sender: self.String(), Recipient: oldFriend.String(),
 		Body: "hi", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -335,17 +335,20 @@ func TestEstablishedBackfillFromHistory(t *testing.T) {
 	appendIncomingRow(t, store, self, strangerSender, "0b7d81f2-9c48-4a6e-9d10-0000000000b1", "")
 	// Simulate the pre-feature state: the fact table is emptied, as if the
 	// rows had been written by a build without it.
-	if _, err := store.db.Exec(`DELETE FROM peer_established`); err != nil {
+	if _, err := store.db.ExecContext(context.Background(), `DELETE FROM peer_established`); err != nil {
 		t.Fatalf("clear facts: %v", err)
 	}
-	_ = store.Close()
-
-	reopened := NewStore(dir, self, ":0")
-	t.Cleanup(func() { _ = reopened.Close() })
-	if established, err := reopened.IsEstablished(oldFriend.String()); err != nil || !established {
+	// The backfill is an explicit start-up step now: the composition root
+	// runs it once the shared database is open, instead of the repository
+	// doing I/O in its constructor.
+	reopened := newTestStoreAt(t, storePath, self)
+	if err := reopened.BackfillEstablishedFromHistory(context.Background(), time.Now().UTC()); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if established, err := reopened.IsEstablished(context.Background(), oldFriend.String()); err != nil || !established {
 		t.Fatalf("messaged peer not backfilled: %v %v", established, err)
 	}
-	if established, _ := reopened.IsEstablished(strangerSender.String()); established {
+	if established, _ := reopened.IsEstablished(context.Background(), strangerSender.String()); established {
 		t.Fatal("an incoming-only sender was backfilled — receipt alone must not establish")
 	}
 }
@@ -354,17 +357,17 @@ func TestEstablishedBackfillFromHistory(t *testing.T) {
 // restart resumes notice retries instead of restarting lookups.
 func TestRecoveryJobDurability(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	self := domaintest.ID("self")
 	peer := domaintest.ID("peer")
 	now := time.Unix(1780000000, 0).UTC()
 
-	store := NewStore(dir, self, ":0")
-	if err := store.UpsertRecoveryJob(peer.String(), now, now.Add(7*24*time.Hour)); err != nil {
+	storePath := filepath.Join(t.TempDir(), "state.db")
+	store := newTestStoreAt(t, storePath, self)
+	if err := store.UpsertRecoveryJob(context.Background(), peer.String(), now, now.Add(7*24*time.Hour)); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	// A second upsert must not reset the existing job.
-	if err := store.UpsertRecoveryJob(peer.String(), now.Add(time.Hour), now.Add(8*24*time.Hour)); err != nil {
+	if err := store.UpsertRecoveryJob(context.Background(), peer.String(), now.Add(time.Hour), now.Add(8*24*time.Hour)); err != nil {
 		t.Fatalf("re-upsert: %v", err)
 	}
 	jobs, err := store.RecoveryJobs(context.Background())
@@ -376,15 +379,10 @@ func TestRecoveryJobDurability(t *testing.T) {
 	job.NoticeAttempts = 3
 	job.LastNoticeAt = now.Add(10 * time.Minute)
 	job.WaitUntil = now.Add(24 * time.Hour)
-	if err := store.UpdateRecoveryJob(job); err != nil {
+	if err := store.UpdateRecoveryJob(context.Background(), job); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	reopened := NewStore(dir, self, ":0")
-	t.Cleanup(func() { _ = reopened.Close() })
+	reopened := newTestStoreAt(t, storePath, self)
 	jobs, err = reopened.RecoveryJobs(context.Background())
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("jobs after reopen = %v err=%v", jobs, err)
@@ -394,7 +392,7 @@ func TestRecoveryJobDurability(t *testing.T) {
 		!got.LastNoticeAt.Equal(now.Add(10*time.Minute)) || !got.WaitUntil.Equal(now.Add(24*time.Hour)) {
 		t.Fatalf("job lost state across reopen: %+v", got)
 	}
-	if err := reopened.DeleteRecoveryJob(peer.String()); err != nil {
+	if err := reopened.DeleteRecoveryJob(context.Background(), peer.String()); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if jobs, _ := reopened.RecoveryJobs(context.Background()); len(jobs) != 0 {
@@ -409,25 +407,25 @@ func TestEstablishedMonotonic(t *testing.T) {
 	store, _, peer := newRecoveryTestStore(t)
 	now := time.Unix(1780000000, 0)
 
-	if established, err := store.IsEstablished(peer.String()); err != nil || established {
+	if established, err := store.IsEstablished(context.Background(), peer.String()); err != nil || established {
 		t.Fatalf("fresh peer established=%v err=%v", established, err)
 	}
-	if err := store.MarkEstablished(peer.String(), EstablishedReasonOutgoing, now); err != nil {
+	if err := store.MarkEstablished(context.Background(), peer.String(), EstablishedReasonOutgoing, now); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
 	// A later, different reason must NOT overwrite the first fact.
-	if err := store.MarkEstablished(peer.String(), EstablishedReasonManual, now.Add(time.Hour)); err != nil {
+	if err := store.MarkEstablished(context.Background(), peer.String(), EstablishedReasonManual, now.Add(time.Hour)); err != nil {
 		t.Fatalf("re-mark: %v", err)
 	}
 	var reason, at string
-	if err := store.db.QueryRow(`SELECT established_reason, established_at FROM peer_established WHERE peer = ?`, peer.String()).
+	if err := store.db.QueryRowContext(context.Background(), `SELECT established_reason, established_at FROM peer_established WHERE peer = ?`, peer.String()).
 		Scan(&reason, &at); err != nil {
 		t.Fatalf("read fact: %v", err)
 	}
 	if reason != EstablishedReasonOutgoing {
 		t.Fatalf("reason = %s — the monotonic fact was overwritten", reason)
 	}
-	if established, err := store.IsEstablished(peer.String()); err != nil || !established {
+	if established, err := store.IsEstablished(context.Background(), peer.String()); err != nil || !established {
 		t.Fatalf("established=%v err=%v", established, err)
 	}
 }
@@ -450,7 +448,7 @@ func TestDecryptFailedEntriesAndChain(t *testing.T) {
 	appendIncomingRow(t, store, self, other, "0b7d81f2-9c48-4a6e-9d10-00000000000d", "")
 
 	for _, id := range rows[:2] {
-		if _, err := store.MarkDecryptFailed(id); err != nil {
+		if _, err := store.MarkDecryptFailed(context.Background(), id); err != nil {
 			t.Fatalf("flag %s: %v", id, err)
 		}
 	}
@@ -465,17 +463,17 @@ func TestDecryptFailedEntriesAndChain(t *testing.T) {
 	// A two-hop chain of resend terminals: every stamped row counts once
 	// however many fresh ids the hops mint.
 	root := rows[0]
-	if err := store.MarkResendTerminal(rows[0], rows[1], root); err != nil {
+	if err := store.MarkResendTerminal(context.Background(), rows[0], rows[1], root); err != nil {
 		t.Fatalf("first terminal: %v", err)
 	}
-	count, err := store.CountRetryChain(root)
+	count, err := store.CountRetryChain(context.Background(), root)
 	if err != nil || count != 2 {
 		t.Fatalf("chain count = %d err=%v, want original + first resend", count, err)
 	}
-	if err := store.MarkResendTerminal(rows[1], rows[2], root); err != nil {
+	if err := store.MarkResendTerminal(context.Background(), rows[1], rows[2], root); err != nil {
 		t.Fatalf("second terminal: %v", err)
 	}
-	count, err = store.CountRetryChain(root)
+	count, err = store.CountRetryChain(context.Background(), root)
 	if err != nil || count != 3 {
 		t.Fatalf("chain count = %d err=%v, want the whole chain", count, err)
 	}
@@ -495,14 +493,14 @@ func TestRecoveryOrphanPeers(t *testing.T) {
 	appendIncomingRow(t, store, self, jobbed, "0b7d81f2-9c48-4a6e-9d10-00000000j001", "")
 	appendIncomingRow(t, store, self, expired, "0b7d81f2-9c48-4a6e-9d10-00000000e001", "")
 	for _, id := range []string{"0b7d81f2-9c48-4a6e-9d10-00000000o001", "0b7d81f2-9c48-4a6e-9d10-00000000j001", "0b7d81f2-9c48-4a6e-9d10-00000000e001"} {
-		if changed, err := store.MarkDecryptFailed(id); err != nil || !changed {
+		if changed, err := store.MarkDecryptFailed(context.Background(), id); err != nil || !changed {
 			t.Fatalf("flag %s: %v %v", id, changed, err)
 		}
 	}
-	if err := store.UpsertRecoveryJob(jobbed.String(), now, now.Add(24*time.Hour)); err != nil {
+	if err := store.UpsertRecoveryJob(context.Background(), jobbed.String(), now, now.Add(24*time.Hour)); err != nil {
 		t.Fatalf("job: %v", err)
 	}
-	if err := store.SetDecryptState("0b7d81f2-9c48-4a6e-9d10-00000000e001", DecryptStateExpired); err != nil {
+	if err := store.SetDecryptState(context.Background(), "0b7d81f2-9c48-4a6e-9d10-00000000e001", DecryptStateExpired); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
 
@@ -523,12 +521,12 @@ func TestRecoveryJobsOrder(t *testing.T) {
 	now := time.Unix(1780000000, 0).UTC()
 
 	for i, peer := range []string{"served-late", "served-early", "never-served"} {
-		if err := store.UpsertRecoveryJob(peer, now.Add(time.Duration(i)*time.Second), now.Add(24*time.Hour)); err != nil {
+		if err := store.UpsertRecoveryJob(context.Background(), peer, now.Add(time.Duration(i)*time.Second), now.Add(24*time.Hour)); err != nil {
 			t.Fatalf("job %s: %v", peer, err)
 		}
 	}
 	stamp := func(peer string, at time.Time) {
-		if err := store.UpdateRecoveryJob(RecoveryJob{Peer: peer, State: DecryptStatePendingNotice, LastNoticeAt: at}); err != nil {
+		if err := store.UpdateRecoveryJob(context.Background(), RecoveryJob{Peer: peer, State: DecryptStatePendingNotice, LastNoticeAt: at}); err != nil {
 			t.Fatalf("stamp %s: %v", peer, err)
 		}
 	}
@@ -553,10 +551,10 @@ func TestDecryptFailedEntriesSkipExpired(t *testing.T) {
 	t.Parallel()
 	store, self, peer := newRecoveryTestStore(t)
 	appendIncomingRow(t, store, self, peer, "0b7d81f2-9c48-4a6e-9d10-0000000000f1", "")
-	if changed, err := store.MarkDecryptFailed("0b7d81f2-9c48-4a6e-9d10-0000000000f1"); err != nil || !changed {
+	if changed, err := store.MarkDecryptFailed(context.Background(), "0b7d81f2-9c48-4a6e-9d10-0000000000f1"); err != nil || !changed {
 		t.Fatalf("flag: %v %v", changed, err)
 	}
-	if err := store.SetDecryptState("0b7d81f2-9c48-4a6e-9d10-0000000000f1", DecryptStateExpired); err != nil {
+	if err := store.SetDecryptState(context.Background(), "0b7d81f2-9c48-4a6e-9d10-0000000000f1", DecryptStateExpired); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
 	entries, err := store.DecryptFailedEntries(context.Background(), peer.String(), self.String(), 10)
@@ -575,27 +573,27 @@ func TestUndeliveredOutgoingExcludesSuperseded(t *testing.T) {
 	t.Parallel()
 	store, self, peer := newRecoveryTestStore(t)
 	const rowID = "0b7d81f2-9c48-4a6e-9d10-0000000000d1"
-	if err := store.Append("dm", self, Entry{
+	if err := store.Append(context.Background(), "dm", self, Entry{
 		ID: rowID, Sender: self.String(), Recipient: peer.String(),
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	undelivered, err := store.UndeliveredOutgoing(self, time.Time{})
+	undelivered, err := store.UndeliveredOutgoing(context.Background(), self, time.Time{})
 	if err != nil || len(undelivered) != 1 {
 		t.Fatalf("baseline: %d err=%v, want the sent row", len(undelivered), err)
 	}
 	const replacementID = "0b7d81f2-9c48-4a6e-9d10-0000000000d2"
-	if err := store.Append("dm", self, Entry{
+	if err := store.Append(context.Background(), "dm", self, Entry{
 		ID: replacementID, Sender: self.String(), Recipient: peer.String(),
 		Body: "sealed-again", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}); err != nil {
 		t.Fatalf("append replacement: %v", err)
 	}
-	if err := store.MarkResendTerminal(rowID, replacementID, rowID); err != nil {
+	if err := store.MarkResendTerminal(context.Background(), rowID, replacementID, rowID); err != nil {
 		t.Fatalf("terminal: %v", err)
 	}
-	undelivered, err = store.UndeliveredOutgoing(self, time.Time{})
+	undelivered, err = store.UndeliveredOutgoing(context.Background(), self, time.Time{})
 	if err != nil {
 		t.Fatalf("undelivered: %v", err)
 	}
@@ -617,11 +615,11 @@ func TestDecryptFailedEntriesExpiredDoesNotConsumeLimit(t *testing.T) {
 	appendIncomingRow(t, store, self, peer, expiredID, "")
 	appendIncomingRow(t, store, self, peer, liveID, "")
 	for _, id := range []string{expiredID, liveID} {
-		if changed, err := store.MarkDecryptFailed(id); err != nil || !changed {
+		if changed, err := store.MarkDecryptFailed(context.Background(), id); err != nil || !changed {
 			t.Fatalf("flag %s: %v %v", id, changed, err)
 		}
 	}
-	if err := store.SetDecryptState(expiredID, DecryptStateExpired); err != nil {
+	if err := store.SetDecryptState(context.Background(), expiredID, DecryptStateExpired); err != nil {
 		t.Fatalf("expire: %v", err)
 	}
 
@@ -652,7 +650,7 @@ func TestUndeliveredOutgoingNullSupersededKept(t *testing.T) {
 		"0b7d81f2-9c48-4a6e-9d10-0000000000c2": `{"note":"{\"superseded_by\":\"x\"}"}`,
 	}
 	for id, metadata := range rows {
-		if err := store.Append("dm", self, Entry{
+		if err := store.Append(context.Background(), "dm", self, Entry{
 			ID: id, Sender: self.String(), Recipient: peer.String(),
 			Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 			Metadata: metadata,
@@ -660,7 +658,7 @@ func TestUndeliveredOutgoingNullSupersededKept(t *testing.T) {
 			t.Fatalf("append %s: %v", id, err)
 		}
 	}
-	undelivered, err := store.UndeliveredOutgoing(self, time.Time{})
+	undelivered, err := store.UndeliveredOutgoing(context.Background(), self, time.Time{})
 	if err != nil {
 		t.Fatalf("undelivered: %v", err)
 	}
@@ -680,14 +678,14 @@ func TestAdmitRecoveryJobIfRoomNeverEvicts(t *testing.T) {
 
 	for i := 0; i < limit; i++ {
 		peer := fmt.Sprintf("peer-%02d", i)
-		if err := store.MarkEstablished(peer, EstablishedReasonOutgoing, now); err != nil {
+		if err := store.MarkEstablished(context.Background(), peer, EstablishedReasonOutgoing, now); err != nil {
 			t.Fatalf("mark established: %v", err)
 		}
-		if _, _, err := store.AdmitRecoveryJob(peer, now, now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil {
+		if _, _, err := store.AdmitRecoveryJob(context.Background(), peer, now, now.Add(24*time.Hour), 3, limit, RecoveryProtectedWork{}); err != nil {
 			t.Fatalf("seed admit: %v", err)
 		}
 	}
-	admitted, err := store.AdmitRecoveryJobIfRoom("orphan-peer", now.Add(time.Hour), now.Add(25*time.Hour), 3, limit)
+	admitted, err := store.AdmitRecoveryJobIfRoom(context.Background(), "orphan-peer", now.Add(time.Hour), now.Add(25*time.Hour), 3, limit)
 	if err != nil {
 		t.Fatalf("if-room admit: %v", err)
 	}
@@ -700,10 +698,10 @@ func TestAdmitRecoveryJobIfRoomNeverEvicts(t *testing.T) {
 	}
 
 	// A freed slot lets the orphan in.
-	if err := store.DeleteRecoveryJob("peer-00"); err != nil {
+	if err := store.DeleteRecoveryJob(context.Background(), "peer-00"); err != nil {
 		t.Fatalf("free a slot: %v", err)
 	}
-	admitted, err = store.AdmitRecoveryJobIfRoom("orphan-peer", now.Add(2*time.Hour), now.Add(26*time.Hour), 3, limit)
+	admitted, err = store.AdmitRecoveryJobIfRoom(context.Background(), "orphan-peer", now.Add(2*time.Hour), now.Add(26*time.Hour), 3, limit)
 	if err != nil || !admitted {
 		t.Fatalf("free-slot admission refused: %v %v", admitted, err)
 	}
@@ -719,7 +717,7 @@ func TestExpireDecryptFailedReachesEveryRow(t *testing.T) {
 	for i := 0; i < rowCount; i++ {
 		id := fmt.Sprintf("0b7d81f2-9c48-4a6e-9d10-0000000070%02x", i)
 		appendIncomingRow(t, store, self, peer, id, "")
-		if changed, err := store.MarkDecryptFailed(id); err != nil || !changed {
+		if changed, err := store.MarkDecryptFailed(context.Background(), id); err != nil || !changed {
 			t.Fatalf("flag %s: %v %v", id, changed, err)
 		}
 	}
@@ -751,21 +749,21 @@ func TestMarkDecryptFailedNeverResurrectsSuperseded(t *testing.T) {
 	store, self, peer := newRecoveryTestStore(t)
 	const rowID = "0b7d81f2-9c48-4a6e-9d10-0000000000a1"
 	appendIncomingRow(t, store, self, peer, rowID, "")
-	if changed, err := store.MarkDecryptFailed(rowID); err != nil || !changed {
+	if changed, err := store.MarkDecryptFailed(context.Background(), rowID); err != nil || !changed {
 		t.Fatalf("first flag: %v %v", changed, err)
 	}
-	if applied, err := store.MarkSupersededCollapsing(rowID, "0b7d81f2-9c48-4a6e-9d10-0000000000a2", rowID); err != nil || !applied {
+	if applied, err := store.MarkSupersededCollapsing(context.Background(), rowID, "0b7d81f2-9c48-4a6e-9d10-0000000000a2", rowID); err != nil || !applied {
 		t.Fatalf("supersede: %v", err)
 	}
 
-	changed, err := store.MarkDecryptFailed(rowID)
+	changed, err := store.MarkDecryptFailed(context.Background(), rowID)
 	if err != nil {
 		t.Fatalf("late flag: %v", err)
 	}
 	if changed {
 		t.Fatal("a late report resurrected a superseded row")
 	}
-	marks, _, err := store.EntryRecoveryMarks(rowID)
+	marks, _, err := store.EntryRecoveryMarks(context.Background(), rowID)
 	if err != nil || marks.DecryptFailed || marks.DecryptState != DecryptStateRecovered {
 		t.Fatalf("marks after late report = %+v err=%v, want recovered untouched", marks, err)
 	}
@@ -780,11 +778,11 @@ func TestRecoveryCycleAnchorImmutable(t *testing.T) {
 	first := time.Unix(1780000000, 0).UTC()
 	later := first.Add(48 * time.Hour)
 
-	anchor, err := store.EnsureRecoveryCycle(peer.String(), first)
+	anchor, err := store.EnsureRecoveryCycle(context.Background(), peer.String(), first)
 	if err != nil || !anchor.Equal(first) {
 		t.Fatalf("first anchor = %v err=%v", anchor, err)
 	}
-	anchor, err = store.EnsureRecoveryCycle(peer.String(), later)
+	anchor, err = store.EnsureRecoveryCycle(context.Background(), peer.String(), later)
 	if err != nil || !anchor.Equal(first) {
 		t.Fatalf("anchor moved to %v err=%v — the cycle clock restarted", anchor, err)
 	}
@@ -793,26 +791,26 @@ func TestRecoveryCycleAnchorImmutable(t *testing.T) {
 	// one transaction, so a racing fresh failure can never lose the anchor.
 	const rowID = "0b7d81f2-9c48-4a6e-9d10-0000000000b1"
 	appendIncomingRow(t, store, self, peer, rowID, "")
-	if changed, err := store.MarkDecryptFailed(rowID); err != nil || !changed {
+	if changed, err := store.MarkDecryptFailed(context.Background(), rowID); err != nil || !changed {
 		t.Fatalf("flag: %v %v", changed, err)
 	}
-	closed, err := store.CloseRecoveryCycleIfIdle(peer.String(), self.String())
+	closed, err := store.CloseRecoveryCycleIfIdle(context.Background(), peer.String(), self.String())
 	if err != nil || closed {
 		t.Fatalf("close with live work: closed=%v err=%v", closed, err)
 	}
-	if anchor, err = store.EnsureRecoveryCycle(peer.String(), later); err != nil || !anchor.Equal(first) {
+	if anchor, err = store.EnsureRecoveryCycle(context.Background(), peer.String(), later); err != nil || !anchor.Equal(first) {
 		t.Fatalf("anchor lost under live work: %v err=%v", anchor, err)
 	}
 
 	// Recovered → the idle close fires and a NEW cycle re-arms.
-	if applied, err := store.MarkSupersededCollapsing(rowID, "0b7d81f2-9c48-4a6e-9d10-0000000000b2", rowID); err != nil || !applied {
+	if applied, err := store.MarkSupersededCollapsing(context.Background(), rowID, "0b7d81f2-9c48-4a6e-9d10-0000000000b2", rowID); err != nil || !applied {
 		t.Fatalf("supersede: %v", err)
 	}
-	closed, err = store.CloseRecoveryCycleIfIdle(peer.String(), self.String())
+	closed, err = store.CloseRecoveryCycleIfIdle(context.Background(), peer.String(), self.String())
 	if err != nil || !closed {
 		t.Fatalf("idle close refused: closed=%v err=%v", closed, err)
 	}
-	anchor, err = store.EnsureRecoveryCycle(peer.String(), later)
+	anchor, err = store.EnsureRecoveryCycle(context.Background(), peer.String(), later)
 	if err != nil || !anchor.Equal(later) {
 		t.Fatalf("post-close anchor = %v err=%v, want a fresh cycle", anchor, err)
 	}
@@ -822,12 +820,12 @@ func TestRecoveryCycleAnchorImmutable(t *testing.T) {
 // insurance is worthless if the crash also loses the intent.
 func TestResendIntentDurability(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	self := domaintest.ID("self")
 	now := time.Unix(1780000000, 0).UTC()
 
-	store := NewStore(dir, self, ":0")
-	if _, admitted, _, err := store.AdmitResendIntent(ResendIntent{
+	storePath := filepath.Join(t.TempDir(), "state.db")
+	store := newTestStoreAt(t, storePath, self)
+	if _, admitted, _, err := store.AdmitResendIntent(context.Background(), ResendIntent{
 		Root: "root-1", OriginalID: "orig-1", Peer: "peer-1",
 		ReplacementID: "repl-1", CreatedAt: now,
 	}, 3, 200, RecoveryProtectedWork{}); err != nil || !admitted {
@@ -835,24 +833,21 @@ func TestResendIntentDurability(t *testing.T) {
 	}
 	// A repeat admission returns the CANONICAL intent — the stored
 	// replacement id survives, a divergent fresh one is discarded.
-	canonical, admitted, _, err := store.AdmitResendIntent(ResendIntent{
+	canonical, admitted, _, err := store.AdmitResendIntent(context.Background(), ResendIntent{
 		Root: "root-1", OriginalID: "orig-1", Peer: "peer-1",
 		ReplacementID: "repl-DIVERGENT", CreatedAt: now.Add(time.Hour),
 	}, 3, 200, RecoveryProtectedWork{})
 	if err != nil || !admitted || canonical.ReplacementID != "repl-1" {
 		t.Fatalf("canonical re-admission = %+v admitted=%v err=%v", canonical, admitted, err)
 	}
-	_ = store.Close()
-
-	reopened := NewStore(dir, self, ":0")
-	t.Cleanup(func() { _ = reopened.Close() })
+	reopened := newTestStoreAt(t, storePath, self)
 	intents, err := reopened.ResendIntents(context.Background(), 10)
 	if err != nil || len(intents) != 1 || intents[0].Root != "root-1" ||
 		intents[0].OriginalID != "orig-1" || intents[0].Peer != "peer-1" ||
 		intents[0].ReplacementID != "repl-1" {
 		t.Fatalf("intents after reopen = %+v err=%v", intents, err)
 	}
-	if err := reopened.DeleteResendIntent("root-1"); err != nil {
+	if err := reopened.DeleteResendIntent(context.Background(), "root-1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if intents, _ := reopened.ResendIntents(context.Background(), 10); len(intents) != 0 {
@@ -873,11 +868,11 @@ func TestMarkDecryptFailedReplacesNonObjectMetadata(t *testing.T) {
 	}
 	for id, metadata := range blobs {
 		appendIncomingRow(t, store, self, peer, id, metadata)
-		changed, err := store.MarkDecryptFailed(id)
+		changed, err := store.MarkDecryptFailed(context.Background(), id)
 		if err != nil || !changed {
 			t.Fatalf("flag %s: %v %v", id, changed, err)
 		}
-		marks, _, err := store.EntryRecoveryMarks(id)
+		marks, _, err := store.EntryRecoveryMarks(context.Background(), id)
 		if err != nil || !marks.DecryptFailed || marks.DecryptState != DecryptStatePendingNotice || marks.DecryptFlaggedAt == "" {
 			t.Fatalf("flag reported written but did not land on %s: %+v err=%v", id, marks, err)
 		}

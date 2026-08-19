@@ -287,7 +287,6 @@ func TestApplyInboundDeleteOnRealChatlog(t *testing.T) {
 	t.Parallel()
 
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	r := &DMRouter{
 		client:         c,
@@ -328,7 +327,7 @@ func TestApplyInboundDeleteOnRealChatlog(t *testing.T) {
 		if domain.PeerIdentityFromWire(sender) != myAddr {
 			owner = domain.PeerIdentityFromWire(sender)
 		}
-		if _, err := c.chatlog.AppendReportNew("dm", owner, entry); err != nil {
+		if _, err := c.chatlog.AppendReportNew(context.Background(), "dm", owner, entry); err != nil {
 			t.Fatalf("AppendReportNew(%s): %v", id, err)
 		}
 	}
@@ -410,7 +409,7 @@ func TestApplyInboundDeleteOnRealChatlog(t *testing.T) {
 				t.Errorf("status = %s, want %s", status, tc.wantStatus)
 			}
 
-			_, rowFound, err := store.EntryByID(domain.MessageID(tc.targetID))
+			_, rowFound, err := store.EntryByID(context.Background(), domain.MessageID(tc.targetID))
 			if err != nil {
 				t.Fatalf("EntryByID after applyInboundDelete: %v", err)
 			}
@@ -432,7 +431,6 @@ func TestHandleInboundMessageDeleteAckPessimisticOrdering(t *testing.T) {
 	t.Parallel()
 
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	store := c.chatlog.Store()
 	if store == nil {
@@ -522,7 +520,7 @@ func TestHandleInboundMessageDeleteAckPessimisticOrdering(t *testing.T) {
 				CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 				Flag:      string(protocol.MessageFlagSenderDelete),
 			}
-			if _, err := c.chatlog.AppendReportNew("dm", peer, entry); err != nil {
+			if _, err := c.chatlog.AppendReportNew(context.Background(), "dm", peer, entry); err != nil {
 				t.Fatalf("AppendReportNew: %v", err)
 			}
 
@@ -544,7 +542,7 @@ func TestHandleInboundMessageDeleteAckPessimisticOrdering(t *testing.T) {
 
 			r.handleInboundMessageDeleteAck(tc.ackPeer, payload)
 
-			_, rowFound, err := store.EntryByID(domain.MessageID(tc.targetID))
+			_, rowFound, err := store.EntryByID(context.Background(), domain.MessageID(tc.targetID))
 			if err != nil {
 				t.Fatalf("EntryByID after handler: %v", err)
 			}
@@ -571,7 +569,6 @@ func TestHandleInboundMessageDeleteAckPessimisticOrdering(t *testing.T) {
 func newTestDMRouterForDelete(t *testing.T) (*DMRouter, *DesktopClient, domain.PeerIdentity, *dispatchCounter) {
 	t.Helper()
 	c, id := newTestDesktopClientWithNode(t)
-	t.Cleanup(func() { _ = c.Close() })
 	counter := &dispatchCounter{}
 	r := &DMRouter{
 		client:                  c,
@@ -589,7 +586,7 @@ func newTestDMRouterForDelete(t *testing.T) (*DMRouter, *DesktopClient, domain.P
 
 func insertChatlogEntry(t *testing.T, gw *ChatlogGateway, owner domain.PeerIdentity, entry chatlog.Entry) {
 	t.Helper()
-	if _, err := gw.AppendReportNew("dm", owner, entry); err != nil {
+	if _, err := gw.AppendReportNew(context.Background(), "dm", owner, entry); err != nil {
 		t.Fatalf("AppendReportNew(%s): %v", entry.ID, err)
 	}
 }
@@ -624,7 +621,7 @@ func TestSendMessageDeleteOutgoingPreservesRowUntilAck(t *testing.T) {
 	}
 
 	store := c.chatlog.Store()
-	if _, found, err := store.EntryByID(domain.MessageID(target)); err != nil || !found {
+	if _, found, err := store.EntryByID(context.Background(), domain.MessageID(target)); err != nil || !found {
 		t.Fatalf("row missing immediately after SendMessageDelete (err=%v, found=%v); pessimistic ordering must wait for ack", err, found)
 	}
 
@@ -673,7 +670,7 @@ func TestSendMessageDeleteIncomingIsLocalOnlySync(t *testing.T) {
 	}
 
 	store := c.chatlog.Store()
-	if _, found, err := store.EntryByID(domain.MessageID(target)); err != nil {
+	if _, found, err := store.EntryByID(context.Background(), domain.MessageID(target)); err != nil {
 		t.Fatalf("EntryByID: %v", err)
 	} else if found {
 		t.Fatal("row still present after incoming local-only delete; should be removed synchronously")
@@ -805,7 +802,7 @@ func TestSendMessageDeleteImmutableRefuses(t *testing.T) {
 	}
 
 	store := c.chatlog.Store()
-	if _, found, err := store.EntryByID(domain.MessageID(target)); err != nil || !found {
+	if _, found, err := store.EntryByID(context.Background(), domain.MessageID(target)); err != nil || !found {
 		t.Fatalf("immutable row missing after refusal (err=%v, found=%v); refusal must not mutate", err, found)
 	}
 

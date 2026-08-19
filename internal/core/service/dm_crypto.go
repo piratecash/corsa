@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -188,7 +190,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 	// plain send on it — masking a broken chatlog behind that would
 	// silently strip quotes from every reply while the DB is unhealthy.
 	if msg.ReplyTo != "" && d.chatlog != nil && d.chatlog.Store() != nil {
-		found, lookupErr := d.chatlog.Store().LookupEntryInConversation(to, domain.MessageID(msg.ReplyTo))
+		found, lookupErr := d.chatlog.Store().LookupEntryInConversation(ctx, to, domain.MessageID(msg.ReplyTo))
 		if lookupErr != nil {
 			return nil, fmt.Errorf("reply_to validation for %q: %w", msg.ReplyTo, lookupErr)
 		}
@@ -218,7 +220,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 	now := time.Now().UTC()
 	createdAt := now.Format(time.RFC3339)
 
-	reply, err := d.rpc.LocalRequestFrame(protocol.Frame{
+	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
 		Type:       "send_message",
 		Topic:      "dm",
 		ID:         string(messageID),
@@ -258,7 +260,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 // be decrypted (missing sender key). Malformed reply_to references are
 // silently cleared — a remote peer cannot inject dangling cross-thread
 // reply links this way.
-func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *DirectMessage {
+func (d *DMCrypto) DecryptIncomingMessage(ctx context.Context, event protocol.LocalChangeEvent) *DirectMessage {
 	if event.Type != protocol.LocalChangeNewMessage || event.Topic != "dm" {
 		return nil
 	}
@@ -301,7 +303,19 @@ func (d *DMCrypto) DecryptIncomingMessage(event protocol.LocalChangeEvent) *Dire
 			if event.Sender == d.id.Address {
 				peerAddress = event.Recipient
 			}
-			if !store.HasEntryInConversation(domain.PeerIdentityFromWire(peerAddress), domain.MessageID(replyTo)) {
+			// Inline decryption has no error path to take — this builds one
+			// message for the UI — so a lookup that FAILED keeps the
+			// reference instead of dropping it. Dropping was the worse of the
+			// two: a cancelled context or an unhealthy database silently
+			// stripped a valid quote, while a kept reference is what every
+			// renderer already tolerates (the peer can delete the quoted
+			// message at any time).
+			found, err := store.LookupEntryInConversation(ctx, domain.PeerIdentityFromWire(peerAddress), domain.MessageID(replyTo))
+			if err != nil {
+				log.Warn().Err(err).
+					Str("message_id", string(event.MessageID)).
+					Msg("reply reference lookup failed; keeping the reference")
+			} else if !found {
 				replyTo = ""
 			}
 		}
@@ -400,7 +414,7 @@ func (d *DMCrypto) SyncDirectMessagesFromPeers(ctx context.Context, peerAddresse
 				continue
 			}
 
-			reply, err := d.rpc.LocalRequestFrame(protocol.Frame{
+			reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
 				Type:       "import_message",
 				Topic:      "dm",
 				ID:         item.ID,
@@ -445,7 +459,7 @@ func (d *DMCrypto) FetchConversation(ctx context.Context, peerAddress domain.Pee
 		return nil, fmt.Errorf("chatlog not available")
 	}
 
-	entries, err := d.chatlog.ReadCtx(ctx, "dm", peerAddress)
+	entries, err := d.chatlog.Read(ctx, "dm", peerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog read: %w", err)
 	}
@@ -492,7 +506,12 @@ func (d *DMCrypto) FetchConversation(ctx context.Context, peerAddress domain.Pee
 	}
 
 	messages := decryptDirectMessagesReporting(d.id, decryptContacts, records, deliveryReceipts, pendingMessages, d.onDecryptFailure, d.onDecryptSuccess)
-	sanitizeReplyReferences(messages, store, d.id.Address)
+	// A failed reply lookup fails the READ. Returning the messages anyway
+	// handed the caller history with quotes silently removed and called it a
+	// success.
+	if err := sanitizeReplyReferences(ctx, messages, store, d.id.Address); err != nil {
+		return nil, err
+	}
 	return messages, nil
 }
 
@@ -504,13 +523,13 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 		return nil, fmt.Errorf("chatlog not available")
 	}
 
-	lastEntries, err := d.chatlog.ReadLastEntryPerPeerCtx(ctx)
+	lastEntries, err := d.chatlog.ReadLastEntryPerPeer(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog previews: %w", err)
 	}
 
 	unreadByPeer := make(map[string]int)
-	summaries, err := d.chatlog.ListConversationsCtx(ctx)
+	summaries, err := d.chatlog.ListConversations(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog summaries: %w", err)
 	}
@@ -599,7 +618,7 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 		return nil, fmt.Errorf("chatlog not available")
 	}
 
-	entry, err := d.chatlog.ReadLastEntryCtx(ctx, "dm", peerAddress)
+	entry, err := d.chatlog.ReadLastEntry(ctx, "dm", peerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog read last: %w", err)
 	}
@@ -712,7 +731,7 @@ var ErrRecipientKeysUnknown = errors.New("recipient's encryption keys are not kn
 // and triggers a one-shot import when only network contacts know the key
 // material.
 func (d *DMCrypto) ensureRecipientContact(ctx context.Context, recipient string) (Contact, error) {
-	trustedReply, err := d.rpc.LocalRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	trustedReply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_trusted_contacts"})
 	if err != nil {
 		return Contact{}, err
 	}
@@ -721,7 +740,7 @@ func (d *DMCrypto) ensureRecipientContact(ctx context.Context, recipient string)
 		return contact, nil
 	}
 
-	networkReply, err := d.rpc.LocalRequestFrame(protocol.Frame{Type: "fetch_contacts"})
+	networkReply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_contacts"})
 	if err != nil {
 		return Contact{}, err
 	}
@@ -734,7 +753,7 @@ func (d *DMCrypto) ensureRecipientContact(ctx context.Context, recipient string)
 		return Contact{}, fmt.Errorf("recipient trust data is incomplete")
 	}
 
-	importReply, err := d.rpc.LocalRequestFrame(protocol.Frame{
+	importReply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
 		Type: "import_contacts",
 		Contacts: []protocol.ContactFrame{{
 			Address: recipient,
@@ -750,7 +769,7 @@ func (d *DMCrypto) ensureRecipientContact(ctx context.Context, recipient string)
 		return Contact{}, fmt.Errorf("unexpected contacts import reply: %s", importReply.Type)
 	}
 
-	trustedReply, err = d.rpc.LocalRequestFrame(protocol.Frame{Type: "fetch_trusted_contacts"})
+	trustedReply, err = d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_trusted_contacts"})
 	if err != nil {
 		return Contact{}, err
 	}

@@ -10,21 +10,53 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/debugserver"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/metrics"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	"github.com/piratecash/corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/storage"
+	"github.com/piratecash/corsa/internal/core/storage/migrations"
 )
 
 func Run() error {
 	cfg := config.Default()
+
+	// Configuration is checked FIRST, before anything is opened, started or
+	// cleaned up. This check used to sit next to the RPC server, after the
+	// shared database was open and the node was running, and it failed through
+	// log.Fatal — which is os.Exit: no cancelNode, no drains, no
+	// Database.Close, none of the deferred cleanup this function is built
+	// around. A half-written pair of credentials is a startup mistake and
+	// belongs here, where returning an error costs nothing and nothing has
+	// happened yet — not even the staging sweep below, which deletes files.
+	if err := cfg.RPC.ValidateAuth(); err != nil {
+		return fmt.Errorf("rpc config invalid: %w", err)
+	}
+
 	// cancelNode stops the node service (and every ctx-bound worker:
 	// metrics collector, resource sampler, status notifier) on the
 	// UI-driven shutdown path — see window.SetShutdown below.
 	ctx, cancelNode := context.WithCancel(context.Background())
-	defer cancelNode()
+
+	// uiOwnsShutdown hands every resource below to the UI's own shutdown hook.
+	//
+	// On desktop app.Main never returns — the UI goroutine exits the process —
+	// so the deferred cleanup here is the path for failures BEFORE the window
+	// runs. On Android app.Main returns as soon as the Activity is up, while
+	// the Activity and the UI goroutine keep running and keep using the node,
+	// the bus and the database. Letting these defers fire there closed the
+	// state database out from under a live UI: everything after it got
+	// "sql: database is closed".
+	uiOwnsShutdown := false
+	defer func() {
+		if uiOwnsShutdown {
+			return
+		}
+		cancelNode()
+	}()
 
 	// Mobile runs as a light client, always: config.Default falls back
 	// to NodeTypeFull (there is no practical way to set CORSA_NODE_TYPE
@@ -75,22 +107,50 @@ func Run() error {
 		return fmt.Errorf("pprof debug server (CORSA_PPROF_ADDR=%q): %w", cfg.Node.PprofAddr, err)
 	}
 	defer func() {
+		if uiOwnsShutdown {
+			return
+		}
 		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = pprofShutdown(sctx)
 	}()
 
+	// The shared state database opens before any service exists: an
+	// unreadable, foreign or unmigratable file must stop the process here,
+	// while nothing has started writing, rather than surface later as
+	// messages that silently fail to persist.
+	database, err := storage.Open(ctx, storage.Config{
+		ExplicitPath:  cfg.Node.StateDBPath,
+		DataDir:       cfg.Node.EffectiveDataDir(),
+		ListenAddress: domain.ListenAddress(cfg.Node.ListenAddress),
+		Owner:         domain.PeerIdentityFromWire(id.Address),
+		Catalog:       migrations.Catalog(),
+	})
+	if err != nil {
+		return fmt.Errorf("open state database: %w", err)
+	}
+	// The deferred cleanup covers the paths that never reach the UI's shutdown
+	// hook — a failure while building the app. Once the window takes over,
+	// uiOwnsShutdown alone decides, and it is written on THIS goroutine before
+	// the window starts: a second flag set by the hook would be read here
+	// while the UI goroutine writes it, which on Android is a real race,
+	// because app.Main returns while that goroutine keeps running.
+	defer func() {
+		if uiOwnsShutdown {
+			return
+		}
+		if err := database.Close(); err != nil {
+			log.Error().Err(err).Msg("state database close failed")
+		}
+	}()
+
 	nodeService := node.NewService(cfg.Node, id, eventBus)
 	runtime := NewNodeRuntime(nodeService)
 
-	client := service.NewDesktopClient(cfg.App, cfg.Node, id, nodeService)
-	defer func() {
-		if err := client.Close(); err != nil {
-			log.Error().Err(err).Msg("chatlog close failed")
-		} else {
-			log.Info().Msg("chatlog closed")
-		}
-	}()
+	client := service.NewDesktopClient(cfg.App, cfg.Node, id, nodeService, database)
+	if err := client.BackfillEstablished(ctx, time.Now().UTC()); err != nil {
+		log.Warn().Err(err).Msg("chatlog established backfill failed")
+	}
 
 	fileBridge := service.NewFileTransferBridge(client)
 
@@ -175,11 +235,6 @@ func Run() error {
 	rpc.RegisterAllCommands(cmdTable, nodeService, client, router, metricsCollector)
 	rpc.RegisterDesktopOverrides(cmdTable, client, nodeService)
 
-	// Fail-fast on partial RPC auth (only username or only password set).
-	if err := cfg.RPC.ValidateAuth(); err != nil {
-		log.Fatal().Err(err).Msg("rpc config invalid")
-	}
-
 	// Start HTTP RPC server for external access (corsa-cli, third-party tools).
 	// RPC is only started when authentication credentials are configured
 	// (CORSA_RPC_USERNAME + CORSA_RPC_PASSWORD). Without auth, the server
@@ -202,7 +257,10 @@ func Run() error {
 	} else if cfg.RPC.AuthEnabled() {
 		rpcServer, err := rpc.NewServer(cfg.RPC, cmdTable, nodeService)
 		if err != nil {
-			log.Fatal().Err(err).Msg("rpc server config invalid")
+			// Returned, not log.Fatal: os.Exit here would skip cancelNode,
+			// the database close and every other deferred cleanup, with the
+			// node already running.
+			return fmt.Errorf("rpc server config invalid: %w", err)
 		}
 
 		if err := rpcServer.StartAsync(); err != nil {
@@ -225,20 +283,29 @@ func Run() error {
 			})
 			return rpcStopped
 		}
-		defer stopRPC()
+		defer func() {
+			if uiOwnsShutdown {
+				return
+			}
+			stopRPC()
+		}()
 	} else {
 		log.Info().Msg("rpc server disabled: CORSA_RPC_USERNAME and CORSA_RPC_PASSWORD not set")
 	}
 
 	// Desktop UI gets CommandTable directly — no HTTP round-trip needed.
 	window := NewWindow(client, router, eventBus, cmdTable, runtime, prefs)
-	// The UI exit paths (window closed, Android DestroyEvent) terminate
-	// the process from the event loop; app.Main never returns, so the
-	// defers above never fire there. Mirror the data-integrity part
-	// here: stop the node first (no new chatlog writes), then close the
-	// chatlog — sql.DB.Close waits out in-flight queries, so sqlite
-	// finishes its WAL work instead of dying inside os.Exit. Double
-	// Close on the theoretical normal-return path is harmless.
+	// From here the UI owns the teardown, on both platforms but for two
+	// different reasons. On desktop its exit paths (window closed) terminate
+	// the process straight from the event loop, so the defers above never get
+	// to run. On Android app.Main RETURNS as soon as the Activity is up, while
+	// the Activity and the UI goroutine keep working — the defers would get to
+	// run, far too early, which is what uiOwnsShutdown stops.
+	//
+	// So the data-integrity part lives here: stop the node first (no new
+	// chatlog writes), then close the chatlog — sql.DB.Close waits out
+	// in-flight queries, so sqlite finishes its WAL work instead of dying
+	// inside os.Exit.
 	window.SetShutdown(func() {
 		// Shutdown ordering — producers stop before their consumers'
 		// state is torn down, and everything settles before sqlite
@@ -263,9 +330,11 @@ func Run() error {
 		//     bus. Bounded externally — bus handlers can wait up to 10s
 		//     per event and Bus.Shutdown itself has no timeout;
 		//  6. the router's full gate + remaining in-flight work;
-		//  7. the chatlog. Every wait is bounded; on timeout we still
-		//     close the DB (sql.DB.Close waits out active queries)
-		//     rather than exit with the WAL dangling.
+		//  7. the chatlog. Every wait is bounded; on timeout the DB is
+		//     deliberately LEFT OPEN — see the stage below — because
+		//     closing it under writers that are still running is what
+		//     loses their terminal writes, while SQLite recovers an
+		//     unclosed WAL crash-consistently on the next start.
 		// clean starts from the RPC stage: a false return means a
 		// handler may still be running inside fasthttp — it calls
 		// straight into the CommandTable → chatlog.
@@ -315,15 +384,21 @@ func Run() error {
 			log.Warn().Msg("router did not drain within 5s")
 			clean = false
 		}
+		// Either way the decision is made here; Run handed ownership over
+		// before starting the window, so nothing revisits it.
 		if clean {
-			if err := client.Close(); err != nil {
-				log.Error().Err(err).Msg("chatlog close failed on ui shutdown")
+			if err := database.Close(); err != nil {
+				log.Error().Err(err).Msg("state database close failed on ui shutdown")
 			} else {
-				log.Info().Msg("chatlog closed on ui shutdown")
+				log.Info().Msg("state database closed on ui shutdown")
 			}
 		} else {
-			log.Warn().Msg("shutdown incomplete: leaving chatlog open for crash-consistent WAL recovery on next start")
+			log.Warn().Msg("shutdown incomplete: leaving state database open for crash-consistent WAL recovery on next start")
 		}
 	})
+	// From here the UI owns the shutdown. On Android this is what keeps the
+	// resources alive after app.Main returns; on desktop it changes nothing,
+	// because app.Main does not return at all.
+	uiOwnsShutdown = true
 	return window.Run()
 }

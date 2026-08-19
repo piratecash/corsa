@@ -115,7 +115,15 @@ type DMRouter struct {
 	sendOps     sync.WaitGroup
 	loopOps     sync.WaitGroup
 	loopCtx     context.Context
-	loopCancel  context.CancelFunc
+	// opCtx outlives loopCtx. It is the context of repository work that no
+	// caller supplied one for — UI actions and ebus handlers — and it is
+	// cancelled only at the very end of ShutdownDrain, after the bus has
+	// drained. Sharing loopCtx here was a bug: StopLoops cancels that one
+	// while handlers are still running, so the terminal delete and recovery
+	// writes those handlers make would fail with context canceled.
+	opCtx      context.Context
+	opCancel   context.CancelFunc
+	loopCancel context.CancelFunc
 
 	mu               sync.RWMutex
 	activePeer       domain.PeerIdentity
@@ -534,12 +542,22 @@ func (r *DMRouter) ShutdownDrain(timeout time.Duration) bool {
 		r.inflight.Wait()
 		close(done)
 	}()
+	drained := true
 	select {
 	case <-done:
-		return true
 	case <-time.After(timeout):
-		return false
+		drained = false
 	}
+
+	// Repository work stops LAST: everything above may still have been
+	// writing a terminal outcome, and cancelling their context earlier is
+	// what would lose it. On a timed-out drain it is cancelled too — the
+	// stragglers are no longer allowed to reach a database the composition
+	// root is about to release.
+	if r.opCancel != nil {
+		r.opCancel()
+	}
+	return drained
 }
 
 // selectPeerCore shares logic for SelectPeer and AutoSelectPeer.
@@ -884,7 +902,7 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 		if msg.ReplyTo != "" {
 			if gw := r.client.ChatlogGateway(); gw != nil {
 				if store := gw.Store(); store != nil {
-					if found, lookErr := store.LookupEntryInConversation(to, domain.MessageID(msg.ReplyTo)); lookErr == nil && !found {
+					if found, lookErr := store.LookupEntryInConversation(r.opContext(), to, domain.MessageID(msg.ReplyTo)); lookErr == nil && !found {
 						log.Warn().
 							Str("peer", to.String()).
 							Str("reply_to", string(msg.ReplyTo)).
@@ -1055,7 +1073,7 @@ func (r *DMRouter) ResolveIdentity(target domain.PeerIdentity) (string, error) {
 // ImportContactLink verifies and imports a pasted corsa: link, returning
 // the imported identity.
 func (r *DMRouter) ImportContactLink(raw string) (domain.PeerIdentity, error) {
-	return r.client.ImportContactLink(raw)
+	return r.client.ImportContactLink(r.opContext(), raw)
 }
 
 func (r *DMRouter) SetSendStatus(s string) {
@@ -1108,7 +1126,7 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	// Delete chat history from the local database. This is the gate
 	// operation: if it fails, the peer is NOT removed and peerGen stays
 	// unchanged so in-flight goroutines remain valid.
-	if _, err := r.client.DeletePeerHistory(identity); err != nil {
+	if _, err := r.client.DeletePeerHistory(r.opContext(), identity); err != nil {
 		log.Error().Str("identity", id).Err(err).Msg("failed to delete identity chat history")
 		return false, fmt.Errorf("delete identity %s: %w", id, err)
 	}
@@ -1162,6 +1180,24 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 // ebus events (messages, receipts). Network-layer events (peer health,
 // aggregate status, contacts, identities) are handled by the
 // NodeStatusMonitor — DMRouter does not subscribe to them.
+// opContext is the context for repository work that no caller supplied one
+// for: UI actions and ebus event handlers, which have no request of their own.
+//
+// It is deliberately NOT loopCtx. StopLoops cancels the loops early in the
+// shutdown order — before the event bus drains — and handlers still running at
+// that point publish terminal delete and recovery outcomes that must reach the
+// database. opCtx is cancelled at the end of ShutdownDrain instead, once the
+// bus is drained and nothing can start new work.
+//
+// Background is the fallback for a router built directly in a test and never
+// started; a nil context panics inside database/sql.
+func (r *DMRouter) opContext() context.Context {
+	if r.opCtx != nil {
+		return r.opCtx
+	}
+	return context.Background()
+}
+
 func (r *DMRouter) Start() {
 	// 1. Subscribe to DM-specific ebus events.
 	r.subscribeEvents()
@@ -1169,6 +1205,7 @@ func (r *DMRouter) Start() {
 	// Cancellable context for the long-lived loops below; ShutdownDrain
 	// cancels it so the loops exit and release their inflight slots.
 	r.loopCtx, r.loopCancel = context.WithCancel(context.Background())
+	r.opCtx, r.opCancel = context.WithCancel(context.Background())
 
 	// 2. Startup: load previews, auto-select first peer, seed the monitor.
 	// Tracked: it reads and writes through the chatlog (previews,
@@ -1491,7 +1528,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		// updates immediately and (b) we have the DirectMessage as a fallback
 		// if the full reload fails.
 		var decryptedMsg *DirectMessage
-		msg := r.client.DecryptIncomingMessage(event)
+		msg := r.client.DecryptIncomingMessage(r.opContext(), event)
 		if msg != nil {
 			r.tryRegisterFileReceive(msg)
 			decryptedMsg = msg
@@ -1557,7 +1594,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		return
 	}
 
-	msg := r.client.DecryptIncomingMessage(event)
+	msg := r.client.DecryptIncomingMessage(r.opContext(), event)
 	if msg == nil {
 		isIncoming := event.Sender != r.client.Address().String()
 		if isIncoming && !replaying {
@@ -1946,7 +1983,7 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 			continue
 		}
 		existing.Preview = p
-		// Apply the SQL unread count unconditionally. ListConversationsCtx
+		// Apply the SQL unread count unconditionally. ListConversations
 		// is the source of truth for unread after startup — if it reports 0,
 		// any stale event-path badge must be cleared, not just increased.
 		existing.Unread = p.UnreadCount
@@ -2017,7 +2054,7 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 // non-active conversations actually appear in
 // FileTransferManager.AllTransfersSnapshot.
 func (r *DMRouter) updateSidebarFromEvent(event protocol.LocalChangeEvent, peerID domain.PeerIdentity) bool {
-	msg := r.client.DecryptIncomingMessage(event)
+	msg := r.client.DecryptIncomingMessage(r.opContext(), event)
 	if msg == nil {
 		return false
 	}

@@ -146,7 +146,7 @@ func newDefaultChatlogProvider(t *testing.T) *rpcmocks.MockChatlogProvider {
 	m.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
 	m.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
 	m.On("FetchConversations").Return("[]", nil).Maybe()
-	m.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	m.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 	return m
 }
 

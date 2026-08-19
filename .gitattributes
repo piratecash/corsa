@@ -1,0 +1,8 @@
+# Migration SQL is embedded verbatim and its SHA-256 is recorded in every
+# database's ledger. A checkout that rewrote these files to CRLF would embed
+# different bytes, and a database migrated by that build would then be refused
+# by an official build as ErrMigrationDrift. The checksum canonicalises line
+# endings as well (see Migration.Checksum) — this keeps the working tree itself
+# identical everywhere, so the SQL that runs is byte-for-byte the reviewed SQL.
+internal/core/storage/migrations/*.sql text eol=lf
+internal/core/storage/migrations/testdata/*.sql text eol=lf

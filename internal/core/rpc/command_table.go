@@ -1260,7 +1260,16 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 					return validationError(fmt.Errorf("reply_to must be a valid message ID (UUID v4)"))
 				}
 				if replyToID != "" && chatlog != nil {
-					if !chatlog.HasEntryInConversation(to, string(replyToID)) {
+					// A failed lookup is not an absent message. Folding the
+					// two together told the client their reply target did not
+					// exist whenever the context was cancelled or the database
+					// was unhealthy — a validation error for something that
+					// had never been established.
+					found, err := chatlog.LookupEntryInConversation(commandContext(req), to, string(replyToID))
+					if err != nil {
+						return internalError(fmt.Errorf("reply_to lookup failed: %w", err))
+					}
+					if !found {
 						return validationError(fmt.Errorf("reply_to references a message that does not exist in this conversation"))
 					}
 				}
@@ -1673,7 +1682,7 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 					return validationError(fmt.Errorf("peer_address must not be the zero peer identity"))
 				}
 			}
-			entries, err := chatlog.FetchChatlog(topic, peerAddress)
+			entries, err := chatlog.FetchChatlog(commandContext(req), topic, peerAddress)
 			if err != nil {
 				return internalError(fmt.Errorf("fetch chatlog: %w", err))
 			}
@@ -1686,7 +1695,7 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 			if r, done := ctxDone(req); done {
 				return r
 			}
-			previews, err := chatlog.FetchChatlogPreviews()
+			previews, err := chatlog.FetchChatlogPreviews(commandContext(req))
 			if err != nil {
 				return internalError(fmt.Errorf("fetch chatlog previews: %w", err))
 			}
@@ -1699,7 +1708,7 @@ func RegisterChatlogCommands(t *CommandTable, chatlog ChatlogProvider) {
 			if r, done := ctxDone(req); done {
 				return r
 			}
-			conversations, err := chatlog.FetchConversations()
+			conversations, err := chatlog.FetchConversations(commandContext(req))
 			if err != nil {
 				return internalError(fmt.Errorf("fetch conversations: %w", err))
 			}

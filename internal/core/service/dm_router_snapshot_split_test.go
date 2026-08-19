@@ -14,8 +14,7 @@ import (
 // with the snapshot cache seeded the same way NewDMRouter does.
 func newSnapshotTestRouter(t *testing.T) *DMRouter {
 	t.Helper()
-	db, cl := newTestChatLog(t)
-	t.Cleanup(func() { _ = db.Close() })
+	cl := newTestChatLog(t)
 	client := &DesktopClient{id: &identity.Identity{Address: "me"}, chatLog: cl}
 	client.wireSubServices()
 

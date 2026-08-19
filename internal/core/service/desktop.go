@@ -14,6 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/service/filetransfer"
+	"github.com/piratecash/corsa/internal/core/storage"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
@@ -33,7 +34,9 @@ var errNoLocalNode = errors.New("no local node (embedded mode required)")
 //
 //   - AppInfo    — immutable config + identity snapshot.
 //   - LocalRPCClient — in-process RPC frame dispatch + remote TCP handshakes.
-//   - ChatlogGateway — single owner of the SQLite-backed chatlog store.
+//   - ChatlogGateway — the SQLite-backed chatlog repository. The database
+//     itself belongs to internal/core/storage and is opened and closed by
+//     the process composition root (desktop.Run / sdk.New).
 //   - MessageStoreAdapter — satisfies node.MessageStore for the embedded node.
 //   - DMCrypto   — direct-message encryption, decryption, send, and
 //     on-demand per-peer sync.
@@ -317,12 +320,20 @@ type ResourceUsage struct {
 	SampledAt string
 }
 
-// NewDesktopClient wires the composition root: opens (or attaches to) the
-// chatlog, builds every sub-service, and registers the MessageStoreAdapter
-// with the embedded node so the node delegates message persistence to the
-// desktop layer instead of managing its own chatlog.
-func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service) *DesktopClient {
-	store := chatlog.NewStore(nodeCfg.EffectiveChatLogDir(), domain.PeerIdentityFromWire(id.Address), domain.ListenAddress(nodeCfg.ListenAddress))
+// NewDesktopClient wires the composition root: builds every sub-service on
+// top of the shared state database and registers the MessageStoreAdapter with
+// the embedded node so the node delegates message persistence to the desktop
+// layer instead of managing its own chatlog.
+//
+// database is the already opened, already migrated state database. It may be
+// nil only in tests that run the client without persistence; production
+// callers open it first so a storage failure aborts startup instead of
+// surfacing later as silently dropped messages.
+func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Identity, localNode *node.Service, database *storage.Database) *DesktopClient {
+	var store *chatlog.Store
+	if database != nil {
+		store = chatlog.NewStore(database.Executor(), domain.PeerIdentityFromWire(id.Address))
+	}
 	c := &DesktopClient{
 		id:        id,
 		appCfg:    appCfg,
@@ -353,7 +364,7 @@ func NewDesktopClient(appCfg config.App, nodeCfg config.Node, id *identity.Ident
 func (c *DesktopClient) wireSubServices() {
 	c.info = NewAppInfo(c.appCfg, c.nodeCfg, c.id)
 	c.rpc = NewLocalRPCClient(c.info, c.localNode)
-	c.chatlog = &ChatlogGateway{store: c.chatLog, selfAddr: c.info.Address()}
+	c.chatlog = NewChatlogGateway(c.chatLog, c.info.Address())
 	c.store = NewMessageStoreAdapter(c.chatlog, c.id)
 	c.dm = NewDMCrypto(c.rpc, c.chatlog, c.id)
 	c.prober = NewNodeProber(c.rpc, c.dm, c.info)
@@ -369,16 +380,12 @@ func (c *DesktopClient) setChatLogForTest(store *chatlog.Store) {
 	}
 }
 
-// Close releases the chatlog SQLite database through the gateway. Called
-// at shutdown so WAL checkpoint and file handles are released cleanly.
-func (c *DesktopClient) Close() error {
-	if c.chatlog != nil {
-		return c.chatlog.Close()
-	}
-	if c.chatLog != nil {
-		return c.chatLog.Close()
-	}
-	return nil
+// BackfillEstablished seeds the monotonic established facts from chat history
+// that predates the peer_established table. Idempotent; the composition root
+// calls it once, after the state database is open and before the node starts
+// classifying peers.
+func (c *DesktopClient) BackfillEstablished(ctx context.Context, now time.Time) error {
+	return c.chatlog.BackfillEstablished(ctx, now)
 }
 
 // ---------------------------------------------------------------------------
@@ -462,31 +469,37 @@ func (c *DesktopClient) DesktopVersion() string { return c.info.DesktopVersion()
 // ---------------------------------------------------------------------------
 
 // DeletePeerHistory removes all chat messages for identity.
-func (c *DesktopClient) DeletePeerHistory(identity domain.PeerIdentity) (int64, error) {
-	return c.chatlog.DeletePeerHistory(identity)
+func (c *DesktopClient) DeletePeerHistory(ctx context.Context, identity domain.PeerIdentity) (int64, error) {
+	return c.chatlog.DeletePeerHistory(ctx, identity)
 }
 
 // FetchChatlog reads the chat entries for a peer and returns a formatted
 // JSON payload suitable for console / RPC consumption.
-func (c *DesktopClient) FetchChatlog(topic, peerAddress string) (string, error) {
-	return c.chatlog.FetchChatlog(topic, peerAddress)
+func (c *DesktopClient) FetchChatlog(ctx context.Context, topic, peerAddress string) (string, error) {
+	return c.chatlog.FetchChatlog(ctx, topic, peerAddress)
 }
 
 // FetchChatlogPreviews reads the last entry per peer and returns a
 // formatted JSON payload with preview-sized fields.
-func (c *DesktopClient) FetchChatlogPreviews() (string, error) {
-	return c.chatlog.FetchChatlogPreviews()
+func (c *DesktopClient) FetchChatlogPreviews(ctx context.Context) (string, error) {
+	return c.chatlog.FetchChatlogPreviews(ctx)
 }
 
 // FetchConversations lists all conversations with their message counts.
-func (c *DesktopClient) FetchConversations() (string, error) {
-	return c.chatlog.FetchConversations()
+func (c *DesktopClient) FetchConversations(ctx context.Context) (string, error) {
+	return c.chatlog.FetchConversations(ctx)
 }
 
 // HasEntryInConversation reports whether a message with the given ID
 // exists in the conversation with peerAddress.
-func (c *DesktopClient) HasEntryInConversation(peerAddress, messageID string) bool {
-	return c.chatlog.HasEntryInConversation(peerAddress, messageID)
+func (c *DesktopClient) HasEntryInConversation(ctx context.Context, peerAddress, messageID string) bool {
+	return c.chatlog.HasEntryInConversation(ctx, peerAddress, messageID)
+}
+
+// LookupEntryInConversation is HasEntryInConversation for callers that must
+// tell absence from a failed lookup.
+func (c *DesktopClient) LookupEntryInConversation(ctx context.Context, peerAddress, messageID string) (bool, error) {
+	return c.chatlog.LookupEntryInConversation(ctx, peerAddress, messageID)
 }
 
 // ---------------------------------------------------------------------------
@@ -520,7 +533,7 @@ func (c *DesktopClient) BuildContactLink() (string, error) {
 // verify-then-import — the fingerprint and box binding are checked by the
 // parser, the node-side import re-verifies and pins the contact in the
 // trust store. Works fully offline.
-func (c *DesktopClient) ImportContactLink(raw string) (domain.PeerIdentity, error) {
+func (c *DesktopClient) ImportContactLink(ctx context.Context, raw string) (domain.PeerIdentity, error) {
 	contact, err := contactlink.Parse(raw, domain.NetworkID(c.NetworkName()))
 	if err != nil {
 		return domain.PeerIdentity{}, err
@@ -542,7 +555,7 @@ func (c *DesktopClient) ImportContactLink(raw string) (domain.PeerIdentity, erro
 	}
 	// A manual import is a §4.10 qualifying event for the established fact.
 	if c.chatLog != nil {
-		if err := c.chatLog.MarkEstablished(contact.Address.String(), chatlog.EstablishedReasonManual, time.Now().UTC()); err != nil {
+		if err := c.chatLog.MarkEstablished(ctx, contact.Address.String(), chatlog.EstablishedReasonManual, time.Now().UTC()); err != nil {
 			return contact.Address, nil // the import itself succeeded; the mark is best-effort
 		}
 	}
@@ -599,8 +612,8 @@ func (c *DesktopClient) SendDirectMessage(ctx context.Context, to domain.PeerIde
 }
 
 // DecryptIncomingMessage decrypts a local-change event into a DirectMessage.
-func (c *DesktopClient) DecryptIncomingMessage(event protocol.LocalChangeEvent) *DirectMessage {
-	return c.dm.DecryptIncomingMessage(event)
+func (c *DesktopClient) DecryptIncomingMessage(ctx context.Context, event protocol.LocalChangeEvent) *DirectMessage {
+	return c.dm.DecryptIncomingMessage(ctx, event)
 }
 
 // SendControlMessage submits a control DM (message_delete,

@@ -936,7 +936,7 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 	}
 
 	svc := node.NewService(cfg, id, ebus.New())
-	store := chatlog.NewStore(dir, domain.PeerIdentityFromWire(id.Address), domain.ListenAddress(":0"))
+	store := newTestChatlogStore(t, domain.PeerIdentityFromWire(id.Address))
 
 	// WaitBackground must run before TempDir cleanup to avoid
 	// "directory not empty" races caused by async disk writes
@@ -958,7 +958,6 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 	t.Parallel()
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -979,7 +978,7 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 	}
 
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-out-1",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1014,7 +1013,6 @@ func TestFetchConversationReturnsDecryptedMessages(t *testing.T) {
 func TestFetchConversationEmptyPeerReturnsError(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	_, err := c.FetchConversation(context.Background(), domain.PeerIdentity{})
 	if err == nil {
@@ -1050,7 +1048,6 @@ func TestFetchConversationNilChatlogReturnsError(t *testing.T) {
 func TestFetchConversationRespectsContextCancellation(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -1066,7 +1063,6 @@ func TestFetchConversationRespectsContextCancellation(t *testing.T) {
 func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 	t.Parallel()
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer1, err := identity.Generate()
 	if err != nil {
@@ -1098,7 +1094,7 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 		if encErr != nil {
 			t.Fatalf("encrypt for %s: %v", tc.peerAddr, encErr)
 		}
-		err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+		err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 			ID:             tc.msgID,
 			Sender:         id.Address,
 			Recipient:      tc.peerAddr,
@@ -1144,7 +1140,6 @@ func TestFetchConversationPreviewsReturnsDecryptedPreviews(t *testing.T) {
 func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	t.Parallel()
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -1178,7 +1173,7 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt outgoing: %v", err)
 	}
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-out",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1202,7 +1197,7 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt incoming: %v", err)
 	}
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-in",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -1239,7 +1234,6 @@ func TestFetchConversationPreviewsShowsIncomingMessage(t *testing.T) {
 func TestFetchSinglePreviewShowsIncomingMessage(t *testing.T) {
 	t.Parallel()
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -1264,7 +1258,7 @@ func TestFetchSinglePreviewShowsIncomingMessage(t *testing.T) {
 		BoxKeyBase64: identity.BoxPublicKeyBase64(peer.BoxPublicKey),
 	}, domain.OutgoingDM{Body: "my message"})
 
-	_ = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	_ = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:        "out-1",
 		Sender:    id.Address,
 		Recipient: peer.Address,
@@ -1277,7 +1271,7 @@ func TestFetchSinglePreviewShowsIncomingMessage(t *testing.T) {
 		BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
 	}, domain.OutgoingDM{Body: "peer reply"})
 
-	_ = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	_ = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:        "in-1",
 		Sender:    peer.Address,
 		Recipient: id.Address,
@@ -1320,11 +1314,10 @@ func TestFetchConversationPreviewsNilChatlogReturnsError(t *testing.T) {
 }
 
 // TestFetchConversationPreviewsIncludesUnreadCount verifies that UnreadCount
-// from ListConversationsCtx is propagated into the preview.
+// from ListConversations is propagated into the preview.
 func TestFetchConversationPreviewsIncludesUnreadCount(t *testing.T) {
 	t.Parallel()
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -1344,7 +1337,7 @@ func TestFetchConversationPreviewsIncludesUnreadCount(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 	// Insert as incoming (from peer) with status "delivered" so it counts as unread.
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-unread",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1363,7 +1356,7 @@ func TestFetchConversationPreviewsIncludesUnreadCount(t *testing.T) {
 	if len(previews) != 1 {
 		t.Fatalf("expected 1 preview, got %d", len(previews))
 	}
-	// UnreadCount comes from ListConversationsCtx which counts non-seen
+	// UnreadCount comes from ListConversations which counts non-seen
 	// incoming messages. Our message is outgoing so unread should be 0.
 	if previews[0].UnreadCount != 0 {
 		t.Fatalf("expected UnreadCount=0 for outgoing message, got %d", previews[0].UnreadCount)
@@ -1398,17 +1391,14 @@ func TestFetchContactsForDecryptPropagatesNetworkError(t *testing.T) {
 }
 
 // TestFetchConversationPreviewsFailsOnSummariesError verifies that
-// FetchConversationPreviews returns an error when ListConversationsCtx
-// fails, rather than silently returning previews with zero unread counts.
-// We simulate this by closing the chatlog db — both queries will fail, and
-// the function must propagate the first error.
+// FetchConversationPreviews returns an error when ListConversations fails,
+// rather than silently returning previews with zero unread counts. We simulate
+// this with a repository whose database is already closed — both queries will
+// fail, and the function must propagate the first error.
 func TestFetchConversationPreviewsFailsOnSummariesError(t *testing.T) {
 	t.Parallel()
-	c, _ := newTestDesktopClientWithNode(t)
-	// Close the chatlog db to make SQLite queries fail.
-	if err := c.chatLog.Close(); err != nil {
-		t.Fatalf("close chatlog: %v", err)
-	}
+	c, id := newTestDesktopClientWithNode(t)
+	c.setChatLogForTest(newClosedChatlogStore(t, domain.PeerIdentityFromWire(id.Address)))
 
 	_, err := c.FetchConversationPreviews(context.Background())
 	if err == nil {
@@ -1424,7 +1414,6 @@ func TestFetchConversationPreviewsFailsOnSummariesError(t *testing.T) {
 func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 	t.Parallel()
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -1442,7 +1431,7 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "msg-single",
 		Sender:         id.Address,
 		Recipient:      peer.Address,
@@ -1474,7 +1463,6 @@ func TestFetchSinglePreviewReturnsDecryptedPreview(t *testing.T) {
 func TestFetchSinglePreviewNonExistentPeerReturnsNil(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	preview, err := c.FetchSinglePreview(context.Background(), domaintest.ID("nonexistent-peer"))
 	if err != nil {
@@ -1509,7 +1497,6 @@ func TestFetchSinglePreviewNilChatlogReturnsError(t *testing.T) {
 func TestFetchSinglePreviewEmptyPeerReturnsError(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	_, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity{})
 	if err == nil {
@@ -1527,7 +1514,6 @@ func TestFetchSinglePreviewEmptyPeerReturnsError(t *testing.T) {
 func TestFetchSinglePreviewWhitespacePeerReturnsError(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	_, err := c.FetchSinglePreview(context.Background(), domain.PeerIdentity{})
 	if err == nil {
@@ -1543,7 +1529,6 @@ func TestFetchSinglePreviewWhitespacePeerReturnsError(t *testing.T) {
 func TestFetchConversationMultipleMessages(t *testing.T) {
 	t.Parallel()
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -1564,7 +1549,7 @@ func TestFetchConversationMultipleMessages(t *testing.T) {
 		if encErr != nil {
 			t.Fatalf("encrypt msg %d: %v", i, encErr)
 		}
-		err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+		err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 			ID:             fmt.Sprintf("msg-%d", i),
 			Sender:         id.Address,
 			Recipient:      peer.Address,
@@ -1614,7 +1599,6 @@ func TestBuildReachableIDsNilNode(t *testing.T) {
 func TestBuildReachableIDsEmptyTable(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	got := c.BuildReachableIDs()
 	if got == nil {
@@ -1630,7 +1614,6 @@ func TestBuildReachableIDsEmptyTable(t *testing.T) {
 func TestReachableFromSnapshotFiltersWithdrawn(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	// With no routes added, snapshot should yield empty reachable set.
 	snap := c.localNode.RoutingSnapshot()
@@ -1645,7 +1628,6 @@ func TestReachableFromSnapshotFiltersWithdrawn(t *testing.T) {
 func TestFetchReachableIDsFrame(t *testing.T) {
 	t.Parallel()
 	c, _ := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	reply := c.localNode.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"})
 	if reply.Type != "reachable_ids" {

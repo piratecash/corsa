@@ -52,13 +52,20 @@ type NodeConfig struct {
 	// outside the inclusive 1..65535 range are ignored at the
 	// boundary and collapse to the default fallback, matching
 	// PeerPort.IsValid.
-	AdvertisePort    *uint16
-	BootstrapPeers   []string
-	PrivateKey       string
-	IdentityPath     string
-	TrustStorePath   string
-	PeersStatePath   string
-	ChatLogDir       string
+	AdvertisePort  *uint16
+	BootstrapPeers []string
+	PrivateKey     string
+	IdentityPath   string
+	TrustStorePath string
+	PeersStatePath string
+	ChatLogDir     string
+
+	// StateDBPath overrides the shared SQLite state database location.
+	// Empty keeps the historical chatlog-<identity_short>-<port>.db file
+	// inside ChatLogDir. An explicit path is never populated from that
+	// default: an empty file there means a deliberately new database.
+	StateDBPath string
+
 	DownloadDir      string
 	ProxyAddress     string
 	Type             NodeType
@@ -268,6 +275,7 @@ func (c Config) internal() coreconfig.Config {
 			TrustStorePath:   cfg.Node.TrustStorePath,
 			PeersStatePath:   cfg.Node.PeersStatePath,
 			ChatLogDir:       cfg.Node.ChatLogDir,
+			StateDBPath:      cfg.Node.StateDBPath,
 			DownloadDir:      cfg.Node.DownloadDir,
 			ProxyAddress:     cfg.Node.ProxyAddress,
 			Type:             nodeType,

@@ -15,11 +15,11 @@ import (
 // scheduler reserves slots for.
 //
 // The per-row marks live in the existing `metadata` JSON column — the
-// chatlog's documented forward-compatible path (docs/chatlog.md): this
-// store deliberately has no schema migrations, and the marks are exactly
-// the kind of additive property the column exists for. The job and
-// established tables are NEW tables, which CREATE TABLE IF NOT EXISTS
-// handles on any existing database.
+// chatlog's documented forward-compatible path (docs/chatlog.md): the marks
+// are exactly the kind of additive property the column exists for, and a
+// rolled-back binary keeps reading the same rows. The job, cycle, intent and
+// established tables are declared by the shared migration catalog
+// (internal/core/storage/migrations); this file only queries them.
 
 // Per-message decrypt states (§4.10): the lifecycle of one flagged row.
 const (
@@ -45,9 +45,9 @@ type entryRecoveryMetadata struct {
 }
 
 // EntryRecoveryMarks reads the recovery marks of one row.
-func (s *Store) EntryRecoveryMarks(id string) (entryRecoveryMetadata, bool, error) {
+func (s *Store) EntryRecoveryMarks(ctx context.Context, id string) (entryRecoveryMetadata, bool, error) {
 	var metadata sql.NullString
-	err := s.db.QueryRow(`SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
+	err := s.db.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return entryRecoveryMetadata{}, false, nil
 	}
@@ -76,9 +76,9 @@ func decodeRecoveryMarks(metadata string) (entryRecoveryMetadata, error) {
 
 // mergeMetadata applies changes into the row's metadata JSON, preserving
 // every unknown key.
-func (s *Store) mergeMetadata(id string, apply func(map[string]any)) (bool, error) {
+func (s *Store) mergeMetadata(ctx context.Context, id string, apply func(map[string]any)) (bool, error) {
 	var metadata sql.NullString
-	err := s.db.QueryRow(`SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
+	err := s.db.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -99,7 +99,7 @@ func (s *Store) mergeMetadata(id string, apply func(map[string]any)) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("encode metadata %s: %w", id, err)
 	}
-	if _, err := s.db.Exec(`UPDATE messages SET metadata = ?, updated_at = ? WHERE id = ?`,
+	if _, err := s.db.ExecContext(ctx, `UPDATE messages SET metadata = ?, updated_at = ? WHERE id = ?`,
 		string(encoded), time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
 		return false, fmt.Errorf("write metadata %s: %w", id, err)
 	}
@@ -114,14 +114,14 @@ func (s *Store) mergeMetadata(id string, apply func(map[string]any)) (bool, erro
 // live workset. Returns changed=false when the row does not exist, is
 // already flagged (the §4.10 idempotency suppressor: UI renders must not
 // multiply jobs) or is already superseded.
-func (s *Store) MarkDecryptFailed(id string) (bool, error) {
+func (s *Store) MarkDecryptFailed(ctx context.Context, id string) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	// A metadata blob that is not a JSON OBJECT (empty, invalid, or a
 	// valid array/string/number) is replaced wholesale: json_set on a
 	// non-object silently returns it unchanged while still counting the
 	// row as affected — the flag would be reported written without a
 	// single recovery field landing.
-	result, err := s.db.Exec(`
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE messages
 		SET metadata = json_set(
 			CASE WHEN metadata IS NULL OR NOT json_valid(metadata) OR json_type(metadata) <> 'object'
@@ -185,8 +185,8 @@ func (s *Store) ExpireDecryptFailed(ctx context.Context, peer, self string) erro
 }
 
 // SetDecryptState moves one flagged row to the given state.
-func (s *Store) SetDecryptState(id, state string) error {
-	_, err := s.mergeMetadata(id, func(fields map[string]any) {
+func (s *Store) SetDecryptState(ctx context.Context, id, state string) error {
+	_, err := s.mergeMetadata(ctx, id, func(fields map[string]any) {
 		fields["decrypt_state"] = state
 	})
 	return err
@@ -194,9 +194,9 @@ func (s *Store) SetDecryptState(id, state string) error {
 
 // mergeMetadataTx is mergeMetadata inside a caller-owned transaction —
 // the building block of multi-row metadata terminals.
-func mergeMetadataTx(tx *sql.Tx, id string, apply func(map[string]any)) (bool, error) {
+func mergeMetadataTx(ctx context.Context, tx *sql.Tx, id string, apply func(map[string]any)) (bool, error) {
 	var metadata sql.NullString
-	err := tx.QueryRow(`SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
+	err := tx.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, id).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -215,7 +215,7 @@ func mergeMetadataTx(tx *sql.Tx, id string, apply func(map[string]any)) (bool, e
 	if err != nil {
 		return false, fmt.Errorf("encode metadata %s: %w", id, err)
 	}
-	if _, err := tx.Exec(`UPDATE messages SET metadata = ?, updated_at = ? WHERE id = ?`,
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET metadata = ?, updated_at = ? WHERE id = ?`,
 		string(encoded), time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
 		return false, fmt.Errorf("write metadata %s: %w", id, err)
 	}
@@ -229,14 +229,14 @@ func mergeMetadataTx(tx *sql.Tx, id string, apply func(map[string]any)) (bool, e
 // crash between them re-open the original for ordinary retry while the
 // replacement is already on the wire, and an unstamped replacement would
 // reset the §4.10 chain budget.
-func (s *Store) MarkResendTerminal(originalID, replacementID, rootID string) error {
-	tx, err := s.db.Begin()
+func (s *Store) MarkResendTerminal(ctx context.Context, originalID, replacementID, rootID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin resend terminal tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	changed, err := mergeMetadataTx(tx, originalID, func(fields map[string]any) {
+	changed, err := mergeMetadataTx(ctx, tx, originalID, func(fields map[string]any) {
 		fields["decrypt_failed"] = false
 		fields["decrypt_state"] = DecryptStateRecovered
 		fields["superseded_by"] = replacementID
@@ -248,7 +248,7 @@ func (s *Store) MarkResendTerminal(originalID, replacementID, rootID string) err
 	if !changed {
 		return fmt.Errorf("resend terminal: original %s not found", originalID)
 	}
-	changed, err = mergeMetadataTx(tx, replacementID, func(fields map[string]any) {
+	changed, err = mergeMetadataTx(ctx, tx, replacementID, func(fields map[string]any) {
 		fields["retry_root_id"] = rootID
 	})
 	if err != nil {
@@ -272,15 +272,15 @@ func (s *Store) MarkResendTerminal(originalID, replacementID, rootID string) err
 // only the first may write the link; the loser reports applied=false and
 // must not touch the rows. applied=false with a nil error also covers a
 // missing original.
-func (s *Store) MarkSupersededCollapsing(originalID, replacementID, rootID string) (bool, error) {
-	tx, err := s.db.Begin()
+func (s *Store) MarkSupersededCollapsing(ctx context.Context, originalID, replacementID, rootID string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin supersede tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	var metadata sql.NullString
-	err = tx.QueryRow(`SELECT metadata FROM messages WHERE id = ?`, originalID).Scan(&metadata)
+	err = tx.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, originalID).Scan(&metadata)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -310,7 +310,7 @@ func (s *Store) MarkSupersededCollapsing(originalID, replacementID, rootID strin
 		return false, fmt.Errorf("encode metadata %s: %w", originalID, err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE messages SET metadata = ?, delivery_status = 'seen', updated_at = ? WHERE id = ?`,
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET metadata = ?, delivery_status = 'seen', updated_at = ? WHERE id = ?`,
 		string(encoded), now, originalID); err != nil {
 		return false, fmt.Errorf("supersede %s: %w", originalID, err)
 	}
@@ -409,39 +409,6 @@ type RecoveryJob struct {
 	ExpiresAt      time.Time
 }
 
-func initRecoverySchema(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS decrypt_recovery_jobs (
-			peer TEXT PRIMARY KEY,
-			state TEXT NOT NULL DEFAULT 'pending_notice',
-			notice_attempts INTEGER NOT NULL DEFAULT 0,
-			last_notice_at TEXT NOT NULL DEFAULT '',
-			wait_until TEXT NOT NULL DEFAULT '',
-			created_at TEXT NOT NULL,
-			expires_at TEXT NOT NULL
-		);
-		CREATE TABLE IF NOT EXISTS peer_established (
-			peer TEXT PRIMARY KEY,
-			established_at TEXT NOT NULL,
-			established_reason TEXT NOT NULL
-		);
-		CREATE TABLE IF NOT EXISTS decrypt_recovery_cycles (
-			peer TEXT PRIMARY KEY,
-			anchored_at TEXT NOT NULL
-		);
-		CREATE TABLE IF NOT EXISTS decrypt_resend_intents (
-			root TEXT PRIMARY KEY,
-			original_id TEXT NOT NULL,
-			peer TEXT NOT NULL,
-			replacement_id TEXT NOT NULL,
-			created_at TEXT NOT NULL
-		);`)
-	if err != nil {
-		return fmt.Errorf("init recovery schema: %w", err)
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Recovery cycle anchors
 // ---------------------------------------------------------------------------
@@ -452,8 +419,8 @@ func initRecoverySchema(db *sql.DB) error {
 // one and jobs get evicted, but the cycle's clock must never restart until
 // the cycle itself closes — otherwise a flood could roll the anchor
 // forward (recover the oldest row, evict, re-admit) indefinitely.
-func (s *Store) EnsureRecoveryCycle(peer string, candidate time.Time) (time.Time, error) {
-	if _, err := s.db.Exec(`
+func (s *Store) EnsureRecoveryCycle(ctx context.Context, peer string, candidate time.Time) (time.Time, error) {
+	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO decrypt_recovery_cycles (peer, anchored_at)
 		VALUES (?, ?)
 		ON CONFLICT(peer) DO NOTHING`,
@@ -461,7 +428,7 @@ func (s *Store) EnsureRecoveryCycle(peer string, candidate time.Time) (time.Time
 		return time.Time{}, fmt.Errorf("ensure recovery cycle %s: %w", peer, err)
 	}
 	var anchored string
-	if err := s.db.QueryRow(`SELECT anchored_at FROM decrypt_recovery_cycles WHERE peer = ?`, peer).Scan(&anchored); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT anchored_at FROM decrypt_recovery_cycles WHERE peer = ?`, peer).Scan(&anchored); err != nil {
 		return time.Time{}, fmt.Errorf("read recovery cycle %s: %w", peer, err)
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, anchored)
@@ -478,15 +445,15 @@ func (s *Store) EnsureRecoveryCycle(peer string, candidate time.Time) (time.Time
 // live work exists, handing the peer a brand-new seven-day clock through
 // the next re-admission. Returns whether the close happened. Never called
 // on an eviction, which must keep the original clock.
-func (s *Store) CloseRecoveryCycleIfIdle(peer, self string) (bool, error) {
-	tx, err := s.db.Begin()
+func (s *Store) CloseRecoveryCycleIfIdle(ctx context.Context, peer, self string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin cycle close %s: %w", peer, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	var one int
-	err = tx.QueryRow(`
+	err = tx.QueryRowContext(ctx, `
 		SELECT 1 FROM messages
 		WHERE topic = 'dm' AND sender = ? AND recipient = ?
 		  AND `+recoveryLiveFlaggedCondition+`
@@ -497,10 +464,10 @@ func (s *Store) CloseRecoveryCycleIfIdle(peer, self string) (bool, error) {
 	if err != sql.ErrNoRows {
 		return false, fmt.Errorf("probe live rows %s: %w", peer, err)
 	}
-	if _, err := tx.Exec(`DELETE FROM decrypt_recovery_jobs WHERE peer = ?`, peer); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM decrypt_recovery_jobs WHERE peer = ?`, peer); err != nil {
 		return false, fmt.Errorf("close recovery job %s: %w", peer, err)
 	}
-	if _, err := tx.Exec(`DELETE FROM decrypt_recovery_cycles WHERE peer = ?`, peer); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM decrypt_recovery_cycles WHERE peer = ?`, peer); err != nil {
 		return false, fmt.Errorf("close recovery cycle %s: %w", peer, err)
 	}
 	return true, tx.Commit()
@@ -557,14 +524,14 @@ type ResendIntent struct {
 // Returns the CANONICAL intent for the root — the pre-existing one when
 // the root was already admitted, so a retried notice reuses the SAME
 // replacement id instead of minting a divergent one.
-func (s *Store) AdmitResendIntent(intent ResendIntent, perPeerLimit, globalLimit int, protected RecoveryProtectedWork) (canonical ResendIntent, admitted bool, victim RecoveryEvictionVictim, err error) {
-	tx, err := s.db.Begin()
+func (s *Store) AdmitResendIntent(ctx context.Context, intent ResendIntent, perPeerLimit, globalLimit int, protected RecoveryProtectedWork) (canonical ResendIntent, admitted bool, victim RecoveryEvictionVictim, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ResendIntent{}, false, RecoveryEvictionVictim{}, fmt.Errorf("begin resend admission: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	existing, found, err := scanResendIntentRow(tx.QueryRow(`
+	existing, found, err := scanResendIntentRow(tx.QueryRowContext(ctx, `
 		SELECT root, original_id, peer, replacement_id, created_at
 		FROM decrypt_resend_intents WHERE root = ?`, intent.Root))
 	if err != nil {
@@ -575,14 +542,14 @@ func (s *Store) AdmitResendIntent(intent ResendIntent, perPeerLimit, globalLimit
 	}
 
 	var proceed bool
-	proceed, victim, err = admitRecoveryBacklogTx(tx, intent.Peer, perPeerLimit, globalLimit, true, protected)
+	proceed, victim, err = admitRecoveryBacklogTx(ctx, tx, intent.Peer, perPeerLimit, globalLimit, true, protected)
 	if err != nil {
 		return ResendIntent{}, false, RecoveryEvictionVictim{}, err
 	}
 	if !proceed {
 		return ResendIntent{}, false, RecoveryEvictionVictim{}, tx.Commit()
 	}
-	if _, err := tx.Exec(`
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO decrypt_resend_intents (root, original_id, peer, replacement_id, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		intent.Root, intent.OriginalID, intent.Peer, intent.ReplacementID,
@@ -594,8 +561,8 @@ func (s *Store) AdmitResendIntent(intent ResendIntent, perPeerLimit, globalLimit
 
 // DeleteResendIntent removes a settled intent (terminal written, or the
 // send conclusively never happened).
-func (s *Store) DeleteResendIntent(root string) error {
-	if _, err := s.db.Exec(`DELETE FROM decrypt_resend_intents WHERE root = ?`, root); err != nil {
+func (s *Store) DeleteResendIntent(ctx context.Context, root string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM decrypt_resend_intents WHERE root = ?`, root); err != nil {
 		return fmt.Errorf("delete resend intent %s: %w", root, err)
 	}
 	return nil
@@ -623,8 +590,8 @@ func scanResendIntentRow(row resendIntentScanner) (ResendIntent, bool, error) {
 // ResendIntentByRoot reads one durable intent — the pre-send re-check of
 // tryResend: an intent evicted between activation and the send means the
 // crash insurance is gone, and a replacement must never leave without it.
-func (s *Store) ResendIntentByRoot(root string) (ResendIntent, bool, error) {
-	return scanResendIntentRow(s.db.QueryRow(`
+func (s *Store) ResendIntentByRoot(ctx context.Context, root string) (ResendIntent, bool, error) {
+	return scanResendIntentRow(s.db.QueryRowContext(ctx, `
 		SELECT root, original_id, peer, replacement_id, created_at
 		FROM decrypt_resend_intents WHERE root = ?`, root))
 }
@@ -653,8 +620,8 @@ func (s *Store) ResendIntents(ctx context.Context, limit int) ([]ResendIntent, e
 
 // UpsertRecoveryJob opens the peer's job if none exists. An existing job is
 // left untouched — one peer, one job, whatever the number of flagged rows.
-func (s *Store) UpsertRecoveryJob(peer string, now, expiresAt time.Time) error {
-	_, err := s.db.Exec(`
+func (s *Store) UpsertRecoveryJob(ctx context.Context, peer string, now, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO decrypt_recovery_jobs (peer, state, created_at, expires_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(peer) DO NOTHING`,
@@ -705,9 +672,9 @@ type RecoveryProtectedWork struct {
 // established rows never leave for an unknown newcomer); with eviction
 // disallowed, or nothing evictable, the newcomer is refused. Returns
 // whether the caller may INSERT its row.
-func admitRecoveryBacklogTx(tx *sql.Tx, peer string, perPeerLimit, globalLimit int, allowEvict bool, protected RecoveryProtectedWork) (bool, RecoveryEvictionVictim, error) {
+func admitRecoveryBacklogTx(ctx context.Context, tx *sql.Tx, peer string, perPeerLimit, globalLimit int, allowEvict bool, protected RecoveryProtectedWork) (bool, RecoveryEvictionVictim, error) {
 	var perPeer int
-	err := tx.QueryRow(`
+	err := tx.QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM decrypt_recovery_jobs WHERE peer = ?)
 		     + (SELECT COUNT(*) FROM decrypt_resend_intents WHERE peer = ?)`, peer, peer).Scan(&perPeer)
 	if err != nil {
@@ -718,7 +685,7 @@ func admitRecoveryBacklogTx(tx *sql.Tx, peer string, perPeerLimit, globalLimit i
 	}
 
 	var total int
-	err = tx.QueryRow(`
+	err = tx.QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM decrypt_recovery_jobs)
 		     + (SELECT COUNT(*) FROM decrypt_resend_intents)`).Scan(&total)
 	if err != nil {
@@ -727,13 +694,13 @@ func admitRecoveryBacklogTx(tx *sql.Tx, peer string, perPeerLimit, globalLimit i
 	overCap := total >= globalLimit
 
 	var newcomerEstablished int
-	err = tx.QueryRow(`SELECT COUNT(*) FROM peer_established WHERE peer = ?`, peer).Scan(&newcomerEstablished)
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM peer_established WHERE peer = ?`, peer).Scan(&newcomerEstablished)
 	if err != nil {
 		return false, RecoveryEvictionVictim{}, fmt.Errorf("probe established %s: %w", peer, err)
 	}
 	if newcomerEstablished == 0 && !overCap {
 		var unknown int
-		err = tx.QueryRow(`
+		err = tx.QueryRowContext(ctx, `
 			SELECT (SELECT COUNT(*) FROM decrypt_recovery_jobs j
 			        LEFT JOIN peer_established e ON e.peer = j.peer WHERE e.peer IS NULL)
 			     + (SELECT COUNT(*) FROM decrypt_resend_intents i
@@ -749,7 +716,7 @@ func admitRecoveryBacklogTx(tx *sql.Tx, peer string, perPeerLimit, globalLimit i
 	if !allowEvict {
 		return false, RecoveryEvictionVictim{}, nil
 	}
-	victim, err := evictRecoveryBacklogTx(tx, protected)
+	victim, err := evictRecoveryBacklogTx(ctx, tx, protected)
 	if err != nil {
 		return false, RecoveryEvictionVictim{}, err
 	}
@@ -770,7 +737,7 @@ const recoveryBacklogUnknownShare = 2
 // with a notice attempt running: evicting either would pull durable state
 // out from under the attempt (a sent replacement stranded without its
 // crash-reconciliation intent; a notice updating a deleted job).
-func evictRecoveryBacklogTx(tx *sql.Tx, protected RecoveryProtectedWork) (RecoveryEvictionVictim, error) {
+func evictRecoveryBacklogTx(ctx context.Context, tx *sql.Tx, protected RecoveryProtectedWork) (RecoveryEvictionVictim, error) {
 	query := `
 		SELECT kind, key, peer FROM (
 			SELECT 'job' AS kind, j.peer AS key, j.peer AS peer, j.created_at AS created_at
@@ -800,7 +767,7 @@ func evictRecoveryBacklogTx(tx *sql.Tx, protected RecoveryProtectedWork) (Recove
 		) ORDER BY created_at ASC LIMIT 1`
 
 	var kind, key, peer string
-	err := tx.QueryRow(query, args...).Scan(&kind, &key, &peer)
+	err := tx.QueryRowContext(ctx, query, args...).Scan(&kind, &key, &peer)
 	if err == sql.ErrNoRows {
 		return RecoveryEvictionVictim{}, nil
 	}
@@ -809,9 +776,9 @@ func evictRecoveryBacklogTx(tx *sql.Tx, protected RecoveryProtectedWork) (Recove
 	}
 	victim := RecoveryEvictionVictim{Job: kind == "job", Key: key, Peer: peer}
 	if victim.Job {
-		_, err = tx.Exec(`DELETE FROM decrypt_recovery_jobs WHERE peer = ?`, key)
+		_, err = tx.ExecContext(ctx, `DELETE FROM decrypt_recovery_jobs WHERE peer = ?`, key)
 	} else {
-		_, err = tx.Exec(`DELETE FROM decrypt_resend_intents WHERE root = ?`, key)
+		_, err = tx.ExecContext(ctx, `DELETE FROM decrypt_resend_intents WHERE root = ?`, key)
 	}
 	if err != nil {
 		return RecoveryEvictionVictim{}, fmt.Errorf("evict backlog row %s: %w", key, err)
@@ -824,8 +791,8 @@ func evictRecoveryBacklogTx(tx *sql.Tx, protected RecoveryProtectedWork) (Recove
 // whether the job now exists and the eviction victim — the caller must
 // release the victim's in-flight work; a job victim's row flags stay, so
 // the orphan reconciliation re-admits it when a slot frees.
-func (s *Store) AdmitRecoveryJob(peer string, now, expiresAt time.Time, perPeerLimit, limit int, protected RecoveryProtectedWork) (bool, RecoveryEvictionVictim, error) {
-	return s.admitRecoveryJob(peer, now, expiresAt, perPeerLimit, limit, true, protected)
+func (s *Store) AdmitRecoveryJob(ctx context.Context, peer string, now, expiresAt time.Time, perPeerLimit, limit int, protected RecoveryProtectedWork) (bool, RecoveryEvictionVictim, error) {
+	return s.admitRecoveryJob(ctx, peer, now, expiresAt, perPeerLimit, limit, true, protected)
 }
 
 // AdmitRecoveryJobIfRoom admits only into a FREE slot — the reconciliation
@@ -834,20 +801,20 @@ func (s *Store) AdmitRecoveryJob(peer string, now, expiresAt time.Time, perPeerL
 // every pass rotate a full-of-unknowns backlog (evict one orphan's way in,
 // orphan the victim, re-admit it next pass...), resetting created_at and
 // the 7-day lifetime on each turn and starving everyone of attempts.
-func (s *Store) AdmitRecoveryJobIfRoom(peer string, now, expiresAt time.Time, perPeerLimit, limit int) (bool, error) {
-	admitted, _, err := s.admitRecoveryJob(peer, now, expiresAt, perPeerLimit, limit, false, RecoveryProtectedWork{})
+func (s *Store) AdmitRecoveryJobIfRoom(ctx context.Context, peer string, now, expiresAt time.Time, perPeerLimit, limit int) (bool, error) {
+	admitted, _, err := s.admitRecoveryJob(ctx, peer, now, expiresAt, perPeerLimit, limit, false, RecoveryProtectedWork{})
 	return admitted, err
 }
 
-func (s *Store) admitRecoveryJob(peer string, now, expiresAt time.Time, perPeerLimit, limit int, allowEvict bool, protected RecoveryProtectedWork) (bool, RecoveryEvictionVictim, error) {
-	tx, err := s.db.Begin()
+func (s *Store) admitRecoveryJob(ctx context.Context, peer string, now, expiresAt time.Time, perPeerLimit, limit int, allowEvict bool, protected RecoveryProtectedWork) (bool, RecoveryEvictionVictim, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, RecoveryEvictionVictim{}, fmt.Errorf("begin job admission: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	var one int
-	err = tx.QueryRow(`SELECT 1 FROM decrypt_recovery_jobs WHERE peer = ?`, peer).Scan(&one)
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM decrypt_recovery_jobs WHERE peer = ?`, peer).Scan(&one)
 	if err == nil {
 		return true, RecoveryEvictionVictim{}, tx.Commit() // one peer, one job
 	}
@@ -855,14 +822,14 @@ func (s *Store) admitRecoveryJob(peer string, now, expiresAt time.Time, perPeerL
 		return false, RecoveryEvictionVictim{}, fmt.Errorf("probe recovery job %s: %w", peer, err)
 	}
 
-	proceed, victim, err := admitRecoveryBacklogTx(tx, peer, perPeerLimit, limit, allowEvict, protected)
+	proceed, victim, err := admitRecoveryBacklogTx(ctx, tx, peer, perPeerLimit, limit, allowEvict, protected)
 	if err != nil {
 		return false, RecoveryEvictionVictim{}, err
 	}
 	if !proceed {
 		return false, RecoveryEvictionVictim{}, tx.Commit()
 	}
-	if _, err := tx.Exec(`
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO decrypt_recovery_jobs (peer, state, created_at, expires_at)
 		VALUES (?, ?, ?, ?)`,
 		peer, DecryptStatePendingNotice, now.UTC().Format(time.RFC3339Nano), expiresAt.UTC().Format(time.RFC3339Nano)); err != nil {
@@ -872,9 +839,9 @@ func (s *Store) admitRecoveryJob(peer string, now, expiresAt time.Time, perPeerL
 }
 
 // HasRecoveryJob probes the peer's receiver-side job.
-func (s *Store) HasRecoveryJob(peer string) (bool, error) {
+func (s *Store) HasRecoveryJob(ctx context.Context, peer string) (bool, error) {
 	var one int
-	err := s.db.QueryRow(`SELECT 1 FROM decrypt_recovery_jobs WHERE peer = ?`, peer).Scan(&one)
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decrypt_recovery_jobs WHERE peer = ?`, peer).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -885,8 +852,8 @@ func (s *Store) HasRecoveryJob(peer string) (bool, error) {
 }
 
 // UpdateRecoveryJob persists one attempt/state transition.
-func (s *Store) UpdateRecoveryJob(job RecoveryJob) error {
-	_, err := s.db.Exec(`
+func (s *Store) UpdateRecoveryJob(ctx context.Context, job RecoveryJob) error {
+	_, err := s.db.ExecContext(ctx, `
 		UPDATE decrypt_recovery_jobs
 		SET state = ?, notice_attempts = ?, last_notice_at = ?, wait_until = ?
 		WHERE peer = ?`,
@@ -898,8 +865,8 @@ func (s *Store) UpdateRecoveryJob(job RecoveryJob) error {
 }
 
 // DeleteRecoveryJob removes a finished job.
-func (s *Store) DeleteRecoveryJob(peer string) error {
-	if _, err := s.db.Exec(`DELETE FROM decrypt_recovery_jobs WHERE peer = ?`, peer); err != nil {
+func (s *Store) DeleteRecoveryJob(ctx context.Context, peer string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM decrypt_recovery_jobs WHERE peer = ?`, peer); err != nil {
 		return fmt.Errorf("delete recovery job %s: %w", peer, err)
 	}
 	return nil
@@ -948,24 +915,26 @@ const (
 	EstablishedReasonManual    = "manual_import"
 )
 
-// backfillEstablishedFromHistory seeds the monotonic established facts
+// BackfillEstablishedFromHistory seeds the monotonic established facts
 // from PRE-FEATURE history: every peer the user already messaged
 // qualifies through the user-outgoing rule, and without this seed a
 // database that predates the peer_established table would classify every
 // long-standing real contact as unknown — exactly the peers the §4.10
 // reservation exists to protect from Sybil eviction. Idempotent (ON
-// CONFLICT DO NOTHING against the monotonic facts); runs at store open.
-func (s *Store) backfillEstablishedFromHistory() error {
-	if s.db == nil {
-		return nil
-	}
+// CONFLICT DO NOTHING against the monotonic facts).
+//
+// This is a data backfill, not a schema step, so it stays in the repository
+// rather than in a migration: it depends on which identity owns the rows, and
+// the migration catalog is deliberately free of chatlog domain rules. The
+// composition root runs it once per start, right after the store is built.
+func (s *Store) BackfillEstablishedFromHistory(ctx context.Context, now time.Time) error {
 	self := s.identityAddr.String()
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO peer_established (peer, established_at, established_reason)
 		SELECT DISTINCT recipient, ?, ? FROM messages
 		WHERE topic = 'dm' AND sender = ? AND recipient <> ?
 		ON CONFLICT(peer) DO NOTHING`,
-		time.Now().UTC().Format(time.RFC3339Nano), EstablishedReasonOutgoing, self, self)
+		now.UTC().Format(time.RFC3339Nano), EstablishedReasonOutgoing, self, self)
 	if err != nil {
 		return fmt.Errorf("backfill established facts: %w", err)
 	}
@@ -975,8 +944,8 @@ func (s *Store) backfillEstablishedFromHistory() error {
 // MarkEstablished records the monotonic established fact for a peer. The
 // first qualifying event wins; later calls are no-ops, so an automatic
 // import can never overwrite the reason a human action set.
-func (s *Store) MarkEstablished(peer, reason string, now time.Time) error {
-	_, err := s.db.Exec(`
+func (s *Store) MarkEstablished(ctx context.Context, peer, reason string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO peer_established (peer, established_at, established_reason)
 		VALUES (?, ?, ?)
 		ON CONFLICT(peer) DO NOTHING`,
@@ -991,9 +960,9 @@ func (s *Store) MarkEstablished(peer, reason string, now time.Time) error {
 // Presence of a chatlog row or a header-derived contact is deliberately
 // NOT enough (§4.10): both appear before decryption, and the first
 // poison-DM would make a Sybil "known".
-func (s *Store) IsEstablished(peer string) (bool, error) {
+func (s *Store) IsEstablished(ctx context.Context, peer string) (bool, error) {
 	var one int
-	err := s.db.QueryRow(`SELECT 1 FROM peer_established WHERE peer = ?`, peer).Scan(&one)
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM peer_established WHERE peer = ?`, peer).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -1024,9 +993,9 @@ func parseOptionalTime(raw string) time.Time {
 // CountRetryChain counts the rows stamped with the given chain root. The
 // match is on the JSON field itself, not a LIKE substring: a root id
 // appearing inside some other value must not inflate the chain budget.
-func (s *Store) CountRetryChain(rootID string) (int, error) {
+func (s *Store) CountRetryChain(ctx context.Context, rootID string) (int, error) {
 	var count int
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM messages
 		WHERE json_valid(metadata) AND json_extract(metadata, '$.retry_root_id') = ?`,
 		rootID).Scan(&count)

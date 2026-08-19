@@ -20,10 +20,10 @@ type sessionState int
 
 const (
 	sessionPending  sessionState = iota // registered but writer not yet attached
-	sessionActive                      // accepting events, writer running
-	sessionDraining                    // no new events; writer draining queue
-	sessionStopped                     // terminal: clean stop
-	sessionFailed                      // terminal: disk error or other failure
+	sessionActive                       // accepting events, writer running
+	sessionDraining                     // no new events; writer draining queue
+	sessionStopped                      // terminal: clean stop
+	sessionFailed                       // terminal: disk error or other failure
 )
 
 // session owns the bounded queue and writer goroutine for a single

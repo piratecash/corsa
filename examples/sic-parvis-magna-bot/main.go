@@ -35,7 +35,10 @@ func main() {
 		log.Fatalf("ensure identity: %v", err)
 	}
 
-	runtime, err := sdk.New(cfg)
+	// The signal context governs construction too: opening the state database
+	// runs an integrity check and any pending migrations, and a Ctrl-C during
+	// that should abandon the start rather than be noticed only afterwards.
+	runtime, err := sdk.NewWithContext(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -62,7 +65,11 @@ func main() {
 			return
 		case msg, ok := <-messages:
 			if !ok {
-				return
+				// The stream closing is the START of the teardown, not its
+				// end: the drains and the SQLite close come long after.
+				// Returning here would kill the process in the middle of them.
+				messages = nil
+				continue
 			}
 			if _, err := runtime.Execute("send_dm", map[string]interface{}{
 				"to":   msg.Sender,

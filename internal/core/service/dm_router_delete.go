@@ -243,7 +243,7 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 		return fmt.Errorf("chatlog store is not available")
 	}
 
-	entry, found, err := store.EntryByID(target)
+	entry, found, err := store.EntryByID(ctx, target)
 	if err != nil {
 		return fmt.Errorf("lookup target %s: %w", target, err)
 	}
@@ -287,7 +287,7 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 			// are removed synchronously, the live UI cache is
 			// evicted, and a terminal "deleted" outcome is published
 			// so the UI settles immediately.
-			if _, err := store.DeleteByID(target); err != nil {
+			if _, err := store.DeleteByID(ctx, target); err != nil {
 				return fmt.Errorf("delete chatlog entry %s: %w", target, err)
 			}
 			if r.fileBridge != nil {
@@ -457,7 +457,7 @@ func (r *DMRouter) refreshPreviewAfterDelete(peer domain.PeerIdentity) {
 	)
 	if r.client.chatlog != nil {
 		if store := r.client.chatlog.Store(); store != nil {
-			n, err := store.UnreadCountFor(peer)
+			n, err := store.UnreadCountFor(r.opContext(), peer)
 			if err == nil {
 				unreadCount = n
 				unreadResolved = true
@@ -597,7 +597,7 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 		return domain.MessageDeleteStatusNotFound
 	}
 
-	entry, found, err := store.EntryByID(target)
+	entry, found, err := store.EntryByID(r.opContext(), target)
 	if err != nil {
 		log.Warn().Err(err).
 			Str("target", string(target)).
@@ -628,7 +628,7 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 		return domain.MessageDeleteStatusDenied
 	}
 
-	if _, err := store.DeleteByID(target); err != nil {
+	if _, err := store.DeleteByID(r.opContext(), target); err != nil {
 		log.Warn().Err(err).
 			Str("target", string(target)).
 			Msg("dm_router: applyInboundDelete: chatlog DeleteByID failed")
@@ -767,7 +767,7 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	if ack.Status.IsTerminalSuccess() {
 		store := r.client.chatlog.Store()
 		if store != nil {
-			if _, err := store.DeleteByID(ack.TargetID); err != nil {
+			if _, err := store.DeleteByID(r.opContext(), ack.TargetID); err != nil {
 				// Best-effort. If the row cannot be removed for some
 				// non-recoverable reason (corrupted database, etc.) we
 				// still publish the outcome so the UI doesn't hang —

@@ -265,6 +265,16 @@ func (m *recoveryManager) noteOutgoingSent(peer string) {
 // per process lifetime (the fact itself never changes, so one durable
 // write is enough); a failed write drops the cache entry so the next
 // qualifying event retries.
+// opContext is the context for recovery work driven by an event rather than
+// by a request: it is the router's lifetime, so a shutdown aborts the query
+// instead of racing the database close.
+func (m *recoveryManager) opContext() context.Context {
+	if m.router == nil {
+		return context.Background()
+	}
+	return m.router.opContext()
+}
+
 func (m *recoveryManager) markEstablishedOnce(peer, reason string) {
 	store := m.store()
 	if store == nil || peer == "" {
@@ -279,7 +289,7 @@ func (m *recoveryManager) markEstablishedOnce(peer, reason string) {
 	if alreadyMarked {
 		return
 	}
-	if err := store.MarkEstablished(peer, reason, m.clock()); err != nil {
+	if err := store.MarkEstablished(m.opContext(), peer, reason, m.clock()); err != nil {
 		log.Warn().Err(err).Str("peer", peer).Msg("established_mark_failed")
 		m.mu.Lock()
 		delete(m.establishedMarked, peer)
@@ -379,6 +389,7 @@ func (m *recoveryManager) store() *chatlog.Store {
 // decrypt path. Idempotent by construction: the row flag suppresses
 // repeated job starts however often the UI re-renders the same row.
 func (m *recoveryManager) Report(failure DecryptFailure) {
+	ctx := m.opContext()
 	switch failure.Class {
 	case DecryptFailureMissingSenderKey:
 		// Keys never seen: a lookup fixes it locally, no notice — the row
@@ -389,7 +400,7 @@ func (m *recoveryManager) Report(failure DecryptFailure) {
 		if store == nil {
 			return
 		}
-		changed, err := store.MarkDecryptFailed(failure.MessageID)
+		changed, err := store.MarkDecryptFailed(ctx, failure.MessageID)
 		if err != nil {
 			log.Warn().Err(err).Str("message_id", failure.MessageID).Msg("decrypt_recovery_flag_failed")
 			return
@@ -399,7 +410,7 @@ func (m *recoveryManager) Report(failure DecryptFailure) {
 		}
 		now := m.clock()
 		m.admissionMu.Lock()
-		admitted, victim, err := store.AdmitRecoveryJob(failure.Sender, now, m.jobDeadline(failure.Sender, now),
+		admitted, victim, err := store.AdmitRecoveryJob(ctx, failure.Sender, now, m.jobDeadline(ctx, failure.Sender, now),
 			recoveryMaxResendsPerPeer, recoveryBacklogLimit, m.protectedWork())
 		m.admissionMu.Unlock()
 		if err != nil {
@@ -509,7 +520,7 @@ func (m *recoveryManager) pass(ctx context.Context) {
 				job.State = chatlog.DecryptStatePendingNotice
 				job.NoticeAttempts = 0
 				job.WaitUntil = time.Time{}
-				if err := store.UpdateRecoveryJob(job); err != nil {
+				if err := store.UpdateRecoveryJob(ctx, job); err != nil {
 					log.Warn().Err(err).Str("peer", job.Peer).Msg("decrypt_recovery_job_update_failed")
 					continue
 				}
@@ -561,7 +572,7 @@ func (m *recoveryManager) pass(ctx context.Context) {
 // the activated resend roots.
 func (m *recoveryManager) selectRecoveryWork(ctx context.Context, store *chatlog.Store, due []chatlog.RecoveryJob) []recoveryWorkItem {
 	isEstablished := func(peer string) bool {
-		established, err := store.IsEstablished(peer)
+		established, err := store.IsEstablished(ctx, peer)
 		if err != nil {
 			log.Warn().Err(err).Str("peer", peer).Msg("decrypt_recovery_established_read_failed")
 		}
@@ -705,13 +716,13 @@ func (m *recoveryManager) reconcileOrphans(ctx context.Context, store *chatlog.S
 		// and survives evictions: a re-admitted job inherits the original
 		// deadline, and rows already past it expire here instead of buying
 		// a fresh lifetime.
-		deadline := m.jobDeadline(peer, now)
+		deadline := m.jobDeadline(ctx, peer, now)
 		if !now.Before(deadline) {
 			if err := store.ExpireDecryptFailed(ctx, peer, m.router.client.id.Address); err != nil {
 				log.Warn().Err(err).Str("peer", peer).Msg("decrypt_recovery_expire_failed")
 				continue // the cycle stays anchored; the next pass retries
 			}
-			m.closeCycleIfIdle(store, peer)
+			m.closeCycleIfIdle(ctx, store, peer)
 			log.Info().Str("peer", peer).Msg("decrypt_recovery_orphan_expired")
 			continue
 		}
@@ -719,7 +730,7 @@ func (m *recoveryManager) reconcileOrphans(ctx context.Context, store *chatlog.S
 		// rotate jobs in and out every pass, resetting their lifetime and
 		// starving everyone — see AdmitRecoveryJobIfRoom.
 		m.admissionMu.Lock()
-		admitted, err := store.AdmitRecoveryJobIfRoom(peer, now, deadline, recoveryMaxResendsPerPeer, recoveryBacklogLimit)
+		admitted, err := store.AdmitRecoveryJobIfRoom(ctx, peer, now, deadline, recoveryMaxResendsPerPeer, recoveryBacklogLimit)
 		m.admissionMu.Unlock()
 		if err != nil {
 			log.Warn().Err(err).Str("peer", peer).Msg("decrypt_recovery_job_open_failed")
@@ -738,20 +749,20 @@ func (m *recoveryManager) reconcileOrphans(ctx context.Context, store *chatlog.S
 // flood roll the clock forward by recovering the oldest row before each
 // eviction. The candidate for a brand-new cycle is the oldest flagged-at
 // (≈ now when the row was flagged in this very call).
-func (m *recoveryManager) jobDeadline(peer string, now time.Time) time.Time {
+func (m *recoveryManager) jobDeadline(ctx context.Context, peer string, now time.Time) time.Time {
 	store := m.store()
 	if store == nil {
 		return now.Add(recoveryJobLifetime)
 	}
 	candidate := now
-	oldest, found, err := store.OldestDecryptFlaggedAt(context.Background(), peer, m.router.client.id.Address)
+	oldest, found, err := store.OldestDecryptFlaggedAt(ctx, peer, m.router.client.id.Address)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", peer).Msg("decrypt_recovery_flagged_at_read_failed")
 	}
 	if err == nil && found {
 		candidate = oldest
 	}
-	anchor, err := store.EnsureRecoveryCycle(peer, candidate)
+	anchor, err := store.EnsureRecoveryCycle(ctx, peer, candidate)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", peer).Msg("decrypt_recovery_cycle_anchor_failed")
 		return candidate.Add(recoveryJobLifetime)
@@ -764,8 +775,8 @@ func (m *recoveryManager) jobDeadline(peer string, now time.Time) time.Time {
 // re-checks inside the same transaction, so a fresh failure racing this
 // call keeps the anchor) and, when the close fired, releases the resolver
 // work.
-func (m *recoveryManager) closeCycleIfIdle(store *chatlog.Store, peer string) {
-	closed, err := store.CloseRecoveryCycleIfIdle(peer, m.router.client.id.Address)
+func (m *recoveryManager) closeCycleIfIdle(ctx context.Context, store *chatlog.Store, peer string) {
+	closed, err := store.CloseRecoveryCycleIfIdle(ctx, peer, m.router.client.id.Address)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", peer).Msg("decrypt_recovery_cycle_close_failed")
 		return
@@ -806,7 +817,7 @@ func (m *recoveryManager) reconcileResendIntents(ctx context.Context, store *cha
 			// write would strand a transmitted replacement.
 			continue
 		}
-		_, found, err := store.EntryByID(domain.MessageID(intent.ReplacementID))
+		_, found, err := store.EntryByID(ctx, domain.MessageID(intent.ReplacementID))
 		if err != nil {
 			log.Warn().Err(err).Str("retry_root", intent.Root).Msg("decrypt_recovery_intent_reconcile_failed")
 			continue // retried next pass
@@ -859,7 +870,7 @@ func (m *recoveryManager) sweepStaleCycles(ctx context.Context, store *chatlog.S
 		return
 	}
 	for _, peer := range cycles {
-		m.closeCycleIfIdle(store, peer)
+		m.closeCycleIfIdle(ctx, store, peer)
 	}
 }
 
@@ -986,7 +997,7 @@ func (m *recoveryManager) attemptNotice(ctx context.Context, store *chatlog.Stor
 	if len(flagged) == 0 {
 		// Every row recovered (or removed): the job and its cycle close
 		// together, re-checked transactionally against fresh failures.
-		m.closeCycleIfIdle(store, job.Peer)
+		m.closeCycleIfIdle(ctx, store, job.Peer)
 		return
 	}
 
@@ -1004,7 +1015,7 @@ func (m *recoveryManager) attemptNotice(ctx context.Context, store *chatlog.Stor
 		// proof-waiting head must rotate to the back of the queue, not
 		// occupy its slot pass after pass while the tail starves.
 		job.LastNoticeAt = m.clock()
-		if err := store.UpdateRecoveryJob(job); err != nil {
+		if err := store.UpdateRecoveryJob(ctx, job); err != nil {
 			log.Warn().Err(err).Str("peer", job.Peer).Msg("decrypt_recovery_job_update_failed")
 		}
 		return
@@ -1033,12 +1044,12 @@ func (m *recoveryManager) attemptNotice(ctx context.Context, store *chatlog.Stor
 		job.State = chatlog.DecryptStateWaitingRetry
 		job.WaitUntil = now.Add(recoveryWaitingRetry)
 		for _, entry := range flagged {
-			if err := store.SetDecryptState(entry.ID, chatlog.DecryptStateWaitingRetry); err != nil {
+			if err := store.SetDecryptState(ctx, entry.ID, chatlog.DecryptStateWaitingRetry); err != nil {
 				log.Warn().Err(err).Str("message_id", entry.ID).Msg("decrypt_recovery_state_update_failed")
 			}
 		}
 	}
-	if err := store.UpdateRecoveryJob(job); err != nil {
+	if err := store.UpdateRecoveryJob(ctx, job); err != nil {
 		log.Warn().Err(err).Str("peer", job.Peer).Msg("decrypt_recovery_job_update_failed")
 	}
 }
@@ -1055,7 +1066,7 @@ func (m *recoveryManager) expireJob(ctx context.Context, store *chatlog.Store, j
 		// orphan sweep.
 		return
 	}
-	m.closeCycleIfIdle(store, job.Peer)
+	m.closeCycleIfIdle(ctx, store, job.Peer)
 	log.Info().Str("peer", job.Peer).Msg("decrypt_recovery_job_expired")
 }
 
@@ -1078,7 +1089,7 @@ func (r *DMRouter) handleInboundDecryptFailed(envelopeSender string, payloadJSON
 	if store == nil || r.recovery == nil {
 		return
 	}
-	entry, found, err := store.EntryByID(payload.MessageID)
+	entry, found, err := store.EntryByID(r.opContext(), payload.MessageID)
 	if err != nil || !found {
 		log.Debug().Err(err).Str("message_id", string(payload.MessageID)).Msg("decrypt_failed_notice_unknown_row")
 		return
@@ -1088,7 +1099,7 @@ func (r *DMRouter) handleInboundDecryptFailed(envelopeSender string, payloadJSON
 		log.Warn().Str("peer", envelopeSender).Str("message_id", entry.ID).Msg("decrypt_failed_notice_row_mismatch")
 		return
 	}
-	marks, _, err := store.EntryRecoveryMarks(entry.ID)
+	marks, _, err := store.EntryRecoveryMarks(r.opContext(), entry.ID)
 	if err != nil {
 		log.Warn().Err(err).Str("message_id", entry.ID).Msg("decrypt_failed_notice_marks_read_failed")
 		return
@@ -1101,7 +1112,7 @@ func (r *DMRouter) handleInboundDecryptFailed(envelopeSender string, payloadJSON
 	if root == "" {
 		root = entry.ID
 	}
-	chain, err := store.CountRetryChain(root)
+	chain, err := store.CountRetryChain(r.opContext(), root)
 	if err != nil {
 		log.Warn().Err(err).Str("retry_root", root).Msg("decrypt_failed_chain_count_failed")
 		return
@@ -1151,7 +1162,7 @@ func (r *DMRouter) handleInboundDecryptFailed(envelopeSender string, payloadJSON
 func (m *recoveryManager) admitResendIntent(store *chatlog.Store, intent chatlog.ResendIntent, perPeerLimit, globalLimit int) (chatlog.ResendIntent, bool, chatlog.RecoveryEvictionVictim, error) {
 	m.admissionMu.Lock()
 	defer m.admissionMu.Unlock()
-	return store.AdmitResendIntent(intent, perPeerLimit, globalLimit, m.protectedWork())
+	return store.AdmitResendIntent(m.opContext(), intent, perPeerLimit, globalLimit, m.protectedWork())
 }
 
 // tryResend attempts one queued sender-side re-send; keys may not be
@@ -1192,7 +1203,7 @@ func (m *recoveryManager) tryResend(root string) {
 	// wire from the intent (the ABA case). Either way ONLY the stale
 	// in-memory task retires: the durable state, if any, belongs to the
 	// root's new incarnation and must survive for its own activation.
-	intent, intact, err := store.ResendIntentByRoot(root)
+	intent, intact, err := store.ResendIntentByRoot(m.opContext(), root)
 	if err != nil {
 		log.Warn().Err(err).Str("retry_root", root).Msg("decrypt_recovery_intent_probe_failed")
 		return
@@ -1209,7 +1220,7 @@ func (m *recoveryManager) tryResend(root string) {
 	// leaving the durable intent behind would re-activate it every pass
 	// and burn proof lookups forever, while the honest outcome is the
 	// manual "send again" fallback.
-	entry, found, err := store.EntryByID(domain.MessageID(resend.originalID))
+	entry, found, err := store.EntryByID(m.opContext(), domain.MessageID(resend.originalID))
 	if err != nil || !found {
 		m.releaseResendOwned(store, root)
 		return
@@ -1281,8 +1292,8 @@ func (m *recoveryManager) releaseResendOwned(store *chatlog.Store, root string) 
 // An original that no longer exists has nothing left to supersede: the
 // replacement stands as an ordinary message and the debt settles.
 func (m *recoveryManager) finishResendTerminal(store *chatlog.Store, root string, resend recoveryResend) {
-	if err := store.MarkResendTerminal(resend.originalID, resend.sentReplacementID, root); err != nil {
-		if _, found, lookupErr := store.EntryByID(domain.MessageID(resend.originalID)); lookupErr == nil && !found {
+	if err := store.MarkResendTerminal(m.opContext(), resend.originalID, resend.sentReplacementID, root); err != nil {
+		if _, found, lookupErr := store.EntryByID(m.opContext(), domain.MessageID(resend.originalID)); lookupErr == nil && !found {
 			log.Info().Str("retry_root", root).Msg("decrypt_recovery_terminal_moot_original_gone")
 			m.releaseResendOwned(store, root)
 			return
@@ -1379,7 +1390,7 @@ func (m *recoveryManager) releaseResend(store *chatlog.Store, root string) {
 	}
 	m.mu.Unlock()
 	if store != nil {
-		if err := store.DeleteResendIntent(root); err != nil {
+		if err := store.DeleteResendIntent(m.opContext(), root); err != nil {
 			log.Warn().Err(err).Str("retry_root", root).Msg("decrypt_recovery_intent_delete_failed")
 		}
 	}
@@ -1420,7 +1431,7 @@ func (m *recoveryManager) cancelPeerReasonsIfIdle(store *chatlog.Store, peer str
 	hasJob := false
 	if store != nil {
 		var err error
-		hasJob, err = store.HasRecoveryJob(peer)
+		hasJob, err = store.HasRecoveryJob(m.opContext(), peer)
 		if err != nil {
 			log.Warn().Err(err).Str("peer", peer).Msg("decrypt_recovery_job_probe_failed")
 			return // keep the reasons rather than cancel a live job's lookup
@@ -1486,7 +1497,7 @@ func (m *recoveryManager) acceptRetryOf(msg *DirectMessage) {
 	if store == nil {
 		return
 	}
-	original, found, err := store.EntryByID(msg.RetryOf)
+	original, found, err := store.EntryByID(m.opContext(), msg.RetryOf)
 	if err != nil || !found {
 		return
 	}
@@ -1494,7 +1505,7 @@ func (m *recoveryManager) acceptRetryOf(msg *DirectMessage) {
 		log.Warn().Str("peer", msg.Sender.String()).Str("retry_of", string(msg.RetryOf)).Msg("retry_of_row_mismatch")
 		return
 	}
-	marks, _, err := store.EntryRecoveryMarks(original.ID)
+	marks, _, err := store.EntryRecoveryMarks(m.opContext(), original.ID)
 	if err != nil || !marks.DecryptFailed || marks.SupersededBy != "" {
 		return
 	}
@@ -1506,7 +1517,7 @@ func (m *recoveryManager) acceptRetryOf(msg *DirectMessage) {
 	// transaction: two paths decrypting replacements concurrently (live
 	// event vs history load) both reach here, and only the first may
 	// write the link — the loser backs off without touching the rows.
-	applied, err := store.MarkSupersededCollapsing(original.ID, msg.ID, root)
+	applied, err := store.MarkSupersededCollapsing(m.opContext(), original.ID, msg.ID, root)
 	if err != nil {
 		log.Warn().Err(err).Str("message_id", original.ID).Msg("retry_of_supersede_failed")
 		return
@@ -1517,7 +1528,7 @@ func (m *recoveryManager) acceptRetryOf(msg *DirectMessage) {
 	log.Info().Str("peer", msg.Sender.String()).Str("original", original.ID).Str("resend", msg.ID).Msg("decrypt_recovery_row_recovered")
 
 	// Close the job when nothing flagged remains.
-	m.closeCycleIfIdle(store, original.Sender)
+	m.closeCycleIfIdle(m.opContext(), store, original.Sender)
 }
 
 // ---------------------------------------------------------------------------

@@ -7,9 +7,9 @@ import (
 
 func TestParseCaptureFormat(t *testing.T) {
 	tests := []struct {
-		input   string
-		want    CaptureFormat
-		wantOK  bool
+		input  string
+		want   CaptureFormat
+		wantOK bool
 	}{
 		{"", CaptureFormatCompact, true},
 		{"compact", CaptureFormatCompact, true},

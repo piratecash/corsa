@@ -73,10 +73,20 @@ func (c *LocalRPCClient) LocalRequestFrame(request protocol.Frame) (protocol.Fra
 }
 
 // LocalRequestFrameCtx dispatches a command frame through the embedded node.
-// ctx.Err() is checked before and after HandleLocalFrame as a best-effort
-// cancellation check — HandleLocalFrame itself is synchronous and cannot be
-// interrupted mid-execution, so a stuck handler will block until it returns
-// regardless of ctx cancellation.
+//
+// ctx is checked ONCE, before dispatch. That is the only moment at which
+// cancellation can still prevent something: HandleLocalFrame is synchronous
+// and cannot be interrupted, so by the time it returns its effect has already
+// happened.
+//
+// It used to be checked afterwards as well, and that was worse than useless
+// for a frame that changes state. A send_message whose context ended mid-call
+// had already stored the message and queued it for delivery, yet the reply —
+// carrying the message ID the node generated — was thrown away and the caller
+// got context.Canceled. Retrying then produced a SECOND message with a new ID,
+// so a cancellation that prevented nothing caused a duplicate. Handing back
+// what actually happened lets the caller decide; the cancellation is still
+// visible through its own context.
 //
 // TCP fallback to the data port is intentionally unavailable: local command
 // dispatch must go through the in-process embedded node exclusively.
@@ -90,9 +100,6 @@ func (c *LocalRPCClient) LocalRequestFrameCtx(ctx context.Context, request proto
 	}
 
 	frame := c.localNode.HandleLocalFrame(request)
-	if err := ctx.Err(); err != nil {
-		return protocol.Frame{}, err
-	}
 	if frame.Type == "error" {
 		if frame.Code != "" {
 			return protocol.Frame{}, protocol.ErrorFromCode(frame.Code)

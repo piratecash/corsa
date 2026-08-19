@@ -5,6 +5,8 @@
 package rpc
 
 import (
+	"context"
+
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -36,8 +38,8 @@ func (_m *MockChatlogProvider) EXPECT() *MockChatlogProvider_Expecter {
 }
 
 // FetchChatlog provides a mock function for the type MockChatlogProvider
-func (_mock *MockChatlogProvider) FetchChatlog(topic string, peerAddress string) (string, error) {
-	ret := _mock.Called(topic, peerAddress)
+func (_mock *MockChatlogProvider) FetchChatlog(ctx context.Context, topic string, peerAddress string) (string, error) {
+	ret := _mock.Called(ctx, topic, peerAddress)
 
 	if len(ret) == 0 {
 		panic("no return value specified for FetchChatlog")
@@ -45,16 +47,16 @@ func (_mock *MockChatlogProvider) FetchChatlog(topic string, peerAddress string)
 
 	var r0 string
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(string, string) (string, error)); ok {
-		return returnFunc(topic, peerAddress)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) (string, error)); ok {
+		return returnFunc(ctx, topic, peerAddress)
 	}
-	if returnFunc, ok := ret.Get(0).(func(string, string) string); ok {
-		r0 = returnFunc(topic, peerAddress)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) string); ok {
+		r0 = returnFunc(ctx, topic, peerAddress)
 	} else {
 		r0 = ret.Get(0).(string)
 	}
-	if returnFunc, ok := ret.Get(1).(func(string, string) error); ok {
-		r1 = returnFunc(topic, peerAddress)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string) error); ok {
+		r1 = returnFunc(ctx, topic, peerAddress)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -67,25 +69,31 @@ type MockChatlogProvider_FetchChatlog_Call struct {
 }
 
 // FetchChatlog is a helper method to define mock.On call
+//   - ctx context.Context
 //   - topic string
 //   - peerAddress string
-func (_e *MockChatlogProvider_Expecter) FetchChatlog(topic interface{}, peerAddress interface{}) *MockChatlogProvider_FetchChatlog_Call {
-	return &MockChatlogProvider_FetchChatlog_Call{Call: _e.mock.On("FetchChatlog", topic, peerAddress)}
+func (_e *MockChatlogProvider_Expecter) FetchChatlog(ctx interface{}, topic interface{}, peerAddress interface{}) *MockChatlogProvider_FetchChatlog_Call {
+	return &MockChatlogProvider_FetchChatlog_Call{Call: _e.mock.On("FetchChatlog", ctx, topic, peerAddress)}
 }
 
-func (_c *MockChatlogProvider_FetchChatlog_Call) Run(run func(topic string, peerAddress string)) *MockChatlogProvider_FetchChatlog_Call {
+func (_c *MockChatlogProvider_FetchChatlog_Call) Run(run func(ctx context.Context, topic string, peerAddress string)) *MockChatlogProvider_FetchChatlog_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 string
+		var arg0 context.Context
 		if args[0] != nil {
-			arg0 = args[0].(string)
+			arg0 = args[0].(context.Context)
 		}
 		var arg1 string
 		if args[1] != nil {
 			arg1 = args[1].(string)
 		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -96,14 +104,14 @@ func (_c *MockChatlogProvider_FetchChatlog_Call) Return(s string, err error) *Mo
 	return _c
 }
 
-func (_c *MockChatlogProvider_FetchChatlog_Call) RunAndReturn(run func(topic string, peerAddress string) (string, error)) *MockChatlogProvider_FetchChatlog_Call {
+func (_c *MockChatlogProvider_FetchChatlog_Call) RunAndReturn(run func(ctx context.Context, topic string, peerAddress string) (string, error)) *MockChatlogProvider_FetchChatlog_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // FetchChatlogPreviews provides a mock function for the type MockChatlogProvider
-func (_mock *MockChatlogProvider) FetchChatlogPreviews() (string, error) {
-	ret := _mock.Called()
+func (_mock *MockChatlogProvider) FetchChatlogPreviews(ctx context.Context) (string, error) {
+	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for FetchChatlogPreviews")
@@ -111,16 +119,16 @@ func (_mock *MockChatlogProvider) FetchChatlogPreviews() (string, error) {
 
 	var r0 string
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() (string, error)); ok {
-		return returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (string, error)); ok {
+		return returnFunc(ctx)
 	}
-	if returnFunc, ok := ret.Get(0).(func() string); ok {
-		r0 = returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context) string); ok {
+		r0 = returnFunc(ctx)
 	} else {
 		r0 = ret.Get(0).(string)
 	}
-	if returnFunc, ok := ret.Get(1).(func() error); ok {
-		r1 = returnFunc()
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -133,13 +141,20 @@ type MockChatlogProvider_FetchChatlogPreviews_Call struct {
 }
 
 // FetchChatlogPreviews is a helper method to define mock.On call
-func (_e *MockChatlogProvider_Expecter) FetchChatlogPreviews() *MockChatlogProvider_FetchChatlogPreviews_Call {
-	return &MockChatlogProvider_FetchChatlogPreviews_Call{Call: _e.mock.On("FetchChatlogPreviews")}
+//   - ctx context.Context
+func (_e *MockChatlogProvider_Expecter) FetchChatlogPreviews(ctx interface{}) *MockChatlogProvider_FetchChatlogPreviews_Call {
+	return &MockChatlogProvider_FetchChatlogPreviews_Call{Call: _e.mock.On("FetchChatlogPreviews", ctx)}
 }
 
-func (_c *MockChatlogProvider_FetchChatlogPreviews_Call) Run(run func()) *MockChatlogProvider_FetchChatlogPreviews_Call {
+func (_c *MockChatlogProvider_FetchChatlogPreviews_Call) Run(run func(ctx context.Context)) *MockChatlogProvider_FetchChatlogPreviews_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
 	})
 	return _c
 }
@@ -149,14 +164,14 @@ func (_c *MockChatlogProvider_FetchChatlogPreviews_Call) Return(s string, err er
 	return _c
 }
 
-func (_c *MockChatlogProvider_FetchChatlogPreviews_Call) RunAndReturn(run func() (string, error)) *MockChatlogProvider_FetchChatlogPreviews_Call {
+func (_c *MockChatlogProvider_FetchChatlogPreviews_Call) RunAndReturn(run func(ctx context.Context) (string, error)) *MockChatlogProvider_FetchChatlogPreviews_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
 // FetchConversations provides a mock function for the type MockChatlogProvider
-func (_mock *MockChatlogProvider) FetchConversations() (string, error) {
-	ret := _mock.Called()
+func (_mock *MockChatlogProvider) FetchConversations(ctx context.Context) (string, error) {
+	ret := _mock.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for FetchConversations")
@@ -164,16 +179,16 @@ func (_mock *MockChatlogProvider) FetchConversations() (string, error) {
 
 	var r0 string
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func() (string, error)); ok {
-		return returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (string, error)); ok {
+		return returnFunc(ctx)
 	}
-	if returnFunc, ok := ret.Get(0).(func() string); ok {
-		r0 = returnFunc()
+	if returnFunc, ok := ret.Get(0).(func(context.Context) string); ok {
+		r0 = returnFunc(ctx)
 	} else {
 		r0 = ret.Get(0).(string)
 	}
-	if returnFunc, ok := ret.Get(1).(func() error); ok {
-		r1 = returnFunc()
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -186,13 +201,20 @@ type MockChatlogProvider_FetchConversations_Call struct {
 }
 
 // FetchConversations is a helper method to define mock.On call
-func (_e *MockChatlogProvider_Expecter) FetchConversations() *MockChatlogProvider_FetchConversations_Call {
-	return &MockChatlogProvider_FetchConversations_Call{Call: _e.mock.On("FetchConversations")}
+//   - ctx context.Context
+func (_e *MockChatlogProvider_Expecter) FetchConversations(ctx interface{}) *MockChatlogProvider_FetchConversations_Call {
+	return &MockChatlogProvider_FetchConversations_Call{Call: _e.mock.On("FetchConversations", ctx)}
 }
 
-func (_c *MockChatlogProvider_FetchConversations_Call) Run(run func()) *MockChatlogProvider_FetchConversations_Call {
+func (_c *MockChatlogProvider_FetchConversations_Call) Run(run func(ctx context.Context)) *MockChatlogProvider_FetchConversations_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
 	})
 	return _c
 }
@@ -202,64 +224,79 @@ func (_c *MockChatlogProvider_FetchConversations_Call) Return(s string, err erro
 	return _c
 }
 
-func (_c *MockChatlogProvider_FetchConversations_Call) RunAndReturn(run func() (string, error)) *MockChatlogProvider_FetchConversations_Call {
+func (_c *MockChatlogProvider_FetchConversations_Call) RunAndReturn(run func(ctx context.Context) (string, error)) *MockChatlogProvider_FetchConversations_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// HasEntryInConversation provides a mock function for the type MockChatlogProvider
-func (_mock *MockChatlogProvider) HasEntryInConversation(peerAddress string, messageID string) bool {
-	ret := _mock.Called(peerAddress, messageID)
+// LookupEntryInConversation provides a mock function for the type MockChatlogProvider
+func (_mock *MockChatlogProvider) LookupEntryInConversation(ctx context.Context, peerAddress string, messageID string) (bool, error) {
+	ret := _mock.Called(ctx, peerAddress, messageID)
 
 	if len(ret) == 0 {
-		panic("no return value specified for HasEntryInConversation")
+		panic("no return value specified for LookupEntryInConversation")
 	}
 
 	var r0 bool
-	if returnFunc, ok := ret.Get(0).(func(string, string) bool); ok {
-		r0 = returnFunc(peerAddress, messageID)
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) (bool, error)); ok {
+		return returnFunc(ctx, peerAddress, messageID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) bool); ok {
+		r0 = returnFunc(ctx, peerAddress, messageID)
 	} else {
 		r0 = ret.Get(0).(bool)
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string) error); ok {
+		r1 = returnFunc(ctx, peerAddress, messageID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
-// MockChatlogProvider_HasEntryInConversation_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'HasEntryInConversation'
-type MockChatlogProvider_HasEntryInConversation_Call struct {
+// MockChatlogProvider_LookupEntryInConversation_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'LookupEntryInConversation'
+type MockChatlogProvider_LookupEntryInConversation_Call struct {
 	*mock.Call
 }
 
-// HasEntryInConversation is a helper method to define mock.On call
+// LookupEntryInConversation is a helper method to define mock.On call
+//   - ctx context.Context
 //   - peerAddress string
 //   - messageID string
-func (_e *MockChatlogProvider_Expecter) HasEntryInConversation(peerAddress interface{}, messageID interface{}) *MockChatlogProvider_HasEntryInConversation_Call {
-	return &MockChatlogProvider_HasEntryInConversation_Call{Call: _e.mock.On("HasEntryInConversation", peerAddress, messageID)}
+func (_e *MockChatlogProvider_Expecter) LookupEntryInConversation(ctx interface{}, peerAddress interface{}, messageID interface{}) *MockChatlogProvider_LookupEntryInConversation_Call {
+	return &MockChatlogProvider_LookupEntryInConversation_Call{Call: _e.mock.On("LookupEntryInConversation", ctx, peerAddress, messageID)}
 }
 
-func (_c *MockChatlogProvider_HasEntryInConversation_Call) Run(run func(peerAddress string, messageID string)) *MockChatlogProvider_HasEntryInConversation_Call {
+func (_c *MockChatlogProvider_LookupEntryInConversation_Call) Run(run func(ctx context.Context, peerAddress string, messageID string)) *MockChatlogProvider_LookupEntryInConversation_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 string
+		var arg0 context.Context
 		if args[0] != nil {
-			arg0 = args[0].(string)
+			arg0 = args[0].(context.Context)
 		}
 		var arg1 string
 		if args[1] != nil {
 			arg1 = args[1].(string)
 		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
 }
 
-func (_c *MockChatlogProvider_HasEntryInConversation_Call) Return(b bool) *MockChatlogProvider_HasEntryInConversation_Call {
-	_c.Call.Return(b)
+func (_c *MockChatlogProvider_LookupEntryInConversation_Call) Return(b bool, err error) *MockChatlogProvider_LookupEntryInConversation_Call {
+	_c.Call.Return(b, err)
 	return _c
 }
 
-func (_c *MockChatlogProvider_HasEntryInConversation_Call) RunAndReturn(run func(peerAddress string, messageID string) bool) *MockChatlogProvider_HasEntryInConversation_Call {
+func (_c *MockChatlogProvider_LookupEntryInConversation_Call) RunAndReturn(run func(ctx context.Context, peerAddress string, messageID string) (bool, error)) *MockChatlogProvider_LookupEntryInConversation_Call {
 	_c.Call.Return(run)
 	return _c
 }

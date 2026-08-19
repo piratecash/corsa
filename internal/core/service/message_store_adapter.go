@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -30,6 +31,23 @@ func NewMessageStoreAdapter(chatlog *ChatlogGateway, id *identity.Identity) *Mes
 	return &MessageStoreAdapter{chatlog: chatlog, id: id}
 }
 
+// opContext is the context every repository call from this adapter runs with.
+//
+// This type is the boundary between the node and the chatlog repository, and
+// the node.MessageStore / DeliveryOutbox / SeenAckJournal callbacks carry no
+// context of their own: they are invoked from connection handlers and retry
+// loops that predate this layer. Widening those interfaces is a node-side
+// change, deliberately not made here.
+//
+// Background is safe for the shutdown contract regardless, because the
+// composition root joins the node — Service.Run and then WaitBackground —
+// BEFORE it closes the database, so these writes are finished rather than
+// cancelled. The ordering is what protects them; cancellation would only make
+// the same guarantee arrive sooner.
+func (a *MessageStoreAdapter) opContext() context.Context {
+	return context.Background()
+}
+
 // StoreMessage persists an inbound or outbound envelope and classifies the
 // outcome so the node can decide whether it saw a new message or a
 // duplicate. Matches the node.MessageStore contract.
@@ -51,7 +69,7 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		DeliveryStatus: status,
 		TTLSeconds:     envelope.TTLSeconds,
 	}
-	inserted, err := a.chatlog.AppendReportNew(envelope.Topic, domain.PeerIdentityFromWire(a.id.Address), entry)
+	inserted, err := a.chatlog.AppendReportNew(a.opContext(), envelope.Topic, domain.PeerIdentityFromWire(a.id.Address), entry)
 	if err != nil {
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
 		return node.StoreFailed
@@ -79,7 +97,7 @@ func (a *MessageStoreAdapter) UpdateDeliveryStatus(receipt protocol.DeliveryRece
 	if chatlogPeer.IsZero() {
 		return true // not our message, nothing to update
 	}
-	if _, err := a.chatlog.UpdateStatus("dm", chatlogPeer, domain.MessageID(receipt.MessageID), receipt.Status); err != nil {
+	if _, err := a.chatlog.UpdateStatus(a.opContext(), "dm", chatlogPeer, domain.MessageID(receipt.MessageID), receipt.Status); err != nil {
 		log.Error().Str("message_id", string(receipt.MessageID)).Str("status", receipt.Status).Err(err).Msg("chatlog update status failed")
 		return false
 	}
@@ -93,7 +111,7 @@ func (a *MessageStoreAdapter) UndeliveredOutgoing() ([]protocol.Envelope, error)
 	if a == nil || a.chatlog == nil {
 		return nil, nil
 	}
-	entries, err := a.chatlog.UndeliveredOutgoing(time.Now().UTC().Add(-reseedHorizon))
+	entries, err := a.chatlog.UndeliveredOutgoing(a.opContext(), time.Now().UTC().Add(-reseedHorizon))
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +157,7 @@ func (a *MessageStoreAdapter) UnconfirmedSeen() ([]protocol.DeliveryReceipt, err
 	if a == nil || a.chatlog == nil {
 		return nil, nil
 	}
-	entries, err := a.chatlog.UnconfirmedSeen(time.Now().UTC().Add(-seenReseedHorizon))
+	entries, err := a.chatlog.UnconfirmedSeen(a.opContext(), time.Now().UTC().Add(-seenReseedHorizon))
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +179,7 @@ func (a *MessageStoreAdapter) MarkDeliveryFailed(id protocol.MessageID) error {
 	if a == nil || a.chatlog == nil {
 		return nil
 	}
-	return a.chatlog.MarkDeliveryFailed(string(id))
+	return a.chatlog.MarkDeliveryFailed(a.opContext(), string(id))
 }
 
 // MarkSeenConfirmed implements node.SeenAckJournal.
@@ -169,5 +187,5 @@ func (a *MessageStoreAdapter) MarkSeenConfirmed(id protocol.MessageID) error {
 	if a == nil || a.chatlog == nil {
 		return nil
 	}
-	return a.chatlog.MarkSeenConfirmed(string(id))
+	return a.chatlog.MarkSeenConfirmed(a.opContext(), string(id))
 }

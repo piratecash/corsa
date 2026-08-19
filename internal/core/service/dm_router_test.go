@@ -1,7 +1,7 @@
 package service
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"runtime"
 	"sort"
@@ -1037,7 +1037,7 @@ func TestSeedPreviewsPreservesEventOnlyPeers(t *testing.T) {
 // TestSeedPreviewsResetsStaleUnreadToZero verifies that when the SQL
 // snapshot reports UnreadCount=0 for a peer that already has a stale
 // event-path Unread > 0, seedPreviews resets it to 0. The SQL snapshot
-// (ListConversationsCtx) is the source of truth for unread after startup.
+// (ListConversations) is the source of truth for unread after startup.
 func TestSeedPreviewsResetsStaleUnreadToZero(t *testing.T) {
 	r := newTestRouter()
 
@@ -1520,6 +1520,13 @@ func TestRepairUnreadSkipsCountOnFirstSyncAfterSeedPreviews(t *testing.T) {
 // TestOnNewMessageRegistersSeenMessageID verifies that onNewMessage adds
 // the event's MessageID to seenMessageIDs, preventing the repair-path
 // (repairUnreadFromHeaders) from double-counting it.
+//
+// The operation gate is closed first, exactly as in the non-active-peer test
+// below: onNewMessage falls back to a store read in a goroutine when the event
+// cannot be decrypted, and that fallback deliberately calls evictSeenMessages
+// — the repair path is supposed to re-count the message later. Asserting
+// presence without closing the gate raced that eviction and failed under
+// -race -count=300.
 func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 	r := newTestRouter()
 
@@ -1528,6 +1535,10 @@ func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
+
+	r.opMu.Lock()
+	r.opClosed = true
+	r.opMu.Unlock()
 
 	event := protocol.LocalChangeEvent{
 		Type:      protocol.LocalChangeNewMessage,
@@ -1549,9 +1560,16 @@ func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 
 // TestOnNewMessageNonActivePeerRegistersSeenID verifies dedup even when
 // the message is for a non-active peer (sidebar-only update path).
+//
+// The operation gate is closed first so the assertion is about the
+// SYNCHRONOUS registration and nothing else. The non-active path may fall back
+// to a store read in a goroutine, and on a store with no row for the peer that
+// fallback deliberately calls evictSeenMessages — the repair path is supposed
+// to re-count the message later. Polling for presence therefore raced that
+// eviction and only passed when the check happened to win, which is not a
+// contract worth asserting.
 func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
-	db, cl := newTestChatLog(t)
-	defer func() { _ = db.Close() }()
+	cl := newTestChatLog(t)
 
 	r := newTestRouter()
 	r.client.setChatLogForTest(cl)
@@ -1559,6 +1577,10 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-2") // different from sender
 	r.mu.Unlock()
+
+	r.opMu.Lock()
+	r.opClosed = true
+	r.opMu.Unlock()
 
 	event := protocol.LocalChangeEvent{
 		Type:      protocol.LocalChangeNewMessage,
@@ -1570,15 +1592,10 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 
 	r.onNewMessage(event)
 
-	// The non-active-peer path may spawn a goroutine that reads from
-	// chatlog. Wait for it to settle before checking seenMessageIDs.
-	ok := pollCondition(200*time.Millisecond, func() bool {
-		r.mu.RLock()
-		defer r.mu.RUnlock()
-		_, seen := r.seenMessageIDs["msg-456"]
-		return seen
-	})
-	if !ok {
+	r.mu.RLock()
+	_, seen := r.seenMessageIDs["msg-456"]
+	r.mu.RUnlock()
+	if !seen {
 		t.Fatal("onNewMessage should register MessageID in seenMessageIDs even for non-active peer")
 	}
 }
@@ -1699,8 +1716,7 @@ func TestStartupDoneClosedOnPanic(t *testing.T) {
 // events while startupComplete is false. After runStartup replays them,
 // seenMessageIDs are populated.
 func TestEbusBuffersDuringStartup(t *testing.T) {
-	db, cl := newTestChatLog(t)
-	defer func() { _ = db.Close() }()
+	cl := newTestChatLog(t)
 
 	client := &DesktopClient{id: &identity.Identity{Address: "me"}, chatLog: cl}
 	client.wireSubServices()
@@ -2776,8 +2792,7 @@ func TestRefreshPreviewForPeerRollsBackSeenOnFailure(t *testing.T) {
 func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 	// Use a real chatlog with schema — FetchSinglePreview returns (nil, nil)
 	// for an empty table (no error, just no entries).
-	db, cl := newTestChatLog(t)
-	defer func() { _ = db.Close() }()
+	cl := newTestChatLog(t)
 
 	r := newTestRouter()
 	r.client.setChatLogForTest(cl)
@@ -2827,8 +2842,7 @@ func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 // The peer and its unread badge must survive — the message is real, just
 // not on disk yet.
 func TestRepairPathHeaderOnlyMessagePreservedAfterNilPreview(t *testing.T) {
-	db, cl := newTestChatLog(t)
-	defer func() { _ = db.Close() }()
+	cl := newTestChatLog(t)
 
 	r := newTestRouter()
 	r.client.setChatLogForTest(cl)
@@ -3352,15 +3366,8 @@ func TestRemovePeerNonActive(t *testing.T) {
 // Note: DeleteContact errors are best-effort (logged, not blocking) because
 // the RPC may be unavailable. Only chatlog failures block removal.
 func TestRemovePeerErrorPreservesState(t *testing.T) {
-	// Open a SQLite database and immediately close it so all queries fail.
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open in-memory db: %v", err)
-	}
-	_ = db.Close()
-
 	r := newTestRouter()
-	r.client.setChatLogForTest(chatlog.NewStoreFromDB(db, domaintest.ID("me")))
+	r.client.setChatLogForTest(newClosedChatlogStore(t, domaintest.ID("me")))
 
 	r.peers[domaintest.ID("a")] = &RouterPeerState{Unread: 2}
 	r.peers[domaintest.ID("b")] = &RouterPeerState{Unread: 1}
@@ -3530,7 +3537,6 @@ func TestRemovePeerGenDoesNotBlockFreshSend(t *testing.T) {
 // directly setting peers[peerID].Preview.
 func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -3640,7 +3646,6 @@ func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 // sender instead of a stale preview.
 func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -3668,7 +3673,7 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-populate chatlog so FetchSinglePreview can read the message.
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "incoming-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -3716,7 +3721,7 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 
 	// Guard: prove that DecryptIncomingMessage returns nil for this event,
 	// confirming the test actually exercises the fallback path.
-	if msg := c.DecryptIncomingMessage(event); msg != nil {
+	if msg := c.DecryptIncomingMessage(context.Background(), event); msg != nil {
 		t.Fatalf("expected DecryptIncomingMessage to return nil (peer not trusted), got %+v", msg)
 	}
 
@@ -3759,7 +3764,6 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 // updatePreviewFromStore path updates the preview from SQLite.
 func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -3785,7 +3789,7 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-populate chatlog so updatePreviewFromStore can read it.
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "mid-switch-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -3835,7 +3839,7 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 
 	// Guard: prove that DecryptIncomingMessage returns nil for this event,
 	// confirming the test actually exercises the fallback path.
-	if msg := c.DecryptIncomingMessage(event); msg != nil {
+	if msg := c.DecryptIncomingMessage(context.Background(), event); msg != nil {
 		t.Fatalf("expected DecryptIncomingMessage to return nil (peer not trusted), got %+v", msg)
 	}
 
@@ -3868,7 +3872,6 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 // briefly show a false unread badge that could stick if doMarkSeen fails.
 func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -3904,7 +3907,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
 	// Pre-populate chatlog so the background reload succeeds.
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "mid-switch-unread-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -3949,7 +3952,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 	}
 
 	// Guard: prove that DecryptIncomingMessage succeeds for this event.
-	if msg := c.DecryptIncomingMessage(event); msg == nil {
+	if msg := c.DecryptIncomingMessage(context.Background(), event); msg == nil {
 		t.Fatal("expected DecryptIncomingMessage to succeed (peer is trusted)")
 	}
 
@@ -3997,7 +4000,6 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 // decrypted in-process.
 func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -4072,7 +4074,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 	}
 
 	// Guard: inline decrypt must succeed.
-	if msg := c.DecryptIncomingMessage(event); msg == nil {
+	if msg := c.DecryptIncomingMessage(context.Background(), event); msg == nil {
 		t.Fatal("expected DecryptIncomingMessage to succeed (peer is trusted)")
 	}
 
@@ -4132,7 +4134,6 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 // spurious UI events for a peer that is no longer active.
 func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -4202,7 +4203,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	}
 
 	// Guard: inline decrypt must succeed.
-	if msg := c.DecryptIncomingMessage(event); msg == nil {
+	if msg := c.DecryptIncomingMessage(context.Background(), event); msg == nil {
 		t.Fatal("expected DecryptIncomingMessage to succeed")
 	}
 
@@ -4318,7 +4319,6 @@ func TestReloadAndRefreshPreviewRollsBackOnLoadFailure(t *testing.T) {
 // creates a deterministic partial-success without mocks.
 func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -4352,7 +4352,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "partial-success-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -4528,7 +4528,6 @@ func TestUpdatePreviewFromCacheStalePeerGuard(t *testing.T) {
 // TestReloadAndRefreshPreviewRollsBackOnLoadFailure.
 func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -4562,7 +4561,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "partial-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -4612,9 +4611,9 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 		t.Fatal("cache should have messages after loadConversation")
 	}
 
-	// Step 2: close chatlog to simulate transient failure for the
-	// updatePreviewFromStore call.
-	_ = c.chatLog.Close()
+	// Step 2: swap in a chatlog whose database is closed, to simulate a
+	// transient failure for the updatePreviewFromStore call.
+	c.setChatLogForTest(newClosedChatlogStore(t, domaintest.ID("me")))
 
 	// Step 3: updatePreviewFromStore must fail (closed chatlog).
 	if r.updatePreviewFromStore(peerID) {
@@ -4644,7 +4643,6 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 // that triggers the cache-fallback branch in reloadAndRefreshPreview.
 func TestUpdatePreviewFromStoreReturnsFalseOnClosedChatlog(t *testing.T) {
 	c, id := newTestDesktopClientWithNode(t)
-	defer func() { _ = c.Close() }()
 
 	peer, err := identity.Generate()
 	if err != nil {
@@ -4666,7 +4664,7 @@ func TestUpdatePreviewFromStoreReturnsFalseOnClosedChatlog(t *testing.T) {
 
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 
-	err = c.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	err = c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID:             "preview-fail-1",
 		Sender:         peer.Address,
 		Recipient:      id.Address,
@@ -4700,8 +4698,8 @@ func TestUpdatePreviewFromStoreReturnsFalseOnClosedChatlog(t *testing.T) {
 		t.Fatal("guard: updatePreviewFromStore must succeed with valid chatlog")
 	}
 
-	// Close chatlog and verify updatePreviewFromStore fails.
-	_ = c.chatLog.Close()
+	// Swap in a dead chatlog and verify updatePreviewFromStore fails.
+	c.setChatLogForTest(newClosedChatlogStore(t, domaintest.ID("me")))
 	if r.updatePreviewFromStore(peerID) {
 		t.Fatal("updatePreviewFromStore must return false after chatlog close")
 	}
@@ -4867,38 +4865,12 @@ func newTestRouter() *DMRouter {
 	}
 }
 
-// newTestChatLog creates an in-memory SQLite chatlog with initialized schema.
-// The caller must call db.Close() when done (typically via defer).
-// MaxOpenConns is set to 1 because :memory: databases are per-connection —
-// without this, the Go connection pool would open new connections that see
-// an empty database (no schema), causing queries to fail.
-func newTestChatLog(t *testing.T) (*sql.DB, *chatlog.Store) {
+// newTestChatLog returns a chatlog repository backed by a real, migrated
+// state database in a temporary directory. The database closes itself through
+// t.Cleanup, so callers own nothing.
+func newTestChatLog(t *testing.T) *chatlog.Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open in-memory db: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	// Initialize schema — NewStoreFromDB doesn't do this automatically.
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS messages (
-			id              TEXT PRIMARY KEY,
-			topic           TEXT NOT NULL DEFAULT 'dm',
-			sender          TEXT NOT NULL,
-			recipient       TEXT NOT NULL,
-			body            TEXT NOT NULL,
-			flag            TEXT NOT NULL DEFAULT '',
-			delivery_status TEXT NOT NULL DEFAULT 'sent',
-			ttl_seconds     INTEGER NOT NULL DEFAULT 0,
-			metadata        TEXT NOT NULL DEFAULT '',
-			created_at      TEXT NOT NULL,
-			updated_at      TEXT NOT NULL DEFAULT ''
-		)`)
-	if err != nil {
-		_ = db.Close()
-		t.Fatalf("init chatlog schema: %v", err)
-	}
-	return db, chatlog.NewStoreFromDB(db, domaintest.ID("me"))
+	return newTestChatlogStore(t, domaintest.ID("me"))
 }
 
 // pollCondition polls fn every 5ms until it returns true or timeout expires.
@@ -5239,3 +5211,39 @@ func TestSetSendStatusInvalidatesSnapshotCache(t *testing.T) {
 // ── Monitor-level tests moved to node_status_monitor_test.go ──
 // TestApplyPeerHealthDelta*, TestMergePeerHealth*, TestApplyPeerPendingDelta*
 // now test NodeStatusMonitor directly since it owns PeerHealth aggregation.
+
+// TestStopLoopsKeepsHandlerContextAlive covers the shutdown ordering both
+// composition roots use: StopLoops runs BEFORE the event bus drains, so the
+// handlers still running at that moment must keep a usable context.
+//
+// Sharing loopCtx between the loops and the repository calls was a bug — the
+// terminal delete and recovery writes those handlers make would have failed
+// with context canceled, which is a lost write dressed up as a clean shutdown.
+//
+// Built through the real constructor rather than newTestRouter: the contexts
+// under test are created by Start, and newTestRouter hands out a router whose
+// startupDone is already closed.
+func TestStopLoopsKeepsHandlerContextAlive(t *testing.T) {
+	t.Parallel()
+
+	r, _, _ := newRecoveryRouter(t)
+	r.Start()
+
+	if err := r.opContext().Err(); err != nil {
+		t.Fatalf("operation context is already cancelled after Start: %v", err)
+	}
+
+	r.StopLoops(2 * time.Second)
+	if err := r.opContext().Err(); err != nil {
+		t.Fatalf("StopLoops cancelled the operation context: %v — handlers draining after it would lose their writes", err)
+	}
+	if r.loopCtx.Err() == nil {
+		t.Fatal("StopLoops did not cancel the loop context")
+	}
+
+	// ShutdownDrain is the last stage: only there may repository work stop.
+	r.ShutdownDrain(2 * time.Second)
+	if r.opContext().Err() == nil {
+		t.Fatal("ShutdownDrain left the operation context live — nothing would ever release it")
+	}
+}

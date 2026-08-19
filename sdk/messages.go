@@ -40,30 +40,44 @@ func fromInternalMessage(msg *service.DirectMessage) DirectMessage {
 }
 
 // SubscribeDirectMessages streams decrypted incoming direct messages.
+//
+// The stream holds an operation slot for as long as it runs: its goroutine
+// decrypts through the chatlog, so a Close must wait for it rather than pull
+// the database out from under it. A closed runtime returns a stream that is
+// already finished.
 func (r *Runtime) SubscribeDirectMessages(ctx context.Context) <-chan DirectMessage {
-	events, cancel := r.client.SubscribeLocalChanges()
 	out := make(chan DirectMessage, 16)
+	if !r.beginOperation() {
+		close(out)
+		return out
+	}
+
+	streamCtx, stopStream := r.streamContext(ctx)
+
+	events, cancel := r.client.SubscribeLocalChanges()
 
 	go func() {
+		defer r.endOperation()
+		defer stopStream()
 		defer cancel()
 		defer close(out)
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-streamCtx.Done():
 				return
 			case event, ok := <-events:
 				if !ok {
 					return
 				}
-				msg := r.client.DecryptIncomingMessage(event)
+				msg := r.client.DecryptIncomingMessage(streamCtx, event)
 				if msg == nil || msg.Sender.String() == r.Address() {
 					continue
 				}
 
 				select {
 				case out <- fromInternalMessage(msg):
-				case <-ctx.Done():
+				case <-streamCtx.Done():
 					return
 				}
 			}
@@ -79,6 +93,11 @@ func (r *Runtime) SendDirectMessage(ctx context.Context, to, body string) (*Dire
 	// layer): a malformed/uppercase/non-40-hex address must surface a clear
 	// address error rather than silently decoding to the zero identity and
 	// failing later with a generic "recipient required" message.
+	if !r.beginOperation() {
+		return nil, errClosed
+	}
+	defer r.endOperation()
+
 	recipient, err := domain.ParsePeerIdentity(strings.TrimSpace(to))
 	if err != nil {
 		return nil, fmt.Errorf("invalid recipient address %q: %w", to, err)
@@ -86,7 +105,13 @@ func (r *Runtime) SendDirectMessage(ctx context.Context, to, body string) (*Dire
 	if recipient.IsZero() {
 		return nil, fmt.Errorf("invalid recipient address: must not be empty or the zero identity")
 	}
-	msg, err := r.client.SendDirectMessage(ctx, recipient, domain.OutgoingDM{
+	// Merged with the runtime's own context, exactly like a command: a caller
+	// passing one that never ends must not be able to keep a send running
+	// past the shutdown's operation drain.
+	sendCtx, release := r.commandContext(ctx)
+	defer release()
+
+	msg, err := r.client.SendDirectMessage(sendCtx, recipient, domain.OutgoingDM{
 		Body: body,
 	})
 	if err != nil {

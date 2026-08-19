@@ -22,7 +22,6 @@ import (
 func newRecoveryRouter(t *testing.T) (*DMRouter, *DesktopClient, *identity.Identity) {
 	t.Helper()
 	client, id := newTestDesktopClientWithNode(t)
-	t.Cleanup(func() { _ = client.Close() })
 	// The production app wiring registers the client as the node's message
 	// store (app.go); the recovery flow depends on sends landing in the
 	// chatlog, so the harness mirrors it.
@@ -55,7 +54,7 @@ func TestRecoveryReportIdempotent(t *testing.T) {
 	peer := domaintest.ID("rot-peer")
 	rowID := testUUID(0x01)
 
-	if err := client.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID: rowID, Sender: peer.String(), Recipient: id.Address,
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -159,13 +158,13 @@ func TestHandleInboundDecryptFailedValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: outgoingToB, Sender: id.Address, Recipient: peerB.String(),
 		Body: outgoingCiphertext, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("append outgoing: %v", err)
 	}
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: incomingFromB, Sender: peerB.String(), Recipient: id.Address,
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -242,7 +241,7 @@ func TestDecryptRecoveryFullCycle(t *testing.T) {
 		store *chatlog.Store
 		self  domain.PeerIdentity
 	}{{clientA.chatLog, selfA}, {clientB.chatLog, selfB}} {
-		if err := side.store.Append("dm", side.self, chatlog.Entry{
+		if err := side.store.Append(context.Background(), "dm", side.self, chatlog.Entry{
 			ID: originalID, Sender: idA.Address, Recipient: idB.Address,
 			Body: staleCiphertext, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
@@ -269,7 +268,7 @@ func TestDecryptRecoveryFullCycle(t *testing.T) {
 	importContact(t, clientB, idA)
 
 	// --- Receiver leg at B: the live decrypt reports the confirmed class. ---
-	msg := clientB.dm.DecryptIncomingMessage(protocol.LocalChangeEvent{
+	msg := clientB.dm.DecryptIncomingMessage(context.Background(), protocol.LocalChangeEvent{
 		Type: protocol.LocalChangeNewMessage, Topic: "dm",
 		MessageID: originalID, Sender: idA.Address, Recipient: idB.Address,
 		Body: staleCiphertext, CreatedAt: time.Now().UTC().Format(time.RFC3339),
@@ -277,7 +276,7 @@ func TestDecryptRecoveryFullCycle(t *testing.T) {
 	if msg != nil {
 		t.Fatal("test setup: the stale envelope decrypted")
 	}
-	marks, _, err := clientB.chatLog.EntryRecoveryMarks(originalID)
+	marks, _, err := clientB.chatLog.EntryRecoveryMarks(context.Background(), originalID)
 	if err != nil || !marks.DecryptFailed {
 		t.Fatalf("B did not flag the row: marks=%+v err=%v", marks, err)
 	}
@@ -371,25 +370,25 @@ func TestDecryptRecoveryFullCycle(t *testing.T) {
 		AnswerAttemptGen: 6,
 	})
 
-	marksA, _, err := clientA.chatLog.EntryRecoveryMarks(originalID)
+	marksA, _, err := clientA.chatLog.EntryRecoveryMarks(context.Background(), originalID)
 	if err != nil || marksA.SupersededBy == "" {
 		t.Fatalf("A did not supersede its original after the re-send: %+v err=%v", marksA, err)
 	}
 	resendID := marksA.SupersededBy
-	resendEntry, found, err := clientA.chatLog.EntryByID(domain.MessageID(resendID))
+	resendEntry, found, err := clientA.chatLog.EntryByID(context.Background(), domain.MessageID(resendID))
 	if err != nil || !found {
 		t.Fatalf("re-send row missing at A: %v", err)
 	}
 
 	// --- The re-send reaches B: the node persists the row, then the live
 	// path decrypts it. ---
-	if err := clientB.chatLog.Append("dm", selfB, chatlog.Entry{
+	if err := clientB.chatLog.Append(context.Background(), "dm", selfB, chatlog.Entry{
 		ID: resendID, Sender: idA.Address, Recipient: idB.Address,
 		Body: resendEntry.Body, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("append re-send at B: %v", err)
 	}
-	resendMsg := clientB.dm.DecryptIncomingMessage(protocol.LocalChangeEvent{
+	resendMsg := clientB.dm.DecryptIncomingMessage(context.Background(), protocol.LocalChangeEvent{
 		Type: protocol.LocalChangeNewMessage, Topic: "dm",
 		MessageID: resendID, Sender: idA.Address, Recipient: idB.Address,
 		Body: resendEntry.Body, CreatedAt: time.Now().UTC().Format(time.RFC3339),
@@ -402,14 +401,14 @@ func TestDecryptRecoveryFullCycle(t *testing.T) {
 	}
 	routerB.recovery.acceptRetryOf(resendMsg)
 
-	marksB, _, err := clientB.chatLog.EntryRecoveryMarks(originalID)
+	marksB, _, err := clientB.chatLog.EntryRecoveryMarks(context.Background(), originalID)
 	if err != nil || marksB.DecryptFailed || marksB.SupersededBy != resendID {
 		t.Fatalf("B did not supersede the original: %+v err=%v", marksB, err)
 	}
 	if jobs, _ := clientB.chatLog.RecoveryJobs(context.Background()); len(jobs) != 0 {
 		t.Fatalf("B's job survived the recovery: %v", jobs)
 	}
-	if unread, _ := clientB.chatLog.UnreadCountFor(selfA); unread != 1 {
+	if unread, _ := clientB.chatLog.UnreadCountFor(context.Background(), selfA); unread != 1 {
 		t.Fatalf("unread = %d, want 1 (original collapsed, re-send counts once)", unread)
 	}
 }
@@ -426,19 +425,19 @@ func TestAcceptRetryOfValidation(t *testing.T) {
 	flagged := testUUID(0x30)
 	unflagged := testUUID(0x31)
 	for _, rowID := range []string{flagged, unflagged} {
-		if err := client.chatLog.Append("dm", self, chatlog.Entry{
+		if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 			ID: rowID, Sender: peerB.String(), Recipient: id.Address,
 			Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	if _, err := client.chatLog.MarkDecryptFailed(flagged); err != nil {
+	if _, err := client.chatLog.MarkDecryptFailed(context.Background(), flagged); err != nil {
 		t.Fatalf("flag: %v", err)
 	}
 
 	supersededOf := func(id string) string {
-		marks, _, err := client.chatLog.EntryRecoveryMarks(id)
+		marks, _, err := client.chatLog.EntryRecoveryMarks(context.Background(), id)
 		if err != nil {
 			t.Fatalf("marks: %v", err)
 		}
@@ -477,7 +476,7 @@ func TestRecoveryOrphanReadmission(t *testing.T) {
 	peer := domaintest.ID("evicted-peer")
 	rowID := testUUID(0x40)
 
-	if err := client.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID: rowID, Sender: peer.String(), Recipient: id.Address,
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -491,7 +490,7 @@ func TestRecoveryOrphanReadmission(t *testing.T) {
 	// The eviction: the job disappears, the row flag stays. A repeat
 	// Report is the suppressed no-op (changed=false) — only the pass can
 	// bring the job back.
-	if err := client.chatLog.DeleteRecoveryJob(peer.String()); err != nil {
+	if err := client.chatLog.DeleteRecoveryJob(context.Background(), peer.String()); err != nil {
 		t.Fatalf("evict: %v", err)
 	}
 	router.recovery.Report(DecryptFailure{MessageID: rowID, Sender: peer.String(), Recipient: id.Address, Class: DecryptFailureSealedUnreadable})
@@ -516,7 +515,7 @@ func TestRecoveryProofWaitRotatesQueue(t *testing.T) {
 	peer := domaintest.ID("proofless-peer")
 	rowID := testUUID(0x41)
 
-	if err := client.chatLog.Append("dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
 		ID: rowID, Sender: peer.String(), Recipient: id.Address,
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -647,7 +646,7 @@ func TestResendTerminalRetriedNotDropped(t *testing.T) {
 
 	// The replacement row does not exist yet: the terminal write fails
 	// WHOLE and the entry must survive as a DEBT for the retry.
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: originalID, Sender: id.Address, Recipient: peer.String(),
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -670,13 +669,13 @@ func TestResendTerminalRetriedNotDropped(t *testing.T) {
 	if !indebted {
 		t.Fatal("a failed terminal write dropped the resend — the original would race its replacement")
 	}
-	if marks, _, _ := client.chatLog.EntryRecoveryMarks(originalID); marks.SupersededBy != "" {
+	if marks, _, _ := client.chatLog.EntryRecoveryMarks(context.Background(), originalID); marks.SupersededBy != "" {
 		t.Fatal("a failed terminal left a half-written supersede")
 	}
 
 	// The replacement lands (the row exists now): the scheduler pass pays
 	// the debt and settles it.
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: replacementID, Sender: id.Address, Recipient: peer.String(),
 		Body: "sealed-2", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -689,7 +688,7 @@ func TestResendTerminalRetriedNotDropped(t *testing.T) {
 	if indebted {
 		t.Fatal("the retried terminal did not settle the debt")
 	}
-	marks, _, err := client.chatLog.EntryRecoveryMarks(originalID)
+	marks, _, err := client.chatLog.EntryRecoveryMarks(context.Background(), originalID)
 	if err != nil || marks.SupersededBy != replacementID {
 		t.Fatalf("terminal marks missing: %+v err=%v", marks, err)
 	}
@@ -711,7 +710,7 @@ func TestCrashedTerminalDebtRestoredNotResent(t *testing.T) {
 	originalID := testUUID(0xD0)
 	replacementID := testUUID(0xD1)
 	for _, row := range []string{originalID, replacementID} {
-		if err := client.chatLog.Append("dm", self, chatlog.Entry{
+		if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 			ID: row, Sender: id.Address, Recipient: peer.String(),
 			Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
@@ -723,7 +722,7 @@ func TestCrashedTerminalDebtRestoredNotResent(t *testing.T) {
 		ReplacementID: replacementID, CreatedAt: time.Now().UTC().Add(-time.Minute),
 	})
 	router.recovery.pass(context.Background())
-	marks, _, err := client.chatLog.EntryRecoveryMarks(originalID)
+	marks, _, err := client.chatLog.EntryRecoveryMarks(context.Background(), originalID)
 	if err != nil || marks.SupersededBy != replacementID {
 		t.Fatalf("restored debt not paid: %+v err=%v", marks, err)
 	}
@@ -741,7 +740,7 @@ func TestCrashedTerminalDebtRestoredNotResent(t *testing.T) {
 	// left to supersede, the debt settles clean instead of wedging.
 	ghostOriginal := testUUID(0xD2)
 	ghostReplacement := testUUID(0xD3)
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: ghostReplacement, Sender: id.Address, Recipient: peer.String(),
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
@@ -791,7 +790,7 @@ func TestOutgoingSendEstablishesFromAnySurface(t *testing.T) {
 		domain.PeerIdentityFromWire(recipient.Address), domain.OutgoingDM{Body: "a file caption"}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	established, err := client.chatLog.IsEstablished(recipient.Address)
+	established, err := client.chatLog.IsEstablished(context.Background(), recipient.Address)
 	if err != nil || !established {
 		t.Fatalf("a direct send did not establish the peer: %v %v", established, err)
 	}
@@ -851,7 +850,7 @@ func TestResendClaimDefersRelease(t *testing.T) {
 	if !stillQueued || !entry.pendingRelease {
 		t.Fatalf("a mid-claim release stripped the entry: queued=%v %+v", stillQueued, entry)
 	}
-	if _, intact, _ := client.chatLog.ResendIntentByRoot(root); !intact {
+	if _, intact, _ := client.chatLog.ResendIntentByRoot(context.Background(), root); !intact {
 		t.Fatal("a mid-claim release deleted the durable intent — the send would leave uninsured")
 	}
 
@@ -863,7 +862,7 @@ func TestResendClaimDefersRelease(t *testing.T) {
 	if stillQueued {
 		t.Fatal("the deferred release did not execute at unclaim")
 	}
-	if _, intact, _ := client.chatLog.ResendIntentByRoot(root); intact {
+	if _, intact, _ := client.chatLog.ResendIntentByRoot(context.Background(), root); intact {
 		t.Fatal("the deferred release left the durable intent behind")
 	}
 }
@@ -899,7 +898,7 @@ func TestResendStaleTaskRetiresOnIDMismatch(t *testing.T) {
 	if stillQueued {
 		t.Fatal("the stale task survived the id mismatch")
 	}
-	intent, intact, err := client.chatLog.ResendIntentByRoot(root)
+	intent, intact, err := client.chatLog.ResendIntentByRoot(context.Background(), root)
 	if err != nil || !intact || intent.ReplacementID != testUUID(0xC3) {
 		t.Fatalf("the new incarnation's intent was damaged: intact=%v %+v err=%v", intact, intent, err)
 	}
@@ -909,7 +908,7 @@ func TestResendStaleTaskRetiresOnIDMismatch(t *testing.T) {
 // predecessor would have left it.
 func admitTestResendIntent(t *testing.T, store *chatlog.Store, intent chatlog.ResendIntent) {
 	t.Helper()
-	if _, admitted, _, err := store.AdmitResendIntent(intent, recoveryMaxResendsPerPeer, recoveryBacklogLimit, chatlog.RecoveryProtectedWork{}); err != nil || !admitted {
+	if _, admitted, _, err := store.AdmitResendIntent(context.Background(), intent, recoveryMaxResendsPerPeer, recoveryBacklogLimit, chatlog.RecoveryProtectedWork{}); err != nil || !admitted {
 		t.Fatalf("admit intent %s: admitted=%v err=%v", intent.Root, admitted, err)
 	}
 }
@@ -930,7 +929,7 @@ func TestReconcileResendIntentsFinishesCrashedTerminal(t *testing.T) {
 	now := time.Now().UTC()
 
 	for _, row := range []string{originalID, replacementID} {
-		if err := client.chatLog.Append("dm", self, chatlog.Entry{
+		if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 			ID: row, Sender: id.Address, Recipient: peer.String(),
 			Body: "sealed", CreatedAt: now.Format(time.RFC3339),
 		}); err != nil {
@@ -944,7 +943,7 @@ func TestReconcileResendIntentsFinishesCrashedTerminal(t *testing.T) {
 
 	router.recovery.pass(context.Background())
 
-	marks, _, err := client.chatLog.EntryRecoveryMarks(originalID)
+	marks, _, err := client.chatLog.EntryRecoveryMarks(context.Background(), originalID)
 	if err != nil || marks.SupersededBy != replacementID {
 		t.Fatalf("crashed terminal not recovered: %+v err=%v", marks, err)
 	}
@@ -956,7 +955,7 @@ func TestReconcileResendIntentsFinishesCrashedTerminal(t *testing.T) {
 	// task under the stored id instead of waiting passively or inventing
 	// a terminal.
 	ghostOriginal := testUUID(0x72)
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: ghostOriginal, Sender: id.Address, Recipient: peer.String(),
 		Body: "sealed", CreatedAt: now.Format(time.RFC3339),
 	}); err != nil {
@@ -967,7 +966,7 @@ func TestReconcileResendIntentsFinishesCrashedTerminal(t *testing.T) {
 		ReplacementID: testUUID(0x73), CreatedAt: now,
 	})
 	router.recovery.pass(context.Background())
-	if marks, _, _ := client.chatLog.EntryRecoveryMarks(ghostOriginal); marks.SupersededBy != "" {
+	if marks, _, _ := client.chatLog.EntryRecoveryMarks(context.Background(), ghostOriginal); marks.SupersededBy != "" {
 		t.Fatal("a never-sent intent invented a terminal")
 	}
 	router.recovery.mu.Lock()
@@ -1045,13 +1044,13 @@ func TestDecryptSuccessHookIndependentOfActiveChat(t *testing.T) {
 	senderID := domain.PeerIdentityFromWire(sender.Address)
 	originalID := testUUID(0xA0)
 
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: originalID, Sender: sender.Address, Recipient: id.Address,
 		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("append original: %v", err)
 	}
-	if changed, err := client.chatLog.MarkDecryptFailed(originalID); err != nil || !changed {
+	if changed, err := client.chatLog.MarkDecryptFailed(context.Background(), originalID); err != nil || !changed {
 		t.Fatalf("flag: %v %v", changed, err)
 	}
 	// The sender's keys must be known for the replacement to decrypt.
@@ -1078,7 +1077,7 @@ func TestDecryptSuccessHookIndependentOfActiveChat(t *testing.T) {
 	}
 	// No SelectPeer, no active conversation: the bare decrypt is all that
 	// happens — exactly the background-chat / history-load situation.
-	msg := client.dm.DecryptIncomingMessage(protocol.LocalChangeEvent{
+	msg := client.dm.DecryptIncomingMessage(context.Background(), protocol.LocalChangeEvent{
 		Type: protocol.LocalChangeNewMessage, Topic: "dm",
 		MessageID: replacementID, Sender: sender.Address, Recipient: id.Address,
 		Body: ciphertext, CreatedAt: time.Now().UTC().Format(time.RFC3339),
@@ -1087,11 +1086,11 @@ func TestDecryptSuccessHookIndependentOfActiveChat(t *testing.T) {
 		t.Fatalf("replacement did not decrypt: %+v", msg)
 	}
 
-	marks, _, err := client.chatLog.EntryRecoveryMarks(originalID)
+	marks, _, err := client.chatLog.EntryRecoveryMarks(context.Background(), originalID)
 	if err != nil || marks.DecryptFailed || marks.SupersededBy != replacementID {
 		t.Fatalf("background replacement did not supersede: %+v err=%v", marks, err)
 	}
-	established, err := client.chatLog.IsEstablished(senderID.String())
+	established, err := client.chatLog.IsEstablished(context.Background(), senderID.String())
 	if err != nil || !established {
 		t.Fatalf("decrypted incoming did not establish the peer: %v %v", established, err)
 	}
@@ -1108,30 +1107,30 @@ func TestJobDeadlineAnchoredToCycle(t *testing.T) {
 	rowID := testUUID(0x80)
 	start := time.Now().UTC()
 
-	if err := client.chatLog.Append("dm", self, chatlog.Entry{
+	if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 		ID: rowID, Sender: peer.String(), Recipient: id.Address,
 		Body: "sealed", CreatedAt: start.Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if changed, err := client.chatLog.MarkDecryptFailed(rowID); err != nil || !changed {
+	if changed, err := client.chatLog.MarkDecryptFailed(context.Background(), rowID); err != nil || !changed {
 		t.Fatalf("flag: %v %v", changed, err)
 	}
 
-	first := router.recovery.jobDeadline(peer.String(), start)
+	first := router.recovery.jobDeadline(context.Background(), peer.String(), start)
 	// The oldest row recovers; a later re-derivation (the eviction →
 	// re-admission path) must keep the ORIGINAL clock.
-	if applied, err := client.chatLog.MarkSupersededCollapsing(rowID, testUUID(0x81), rowID); err != nil || !applied {
+	if applied, err := client.chatLog.MarkSupersededCollapsing(context.Background(), rowID, testUUID(0x81), rowID); err != nil || !applied {
 		t.Fatalf("supersede: %v", err)
 	}
 	later := start.Add(48 * time.Hour)
-	if again := router.recovery.jobDeadline(peer.String(), later); !again.Equal(first) {
+	if again := router.recovery.jobDeadline(context.Background(), peer.String(), later); !again.Equal(first) {
 		t.Fatalf("deadline moved %v → %v — the cycle clock restarted", first, again)
 	}
 	// A CLOSED cycle re-arms from scratch (the row recovered above, so
 	// the idle close fires).
-	router.recovery.closeCycleIfIdle(client.chatLog, peer.String())
-	if fresh := router.recovery.jobDeadline(peer.String(), later); fresh.Equal(first) {
+	router.recovery.closeCycleIfIdle(context.Background(), client.chatLog, peer.String())
+	if fresh := router.recovery.jobDeadline(context.Background(), peer.String(), later); fresh.Equal(first) {
 		t.Fatal("a closed cycle kept the old anchor")
 	}
 }
@@ -1156,7 +1155,7 @@ func TestResendQuotasBoundSenderLeg(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encrypt: %v", err)
 		}
-		if err := client.chatLog.Append("dm", self, chatlog.Entry{
+		if err := client.chatLog.Append(context.Background(), "dm", self, chatlog.Entry{
 			ID: rowID, Sender: id.Address, Recipient: flood.String(),
 			Body: ciphertext, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {

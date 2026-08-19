@@ -41,6 +41,15 @@ type Server struct {
 	table       *CommandTable
 	node        NodeProvider
 	authLimiter *authRateLimiter
+
+	// The graceful shutdown runs ONCE in the background and reports through
+	// shutdownDone. A per-attempt Shutdown could not answer the question the
+	// shutdown path actually asks — "is this server quiet?" — because after
+	// the first attempt closes the listener every later call returns nil
+	// immediately, whether or not a request is still being read or served.
+	shutdownOnce sync.Once
+	shutdownDone chan struct{}
+	shutdownErr  error
 }
 
 // NewServer creates a new RPC HTTP server backed by the given CommandTable.
@@ -58,10 +67,11 @@ func NewServer(cfg config.RPC, table *CommandTable, node ...NodeProvider) (*Serv
 	})
 
 	server := &Server{
-		app:         app,
-		cfg:         cfg,
-		table:       table,
-		authLimiter: newAuthRateLimiter(),
+		app:          app,
+		cfg:          cfg,
+		table:        table,
+		authLimiter:  newAuthRateLimiter(),
+		shutdownDone: make(chan struct{}),
 	}
 	if len(node) > 0 {
 		server.node = node[0]
@@ -139,17 +149,38 @@ func (s *Server) Shutdown() error {
 	return s.app.Shutdown()
 }
 
-// ShutdownWithTimeout gracefully shuts down the RPC server, giving
-// active connections until the deadline and then returning an error.
-// NB: a timeout error does NOT mean in-flight handlers were aborted —
-// fasthttp has no handler cancellation, so a wedged handler may still
-// be executing (and reaching the CommandTable → chatlog) after this
-// returns. Callers on the shutdown path must treat a non-nil result as
-// an unclean stage and refrain from tearing down the handlers'
-// dependencies. The UI-driven desktop shutdown uses this instead of
-// plain Shutdown, which waits for keep-alive connections indefinitely.
+// ShutdownWithTimeout gracefully shuts the RPC server down and waits up to
+// timeout for it to FINISH. A non-nil result means the server is not quiet yet.
+//
+// The graceful shutdown itself is started once and runs in the background;
+// every call — including a retry from a later shutdown attempt — waits on the
+// same completion signal. That distinction is the whole point: fasthttp's
+// Shutdown closes the listeners and then waits for every connection to go
+// idle, but calling it a second time returns immediately because the listeners
+// are already closed. A retry that trusted that answer would tear down the
+// command table's dependencies while a slow request was still being read, or
+// while the handler that caused the first timeout was still running.
+//
+// NB: a timeout does NOT abort anything — fasthttp has no handler
+// cancellation. Callers on the shutdown path must treat a non-nil result as an
+// unclean stage and refrain from tearing down the handlers' dependencies.
 func (s *Server) ShutdownWithTimeout(timeout time.Duration) error {
-	return s.app.ShutdownWithTimeout(timeout)
+	s.shutdownOnce.Do(func() {
+		go func() {
+			// Unbounded on purpose: the deadline belongs to the caller, and
+			// the goroutine must survive it to keep reporting the truth to
+			// the next attempt.
+			s.shutdownErr = s.app.Shutdown()
+			close(s.shutdownDone)
+		}()
+	})
+
+	select {
+	case <-s.shutdownDone:
+		return s.shutdownErr
+	case <-time.After(timeout):
+		return fmt.Errorf("rpc: server did not finish shutting down within %s", timeout)
+	}
 }
 
 // handleExec is the universal command dispatcher.
@@ -169,7 +200,7 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 
 	// CommandTable.Execute resolves camelCase, snake_case, and case-insensitive
 	// input transparently — no need to lowercase here.
-	resp := s.table.Execute(CommandRequest{Name: req.Command, Args: req.Args})
+	resp := s.table.Execute(CommandRequest{Name: req.Command, Args: req.Args, Ctx: c.RequestCtx()})
 	if resp.Error != nil {
 		return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
 	}
@@ -207,6 +238,7 @@ func (s *Server) handleFrame(c fiber.Ctx) error {
 		return ErrorResponse(c, fiber.StatusBadRequest, err.Error())
 	}
 
+	req.Ctx = c.RequestCtx()
 	resp := s.table.Execute(req)
 
 	if resp.ErrorKind == ErrNotFound {
@@ -297,11 +329,18 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 	rpc.Post("/file/explain_route", s.legacyArgHandler("explainFileRoute"))
 }
 
+// Every entry point carries the REQUEST's context, not a fresh one.
+// c.RequestCtx() is the cancellation-bearing handle — c.Context() returns
+// whatever a middleware stored, or an empty context — and without it a command
+// that reaches SQLite ran under context.Background(): shutting the server down
+// closed the connection while the query kept going, ShutdownWithTimeout hit its
+// deadline, and the database was left open for the next attempt to wait on.
+
 // legacyHandler creates a Fiber handler for a no-args command.
 // Mode-gated commands return 503 via ErrUnavailable from CommandTable.Execute().
 func (s *Server) legacyHandler(command string) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		resp := s.table.Execute(CommandRequest{Name: command})
+		resp := s.table.Execute(CommandRequest{Name: command, Ctx: c.RequestCtx()})
 		if resp.Error != nil {
 			return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
 		}
@@ -321,7 +360,7 @@ func (s *Server) legacyArgHandler(command string) fiber.Handler {
 				return ErrorResponse(c, fiber.StatusBadRequest, "invalid request body")
 			}
 		}
-		resp := s.table.Execute(CommandRequest{Name: command, Args: args})
+		resp := s.table.Execute(CommandRequest{Name: command, Args: args, Ctx: c.RequestCtx()})
 		if resp.Error != nil {
 			return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
 		}

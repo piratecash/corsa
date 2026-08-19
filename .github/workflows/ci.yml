@@ -133,3 +133,6 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Run storage tests against the cgo SQLite driver
+        run: make test-cgo

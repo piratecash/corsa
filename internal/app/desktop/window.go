@@ -487,10 +487,13 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 
 // SetShutdown registers a teardown callback that runs before the process
 // exits on the UI-driven paths (window closed, Android DestroyEvent).
-// Those paths terminate the process straight from the event-loop
-// goroutine — app.Main never returns — so desktop.Run's defers never
-// fire there; the callback is where the data-integrity part of that
-// teardown (node stop, chatlog close) actually happens. Call before Run.
+//
+// It is where the data-integrity part of the teardown (node stop, chatlog
+// close) happens, because desktop.Run's own defers cannot do it: on desktop
+// those paths exit the process straight from the event-loop goroutine and the
+// defers never run, while on Android app.Main returns as soon as the Activity
+// is up — there they WOULD run, with the UI still live, which is why Run hands
+// ownership to this callback before starting the window. Call before Run.
 func (w *Window) SetShutdown(fn func()) {
 	w.shutdown = fn
 }

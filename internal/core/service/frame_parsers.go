@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -600,9 +601,9 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 // Without this check, a remote peer could inject cross-thread reply links
 // by re-encrypting a foreign message into a fresh envelope that claims a
 // ReplyTo outside the current thread.
-func sanitizeReplyReferences(messages []DirectMessage, store *chatlog.Store, selfAddress string) {
+func sanitizeReplyReferences(ctx context.Context, messages []DirectMessage, store *chatlog.Store, selfAddress string) error {
 	if store == nil {
-		return
+		return nil
 	}
 	for i := range messages {
 		if messages[i].ReplyTo == "" {
@@ -612,8 +613,18 @@ func sanitizeReplyReferences(messages []DirectMessage, store *chatlog.Store, sel
 		if peerAddr == domain.PeerIdentityFromWire(selfAddress) {
 			peerAddr = messages[i].Recipient
 		}
-		if !store.HasEntryInConversation(peerAddr, domain.MessageID(messages[i].ReplyTo)) {
+		// A lookup that FAILED says nothing about the reference. The
+		// bool-only form returned false for a cancelled context and for an
+		// unhealthy database exactly as it did for a genuine miss, so a valid
+		// quote was stripped from history and the caller was handed the
+		// edited messages as a successful read.
+		found, err := store.LookupEntryInConversation(ctx, peerAddr, domain.MessageID(messages[i].ReplyTo))
+		if err != nil {
+			return fmt.Errorf("reply reference lookup for message %s: %w", messages[i].ID, err)
+		}
+		if !found {
 			messages[i].ReplyTo = ""
 		}
 	}
+	return nil
 }

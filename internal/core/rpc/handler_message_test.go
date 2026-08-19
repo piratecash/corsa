@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -668,12 +669,13 @@ func TestMessageSendDMRejectsDanglingReplyToWithChatlog(t *testing.T) {
 
 	knownEntries := map[string]bool{} // empty — no messages exist
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.EXPECT().HasEntryInConversation(mock.Anything, mock.Anything).
-		RunAndReturn(func(peerAddress, messageID string) bool {
-			return knownEntries[peerAddress+":"+messageID]
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	// Any context: the handler now receives the REQUEST's, not a fresh one.
+	chatlog.EXPECT().LookupEntryInConversation(mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, peerAddress, messageID string) (bool, error) {
+			return knownEntries[peerAddress+":"+messageID], nil
 		})
 
 	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
@@ -708,12 +710,12 @@ func TestMessageSendDMAcceptsExistingReplyToWithChatlog(t *testing.T) {
 		validTo + ":a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5": true,
 	}
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.EXPECT().HasEntryInConversation(mock.Anything, mock.Anything).
-		RunAndReturn(func(peerAddress, messageID string) bool {
-			return knownEntries[peerAddress+":"+messageID]
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.EXPECT().LookupEntryInConversation(mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, peerAddress, messageID string) (bool, error) {
+			return knownEntries[peerAddress+":"+messageID], nil
 		})
 
 	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
@@ -875,5 +877,36 @@ func TestMessageCommandsVisibleWithDMRouter(t *testing.T) {
 		if !visible {
 			t.Errorf("command %q should be visible when dmRouter is present", name)
 		}
+	}
+}
+
+func TestSendDMReportsAFailedReplyLookupAsAFailure(t *testing.T) {
+	// A lookup that could not run says nothing about the message. Folding it
+	// into "not found" told the client their reply target does not exist
+	// whenever the context was cancelled or the database was unhealthy — a
+	// 400 asserting something about the data that had never been established.
+	node := newDefaultNodeProvider(t)
+	dmRouter := newDefaultDMRouterProvider(t)
+
+	chatlog := rpcmocks.NewMockChatlogProvider(t)
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.EXPECT().LookupEntryInConversation(mock.Anything, mock.Anything, mock.Anything).
+		RunAndReturn(func(_ context.Context, _, _ string) (bool, error) {
+			return false, context.Canceled
+		})
+
+	server := setupTestServerWithDMRouterAndChatlog(t, node, chatlog, dmRouter)
+
+	code, result := postJSON(t, server, "/rpc/v1/message/send_dm", map[string]interface{}{
+		"to":       validTo,
+		"body":     "hello",
+		"reply_to": "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5",
+	})
+
+	expectStatusCode(t, code, 500)
+	if errMsg, _ := result["error"].(string); strings.Contains(errMsg, "does not exist") {
+		t.Fatalf("error = %q: a failed lookup was reported as an absent message", errMsg)
 	}
 }

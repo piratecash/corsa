@@ -114,8 +114,8 @@ sequenceDiagram
 
     Router->>Router: resetIdentityState()
     Router->>Client: FetchConversationPreviews()
-    Client->>DB: ReadLastEntryPerPeerCtx()
-    Client->>DB: ListConversationsCtx()
+    Client->>DB: ReadLastEntryPerPeer()
+    Client->>DB: ListConversations()
     DB-->>Client: []ConversationPreview
     Client-->>Router: previews
 
@@ -495,8 +495,8 @@ sequenceDiagram
 
     Router->>Router: resetIdentityState()
     Router->>Client: FetchConversationPreviews()
-    Client->>DB: ReadLastEntryPerPeerCtx()
-    Client->>DB: ListConversationsCtx()
+    Client->>DB: ReadLastEntryPerPeer()
+    Client->>DB: ListConversations()
     DB-->>Client: []ConversationPreview
     Client-->>Router: previews
 

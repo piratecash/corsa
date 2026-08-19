@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
@@ -34,7 +33,7 @@ func TestReachableIDsReconcileOnlyOnSnapshotReason(t *testing.T) {
 		PeersStatePath: filepath.Join(dir, "peers.json"),
 	}, id, bus)
 	t.Cleanup(func() { svc.WaitBackground() })
-	store := chatlog.NewStore(dir, domain.PeerIdentityFromWire(id.Address), domain.ListenAddress(":0"))
+	store := newTestChatlogStore(t, domain.PeerIdentityFromWire(id.Address))
 
 	client := &DesktopClient{
 		id:        id,
@@ -43,7 +42,6 @@ func TestReachableIDsReconcileOnlyOnSnapshotReason(t *testing.T) {
 		chatLog:   store,
 	}
 	client.wireSubServices()
-	t.Cleanup(func() { _ = client.Close() })
 
 	notified := make(chan NodeStatusDomain, 8)
 	monitor := NewNodeStatusMonitor(NodeStatusMonitorOpts{

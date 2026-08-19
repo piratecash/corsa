@@ -1,12 +1,17 @@
 package rpc_test
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 
@@ -698,13 +703,14 @@ func TestFrameEndpointChatlogDispatch(t *testing.T) {
 	chatlogJSON := `{"entries":[{"id":"1","text":"hello"}]}`
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
 	var chatlogPeerAddress string
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
-			chatlogPeerAddress = args.String(1)
+			// args[0] is the request context, args[1] the topic.
+			chatlogPeerAddress = args.String(2)
 		}).Return(chatlogJSON, nil)
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 
@@ -788,4 +794,95 @@ func TestFrameEndpointNotRegisteredWithoutNode(t *testing.T) {
 	if code != 404 {
 		t.Errorf("expected 404 when /frame not registered, got %d", code)
 	}
+}
+
+// TestShutdownCancelsAnInFlightCommand is the regression for a handler that
+// outlives its request.
+//
+// Commands reach SQLite through the chatlog, and those calls take a context.
+// Every RPC entry point used to build a CommandRequest without one, so the
+// query ran under context.Background(): shutting the server down closed the
+// connection while the command kept going, ShutdownWithTimeout hit its
+// deadline, and the state database was left open for the next attempt to wait
+// on the same stuck query.
+func TestShutdownCancelsAnInFlightCommand(t *testing.T) {
+	entered := make(chan struct{})
+	released := make(chan error, 1)
+
+	table := rpc.NewCommandTable()
+	table.Register(
+		rpc.CommandInfo{Name: "blockUntilCancelled", Description: "blocks until its context ends", Category: "test"},
+		func(req rpc.CommandRequest) rpc.CommandResponse {
+			close(entered)
+			if req.Ctx == nil {
+				released <- errors.New("the command was given no context at all")
+				return rpc.CommandResponse{Data: []byte(`{}`)}
+			}
+			<-req.Ctx.Done()
+			released <- req.Ctx.Err()
+			return rpc.CommandResponse{Data: []byte(`{}`)}
+		},
+	)
+
+	host, port := "127.0.0.1", freePort(t)
+	server, err := rpc.NewServer(config.RPC{Host: host, Port: port}, table)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	if err := server.StartAsync(); err != nil {
+		t.Fatalf("StartAsync() error = %v", err)
+	}
+
+	go func() {
+		body := strings.NewReader(`{"command":"blockUntilCancelled"}`)
+		request, err := http.NewRequest(http.MethodPost, "http://"+net.JoinHostPort(host, port)+"/rpc/v1/exec", body)
+		if err != nil {
+			return
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if response, err := http.DefaultClient.Do(request); err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the command was never reached")
+	}
+
+	if err := server.ShutdownWithTimeout(5 * time.Second); err != nil {
+		t.Fatalf("ShutdownWithTimeout() error = %v — the handler outlived its request", err)
+	}
+
+	select {
+	case err := <-released:
+		if err == nil {
+			t.Fatal("the command returned without its context being cancelled")
+		}
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the command ended with %v, want a context error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the command never noticed the shutdown")
+	}
+}
+
+// freePort reserves a port and releases it, so the server can bind a port the
+// test knows: Server exposes no accessor for the one it ends up on.
+func freePort(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("read the reserved port: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release the reserved port: %v", err)
+	}
+	return port
 }

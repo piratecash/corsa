@@ -12,10 +12,10 @@ import (
 func TestChatlogFetchEntriesValidRequest(t *testing.T) {
 	chatlogJSON := `{"entries":[{"id":"1","text":"hello"}]}`
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return(chatlogJSON, nil)
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return(chatlogJSON, nil)
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)
@@ -40,15 +40,16 @@ func TestChatlogFetchEntriesDefaultsTopic(t *testing.T) {
 
 	var capturedTopic, capturedPeerAddress string
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
-			capturedTopic = args.String(0)
-			capturedPeerAddress = args.String(1)
+			// args[0] is the request context.
+			capturedTopic = args.String(1)
+			capturedPeerAddress = args.String(2)
 		}).
 		Return(chatlogJSON, nil)
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)
@@ -70,10 +71,10 @@ func TestChatlogFetchEntriesOptionalPeerAddress(t *testing.T) {
 	// matching the old desktop console behavior (consoleFetchChatlog).
 	chatlogJSON := `{"entries":[]}`
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return(chatlogJSON, nil)
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return(chatlogJSON, nil)
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)
@@ -102,10 +103,10 @@ func TestChatlogFetchEntriesNilProvider(t *testing.T) {
 
 func TestChatlogFetchEntriesProviderError(t *testing.T) {
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("", errorWithMessage("failed to fetch chatlog"))
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("", errorWithMessage("failed to fetch chatlog"))
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)
@@ -164,10 +165,10 @@ func TestChatlogFetchEntriesRejectsZeroIdentityPeerAddress(t *testing.T) {
 func TestChatlogFetchPreviews(t *testing.T) {
 	previewsJSON := `{"previews":[{"id":"1","name":"chat1"}]}`
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
-	chatlog.On("FetchChatlogPreviews").Return(previewsJSON, nil)
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return(previewsJSON, nil)
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)
@@ -194,10 +195,10 @@ func TestChatlogFetchPreviewsNilProvider(t *testing.T) {
 
 func TestChatlogFetchPreviewsProviderError(t *testing.T) {
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
-	chatlog.On("FetchChatlogPreviews").Return("", errorWithMessage("failed to fetch previews"))
-	chatlog.On("FetchConversations").Return("[]", nil).Maybe()
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("", errorWithMessage("failed to fetch previews"))
+	chatlog.On("FetchConversations", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)
@@ -211,10 +212,10 @@ func TestChatlogFetchPreviewsProviderError(t *testing.T) {
 func TestChatlogFetchConversations(t *testing.T) {
 	conversationsJSON := `{"conversations":[{"id":"1","peer":"addr"}]}`
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return(conversationsJSON, nil)
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return(conversationsJSON, nil)
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)
@@ -241,10 +242,10 @@ func TestChatlogFetchConversationsNilProvider(t *testing.T) {
 
 func TestChatlogFetchConversationsProviderError(t *testing.T) {
 	chatlog := rpcmocks.NewMockChatlogProvider(t)
-	chatlog.On("FetchChatlog", mock.Anything, mock.Anything).Return("[]", nil).Maybe()
-	chatlog.On("FetchChatlogPreviews").Return("[]", nil).Maybe()
-	chatlog.On("FetchConversations").Return("", errorWithMessage("failed to fetch conversations"))
-	chatlog.On("HasEntryInConversation", mock.Anything, mock.Anything).Return(false).Maybe()
+	chatlog.On("FetchChatlog", mock.Anything, mock.Anything, mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchChatlogPreviews", mock.Anything).Return("[]", nil).Maybe()
+	chatlog.On("FetchConversations", mock.Anything).Return("", errorWithMessage("failed to fetch conversations"))
+	chatlog.On("LookupEntryInConversation", mock.Anything, mock.Anything, mock.Anything).Return(false, nil).Maybe()
 
 	node := newDefaultNodeProvider(t)
 	server := setupTestServer(t, node, chatlog)

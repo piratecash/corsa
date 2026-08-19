@@ -190,8 +190,12 @@ sequenceDiagram
 
 ### Database naming
 
-Each node identity+port combination gets its own SQLite database file in the
-chatlog directory (defaults to `.corsa/`, configurable via `CORSA_CHATLOG_DIR`):
+Chatlog does not own a database file of its own. It is one repository inside
+the node's shared state database, which `internal/core/storage` opens once at
+the composition root — see [storage.md](storage.md).
+
+By default that database is still the historical chatlog file in the data
+directory (defaults to `.corsa/`, configurable via `CORSA_CHATLOG_DIR`):
 
 ```
 chatlog-<identity_short>-<port>.db
@@ -204,9 +208,20 @@ This naming scheme ensures:
 - Multiple identities on the same machine don't collide
 - Multiple node instances on different ports don't collide
 
+The file name no longer decides which tables the file may hold, and
+`CORSA_STATE_DB_PATH` overrides the location outright. The owner identity
+recorded inside the database — the full address, not the eight-character
+prefix — is what actually guards against opening somebody else's file.
+
 ### Database schema
 
-The database uses a single `messages` table with CHECK constraints for enum fields:
+The chatlog tables are created by the shared migration catalog
+(`internal/core/storage/migrations`), not by this package: chatlog contains no
+DDL at all. The statements below are reproduced from migrations `0002`–`0004`
+for reference — the catalog is the source of truth, and a schema change is a
+new migration there.
+
+The main table is `messages`, with CHECK constraints for enum fields:
 
 ```sql
 CREATE TABLE IF NOT EXISTS messages (
@@ -230,12 +245,16 @@ Indexes:
 - `idx_messages_created` — `(created_at DESC)` for recent message queries
 - `idx_messages_ttl` — partial index on `(flag, created_at) WHERE flag = 'auto-delete-ttl'` for TTL expiration queries
 
-SQLite pragmas:
-- `journal_mode=WAL` — Write-Ahead Logging for concurrent read access
-- `busy_timeout=5000` — 5 second timeout for concurrent writes
+Alongside `messages` the same catalog creates the delivery journals
+(`seen_ack`, `delivery_failed`) and the decrypt-recovery tables
+(`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`,
+`decrypt_resend_intents`).
 
-The driver is `modernc.org/sqlite` — a pure Go SQLite implementation (no CGO
-required), chosen for easy cross-compilation.
+SQLite pragmas and driver selection belong to the storage layer:
+`busy_timeout=5000`, `journal_mode=WAL` and `foreign_keys=ON`, with
+`modernc.org/sqlite` everywhere except Android, which uses
+`github.com/mattn/go-sqlite3`. See [storage.md](storage.md) for why both
+drivers are kept.
 
 ### Entry fields
 
@@ -265,22 +284,23 @@ peer identities, message IDs, and other string-shaped values:
 
 - **`domain.PeerIdentity`** — used for `selfAddress`, `peerAddress`, `identity` parameters (40-char Ed25519 hex fingerprint).
 - **`domain.MessageID`** — used for `messageID`, `id` parameters (UUID v4 string).
-- **`domain.ListenAddress`** — used for the `listenAddress` constructor parameter.
+- **`domain.PeerIdentity`** is also the constructor's own parameter: `NewStore(db storage.Executor, identity domain.PeerIdentity)` takes the owning identity and the shared state database — there is no `listenAddress` parameter, and the store no longer opens a file of its own.
 
-Method signatures:
+Every method takes `context.Context` first: they reach SQLite through the
+shared state database, and cancellation has to travel with the call. Method
+signatures:
 
-- `Append(topic string, selfAddress domain.PeerIdentity, entry Entry) error`
-- `AppendReportNew(topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
-- `Read(topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
-- `ReadCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
-- `ReadLast(topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
-- `ReadLastEntry(topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
-- `ReadLastEntryCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
-- `UpdateStatus(topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
-- `HasEntryID(topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
-- `HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool`
-- `DeleteByID(messageID domain.MessageID) (bool, error)`
-- `DeleteByPeer(identity domain.PeerIdentity) (int64, error)`
+- `Append(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) error`
+- `AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
+- `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
+- `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
+- `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
+- `HasEntryID(ctx context.Context, topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `HasEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `LookupEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) (bool, error)`
+- `DeleteByID(ctx context.Context, messageID domain.MessageID) (bool, error)`
+- `DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) (int64, error)`
 
 #### Message status lifecycle
 
@@ -420,22 +440,32 @@ cross-thread reference or a message that was deleted/expired — the `ReplyTo`
 field is silently cleared. This preserves the invariant that `reply_to` always
 resolves within the same thread, so the UI never encounters broken quote links.
 
-### Integrity check and recovery
+Cleared on an ESTABLISHED absence, never on a failed lookup. The two are told
+apart by `LookupEntryInConversation`: the bool-only form returned false for a
+cancelled context and for an unhealthy database exactly as it did for a genuine
+miss, so a valid quote was stripped and the caller was handed the edited
+messages as a successful read. The reload path now fails the read instead —
+history is not silently edited — while the live-event path, which builds one
+message and has no error to return, KEEPS the reference and logs the failure. A
+kept reference is what every renderer already tolerates; a dropped one is
+invisible.
 
-On startup, `NewStore()` runs `PRAGMA integrity_check` on the database file.
-The result is classified into three categories:
+### Integrity and startup failures
 
-- **`openOK`** — database is healthy, proceed normally.
-- **`openCorrupt`** — `PRAGMA integrity_check` reported corruption. The
-  corrupt file is renamed to `*.corrupt` (along with `-wal` and `-shm`
-  sidecar files), a fresh database is created, and the node continues with
-  an empty chat history.
-- **`openError`** — transient I/O error (permission denied, disk full,
-  locked file, etc.). The file is NOT renamed — it may be perfectly
-  healthy. The node runs without persistence until the next restart.
+Integrity checking is no longer a chatlog concern. `storage.Open` runs
+`PRAGMA integrity_check` before writing anything, verifies the file's
+`application_id` and owner identity, and migrates the schema to the version
+this binary knows. Any failure aborts startup.
 
-This distinction prevents data loss: a temporary disk error no longer causes
-a healthy database to be renamed and replaced.
+The old behaviour — rename a corrupt file to `*.corrupt` and continue with an
+empty history — is deliberately gone. It was tolerable while the file held only
+chat history; the same file now holds several kinds of state, so a silent
+rebuild would be silent multi-subsystem data loss. The corrupt file is left
+untouched and recovery from a backup is an explicit operation.
+
+There is likewise no "running without persistence" mode: the repository is
+built on an executor that is already open and migrated, so a store that
+silently swallows writes cannot exist.
 
 ### Graceful shutdown
 
@@ -452,14 +482,16 @@ Shutdown is split between the node layer and the service layer:
    `storeDeliveryReceipt` calls (which may call `MessageStore`) complete
    before shutdown proceeds.
 
-**Service layer** (`DesktopClient.Close()`, called via `defer` in `app.go`):
+**Composition root** (`storage.Database.Close()`, called via `defer` in
+`app.go` and from `Runtime.Close` in the SDK):
 
-4. `DesktopClient.Close()` forwards to `ChatlogGateway.Close()`, which runs
-   the SQLite WAL checkpoint and releases the file handles owned by
-   `ChatlogGateway` (the sub-service that now owns `chatlog.Store`).
+4. `Database.Close()` runs the SQLite WAL checkpoint and releases the file
+   handles. It is idempotent and must be the last thing to run — neither
+   `chatlog.Store` nor `ChatlogGateway` can close the database, because
+   neither owns it.
 
 Without steps 2–3, a slow peer could still be calling `MessageStore` after
-`Close()`, causing "database is closed" errors and potential data loss.
+the close, causing "database is closed" errors and potential data loss.
 Without step 2, `connWg.Wait()` could block indefinitely if a peer keeps
 its connection open (e.g. a persistent session from another node).
 
@@ -671,22 +703,22 @@ HandleLocalFrame("fetch_dm_headers")
 
 # Preview load (on startup with retry + on new message) — DesktopClient reads chatlog directly
 FetchConversationPreviews(ctx)
-  ├── chatLog.ReadLastEntryPerPeerCtx(ctx)
+  ├── chatLog.ReadLastEntryPerPeer(ctx)
   │     └── ROW_NUMBER() window per peer, ORDER BY created_at DESC, rowid DESC
-  ├── chatLog.ListConversationsCtx(ctx)
+  ├── chatLog.ListConversations(ctx)
   │     └── returns []ConversationSummary with UnreadCount
   └── decrypt each preview + merge UnreadCount
 # Startup: retries up to 3 times (linear backoff 1s, 2s) if chatlog is not ready
 
 # Full conversation load (on demand) — DesktopClient reads chatlog directly
 FetchConversation(ctx, peerAddress)
-  ├── chatLog.ReadCtx(ctx, "dm", peerAddress)
+  ├── chatLog.Read(ctx, "dm", peerAddress)
   │     └── SELECT from messages WHERE conversation matches → return []Entry
   └── decrypt via decryptDirectMessages()
 
 # Single preview reload (after new message arrives)
 FetchSinglePreview(ctx, peerAddress)
-  ├── chatLog.ReadLastEntryCtx(ctx, "dm", peerAddress)
+  ├── chatLog.ReadLastEntry(ctx, "dm", peerAddress)
   │     └── SELECT … ORDER BY created_at DESC, rowid DESC LIMIT 1
   └── decrypt single preview
 ```
@@ -704,16 +736,23 @@ FetchSinglePreview(ctx, peerAddress)
 > `fetch_conversations` were removed from `node.HandleLocalFrame()` after the
 > chatlog ownership was moved to `DesktopClient`. Console commands for these
 > are now intercepted by `ExecuteConsoleCommand()` and handled directly by
-> `DesktopClient` via `chatLog.ReadCtx()`, `chatLog.ReadLastEntryPerPeerCtx()`,
-> and `chatLog.ListConversationsCtx()` — no node frame protocol round-trip needed.
+> `DesktopClient` via `chatLog.Read()`, `chatLog.ReadLastEntryPerPeer()`,
+> and `chatLog.ListConversations()` — no node frame protocol round-trip needed.
 >
-> **Context-aware queries:** All chatlog `Store` readers have context-aware
-> variants (`ReadCtx`, `ReadLastCtx`, `ListConversationsCtx`,
-> `ReadLastEntryCtx`, `ReadLastEntryPerPeerCtx`) that use
-> `db.QueryContext`/`db.QueryRowContext` to respect caller deadlines. The
-> original methods delegate to `Ctx` variants with `context.Background()`.
-> Desktop `Fetch*` methods pass through the caller's `ctx` so UI-imposed
-> timeouts propagate all the way to SQLite I/O.
+> **Context-aware queries:** EVERY `Store` method — readers, writes, delivery
+> journals and the recovery transactions — takes a `context.Context` as its
+> first argument and uses the `*Context` driver calls, so a caller's deadline
+> reaches SQLite. There is no context-free variant of any of them, and
+> `storage.Executor` does not offer one: two APIs for the same query with
+> different cancellation is how a deadline gets lost. Desktop `Fetch*` methods
+> pass the caller's `ctx` through.
+>
+> Two places have no caller context to pass and supply their own:
+> `DMRouter.opContext()` hands UI actions and ebus handlers the router's
+> lifetime context, so a shutdown aborts them; `MessageStoreAdapter` uses
+> Background because the `node.MessageStore` callbacks carry no context, and
+> those writes are protected by the shutdown order joining the node before the
+> database closes rather than by cancellation.
 
 ### Config
 
@@ -950,8 +989,12 @@ sequenceDiagram
 
 ### Именование БД
 
-Каждая комбинация identity+port получает свой файл SQLite БД в директории chatlog
-(по умолчанию `.corsa/`, настраивается через `CORSA_CHATLOG_DIR`):
+У chatlog нет собственного файла БД. Это один из repositories внутри общей базы
+состояния ноды, которую `internal/core/storage` открывает один раз в
+composition root — см. [storage.md](storage.md).
+
+По умолчанию эта база — по-прежнему исторический файл chatlog в директории
+данных (по умолчанию `.corsa/`, настраивается через `CORSA_CHATLOG_DIR`):
 
 ```
 chatlog-<identity_short>-<port>.db
@@ -964,9 +1007,19 @@ chatlog-<identity_short>-<port>.db
 - Разные identity на одной машине не пересекаются
 - Разные инстансы ноды на разных портах не пересекаются
 
+Имя файла больше не определяет, какие таблицы в нём допустимы, а
+`CORSA_STATE_DB_PATH` переопределяет расположение полностью. От открытия чужого
+файла защищает записанная внутри базы identity владельца — полный адрес, а не
+восьмисимвольный префикс.
+
 ### Схема БД
 
-БД использует одну таблицу `messages` с CHECK-ограничениями для enum-полей:
+Таблицы chatlog создаются общим каталогом миграций
+(`internal/core/storage/migrations`), а не этим пакетом: в chatlog нет DDL
+вообще. Ниже приведена справочная копия из миграций `0002`–`0004` — источник
+истины именно каталог, и изменение схемы делается новой миграцией там.
+
+Основная таблица — `messages`, с CHECK-ограничениями для enum-полей:
 
 ```sql
 CREATE TABLE IF NOT EXISTS messages (
@@ -990,12 +1043,14 @@ CREATE TABLE IF NOT EXISTS messages (
 - `idx_messages_created` — `(created_at DESC)` для запросов последних сообщений
 - `idx_messages_ttl` — частичный индекс `(flag, created_at) WHERE flag = 'auto-delete-ttl'` для запросов истечения TTL
 
-Прагмы SQLite:
-- `journal_mode=WAL` — Write-Ahead Logging для параллельного чтения
-- `busy_timeout=5000` — таймаут 5 секунд для конкурентных записей
+Рядом с `messages` тот же каталог создаёт журналы доставки (`seen_ack`,
+`delivery_failed`) и таблицы decrypt-recovery (`decrypt_recovery_jobs`,
+`peer_established`, `decrypt_recovery_cycles`, `decrypt_resend_intents`).
 
-Драйвер — `modernc.org/sqlite` — чистая Go-реализация SQLite (без CGO),
-выбранная для простоты кросс-компиляции.
+Прагмы SQLite и выбор драйвера принадлежат слою storage: `busy_timeout=5000`,
+`journal_mode=WAL` и `foreign_keys=ON`, драйвер `modernc.org/sqlite` везде,
+кроме Android, где используется `github.com/mattn/go-sqlite3`. Почему оставлены
+оба — см. [storage.md](storage.md).
 
 ### Поля записи
 
@@ -1025,22 +1080,23 @@ CREATE TABLE IF NOT EXISTS messages (
 
 - **`domain.PeerIdentity`** — для параметров `selfAddress`, `peerAddress`, `identity` (40-символьный Ed25519 hex fingerprint).
 - **`domain.MessageID`** — для параметров `messageID`, `id` (строка UUID v4).
-- **`domain.ListenAddress`** — для параметра `listenAddress` в конструкторе.
+- **`domain.PeerIdentity`** — это и параметр самого конструктора: `NewStore(db storage.Executor, identity domain.PeerIdentity)` принимает identity владельца и общую state-базу; параметра `listenAddress` нет, и store больше не открывает собственный файл.
 
+Каждый метод принимает `context.Context` первым аргументом: они доходят до
+SQLite через общую state-базу, и отмена обязана ехать вместе с вызовом.
 Сигнатуры методов:
 
-- `Append(topic string, selfAddress domain.PeerIdentity, entry Entry) error`
-- `AppendReportNew(topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
-- `Read(topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
-- `ReadCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
-- `ReadLast(topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
-- `ReadLastEntry(topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
-- `ReadLastEntryCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
-- `UpdateStatus(topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
-- `HasEntryID(topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
-- `HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool`
-- `DeleteByID(messageID domain.MessageID) (bool, error)`
-- `DeleteByPeer(identity domain.PeerIdentity) (int64, error)`
+- `Append(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) error`
+- `AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
+- `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
+- `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
+- `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
+- `HasEntryID(ctx context.Context, topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `HasEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
+- `LookupEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) (bool, error)`
+- `DeleteByID(ctx context.Context, messageID domain.MessageID) (bool, error)`
+- `DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) (int64, error)`
 
 #### Жизненный цикл статуса
 
@@ -1181,22 +1237,33 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 всегда разрешается внутри того же треда, и UI никогда не встретит битые ссылки
 на цитаты.
 
-### Проверка целостности и восстановление
+Очищается при УСТАНОВЛЕННОМ отсутствии и никогда — при неудавшемся поиске. Их
+различает `LookupEntryInConversation`: форма с одним `bool` возвращала false и
+для отменённого контекста, и для больной базы ровно так же, как для настоящего
+промаха, поэтому корректная цитата исчезала, а вызывающий получал
+отредактированные сообщения как успешное чтение. Путь перезагрузки истории
+теперь возвращает ошибку — история не правится молча, — а путь live-события,
+который строит одно сообщение и не имеет куда вернуть ошибку, СОХРАНЯЕТ ссылку
+и пишет предупреждение в лог. Сохранённую ссылку любой рендерер и так обязан
+переживать; потерянная не видна никому.
 
-При запуске `NewStore()` выполняет `PRAGMA integrity_check` на файле БД.
-Результат классифицируется в три категории:
+### Целостность и ошибки старта
 
-- **`openOK`** — БД здорова, продолжаем штатно.
-- **`openCorrupt`** — `PRAGMA integrity_check` обнаружил повреждение.
-  Файл переименовывается в `*.corrupt` (вместе с `-wal` и `-shm`),
-  создаётся свежая БД, нода продолжает с пустой историей.
-- **`openError`** — временная ошибка I/O (нет прав, диск полон, файл
-  заблокирован и т.д.). Файл НЕ переименовывается — он может быть
-  полностью здоровым. Нода работает без персистенции до следующего
-  перезапуска.
+Проверка целостности больше не относится к chatlog. `storage.Open` выполняет
+`PRAGMA integrity_check` до любой записи, проверяет `application_id` файла и
+identity владельца и мигрирует схему до версии, известной этому бинарю. Любая
+ошибка останавливает запуск.
 
-Это разделение предотвращает потерю данных: временная ошибка диска больше
-не приводит к переименованию и замене здоровой базы.
+Прежнее поведение — переименовать повреждённый файл в `*.corrupt` и продолжить
+с пустой историей — убрано намеренно. Оно было терпимо, пока в файле лежала
+только история чата; теперь в том же файле несколько видов состояния, и тихая
+пересборка означала бы тихую потерю данных сразу нескольких подсистем.
+Повреждённый файл остаётся нетронутым, восстановление из бэкапа — явная
+операция.
+
+Режима «работа без персистенции» тоже нет: repository строится на executor-е,
+который уже открыт и мигрирован, поэтому store, молча проглатывающий записи,
+существовать не может.
 
 ### Корректное завершение (graceful shutdown)
 
@@ -1213,15 +1280,16 @@ sidebar остаётся пустым, а 5-секундный тикер чер
    `storeIncomingMessage` / `storeDeliveryReceipt` (которые могут вызвать
    `MessageStore`) завершатся до продолжения shutdown.
 
-**Сервисный уровень** (`DesktopClient.Close()`, вызывается через `defer` в `app.go`):
+**Composition root** (`storage.Database.Close()`, вызывается через `defer` в
+`app.go` и из `Runtime.Close` в SDK):
 
-4. `DesktopClient.Close()` делегирует закрытие в `ChatlogGateway.Close()`,
-   который выполняет SQLite WAL checkpoint и освобождает файловые
-   дескрипторы, принадлежащие `ChatlogGateway` — суб-сервису, теперь
-   владеющему `chatlog.Store`.
+4. `Database.Close()` выполняет SQLite WAL checkpoint и освобождает файловые
+   дескрипторы. Вызов идемпотентен и обязан быть последним: ни
+   `chatlog.Store`, ни `ChatlogGateway` закрыть базу не могут — они ей не
+   владеют.
 
 Без шагов 2–3 медленный peer мог бы ещё вызывать `MessageStore` после
-`Close()`, вызывая ошибки «database is closed» и потенциальную потерю данных.
+закрытия, вызывая ошибки «database is closed» и потенциальную потерю данных.
 Без шага 2 `connWg.Wait()` мог бы блокироваться бесконечно, если peer
 удерживает соединение открытым (например, персистентная сессия другой ноды).
 
@@ -1438,16 +1506,23 @@ storeDeliveryReceipt()
 > `fetch_conversations` удалены из `node.HandleLocalFrame()` после переноса
 > владения chatlog в `DesktopClient`. Консольные команды для них теперь
 > перехватываются в `ExecuteConsoleCommand()` и обрабатываются `DesktopClient`
-> напрямую через `chatLog.ReadCtx()`, `chatLog.ReadLastEntryPerPeerCtx()` и
-> `chatLog.ListConversationsCtx()` — без round-trip через фреймовый протокол ноды.
+> напрямую через `chatLog.Read()`, `chatLog.ReadLastEntryPerPeer()` и
+> `chatLog.ListConversations()` — без round-trip через фреймовый протокол ноды.
 >
-> **Context-aware запросы:** Все reader-методы `chatlog.Store` имеют
-> context-aware варианты (`ReadCtx`, `ReadLastCtx`, `ListConversationsCtx`,
-> `ReadLastEntryCtx`, `ReadLastEntryPerPeerCtx`), использующие
-> `db.QueryContext`/`db.QueryRowContext` для соблюдения дедлайнов вызывающего.
-> Оригинальные методы делегируют в `Ctx`-варианты с `context.Background()`.
-> Desktop `Fetch*` методы пробрасывают `ctx` от вызывающего, поэтому
-> таймауты UI распространяются до SQLite I/O.
+> **Context-aware запросы:** КАЖДЫЙ метод `Store` — чтения, записи, журналы
+> доставки и recovery-транзакции — принимает `context.Context` первым
+> аргументом и использует `*Context`-вызовы драйвера, поэтому дедлайн
+> вызывающего доходит до SQLite. Безконтекстного варианта нет ни у одного из
+> них, и `storage.Executor` его не предоставляет: два API для одного запроса с
+> разной отменой — это способ потерять дедлайн. Desktop `Fetch*` методы
+> пробрасывают `ctx` вызывающего.
+>
+> Двум местам контекст брать неоткуда, и они дают свой:
+> `DMRouter.opContext()` отдаёт UI-действиям и ebus-обработчикам контекст
+> жизни роутера, чтобы shutdown их прерывал; `MessageStoreAdapter` использует
+> Background, потому что колбэки `node.MessageStore` контекста не несут, а эти
+> записи защищены порядком остановки — нода джойнится до закрытия базы, — а не
+> отменой.
 
 ### Конфигурация
 

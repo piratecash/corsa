@@ -226,6 +226,10 @@ The architecture separates command execution from transport:
 
 **Layer 2 — Fiber HTTP Server (external):** Thin HTTP wrapper around `CommandTable`. Adds auth middleware, URL routing, JSON serialization. Only used by external clients (`corsa-cli`, `curl`).
 
+`send_dm` validates `reply_to` through `LookupEntryInConversation`, which reports a lookup that FAILED as an error rather than as absence. The bool-only form it replaced folded the two together, so a cancelled context or an unhealthy database reached the client as `400 reply_to references a message that does not exist` — a claim about the data that had never been established. A failed lookup is a `500` now; only an established absence is a validation error.
+
+Every HTTP entry point puts the REQUEST's context into `CommandRequest.Ctx` — `c.RequestCtx()`, the cancellation-bearing handle, not `c.Context()`, which returns whatever a middleware stored. Commands reach SQLite through the chatlog and those calls take a context: without it they ran under `context.Background()`, so shutting the server down closed the connection while the query kept going, `ShutdownWithTimeout` hit its deadline, and the state database was left open for the next attempt to wait on the same stuck query.
+
 ```go
 // CommandTable — single source of truth for all commands.
 // RegisterAllCommands is the single registration point — both bootstrap and tests use it.
@@ -700,6 +704,10 @@ graph TD
 Архитектура разделяет выполнение команд и транспорт:
 
 **Слой 1 — CommandTable (внутрипроцессный):** Чистая диспетчеризация функций. Каждая команда — это `CommandHandler func(req CommandRequest) CommandResponse`. Без HTTP, без сети — просто map имён команд на функции-обработчики. Desktop UI вызывает напрямую.
+
+Каждая HTTP-точка входа кладёт контекст ЗАПРОСА в `CommandRequest.Ctx` — это `c.RequestCtx()`, дескриптор с отменой, а не `c.Context()`, возвращающий то, что положил middleware. Команды доходят до SQLite через chatlog, а те вызовы принимают контекст: без него они работали под `context.Background()`, поэтому остановка сервера закрывала соединение, запрос продолжался, `ShutdownWithTimeout` упирался в дедлайн, а база оставалась открытой — и следующая попытка ждала тот же зависший запрос.
+
+`send_dm` проверяет `reply_to` через `LookupEntryInConversation`, который сообщает о НЕУДАВШЕМСЯ поиске ошибкой, а не отсутствием. Прежняя форма с одним `bool` сворачивала одно в другое, поэтому отменённый контекст или больная база доезжали до клиента как `400 reply_to references a message that does not exist` — утверждение о данных, которое никто не устанавливал. Теперь неудавшийся поиск это `500`, а validation error остаётся только за установленным отсутствием.
 
 **Слой 2 — Fiber HTTP сервер (внешний):** Тонкая HTTP-обёртка над `CommandTable`. Добавляет middleware авторизации, URL-маршрутизацию, JSON-сериализацию. Используется только внешними клиентами (`corsa-cli`, `curl`).
 

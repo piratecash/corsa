@@ -1,13 +1,15 @@
-// Package chatlog provides SQLite-backed storage for chat messages.
+// Package chatlog is the SQLite-backed repository of chat history.
 //
-// Messages are stored in a single SQLite database file per node identity+port:
+// It owns SQL, row scanning and transactions for its own tables and nothing
+// else. The database file, its schema and its lifecycle belong to
+// internal/core/storage, which opens the shared state database once at the
+// composition root and hands this package a non-owning executor. A schema
+// change is therefore a new migration in storage's catalog — this package
+// contains no DDL, no driver import and no Close.
 //
-//	chatlog-<identity_short>-<port>.db
-//
-// The database uses WAL mode for concurrent read access. Messages are stored
-// as-is: incoming DM bodies are already sealed envelopes, and outgoing DMs
-// are encrypted with the sender's own key before storage. Reading a chatlog
-// always requires decryption via the identity key.
+// Messages are stored as-is: incoming DM bodies are already sealed envelopes,
+// and outgoing DMs are encrypted with the sender's own key before storage.
+// Reading a chatlog always requires decryption via the identity key.
 package chatlog
 
 import (
@@ -15,14 +17,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
-
-	"github.com/rs/zerolog/log"
+	"github.com/piratecash/corsa/internal/core/storage"
 )
 
 // Message delivery statuses.
@@ -62,218 +61,28 @@ type ConversationSummary struct {
 	UnreadCount int       `json:"unread_count"`
 }
 
-// Store manages the SQLite chatlog database for a single node identity.
+// Store is the chatlog repository. It issues SQL against the shared state
+// database but never owns it: opening, migrating and closing the file are the
+// composition root's job through internal/core/storage.
 type Store struct {
-	db           *sql.DB
+	db           storage.Executor
 	identityAddr domain.PeerIdentity // full 40-char identity address
 }
 
-// NewStoreFromDB wraps an existing *sql.DB (may be nil) into a Store.
-// Intended for tests that need a Store without filesystem side-effects.
-func NewStoreFromDB(db *sql.DB, identity domain.PeerIdentity) *Store {
+// NewStore builds the repository on an already opened and migrated shared
+// database.
+//
+// db must not be nil. Running without persistence is a decision the
+// composition root makes by not building a Store at all — a store that
+// silently swallows writes is how a node used to come up looking healthy
+// while losing every message.
+func NewStore(db storage.Executor, identity domain.PeerIdentity) *Store {
 	return &Store{db: db, identityAddr: identity}
 }
 
-// NewStore creates a chatlog store backed by SQLite.
-//   - dir:           base directory for the database file (e.g. ".corsa")
-//   - identityAddr:  full 40-char hex identity address
-//   - listenAddress: node listen address (e.g. ":64646") — port is extracted
-//
-// On startup the database file is checked with PRAGMA integrity_check.
-// If corruption is detected the file is renamed to *.corrupt and a fresh
-// database is created so the node can keep running.
-func NewStore(dir string, identity domain.PeerIdentity, listenAddress domain.ListenAddress) *Store {
-	identityAddr := identity
-	short := identityAddr.String()
-	if len(short) > 8 {
-		short = short[:8]
-	}
-	port := portSuffix(string(listenAddress))
-
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		// Best effort — the database open will fail with a clear error.
-		_ = err
-	}
-
-	dbPath := filepath.Join(dir, fmt.Sprintf("chatlog-%s-%s.db", short, port))
-
-	db, result := openAndVerify(dbPath)
-	switch result {
-	case openOK:
-		// Database is healthy — proceed.
-
-	case openCorrupt:
-		// Genuine corruption — move the bad file aside and start fresh.
-		corruptPath := dbPath + ".corrupt"
-		log.Warn().Str("db_path", dbPath).Str("corrupt_path", corruptPath).Msg("chatlog integrity check failed, renaming")
-		_ = os.Rename(dbPath, corruptPath)
-		// Also move WAL and SHM sidecar files if present.
-		_ = os.Rename(dbPath+"-wal", corruptPath+"-wal")
-		_ = os.Rename(dbPath+"-shm", corruptPath+"-shm")
-
-		db, result = openAndVerify(dbPath)
-		if result != openOK {
-			// Even a fresh database failed — give up.
-			log.Error().Str("db_path", dbPath).Msg("chatlog cannot create fresh database")
-			return &Store{identityAddr: identityAddr}
-		}
-		log.Info().Str("db_path", dbPath).Msg("chatlog created fresh database after corruption recovery")
-
-	case openError:
-		// Transient error (permissions, disk full, locked file, etc.).
-		// Do NOT rename the file — it may be perfectly healthy.
-		log.Error().Str("db_path", dbPath).Msg("chatlog open failed (transient error), running without persistence")
-		return &Store{identityAddr: identityAddr}
-	}
-
-	store := &Store{
-		db:           db,
-		identityAddr: identityAddr,
-	}
-	if err := store.backfillEstablishedFromHistory(); err != nil {
-		log.Warn().Err(err).Msg("chatlog established backfill failed")
-	}
-	return store
-}
-
-// openResult describes the outcome of openAndVerify.
-type openResult int
-
-const (
-	openOK      openResult = iota // database opened, schema OK, integrity OK
-	openCorrupt                   // PRAGMA integrity_check reported corruption
-	openError                     // transient error (permissions, disk full, etc.)
-)
-
-// openAndVerify opens the SQLite database at path, runs schema migration,
-// and performs an integrity check. It distinguishes true corruption (where
-// renaming the file and starting fresh is appropriate) from transient I/O
-// errors (where renaming a healthy file would cause data loss).
-func openAndVerify(dbPath string) (*sql.DB, openResult) {
-	// Driver name and DSN options are platform-selected: see
-	// driver_default.go (modernc, pure Go) and driver_android.go (mattn,
-	// cgo — modernc's libc has no android port).
-	db, err := sql.Open(sqliteDriverName, dbPath+sqliteDSNOptions)
-	if err != nil {
-		log.Error().Err(err).Str("db_path", dbPath).Msg("chatlog sql.Open failed")
-		return nil, openError
-	}
-
-	if err := initSchema(db); err != nil {
-		log.Error().Err(err).Str("db_path", dbPath).Msg("chatlog initSchema failed")
-		_ = db.Close()
-		// If the file exists and does not start with the SQLite magic
-		// header, it is genuinely corrupt (not a transient I/O error).
-		if looksCorrupt(dbPath) {
-			return nil, openCorrupt
-		}
-		return nil, openError
-	}
-
-	if err := checkIntegrity(db); err != nil {
-		log.Error().Err(err).Str("db_path", dbPath).Msg("chatlog integrity check failed")
-		_ = db.Close()
-		return nil, openCorrupt
-	}
-
-	return db, openOK
-}
-
-// sqliteMagic is the first 16 bytes of any valid SQLite database file.
-var sqliteMagic = []byte("SQLite format 3\x00")
-
-// looksCorrupt returns true if the file at path exists, has content, and does
-// not start with the SQLite magic header — indicating it is genuinely corrupt
-// rather than missing or locked.
-func looksCorrupt(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false // file missing or unreadable — not necessarily corrupt
-	}
-	defer func() { _ = f.Close() }()
-
-	header := make([]byte, len(sqliteMagic))
-	n, err := f.Read(header)
-	if err != nil || n == 0 {
-		return false
-	}
-	// If the file has content but the header doesn't match, it's corrupt.
-	for i := 0; i < len(sqliteMagic) && i < n; i++ {
-		if header[i] != sqliteMagic[i] {
-			return true
-		}
-	}
-	return false
-}
-
-// checkIntegrity runs PRAGMA integrity_check and returns an error if the
-// database reports corruption.
-func checkIntegrity(db *sql.DB) error {
-	var result string
-	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
-		return fmt.Errorf("integrity_check query failed: %w", err)
-	}
-	if result != "ok" {
-		return fmt.Errorf("integrity_check: %s", result)
-	}
-	return nil
-}
-
-func initSchema(db *sql.DB) error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS messages (
-		id              TEXT PRIMARY KEY,
-		topic           TEXT NOT NULL DEFAULT 'dm' CHECK(topic IN ('dm','global')),
-		sender          TEXT NOT NULL,
-		recipient       TEXT NOT NULL,
-		body            TEXT NOT NULL,
-		flag            TEXT NOT NULL DEFAULT '' CHECK(flag IN ('','immutable','sender-delete','any-delete','auto-delete-ttl')),
-		delivery_status TEXT NOT NULL DEFAULT 'sent' CHECK(delivery_status IN ('sent','delivered','seen')),
-		ttl_seconds     INTEGER NOT NULL DEFAULT 0,
-		metadata        TEXT NOT NULL DEFAULT '',
-		created_at      TEXT NOT NULL,
-		updated_at      TEXT NOT NULL DEFAULT ''
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_messages_peer
-		ON messages(topic, sender, recipient, created_at);
-
-	CREATE INDEX IF NOT EXISTS idx_messages_status
-		ON messages(recipient, delivery_status);
-
-	CREATE TABLE IF NOT EXISTS seen_ack (
-		id TEXT PRIMARY KEY
-	);
-
-	CREATE TABLE IF NOT EXISTS delivery_failed (
-		id TEXT PRIMARY KEY
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_messages_created
-		ON messages(created_at DESC);
-
-	CREATE INDEX IF NOT EXISTS idx_messages_ttl
-		ON messages(flag, created_at) WHERE flag = 'auto-delete-ttl';
-	`
-	if _, err := db.Exec(schema); err != nil {
-		return err
-	}
-	// The §4.10 decrypt-recovery tables (recovery.go). New TABLES are safe
-	// on an existing database — unlike new columns, which this store
-	// deliberately avoids in favour of the metadata JSON column.
-	return initRecoverySchema(db)
-}
-
-func (s *Store) Close() error {
-	if s.db == nil {
-		return nil
-	}
-	return s.db.Close()
-}
-
 // For DMs the peer is the other party; for global/broadcast use topic "global".
-func (s *Store) Append(topic string, selfAddress domain.PeerIdentity, entry Entry) error {
-	inserted, err := s.AppendReportNew(topic, selfAddress, entry)
+func (s *Store) Append(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) error {
+	inserted, err := s.AppendReportNew(ctx, topic, selfAddress, entry)
 	_ = inserted
 	return err
 }
@@ -282,17 +91,13 @@ func (s *Store) Append(topic string, selfAddress domain.PeerIdentity, entry Entr
 // actually inserted (true) or already existed (false). This allows callers
 // to distinguish genuinely new messages from duplicates that were silently
 // ignored by INSERT OR IGNORE, so they can suppress duplicate UI events.
-func (s *Store) AppendReportNew(topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error) {
-	if s.db == nil {
-		return false, fmt.Errorf("chatlog: database not available")
-	}
-
+func (s *Store) AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error) {
 	status := entry.DeliveryStatus
 	if status == "" {
 		status = StatusSent
 	}
 
-	res, err := s.db.Exec(`
+	res, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO messages (id, topic, sender, recipient, body, flag, delivery_status, ttl_seconds, metadata, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID, topic, entry.Sender, entry.Recipient, entry.Body,
@@ -318,11 +123,7 @@ var statusRank = map[string]int{
 // lifecycle (sent → delivered → seen). Attempts to regress
 // (e.g. seen → delivered) are silently ignored and return false.
 // Returns true if the message was found and actually updated.
-func (s *Store) UpdateStatus(topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error) {
-	if s.db == nil {
-		return false, fmt.Errorf("chatlog: database not available")
-	}
-
+func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error) {
 	newRank, ok := statusRank[status]
 	if !ok {
 		return false, fmt.Errorf("chatlog: invalid status %q", status)
@@ -356,7 +157,7 @@ func (s *Store) UpdateStatus(topic string, peerAddress domain.PeerIdentity, mess
 	}
 	query += ")"
 
-	res, err := s.db.Exec(query, args...)
+	res, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return false, fmt.Errorf("chatlog: update status %s: %w", messageID, err)
 	}
@@ -365,17 +166,9 @@ func (s *Store) UpdateStatus(topic string, peerAddress domain.PeerIdentity, mess
 	return n > 0, nil
 }
 
-func (s *Store) Read(topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
-	return s.ReadCtx(context.Background(), topic, peerAddress)
-}
-
-// ReadCtx is the context-aware variant of Read.  The context deadline is
-// propagated to the underlying SQLite query so callers can bound I/O time.
-func (s *Store) ReadCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-
+// Read returns the conversation entries in ascending time order. The context
+// deadline is propagated to SQLite so callers can bound I/O time.
+func (s *Store) Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
 	query, args := s.peerQuery(topic, peerAddress,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages WHERE `, ` ORDER BY created_at ASC`)
@@ -395,12 +188,8 @@ func (s *Store) ReadCtx(ctx context.Context, topic string, peerAddress domain.Pe
 // recently-updated rows so a first run on a long history does not reseed
 // the whole archive. Durable source for the seen half of the sender-side
 // retry scheduler (node.SeenAckJournal).
-func (s *Store) UnconfirmedSeen(self domain.PeerIdentity, since time.Time) ([]Entry, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-
-	rows, err := s.db.Query(
+func (s *Store) UnconfirmedSeen(ctx context.Context, self domain.PeerIdentity, since time.Time) ([]Entry, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages
 		 WHERE topic = 'dm' AND recipient = ? AND delivery_status = ?
@@ -419,11 +208,8 @@ func (s *Store) UnconfirmedSeen(self domain.PeerIdentity, since time.Time) ([]En
 // MarkDeliveryFailed durably records that automatic retries for the
 // locally-sent message were abandoned (TTL expiry / attempts cap), so
 // UndeliveredOutgoing stops reseeding it. Idempotent.
-func (s *Store) MarkDeliveryFailed(messageID string) error {
-	if s.db == nil {
-		return fmt.Errorf("chatlog: database not available")
-	}
-	if _, err := s.db.Exec(`INSERT OR IGNORE INTO delivery_failed (id) VALUES (?)`, messageID); err != nil {
+func (s *Store) MarkDeliveryFailed(ctx context.Context, messageID string) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO delivery_failed (id) VALUES (?)`, messageID); err != nil {
 		return fmt.Errorf("chatlog: mark delivery failed %s: %w", messageID, err)
 	}
 	return nil
@@ -431,11 +217,8 @@ func (s *Store) MarkDeliveryFailed(messageID string) error {
 
 // MarkSeenConfirmed durably records that the original sender confirmed the
 // seen receipt for the message (seen_ack arrived). Idempotent.
-func (s *Store) MarkSeenConfirmed(messageID string) error {
-	if s.db == nil {
-		return fmt.Errorf("chatlog: database not available")
-	}
-	if _, err := s.db.Exec(`INSERT OR IGNORE INTO seen_ack (id) VALUES (?)`, messageID); err != nil {
+func (s *Store) MarkSeenConfirmed(ctx context.Context, messageID string) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO seen_ack (id) VALUES (?)`, messageID); err != nil {
 		return fmt.Errorf("chatlog: mark seen confirmed %s: %w", messageID, err)
 	}
 	return nil
@@ -449,11 +232,7 @@ func (s *Store) MarkSeenConfirmed(messageID string) error {
 // recipient never returned: the scheduler caps a single message at ~3.5h of
 // attempts, so anything older than the horizon is already abandoned in
 // practice. Symmetric with UnconfirmedSeen's `since`.
-func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity, since time.Time) ([]Entry, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-
+func (s *Store) UndeliveredOutgoing(ctx context.Context, self domain.PeerIdentity, since time.Time) ([]Entry, error) {
 	// A recovery-superseded original must never re-enter the ordinary
 	// retry path: its replacement is already in flight under a new id, and
 	// re-sending the OLD ciphertext would race the replacement with the
@@ -462,7 +241,7 @@ func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity, since time.Time) (
 	// null value, a non-object blob or the key nested inside some other
 	// value all count as NOT superseded — a LIKE substring test would
 	// wrongly drop those rows.
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages
 		 WHERE topic = 'dm' AND sender = ? AND delivery_status = ?
@@ -480,16 +259,8 @@ func (s *Store) UndeliveredOutgoing(self domain.PeerIdentity, since time.Time) (
 	return scanEntries(rows)
 }
 
-func (s *Store) ReadLast(topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error) {
-	return s.ReadLastCtx(context.Background(), topic, peerAddress, n)
-}
-
-// ReadLastCtx is the context-aware variant of ReadLast.
-func (s *Store) ReadLastCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-
+// ReadLast returns the newest n entries of a conversation, oldest first.
+func (s *Store) ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error) {
 	// Use a subquery to get the last N, then re-order ascending.
 	innerQuery, args := s.peerQuery(topic, peerAddress,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
@@ -508,17 +279,9 @@ func (s *Store) ReadLastCtx(ctx context.Context, topic string, peerAddress domai
 	return scanEntries(rows)
 }
 
-// Conversations with unread messages are sorted first, then by last message time.
-func (s *Store) ListConversations() ([]ConversationSummary, error) {
-	return s.ListConversationsCtx(context.Background())
-}
-
-// ListConversationsCtx is the context-aware variant of ListConversations.
-func (s *Store) ListConversationsCtx(ctx context.Context) ([]ConversationSummary, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-
+// ListConversations lists every DM conversation. Conversations with unread
+// messages come first, then by last message time.
+func (s *Store) ListConversations(ctx context.Context) ([]ConversationSummary, error) {
 	selfAddr := s.identityAddr
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
@@ -555,16 +318,8 @@ func (s *Store) ListConversationsCtx(ctx context.Context) ([]ConversationSummary
 	return result, rows.Err()
 }
 
-func (s *Store) ReadLastEntry(topic string, peerAddress domain.PeerIdentity) (*Entry, error) {
-	return s.ReadLastEntryCtx(context.Background(), topic, peerAddress)
-}
-
-// ReadLastEntryCtx is the context-aware variant of ReadLastEntry.
-func (s *Store) ReadLastEntryCtx(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-
+// ReadLastEntry returns the newest entry of a conversation, nil when empty.
+func (s *Store) ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error) {
 	query, args := s.peerQuery(topic, peerAddress,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages WHERE `, ` ORDER BY created_at DESC, rowid DESC LIMIT 1`)
@@ -581,16 +336,9 @@ func (s *Store) ReadLastEntryCtx(ctx context.Context, topic string, peerAddress 
 	return &e, nil
 }
 
-func (s *Store) ReadLastEntryPerPeer() (map[string]Entry, error) {
-	return s.ReadLastEntryPerPeerCtx(context.Background())
-}
-
-// ReadLastEntryPerPeerCtx is the context-aware variant of ReadLastEntryPerPeer.
-func (s *Store) ReadLastEntryPerPeerCtx(ctx context.Context) (map[string]Entry, error) {
-	if s.db == nil {
-		return nil, nil
-	}
-
+// ReadLastEntryPerPeer returns the newest entry of every DM conversation,
+// keyed by peer address.
+func (s *Store) ReadLastEntryPerPeer(ctx context.Context) (map[string]Entry, error) {
 	selfAddr := s.identityAddr
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
@@ -630,12 +378,8 @@ func (s *Store) ReadLastEntryPerPeerCtx(ctx context.Context) (map[string]Entry, 
 }
 
 // Returns the number of deleted rows.
-func (s *Store) DeleteExpired() (int64, error) {
-	if s.db == nil {
-		return 0, nil
-	}
-
-	res, err := s.db.Exec(`
+func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM messages
 		WHERE flag = 'auto-delete-ttl'
 		  AND ttl_seconds > 0
@@ -650,16 +394,13 @@ func (s *Store) DeleteExpired() (int64, error) {
 
 // DeleteByPeer removes all messages for a conversation with the given identity.
 // Returns the number of deleted rows.
-func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
-	if s.db == nil {
-		return 0, fmt.Errorf("chatlog: database not available")
-	}
+func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) (int64, error) {
 	id := identity.String()
 	if strings.TrimSpace(id) == "" {
 		return 0, fmt.Errorf("chatlog: empty identity")
 	}
 
-	res, err := s.db.Exec(`
+	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM messages
 		WHERE topic = 'dm'
 		  AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`,
@@ -674,7 +415,7 @@ func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
 
 // UnreadCountFor returns the number of unread messages in the
 // conversation with peerAddress. Mirrors the unread_count column
-// computed by ListConversationsCtx for a single conversation, used by
+// computed by ListConversations for a single conversation, used by
 // the DM-router delete path to refresh the in-memory sidebar badge
 // after a row is removed (otherwise the badge would stay at the
 // stale pre-delete count).
@@ -683,13 +424,13 @@ func (s *Store) DeleteByPeer(identity domain.PeerIdentity) (int64, error) {
 // when the database is not available; the latter mirrors the contract
 // of the surrounding chatlog Read* helpers (transient unavailability
 // is not an error).
-func (s *Store) UnreadCountFor(peerAddress domain.PeerIdentity) (int, error) {
-	if s.db == nil || peerAddress.IsZero() {
+func (s *Store) UnreadCountFor(ctx context.Context, peerAddress domain.PeerIdentity) (int, error) {
+	if peerAddress.IsZero() {
 		return 0, nil
 	}
 	selfAddr := s.identityAddr
 	var n int
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM messages
 		WHERE topic = 'dm'
@@ -717,12 +458,8 @@ func (s *Store) UnreadCountFor(peerAddress domain.PeerIdentity) (int, error) {
 // delete: the envelope sender of the inbound message_delete must
 // match either the original Sender or the Recipient (depending on
 // MessageFlag), and an immutable target is rejected outright.
-func (s *Store) EntryByID(messageID domain.MessageID) (Entry, bool, error) {
-	if s.db == nil {
-		return Entry{}, false, fmt.Errorf("chatlog: database not available")
-	}
-
-	row := s.db.QueryRow(
+func (s *Store) EntryByID(ctx context.Context, messageID domain.MessageID) (Entry, bool, error) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages WHERE id = ? LIMIT 1`,
 		messageID,
@@ -741,12 +478,8 @@ func (s *Store) EntryByID(messageID domain.MessageID) (Entry, bool, error) {
 }
 
 // Returns true if a row was deleted.
-func (s *Store) DeleteByID(messageID domain.MessageID) (bool, error) {
-	if s.db == nil {
-		return false, fmt.Errorf("chatlog: database not available")
-	}
-
-	res, err := s.db.Exec(`DELETE FROM messages WHERE id = ?`, messageID)
+func (s *Store) DeleteByID(ctx context.Context, messageID domain.MessageID) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, messageID)
 	if err != nil {
 		return false, fmt.Errorf("chatlog: delete %s: %w", messageID, err)
 	}
@@ -755,12 +488,9 @@ func (s *Store) DeleteByID(messageID domain.MessageID) (bool, error) {
 	return n > 0, nil
 }
 
-func (s *Store) HasEntryID(topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool {
-	if s.db == nil {
-		return false
-	}
+func (s *Store) HasEntryID(ctx context.Context, topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool {
 	var exists int
-	err := s.db.QueryRow(`SELECT 1 FROM messages WHERE id = ? LIMIT 1`, id).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM messages WHERE id = ? LIMIT 1`, id).Scan(&exists)
 	return err == nil
 }
 
@@ -770,8 +500,8 @@ func (s *Store) HasEntryID(topic string, peerAddress domain.PeerIdentity, id dom
 // Collapses DB failures into false; callers that must distinguish "the row
 // is genuinely absent" from "the lookup itself failed" (the reply-degrade
 // path in DMCrypto.SendDirectMessage) use LookupEntryInConversation.
-func (s *Store) HasEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) bool {
-	found, err := s.LookupEntryInConversation(peerAddress, id)
+func (s *Store) HasEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) bool {
+	found, err := s.LookupEntryInConversation(ctx, peerAddress, id)
 	return err == nil && found
 }
 
@@ -780,15 +510,15 @@ func (s *Store) HasEntryInConversation(peerAddress domain.PeerIdentity, id domai
 // separate error instead of folding them into "not found". A nil store,
 // zero peer or empty ID is a definitive miss (false, nil), matching the
 // HasEntryInConversation contract.
-func (s *Store) LookupEntryInConversation(peerAddress domain.PeerIdentity, id domain.MessageID) (bool, error) {
-	if s.db == nil || peerAddress.IsZero() || id == "" {
+func (s *Store) LookupEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) (bool, error) {
+	if peerAddress.IsZero() || id == "" {
 		return false, nil
 	}
 	query, params := s.peerQuery("dm", peerAddress,
 		`SELECT 1 FROM messages WHERE id = ? AND `, ` LIMIT 1`)
 	params = append([]interface{}{id}, params...)
 	var exists int
-	err := s.db.QueryRow(query, params...).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, query, params...).Scan(&exists)
 	switch {
 	case err == nil:
 		return true, nil
@@ -821,12 +551,4 @@ func scanEntries(rows *sql.Rows) ([]Entry, error) {
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
-}
-
-func portSuffix(listenAddress string) string {
-	port := "default"
-	if idx := strings.LastIndex(listenAddress, ":"); idx >= 0 && idx < len(listenAddress)-1 {
-		port = listenAddress[idx+1:]
-	}
-	return port
 }

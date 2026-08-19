@@ -46,7 +46,7 @@ type StartEntry struct {
 // RuleEntry describes a capture rule that was installed or removed.
 type RuleEntry struct {
 	Scope          domain.CaptureScope
-	Target         netip.Addr          // zero for scope=all
+	Target         netip.Addr // zero for scope=all
 	Format         domain.CaptureFormat
 	CreatedAt      time.Time
 	MatchedConnIDs []domain.ConnID

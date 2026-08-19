@@ -94,7 +94,7 @@ flowchart TB
     end
 
     subgraph SVC["Service Layer (DesktopClient + DMRouter + NodeStatusMonitor)"]
-        DC["DesktopClient\n(desktop.go)\nowns chatlog.Store\nimplements MessageStore"]
+        DC["DesktopClient\n(desktop.go)\nholds chatlog.Store\nimplements MessageStore"]
         DR["DMRouter\n(dm_router.go)"]
         NSM["NodeStatusMonitor\n(node_status_monitor.go)\nowns NodeStatus"]
         CACHE["ConversationCache\n(active chat only)"]

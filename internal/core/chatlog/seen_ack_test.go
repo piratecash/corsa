@@ -1,6 +1,7 @@
 package chatlog
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -14,8 +15,7 @@ import (
 func TestSeenAckJournal(t *testing.T) {
 	t.Parallel()
 	self := domaintest.ID("self-identity-aaaaaaaaaaaaaaaaaaaaaaaaaa")
-	store := NewStore(t.TempDir(), self, domain.ListenAddress(":0"))
-	t.Cleanup(func() { _ = store.Close() })
+	store := newTestStore(t, self)
 
 	entry := Entry{
 		ID:        "seen-journal-1",
@@ -25,14 +25,14 @@ func TestSeenAckJournal(t *testing.T) {
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      "immutable",
 	}
-	if err := store.Append("dm", self, entry); err != nil {
+	if err := store.Append(context.Background(), "dm", self, entry); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
 	since := time.Now().UTC().Add(-time.Hour)
 
 	// Still "sent" (the append default) — not eligible.
-	unconfirmed, err := store.UnconfirmedSeen(self, since)
+	unconfirmed, err := store.UnconfirmedSeen(context.Background(), self, since)
 	if err != nil {
 		t.Fatalf("unconfirmed seen: %v", err)
 	}
@@ -40,11 +40,11 @@ func TestSeenAckJournal(t *testing.T) {
 		t.Fatalf("non-seen entry must not be reported, got %#v", unconfirmed)
 	}
 
-	if _, err := store.UpdateStatus("dm", domaintest.ID(entry.Sender), domain.MessageID(entry.ID), StatusSeen); err != nil {
+	if _, err := store.UpdateStatus(context.Background(), "dm", domaintest.ID(entry.Sender), domain.MessageID(entry.ID), StatusSeen); err != nil {
 		t.Fatalf("update status: %v", err)
 	}
 
-	unconfirmed, err = store.UnconfirmedSeen(self, since)
+	unconfirmed, err = store.UnconfirmedSeen(context.Background(), self, since)
 	if err != nil {
 		t.Fatalf("unconfirmed seen: %v", err)
 	}
@@ -52,15 +52,15 @@ func TestSeenAckJournal(t *testing.T) {
 		t.Fatalf("seen entry must be reported until confirmed, got %#v", unconfirmed)
 	}
 
-	if err := store.MarkSeenConfirmed(entry.ID); err != nil {
+	if err := store.MarkSeenConfirmed(context.Background(), entry.ID); err != nil {
 		t.Fatalf("mark confirmed: %v", err)
 	}
 	// Idempotent.
-	if err := store.MarkSeenConfirmed(entry.ID); err != nil {
+	if err := store.MarkSeenConfirmed(context.Background(), entry.ID); err != nil {
 		t.Fatalf("mark confirmed (repeat): %v", err)
 	}
 
-	unconfirmed, err = store.UnconfirmedSeen(self, since)
+	unconfirmed, err = store.UnconfirmedSeen(context.Background(), self, since)
 	if err != nil {
 		t.Fatalf("unconfirmed seen: %v", err)
 	}
@@ -75,8 +75,7 @@ func TestSeenAckJournal(t *testing.T) {
 func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 	t.Parallel()
 	self := domaintest.ID("self-identity-cccccccccccccccccccccccccc")
-	store := NewStore(t.TempDir(), self, domain.ListenAddress(":0"))
-	t.Cleanup(func() { _ = store.Close() })
+	store := newTestStore(t, self)
 
 	entry := Entry{
 		ID:        "fail-journal-1",
@@ -86,11 +85,11 @@ func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      "immutable",
 	}
-	if err := store.Append("dm", self, entry); err != nil {
+	if err := store.Append(context.Background(), "dm", self, entry); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
-	undelivered, err := store.UndeliveredOutgoing(self, time.Time{})
+	undelivered, err := store.UndeliveredOutgoing(context.Background(), self, time.Time{})
 	if err != nil {
 		t.Fatalf("undelivered outgoing: %v", err)
 	}
@@ -98,15 +97,15 @@ func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 		t.Fatalf("sent row must be reported before abandonment, got %#v", undelivered)
 	}
 
-	if err := store.MarkDeliveryFailed(entry.ID); err != nil {
+	if err := store.MarkDeliveryFailed(context.Background(), entry.ID); err != nil {
 		t.Fatalf("mark delivery failed: %v", err)
 	}
 	// Idempotent.
-	if err := store.MarkDeliveryFailed(entry.ID); err != nil {
+	if err := store.MarkDeliveryFailed(context.Background(), entry.ID); err != nil {
 		t.Fatalf("mark delivery failed (repeat): %v", err)
 	}
 
-	undelivered, err = store.UndeliveredOutgoing(self, time.Time{})
+	undelivered, err = store.UndeliveredOutgoing(context.Background(), self, time.Time{})
 	if err != nil {
 		t.Fatalf("undelivered outgoing: %v", err)
 	}
@@ -121,8 +120,7 @@ func TestDeliveryFailedJournalExcludesFromOutbox(t *testing.T) {
 func TestUndeliveredOutgoing_AgeBounded(t *testing.T) {
 	t.Parallel()
 	self := domaintest.ID("self-identity-eeeeeeeeeeeeeeeeeeeeeeeeee")
-	store := NewStore(t.TempDir(), self, domain.ListenAddress(":0"))
-	t.Cleanup(func() { _ = store.Close() })
+	store := newTestStore(t, self)
 
 	recipient := "remote-recipient-ffffffffffffffffffffffff"
 	old := Entry{
@@ -135,14 +133,14 @@ func TestUndeliveredOutgoing_AgeBounded(t *testing.T) {
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      "immutable",
 	}
-	if err := store.Append("dm", self, old); err != nil {
+	if err := store.Append(context.Background(), "dm", self, old); err != nil {
 		t.Fatalf("append old: %v", err)
 	}
-	if err := store.Append("dm", self, recent); err != nil {
+	if err := store.Append(context.Background(), "dm", self, recent); err != nil {
 		t.Fatalf("append recent: %v", err)
 	}
 
-	out, err := store.UndeliveredOutgoing(self, time.Now().UTC().Add(-7*24*time.Hour))
+	out, err := store.UndeliveredOutgoing(context.Background(), self, time.Now().UTC().Add(-7*24*time.Hour))
 	if err != nil {
 		t.Fatalf("undelivered outgoing: %v", err)
 	}

@@ -9,7 +9,12 @@ import (
 
 // RunningUnderGoTest reports whether the current process is a `go test` binary.
 func RunningUnderGoTest() bool {
-	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
+	// Windows names the binary "<pkg>.test.exe", so a plain ".test" suffix
+	// check reports false there — and DefaultDir then resolves to the real
+	// %AppData%\CorsaCore, with the user's identity, state database and
+	// message history in it.
+	name := filepath.Base(os.Args[0])
+	return strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".test.exe")
 }
 
 // baseDirOverride, when non-empty, wins over all platform detection in

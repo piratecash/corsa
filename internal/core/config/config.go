@@ -53,8 +53,17 @@ type Node struct {
 	IdentityIntentsPath string
 	PeersStatePath      string
 	ChatLogDir          string // directory for chatlog/state files
-	DownloadDir         string // directory for downloaded files (defaults to "<DataDir>/downloads")
-	ProxyAddress        string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
+
+	// StateDBPath overrides the location of the shared SQLite state
+	// database (env: CORSA_STATE_DB_PATH). Empty — the default — keeps the
+	// historical chatlog-<identity_short>-<port>.db file inside ChatLogDir,
+	// so an older binary rolled back onto this machine still finds the full
+	// history. An explicit path is never populated from the default one:
+	// pointing at an empty file means a deliberately new database, and it is
+	// invisible to a rolled-back binary.
+	StateDBPath  string
+	DownloadDir  string // directory for downloaded files (defaults to "<DataDir>/downloads")
+	ProxyAddress string // SOCKS5 proxy for .onion peers (e.g. "127.0.0.1:9050")
 
 	// ConnectOnly pins outbound dialing to a single peer address. When set
 	// (env: CORSA_CONNECT_ONLY), the node drops every other outbound
@@ -505,6 +514,7 @@ func Default() Config {
 	identityIntentsPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_INTENTS_PATH", defaultIdentityIntentsPath(listenAddress)))
 	peersStatePath := resolveStartupPath(envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress)))
 	chatLogDir := resolveStartupPath(envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir()))
+	stateDBPath := resolveStartupPath(envOrDefault("CORSA_STATE_DB_PATH", ""))
 	downloadDir := resolveStartupPath(envOrDefault("CORSA_DOWNLOAD_DIR", ""))
 	proxyAddress := envOrDefault("CORSA_PROXY", "")
 	connectOnly := connectOnlyFromEnv()
@@ -548,6 +558,7 @@ func Default() Config {
 			IdentityLookupBGAttempts:   identityLookupBGAttemptsFromEnv(),
 			PeersStatePath:             peersStatePath,
 			ChatLogDir:                 chatLogDir,
+			StateDBPath:                stateDBPath,
 			DownloadDir:                downloadDir,
 			ProxyAddress:               proxyAddress,
 			ConnectOnly:                connectOnly,

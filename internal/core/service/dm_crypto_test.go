@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -240,5 +241,26 @@ func TestSendDirectMessageGuardIgnoresDataCommands(t *testing.T) {
 				t.Fatalf("SendDirectMessage(%q): err = %q; want substring %q (the body+recipient guard)", cmd, err.Error(), expectErrSubstr)
 			}
 		})
+	}
+}
+
+func TestSendDirectMessageStopsAtAnAlreadyCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	// The method took a context but reached the node through the context-free
+	// frame call, so a cancelled caller still imported the contact and still
+	// sent the message. The first thing it does after validation is fetch
+	// contacts, which is where the cancellation must now surface.
+	d := &DMCrypto{rpc: &LocalRPCClient{}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := d.SendDirectMessage(ctx, domaintest.ID("any-peer"), domain.OutgoingDM{Body: "hello"})
+	if err == nil {
+		t.Fatal("SendDirectMessage accepted an already cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }

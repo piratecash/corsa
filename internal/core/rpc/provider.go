@@ -74,13 +74,19 @@ type NodeProvider interface {
 // ChatlogProvider abstracts access to chatlog operations.
 // Only available when desktop client is present.
 type ChatlogProvider interface {
-	FetchChatlog(topic, peerAddress string) (string, error)
-	FetchChatlogPreviews() (string, error)
-	FetchConversations() (string, error)
-	// HasEntryInConversation checks whether a message with the given ID
-	// exists in the conversation with peerAddress. Used by send_dm to
-	// validate reply_to references synchronously before queueing.
-	HasEntryInConversation(peerAddress, messageID string) bool
+	FetchChatlog(ctx context.Context, topic, peerAddress string) (string, error)
+	FetchChatlogPreviews(ctx context.Context) (string, error)
+	FetchConversations(ctx context.Context) (string, error)
+	// LookupEntryInConversation reports whether a message with the given ID
+	// exists in the conversation with peerAddress, and reports a lookup that
+	// FAILED as an error rather than as absence. Used by send_dm to validate
+	// reply_to references synchronously before queueing.
+	//
+	// The bool-only form it replaced folded every failure into "not found",
+	// so a cancelled context or a database fault reached the client as
+	// "reply_to references a message that does not exist" — a claim about the
+	// data that had never actually been established.
+	LookupEntryInConversation(ctx context.Context, peerAddress, messageID string) (bool, error)
 }
 
 // DMRouterProvider abstracts access to dm_router.

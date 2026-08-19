@@ -16,8 +16,8 @@ import (
 //
 // Responsibilities:
 //
-//   - Owns *chatlog.Store (lifecycle: created with NewChatlogGateway, released
-//     with Close).
+//   - Holds the *chatlog.Store built by the composition root. The database
+//     itself is owned by internal/core/storage, so the gateway has no Close.
 //   - Provides history read APIs consumed by the UI (FetchChatlog,
 //     FetchChatlogPreviews, FetchConversations, HasEntryInConversation).
 //   - Exposes the low-level store handle to sub-services that need it for
@@ -30,16 +30,16 @@ type ChatlogGateway struct {
 	selfAddr domain.PeerIdentity
 }
 
-// NewChatlogGateway opens (or attaches to) the SQLite-backed chatlog store
-// located at chatLogDir for the given local identity. The listen address is
-// recorded alongside each write for multi-device correlation.
+// NewChatlogGateway wraps an already built chatlog repository. The store is
+// created by the composition root from the shared state database, so the
+// gateway neither opens nor closes anything.
 //
 // A nil *chatlog.Store is allowed for code paths that run without local
 // persistence (standalone RPC tests) — all gateway methods degrade to
 // "chatlog not available" errors in that mode.
-func NewChatlogGateway(chatLogDir string, selfAddr domain.PeerIdentity, listenAddress domain.ListenAddress) *ChatlogGateway {
+func NewChatlogGateway(store *chatlog.Store, selfAddr domain.PeerIdentity) *ChatlogGateway {
 	return &ChatlogGateway{
-		store:    chatlog.NewStore(chatLogDir, selfAddr, listenAddress),
+		store:    store,
 		selfAddr: selfAddr,
 	}
 }
@@ -63,38 +63,53 @@ func (g *ChatlogGateway) SelfAddress() domain.PeerIdentity {
 	return g.selfAddr
 }
 
-// Close releases the underlying SQLite database and all prepared statements.
-// Safe to call multiple times.
-func (g *ChatlogGateway) Close() error {
+// BackfillEstablished seeds the monotonic established facts from history the
+// peer_established table predates. Idempotent; the composition root runs it
+// once per start.
+func (g *ChatlogGateway) BackfillEstablished(ctx context.Context, now time.Time) error {
 	if g == nil || g.store == nil {
 		return nil
 	}
-	return g.store.Close()
+	return g.store.BackfillEstablishedFromHistory(ctx, now)
 }
 
 // HasEntryInConversation reports whether a message with the given ID exists
 // in the conversation with peerAddress. Returns false when the gateway has
 // no store (standalone node mode).
-func (g *ChatlogGateway) HasEntryInConversation(peerAddress, messageID string) bool {
+func (g *ChatlogGateway) HasEntryInConversation(ctx context.Context, peerAddress, messageID string) bool {
 	if g == nil || g.store == nil {
 		return false
 	}
-	return g.store.HasEntryInConversation(domain.PeerIdentityFromWire(peerAddress), domain.MessageID(messageID))
+	return g.store.HasEntryInConversation(ctx, domain.PeerIdentityFromWire(peerAddress), domain.MessageID(messageID))
+}
+
+// LookupEntryInConversation is HasEntryInConversation for callers that must
+// tell "the row is absent" from "the lookup failed" — the RPC validation of
+// reply_to, which otherwise told the client their message did not exist
+// whenever the context was cancelled or the database was unhealthy.
+//
+// No store (standalone node mode) is a definitive miss, not a failure: there
+// is no conversation history to contradict.
+func (g *ChatlogGateway) LookupEntryInConversation(ctx context.Context, peerAddress, messageID string) (bool, error) {
+	if g == nil || g.store == nil {
+		return false, nil
+	}
+	return g.store.LookupEntryInConversation(ctx, domain.PeerIdentityFromWire(peerAddress), domain.MessageID(messageID))
 }
 
 // DeletePeerHistory removes all chat messages for the given identity.
-func (g *ChatlogGateway) DeletePeerHistory(identity domain.PeerIdentity) (int64, error) {
+func (g *ChatlogGateway) DeletePeerHistory(ctx context.Context, identity domain.PeerIdentity) (int64, error) {
 	if g == nil || g.store == nil {
 		return 0, nil
 	}
-	return g.store.DeleteByPeer(identity)
+	return g.store.DeleteByPeer(ctx, identity)
 }
 
 // FetchChatlog reads the chat entries for a peer and returns a JSON payload
 // ready for console / RPC consumption. Keeps the JSON-marshalling concern
 // inside the gateway so the console command table need not know about the
 // underlying store schema.
-func (g *ChatlogGateway) FetchChatlog(topic, peerAddress string) (string, error) {
+func (g *ChatlogGateway) FetchChatlog(ctx context.Context, topic, peerAddress string) (string, error) {
 	if g == nil || g.store == nil {
 		return "", fmt.Errorf("chatlog not available")
 	}
@@ -116,7 +131,7 @@ func (g *ChatlogGateway) FetchChatlog(topic, peerAddress string) (string, error)
 		}
 		peer = parsed
 	}
-	entries, err := g.store.Read(topic, peer)
+	entries, err := g.store.Read(ctx, topic, peer)
 	if err != nil {
 		return "", fmt.Errorf("chatlog read: %w", err)
 	}
@@ -129,11 +144,11 @@ func (g *ChatlogGateway) FetchChatlog(topic, peerAddress string) (string, error)
 
 // FetchChatlogPreviews reads the last entry per peer and returns a JSON
 // payload with preview-sized fields.
-func (g *ChatlogGateway) FetchChatlogPreviews() (string, error) {
+func (g *ChatlogGateway) FetchChatlogPreviews(ctx context.Context) (string, error) {
 	if g == nil || g.store == nil {
 		return "", fmt.Errorf("chatlog not available")
 	}
-	previews, err := g.store.ReadLastEntryPerPeer()
+	previews, err := g.store.ReadLastEntryPerPeer(ctx)
 	if err != nil {
 		return "", fmt.Errorf("chatlog previews: %w", err)
 	}
@@ -145,11 +160,11 @@ func (g *ChatlogGateway) FetchChatlogPreviews() (string, error) {
 }
 
 // FetchConversations lists all conversations with their message counts.
-func (g *ChatlogGateway) FetchConversations() (string, error) {
+func (g *ChatlogGateway) FetchConversations(ctx context.Context) (string, error) {
 	if g == nil || g.store == nil {
 		return "", fmt.Errorf("chatlog not available")
 	}
-	conversations, err := g.store.ListConversations()
+	conversations, err := g.store.ListConversations(ctx)
 	if err != nil {
 		return "", fmt.Errorf("chatlog conversations: %w", err)
 	}
@@ -163,92 +178,92 @@ func (g *ChatlogGateway) FetchConversations() (string, error) {
 // UndeliveredOutgoing returns the locally-sent DM entries still in the
 // "sent" delivery status — the durable source for the sender-side delivery
 // retry scheduler.
-func (g *ChatlogGateway) UndeliveredOutgoing(since time.Time) ([]chatlog.Entry, error) {
+func (g *ChatlogGateway) UndeliveredOutgoing(ctx context.Context, since time.Time) ([]chatlog.Entry, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.UndeliveredOutgoing(g.SelfAddress(), since)
+	return g.store.UndeliveredOutgoing(ctx, g.SelfAddress(), since)
 }
 
 // UnconfirmedSeen returns the inbound DM entries marked "seen" whose seen
 // receipt the original sender has not confirmed yet (since bounds the scan).
-func (g *ChatlogGateway) UnconfirmedSeen(since time.Time) ([]chatlog.Entry, error) {
+func (g *ChatlogGateway) UnconfirmedSeen(ctx context.Context, since time.Time) ([]chatlog.Entry, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.UnconfirmedSeen(g.SelfAddress(), since)
+	return g.store.UnconfirmedSeen(ctx, g.SelfAddress(), since)
 }
 
 // MarkDeliveryFailed durably journals an abandoned delivery retry.
-func (g *ChatlogGateway) MarkDeliveryFailed(messageID string) error {
+func (g *ChatlogGateway) MarkDeliveryFailed(ctx context.Context, messageID string) error {
 	if g == nil || g.store == nil {
 		return fmt.Errorf("chatlog not available")
 	}
-	return g.store.MarkDeliveryFailed(messageID)
+	return g.store.MarkDeliveryFailed(ctx, messageID)
 }
 
 // MarkSeenConfirmed durably journals an arrived seen_ack.
-func (g *ChatlogGateway) MarkSeenConfirmed(messageID string) error {
+func (g *ChatlogGateway) MarkSeenConfirmed(ctx context.Context, messageID string) error {
 	if g == nil || g.store == nil {
 		return fmt.Errorf("chatlog not available")
 	}
-	return g.store.MarkSeenConfirmed(messageID)
+	return g.store.MarkSeenConfirmed(ctx, messageID)
 }
 
-// ReadCtx returns the raw chatlog entries for a conversation using the
+// Read returns the raw chatlog entries for a conversation using the
 // caller's context to bound SQLite I/O. Used by DMCrypto when it needs the
 // full history for on-demand decryption.
-func (g *ChatlogGateway) ReadCtx(ctx context.Context, topic string, peer domain.PeerIdentity) ([]chatlog.Entry, error) {
+func (g *ChatlogGateway) Read(ctx context.Context, topic string, peer domain.PeerIdentity) ([]chatlog.Entry, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.ReadCtx(ctx, topic, peer)
+	return g.store.Read(ctx, topic, peer)
 }
 
-// ReadLastEntryCtx returns the most recent entry for a conversation or nil
+// ReadLastEntry returns the most recent entry for a conversation or nil
 // when the conversation is empty.
-func (g *ChatlogGateway) ReadLastEntryCtx(ctx context.Context, topic string, peer domain.PeerIdentity) (*chatlog.Entry, error) {
+func (g *ChatlogGateway) ReadLastEntry(ctx context.Context, topic string, peer domain.PeerIdentity) (*chatlog.Entry, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.ReadLastEntryCtx(ctx, topic, peer)
+	return g.store.ReadLastEntry(ctx, topic, peer)
 }
 
-// ReadLastEntryPerPeerCtx returns the most recent entry for each peer.
-func (g *ChatlogGateway) ReadLastEntryPerPeerCtx(ctx context.Context) (map[string]chatlog.Entry, error) {
+// ReadLastEntryPerPeer returns the most recent entry for each peer.
+func (g *ChatlogGateway) ReadLastEntryPerPeer(ctx context.Context) (map[string]chatlog.Entry, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.ReadLastEntryPerPeerCtx(ctx)
+	return g.store.ReadLastEntryPerPeer(ctx)
 }
 
-// ListConversationsCtx lists all conversations with unread counts bounded
+// ListConversations lists all conversations with unread counts bounded
 // by the caller's context.
-func (g *ChatlogGateway) ListConversationsCtx(ctx context.Context) ([]chatlog.ConversationSummary, error) {
+func (g *ChatlogGateway) ListConversations(ctx context.Context) ([]chatlog.ConversationSummary, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.ListConversationsCtx(ctx)
+	return g.store.ListConversations(ctx)
 }
 
 // AppendReportNew inserts an entry for the given topic and reports whether
 // the write was a new record (as opposed to a duplicate ID). Used by
 // MessageStoreAdapter when the node hands persistence to the desktop layer.
-func (g *ChatlogGateway) AppendReportNew(topic string, owner domain.PeerIdentity, entry chatlog.Entry) (bool, error) {
+func (g *ChatlogGateway) AppendReportNew(ctx context.Context, topic string, owner domain.PeerIdentity, entry chatlog.Entry) (bool, error) {
 	if g == nil || g.store == nil {
 		return false, fmt.Errorf("chatlog not available")
 	}
-	return g.store.AppendReportNew(topic, owner, entry)
+	return g.store.AppendReportNew(ctx, topic, owner, entry)
 }
 
 // UpdateStatus advances the delivery_status of a message persisted in the
 // chatlog. Used by MessageStoreAdapter when the node forwards a delivery
 // receipt.
-func (g *ChatlogGateway) UpdateStatus(topic string, peer domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error) {
+func (g *ChatlogGateway) UpdateStatus(ctx context.Context, topic string, peer domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error) {
 	if g == nil || g.store == nil {
 		return false, fmt.Errorf("chatlog not available")
 	}
-	return g.store.UpdateStatus(topic, peer, messageID, status)
+	return g.store.UpdateStatus(ctx, topic, peer, messageID, status)
 }
 
 // setStoreForTest replaces the underlying store. Test-only — production

@@ -19,8 +19,7 @@ import (
 func newFileReplyTestRouter(t *testing.T) (*DMRouter, domain.PeerIdentity, chan domain.OutgoingDM) {
 	t.Helper()
 	r := newTestRouter()
-	db, cl := newTestChatLog(t)
-	t.Cleanup(func() { _ = db.Close() })
+	cl := newTestChatLog(t)
 	r.client.setChatLogForTest(cl)
 
 	sent := make(chan domain.OutgoingDM, 1)
@@ -102,7 +101,7 @@ func TestSendFileAnnounceFromComposerKeepsLiveReplyTo(t *testing.T) {
 
 	const replyID = "22222222-2222-4222-8222-222222222222"
 	// Seed the quoted message so the reference is live in this conversation.
-	if err := r.client.chatLog.Append("dm", domaintest.ID("me"), chatlog.Entry{
+	if err := r.client.chatLog.Append(context.Background(), "dm", domaintest.ID("me"), chatlog.Entry{
 		ID:        replyID,
 		Sender:    domaintest.ID("me").String(),
 		Recipient: peer.String(),

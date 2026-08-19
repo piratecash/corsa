@@ -1179,7 +1179,7 @@ func (r *DMRouter) SendConversationDelete(ctx context.Context, peer domain.PeerI
 // file-transfer cleanup for each removed ID.
 //
 // Returns the number of rows actually removed and ok==false when
-// the wipe could not run completely (chatlog unavailable, ReadCtx
+// the wipe could not run completely (chatlog unavailable, Read
 // failed before the first row, or DeleteByID failed for at least
 // one row). The ack handler uses ok to decide whether to publish
 // the outcome with LocalCleanupFailed=true so the UI can warn the
@@ -1204,7 +1204,7 @@ func (r *DMRouter) applyLocalConversationWipe(peer domain.PeerIdentity, localKno
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	entries, err := store.ReadCtx(ctx, "dm", peer)
+	entries, err := store.Read(ctx, "dm", peer)
 	if err != nil {
 		log.Warn().Err(err).
 			Str("peer", peer.String()).
@@ -1248,7 +1248,7 @@ func (r *DMRouter) applyLocalConversationWipe(peer domain.PeerIdentity, localKno
 		// row whose DeleteByID later fails is harmless: a future
 		// replay simply re-DELETEs.
 		r.wipeTombstones.Note([]domain.MessageID{id}, time.Now().UTC())
-		removed, err := store.DeleteByID(id)
+		removed, err := store.DeleteByID(r.opContext(), id)
 		if err != nil {
 			failures++
 			log.Warn().Err(err).
@@ -2817,7 +2817,7 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	if store == nil {
 		return false
 	}
-	removed, err := store.DeleteByID(id)
+	removed, err := store.DeleteByID(r.opContext(), id)
 	if err != nil {
 		log.Warn().Err(err).
 			Str("message_id", event.MessageID).
@@ -2929,7 +2929,7 @@ func (r *DMRouter) snapshotLocalKnownConversationIDs(ctx context.Context, peer d
 	if store == nil {
 		return nil, fmt.Errorf("chatlog store is not available")
 	}
-	entries, err := store.ReadCtx(ctx, "dm", peer)
+	entries, err := store.Read(ctx, "dm", peer)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot local known ids %s: %w", peer, err)
 	}
@@ -2993,7 +2993,7 @@ func (r *DMRouter) gatherInboundDeleteCandidates(envelopeSender domain.PeerIdent
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	entries, err := store.ReadCtx(ctx, "dm", envelopeSender)
+	entries, err := store.Read(ctx, "dm", envelopeSender)
 	if err != nil {
 		log.Warn().Err(err).
 			Str("envelope_sender", envelopeSender.String()).
@@ -3077,7 +3077,7 @@ func (r *DMRouter) sweepInboundDeleteScope(envelopeSender domain.PeerIdentity, r
 		// it (which is the right behaviour — the user wanted
 		// it gone).
 		r.wipeTombstones.Note([]domain.MessageID{id}, time.Now().UTC())
-		removed, err := store.DeleteByID(id)
+		removed, err := store.DeleteByID(r.opContext(), id)
 		if err != nil {
 			survivors[id] = struct{}{}
 			log.Warn().Err(err).
