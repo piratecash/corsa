@@ -48,10 +48,10 @@ func TestConsumeComposerFocusDropsTheRequestUnderAnOpenMenu(t *testing.T) {
 	}
 }
 
-// Both menus are full-window overlays over the composer, so either one of them
-// has to answer the question. A guard that only knew about the identity menu
-// would let a long-pressed MESSAGE hand focus to the editor beneath it.
-func TestContextMenuOpenCoversBothMenus(t *testing.T) {
+// The menus and identity details are full-window overlays over the composer,
+// so every one of them has to answer the question. A guard that only knew
+// about the contact menu would let focus move into the editor beneath them.
+func TestContextMenuOpenCoversEveryComposerOverlay(t *testing.T) {
 	peer := domain.PeerIdentity{}
 	copy(peer[:], "11ab110000000000000000000000000000000000")
 
@@ -67,6 +67,11 @@ func TestContextMenuOpenCoversBothMenus(t *testing.T) {
 	w.msgContextMsg = &service.DirectMessage{}
 	if !w.contextMenuOpen() {
 		t.Fatal("the message menu counts as open")
+	}
+	w.msgContextMsg = nil
+	w.identityPanelVisible = true
+	if !w.contextMenuOpen() {
+		t.Fatal("the my-identity panel counts as open")
 	}
 }
 

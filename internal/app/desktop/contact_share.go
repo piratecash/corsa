@@ -14,34 +14,70 @@ import (
 	"gioui.org/widget"
 
 	"github.com/piratecash/corsa/internal/core/contactlink"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/qrcode"
 )
 
-// contact_share.go is the §4.8 UI: "share contact" renders the node's own
-// corsa: link as a QR and puts the link on the clipboard; a link pasted
-// into the identity search or the composer imports the contact — keys
+// contact_share.go is the §4.8 UI: the identity panel renders the node's own
+// corsa: link as a QR and the share action puts that link on the clipboard; a
+// link pasted into identity search or the composer imports the contact — keys
 // verified — with no network involved.
 
-// handleShareContact serves the share button: first click builds the link,
-// copies it and shows the QR; the next click hides the QR again.
-func (w *Window) handleShareContact(gtx layout.Context) {
-	for w.shareContactButton.Clicked(gtx) {
-		if w.shareQRVisible {
-			w.shareQRVisible = false
-			continue
-		}
+// handleMyIdentityPanel opens the node identity details after preparing the
+// same verified contact link used by the share action and QR code.
+func (w *Window) handleMyIdentityPanel(gtx layout.Context) {
+	for w.myIdentityButton.Clicked(gtx) {
 		link, err := w.router.BuildContactLink()
 		if err != nil {
-			w.router.SetSendStatus(w.t("status.contact_import_failed", err.Error()))
+			w.router.SetSendStatus(w.t("status.contact_share_failed", err.Error()))
 			continue
 		}
 		qrImage, err := contactLinkQRImage(link)
 		if err != nil {
-			w.router.SetSendStatus(w.t("status.contact_import_failed", err.Error()))
+			w.router.SetSendStatus(w.t("status.contact_share_failed", err.Error()))
 			continue
 		}
-		w.shareQRImage = qrImage
-		w.shareQRVisible = true
+		w.openIdentityPanel(link, qrImage)
+	}
+
+	for w.identityPanelClose.Clicked(gtx) {
+		w.closeIdentityPanel()
+	}
+}
+
+func (w *Window) openIdentityPanel(link string, qrImage widget.Image) {
+	w.identityPanelContactLink = link
+	w.identityPanelQRImage = qrImage
+	w.identityPanelList.Position = layout.Position{}
+	w.identityPanelVisible = true
+	w.identityPanelFocus.open(&w.myIdentityButton)
+	w.showLanguageMenu = false
+	w.contextMenuPeer = domain.PeerIdentity{}
+	w.showDeleteConfirm = false
+	w.showClearChatConfirm = false
+	w.showAliasEditor = false
+	w.msgContextMsg = nil
+	w.peerMenuFocus.abandonRestore()
+	w.msgMenuFocus.abandonRestore()
+}
+
+func (w *Window) closeIdentityPanel() {
+	w.identityPanelVisible = false
+	w.identityPanelContactLink = ""
+	w.identityPanelQRImage = widget.Image{}
+	if w.window != nil {
+		w.window.Invalidate()
+	}
+}
+
+// handleShareContact copies the contact link shown by the open identity panel.
+func (w *Window) handleShareContact(gtx layout.Context) {
+	for w.shareContactButton.Clicked(gtx) {
+		link, ok := contactLinkForClipboard(w.identityPanelContactLink)
+		if !ok {
+			w.router.SetSendStatus(w.t("status.contact_share_unavailable"))
+			continue
+		}
 		gtx.Execute(clipboard.WriteCmd{
 			Type: "text/plain",
 			Data: io.NopCloser(strings.NewReader(link)),
@@ -50,10 +86,18 @@ func (w *Window) handleShareContact(gtx layout.Context) {
 	}
 }
 
+func contactLinkForClipboard(link string) (string, bool) {
+	link = strings.TrimSpace(link)
+	return link, link != ""
+}
+
 // handleContactLinkPaste watches the identity-search editor for a pasted
 // corsa: link and imports it immediately. Edge-triggered on the text value
 // so one bad link is reported once, not every frame.
 func (w *Window) handleContactLinkPaste() {
+	if w.identityPanelVisible {
+		return
+	}
 	text := strings.TrimSpace(w.identitySearchEditor.Text())
 	if !contactlink.IsContactLink(text) {
 		w.lastContactLinkTried = ""
@@ -116,10 +160,9 @@ func contactLinkQRImage(link string) (widget.Image, error) {
 	return widget.Image{Src: paint.NewImageOp(img), Fit: widget.Contain}, nil
 }
 
-// layoutShareContactQR draws the QR panel under the profile header.
-func (w *Window) layoutShareContactQR(gtx layout.Context) layout.Dimensions {
-	side := gtx.Dp(unit.Dp(220))
+func (w *Window) layoutIdentityQR(gtx layout.Context, sideDp unit.Dp) layout.Dimensions {
+	side := min(gtx.Dp(sideDp), gtx.Constraints.Max.X)
 	gtx.Constraints.Min = image.Pt(side, side)
 	gtx.Constraints.Max = image.Pt(side, side)
-	return w.shareQRImage.Layout(gtx)
+	return w.identityPanelQRImage.Layout(gtx)
 }

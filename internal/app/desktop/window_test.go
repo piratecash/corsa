@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"fmt"
 	"image"
 	"strings"
 	"testing"
@@ -10,12 +11,17 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/service"
 
+	"gioui.org/f32"
 	"gioui.org/io/input"
+	"gioui.org/io/key"
 	"gioui.org/io/pointer"
+	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
+	"gioui.org/widget/material"
 )
 
 func TestMergeRecipientOrder(t *testing.T) {
@@ -70,6 +76,350 @@ func TestSearchKnownIdentitiesEmptyQuery(t *testing.T) {
 	results := searchKnownIdentities([]string{"a", "b"}, nil, nil, domaintest.ID("self"), "")
 	if results != nil {
 		t.Fatalf("expected nil for empty query, got %v", results)
+	}
+}
+
+func newIdentityLayoutTestWindow(t *testing.T) *Window {
+	t.Helper()
+	icons, err := loadWindowIcons()
+	if err != nil {
+		t.Fatalf("load embedded UI icons: %v", err)
+	}
+	return &Window{
+		theme:             newAppTheme(),
+		language:          "en",
+		identityPanelList: layout.List{Axis: layout.Vertical},
+		searchIcon:        icons.search,
+		fingerprintIcon:   icons.fingerprint,
+		chevronIcon:       icons.chevron,
+		copyIcon:          icons.copy,
+		shareIcon:         icons.share,
+		closeIcon:         icons.close,
+	}
+}
+
+func TestLoadUIIconReturnsAnErrorForInvalidData(t *testing.T) {
+	if _, err := loadUIIcon("broken-test-icon", []byte("not IconVG")); err == nil {
+		t.Fatal("invalid embedded icon data was accepted")
+	}
+}
+
+func TestIdentitySearchUsesCompactSingleRow(t *testing.T) {
+	w := newIdentityLayoutTestWindow(t)
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Constraints{Max: image.Pt(320, 200)},
+	}
+
+	dims := w.identitySearchCard(gtx, service.NodeStatus{}, nil)
+
+	if dims.Size.Y != 48 {
+		t.Fatalf("empty identity search height = %d, want one compact 48dp row", dims.Size.Y)
+	}
+}
+
+func TestMyIdentityAddressWrapsWithoutTruncation(t *testing.T) {
+	const address = "ae47201ce461599cbb1562eb159fcee0075fdcdd"
+	w := &Window{
+		theme:    newAppTheme(),
+		language: "en",
+		snap: service.RouterSnapshot{
+			MyAddress: domain.PeerIdentityFromWire(address),
+		},
+	}
+	layoutAt := func(width, height int) widget.TextInfo {
+		gtx := layout.Context{
+			Ops:         new(op.Ops),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Constraints{Max: image.Pt(width, height)},
+		}
+		_, info := w.layoutMyIdentityAddress(gtx)
+		return info
+	}
+
+	// About 181dp is what the address receives in a 1024dp-wide window after
+	// the sidebar card's avatar, chevron, padding and gaps take their share.
+	if got := layoutAt(181, 200).Truncated; got != 0 {
+		t.Fatalf("identity address still truncates %d runes at the normal sidebar width", got)
+	}
+	// Around 70dp remains for the address in the sidebar of a 640dp-wide
+	// two-pane window. The card may grow vertically, but the identity must stay
+	// complete instead of losing its tail.
+	if got := layoutAt(70, 200).Truncated; got != 0 {
+		t.Fatalf("identity address truncates %d runes in a narrow two-pane sidebar", got)
+	}
+	// Control: the former two-line policy must report truncation under the same
+	// constraints, proving that Truncated observes rendered glyph layout rather
+	// than the always-complete semantic label.
+	controlGTX := layout.Context{
+		Ops:         new(op.Ops),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Constraints{Max: image.Pt(70, 200)},
+	}
+	style := material.Caption(w.theme, address)
+	_, control := (widget.Label{MaxLines: 2, WrapPolicy: text.WrapGraphemes}).LayoutDetailed(
+		controlGTX, style.Shaper, style.Font, style.TextSize, style.Text, op.CallOp{},
+	)
+	if control.Truncated == 0 {
+		t.Fatal("two-line control did not report truncation")
+	}
+}
+
+func TestMyIdentityCardGrowsForNarrowTwoPaneWindows(t *testing.T) {
+	const address = "ae47201ce461599cbb1562eb159fcee0075fdcdd"
+	for _, width := range []int{174, 222} {
+		t.Run(fmt.Sprintf("card-width-%d", width), func(t *testing.T) {
+			w := newIdentityLayoutTestWindow(t)
+			w.snap.MyAddress = domain.PeerIdentityFromWire(address)
+			gtx := layout.Context{
+				Ops:         new(op.Ops),
+				Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+				Constraints: layout.Constraints{Max: image.Pt(width, 400)},
+			}
+
+			dims := w.layoutMyIdentityButton(gtx, 12)
+			if dims.Size.Y <= 96 {
+				t.Fatalf("narrow identity card stayed at %ddp and cannot expose all wrapped address lines", dims.Size.Y)
+			}
+		})
+	}
+}
+
+func TestIdentitySearchEditorLayoutAppliesOpticalOffset(t *testing.T) {
+	contextFor := func() layout.Context {
+		return layout.Context{
+			Ops:         new(op.Ops),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Constraints{Max: image.Pt(240, 26)},
+		}
+	}
+	shiftedWindow := &Window{theme: newAppTheme(), language: "en"}
+	shifted := shiftedWindow.layoutIdentitySearchEditor(contextFor())
+	rawWindow := &Window{theme: newAppTheme(), language: "en"}
+	raw := rawWindow.identitySearchEditorStyle().Layout(contextFor())
+
+	shiftedBaselineFromTop := shifted.Size.Y - shifted.Baseline
+	rawBaselineFromTop := raw.Size.Y - raw.Baseline
+	if shifted.Size.Y != raw.Size.Y+2 || shiftedBaselineFromTop != rawBaselineFromTop+2 {
+		t.Fatalf("search editor optical layout = size %v baseline %d; raw = size %v baseline %d, want a real 2dp downward shift",
+			shifted.Size, shifted.Baseline, raw.Size, raw.Baseline)
+	}
+}
+
+func TestIdentityPanelSizeStaysInsideWindow(t *testing.T) {
+	tests := []struct {
+		name   string
+		window image.Point
+		want   image.Point
+	}{
+		{name: "desktop", window: image.Pt(1000, 700), want: image.Pt(384, 520)},
+		{name: "phone", window: image.Pt(360, 640), want: image.Pt(328, 520)},
+		{name: "landscape phone", window: image.Pt(640, 320), want: image.Pt(384, 288)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := identityPanelSize(tt.window, 1); got != tt.want {
+				t.Fatalf("identityPanelSize(%v) = %v, want %v", tt.window, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIdentityPanelFillsCompactWindow(t *testing.T) {
+	window := image.Pt(390, 720)
+	if got := identityPanelSizeForMode(window, 1, true); got != window {
+		t.Fatalf("compact identity panel size = %v, want full client area %v", got, window)
+	}
+
+	if got := identityPanelSizeForMode(window, 1, false); got == window {
+		t.Fatalf("desktop identity panel unexpectedly fills the window: %v", got)
+	}
+}
+
+func TestDesktopIdentityPanelCentersItsCloseButton(t *testing.T) {
+	var router input.Router
+	w := newIdentityLayoutTestWindow(t)
+	frame := func() layout.Context {
+		gtx := layout.Context{
+			Ops:         new(op.Ops),
+			Source:      router.Source(),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Exact(image.Pt(1000, 700)),
+		}
+		w.layoutIdentityPanelOverlay(gtx)
+		router.Frame(gtx.Ops)
+		return gtx
+	}
+
+	frame()
+	router.Queue(
+		pointer.Event{Source: pointer.Mouse, Kind: pointer.Press, Buttons: pointer.ButtonPrimary, Position: f32.Pt(660, 124)},
+		pointer.Event{Source: pointer.Mouse, Kind: pointer.Release, Position: f32.Pt(660, 124)},
+	)
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Source:      router.Source(),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Exact(image.Pt(1000, 700)),
+	}
+	if !w.identityPanelClose.Clicked(gtx) {
+		t.Fatal("close button was not hit at the centered desktop-panel coordinates")
+	}
+}
+
+func TestIdentityPanelBackdropHasNoButtonSemantics(t *testing.T) {
+	var router input.Router
+	w := newIdentityLayoutTestWindow(t)
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Source:      router.Source(),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Exact(image.Pt(1000, 700)),
+	}
+	w.layoutIdentityPanelOverlay(gtx)
+	router.Frame(gtx.Ops)
+
+	windowBounds := image.Rect(0, 0, 1000, 700)
+	for _, node := range router.AppendSemantics(nil) {
+		if node.Desc.Class == semantic.Button && node.Desc.Bounds == windowBounds {
+			t.Fatalf("identity panel exposes its full-window backdrop as a button: %+v", node.Desc)
+		}
+	}
+}
+
+func TestIdentityPanelBackdropDismissesOnlyOutsideTheCard(t *testing.T) {
+	runPress := func(t *testing.T, position f32.Point) bool {
+		t.Helper()
+		var router input.Router
+		w := newIdentityLayoutTestWindow(t)
+		w.identityPanelVisible = true
+		frame := func() {
+			gtx := layout.Context{
+				Ops:         new(op.Ops),
+				Source:      router.Source(),
+				Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+				Constraints: layout.Exact(image.Pt(1000, 700)),
+			}
+			w.layoutIdentityPanelOverlay(gtx)
+			router.Frame(gtx.Ops)
+		}
+
+		frame()
+		router.Queue(pointer.Event{Source: pointer.Mouse, Kind: pointer.Press, Buttons: pointer.ButtonPrimary, Position: position})
+		frame()
+		return w.identityPanelVisible
+	}
+
+	if runPress(t, f32.Pt(4, 4)) {
+		t.Fatal("press on the desktop backdrop did not close the identity panel")
+	}
+	if !runPress(t, f32.Pt(500, 350)) {
+		t.Fatal("press on blank space inside the identity card closed the panel")
+	}
+}
+
+func TestIdentityPanelBlocksClicksThroughBlankPanelAreas(t *testing.T) {
+	tests := []struct {
+		name     string
+		window   image.Point
+		position f32.Point
+	}{
+		{name: "desktop inner padding", window: image.Pt(1000, 700), position: f32.Pt(315, 97)},
+		{name: "desktop bottom padding", window: image.Pt(1000, 700), position: f32.Pt(500, 605)},
+		{name: "compact edge", window: image.Pt(390, 720), position: f32.Pt(5, 5)},
+		{name: "compact bottom padding", window: image.Pt(390, 720), position: f32.Pt(200, 715)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var router input.Router
+			var underneath widget.Clickable
+			w := newIdentityLayoutTestWindow(t)
+			w.identityPanelVisible = true
+			clickedUnderneath := false
+			frame := func() {
+				gtx := layout.Context{
+					Ops:         new(op.Ops),
+					Source:      router.Source(),
+					Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+					Constraints: layout.Exact(tt.window),
+				}
+				for underneath.Clicked(gtx) {
+					clickedUnderneath = true
+				}
+				underneath.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Dimensions{Size: gtx.Constraints.Max}
+				})
+				w.layoutIdentityPanelOverlay(gtx)
+				router.Frame(gtx.Ops)
+			}
+
+			frame()
+			router.Queue(
+				pointer.Event{Source: pointer.Mouse, Kind: pointer.Press, Buttons: pointer.ButtonPrimary, Position: tt.position},
+				pointer.Event{Source: pointer.Mouse, Kind: pointer.Release, Position: tt.position},
+			)
+			frame()
+			if clickedUnderneath {
+				t.Fatal("click reached the application underneath the identity panel")
+			}
+		})
+	}
+}
+
+func TestContactLinkForClipboardRejectsEmptyPayload(t *testing.T) {
+	if link, ok := contactLinkForClipboard(" \n\t "); ok || link != "" {
+		t.Fatalf("blank contact link accepted as %q", link)
+	}
+	if link, ok := contactLinkForClipboard("  corsa:test  "); !ok || link != "corsa:test" {
+		t.Fatalf("valid contact link = (%q, %v), want trimmed payload", link, ok)
+	}
+}
+
+func TestIdentityPanelClaimsAndTrapsKeyboardFocus(t *testing.T) {
+	var router input.Router
+	w := newIdentityLayoutTestWindow(t)
+	frame := func() {
+		ops := new(op.Ops)
+		gtx := layout.Context{
+			Ops:         ops,
+			Source:      router.Source(),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Exact(image.Pt(1000, 700)),
+		}
+		w.identitySearchCard(gtx, service.NodeStatus{}, nil)
+		if w.identityPanelVisible {
+			w.layoutIdentityPanelOverlay(gtx)
+		}
+		router.Frame(ops)
+	}
+
+	// Reproduce the reported state: search owns focus before the panel opens.
+	ops := new(op.Ops)
+	gtx := layout.Context{
+		Ops:         ops,
+		Source:      router.Source(),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Exact(image.Pt(1000, 700)),
+	}
+	gtx.Execute(key.FocusCmd{Tag: &w.identitySearchEditor})
+	w.identitySearchCard(gtx, service.NodeStatus{}, nil)
+	router.Frame(ops)
+	if !router.Source().Focused(&w.identitySearchEditor) {
+		t.Fatal("test setup failed: search editor did not gain focus")
+	}
+
+	w.openIdentityPanel("corsa:test", widget.Image{})
+	frame()
+	if !router.Source().Focused(&w.identityPanelClose) {
+		t.Fatal("opening identity details left keyboard focus in the search editor underneath")
+	}
+
+	router.Queue(key.Event{Name: key.NameTab, State: key.Press})
+	frame()
+	if !router.Source().Focused(&w.copyIdentityButton) {
+		t.Fatal("Tab escaped identity details instead of moving to its next action")
 	}
 }
 
@@ -448,18 +798,16 @@ func TestCompactContactsPaneShowsNetworkStatus(t *testing.T) {
 		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
 		Constraints: layout.Exact(image.Pt(360, 720)),
 	}
-	w := &Window{
-		theme:        newAppTheme(),
-		contactsList: widget.List{List: layout.List{Axis: layout.Vertical}},
-		snap: service.RouterSnapshot{NodeStatus: service.NodeStatus{
-			AggregateStatus: &service.AggregateStatus{
-				Status:          "healthy",
-				ConnectedPeers:  2,
-				TotalPeers:      4,
-				PendingMessages: 3,
-			},
-		}},
-	}
+	w := newIdentityLayoutTestWindow(t)
+	w.contactsList = widget.List{List: layout.List{Axis: layout.Vertical}}
+	w.snap = service.RouterSnapshot{NodeStatus: service.NodeStatus{
+		AggregateStatus: &service.AggregateStatus{
+			Status:          "healthy",
+			ConnectedPeers:  2,
+			TotalPeers:      4,
+			PendingMessages: 3,
+		},
+	}}
 
 	w.layoutMainCompact(gtx, w.snap.NodeStatus, nil)
 	router.Frame(gtx.Ops)
@@ -873,13 +1221,11 @@ func TestSearchRowAnchorTracksTheBlockAndNotItsContents(t *testing.T) {
 		headerDp = 66
 	)
 	status := service.NodeStatus{KnownIDs: []string{hexA}}
-	w := &Window{
-		theme:               newAppTheme(),
-		recipientButtons:    make(map[domain.PeerIdentity]*widget.Clickable),
-		recipientRightClick: make(map[domain.PeerIdentity]*rightClickState),
-		recipientMenuBtns:   make(map[domain.PeerIdentity]*widget.Clickable),
-		menuBtnRects:        make(map[*widget.Clickable]image.Rectangle),
-	}
+	w := newIdentityLayoutTestWindow(t)
+	w.recipientButtons = make(map[domain.PeerIdentity]*widget.Clickable)
+	w.recipientRightClick = make(map[domain.PeerIdentity]*rightClickState)
+	w.recipientMenuBtns = make(map[domain.PeerIdentity]*widget.Clickable)
+	w.menuBtnRects = make(map[*widget.Clickable]image.Rectangle)
 	w.identitySearchEditor.SetText("11")
 	btn := new(widget.Clickable)
 	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }

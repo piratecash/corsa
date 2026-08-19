@@ -294,7 +294,10 @@ func Run() error {
 	}
 
 	// Desktop UI gets CommandTable directly — no HTTP round-trip needed.
-	window := NewWindow(client, router, eventBus, cmdTable, runtime, prefs)
+	window, err := NewWindow(client, router, eventBus, cmdTable, runtime, prefs)
+	if err != nil {
+		return fmt.Errorf("initialize desktop window: %w", err)
+	}
 	// From here the UI owns the teardown, on both platforms but for two
 	// different reasons. On desktop its exit paths (window closed) terminate
 	// the process straight from the event loop, so the defers above never get

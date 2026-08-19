@@ -12,6 +12,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0
 	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.56.0
@@ -42,7 +43,6 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.73.0 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
-	golang.org/x/exp/shiny v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect

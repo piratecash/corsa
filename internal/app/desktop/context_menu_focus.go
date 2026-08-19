@@ -394,11 +394,11 @@ func (w *Window) escapePeerMenu() {
 	}
 }
 
-// contextMenuOpen reports whether either context menu is currently up. Both
-// are drawn as full-window overlays over the composer, so for anything that
-// asks "may I take focus?" the two are one condition.
+// contextMenuOpen reports whether an interaction overlay is currently up. The
+// two context menus and identity details cover the composer, so for anything
+// that asks "may I take focus?" they are one condition.
 func (w *Window) contextMenuOpen() bool {
-	return !w.contextMenuPeer.IsZero() || w.msgContextMsg != nil
+	return w.identityPanelVisible || !w.contextMenuPeer.IsZero() || w.msgContextMsg != nil
 }
 
 // consumeComposerFocus decides what a pending "focus the composer" request may

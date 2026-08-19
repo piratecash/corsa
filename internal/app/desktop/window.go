@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"io"
@@ -43,6 +44,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 	"gioui.org/x/explorer"
+	"golang.org/x/exp/shiny/materialdesign/icons"
 )
 
 type Window struct {
@@ -65,20 +67,30 @@ type Window struct {
 	// does not raise the keyboard, so the composer would gain focus with no
 	// keyboard. It is deliberately NOT set by the long-press context-menu
 	// path, which focuses the composer but should leave the keyboard down.
-	composerKeyboardPending bool
-	contactsList            widget.List
-	chatList                widget.List
-	consoleButton           widget.Clickable
-	updateButton            widget.Clickable
-	compactBackBtn          widget.Clickable
-	sendButton              widget.Clickable
-	copyIdentityButton      widget.Clickable
-	shareContactButton      widget.Clickable
-	// shareQRVisible / shareQRImage carry the §4.8 "share contact" QR
-	// panel; lastContactLinkTried edge-triggers the search-paste import
+	composerKeyboardPending  bool
+	contactsList             widget.List
+	chatList                 widget.List
+	consoleButton            widget.Clickable
+	updateButton             widget.Clickable
+	compactBackBtn           widget.Clickable
+	sendButton               widget.Clickable
+	myIdentityButton         widget.Clickable
+	copyIdentityButton       widget.Clickable
+	shareContactButton       widget.Clickable
+	identityPanelClose       widget.Clickable
+	identityPanelDismissTag  struct{}
+	identityPanelVisible     bool
+	identityPanelQRImage     widget.Image
+	identityPanelContactLink string
+	identityPanelList        layout.List
+	searchIcon               *widget.Icon
+	fingerprintIcon          *widget.Icon
+	chevronIcon              *widget.Icon
+	copyIcon                 *widget.Icon
+	shareIcon                *widget.Icon
+	closeIcon                *widget.Icon
+	// lastContactLinkTried edge-triggers the search-paste import
 	// (contact_share.go).
-	shareQRVisible       bool
-	shareQRImage         widget.Image
 	lastContactLinkTried string
 	languageToggle       widget.Clickable
 	languageOptions      map[string]*widget.Clickable
@@ -154,8 +166,9 @@ type Window struct {
 	// Keyboard/Narrator focus contract of the two context menus above: which
 	// "⋯" button opened one, whether it holds focus, and where focus goes back
 	// to when it closes. See context_menu_focus.go.
-	peerMenuFocus menuFocusState
-	msgMenuFocus  menuFocusState
+	peerMenuFocus      menuFocusState
+	msgMenuFocus       menuFocusState
+	identityPanelFocus menuFocusState
 
 	// menuBtnRects holds the last known WINDOW-space rectangle of each "⋯"
 	// button, captured during layout on frames where a pointer press lets us
@@ -438,7 +451,52 @@ func newAppTheme() *material.Theme {
 	return theme
 }
 
-func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus *ebus.Bus, cmdTable *rpc.CommandTable, runtime *NodeRuntime, prefs *Preferences) *Window {
+func loadUIIcon(name string, data []byte) (*widget.Icon, error) {
+	icon, err := widget.NewIcon(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode embedded UI icon %s: %w", name, err)
+	}
+	return icon, nil
+}
+
+type windowIcons struct {
+	search      *widget.Icon
+	fingerprint *widget.Icon
+	chevron     *widget.Icon
+	copy        *widget.Icon
+	share       *widget.Icon
+	close       *widget.Icon
+}
+
+func loadWindowIcons() (windowIcons, error) {
+	var loaded windowIcons
+	definitions := []struct {
+		name string
+		data []byte
+		dst  **widget.Icon
+	}{
+		{name: "search", data: icons.ActionSearch, dst: &loaded.search},
+		{name: "fingerprint", data: icons.ActionFingerprint, dst: &loaded.fingerprint},
+		{name: "chevron-right", data: icons.NavigationChevronRight, dst: &loaded.chevron},
+		{name: "copy", data: icons.ContentContentCopy, dst: &loaded.copy},
+		{name: "share", data: icons.SocialShare, dst: &loaded.share},
+		{name: "close", data: icons.NavigationClose, dst: &loaded.close},
+	}
+	for _, definition := range definitions {
+		icon, err := loadUIIcon(definition.name, definition.data)
+		if err != nil {
+			return windowIcons{}, err
+		}
+		*definition.dst = icon
+	}
+	return loaded, nil
+}
+
+func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus *ebus.Bus, cmdTable *rpc.CommandTable, runtime *NodeRuntime, prefs *Preferences) (*Window, error) {
+	loadedIcons, err := loadWindowIcons()
+	if err != nil {
+		return nil, err
+	}
 	theme := newAppTheme()
 
 	language := normalizeLanguage(client.Language())
@@ -474,7 +532,14 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
 		ctxMenuList:         layout.List{Axis: layout.Vertical},
 		msgCtxMenuList:      layout.List{Axis: layout.Vertical},
+		identityPanelList:   layout.List{Axis: layout.Vertical},
 		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
+		searchIcon:          loadedIcons.search,
+		fingerprintIcon:     loadedIcons.fingerprint,
+		chevronIcon:         loadedIcons.chevron,
+		copyIcon:            loadedIcons.copy,
+		shareIcon:           loadedIcons.share,
+		closeIcon:           loadedIcons.close,
 		// Generously buffered and fully drained each frame so background
 		// producers (file picks, failed-send restores) block-send without
 		// dropping cross-conversation events.
@@ -482,7 +547,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 	}
 	w.aliasEditor.SingleLine = true
 	w.aliasEditor.Submit = true
-	return w
+	return w, nil
 }
 
 // SetShutdown registers a teardown callback that runs before the process
@@ -767,6 +832,9 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		w.msgCtxMenuList.Position = layout.Position{}
 		w.msgMenuFocus.restoreOnClose(gtx, &w.messageEditor)
 	}
+	if !w.identityPanelVisible {
+		w.identityPanelFocus.restoreOnClose(gtx, &w.myIdentityButton)
+	}
 	w.snap = w.router.Snapshot()
 	w.rebuildMsgCache()
 	// AFTER the snapshot, and after rebuildMsgCache: the signature carries
@@ -798,6 +866,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	if w.touchKbd.dismissOnOutsideTap(gtx) {
 		w.peerMenuFocus.abandonRestore()
 		w.msgMenuFocus.abandonRestore()
+		w.identityPanelFocus.abandonRestore()
 	}
 
 	// Track cursor position at window level for accurate context menu
@@ -994,6 +1063,12 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 				return layout.Dimensions{}
 			}
 			return w.layoutMsgContextMenuOverlay(gtx)
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if !w.identityPanelVisible {
+				return layout.Dimensions{}
+			}
+			return w.layoutIdentityPanelOverlay(gtx)
 		}),
 	)
 
@@ -1539,6 +1614,7 @@ func (w *Window) handleActions(gtx layout.Context) {
 	}
 
 	w.handleMessageSubmitShortcut(gtx)
+	w.handleMyIdentityPanel(gtx)
 
 	for w.copyIdentityButton.Clicked(gtx) {
 		gtx.Execute(clipboard.WriteCmd{
@@ -2260,14 +2336,13 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 // is something in-app to dismiss, top-most first:
 //
 //  1. an open overlay, in REVERSE draw order — the overlays are Stacked
-//     language → identity menu → message menu (see layout()), so the
-//     message menu is the top-most visual layer and closes first, the
-//     identity menu second (backing out of its confirmation / alias
-//     sub-views one step at a time, exactly like Escape — reusing
-//     escapePeerMenu keeps the focus-restore invariants of the menu
-//     machinery intact), and the language dropdown last. The language
-//     overlay does not block interaction underneath, so a context menu
-//     CAN legitimately be open on top of it;
+//     language → identity menu → message menu → my identity (see layout()),
+//     so identity details close first, followed by the message menu and then
+//     the identity menu (backing out of its confirmation / alias sub-views one
+//     step at a time, exactly like Escape — reusing escapePeerMenu keeps the
+//     focus-restore invariants of the menu machinery intact), and the language
+//     dropdown last. The language overlay does not block interaction
+//     underneath, so a context menu CAN legitimately be open on top of it;
 //  2. in the compact layout, an open chat — Back returns to the contact
 //     list (DeselectPeer).
 //
@@ -2277,7 +2352,8 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 // behaviour on the contact list with nothing open. Overlay dismissal is
 // not gated on the compact mode: menus overlay both layouts.
 func (w *Window) handleBackNavigation(gtx layout.Context) {
-	backTarget := w.showLanguageMenu ||
+	backTarget := w.identityPanelVisible ||
+		w.showLanguageMenu ||
 		w.msgContextMsg != nil ||
 		!w.contextMenuPeer.IsZero() ||
 		(w.isCompactLayout(gtx) && !w.snap.ActivePeer.IsZero())
@@ -2290,6 +2366,8 @@ func (w *Window) handleBackNavigation(gtx layout.Context) {
 			break
 		}
 		switch {
+		case w.identityPanelVisible:
+			w.closeIdentityPanel()
 		case w.msgContextMsg != nil:
 			w.escapeMsgMenu()
 		case !w.contextMenuPeer.IsZero():
@@ -2482,49 +2560,18 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 	// changes nothing, since both are before the editor lays out and takes this
 	// frame's keystrokes.
 	searchResults := w.resolveIdentitySearchRows(status, recipients)
-	rows := []string{
-		w.t("clients.you", w.snap.MyAddress),
-		w.t("clients.known", len(recipients)),
-	}
 
-	return w.card(gtx, w.t("clients.title"), rows, func(gtx layout.Context) layout.Dimensions {
-		return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			// Stacked vertically: the sidebar is too narrow for two buttons
-			// side by side — a Rigid squeezed past its text width wraps the
-			// label one letter per line. Min.X is pinned to the same value
-			// as the cap, so both buttons render at ONE width regardless of
-			// how long their labels are in the active language.
-			buttonWidth := func(gtx layout.Context) layout.Context {
-				width := min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(220)))
-				gtx.Constraints.Min.X = width
-				gtx.Constraints.Max.X = width
-				return gtx
-			}
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					btn := material.Button(w.theme, &w.copyIdentityButton, w.t("clients.copy_identity"))
-					return btn.Layout(buttonWidth(gtx))
-				}),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					btn := material.Button(w.theme, &w.shareContactButton, w.t("clients.share_contact"))
-					return btn.Layout(buttonWidth(gtx))
-				}),
-			)
-		})
+	return w.card(gtx, w.t("clients.title"), nil, func(gtx layout.Context) layout.Dimensions {
+		return w.layoutMyIdentityButton(gtx, len(recipients))
 	}, func(gtx layout.Context) layout.Dimensions {
 		children := []layout.FlexChild{}
-		if w.shareQRVisible {
-			children = append(children,
-				layout.Rigid(w.layoutShareContactQR),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-			)
-		}
 		children = append(children,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return w.identitySearchCard(gtx, status, searchResults)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+			layout.Rigid(w.layoutKnownIdentitiesHeader),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 		)
 
 		if len(recipients) == 0 {
@@ -2546,11 +2593,92 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 	})
 }
 
+func (w *Window) layoutMyIdentityButton(gtx layout.Context, known int) layout.Dimensions {
+	minHeight := min(gtx.Dp(unit.Dp(96)), gtx.Constraints.Max.Y)
+	if gtx.Constraints.Min.Y < minHeight {
+		gtx.Constraints.Min.Y = minHeight
+	}
+	border := widget.Border{
+		Color:        color.NRGBA{R: 54, G: 69, B: 89, A: 255},
+		CornerRadius: unit.Dp(10),
+		Width:        unit.Dp(1),
+	}
+	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		button := material.ButtonLayout(w.theme, &w.myIdentityButton)
+		button.Background = color.NRGBA{R: 22, G: 31, B: 42, A: 255}
+		button.CornerRadius = unit.Dp(10)
+		return button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(12), Left: unit.Dp(12), Right: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						side := gtx.Dp(unit.Dp(44))
+						iconGTX := gtx
+						iconGTX.Constraints.Min = image.Pt(side, side)
+						iconGTX.Constraints.Max = image.Pt(side, side)
+						defer clip.Ellipse(image.Rect(0, 0, side, side)).Push(gtx.Ops).Pop()
+						fill(iconGTX, color.NRGBA{R: 25, G: 119, B: 67, A: 255})
+						return layout.Center.Layout(iconGTX, func(gtx layout.Context) layout.Dimensions {
+							return layoutVectorIcon(gtx, w.fingerprintIcon, unit.Dp(25), color.NRGBA{R: 240, G: 250, B: 244, A: 255})
+						})
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								label := material.Body1(w.theme, w.t("clients.my_identity"))
+								label.Color = color.NRGBA{R: 247, G: 249, B: 252, A: 255}
+								label.Font.Weight = 600
+								label.MaxLines = 1
+								return label.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								dims, _ := w.layoutMyIdentityAddress(gtx)
+								return dims
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(5)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								label := material.Caption(w.theme, w.t("clients.known", known))
+								label.Color = color.NRGBA{R: 180, G: 194, B: 211, A: 255}
+								label.MaxLines = 1
+								return label.Layout(gtx)
+							}),
+						)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layoutVectorIcon(gtx, w.chevronIcon, unit.Dp(22), color.NRGBA{R: 218, G: 228, B: 240, A: 255})
+					}),
+				)
+			})
+		})
+	})
+}
+
+func (w *Window) layoutMyIdentityAddress(gtx layout.Context) (layout.Dimensions, widget.TextInfo) {
+	style := material.Caption(w.theme, w.snap.MyAddress.String())
+	textMacro := op.Record(gtx.Ops)
+	paint.ColorOp{Color: color.NRGBA{R: 167, G: 181, B: 199, A: 255}}.Add(gtx.Ops)
+	textMaterial := textMacro.Stop()
+	label := widget.Label{WrapPolicy: text.WrapGraphemes}
+	return label.LayoutDetailed(gtx, style.Shaper, style.Font, style.TextSize, style.Text, textMaterial)
+}
+
+func (w *Window) layoutKnownIdentitiesHeader(gtx layout.Context) layout.Dimensions {
+	label := material.Caption(w.theme, strings.ToUpper(w.t("clients.known_title")))
+	label.Color = color.NRGBA{R: 143, G: 158, B: 178, A: 255}
+	return label.Layout(gtx)
+}
+
 // identitySearchMaxRows caps how many search hits get a row. The cap belongs to
 // resolveIdentitySearchRows and not to the card, because it has to be applied to
 // the same slice the digest is taken from: a cap in the card would let the rows
 // actually drawn disagree with the signature guarding their cached rectangles.
 const identitySearchMaxRows = 4
+
+// identitySearchTextTopInset compensates for the editor's font metrics so its
+// visible glyphs, rather than its line box, align with the search icon.
+const identitySearchTextTopInset = unit.Dp(2)
 
 // resolveIdentitySearchRows returns the identity-search hits this frame will lay
 // out, and records them in the menu-rect signature.
@@ -2608,56 +2736,60 @@ func (w *Window) recordSearchRowAnchor(gtx layout.Context, rows int) {
 func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatus, results []domain.PeerIdentity) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
-				backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
-				cardHeight := gtx.Dp(unit.Dp(78))
-				return layout.Stack{}.Layout(gtx,
-					layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Min.Y = cardHeight
-						gtx.Constraints.Max.Y = cardHeight
-						fill(gtx, borderColor)
-						return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							fill(gtx, backgroundColor)
-							return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										label := material.Body2(w.theme, w.t("clients.search_label"))
-										label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-										return label.Layout(gtx)
-									}),
-									layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										w.identitySearchEditor.SingleLine = true
-										editor := material.Editor(w.theme, &w.identitySearchEditor, w.t("clients.search_placeholder"))
-										editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
-										editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
-										return editorTouchKeyboardArea(gtx, &w.touchKbdTags[1], &w.touchKbd, editor.Layout)
-									}),
-								)
-							})
-						})
-					}),
-				)
+			fieldHeight := min(gtx.Dp(unit.Dp(48)), gtx.Constraints.Max.Y)
+			gtx.Constraints.Min.Y = fieldHeight
+			gtx.Constraints.Max.Y = fieldHeight
+			border := widget.Border{
+				Color:        color.NRGBA{R: 55, G: 70, B: 91, A: 255},
+				CornerRadius: unit.Dp(9),
+				Width:        unit.Dp(1),
+			}
+			return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				fillRounded(gtx, color.NRGBA{R: 20, G: 29, B: 39, A: 255}, unit.Dp(9))
+				return layout.Inset{Top: unit.Dp(11), Bottom: unit.Dp(11), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layoutVectorIcon(gtx, w.searchIcon, unit.Dp(20), color.NRGBA{R: 139, G: 158, B: 183, A: 255})
+						}),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return w.layoutIdentitySearchEditor(gtx)
+						}),
+					)
+				})
 			})
 		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			// Above the early return and above the first row, like every other
-			// term of the signature: this is where the hits begin, and a
-			// keyboard or Narrator menu opened while they lay out is anchored
-			// from the cache this guards.
-			w.recordSearchRowAnchor(gtx, len(results))
 			if len(results) == 0 {
+				w.recordSearchRowAnchor(gtx, 0)
 				return layout.Dimensions{}
 			}
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, recipientsToChildren(results, func(gtx layout.Context, identity domain.PeerIdentity) layout.Dimensions {
-				return layout.Inset{Left: unit.Dp(4), Right: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				// Record the actual top edge of the first result, after the gap
+				// between the search field and its hits has been applied.
+				w.recordSearchRowAnchor(gtx, len(results))
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, recipientsToChildren(results, func(gtx layout.Context, identity domain.PeerIdentity) layout.Dimensions {
 					return w.layoutRecipientButton(gtx, status, identity, false)
-				})
-			})...)
+				})...)
+			})
 		}),
 	)
+}
+
+func (w *Window) identitySearchEditorStyle() material.EditorStyle {
+	w.identitySearchEditor.SingleLine = true
+	editor := material.Editor(w.theme, &w.identitySearchEditor, w.t("clients.search_placeholder"))
+	editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
+	editor.HintColor = color.NRGBA{R: 139, G: 153, B: 174, A: 255}
+	editor.TextSize = unit.Sp(14)
+	return editor
+}
+
+func (w *Window) layoutIdentitySearchEditor(gtx layout.Context) layout.Dimensions {
+	return layout.Inset{Top: identitySearchTextTopInset}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		semantic.DescriptionOp(w.t("clients.search_label")).Add(gtx.Ops)
+		return editorTouchKeyboardArea(gtx, &w.touchKbdTags[1], &w.touchKbd, w.identitySearchEditorStyle().Layout)
+	})
 }
 
 func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity, showUnread bool) layout.Dimensions {
@@ -5374,6 +5506,194 @@ func (w *Window) layoutLanguageDropdown(gtx layout.Context) layout.Dimensions {
 	})
 }
 
+func identityPanelSize(window image.Point, pxPerDp float32) image.Point {
+	dp := func(value int) int {
+		return int(float32(value)*pxPerDp + 0.5)
+	}
+	inset := dp(16)
+	width := min(dp(384), window.X-2*inset)
+	height := min(dp(520), window.Y-2*inset)
+	if width < 0 {
+		width = 0
+	}
+	if height < 0 {
+		height = 0
+	}
+	return image.Pt(width, height)
+}
+
+func identityPanelSizeForMode(window image.Point, pxPerDp float32, compact bool) image.Point {
+	if compact {
+		return window
+	}
+	return identityPanelSize(window, pxPerDp)
+}
+
+func identityPanelBounds(window, panel image.Point) image.Rectangle {
+	origin := image.Pt((window.X-panel.X)/2, (window.Y-panel.Y)/2)
+	return image.Rectangle{Min: origin, Max: origin.Add(panel)}
+}
+
+func (w *Window) registerIdentityPanelInputBlocker(gtx layout.Context) {
+	area := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
+	event.Op(gtx.Ops, &w.identityPanelDismissTag)
+	area.Pop()
+}
+
+func pointInsideRectangle(point f32.Point, bounds image.Rectangle) bool {
+	return point.X >= float32(bounds.Min.X) && point.X < float32(bounds.Max.X) &&
+		point.Y >= float32(bounds.Min.Y) && point.Y < float32(bounds.Max.Y)
+}
+
+func (w *Window) layoutIdentityPanelOverlay(gtx layout.Context) layout.Dimensions {
+	if w.identityPanelFocus.drive(gtx, w.identityPanelItems(), false) {
+		w.closeIdentityPanel()
+		return layout.Dimensions{}
+	}
+	compact := w.isCompactLayout(gtx)
+	panelSize := identityPanelSizeForMode(gtx.Constraints.Max, gtx.Metric.PxPerDp, compact)
+	panelBounds := identityPanelBounds(gtx.Constraints.Max, panelSize)
+	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			fill(gtx, color.NRGBA{R: 2, G: 8, B: 14, A: 205})
+			w.registerIdentityPanelInputBlocker(gtx)
+			for {
+				ev, ok := gtx.Event(pointer.Filter{Target: &w.identityPanelDismissTag, Kinds: pointer.Press})
+				if !ok {
+					break
+				}
+				if pointerEvent, ok := ev.(pointer.Event); ok {
+					// The full-window target always consumes the press so blank
+					// card padding and the compact screen cannot leak input to
+					// the application below. Only the desktop area outside the
+					// centered card also dismisses the panel.
+					if !compact && !pointInsideRectangle(pointerEvent.Position, panelBounds) {
+						w.closeIdentityPanel()
+					}
+				}
+			}
+			return layout.Dimensions{Size: gtx.Constraints.Max}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if panelSize.X == 0 || panelSize.Y == 0 {
+				return layout.Dimensions{}
+			}
+			gtx.Constraints.Min = panelSize
+			gtx.Constraints.Max = panelSize
+			return w.layoutIdentityPanelCard(gtx, compact)
+		}),
+	)
+}
+
+func (w *Window) identityPanelItems() []event.Tag {
+	return []event.Tag{&w.identityPanelClose, &w.copyIdentityButton, &w.shareContactButton}
+}
+
+func (w *Window) layoutIdentityPanelCard(gtx layout.Context, fullscreen bool) layout.Dimensions {
+	if fullscreen {
+		fill(gtx, color.NRGBA{R: 18, G: 27, B: 37, A: 255})
+		return layout.UniformInset(unit.Dp(20)).Layout(gtx, w.layoutIdentityPanelList)
+	}
+
+	border := widget.Border{
+		Color:        color.NRGBA{R: 52, G: 68, B: 87, A: 255},
+		CornerRadius: unit.Dp(16),
+		Width:        unit.Dp(1),
+	}
+	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		fillRounded(gtx, color.NRGBA{R: 18, G: 27, B: 37, A: 255}, unit.Dp(16))
+		return layout.UniformInset(unit.Dp(20)).Layout(gtx, w.layoutIdentityPanelList)
+	})
+}
+
+func (w *Window) layoutIdentityPanelList(gtx layout.Context) layout.Dimensions {
+	return w.identityPanelList.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+		return w.layoutIdentityPanelContent(gtx)
+	})
+}
+
+func (w *Window) layoutIdentityPanelContent(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					label := material.H6(w.theme, w.t("clients.my_identity"))
+					label.Color = color.NRGBA{R: 246, G: 248, B: 251, A: 255}
+					return label.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					button := material.IconButton(w.theme, &w.identityPanelClose, w.closeIcon, w.t("clients.close_identity"))
+					button.Background = color.NRGBA{R: 27, G: 39, B: 53, A: 255}
+					button.Color = color.NRGBA{R: 157, G: 173, B: 194, A: 255}
+					button.Size = unit.Dp(20)
+					button.Inset = layout.UniformInset(unit.Dp(12))
+					return button.Layout(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return w.layoutIdentityQR(gtx, unit.Dp(220))
+			})
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			label := material.Body1(w.theme, w.snap.MyAddress.String())
+			label.Color = color.NRGBA{R: 190, G: 204, B: 222, A: 255}
+			label.Alignment = text.Middle
+			label.MaxLines = 2
+			return label.Layout(gtx)
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(1))
+			gtx.Constraints.Max.Y = gtx.Constraints.Min.Y
+			fill(gtx, color.NRGBA{R: 50, G: 65, B: 84, A: 255})
+			return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.layoutIdentityActionButton(gtx, &w.copyIdentityButton, w.copyIcon, w.t("clients.copy_identity"))
+		}),
+		layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.layoutIdentityActionButton(gtx, &w.shareContactButton, w.shareIcon, w.t("clients.share_contact"))
+		}),
+	)
+}
+
+func (w *Window) layoutIdentityActionButton(gtx layout.Context, button *widget.Clickable, icon *widget.Icon, labelText string) layout.Dimensions {
+	gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(52))
+	gtx.Constraints.Max.Y = gtx.Constraints.Min.Y
+	border := widget.Border{
+		Color:        color.NRGBA{R: 57, G: 75, B: 98, A: 255},
+		CornerRadius: unit.Dp(10),
+		Width:        unit.Dp(1),
+	}
+	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		buttonStyle := material.ButtonLayout(w.theme, button)
+		buttonStyle.Background = color.NRGBA{R: 27, G: 39, B: 53, A: 255}
+		buttonStyle.CornerRadius = unit.Dp(10)
+		return buttonStyle.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Left: unit.Dp(14), Right: unit.Dp(14), Top: unit.Dp(13), Bottom: unit.Dp(13)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layoutVectorIcon(gtx, icon, unit.Dp(23), color.NRGBA{R: 202, G: 215, B: 231, A: 255})
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						label := material.Body1(w.theme, labelText)
+						label.Color = color.NRGBA{R: 242, G: 245, B: 249, A: 255}
+						label.MaxLines = 1
+						return label.Layout(gtx)
+					}),
+				)
+			})
+		})
+	})
+}
+
 func (w *Window) layoutLanguageOverlay(gtx layout.Context) layout.Dimensions {
 	x := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(windowInset)) - gtx.Dp(unit.Dp(languageMenuWidth))
 	if x < 0 {
@@ -7052,4 +7372,16 @@ func fill(gtx layout.Context, c color.NRGBA) {
 	defer stack.Pop()
 	paint.ColorOp{Color: c}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
+}
+
+func fillRounded(gtx layout.Context, c color.NRGBA, radius unit.Dp) {
+	bounds := image.Rectangle{Max: gtx.Constraints.Max}
+	paint.FillShape(gtx.Ops, c, clip.UniformRRect(bounds, gtx.Dp(radius)).Op(gtx.Ops))
+}
+
+func layoutVectorIcon(gtx layout.Context, icon *widget.Icon, size unit.Dp, iconColor color.NRGBA) layout.Dimensions {
+	side := gtx.Dp(size)
+	gtx.Constraints.Min = image.Pt(side, side)
+	gtx.Constraints.Max = image.Pt(side, side)
+	return icon.Layout(gtx, iconColor)
 }

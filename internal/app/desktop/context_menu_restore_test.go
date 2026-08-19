@@ -346,7 +346,7 @@ func TestDismissOnOutsideTapReportsTheClear(t *testing.T) {
 }
 
 // The wiring the tests above cannot see: layout() has to pass a fallback to
-// both restores, and it has to USE the answer dismissOnOutsideTap returns.
+// every overlay restore, and it has to USE the answer dismissOnOutsideTap returns.
 // Dropping the result of a bool-returning call is silent in Go, so nothing but
 // a check like this notices the cancellation going missing.
 func TestLayoutWiresTheRestoreFallbackAndItsCancellation(t *testing.T) {
@@ -405,8 +405,8 @@ func TestLayoutWiresTheRestoreFallbackAndItsCancellation(t *testing.T) {
 		}
 		return true
 	})
-	if restores != 2 {
-		t.Errorf("layout() calls restoreOnClose %d times, want 2 (the identity menu and the message menu)", restores)
+	if restores != 3 {
+		t.Errorf("layout() calls restoreOnClose %d times, want 3 (the peer menu, message menu, and identity panel)", restores)
 	}
 
 	// The cancellation has to hang off the call's own result. Anything else —

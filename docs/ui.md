@@ -12,8 +12,13 @@ The desktop UI is built with [Gio](https://gioui.org) — a portable immediate-m
 Window (Gio event loop)
   ├── Header (console button, language selector, update badge)
   ├── Sidebar (contacts card)
-  │   ├── Identity search
-  │   ├── Recipient list (from router peers)
+  │   ├── My identity card (fingerprint, fully wrapped address, known count)
+  │   │   └── Identity details overlay
+  │   │       ├── QR contact link + full address
+  │   │       ├── Copy identity / Share contact actions
+  │   │       └── Centered modal on desktop; opaque full-screen view in compact mode
+  │   ├── Identity search (short visual hint, descriptive accessibility label)
+  │   ├── Known identity list (from router peers)
   │   │   └── Reachable indicator (green/gray dot)
   │   └── Context menu (right-click, 500 ms long-press, or the card's ⋯ button: copy, alias, delete)
   ├── Chat area
@@ -32,6 +37,12 @@ Window (Gio event loop)
       ├── Send button
       └── Status line (send/delete/sync feedback)
 ```
+
+The identity details overlay owns keyboard focus while it is open. Focus starts
+on Close, Tab and Shift+Tab cycle through Close, Copy identity, and Share
+contact, and Escape closes the overlay. This prevents the search editor or
+composer underneath from receiving text and shortcuts. Closing from the
+keyboard returns focus to the My identity card.
 
 ### Touch keyboard (Windows tablets)
 
@@ -394,8 +405,13 @@ Desktop UI построен на [Gio](https://gioui.org) — кроссплат
 Window (Gio event loop)
   ├── Header (кнопка консоли, выбор языка, бейдж обновления)
   ├── Sidebar (карточка контактов)
-  │   ├── Поиск identity
-  │   ├── Список получателей (из peers роутера)
+  │   ├── Карточка «Мой identity» (fingerprint, полный адрес с переносом, число известных identity)
+  │   │   └── Оверлей сведений об identity
+  │   │       ├── QR-ссылка контакта + полный адрес
+  │   │       ├── Действия «Скопировать identity» / «Поделиться контактом»
+  │   │       └── Центрированная модалка на desktop; непрозрачный полноэкранный вид в compact-режиме
+  │   ├── Поиск identity (короткий визуальный hint, расширенный accessibility label)
+  │   ├── Список известных identity (из peers роутера)
   │   │   └── Индикатор достижимости (зеленая/серая точка)
   │   └── Контекстное меню (правый клик, долгое удержание 500 мс или кнопка ⋯ на карточке: копировать, псевдоним, удалить)
   ├── Область чата
@@ -414,6 +430,12 @@ Window (Gio event loop)
       ├── Кнопка отправки
       └── Строка статуса (обратная связь по отправке/удалению/синхронизации)
 ```
+
+Пока оверлей identity открыт, он владеет клавиатурным фокусом. Сначала фокус
+получает кнопка закрытия, Tab и Shift+Tab циклически переключают «Закрыть»,
+«Скопировать identity» и «Поделиться контактом», а Escape закрывает оверлей.
+Поэтому поиск и поле сообщения под ним не получают текст и сочетания клавиш.
+При закрытии с клавиатуры фокус возвращается на карточку «Мой identity».
 
 ### Сенсорная клавиатура (Windows-планшеты)
 
@@ -720,4 +742,3 @@ Payload `CaptureSessionStarted` несёт overlay-идентичность (`Ad
 Контракт payload разрешает пустой `Address`, если publisher не смог разрешить соединение (оно было закрыто между `StartCapture` и публикацией или никогда не отслеживалось). Сессия всё равно сохраняется в `NodeStatus.CaptureSessions`, чтобы writer оставался виден для пути "Stop all recordings", но desktop-fallback считает такие сессии неопознанными: `captureHasIdentity` возвращает false, когда оба поля `Address` и `PeerID` пусты, и `mergeCapturesIntoPeers` / `countUniquePeers` / `countConnectedPeers` их пропускают. Без этого фильтра неопознанные captures рендерились бы как пустые peer-карточки и все коллапсировали бы в единственную фантомную запись под пустым ключом дедупа (`peerIdentityKey("", "") == ""`), раздувая `known_peers` / `connected_peers` ровно на один элемент вне зависимости от количества активных неопознанных captures.
 
 `mergeCapturesIntoPeers` сверяет каждую активную capture со списком `peers` по трём упорядоченным правилам: (1) строка с тем же `ConnID` авторитетна и capture пропускается; (2) иначе, если существует address-level placeholder с `ConnID=0` (создан `applySlotStateDelta` либо `applyPeerPendingDelta`) и совпадающим `Address`, placeholder promote'ится на месте — `ConnID`, `Direction` и `Connected` берутся из capture, а `SlotState`, `PendingCount` и уже наблюдаемый `PeerID` сохраняются; (3) иначе через `synthesizePeerHealthFromCapture` добавляется новая синтетическая строка. Promotion исключает split-state дубликат, при котором slot-only placeholder и сиротская capture для одного и того же peer'а рендерились бы как две отдельные карточки до прихода следующей health-delta. При этом инвариант "не мутировать слайс вызывающего" сохраняется через copy-on-write: входной слайс клонируется при первой же promotion, чтобы диагностические снапшоты продолжали видеть исходный placeholder без изменений.
-
