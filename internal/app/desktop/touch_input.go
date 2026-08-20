@@ -116,6 +116,27 @@ type touchKeyboardState struct {
 	paneVisible       atomic.Bool    // Windows: a pane session is live for this window — set by Showing/AlreadyVisible EVIDENCE (incl. user-opened keyboards), cleared by Hiding/session end; NOT derivable from ownership or padding (a user-opened floating keyboard has neither); corrected against the physical pane by tkCmdPaneTruth when the two disagree
 	released          atomic.Bool    // window destroyed; no further platform work for this state
 
+	// What a non-modal surface restores when it closes: a keyboard was asked
+	// for and focus has not since been fully lost. Both are WINDOW-scoped and
+	// neither names an editor — every editor routed through
+	// editorTouchKeyboardArea can set them, the composer as much as the
+	// identity search, the alias editor or the picker's own search field.
+	//
+	// That scope is the right one for the only question asked of them, which
+	// is "was there a keyboard to come back to", not "whose". The restore is
+	// not aimed at whoever set the flag: closeEmojiPicker focuses the composer
+	// and only then re-raises a keyboard, so the answer belongs to the window.
+	// A surface that needs to know WHICH editor had the keyboard has to keep
+	// that itself; it cannot be read out of these.
+	softKeyboardExpected atomic.Bool // an editor pointer requested Gio's soft keyboard — the cross-platform half, set for mouse presses too
+	// Set on EVERY platform, by touch alone: it records that the keyboard was
+	// raised by a finger rather than a mouse, which is what makes it safe to
+	// raise again on restore. Only its consumer is Windows-specific — the
+	// TabTip dispatch, which the other platforms stub out — so a restore that
+	// re-runs showTouchKeyboard there is not idle: it puts these two flags
+	// back, and Gio raises the keyboard from the SoftKeyboardCmd beside it.
+	platformTouchKeyboardExpected atomic.Bool
+
 	// Editor-focus tracking for symmetric hide; touched only from this
 	// window's frame loop, so plain fields suffice.
 	focusSeen   bool
@@ -254,6 +275,8 @@ func endKeyboardSession(kbd *touchKeyboardState) {
 	kbd.expectHiding.Store(false)
 	kbd.shownByUs.Store(false)
 	kbd.paneVisible.Store(false)
+	kbd.softKeyboardExpected.Store(false)
+	kbd.platformTouchKeyboardExpected.Store(false)
 	kbd.expectOwnPaneShow.Store(0) // no pending own-pane Showing after teardown
 	kbd.adoptedGen.Store(0)        // the adopted session is over; its Hiding has nothing left to clear
 	kbd.publishOccludedDp(0)
@@ -1040,10 +1063,17 @@ func editorTouchKeyboardArea(gtx layout.Context, tag event.Tag, kbd *touchKeyboa
 				continue
 			}
 			tkTraceEvent("editor-area").Msg("touch keyboard: touch on editor cancelled by a grab, treating it as a tap")
-			requestTouchKeyboard(kbd)
+			showTouchKeyboard(kbd)
 			continue
 		}
 		if pe.Source != pointer.Touch {
+			if pe.Source == pointer.Mouse && pe.Kind == pointer.Press {
+				// widget.Editor emits SoftKeyboardCmd{Show:true} for this same
+				// mouse press. Remember the generic intent so a non-modal
+				// surface can restore it, but do not request Windows TabTip:
+				// an ordinary desktop mouse must never open the touch keyboard.
+				kbd.softKeyboardExpected.Store(true)
+			}
 			// Traced, not silent: "the editor was tapped and nothing
 			// happened" and "the tap arrived as a mouse/stylus event, which
 			// this area deliberately ignores" are indistinguishable on a
@@ -1061,7 +1091,7 @@ func editorTouchKeyboardArea(gtx layout.Context, tag event.Tag, kbd *touchKeyboa
 		case pointer.Release:
 			kbd.dropEditorTouch(tag, pe.PointerID)
 			tkTraceEvent("editor-area").Msg("touch keyboard: touch release on editor, requesting show")
-			requestTouchKeyboard(kbd)
+			showTouchKeyboard(kbd)
 		}
 	}
 	macro := op.Record(gtx.Ops)
@@ -1294,6 +1324,18 @@ func tkHideStillClosing(now, handled, raised int64) bool {
 	return (handled != 0 && now < handled) || (raised != 0 && now < raised)
 }
 
+// showTouchKeyboard records that a touch asked for the keyboard — both the
+// generic soft keyboard and the platform touch keyboard are expected from here
+// on — and then dispatches the platform show path. The two records are
+// unconditional because they describe the REQUEST, which is the same
+// everywhere; it is the dispatch that is platform-specific, and on
+// non-Windows it stubs itself out and leaves the generic request to Gio.
+func showTouchKeyboard(kbd *touchKeyboardState) {
+	kbd.softKeyboardExpected.Store(true)
+	kbd.platformTouchKeyboardExpected.Store(true)
+	requestTouchKeyboard(kbd)
+}
+
 // requestTouchKeyboard asks the platform to show the on-screen keyboard
 // for kbd's window. Debounced per window (a tap in the OTHER window must
 // not be swallowed — its monitor and occlusion state still need to start)
@@ -1418,6 +1460,8 @@ func (s *touchKeyboardState) trackEditorFocus(gtx layout.Context, focused bool) 
 	}
 	s.hidePending = false
 	s.focusSeen = false
+	s.softKeyboardExpected.Store(false)
+	s.platformTouchKeyboardExpected.Store(false)
 	// Cancel any still-pending SHOW too, not just hide an already-shown
 	// keyboard: a show dispatched moments before the blur may still be in its
 	// ~150ms settle or on the retry ladder and has no idea focus has left —
@@ -1680,6 +1724,64 @@ func requestTouchKeyboardHide(kbd *touchKeyboardState) (int64, bool) {
 	gen := kbd.hideGen.Load()
 	hidePlatformTouchKeyboard(kbd, gen)
 	return gen, true
+}
+
+// requestTouchKeyboardRoom asks for the touch keyboard to be taken away on
+// behalf of a surface that has too little clear height to draw itself, so the
+// room appears within a frame or two and the still-open surface draws itself
+// then. askedGen is that surface's OWN throttle marker; the caller clears it
+// to 0 on the frames it has room, which is what re-arms the next ask.
+//
+// The ask is throttled by the hide GENERATION it was dispatched with — not by
+// a bool, not by a clock, and not by the occlusion it was made for. Occlusion
+// described the keyboard, but what a repeat ask has to know is whether the
+// PREVIOUS ask is still alive, and the two come apart exactly where it
+// matters: every editor tap bumps hideGen, doHide then drops the command, and
+// because the retry ladder re-enqueues the SAME generation the hide is
+// cancelled rather than eventually retried. So after "open the surface → close
+// it → tap the editor → open it again" the keyboard stands at the same height,
+// an occlusion key calls that the same ask, no new hide is sent and the
+// surface sits open and undrawn for good. hideGen moves on precisely the
+// events that kill an ask, so keying on it needs no clearing rule at any site
+// that closes a surface — and a rule that has to be repeated at N sites is the
+// exact shape that has produced regressions in this code. A wall-clock
+// deadline would misbehave across the sleep/resume time jumps this tablet
+// actually does.
+//
+// Both the ask and the caller's own reset of askedGen are statements about
+// what is on screen NOW, so neither may run in an inert measuring pass — and
+// the two callers reach that rule from opposite sides, which is deliberate
+// rather than an inconsistency to be tidied away. A context menu is a Stacked
+// overlay no measurement reaches, so menuOverlayRoom needs no guard and does
+// not look at gtx.Enabled(); the emoji picker sits inside the composer, which
+// keyboardTailRow measures with the keyboard's height handed back, so
+// emojiPickerRoom returns before BOTH branches on a disabled source. Making
+// either one look like the other would be a bug: a guard in the menu is dead
+// code, and dropping the picker's guard would reset the marker off a
+// measurement of a window that is not the one on screen, and ask again every
+// frame.
+//
+// The marker stores the generation PLUS ONE so that 0 can mean "nothing
+// asked": hideGen legitimately starts at 0, and a bare 0 would suppress the
+// first ask of the session. The generation is taken from the dispatch itself
+// instead of being re-read, because the service goroutine bumps hideGen too.
+// An ask that was NOT dispatched stores nothing — no command is in flight, so
+// there is nothing to throttle and the next frame may try again.
+//
+// LIMIT, stated rather than papered over: requestTouchKeyboardHide only hides
+// a keyboard WE opened. If the user raised it themselves we cannot take it
+// away, and on a window this short the surface stays open but undrawn until
+// they lower it — at which point it appears. Every caller therefore has to
+// keep a way OUT of the deferred surface live the whole time: a dismiss area,
+// the Escape handler, the toggle that opened it.
+func requestTouchKeyboardRoom(kbd *touchKeyboardState, askedGen *int64) {
+	if *askedGen != 0 && kbd.hideGen.Load() == *askedGen-1 {
+		return
+	}
+	*askedGen = 0
+	if gen, sent := requestTouchKeyboardHide(kbd); sent {
+		*askedGen = gen + 1
+	}
 }
 
 // cancelLongPressOnMultiTouch cancels an armed long-press when a second

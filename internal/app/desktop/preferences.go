@@ -10,9 +10,10 @@ import (
 )
 
 type Preferences struct {
-	path     string
-	Language string            `json:"language"`
-	Aliases  map[string]string `json:"aliases,omitempty"`
+	path         string
+	Language     string            `json:"language"`
+	Aliases      map[string]string `json:"aliases,omitempty"`
+	RecentEmojis []string          `json:"recent_emojis,omitempty"`
 }
 
 func LoadPreferences(path string) (*Preferences, error) {
@@ -32,6 +33,7 @@ func LoadPreferences(path string) (*Preferences, error) {
 
 	prefs.path = path
 	prefs.Language = normalizeLanguage(prefs.Language)
+	prefs.RecentEmojis = normalizeRecentEmojis(prefs.RecentEmojis)
 	if prefs.Aliases == nil {
 		prefs.Aliases = make(map[string]string)
 	}
@@ -53,11 +55,13 @@ func (p *Preferences) Save() error {
 	}
 
 	payload, err := json.MarshalIndent(struct {
-		Language string            `json:"language"`
-		Aliases  map[string]string `json:"aliases,omitempty"`
+		Language     string            `json:"language"`
+		Aliases      map[string]string `json:"aliases,omitempty"`
+		RecentEmojis []string          `json:"recent_emojis,omitempty"`
 	}{
-		Language: normalizeLanguage(p.Language),
-		Aliases:  aliases,
+		Language:     normalizeLanguage(p.Language),
+		Aliases:      aliases,
+		RecentEmojis: normalizeRecentEmojis(p.RecentEmojis),
 	}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal preferences: %w", err)

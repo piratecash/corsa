@@ -95,6 +95,8 @@ func newIdentityLayoutTestWindow(t *testing.T) *Window {
 		copyIcon:          icons.copy,
 		shareIcon:         icons.share,
 		closeIcon:         icons.close,
+		shieldIcon:        icons.shield,
+		consoleIcon:       icons.console,
 	}
 }
 

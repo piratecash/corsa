@@ -44,6 +44,25 @@ func TestDraftSwapTextRoundTripsAcrossPeers(t *testing.T) {
 	}
 }
 
+func TestEmojiAppendsToRestoredDraft(t *testing.T) {
+	w := &Window{}
+	peerA := domaintest.ID("peer-a")
+	peerB := domaintest.ID("peer-b")
+
+	w.snap = service.RouterSnapshot{ActivePeer: peerA}
+	w.swapComposerDraftOnPeerChange()
+	w.messageEditor.SetText("draft")
+	w.snap = service.RouterSnapshot{ActivePeer: peerB}
+	w.swapComposerDraftOnPeerChange()
+	w.snap = service.RouterSnapshot{ActivePeer: peerA}
+	w.swapComposerDraftOnPeerChange()
+
+	insertEmoji(&w.messageEditor, "😀")
+	if got := w.messageEditor.Text(); got != "draft😀" {
+		t.Fatalf("restored draft after emoji = %q, want %q", got, "draft😀")
+	}
+}
+
 // TestDraftSwapFileRoundTripsAcrossPeers verifies the selected-but-unsent
 // attachment is stashed and restored with the conversation, independently of
 // the text draft.

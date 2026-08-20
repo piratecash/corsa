@@ -89,6 +89,13 @@ type Window struct {
 	copyIcon                 *widget.Icon
 	shareIcon                *widget.Icon
 	closeIcon                *widget.Icon
+	attachIcon               *widget.Icon
+	emojiIcon                *widget.Icon
+	sendIcon                 *widget.Icon
+	shieldIcon               *widget.Icon
+	consoleIcon              *widget.Icon
+	emojiCategoryIcons       map[emojiCategoryID]*widget.Icon
+	emojiPicker              emojiPickerState
 	// lastContactLinkTried edge-triggers the search-paste import
 	// (contact_share.go).
 	lastContactLinkTried string
@@ -131,9 +138,9 @@ type Window struct {
 	lastPressAt     time.Time                  // frame time of that press (recency gate for touchDrivenInput)
 
 	// Touch input: pointer tags for the on-screen keyboard invocation
-	// areas — composer, contact search, alias editor — plus this window's
+	// areas — composer, contact search, alias editor, emoji search — plus this window's
 	// keyboard occlusion state (see touch_input.go).
-	touchKbdTags [3]int8
+	touchKbdTags [4]int8
 	touchKbd     touchKeyboardState
 
 	// Context menu state for right-click on recipient buttons.
@@ -224,9 +231,13 @@ type Window struct {
 	// recordSearchRowAnchor.
 	searchAvail int
 
-	// Hide generation PLUS ONE that a context menu's last "please go away"
-	// was dispatched with, 0 for "never asked" — see menuOverlayRoom.
-	menuKbdHideAskedGen int64
+	// Hide generation PLUS ONE that a surface's last "please go away" was
+	// dispatched with, 0 for "never asked" — see requestTouchKeyboardRoom.
+	// One marker per surface: a context menu and the emoji picker defer
+	// independently, and a shared marker would let whichever asked first
+	// throttle the other's first ask.
+	menuKbdHideAskedGen  int64
+	emojiKbdHideAskedGen int64
 
 	// Context menus scroll when taller than the space above the keyboard (in
 	// landscape the keyboard can leave too little height for every row — Delete
@@ -443,7 +454,9 @@ const (
 func newAppTheme() *material.Theme {
 	theme := material.NewTheme()
 	theme.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
-	theme.Face = font.Typeface("Go")
+	// Keep the bundled Go face for normal text and explicitly fall back to the
+	// platform emoji family for picker choices and emoji embedded in messages.
+	theme.Face = font.Typeface("Go, emoji")
 	theme.Bg = color.NRGBA{R: 18, G: 21, B: 26, A: 255}
 	theme.Fg = color.NRGBA{R: 235, G: 239, B: 244, A: 255}
 	theme.ContrastBg = color.NRGBA{R: 36, G: 67, B: 126, A: 255}
@@ -460,12 +473,18 @@ func loadUIIcon(name string, data []byte) (*widget.Icon, error) {
 }
 
 type windowIcons struct {
-	search      *widget.Icon
-	fingerprint *widget.Icon
-	chevron     *widget.Icon
-	copy        *widget.Icon
-	share       *widget.Icon
-	close       *widget.Icon
+	search          *widget.Icon
+	fingerprint     *widget.Icon
+	chevron         *widget.Icon
+	copy            *widget.Icon
+	share           *widget.Icon
+	close           *widget.Icon
+	attach          *widget.Icon
+	emoji           *widget.Icon
+	send            *widget.Icon
+	shield          *widget.Icon
+	console         *widget.Icon
+	emojiCategories map[emojiCategoryID]*widget.Icon
 }
 
 func loadWindowIcons() (windowIcons, error) {
@@ -481,6 +500,11 @@ func loadWindowIcons() (windowIcons, error) {
 		{name: "copy", data: icons.ContentContentCopy, dst: &loaded.copy},
 		{name: "share", data: icons.SocialShare, dst: &loaded.share},
 		{name: "close", data: icons.NavigationClose, dst: &loaded.close},
+		{name: "attachment", data: icons.EditorAttachFile, dst: &loaded.attach},
+		{name: "emoji", data: icons.EditorInsertEmoticon, dst: &loaded.emoji},
+		{name: "send", data: icons.ContentSend, dst: &loaded.send},
+		{name: "shield", data: icons.ActionVerifiedUser, dst: &loaded.shield},
+		{name: "console", data: icons.EditorShowChart, dst: &loaded.console},
 	}
 	for _, definition := range definitions {
 		icon, err := loadUIIcon(definition.name, definition.data)
@@ -488,6 +512,29 @@ func loadWindowIcons() (windowIcons, error) {
 			return windowIcons{}, err
 		}
 		*definition.dst = icon
+	}
+	loaded.emojiCategories = make(map[emojiCategoryID]*widget.Icon, len(emojiCategories)+1)
+	categoryDefinitions := []struct {
+		id   emojiCategoryID
+		name string
+		data []byte
+	}{
+		{id: emojiCategoryRecent, name: "emoji-recent", data: icons.ActionHistory},
+		{id: emojiCategorySmileys, name: "emoji-smileys", data: icons.SocialMood},
+		{id: emojiCategoryGestures, name: "emoji-gestures", data: icons.SocialPeople},
+		{id: emojiCategoryAnimals, name: "emoji-animals", data: icons.ActionPets},
+		{id: emojiCategoryFood, name: "emoji-food", data: icons.MapsRestaurant},
+		{id: emojiCategoryTravel, name: "emoji-travel", data: icons.MapsDirectionsCar},
+		{id: emojiCategoryActivities, name: "emoji-activities", data: icons.HardwareVideogameAsset},
+		{id: emojiCategorySymbols, name: "emoji-symbols", data: icons.ActionFavorite},
+		{id: emojiCategoryFlags, name: "emoji-flags", data: icons.ContentFlag},
+	}
+	for _, definition := range categoryDefinitions {
+		icon, err := loadUIIcon(definition.name, definition.data)
+		if err != nil {
+			return windowIcons{}, err
+		}
+		loaded.emojiCategories[definition.id] = icon
 	}
 	return loaded, nil
 }
@@ -503,6 +550,11 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 	if prefs != nil && prefs.Language != "" {
 		language = normalizeLanguage(prefs.Language)
 	}
+	var recentEmojis []string
+	if prefs != nil {
+		recentEmojis = prefs.RecentEmojis
+	}
+	emojiPicker := newEmojiPickerStateWithRecents(recentEmojis)
 
 	w := &Window{
 		router:              router,
@@ -540,6 +592,13 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		copyIcon:            loadedIcons.copy,
 		shareIcon:           loadedIcons.share,
 		closeIcon:           loadedIcons.close,
+		attachIcon:          loadedIcons.attach,
+		emojiIcon:           loadedIcons.emoji,
+		sendIcon:            loadedIcons.send,
+		shieldIcon:          loadedIcons.shield,
+		consoleIcon:         loadedIcons.console,
+		emojiCategoryIcons:  loadedIcons.emojiCategories,
+		emojiPicker:         emojiPicker,
 		// Generously buffered and fully drained each frame so background
 		// producers (file picks, failed-send restores) block-send without
 		// dropping cross-conversation events.
@@ -566,6 +625,7 @@ func (w *Window) SetShutdown(fn func()) {
 // runShutdown invokes the SetShutdown callback exactly once.
 func (w *Window) runShutdown() {
 	w.shutdownOnce.Do(func() {
+		w.flushRecentEmojiPreferences(time.Time{}, true)
 		if w.shutdown != nil {
 			w.shutdown()
 		}
@@ -954,7 +1014,8 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.touchKbd.trackEditorFocus(gtx,
 		gtx.Focused(&w.messageEditor) ||
 			gtx.Focused(&w.identitySearchEditor) ||
-			gtx.Focused(&w.aliasEditor))
+			gtx.Focused(&w.aliasEditor) ||
+			gtx.Focused(&w.emojiPicker.searchEditor))
 
 	// Publish what THIS frame measures, at its end — deferred so it happens
 	// however the function returns. The header yields on what the composer and
@@ -996,7 +1057,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		if raiseKeyboard {
 			// Touch-driven contact selection: FocusCmd alone won't raise the
 			// keyboard on Windows, so ask explicitly.
-			requestTouchKeyboard(&w.touchKbd)
+			showTouchKeyboard(&w.touchKbd)
 		}
 	}
 
@@ -1559,6 +1620,7 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 
 func (w *Window) handleActions(gtx layout.Context) {
 	w.handleBackNavigation(gtx)
+	w.handleEmojiEscapeNavigation(gtx)
 
 	for w.languageToggle.Clicked(gtx) {
 		w.showLanguageMenu = !w.showLanguageMenu
@@ -1578,6 +1640,8 @@ func (w *Window) handleActions(gtx layout.Context) {
 	for w.compactBackBtn.Clicked(gtx) {
 		w.router.DeselectPeer()
 	}
+
+	w.handleEmojiActions(gtx)
 
 	for w.sendButton.Clicked(gtx) {
 		w.triggerSend()
@@ -1669,7 +1733,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 			// The menu item was TAPPED (not activated by Return/Space, which
 			// records no press): focusing alone won't bring the keyboard up on
 			// Windows (and a pending blur-hide may be closing it).
-			requestTouchKeyboard(&w.touchKbd)
+			showTouchKeyboard(&w.touchKbd)
 		}
 		if w.window != nil {
 			w.window.Invalidate()
@@ -2323,12 +2387,46 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 			}.Layout(gtx,
 				layout.Rigid(w.layoutUpdateBadge),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-				layout.Rigid(w.layoutConsoleButton),
-				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 				layout.Rigid(w.layoutLanguageSelectorInline),
 			)
 		}),
 	)
+}
+
+// navigationDismissTarget identifies the top in-app surface handled by Back
+// or Escape before navigation is allowed to reach the platform.
+type navigationDismissTarget uint8
+
+const (
+	dismissNothing navigationDismissTarget = iota
+	dismissIdentityPanel
+	dismissMessageMenu
+	dismissIdentityMenu
+	dismissLanguageMenu
+	dismissEmojiPicker
+	dismissCompactChat
+)
+
+// topNavigationDismissTarget is the single source of truth for overlay priority
+// shared by Back and Escape. It follows reverse draw order, then falls through
+// to the non-modal picker and finally compact-chat navigation.
+func (w *Window) topNavigationDismissTarget(gtx layout.Context) navigationDismissTarget {
+	switch {
+	case w.identityPanelVisible:
+		return dismissIdentityPanel
+	case w.msgContextMsg != nil:
+		return dismissMessageMenu
+	case !w.contextMenuPeer.IsZero():
+		return dismissIdentityMenu
+	case w.showLanguageMenu:
+		return dismissLanguageMenu
+	case w.emojiPicker.visible:
+		return dismissEmojiPicker
+	case w.isCompactLayout(gtx) && !w.snap.ActivePeer.IsZero():
+		return dismissCompactChat
+	default:
+		return dismissNothing
+	}
 }
 
 // handleBackNavigation consumes the system Back key (Android hardware /
@@ -2343,7 +2441,8 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 //     focus-restore invariants of the menu machinery intact), and the language
 //     dropdown last. The language overlay does not block interaction
 //     underneath, so a context menu CAN legitimately be open on top of it;
-//  2. in the compact layout, an open chat — Back returns to the contact
+//  2. the non-modal emoji picker;
+//  3. in the compact layout, an open chat — Back returns to the contact
 //     list (DeselectPeer).
 //
 // The filter is registered ONLY while such a target exists: an
@@ -2352,32 +2451,34 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 // behaviour on the contact list with nothing open. Overlay dismissal is
 // not gated on the compact mode: menus overlay both layouts.
 func (w *Window) handleBackNavigation(gtx layout.Context) {
-	backTarget := w.identityPanelVisible ||
-		w.showLanguageMenu ||
-		w.msgContextMsg != nil ||
-		!w.contextMenuPeer.IsZero() ||
-		(w.isCompactLayout(gtx) && !w.snap.ActivePeer.IsZero())
-	if !backTarget {
+	if w.topNavigationDismissTarget(gtx) == dismissNothing {
 		return
 	}
 	for {
-		_, ok := gtx.Event(key.Filter{Name: key.NameBack})
+		ev, ok := gtx.Event(key.Filter{Name: key.NameBack})
 		if !ok {
 			break
 		}
-		switch {
-		case w.identityPanelVisible:
+		ke, ok := ev.(key.Event)
+		if !ok || ke.State != key.Press {
+			continue
+		}
+		switch w.topNavigationDismissTarget(gtx) {
+		case dismissIdentityPanel:
 			w.closeIdentityPanel()
-		case w.msgContextMsg != nil:
+		case dismissMessageMenu:
 			w.escapeMsgMenu()
-		case !w.contextMenuPeer.IsZero():
+		case dismissIdentityMenu:
 			w.escapePeerMenu()
-		case w.showLanguageMenu:
+		case dismissLanguageMenu:
 			w.showLanguageMenu = false
 			if w.window != nil {
 				w.window.Invalidate()
 			}
-		case w.isCompactLayout(gtx) && !w.snap.ActivePeer.IsZero():
+		case dismissEmojiPicker:
+			w.closeEmojiPicker(gtx)
+			w.dropEmojiToggleClicks(gtx)
+		case dismissCompactChat:
 			w.router.DeselectPeer()
 		}
 	}
@@ -2478,9 +2579,7 @@ func (w *Window) layoutMainCompact(gtx layout.Context, status service.NodeStatus
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return w.layoutNetworkStatus(gtx, status)
-				})
+				return w.layoutComposerFooter(gtx, status)
 			}),
 		)
 	}
@@ -3042,6 +3141,15 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 	maxInputHeight := max(gtx.Constraints.Max.Y/3-gtx.Dp(unit.Dp(76)), gtx.Dp(unit.Dp(62)))
 
 	return w.card(gtx, "", nil, func(gtx layout.Context) layout.Dimensions {
+		footerMacro := op.Record(gtx.Ops)
+		footerDims := w.layoutComposerFooter(gtx, status)
+		footerCall := footerMacro.Stop()
+		footer := func(gtx layout.Context) layout.Dimensions {
+			footerCall.Add(gtx.Ops)
+			return footerDims
+		}
+		footerReserve := footerDims.Size.Y + gtx.Dp(unit.Dp(6))
+
 		return layout.Flex{
 			Axis: layout.Vertical,
 		}.Layout(gtx,
@@ -3058,73 +3166,40 @@ func (w *Window) layoutComposerCard(gtx layout.Context) layout.Dimensions {
 				return w.layoutReplyPreview(gtx)
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return w.messageInputCard(gtx, recipient, maxInputHeight)
+				return w.messageInputCard(gtx, recipient, maxInputHeight, footerReserve)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				statusRow := func(gtx layout.Context) layout.Dimensions {
-					return w.layoutNetworkStatus(gtx, status)
-				}
-				sendBtn := func(gtx layout.Context) layout.Dimensions {
-					label := w.t("compose.send")
-					if recipient.IsZero() {
-						label = w.t("compose.select_first")
-					}
-					// Visual + interactive disable while a
-					// conversation_delete is in flight for
-					// the active peer. We render through a
-					// dummy Clickable (not w.sendButton) so
-					// even queued click events from the
-					// active sendButton are ignored — the
-					// service-layer ErrConversationDeleteInflight
-					// gate is still enforced as defence in
-					// depth.
-					pending := !recipient.IsZero() && w.router.IsConversationDeletePending(recipient)
-					if pending {
-						label = w.t("compose.send_blocked_during_wipe")
-					}
-					return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(260)))
-						if pending {
-							var inert widget.Clickable
-							btn := material.Button(w.theme, &inert, label)
-							btn.Background = color.NRGBA{R: 60, G: 60, B: 64, A: 255}
-							btn.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
-							return btn.Layout(gtx)
-						}
-						btn := material.Button(w.theme, &w.sendButton, label)
-						return btn.Layout(gtx)
-					})
-				}
-
-				// Narrow (phone) widths: the network pill and the send
-				// button no longer fit side by side — the button would be
-				// squeezed into a wrapped multi-line sliver. Stack them.
-				// 500dp ≈ pill (~280dp) + button (~200dp) + margins.
-				if gtx.Constraints.Max.X < gtx.Dp(unit.Dp(500)) {
-					return layout.Flex{
-						Axis: layout.Vertical,
-					}.Layout(gtx,
-						layout.Rigid(statusRow),
-						layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-						layout.Rigid(sendBtn),
-					)
-				}
-
-				return layout.Flex{
-					Axis:      layout.Horizontal,
-					Spacing:   layout.SpaceBetween,
-					Alignment: layout.Middle,
-				}.Layout(gtx,
-					layout.Rigid(statusRow),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Dimensions{}
-					}),
-					layout.Rigid(sendBtn),
-				)
-			}),
+			layout.Rigid(footer),
 		)
 	})
+}
+
+const composerFooterStackMaxDp = 360
+
+func (w *Window) layoutComposerFooter(gtx layout.Context, status service.NodeStatus) layout.Dimensions {
+	statusRow := func(gtx layout.Context) layout.Dimensions {
+		return w.layoutNetworkStatus(gtx, status)
+	}
+	if runtime.GOOS == "android" {
+		return statusRow(gtx)
+	}
+
+	consoleButton := func(gtx layout.Context) layout.Dimensions {
+		return layout.E.Layout(gtx, w.layoutConsoleButton)
+	}
+	if gtx.Constraints.Max.X < gtx.Dp(unit.Dp(composerFooterStackMaxDp)) {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(statusRow),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+			layout.Rigid(consoleButton),
+		)
+	}
+
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+		layout.Flexed(1, statusRow),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
+		layout.Rigid(consoleButton),
+	)
 }
 
 func (w *Window) layoutSendStatusRow(gtx layout.Context, statusText string) layout.Dimensions {
@@ -3163,21 +3238,30 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 		inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(8), Right: unit.Dp(8)}
 		macro := op.Record(gtx.Ops)
 		dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Caption(w.theme, labelText)
-					label.Color = fg
-					return label.Layout(gtx)
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							label := material.Caption(w.theme, labelText)
+							label.Color = fg
+							return label.Layout(gtx)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							if strings.TrimSpace(breakdownText) == "" {
+								return layout.Dimensions{}
+							}
+							return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								label := material.Caption(w.theme, breakdownText)
+								label.Color = color.NRGBA{R: 214, G: 221, B: 232, A: 220}
+								return label.Layout(gtx)
+							})
+						}),
+					)
 				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					if strings.TrimSpace(breakdownText) == "" {
-						return layout.Dimensions{}
-					}
-					return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						label := material.Caption(w.theme, breakdownText)
-						label.Color = color.NRGBA{R: 214, G: 221, B: 232, A: 220}
-						return label.Layout(gtx)
-					})
+					semantic.DescriptionOp(w.t("compose.network_security")).Add(gtx.Ops)
+					return layoutVectorIcon(gtx, w.shieldIcon, unit.Dp(24), fg)
 				}),
 			)
 		})
@@ -3288,14 +3372,81 @@ func networkStateColors(state string) (color.NRGBA, color.NRGBA) {
 	}
 }
 
-func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity, maxInputHeight int) layout.Dimensions {
+func layoutComposerEditorContent(gtx layout.Context, lines int, content layout.Widget) layout.Dimensions {
+	if lines <= 1 {
+		return layoutVerticallyCentered(gtx, content)
+	}
+	return content(gtx)
+}
+
+const composerEditorLineHeight = unit.Sp(21)
+
+func composerEditorStyle(theme *material.Theme, editor *widget.Editor, hint string) material.EditorStyle {
+	style := material.Editor(theme, editor, hint)
+	style.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
+	style.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
+	style.TextSize = unit.Sp(15)
+	style.LineHeight = composerEditorLineHeight
+	// Gio otherwise applies its default 1.2 multiplier. The editor-height and
+	// scrollbar arithmetic below deliberately budgets this exact fixed step.
+	style.LineHeightScale = 1
+	return style
+}
+
+// composerEditorMetrics sizes the editor in WHOLE lines. The growth steps are
+// whole lines by construction, but the cap is not: it arrives as a third of
+// the window minus the composer's chrome, and a 480dp window leaves 58px where
+// two lines cost 42 — the remaining 16px draw the top slice of a third line
+// that can never be read. Every window height produced one: 6px at 640dp,
+// 12px at 720dp, 6px at 1080dp. So the cap is floored to the line step here,
+// where visibleLines is computed from it, and the two cannot disagree about
+// what fits.
+//
+// The floor never eats the last line: baseEditorHeight is the caller's own
+// two-line minimum, so a cap below it was already being raised to it.
+func composerEditorMetrics(totalLines, maxEditorHeight, baseEditorHeight, lineStep int) (editorHeight, visibleLines int, showScrollbar bool) {
+	if lineStep <= 0 {
+		lineStep = 1
+	}
+	maxEditorHeight = max(baseEditorHeight, maxEditorHeight/lineStep*lineStep)
+	extraLines := max(0, totalLines-2)
+	editorHeight = min(baseEditorHeight+extraLines*lineStep, maxEditorHeight)
+	visibleLines = max(1, editorHeight/lineStep)
+	return editorHeight, visibleLines, totalLines > visibleLines
+}
+
+// composerPickerHeight is the height the emoji picker may take under the
+// editor, or 0 when what is left over cannot hold minHeight — the picker's own
+// chrome plus one row of cells. Anything between the two would draw a clipped
+// strip with no reachable cell in it, so the caller defers the picker rather
+// than shrinking it past the point of being usable.
+func composerPickerHeight(availableHeight, chromeHeight, editorHeight, footerReserve, minHeight, desiredHeight int) int {
+	available := availableHeight - chromeHeight - editorHeight - footerReserve
+	if available < minHeight {
+		return 0
+	}
+	return min(desiredHeight, available)
+}
+
+func composerSendActionState(hasRecipient, deletePending, hasContent bool) (enabled bool, reasonKey string) {
+	switch {
+	case !hasRecipient:
+		return false, "compose.select_first"
+	case deletePending:
+		return false, "compose.send_blocked_during_wipe"
+	default:
+		return hasContent, ""
+	}
+}
+
+func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity, maxInputHeight, footerReserve int) layout.Dimensions {
 	borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
 	backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
 	editorBg := backgroundColor
 	scrollTrack := color.NRGBA{R: 38, G: 46, B: 58, A: 255}
 	scrollThumb := color.NRGBA{R: 112, G: 132, B: 164, A: 255}
-	lineStep := gtx.Dp(unit.Dp(18))
-	baseEditorHeight := gtx.Dp(unit.Dp(36))
+	lineStep := gtx.Sp(composerEditorLineHeight)
+	baseEditorHeight := 2 * lineStep
 	chromeHeight := gtx.Dp(unit.Dp(26))
 	if w.attachedFile != "" {
 		chromeHeight += gtx.Dp(unit.Dp(40))
@@ -3303,18 +3454,13 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 
 	line, _ := w.messageEditor.CaretPos()
 	totalLines := max(line+1, strings.Count(w.messageEditor.Text(), "\n")+1)
-	extraLines := max(0, totalLines-2)
-	editorHeight := baseEditorHeight + extraLines*lineStep
 	maxEditorHeight := maxInputHeight - chromeHeight
-	if maxEditorHeight < baseEditorHeight {
-		maxEditorHeight = baseEditorHeight
+	editorHeight, visibleLines, showScrollbar := composerEditorMetrics(totalLines, maxEditorHeight, baseEditorHeight, lineStep)
+	pickerHeight := 0
+	if w.emojiPicker.visible {
+		pickerHeight = w.emojiPickerRoom(gtx, chromeHeight, editorHeight, footerReserve)
 	}
-	if editorHeight > maxEditorHeight {
-		editorHeight = maxEditorHeight
-	}
-	cardHeight := chromeHeight + editorHeight
-	visibleLines := max(2, editorHeight/lineStep)
-	showScrollbar := totalLines > visibleLines
+	cardHeight := chromeHeight + editorHeight + pickerHeight
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.Y = cardHeight
@@ -3399,26 +3545,18 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 							Alignment: layout.Middle,
 						}.Layout(gtx,
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								btn := material.Button(w.theme, &w.attachButton, w.t("file.attach_icon"))
-								btn.Background = color.NRGBA{R: 55, G: 65, B: 85, A: 255}
-								btn.Color = color.NRGBA{R: 200, G: 210, B: 230, A: 255}
-								btn.TextSize = unit.Sp(18)
-								btn.Inset = layout.UniformInset(unit.Dp(2))
-								gtx.Constraints.Min.X = gtx.Dp(unit.Dp(28))
-								gtx.Constraints.Max.X = gtx.Dp(unit.Dp(28))
-								gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(28))
-								gtx.Constraints.Max.Y = gtx.Dp(unit.Dp(28))
+								btn := material.IconButton(w.theme, &w.attachButton, w.attachIcon, w.t("file.attach"))
+								btn.Background = backgroundColor
+								btn.Color = color.NRGBA{R: 157, G: 176, B: 201, A: 255}
+								btn.Size = unit.Dp(22)
+								btn.Inset = layout.UniformInset(unit.Dp(6))
 								return btn.Layout(gtx)
 							}),
 							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 								w.messageEditor.SingleLine = false
 								w.messageEditor.Submit = false
-								editor := material.Editor(w.theme, &w.messageEditor, w.t("compose.placeholder"))
-								editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
-								editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
-								editor.TextSize = unit.Sp(15)
-								editor.LineHeight = unit.Sp(18)
+								editor := composerEditorStyle(w.theme, &w.messageEditor, w.t("compose.placeholder"))
 
 								radius := gtx.Dp(unit.Dp(12))
 								defer clip.UniformRRect(image.Rectangle{Max: image.Pt(gtx.Constraints.Max.X, editorHeight)}, radius).Push(gtx.Ops).Pop()
@@ -3443,7 +3581,17 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 												Alignment: layout.Middle,
 											}.Layout(gtx,
 												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-													return editorTouchKeyboardArea(gtx, &w.touchKbdTags[0], &w.touchKbd, editor.Layout)
+													return editorTouchKeyboardArea(gtx, &w.touchKbdTags[0], &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
+														dims := layoutComposerEditorContent(gtx, totalLines, editor.Layout)
+														if w.emojiPicker.takeSoftKeyboardSuppression(gtx.Enabled()) {
+															// Editor.Layout may emit Show:true for the FocusEvent
+															// caused by opening the picker. Close wins once, on that
+															// enabled layout; later taps in the editor can show the
+															// keyboard normally while the picker remains open.
+															gtx.Execute(key.SoftKeyboardCmd{Show: false})
+														}
+														return dims
+													})
 												}),
 												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 													if !showScrollbar {
@@ -3456,10 +3604,87 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 									}),
 								)
 							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								description := w.t("emoji.open")
+								background := backgroundColor
+								iconColor := color.NRGBA{R: 157, G: 176, B: 201, A: 255}
+								if w.emojiPicker.visible {
+									description = w.t("emoji.close")
+									background = color.NRGBA{R: 34, G: 83, B: 151, A: 255}
+									iconColor = color.NRGBA{R: 225, G: 240, B: 255, A: 255}
+								}
+								btn := material.IconButton(w.theme, &w.emojiPicker.toggleButton, w.emojiIcon, description)
+								btn.Background = background
+								btn.Color = iconColor
+								btn.Size = unit.Dp(22)
+								btn.Inset = layout.UniformInset(unit.Dp(6))
+								return btn.Layout(gtx)
+							}),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								pending := !recipient.IsZero() && w.router.IsConversationDeletePending(recipient)
+								hasContent := strings.TrimSpace(w.messageEditor.Text()) != "" || w.attachedFile != ""
+								enabled, reasonKey := composerSendActionState(!recipient.IsZero(), pending, hasContent)
+								description := w.t("compose.send")
+								if reasonKey != "" {
+									description = w.t(reasonKey)
+								}
+								return w.layoutComposerSendButton(gtx, enabled, description, reasonKey != "")
+							}),
 						)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if !w.emojiPicker.visible || pickerHeight <= 0 {
+							return layout.Dimensions{}
+						}
+						return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							height := max(0, pickerHeight-gtx.Dp(unit.Dp(6)))
+							gtx.Constraints.Min.Y = height
+							gtx.Constraints.Max.Y = height
+							return w.layoutEmojiPicker(gtx)
+						})
 					}),
 				)
 			})
+		})
+	})
+}
+
+func (w *Window) layoutComposerSendButton(gtx layout.Context, enabled bool, description string, showReason bool) layout.Dimensions {
+	background := color.NRGBA{R: 31, G: 91, B: 176, A: 255}
+	foreground := color.NRGBA{R: 245, G: 249, B: 255, A: 255}
+	if !enabled {
+		gtx = gtx.Disabled()
+		foreground = color.NRGBA{R: 190, G: 201, B: 216, A: 255}
+	}
+	if !showReason {
+		button := material.IconButton(w.theme, &w.sendButton, w.sendIcon, description)
+		button.Background = background
+		button.Color = foreground
+		button.Size = unit.Dp(22)
+		button.Inset = layout.UniformInset(unit.Dp(7))
+		return button.Layout(gtx)
+	}
+
+	gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(unit.Dp(200)))
+	button := material.ButtonLayout(w.theme, &w.sendButton)
+	button.Background = background
+	return button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		semantic.DescriptionOp(description).Add(gtx.Ops)
+		return layout.Inset{Top: unit.Dp(7), Bottom: unit.Dp(7), Left: unit.Dp(9), Right: unit.Dp(9)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Label(w.theme, unit.Sp(11), description)
+					label.Color = foreground
+					label.MaxLines = 1
+					return label.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layoutVectorIcon(gtx, w.sendIcon, unit.Dp(18), foreground)
+				}),
+			)
 		})
 	})
 }
@@ -5412,16 +5637,25 @@ func (w *Window) contextMenuDeleteEnabled() bool {
 }
 
 func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
-	// Gio supports a single window per Android activity: the console
-	// opens a second app.Window (console_window.go), which never attaches
-	// on Android. Hide the entry point instead of rendering a dead button.
-	if runtime.GOOS == "android" {
-		return layout.Dimensions{}
-	}
-	btn := material.Button(w.theme, &w.consoleButton, w.t("header.console"))
-	btn.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-	btn.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-	return btn.Layout(gtx)
+	foreground := color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+	button := material.ButtonLayout(w.theme, &w.consoleButton)
+	button.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
+	return button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return layoutVectorIcon(gtx, w.consoleIcon, unit.Dp(18), foreground)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Label(w.theme, unit.Sp(14), w.t("header.console"))
+					label.Color = foreground
+					label.MaxLines = 1
+					return label.Layout(gtx)
+				}),
+			)
+		})
+	})
 }
 
 func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
@@ -5777,51 +6011,17 @@ func (w *Window) menuAvailableHeight(gtx layout.Context) int {
 // menuOverlayRoom reports the height a context-menu overlay may occupy and
 // whether that is enough to draw one at all. When it is not, it asks for the
 // keyboard to be taken away, so the room appears within a frame or two and the
-// still-open menu draws itself then. The caller must skip its card — but NOT
-// its dismiss area — on a false, and must not close the menu: the menu is
-// deferred, not cancelled.
-//
-// The ask is throttled by the hide GENERATION it was dispatched with — not by
-// a bool, not by a clock, and no longer by the occlusion it was made for.
-// Occlusion described the keyboard, but what a repeat ask has to know is
-// whether the PREVIOUS ask is still alive, and the two come apart exactly
-// where it matters: every editor tap bumps hideGen, doHide then drops the
-// command, and because the retry ladder re-enqueues the SAME generation the
-// hide is cancelled rather than eventually retried. So after "open menu →
-// close it → tap the editor → open the menu again" the keyboard stands at the
-// same height, an occlusion key calls that the same ask, no new hide is sent
-// and the menu sits open and undrawn for good. hideGen moves on precisely the
-// events that kill an ask, so keying on it needs no clearing rule at any site
-// that closes a menu — and a rule that has to be repeated at N sites is the
-// exact shape that has produced regressions in this file; both writes of this
-// marker are inside this function. A wall-clock deadline would misbehave
-// across the sleep/resume time jumps this tablet actually does.
-//
-// The marker stores the generation PLUS ONE so that 0 can mean "nothing
-// asked": hideGen legitimately starts at 0, and a bare 0 would suppress the
-// first ask of the session. The generation is taken from the dispatch itself
-// instead of being re-read, because the service goroutine bumps hideGen too.
-// An ask that was NOT dispatched stores nothing — no command is in flight, so
-// there is nothing to throttle and the next frame may try again.
-//
-// LIMIT, stated rather than papered over: requestTouchKeyboardHide only hides
-// a keyboard WE opened. If the user raised it themselves we cannot take it
-// away, and on a window this short the menu stays open but undrawn until they
-// lower it — at which point it appears. The dismiss area is live underneath
-// the whole time, so a tap anywhere still clear closes it.
+// still-open menu draws itself then — see requestTouchKeyboardRoom for how
+// that ask is throttled and what it cannot do. The caller must skip its card —
+// but NOT its dismiss area — on a false, and must not close the menu: the menu
+// is deferred, not cancelled.
 func (w *Window) menuOverlayRoom(gtx layout.Context) (int, bool) {
 	availH := w.menuAvailableHeight(gtx)
 	if availH >= gtx.Dp(unit.Dp(menuMinUsableDp)) {
 		w.menuKbdHideAskedGen = 0
 		return availH, true
 	}
-	if w.menuKbdHideAskedGen == 0 ||
-		w.touchKbd.hideGen.Load() != w.menuKbdHideAskedGen-1 {
-		w.menuKbdHideAskedGen = 0
-		if gen, sent := requestTouchKeyboardHide(&w.touchKbd); sent {
-			w.menuKbdHideAskedGen = gen + 1
-		}
-	}
+	requestTouchKeyboardRoom(&w.touchKbd, &w.menuKbdHideAskedGen)
 	return availH, false
 }
 
@@ -6663,7 +6863,7 @@ func (w *Window) handleReplyContextClicks(gtx layout.Context) {
 		if pointerClickedThisFrame(&w.msgCtxReply, gtx) && w.touchDrivenInput(gtx) {
 			// Reply item TAPPED (not Return/Space): raise the keyboard for the
 			// composer.
-			requestTouchKeyboard(&w.touchKbd)
+			showTouchKeyboard(&w.touchKbd)
 		}
 		if w.window != nil {
 			w.window.Invalidate()

@@ -467,7 +467,7 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 			// keyboard-driven picks (Tab/Enter/Escape/RightArrow) reach
 			// applySuggestion & co. through key handlers.
 			if pointerClickedThisFrame(btn, gtx) && c.touchDrivenInput(gtx) {
-				requestTouchKeyboard(&c.touchKbd)
+				showTouchKeyboard(&c.touchKbd)
 			}
 		}
 	}

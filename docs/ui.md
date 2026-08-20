@@ -10,7 +10,7 @@ The desktop UI is built with [Gio](https://gioui.org) — a portable immediate-m
 
 ```
 Window (Gio event loop)
-  ├── Header (console button, language selector, update badge)
+  ├── Header (language selector, update badge)
   ├── Sidebar (contacts card)
   │   ├── My identity card (fingerprint, fully wrapped address, known count)
   │   │   └── Identity details overlay
@@ -33,10 +33,56 @@ Window (Gio event loop)
   └── Composer card
       ├── Recipient display
       ├── Reply preview banner (when replying)
-      ├── Message input
-      ├── Send button
-      └── Status line (send/delete/sync feedback)
+      ├── Message input (vertically centered single-line text, upright attachment icon, emoji picker, inline send action)
+      │   └── Emoji picker (categories, keyword search aligned with its icon, recently used)
+      ├── Status line (send/delete/sync feedback)
+      └── Footer (flexible shielded network status, chart-icon console button on the same desktop row down to 360dp)
 ```
+
+The emoji picker is non-modal. Opening it and selecting an emoji keep keyboard
+focus in the message editor; `Escape` and system `Back` close the picker before
+chat or Activity navigation. On touch input, opening the picker hides the soft
+keyboard without blurring the editor. Only the opening layout suppresses the
+focus-triggered show command: tapping the message editor while the picker is
+open can raise the keyboard normally. Closing restores the keyboard state that
+was active before opening, independently of whether the picker button was
+pressed by touch or mouse, and clears the search query and the grid's scroll
+offset: a query that outlived its picker would reopen it on a single cell with
+no category highlighted, explained only by small text in a field nobody is
+looking at. Opening the picker scrolls the chip row to the selected category,
+which is what keeps a scrolling row from highlighting none of the chips it has
+room for.
+Search is global across categories and matches prefixes at keyword boundaries;
+every catalog entry has individual English and Russian names, so incremental
+queries such as `piz` work without arbitrary infix matches. Category selection
+is not highlighted while a global query is active. Up to 12 recently used emoji
+are stored in desktop preferences, with rapid selections coalesced into one
+write and the pending snapshot flushed on shutdown, then restored on the next
+start.
+
+The composer measures the rendered footer once and uses that exact height when
+sizing the emoji picker. Below the picker's own chrome plus one row of emoji
+the surface is not drawn at all: it stays open, asks for the touch keyboard to
+be taken away, and appears once that room does — a clipped strip with no
+reachable cell would be worse than the wait. `Escape`, system `Back` and the
+picker button keep closing it while it waits, since they are handled outside
+the layout. A dismissal key wins over a toggle tap delivered in the same
+frame — one gesture, one outcome.
+
+The row of category chips spreads across the picker when all nine fit at full
+size and scrolls them at full size when they do not, the way the grid below it
+already works. Shrinking them to fit was the alternative and it is worse: at
+140dp of row the icon would be 15dp, at 40dp it would be 4dp — overlapping
+nothing and hittable by nobody — and unlike vertical room, horizontal room
+cannot be asked for by dismissing the keyboard. Each emoji in the grid is centred on its INK
+rather than on its line box, because an emoji's ink ends on the baseline and
+the font descent below it is empty — centring the box lifts every glyph off the
+middle of the hover highlight drawn around it. A blocked send action shows its localized reason next
+to the arrow instead of exposing it only to accessibility. Editor height and
+scrollbar visibility use the same 21sp line-height metric as text rendering,
+and the height cap is floored to a whole number of those lines, so a capped
+editor never shows the top slice of a line that cannot be read;
+the Gio line-height scale is explicitly `1` instead of its 1.2 default.
 
 The identity details overlay owns keyboard focus while it is open. Focus starts
 on Close, Tab and Shift+Tab cycle through Close, Copy identity, and Share
@@ -370,7 +416,7 @@ The `CommandTable` is a single registry of all available commands. Desktop UI ca
 
 ### Console Window — Traffic Recording Indicators
 
-The Console Window (opened via the header console button) displays per-peer diagnostic information. When a capture session is active, the following UI elements appear:
+The Console Window (opened via the composer footer console button) displays per-peer diagnostic information. When a capture session is active, the following UI elements appear:
 
 - **Recording dot** — a small red ellipse on the peer card header next to the peer address. Visible when `NodeStatus.CaptureSessions` contains an `Active` entry whose `ConnID` matches the peer row.
 - **Recording info row** — displayed below the peer card health data. Shows scope (`conn_id` / `ip` / `all`), file path (selectable text), capture start time, and dropped event count if non-zero. An error string is shown if the capture writer encountered a disk error.
@@ -403,7 +449,7 @@ Desktop UI построен на [Gio](https://gioui.org) — кроссплат
 
 ```
 Window (Gio event loop)
-  ├── Header (кнопка консоли, выбор языка, бейдж обновления)
+  ├── Header (выбор языка, бейдж обновления)
   ├── Sidebar (карточка контактов)
   │   ├── Карточка «Мой identity» (fingerprint, полный адрес с переносом, число известных identity)
   │   │   └── Оверлей сведений об identity
@@ -426,10 +472,54 @@ Window (Gio event loop)
   └── Карточка ввода
       ├── Отображение получателя
       ├── Баннер предпросмотра ответа (при ответе)
-      ├── Поле ввода сообщения
-      ├── Кнопка отправки
-      └── Строка статуса (обратная связь по отправке/удалению/синхронизации)
+      ├── Поле ввода (однострочный текст выровнен по вертикали, вертикальная скрепка, выбор эмодзи, встроенная кнопка отправки)
+      │   └── Выбор эмодзи (категории, поиск по ключевым словам с выравниванием по лупе, недавние)
+      ├── Строка статуса (обратная связь по отправке/удалению/синхронизации)
+      └── Нижняя строка (гибкий статус защищённой сети со щитом, кнопка консоли с иконкой графика в той же desktop-строке до 360dp)
 ```
+
+Пикер эмодзи немодальный. При открытии и выборе эмодзи фокус
+остаётся в редакторе сообщения; `Escape` и системный `Back`
+сначала закрывают пикер, а не чат или Activity. При сенсорном вводе пикер
+скрывает экранную клавиатуру без потери фокуса. Команда показа гасится только в layout
+открытия: тап по тексту сообщения при открытом пикере снова поднимает клавиатуру. При закрытии
+восстанавливается состояние до открытия независимо от того, была ли кнопка нажата пальцем или мышью,
+а поисковый запрос и позиция прокрутки сетки сбрасываются: переживший закрытие
+запрос открывал бы пикер на одной ячейке без подсвеченной категории, и
+объяснял бы это только мелкий текст в поле, на которое никто не смотрит. При
+открытии ряд чипов подскролливается к выбранной категории — иначе прокручиваемый
+ряд не подсвечивает ни один из чипов, которые в нём поместились.
+Поиск глобальный по всем категориям и совпадает с началом ключевого слова;
+каждая запись каталога имеет свои английские и русские имена. Поэтому `piz`
+уже находит pizza, но произвольная подстрока в середине слова не даёт ложного совпадения.
+При активном глобальном запросе категория не подсвечивается. До 12 недавних эмодзи
+хранятся в desktop-настройках: быстрые выборы объединяются в одну запись,
+ожидающий снимок сохраняется при завершении, а при следующем запуске список восстанавливается.
+
+Композер один раз измеряет отрисованный footer и использует его точную
+высоту при расчёте пикера. Если остатка не хватает на собственный хром пикера
+плюс один ряд эмодзи, поверхность не рисуется вовсе: пикер остаётся открытым,
+просит убрать сенсорную клавиатуру и появляется, когда место освободится, —
+обрезанная полоса без единой доступной ячейки была бы хуже ожидания. Всё это
+время `Escape`, системный `Back` и кнопка пикера продолжают его закрывать:
+они обрабатываются вне layout. Клавиша закрытия побеждает тап по тумблеру,
+пришедший в том же кадре, — один жест, один результат.
+
+Ряд категорий распределяет чипы по ширине пикера, когда все девять помещаются
+в полный размер, и прокручивает их полноразмерными, когда не помещаются, — так
+же, как устроена сетка под ним. Альтернатива — ужимать чипы — хуже: при ширине
+ряда 140dp иконка становится 15dp, при 40dp — 4dp, наезда нет, но и попасть по
+такому чипу нельзя, а горизонтальное место, в отличие от вертикального, не у
+кого попросить убиранием клавиатуры. Каждое эмодзи в сетке центрируется по своим
+чернилам, а не по строчному боксу: чернила эмодзи заканчиваются на базовой
+линии, а нижний выносной элемент шрифта под ней пуст, поэтому центровка бокса
+поднимала глиф выше центра ховер-подсветки. Заблокированная отправка показывает
+локализованную причину рядом со стрелкой, а не только в accessibility.
+Высота редактора и видимость скроллбара считаются из той же высоты
+строки 21sp, которую использует отрисовка текста, а предельная высота
+округляется вниз до целого числа таких строк, поэтому упёршийся в предел
+редактор не показывает верхний срез нечитаемой строки; масштаб высоты строки Gio
+явно равен `1`, а не значению 1,2 по умолчанию.
 
 Пока оверлей identity открыт, он владеет клавиатурным фокусом. Сначала фокус
 получает кнопка закрытия, Tab и Shift+Tab циклически переключают «Закрыть»,
@@ -722,7 +812,7 @@ flowchart TD
 
 ### Окно консоли — индикаторы записи трафика
 
-Окно консоли (открывается кнопкой консоли в заголовке) отображает диагностическую информацию по каждому peer'у. Когда capture-сессия активна, появляются следующие UI-элементы:
+Окно консоли (открывается кнопкой консоли в нижней строке карточки ввода) отображает диагностическую информацию по каждому peer'у. Когда capture-сессия активна, появляются следующие UI-элементы:
 
 - **Точка записи** — маленький красный эллипс на заголовке peer-карточки рядом с адресом. Виден когда `NodeStatus.CaptureSessions` содержит запись с `Active=true` и `ConnID`, совпадающим со строкой пира.
 - **Строка информации о записи** — отображается под данными здоровья peer-карточки. Показывает scope (`conn_id` / `ip` / `all`), путь к файлу (выделяемый текст), время старта записи и количество потерянных событий если ненулевое. Строка ошибки показывается если capture writer столкнулся с ошибкой диска.

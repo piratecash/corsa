@@ -327,6 +327,41 @@ func TestKeyboardInsetDpReportsTheWholeOcclusion(t *testing.T) {
 	}
 }
 
+// A surface that cannot be drawn asks once per LIVE ask, not once per frame,
+// and asks again the moment the previous one is cancelled — which is what an
+// editor tap does to it.
+func TestRequestTouchKeyboardRoomAsksOncePerLiveHide(t *testing.T) {
+	kbd := new(touchKeyboardState)
+	var asked int64
+
+	// No keyboard of ours to take away: nothing is dispatched, so nothing is
+	// throttled either and the next frame is free to try again.
+	requestTouchKeyboardRoom(kbd, &asked)
+	if asked != 0 {
+		t.Fatalf("marker after an undispatched ask = %d, want 0", asked)
+	}
+
+	kbd.shownByUs.Store(true)
+	requestTouchKeyboardRoom(kbd, &asked)
+	if want := kbd.hideGen.Load() + 1; asked != want {
+		t.Fatalf("marker after the first ask = %d, want %d (generation plus one)", asked, want)
+	}
+
+	dispatched := asked
+	requestTouchKeyboardRoom(kbd, &asked)
+	if asked != dispatched {
+		t.Fatalf("marker after a repeat frame = %d, want the live ask %d", asked, dispatched)
+	}
+
+	// Every editor tap bumps hideGen and cancels the hide in flight. Waiting
+	// on it would leave the surface open and undrawn for good.
+	kbd.hideGen.Add(1)
+	requestTouchKeyboardRoom(kbd, &asked)
+	if want := kbd.hideGen.Load() + 1; asked != want {
+		t.Fatalf("marker after the ask was cancelled = %d, want a fresh %d", asked, want)
+	}
+}
+
 // The chrome yields exactly when the strip the keyboard leaves free cannot
 // hold both it and the tail the CONTENT measured, and it is laid out either
 // way so it still reads its events on the frames it is not drawn on.
