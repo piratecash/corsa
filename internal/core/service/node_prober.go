@@ -283,13 +283,14 @@ func (p *NodeProber) DeleteContact(identity domain.PeerIdentity) error {
 // BuildReachableIDs returns the set of identities that have at least one
 // live route in the routing table.
 //
-// Embedded mode: reads directly from node.RoutingSnapshot (no wire round
-// trip). Remote-RPC mode: falls back to "fetch_reachable_ids" over RPC.
+// Embedded mode: reads the reachability projection cached alongside the
+// node's RoutingSnapshot (no wire round trip). Remote-RPC mode falls back to
+// "fetch_reachable_ids", which reads the same cached projection.
 // Returns nil if the node is unreachable — callers must treat nil as
 // "unknown" rather than "no reachable peers".
 func (p *NodeProber) BuildReachableIDs() map[domain.PeerIdentity]bool {
 	if node := p.rpc.LocalNode(); node != nil {
-		return reachableFromSnapshot(node.RoutingSnapshot())
+		return node.ReachableIDsSnapshot()
 	}
 	reply, err := p.rpc.LocalRequestFrame(protocol.Frame{Type: "fetch_reachable_ids"})
 	if err != nil || reply.Type == "error" {

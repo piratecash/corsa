@@ -989,6 +989,22 @@ func TestSeedFromProbeMergesContacts(t *testing.T) {
 	}
 }
 
+func TestMergeContactsKeepsNewestDurableLastOnline(t *testing.T) {
+	older := time.Date(2026, time.August, 21, 7, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	merged := mergeContacts(
+		map[string]Contact{"alice": {PubKey: "ebus-key", LastOnlineAt: domain.TimeOf(older)}},
+		map[string]Contact{"alice": {PubKey: "probe-key", LastOnlineAt: domain.TimeOf(newer)}},
+	)
+
+	if merged["alice"].PubKey != "ebus-key" {
+		t.Fatalf("probe replaced fresher ebus key material: got %q", merged["alice"].PubKey)
+	}
+	if got := merged["alice"].LastOnlineAt; !got.Valid() || !got.Time().Equal(newer) {
+		t.Fatalf("merged last online = %v, want durable probe value %v", got, newer)
+	}
+}
+
 // ── Reset ──
 
 func TestResetClearsAllState(t *testing.T) {

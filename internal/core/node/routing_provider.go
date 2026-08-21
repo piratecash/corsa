@@ -17,20 +17,20 @@ import (
 //   - Structural changes (route accepted/withdrawn/replaced, direct peer
 //     added/removed, flap burst arming hold-down, flap-state cleanup
 //     after a writer touched the table) are reflected within
-//     routingSnapshotMinInterval (1 s — the coalescing floor that throttles
+//     routingSnapshotMinInterval (2 s — the coalescing floor that throttles
 //     the 500 ms refresher) plus the next refresh tick that crosses that
 //     floor (~500 ms) plus the publisher's t.mu.Lock acquisition time
 //     (SnapshotIncremental takes the exclusive lock to consume the snap
-//     dirty-set and update the reuse cache) — on the order of 1–1.5 s.
+//     dirty-set and update the reuse cache) — on the order of 2–2.5 s.
 //   - Time-derived state (`IsExpired`, `ttl_seconds` evaluated against
 //     `snap.TakenAt`, `FlapEntry.InHoldDown` flipping from true to
 //     false on hold-down expiry) lags up to TickTTL_interval (≈10 s)
 //     plus the structural publish bound (routingSnapshotMinInterval
-//     floor + a refresh tick, ~1–1.5 s), i.e. ≈11–11.5 s: the dirty-flag
+//     floor + a refresh tick, ~2–2.5 s), i.e. ≈12–12.5 s: the dirty-flag
 //     publisher only republishes when a writer touches the table, but
 //     TTL elapse and hold-down expiry are wall-clock events without a
 //     writer until TickTTL rewrites the entry. Hold-down arming is a
-//     writer event and is reflected within the structural bound (~1–1.5 s).
+//     writer event and is reflected within the structural bound (~2–2.5 s).
 //
 // Returned routing.Snapshot must NOT be mutated by callers — the underlying
 // routes map is shared between every concurrent reader of the same
@@ -100,12 +100,12 @@ func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domai
 // Reads from the cached routing snapshot — the same lock-free path that
 // fetchRouteTable / fetchRouteSummary use. Two staleness bounds apply
 // (see RoutingSnapshot doc): structural reachability changes (peer
-// connect / withdraw) are visible within ~1–1.5 s (routingSnapshotMinInterval
-// floor plus the next refresh tick plus the publisher's t.mu.Lock); TTL-derived expiry
-// inside BestRoute is evaluated against snap.TakenAt and may lag up
-// to TickTTL_interval + the structural publish bound (~1–1.5 s), i.e.
-// ~11–11.5 s, for routes that age out without any other table
-// mutation. Both bounds are acceptable for a
+// connect / withdraw) are visible within ~2–2.5 s (routingSnapshotMinInterval
+// floor plus the next refresh tick plus the publisher's t.mu.Lock); TTL-derived
+// expiry inside the cached projection is evaluated against snap.TakenAt and may
+// lag up to TickTTL_interval + the structural publish bound (~2–2.5 s), i.e.
+// ~12–12.5 s, for routes that age out without any other table mutation. Both
+// bounds are acceptable for a
 // UI reachability indicator: this frame feeds desktop polling, not
 // message routing — operators see reachable=true for an aged-out route
 // for at most one TickTTL cycle, never an action that depends on
@@ -114,13 +114,10 @@ func (s *Service) PeerTransport(peerIdentity domain.PeerIdentity) (address domai
 // The synthetic local self-route (RouteSourceLocal) is excluded because
 // reachability is about remote peers, not the node itself.
 func (s *Service) reachableIDsFrame() protocol.Frame {
-	snap := s.loadRoutingSnapshot()
-	var ids []string
-	for id := range snap.Routes {
-		best := snap.BestRoute(id)
-		if best != nil && best.Source != routing.RouteSourceLocal {
-			ids = append(ids, id.String())
-		}
+	reachable := s.loadReachableIDsSnapshot()
+	ids := make([]string, 0, len(reachable))
+	for _, id := range reachable {
+		ids = append(ids, id.String())
 	}
 	return protocol.Frame{
 		Type:       "reachable_ids",

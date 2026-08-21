@@ -12,17 +12,18 @@ import (
 )
 
 type peerEntry struct {
-	Address             domain.PeerAddress `json:"address"`
-	NodeType            domain.NodeType    `json:"node_type,omitempty"`
-	Network             domain.NetGroup    `json:"network,omitempty"` // network group classification for this address
-	LastConnectedAt     *time.Time         `json:"last_connected_at,omitempty"`
-	LastDisconnectedAt  *time.Time         `json:"last_disconnected_at,omitempty"`
-	ConsecutiveFailures int                `json:"consecutive_failures"`
-	LastError           string             `json:"last_error,omitempty"`
-	Source              domain.PeerSource  `json:"source"`                 // bootstrap, peer_exchange, manual, announce
-	AddedAt             *time.Time         `json:"added_at,omitempty"`     // first time this address was seen
-	Score               int                `json:"score"`                  // higher = better; decays on failure, grows on success
-	BannedUntil         *time.Time         `json:"banned_until,omitempty"` // peer is not dialled until this time expires
+	Address             domain.PeerAddress  `json:"address"`
+	Identity            domain.PeerIdentity `json:"identity,omitzero"`
+	NodeType            domain.NodeType     `json:"node_type,omitempty"`
+	Network             domain.NetGroup     `json:"network,omitempty"` // network group classification for this address
+	LastConnectedAt     *time.Time          `json:"last_connected_at,omitempty"`
+	LastDisconnectedAt  *time.Time          `json:"last_disconnected_at,omitempty"`
+	ConsecutiveFailures int                 `json:"consecutive_failures"`
+	LastError           string              `json:"last_error,omitempty"`
+	Source              domain.PeerSource   `json:"source"`                 // bootstrap, peer_exchange, manual, announce
+	AddedAt             *time.Time          `json:"added_at,omitempty"`     // first time this address was seen
+	Score               int                 `json:"score"`                  // higher = better; decays on failure, grows on success
+	BannedUntil         *time.Time          `json:"banned_until,omitempty"` // peer is not dialled until this time expires
 
 	// Machine-readable version diagnostics — persisted so the operator-visible
 	// peerHealthFrames() snapshot retains the exact evidence that created a
@@ -134,7 +135,7 @@ type peerStateFile struct {
 type announceState string
 
 const (
-	peerStateVersion             = 2              // v2: added banned_ips section with ban_origin/ban_reason
+	peerStateVersion             = 3              // v3: persisted the address-to-identity binding
 	peerScoreConnect             = 10             // awarded on successful TCP handshake
 	peerScoreDisconnect          = -2             // applied on clean disconnect
 	peerScoreFailure             = -5             // applied on dial/protocol failure

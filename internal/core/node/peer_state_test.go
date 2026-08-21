@@ -52,6 +52,7 @@ func TestSaveAndLoadPeerStateRoundTrip(t *testing.T) {
 		Peers: []peerEntry{
 			{
 				Address:             "198.51.100.1:64646",
+				Identity:            domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 				NodeType:            domain.NodeTypeFull,
 				LastConnectedAt:     &now,
 				LastDisconnectedAt:  &past5,
@@ -89,6 +90,9 @@ func TestSaveAndLoadPeerStateRoundTrip(t *testing.T) {
 	}
 	if got.Peers[0].Score != 10 {
 		t.Fatalf("expected score 10, got %d", got.Peers[0].Score)
+	}
+	if got.Peers[0].Identity != want.Peers[0].Identity {
+		t.Fatalf("expected identity %s, got %s", want.Peers[0].Identity, got.Peers[0].Identity)
 	}
 	if got.Peers[1].Address != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:64646" {
 		t.Fatalf("unexpected second peer address: %s", got.Peers[1].Address)

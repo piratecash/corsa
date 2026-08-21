@@ -1,6 +1,8 @@
 package node
 
 import (
+	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -502,6 +504,21 @@ func TestPrimeHotReadSnapshotsCoversRouting(t *testing.T) {
 	}
 }
 
+func TestReachableIDsSnapshotNormalizesDirectOnlyClassification(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	peer := domaintest.ID("reachable-direct-only")
+	if _, err := svc.routingTable.AddDirectPeer(peer); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	svc.rebuildRoutingSnapshot()
+
+	if reachable := svc.ReachableIDsSnapshot(); !reachable[peer] {
+		t.Fatalf("direct-only identity missing from public reachability set: %v", reachable)
+	}
+}
+
 // TestRoutingSnapshotEventOrdersReachability is the §1.2 regression test of
 // docs/refactoring/identity-discovery-lookup.md: after a table mutation, the
 // snapshot-reason TopicRouteTableChanged event must arrive strictly AFTER the
@@ -554,4 +571,491 @@ func TestRoutingSnapshotEventOrdersReachability(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("post-mutation rebuild published no snapshot event")
 	}
+}
+
+func TestRoutingSnapshotPersistsLastOnlineWhenFinalRouteDisappears(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	bus := ebus.New()
+	svc.eventBus = bus
+	t.Cleanup(bus.Shutdown)
+	var presenceChanges []ebus.IdentityPresenceChange
+	bus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
+		presenceChanges = append(presenceChanges, change)
+	}, ebus.WithSync())
+
+	peer := domaintest.ID("last-online-routed-peer")
+	firstOrigin := domaintest.ID("last-online-origin-a")
+	firstHop := domaintest.ID("last-online-hop-a")
+	secondOrigin := domaintest.ID("last-online-origin-b")
+	secondHop := domaintest.ID("last-online-hop-b")
+	witness := domaintest.ID("last-online-network-witness")
+	witnessOrigin := domaintest.ID("last-online-witness-origin")
+	witnessHop := domaintest.ID("last-online-witness-hop")
+	if stored, err := svc.trust.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+
+	// Prime the previous-generation side of the transition detector, then
+	// publish two independent live paths for the contact.
+	svc.rebuildRoutingSnapshot()
+	for _, route := range []routing.RouteEntry{
+		{Identity: peer, Origin: firstOrigin, NextHop: firstHop, Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement},
+		{Identity: peer, Origin: secondOrigin, NextHop: secondHop, Hops: 3, SeqNo: 1, Source: routing.RouteSourceAnnouncement},
+		{Identity: witness, Origin: witnessOrigin, NextHop: witnessHop, Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement},
+	} {
+		if _, err := svc.routingTable.UpdateRoute(route); err != nil {
+			t.Fatalf("UpdateRoute(%s): %v", route.NextHop, err)
+		}
+	}
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+
+	// Losing only one path must keep the contact online and leave the durable
+	// timestamp empty.
+	if !svc.routingTable.WithdrawRoute(peer, firstOrigin, firstHop, 2) {
+		t.Fatal("withdraw first route returned false")
+	}
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	if got := svc.trust.trustedContacts()[peer.String()].LastOnlineAt; !got.IsZero() {
+		t.Fatalf("last_online_at after losing one of two paths = %v, want zero", got)
+	}
+
+	want := time.Date(2026, time.August, 21, 18, 5, 0, 0, time.UTC)
+	svc.presenceClock = func() time.Time { return want }
+	if !svc.routingTable.WithdrawRoute(peer, secondOrigin, secondHop, 2) {
+		t.Fatal("withdraw final route returned false")
+	}
+	// A slow trust-store write must not hold up the routing refresher. Lock the
+	// disk-write serializer and require the snapshot publish itself to finish;
+	// the tracked background writer may wait until we release it below.
+	svc.trust.saveMu.Lock()
+	svc.lastRoutingSnapAtNanos.Store(0)
+	rebuilt := make(chan struct{})
+	go func() {
+		svc.rebuildRoutingSnapshot()
+		close(rebuilt)
+	}()
+	select {
+	case <-rebuilt:
+		svc.trust.saveMu.Unlock()
+	case <-time.After(5 * time.Second):
+		svc.trust.saveMu.Unlock()
+		t.Fatal("routing snapshot publisher blocked on trust-store disk I/O")
+	}
+	svc.WaitBackground()
+
+	got := svc.trust.trustedContacts()[peer.String()].LastOnlineAt
+	if !got.Equal(want) {
+		t.Fatalf("last_online_at = %v, want injected observation time %v", got, want)
+	}
+	var offlineEventFound bool
+	for _, change := range presenceChanges {
+		if !change.ChangedAt.Equal(got) {
+			continue
+		}
+		if change.Source != domain.PeerIdentityFromWire(svc.identity.Address) {
+			t.Fatalf("presence source = %s, want local identity %s", change.Source, svc.identity.Address)
+		}
+		for _, identity := range change.Identities {
+			if identity == peer {
+				offlineEventFound = true
+			}
+		}
+	}
+	if !offlineEventFound {
+		t.Fatalf("no offline identity presence event carried persisted timestamp %v", got)
+	}
+}
+
+func TestRoutingSnapshotDoesNotAttributeTotalCollapseToContacts(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	bus := ebus.New()
+	svc.eventBus = bus
+	t.Cleanup(bus.Shutdown)
+	var offlineChanges []ebus.IdentityPresenceChange
+	bus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
+		offlineChanges = append(offlineChanges, change)
+	}, ebus.WithSync())
+	first := domaintest.ID("collapse-contact-a")
+	second := domaintest.ID("collapse-contact-b")
+	firstOrigin := domaintest.ID("collapse-origin-a")
+	secondOrigin := domaintest.ID("collapse-origin-b")
+	firstHop := domaintest.ID("collapse-hop-a")
+	secondHop := domaintest.ID("collapse-hop-b")
+	for _, peer := range []domain.PeerIdentity{first, second} {
+		if stored, err := svc.trust.remember(trustedContact{Address: peer.String(), PubKey: "pk-" + peer.String()}); err != nil || !stored {
+			t.Fatalf("remember %s: stored=%v err=%v", peer, stored, err)
+		}
+	}
+
+	svc.rebuildRoutingSnapshot()
+	for _, route := range []routing.RouteEntry{
+		{Identity: first, Origin: firstOrigin, NextHop: firstHop, Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement},
+		{Identity: second, Origin: secondOrigin, NextHop: secondHop, Hops: 2, SeqNo: 1, Source: routing.RouteSourceAnnouncement},
+	} {
+		if _, err := svc.routingTable.UpdateRoute(route); err != nil {
+			t.Fatalf("UpdateRoute(%s): %v", route.Identity, err)
+		}
+	}
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	offlineChanges = nil
+
+	if !svc.routingTable.WithdrawRoute(first, firstOrigin, firstHop, 2) ||
+		!svc.routingTable.WithdrawRoute(second, secondOrigin, secondHop, 2) {
+		t.Fatal("failed to withdraw both routes for total-collapse setup")
+	}
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+
+	contacts := svc.trust.trustedContacts()
+	if len(offlineChanges) != 0 {
+		t.Fatalf("total local collapse emitted offline presence changes: %+v", offlineChanges)
+	}
+	for _, peer := range []domain.PeerIdentity{first, second} {
+		if got := contacts[peer.String()].LastOnlineAt; !got.IsZero() {
+			t.Fatalf("total local collapse assigned %s last_online_at=%v", peer, got)
+		}
+	}
+}
+
+func TestRemoteEOFDirectDisconnectPersistsLastOnlineOnTotalCollapse(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	bus := ebus.New()
+	svc.eventBus = bus
+	t.Cleanup(bus.Shutdown)
+
+	peer := domaintest.ID("single-direct-contact")
+	if stored, err := svc.trust.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+	if _, err := svc.routingTable.AddDirectPeer(peer); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	svc.rebuildRoutingSnapshot()
+	svc.routeWithdrawalGracePeriodTest = -1
+	svc.identitySessions[peer] = 1
+	svc.identityRelaySessions[peer] = 1
+
+	var observed []ebus.IdentityPresenceChange
+	bus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
+		observed = append(observed, change)
+	}, ebus.WithSync())
+
+	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+	// The later snapshot owns ReachableIDs but must not publish the same direct
+	// offline transition a second time.
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	svc.WaitBackground()
+
+	got := svc.trust.trustedContacts()[peer.String()].LastOnlineAt
+	if got.IsZero() {
+		t.Fatal("peer-initiated final direct disconnect left last_online_at at zero")
+	}
+	if len(observed) != 1 {
+		t.Fatalf("direct disconnect emitted %d presence events, want exactly one: %+v", len(observed), observed)
+	}
+	if observed[0].Source != domain.PeerIdentityFromWire(svc.identity.Address) {
+		t.Fatalf("presence source = %s, want local identity %s", observed[0].Source, svc.identity.Address)
+	}
+	if len(observed[0].Identities) != 1 || observed[0].Identities[0] != peer {
+		t.Fatalf("presence identities = %v, want [%s]", observed[0].Identities, peer)
+	}
+}
+
+func TestRemoteEOFDirectDisconnectPersistsSessionCloseTimeAcrossGrace(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	peer := domaintest.ID("grace-timestamp-direct-contact")
+	if stored, err := svc.trust.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+	if _, err := svc.routingTable.AddDirectPeer(peer); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	svc.rebuildRoutingSnapshot()
+	const grace = 300 * time.Millisecond
+	svc.routeWithdrawalGracePeriodTest = grace
+	svc.identitySessions[peer] = 1
+	svc.identityRelaySessions[peer] = 1
+	want := time.Date(2026, time.August, 21, 17, 31, 47, 155000000, time.UTC)
+	svc.presenceClock = func() time.Time { return want }
+
+	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var got time.Time
+	for time.Now().Before(deadline) {
+		got = svc.trust.trustedContacts()[peer.String()].LastOnlineAt
+		if !got.IsZero() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got.IsZero() {
+		t.Fatal("grace withdrawal did not persist last_online_at")
+	}
+	if !got.Equal(want) {
+		t.Fatalf("last_online_at=%v, want session-close time %v; grace must not be included", got, want)
+	}
+}
+
+func TestAmbiguousDirectTransportFailureDoesNotPersistPeerPresence(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	peer := domaintest.ID("ambiguous-direct-contact")
+	witness := domaintest.ID("ambiguous-direct-witness")
+	if stored, err := svc.trust.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+	for _, identity := range []domain.PeerIdentity{peer, witness} {
+		if _, err := svc.routingTable.AddDirectPeer(identity); err != nil {
+			t.Fatalf("AddDirectPeer(%s): %v", identity, err)
+		}
+	}
+	svc.rebuildRoutingSnapshot()
+	svc.routeWithdrawalGracePeriodTest = -1
+	svc.identitySessions[peer] = 1
+	svc.identityRelaySessions[peer] = 1
+
+	// A timeout can be caused by our own interface or route. It still feeds
+	// disconnect-storm classification, but is not identity-scoped offline
+	// evidence and therefore must not become durable last_online_at.
+	svc.onPeerSessionClosedWithError(
+		peer,
+		[]domain.Capability{domain.CapMeshRelayV1},
+		errors.New("read tcp: i/o timeout"),
+	)
+	// Keep another live route as a connectivity witness and publish the route
+	// snapshot after the direct removal. The snapshot path must not reinterpret
+	// an ambiguous direct close as transit-presence evidence.
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	svc.WaitBackground()
+
+	if got := svc.trust.trustedContacts()[peer.String()].LastOnlineAt; !got.IsZero() {
+		t.Fatalf("ambiguous transport failure assigned peer last_online_at=%v", got)
+	}
+}
+
+func TestAmbiguousDirectThenTransitLossIsSnapshotGenerationIndependent(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		rebuildBetweenRouteLosses bool
+	}{
+		{name: "same_generation"},
+		{name: "separate_generations", rebuildBetweenRouteLosses: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := newTestService(t, config.NodeTypeFull)
+			peer := domaintest.ID("mixed-peer")
+			backup := domaintest.ID("mixed-backup")
+			witness := domaintest.ID("mixed-witness")
+			if stored, err := svc.trust.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+				t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+			}
+			for _, identity := range []domain.PeerIdentity{peer, witness} {
+				if _, err := svc.routingTable.AddDirectPeer(identity); err != nil {
+					t.Fatalf("AddDirectPeer(%s): %v", identity, err)
+				}
+			}
+			if status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+				Identity: peer,
+				Origin:   backup,
+				NextHop:  backup,
+				Hops:     2,
+				SeqNo:    2,
+				Source:   routing.RouteSourceAnnouncement,
+			}); err != nil || status != routing.RouteAccepted {
+				t.Fatalf("add transit fallback: status=%v err=%v", status, err)
+			}
+			svc.rebuildRoutingSnapshot()
+			svc.routeWithdrawalGracePeriodTest = -1
+			svc.identitySessions[peer] = 1
+			svc.identityRelaySessions[peer] = 1
+			want := time.Date(2026, time.August, 21, 19, 0, 0, 0, time.UTC)
+			svc.presenceClock = func() time.Time { return want }
+
+			// The direct timeout is ambiguous and therefore not owned by lifecycle.
+			// The transit fallback then disappears while a separate witness remains
+			// reachable. Snapshot must own the combined transition regardless of
+			// whether a rebuild lands between the two route losses.
+			svc.onPeerSessionClosedWithError(
+				peer,
+				[]domain.Capability{domain.CapMeshRelayV1},
+				errors.New("read tcp: i/o timeout"),
+			)
+			if tc.rebuildBetweenRouteLosses {
+				svc.lastRoutingSnapAtNanos.Store(0)
+				svc.rebuildRoutingSnapshot()
+			}
+			if !svc.routingTable.WithdrawRoute(peer, backup, backup, 3) {
+				t.Fatal("withdraw transit fallback returned false")
+			}
+			svc.lastRoutingSnapAtNanos.Store(0)
+			svc.rebuildRoutingSnapshot()
+			svc.WaitBackground()
+
+			if got := svc.trust.trustedContacts()[peer.String()].LastOnlineAt; !got.Equal(want) {
+				t.Fatalf("last_online_at=%v, want snapshot observation %v", got, want)
+			}
+		})
+	}
+}
+
+func TestLocalDirectTeardownDoesNotPersistPeerPresence(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	peer := domaintest.ID("locally-evicted-direct-contact")
+	if stored, err := svc.trust.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+	if _, err := svc.routingTable.AddDirectPeer(peer); err != nil {
+		t.Fatalf("AddDirectPeer: %v", err)
+	}
+	svc.rebuildRoutingSnapshot()
+	svc.routeWithdrawalGracePeriodTest = -1
+	svc.identitySessions[peer] = 1
+	svc.identityRelaySessions[peer] = 1
+
+	svc.onPeerSessionClosedWithCause(peer, []domain.Capability{domain.CapMeshRelayV1}, sessionCloseLocalEviction)
+	svc.WaitBackground()
+
+	if got := svc.trust.trustedContacts()[peer.String()].LastOnlineAt; !got.IsZero() {
+		t.Fatalf("local teardown assigned peer last_online_at=%v", got)
+	}
+}
+
+func TestAmbiguousDirectFailureAfterReconnectIsNotAttributedBySnapshot(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	bus := ebus.New()
+	svc.eventBus = bus
+	t.Cleanup(bus.Shutdown)
+	peer := domaintest.ID("direct-marker-reconnected-peer")
+	witness := domaintest.ID("direct-marker-witness")
+	for _, identity := range []domain.PeerIdentity{peer, witness} {
+		if _, err := svc.routingTable.AddDirectPeer(identity); err != nil {
+			t.Fatalf("AddDirectPeer(%s): %v", identity, err)
+		}
+	}
+	svc.rebuildRoutingSnapshot()
+	svc.routeWithdrawalGracePeriodTest = -1
+	svc.identitySessions[peer] = 1
+	svc.identityRelaySessions[peer] = 1
+
+	var observed []ebus.IdentityPresenceChange
+	bus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
+		observed = append(observed, change)
+	}, ebus.WithSync())
+
+	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+	svc.onPeerSessionEstablished(peer, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, errors.New("read tcp: i/o timeout"))
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+
+	if len(observed) != 1 {
+		t.Fatalf("presence events = %d, want only the clean-EOF transition: %+v", len(observed), observed)
+	}
+}
+
+func TestTransitLossAfterDirectFallbackUsesSnapshotPresence(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	bus := ebus.New()
+	svc.eventBus = bus
+	t.Cleanup(bus.Shutdown)
+	peer := domaintest.ID("fallback-peer")
+	backup := domaintest.ID("fallback-backup")
+	witness := domaintest.ID("fallback-witness")
+	for _, identity := range []domain.PeerIdentity{peer, witness} {
+		if _, err := svc.routingTable.AddDirectPeer(identity); err != nil {
+			t.Fatalf("AddDirectPeer(%s): %v", identity, err)
+		}
+	}
+	if status, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
+		Identity: peer,
+		Origin:   backup,
+		NextHop:  backup,
+		Hops:     2,
+		SeqNo:    2,
+		Source:   routing.RouteSourceAnnouncement,
+	}); err != nil || status != routing.RouteAccepted {
+		t.Fatalf("add backup route: status=%v err=%v", status, err)
+	}
+	svc.rebuildRoutingSnapshot()
+	svc.routeWithdrawalGracePeriodTest = -1
+	svc.identitySessions[peer] = 1
+	svc.identityRelaySessions[peer] = 1
+
+	var observed []ebus.IdentityPresenceChange
+	bus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
+		observed = append(observed, change)
+	}, ebus.WithSync())
+
+	// The direct route disappears, but the transit fallback keeps the identity
+	// reachable, so neither lifecycle nor snapshot should emit offline yet.
+	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+	if len(observed) != 0 {
+		t.Fatalf("direct loss with a live fallback emitted presence: %+v", observed)
+	}
+
+	want := time.Date(2026, time.August, 21, 18, 30, 0, 0, time.UTC)
+	svc.presenceClock = func() time.Time { return want }
+	if !svc.routingTable.WithdrawRoute(peer, backup, backup, 3) {
+		t.Fatal("withdraw backup route returned false")
+	}
+	svc.lastRoutingSnapAtNanos.Store(0)
+	svc.rebuildRoutingSnapshot()
+
+	if len(observed) != 1 {
+		t.Fatalf("transit fallback loss emitted %d events, want one: %+v", len(observed), observed)
+	}
+	if !observed[0].ChangedAt.Equal(want) {
+		t.Fatalf("transit ChangedAt=%v, want %v", observed[0].ChangedAt, want)
+	}
+}
+
+func TestPresenceSnapshotWithoutLocalIdentityDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	table := routing.NewTable(routing.WithLocalOrigin(domaintest.ID("nil-identity-local-origin")))
+	peer := domaintest.ID("nil-identity-peer")
+	witness := domaintest.ID("nil-identity-witness")
+	for _, identity := range []domain.PeerIdentity{peer, witness} {
+		if _, err := table.AddDirectPeer(identity); err != nil {
+			t.Fatalf("AddDirectPeer(%s): %v", identity, err)
+		}
+	}
+	bus := ebus.New()
+	t.Cleanup(bus.Shutdown)
+	svc := &Service{routingTable: table, eventBus: bus}
+	svc.rebuildRoutingSnapshot()
+	if _, err := table.RemoveDirectPeer(peer); err != nil {
+		t.Fatalf("RemoveDirectPeer: %v", err)
+	}
+	svc.lastRoutingSnapAtNanos.Store(0)
+
+	// A minimal/headless fixture has no local identity and therefore cannot
+	// source an identity.presence.changed event, but rebuilding its route
+	// snapshot must remain safe.
+	svc.rebuildRoutingSnapshot()
 }

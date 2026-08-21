@@ -172,10 +172,11 @@ type Frame struct {
 }
 
 type ContactFrame struct {
-	Address string `json:"address"`
-	PubKey  string `json:"pubkey"`
-	BoxKey  string `json:"boxkey"`
-	BoxSig  string `json:"boxsig"`
+	Address      string `json:"address"`
+	PubKey       string `json:"pubkey"`
+	BoxKey       string `json:"boxkey"`
+	BoxSig       string `json:"boxsig"`
+	LastOnlineAt string `json:"last_online_at,omitempty"`
 }
 
 type MessageFrame struct {

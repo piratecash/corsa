@@ -44,6 +44,53 @@ func mustRemoveDirect(t *testing.T, tbl *Table, peerID PeerIdentity) RemoveDirec
 	return result
 }
 
+func TestRemoveDirectPeerReportsSnapshotReachabilityAtomically(t *testing.T) {
+	t.Parallel()
+
+	local := domaintest.ID("rm-local")
+	peer := domaintest.ID("rm-peer")
+	backup := domaintest.ID("rm-backup")
+
+	withBackup := NewTable(WithLocalOrigin(local))
+	mustAddDirect(t, withBackup, peer)
+	if status := mustUpdate(t, withBackup, RouteEntry{
+		Identity: peer,
+		Origin:   backup,
+		NextHop:  backup,
+		Hops:     2,
+		SeqNo:    2,
+		Source:   RouteSourceAnnouncement,
+	}); status != RouteAccepted {
+		t.Fatalf("backup route status = %v, want accepted", status)
+	}
+	if result := mustRemoveDirect(t, withBackup, peer); !result.PeerReachable {
+		t.Fatalf("RemoveDirectPeer reported peer unreachable despite a selectable backup route: %+v", withBackup.Snapshot().Routes[peer])
+	}
+
+	directOnly := NewTable(WithLocalOrigin(local))
+	mustAddDirect(t, directOnly, peer)
+	if result := mustRemoveDirect(t, directOnly, peer); result.PeerReachable {
+		t.Fatal("RemoveDirectPeer reported peer reachable after its final selectable route disappeared")
+	}
+
+	deadBackup := NewTable(WithLocalOrigin(local))
+	mustAddDirect(t, deadBackup, peer)
+	if status := mustUpdate(t, deadBackup, RouteEntry{
+		Identity: peer,
+		Origin:   backup,
+		NextHop:  backup,
+		Hops:     2,
+		SeqNo:    2,
+		Source:   RouteSourceAnnouncement,
+	}); status != RouteAccepted {
+		t.Fatalf("dead-backup route status = %v, want accepted", status)
+	}
+	deadBackup.ForceHealthForTest(peer, backup, HealthDead)
+	if result := mustRemoveDirect(t, deadBackup, peer); result.PeerReachable {
+		t.Fatal("RemoveDirectPeer counted a HealthDead transit backup that snapshot reachability excludes")
+	}
+}
+
 // --- Insertion & deduplication ---
 
 func TestUpdateRouteInsertsNew(t *testing.T) {

@@ -9,9 +9,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -327,6 +329,51 @@ func TestNetworkContactsReplyIsCappedAndTheLocalOneIsNot(t *testing.T) {
 	if network.Count != len(network.Contacts) {
 		t.Fatalf("count = %d but %d contacts travel: the header and the body disagree",
 			network.Count, len(network.Contacts))
+	}
+}
+
+func TestLastOnlineIsLocalTrustedContactMetadata(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	peer := domaintest.ID("last-online-local-metadata")
+	if stored, err := svc.trust.remember(trustedContact{
+		Address: peer.String(),
+		PubKey:  "pubkey",
+		BoxKey:  "boxkey",
+	}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+	want := time.Date(2026, time.August, 21, 7, 6, 16, 123456789, time.UTC)
+	if updated, err := svc.trust.recordLastOnlineAt([]domain.PeerIdentity{peer}, want); err != nil || updated != 1 {
+		t.Fatalf("record last online: updated=%d err=%v", updated, err)
+	}
+	svc.addKnownPubKey(peer.String(), "pubkey")
+	svc.addKnownBoxKey(peer.String(), "boxkey")
+
+	var localLastOnline string
+	for _, contact := range svc.trustedContactsFrame().Contacts {
+		if contact.Address == peer.String() {
+			localLastOnline = contact.LastOnlineAt
+			break
+		}
+	}
+	if localLastOnline != want.Format(time.RFC3339Nano) {
+		t.Fatalf("trusted contact last_online_at = %q, want %q", localLastOnline, want.Format(time.RFC3339Nano))
+	}
+
+	foundOnNetwork := false
+	for _, contact := range svc.contactsFrameForNetwork().Contacts {
+		if contact.Address != peer.String() {
+			continue
+		}
+		foundOnNetwork = true
+		if contact.LastOnlineAt != "" {
+			t.Fatalf("P2P contact leaked local last_online_at %q", contact.LastOnlineAt)
+		}
+	}
+	if !foundOnNetwork {
+		t.Fatal("test setup: contact was absent from P2P fetch_contacts response")
 	}
 }
 

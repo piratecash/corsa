@@ -1,6 +1,8 @@
 package node
 
 import (
+	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,11 +31,11 @@ import (
 // hold-down, flap-state cleanup after a writer touched the table): unlike
 // the other hot-read snapshots (network_stats, peer_health, peers_exchange,
 // cm_slots) the routing rebuild is additionally coalesced by
-// routingSnapshotMinInterval (1 s), checked BEFORE ConsumeDirty. Worst-case
-// staleness is therefore that 1 s floor plus the next refresh tick that
+// routingSnapshotMinInterval (2 s), checked BEFORE ConsumeDirty. Worst-case
+// staleness is therefore that 2 s floor plus the next refresh tick that
 // crosses it (~500 ms) plus the time the refresher needs to acquire
 // routing.Table.t.mu (now an exclusive Lock for the incremental projection
-// build, see rebuildRoutingSnapshot) — on the order of 1–1.5 s, the churn
+// build, see rebuildRoutingSnapshot) — on the order of 2–2.5 s, the churn
 // reduction routing trades for the tighter ~500 ms bound of the others.
 //
 // Time-derived state is bounded more loosely — the dirty-flag publisher
@@ -45,12 +47,12 @@ import (
 //     ttl_seconds therefore can lag up to TickTTL_interval (≈10 s) plus
 //     the structural publish bound — TickTTL's dirty mark still flows
 //     through the routingSnapshotMinInterval floor + a refresh tick
-//     (~1–1.5 s), so ≈11–11.5 s total.
+//     (~2–2.5 s), so ≈12–12.5 s total.
 //   - FlapEntry.InHoldDown flipping from true to false is also driven
 //     by wall-clock — fs.holdDownUntil elapsing. TickTTL clears the
 //     deadline on its 10 s cadence and marks the table dirty, so the
 //     transition is published within TickTTL_interval + the structural
-//     publish bound (~1–1.5 s), i.e. ≈11–11.5 s.
+//     publish bound (~2–2.5 s), i.e. ≈12–12.5 s.
 //     Hold-down arming is a writer event (the disconnect that crossed
 //     the flap threshold) and is reflected within the structural
 //     bound. Both Snapshot and FlapSnapshot normalize HoldDownUntil
@@ -75,6 +77,80 @@ type routingSnapshot struct {
 	// see, and the next rebuild produces a brand-new routes map under
 	// a new pointer rather than mutating in place.
 	snap routing.Snapshot
+	// reachable is the immutable identity-only projection published to hot
+	// readers. Presence owns the richer map[identity]hasTransit classification;
+	// keeping only a slice here avoids a second full-size map per rebuild and
+	// lets direct teardown mutate its private projection without racing readers.
+	reachable []domain.PeerIdentity
+}
+
+// presenceProjectionState serializes the presence-specific projection of the
+// routing table with direct-route removal. It remembers which selectable
+// source classes made each identity reachable in the last observed routing
+// generation. The direct lifecycle removes its source from this projection
+// under the same lock that surrounds RemoveDirectPeer; consequently a later
+// snapshot suppresses a direct loss only when lifecycle actually consumed the
+// source, not merely because an older topology happened to contain it.
+//
+// The zero value is ready for use. Callers must not perform event publication,
+// persistence or other I/O while holding mu.
+type presenceProjectionState struct {
+	mu     sync.Mutex
+	primed bool
+	// reachable uses key presence for reachability and the value for the only
+	// ownership distinction needed here: whether a selectable transit source
+	// existed. false therefore means exclusively direct.
+	reachable map[domain.PeerIdentity]bool
+}
+
+// observeSnapshotLocked advances the projection and returns witnessed
+// final-route losses owned by the snapshot path. Caller must hold
+// Service.presenceProjection.mu (p.mu).
+func (p *presenceProjectionState) observeSnapshotLocked(next map[domain.PeerIdentity]bool) []domain.PeerIdentity {
+	if !p.primed {
+		p.reachable = next
+		p.primed = true
+		return nil
+	}
+
+	var transitions []domain.PeerIdentity
+	for identity, hadTransit := range p.reachable {
+		if _, stillReachable := next[identity]; stillReachable {
+			continue
+		}
+		// An exclusively-direct route that disappeared outside the serialized
+		// lifecycle path carries no typed remote-close evidence. The normal
+		// RemoveDirectPeer path already removes this bit below, and either
+		// publishes the exact EOF observation or deliberately leaves an
+		// ambiguous close un-attributed.
+		if !hadTransit {
+			continue
+		}
+		transitions = append(transitions, identity)
+	}
+	p.reachable = next
+	sort.Slice(transitions, func(i, j int) bool {
+		return transitions[i].Compare(transitions[j]) < 0
+	})
+	return transitions
+}
+
+// removeDirectSourceLocked transfers the removed direct source out of the
+// snapshot baseline. When lifecycle published the final offline transition it
+// consumes the entire identity; otherwise any previous transit source remains
+// snapshot-owned. Caller must hold Service.presenceProjection.mu (p.mu).
+func (p *presenceProjectionState) removeDirectSourceLocked(identity domain.PeerIdentity, transitionHandled bool) {
+	if !p.primed {
+		return
+	}
+	if transitionHandled {
+		delete(p.reachable, identity)
+		return
+	}
+
+	if hadTransit, wasReachable := p.reachable[identity]; wasReachable && !hadTransit {
+		delete(p.reachable, identity)
+	}
 }
 
 // loadRoutingSnapshot atomically retrieves the last-published routing
@@ -99,6 +175,29 @@ func (s *Service) loadRoutingSnapshot() routing.Snapshot {
 	return rs.snap
 }
 
+// ReachableIDsSnapshot returns a caller-owned copy of the reachability set
+// computed alongside the cached routing snapshot. It avoids repeating the
+// full route/health projection in desktop and RPC readers.
+func (s *Service) ReachableIDsSnapshot() map[domain.PeerIdentity]bool {
+	reachable := s.loadReachableIDsSnapshot()
+	clone := make(map[domain.PeerIdentity]bool, len(reachable))
+	for _, identity := range reachable {
+		clone[identity] = true
+	}
+	return clone
+}
+
+func (s *Service) loadReachableIDsSnapshot() []domain.PeerIdentity {
+	if s.routingTable == nil {
+		return nil
+	}
+	rs := s.routingSnap.Load()
+	if rs == nil || rs.reachable == nil {
+		return nil
+	}
+	return rs.reachable
+}
+
 // rebuildRoutingSnapshot publishes a fresh routing.Snapshot if the
 // table has been mutated since the previous publish OR no snapshot has
 // been published yet (cold start primed by Run()). Skipping the
@@ -112,7 +211,7 @@ func (s *Service) loadRoutingSnapshot() routing.Snapshot {
 // already returned true (and the rebuild has started) leaves the next
 // eligible refresh observing dirty=true again and producing one more
 // rebuild — a single missed mutation is therefore visible no later than
-// the next rebuild that passes the routingSnapshotMinInterval (1 s) floor
+// the next rebuild that passes the routingSnapshotMinInterval (2 s) floor
 // plus one refresh tick, well inside the bounded-staleness contract above.
 //
 // routing.Table.SnapshotIncremental acquires t.mu.Lock (exclusive — it
@@ -203,12 +302,35 @@ func (s *Service) rebuildRoutingSnapshot() {
 	// or on cold start. Timestamp the self-heal cadence off the real full so
 	// a bulk-driven full resets the interval and we do not redundantly force
 	// another one shortly after.
+	// Serialize the presence baseline with RemoveDirectPeer. This section spans
+	// SnapshotIncremental's exclusive routing-table projection build, the single
+	// reachability/source-classification pass and the atomic snapshot store. A
+	// direct teardown waiting here already holds peerMu, so no duplicate route or
+	// health traversal belongs in this interval and all publication/I/O remains
+	// after the lock is released.
+	s.presenceProjection.mu.Lock()
 	snap, wasFull := s.routingTable.SnapshotIncremental(forceFull)
-	s.routingSnap.Store(&routingSnapshot{snap: snap})
-	now := time.Now()
-	s.lastRoutingSnapAtNanos.Store(now.UnixNano())
+	reachable := snap.ReachableIdentitiesWithTransit()
+	presenceTransitions := s.presenceProjection.observeSnapshotLocked(reachable)
+	reachableIDs := make([]domain.PeerIdentity, 0, len(reachable))
+	for identity := range reachable {
+		reachableIDs = append(reachableIDs, identity)
+	}
+	// Once every route disappears there is no surviving network witness that
+	// can distinguish "all contacts went offline" from "this node lost its own
+	// connectivity". Do not turn that ambiguous local failure into durable
+	// evidence for every routed identity. A direct peer whose final session
+	// ended with a confirmed remote EOF is recorded at that lifecycle
+	// boundary.
+	if len(reachable) == 0 {
+		presenceTransitions = nil
+	}
+	s.routingSnap.Store(&routingSnapshot{snap: snap, reachable: reachableIDs})
+	s.presenceProjection.mu.Unlock()
+	publishedAt := time.Now().UTC()
+	s.lastRoutingSnapAtNanos.Store(publishedAt.UnixNano())
 	if wasFull {
-		s.lastRoutingFullSnapAtNanos.Store(now.UnixNano())
+		s.lastRoutingFullSnapAtNanos.Store(publishedAt.UnixNano())
 	}
 	// Published AFTER the Store above, which is the whole point of the
 	// snapshot reason: the mutation-time TopicRouteTableChanged events fire
@@ -218,13 +340,62 @@ func (s *Service) rebuildRoutingSnapshot() {
 	// with the ordering guarantee — a subscriber that reconciles on it
 	// reads a snapshot at least as fresh as the change that made the table
 	// dirty (docs/refactoring/identity-discovery-lookup.md §1.2).
+	//
 	s.eventBus.Publish(ebus.TopicRouteTableChanged, ebus.RouteTableChange{
 		Reason: domain.RouteChangeSnapshot,
 	})
+	// Presence is a separate identity-domain event rather than extra fields on
+	// RouteTableChanged. The snapshot comparison emits only final-route loss;
+	// online state is already carried by the route snapshot event. The offline
+	// event owns the transition time, durable update and desktop notification.
+	if source, ok := s.identityPresenceSource(); ok && len(presenceTransitions) > 0 {
+		s.publishIdentityPresenceChanged(ebus.IdentityPresenceChange{
+			Source:     source,
+			Identities: presenceTransitions,
+			ChangedAt:  s.presenceNow(),
+		})
+	}
 	log.Trace().
 		Int("total", snap.TotalEntries).
 		Int("active", snap.ActiveEntries).
 		Msg("routing_snapshot_refresh_end")
+}
+
+func (s *Service) identityPresenceSource() (domain.PeerIdentity, bool) {
+	if s.identity == nil {
+		return domain.PeerIdentity{}, false
+	}
+	source := domain.PeerIdentityFromWire(s.identity.Address)
+	return source, !source.IsZero()
+}
+
+func (s *Service) publishIdentityPresenceChanged(change ebus.IdentityPresenceChange) {
+	// Durable state is an invariant of the observing node, not a command
+	// consumed from a potentially shared best-effort Bus. Queue it exactly once
+	// for both bus-backed and headless services, then notify UI consumers.
+	s.persistIdentityPresenceChange(change)
+	ebus.PublishIdentityPresenceChanged(s.eventBus, change)
+}
+
+func (s *Service) persistIdentityPresenceChange(change ebus.IdentityPresenceChange) {
+	if s.identity == nil || s.trust == nil {
+		return
+	}
+	local := domain.PeerIdentityFromWire(s.identity.Address)
+	if change.Source != local || len(change.Identities) == 0 || change.ChangedAt.IsZero() {
+		return
+	}
+	identities := append([]domain.PeerIdentity(nil), change.Identities...)
+	observedAt := change.ChangedAt.UTC()
+	s.goBackground(func() {
+		if updated, err := s.trust.recordLastOnlineAt(identities, observedAt); err != nil {
+			log.Warn().Err(err).
+				Str("identity_sample", identities[0].String()).
+				Int("updated", updated).
+				Int("offline", len(identities)).
+				Msg("trust_store_last_online_persist_failed")
+		}
+	})
 }
 
 // routingSnapPtr wraps atomic.Pointer[routingSnapshot] — mirror of

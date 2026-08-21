@@ -74,6 +74,9 @@ const (
 	NodeStatusDomainPeerHealth
 	// NodeStatusDomainReachableIDs — routing reachability (route-table change).
 	NodeStatusDomainReachableIDs
+	// NodeStatusDomainPresence — a trusted contact's durable LastOnlineAt.
+	// ReachableIDs belongs exclusively to NodeStatusDomainReachableIDs.
+	NodeStatusDomainPresence
 	// NodeStatusDomainKnownIDs — discovered identity list (identity added).
 	NodeStatusDomainKnownIDs
 	// NodeStatusDomainAggregate — AggregateStatus + CheckedAt (aggregate
@@ -87,9 +90,10 @@ const (
 // long uptimes. Used when NodeStatusMonitorOpts.CaptureRetention is zero.
 const defaultCaptureRetention = 60 * time.Second
 
-// NodeStatusMonitorOpts holds the required dependencies for constructing
-// a NodeStatusMonitor. EventBus, Client, and OnChanged are mandatory;
-// Clock and CaptureRetention are optional (defaults applied when zero).
+// NodeStatusMonitorOpts holds the dependencies for constructing a
+// NodeStatusMonitor. EventBus and Client are required. OnChanged and
+// OnPartialChanged are optional notification hooks; Clock and
+// CaptureRetention receive defaults when left zero.
 type NodeStatusMonitorOpts struct {
 	EventBus  *ebus.Bus
 	Client    *DesktopClient
@@ -115,7 +119,8 @@ type NodeStatusMonitorOpts struct {
 //     TopicPeerPendingChanged, TopicPeerTrafficUpdated)
 //   - Aggregate network counters (TopicAggregateStatusChanged)
 //   - Version policy (TopicVersionPolicyChanged)
-//   - Reachability tracking (TopicRouteTableChanged)
+//   - Reachability tracking (TopicRouteTableChanged) and identity presence
+//     transitions (TopicIdentityPresenceChanged)
 //   - Contact management (TopicContactAdded, TopicContactRemoved)
 //   - Identity registry (TopicIdentityAdded)
 //   - ProbeNode merge logic (mergeNodeStatusLocked, mergePeerHealth,
@@ -234,6 +239,12 @@ func (m *NodeStatusMonitor) notifyPartial(d NodeStatusDomain) {
 		m.onPartialChanged(d)
 		return
 	}
+	m.notifyChanged()
+}
+
+// notifyChanged safely emits a full-status notification. Tests and headless
+// consumers may intentionally construct a monitor without a UI callback.
+func (m *NodeStatusMonitor) notifyChanged() {
 	if m.onChanged != nil {
 		m.onChanged()
 	}
@@ -371,7 +382,7 @@ func (m *NodeStatusMonitor) SeedFromProbe(s NodeStatus) {
 	m.mergeNodeStatusLocked(s)
 	m.mu.Unlock()
 
-	m.onChanged()
+	m.notifyChanged()
 }
 
 // FetchAndSeed performs the initial ProbeNode RPC and seeds the monitor.
@@ -448,8 +459,29 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		m.mu.Lock()
 		m.status.ReachableIDs = fresh
 		m.mu.Unlock()
-
 		m.notifyPartial(NodeStatusDomainReachableIDs)
+	})
+
+	// Identity presence changed — apply only the transition timestamp from the
+	// dedicated identity-domain event. ReachableIDs is deliberately untouched:
+	// the route-snapshot event above is its single writer, avoiding cross-topic
+	// generation races between independent ebus subscriber goroutines.
+	m.eventBus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
+		if change.Source != m.client.Address() || len(change.Identities) == 0 || change.ChangedAt.IsZero() {
+			return
+		}
+		m.mu.Lock()
+		observedAt := change.ChangedAt.UTC()
+		for _, identity := range change.Identities {
+			contact, ok := m.status.Contacts[identity.String()]
+			if !ok || (contact.LastOnlineAt.Valid() && !observedAt.After(contact.LastOnlineAt.Time())) {
+				continue
+			}
+			contact.LastOnlineAt = domain.TimeOf(observedAt)
+			m.status.Contacts[identity.String()] = contact
+		}
+		m.mu.Unlock()
+		m.notifyPartial(NodeStatusDomainPresence)
 	})
 
 	// Individual peer health changed — apply state delta directly.
@@ -478,14 +510,16 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		if m.status.Contacts == nil {
 			m.status.Contacts = make(map[string]Contact)
 		}
+		lastOnlineAt := m.status.Contacts[c.Address.String()].LastOnlineAt
 		m.status.Contacts[c.Address.String()] = Contact{
 			PubKey:       string(c.PubKey),
 			BoxKey:       string(c.BoxKey),
 			BoxSignature: string(c.BoxSig),
+			LastOnlineAt: lastOnlineAt,
 		}
 		m.mu.Unlock()
 
-		m.onChanged()
+		m.notifyChanged()
 	})
 
 	// Contact removed — delete from local map.
@@ -494,7 +528,7 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		delete(m.status.Contacts, identity.String())
 		m.mu.Unlock()
 
-		m.onChanged()
+		m.notifyChanged()
 	})
 
 	// New identity discovered — append to local list.
@@ -785,7 +819,7 @@ func (m *NodeStatusMonitor) applyPeerHealthDelta(delta ebus.PeerHealthDelta) {
 	}
 
 	m.mu.Unlock()
-	m.onChanged()
+	m.notifyChanged()
 }
 
 // applyHealthDeltaToRow writes delta fields into an existing PeerHealth row.
@@ -911,7 +945,7 @@ func (m *NodeStatusMonitor) applySlotStateDelta(address domain.PeerAddress, slot
 	// allocator / UI-freeze source in profiling. Mirrors applyTrafficBatch's
 	// `updated` gate.
 	if changed {
-		m.onChanged()
+		m.notifyChanged()
 	}
 }
 
@@ -949,7 +983,7 @@ func (m *NodeStatusMonitor) applyPeerPendingDelta(delta ebus.PeerPendingDelta) {
 	// was the top allocator / UI-freeze source in profiling. Mirrors
 	// applyTrafficBatch's `updated` gate.
 	if changed {
-		m.onChanged()
+		m.notifyChanged()
 	}
 }
 
@@ -1022,7 +1056,7 @@ func (m *NodeStatusMonitor) applyCaptureStarted(ev ebus.CaptureSessionStarted) {
 	}
 	m.mu.Unlock()
 
-	m.onChanged()
+	m.notifyChanged()
 }
 
 // applyCaptureStopped marks the CaptureSession for this ConnID as stopped
@@ -1057,7 +1091,7 @@ func (m *NodeStatusMonitor) applyCaptureStopped(ev ebus.CaptureSessionStopped) {
 	m.evictExpiredCaptureSessionsLocked()
 	m.mu.Unlock()
 
-	m.onChanged()
+	m.notifyChanged()
 }
 
 // evictExpiredCaptureSessionsLocked removes stopped entries whose TTL has
@@ -1424,9 +1458,10 @@ func enrichPeerHealthIdentityFromProbe(dst, src *PeerHealth) {
 	}
 }
 
-// mergeContacts merges probe contacts into the ebus-driven map. Ebus entries
-// take precedence on key conflicts (they are fresher real-time updates).
-// Probe entries for keys not yet in the ebus map are added.
+// mergeContacts merges probe contacts into the ebus-driven map. Ebus key
+// material takes precedence on conflicts, while LastOnlineAt is durable node
+// state and merges monotonically by timestamp so a dropped ebus notification
+// can be repaired by a later probe.
 func mergeContacts(ebusCt, probeCt map[string]Contact) map[string]Contact {
 	if len(ebusCt) == 0 {
 		return probeCt
@@ -1438,9 +1473,14 @@ func mergeContacts(ebusCt, probeCt map[string]Contact) map[string]Contact {
 	for k, v := range probeCt {
 		merged[k] = v
 	}
-	// Ebus entries overwrite probe entries on conflict — they are fresher.
-	for k, v := range ebusCt {
-		merged[k] = v
+	for address, ebusContact := range ebusCt {
+		probeContact, exists := probeCt[address]
+		probeNewer := exists && probeContact.LastOnlineAt.Valid() &&
+			(!ebusContact.LastOnlineAt.Valid() || probeContact.LastOnlineAt.After(ebusContact.LastOnlineAt.Time()))
+		if probeNewer {
+			ebusContact.LastOnlineAt = probeContact.LastOnlineAt
+		}
+		merged[address] = ebusContact
 	}
 	return merged
 }

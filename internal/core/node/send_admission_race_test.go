@@ -342,7 +342,7 @@ func TestEmitToWalksOnWhenTheSelectedConnIsRetiredInsideTheAdmissionWindow(t *te
 	}
 
 	rendezvous := startTeardownRendezvous(t, svc, func() {
-		svc.trackInboundDisconnect(conns[0].id, conns[0].address)
+		svc.trackInboundDisconnectWithPresenceEvidence(conns[0].id, conns[0].address, nil)
 	})
 
 	line := mustDatagramLine(t, frame)

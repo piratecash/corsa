@@ -144,6 +144,50 @@ func TestSnapshotBestRouteNone(t *testing.T) {
 	}
 }
 
+func TestSnapshotReachableIdentitiesWithTransitClassifiesSources(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	transit := domaintest.ID("classified-transit")
+	direct := domaintest.ID("classified-direct")
+	mixed := domaintest.ID("classified-mixed")
+	dead := domaintest.ID("classified-dead")
+	local := domaintest.ID("classified-local")
+	deadHop := domaintest.ID("classified-dead-hop")
+
+	snap := Snapshot{
+		TakenAt: now,
+		Routes: map[PeerIdentity][]RouteEntry{
+			transit: {{Identity: transit, NextHop: domaintest.ID("transit-hop"), Hops: 2, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)}},
+			direct:  {{Identity: direct, NextHop: direct, Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)}},
+			mixed: {
+				{Identity: mixed, NextHop: mixed, Hops: 1, Source: RouteSourceDirect, ExpiresAt: now.Add(time.Hour)},
+				{Identity: mixed, NextHop: domaintest.ID("mixed-hop"), Hops: 2, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)},
+			},
+			dead:  {{Identity: dead, NextHop: deadHop, Hops: 2, Source: RouteSourceAnnouncement, ExpiresAt: now.Add(time.Hour)}},
+			local: {{Identity: local, NextHop: local, Hops: 0, Source: RouteSourceLocal}},
+		},
+		Health: []RouteHealthState{
+			{Identity: dead, Uplink: deadHop, Health: HealthDead},
+			// A stale health row must not hide a session-bound direct route.
+			{Identity: direct, Uplink: direct, Health: HealthDead},
+		},
+	}
+
+	got := snap.ReachableIdentitiesWithTransit()
+	if hasTransit, ok := got[direct]; !ok || hasTransit {
+		t.Fatalf("direct classification = (%v, %v), want reachable without transit", hasTransit, ok)
+	}
+	for _, identity := range []PeerIdentity{transit, mixed} {
+		if hasTransit, ok := got[identity]; !ok || !hasTransit {
+			t.Fatalf("%s classification = (%v, %v), want reachable with transit", identity, hasTransit, ok)
+		}
+	}
+	for _, identity := range []PeerIdentity{dead, local} {
+		if _, ok := got[identity]; ok {
+			t.Fatalf("%s unexpectedly classified reachable: %v", identity, got)
+		}
+	}
+}
+
 // --- Validate ---
 
 func TestValidateRejectsDirectWithWrongHops(t *testing.T) {

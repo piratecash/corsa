@@ -7,6 +7,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
@@ -27,6 +28,7 @@ func TestReachableIDsReconcileOnlyOnSnapshotReason(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	bus := ebus.New()
+	t.Cleanup(bus.Shutdown)
 	svc := node.NewService(config.Node{
 		ListenAddress:  ":0",
 		TrustStorePath: filepath.Join(dir, "trust.json"),
@@ -45,9 +47,8 @@ func TestReachableIDsReconcileOnlyOnSnapshotReason(t *testing.T) {
 
 	notified := make(chan NodeStatusDomain, 8)
 	monitor := NewNodeStatusMonitor(NodeStatusMonitorOpts{
-		EventBus:  bus,
-		Client:    client,
-		OnChanged: func() {},
+		EventBus: bus,
+		Client:   client,
 		OnPartialChanged: func(domain NodeStatusDomain) {
 			notified <- domain
 		},
@@ -88,9 +89,50 @@ func TestReachableIDsReconcileOnlyOnSnapshotReason(t *testing.T) {
 				}
 			default:
 			}
-			return
+			goto reachabilityVerified
 		case <-deadline:
 			t.Fatal("the snapshot reason never triggered the reachability rebuild")
 		}
+	}
+
+reachabilityVerified:
+	// The dedicated presence event carries the exact timestamp persisted by
+	// the node for online→offline transitions. The monitor must apply it to the
+	// trusted contact in the same status update, without waiting for a probe.
+	peer := domaintest.ID("monitor-last-online-peer")
+	observedAt := time.Date(2026, time.August, 21, 7, 6, 16, 0, time.UTC)
+	foreignObservedAt := observedAt.Add(time.Hour)
+	monitor.mu.Lock()
+	monitor.status.Contacts = map[string]Contact{peer.String(): {PubKey: "pk-peer"}}
+	monitor.status.ReachableIDs = map[domain.PeerIdentity]bool{peer: true}
+	monitor.mu.Unlock()
+
+	// A shared bus may carry presence observations from another embedded node.
+	// Its newer timestamp must not contaminate this monitor, and presence must
+	// never rewrite ReachableIDs (the snapshot route event is the sole owner).
+	ebus.PublishIdentityPresenceChanged(bus, ebus.IdentityPresenceChange{
+		Source:     domaintest.ID("foreign-node"),
+		Identities: []domain.PeerIdentity{peer},
+		ChangedAt:  foreignObservedAt,
+	})
+	ebus.PublishIdentityPresenceChanged(bus, ebus.IdentityPresenceChange{
+		Source:     client.Address(),
+		Identities: []domain.PeerIdentity{peer},
+		ChangedAt:  observedAt,
+	})
+	select {
+	case changed := <-notified:
+		if changed != NodeStatusDomainPresence {
+			t.Fatalf("last-online transition notified domain %v, want presence", changed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("last-online transition did not notify the partial-only subscriber")
+	}
+	contact := monitor.Contacts()[peer.String()]
+	if !contact.LastOnlineAt.Valid() || !contact.LastOnlineAt.Time().Equal(observedAt) {
+		t.Fatalf("contact last online = %v, want %v", contact.LastOnlineAt, observedAt)
+	}
+	if reachable := monitor.ReachableIDsSnapshot(); !reachable[peer] {
+		t.Fatalf("presence event rewrote ReachableIDs: %v", reachable)
 	}
 }

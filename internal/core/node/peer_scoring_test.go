@@ -673,7 +673,7 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 
 	// Clean up.
 	_ = authConn.Close()
-	svc.trackInboundDisconnect(authID, peerAddr)
+	svc.trackInboundDisconnectWithPresenceEvidence(authID, peerAddr, nil)
 	_ = spoofConn.Close()
-	svc.trackInboundDisconnect(spoofID, peerAddr)
+	svc.trackInboundDisconnectWithPresenceEvidence(spoofID, peerAddr, nil)
 }

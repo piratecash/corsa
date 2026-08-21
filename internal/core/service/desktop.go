@@ -96,6 +96,7 @@ type Contact struct {
 	BoxKey       string
 	PubKey       string
 	BoxSignature string
+	LastOnlineAt domain.OptionalTime
 }
 
 // MessageRecord is the normalized form of a persisted envelope handed to

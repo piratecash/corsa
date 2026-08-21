@@ -86,6 +86,8 @@ type Window struct {
 	identityPanelList        layout.List
 	searchIcon               *widget.Icon
 	fingerprintIcon          *widget.Icon
+	personIcon               *widget.Icon
+	personOutlineIcon        *widget.Icon
 	chevronIcon              *widget.Icon
 	copyIcon                 *widget.Icon
 	shareIcon                *widget.Icon
@@ -372,6 +374,10 @@ type Window struct {
 	fileExplorer *explorer.Explorer
 
 	snap service.RouterSnapshot
+	// peerLastOnlineByIdentity is rebuilt once per frame from PeerHealth and
+	// reused by every visible contact row. This keeps row layout O(1) instead of
+	// decoding the full peer-health slice for every contact.
+	peerLastOnlineByIdentity map[domain.PeerIdentity]time.Time
 
 	consoleMu sync.Mutex
 
@@ -476,6 +482,8 @@ func loadUIIcon(name string, data []byte) (*widget.Icon, error) {
 type windowIcons struct {
 	search          *widget.Icon
 	fingerprint     *widget.Icon
+	person          *widget.Icon
+	personOutline   *widget.Icon
 	chevron         *widget.Icon
 	copy            *widget.Icon
 	share           *widget.Icon
@@ -497,6 +505,8 @@ func loadWindowIcons() (windowIcons, error) {
 	}{
 		{name: "search", data: icons.ActionSearch, dst: &loaded.search},
 		{name: "fingerprint", data: icons.ActionFingerprint, dst: &loaded.fingerprint},
+		{name: "person", data: icons.SocialPerson, dst: &loaded.person},
+		{name: "person-outline", data: icons.SocialPersonOutline, dst: &loaded.personOutline},
 		{name: "chevron-right", data: icons.NavigationChevronRight, dst: &loaded.chevron},
 		{name: "copy", data: icons.ContentContentCopy, dst: &loaded.copy},
 		{name: "share", data: icons.SocialShare, dst: &loaded.share},
@@ -558,48 +568,51 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 	emojiPicker := newEmojiPickerStateWithRecents(recentEmojis)
 
 	w := &Window{
-		router:              router,
-		client:              client,
-		eventBus:            eventBus,
-		cmdTable:            cmdTable,
-		runtime:             runtime,
-		prefs:               prefs,
-		theme:               theme,
-		language:            language,
-		languageOptions:     make(map[string]*widget.Clickable),
-		recipientButtons:    make(map[domain.PeerIdentity]*widget.Clickable),
-		recipientRightClick: make(map[domain.PeerIdentity]*rightClickState),
-		messageSelectables:  make(map[string]*widget.Selectable),
-		msgRightClick:       make(map[string]*rightClickState),
-		msgMenuBtns:         make(map[string]*widget.Clickable),
-		recipientMenuBtns:   make(map[domain.PeerIdentity]*widget.Clickable),
-		menuBtnRects:        make(map[*widget.Clickable]image.Rectangle),
-		touchPressPos:       make(map[pointer.ID]image.Point),
-		pointerPressPos:     make(map[pointer.ID]pressPoint),
-		drafts:              make(map[domain.PeerIdentity]composerDraft),
-		attachGen:           make(map[domain.PeerIdentity]uint64),
-		peerForgetEpoch:     make(map[domain.PeerIdentity]uint64),
-		failedSends:         make(map[domain.PeerIdentity][]failedSend),
-		failedShown:         make(map[domain.PeerIdentity]int),
-		pendingFailed:       make(chan pendingFailedMsg, 64),
-		contactsList:        widget.List{List: layout.List{Axis: layout.Vertical}},
-		ctxMenuList:         layout.List{Axis: layout.Vertical},
-		msgCtxMenuList:      layout.List{Axis: layout.Vertical},
-		identityPanelList:   layout.List{Axis: layout.Vertical},
-		chatList:            widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
-		searchIcon:          loadedIcons.search,
-		fingerprintIcon:     loadedIcons.fingerprint,
-		chevronIcon:         loadedIcons.chevron,
-		copyIcon:            loadedIcons.copy,
-		shareIcon:           loadedIcons.share,
-		closeIcon:           loadedIcons.close,
-		attachIcon:          loadedIcons.attach,
-		emojiIcon:           loadedIcons.emoji,
-		sendIcon:            loadedIcons.send,
-		shieldIcon:          loadedIcons.shield,
-		consoleIcon:         loadedIcons.console,
-		emojiCategoryIcons:  loadedIcons.emojiCategories,
-		emojiPicker:         emojiPicker,
+		router:                   router,
+		client:                   client,
+		eventBus:                 eventBus,
+		cmdTable:                 cmdTable,
+		runtime:                  runtime,
+		prefs:                    prefs,
+		theme:                    theme,
+		language:                 language,
+		languageOptions:          make(map[string]*widget.Clickable),
+		recipientButtons:         make(map[domain.PeerIdentity]*widget.Clickable),
+		recipientRightClick:      make(map[domain.PeerIdentity]*rightClickState),
+		messageSelectables:       make(map[string]*widget.Selectable),
+		msgRightClick:            make(map[string]*rightClickState),
+		msgMenuBtns:              make(map[string]*widget.Clickable),
+		recipientMenuBtns:        make(map[domain.PeerIdentity]*widget.Clickable),
+		menuBtnRects:             make(map[*widget.Clickable]image.Rectangle),
+		touchPressPos:            make(map[pointer.ID]image.Point),
+		pointerPressPos:          make(map[pointer.ID]pressPoint),
+		drafts:                   make(map[domain.PeerIdentity]composerDraft),
+		attachGen:                make(map[domain.PeerIdentity]uint64),
+		peerForgetEpoch:          make(map[domain.PeerIdentity]uint64),
+		peerLastOnlineByIdentity: make(map[domain.PeerIdentity]time.Time),
+		failedSends:              make(map[domain.PeerIdentity][]failedSend),
+		failedShown:              make(map[domain.PeerIdentity]int),
+		pendingFailed:            make(chan pendingFailedMsg, 64),
+		contactsList:             widget.List{List: layout.List{Axis: layout.Vertical}},
+		ctxMenuList:              layout.List{Axis: layout.Vertical},
+		msgCtxMenuList:           layout.List{Axis: layout.Vertical},
+		identityPanelList:        layout.List{Axis: layout.Vertical},
+		chatList:                 widget.List{List: layout.List{Axis: layout.Vertical, ScrollToEnd: true}},
+		searchIcon:               loadedIcons.search,
+		fingerprintIcon:          loadedIcons.fingerprint,
+		personIcon:               loadedIcons.person,
+		personOutlineIcon:        loadedIcons.personOutline,
+		chevronIcon:              loadedIcons.chevron,
+		copyIcon:                 loadedIcons.copy,
+		shareIcon:                loadedIcons.share,
+		closeIcon:                loadedIcons.close,
+		attachIcon:               loadedIcons.attach,
+		emojiIcon:                loadedIcons.emoji,
+		sendIcon:                 loadedIcons.send,
+		shieldIcon:               loadedIcons.shield,
+		consoleIcon:              loadedIcons.console,
+		emojiCategoryIcons:       loadedIcons.emojiCategories,
+		emojiPicker:              emojiPicker,
 		// Generously buffered and fully drained each frame so background
 		// producers (file picks, failed-send restores) block-send without
 		// dropping cross-conversation events.
@@ -922,6 +935,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		w.identityPanelFocus.restoreOnClose(gtx, &w.myIdentityButton)
 	}
 	w.snap = w.router.Snapshot()
+	w.rebuildPeerLastOnlineIndex()
 	w.rebuildMsgCache()
 	// AFTER the snapshot, and after rebuildMsgCache: the signature carries
 	// chatOrder, which rebuildMsgCache derives from the messages this snapshot
@@ -2715,7 +2729,7 @@ func (w *Window) layoutContactsCard(gtx layout.Context, status service.NodeStatu
 	// frame's keystrokes.
 	searchResults := w.resolveIdentitySearchRows(status, recipients)
 
-	return w.card(gtx, w.t("clients.title"), nil, func(gtx layout.Context) layout.Dimensions {
+	return w.card(gtx, "", nil, func(gtx layout.Context) layout.Dimensions {
 		return w.layoutMyIdentityButton(gtx, len(recipients))
 	}, func(gtx layout.Context) layout.Dimensions {
 		children := []layout.FlexChild{}
@@ -2946,9 +2960,13 @@ func (w *Window) layoutIdentitySearchEditor(gtx layout.Context) layout.Dimension
 	})
 }
 
-func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity, showUnread bool) layout.Dimensions {
+func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity, contactRow bool) layout.Dimensions {
 	btn := w.recipientButton(fingerprint)
 	rc := w.recipientRightClickState(fingerprint)
+	// On a compact sidebar the full localized label (for example,
+	// "3 дня назад") must yield to the contact name. Screen readers still get
+	// the complete last-online text from the row description below.
+	showLastOnlineLabel := shouldShowContactLastOnlineLabel(gtx, contactRow)
 
 	return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fpStr := fingerprint.String()
@@ -3055,61 +3073,81 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 			fill(gtx, bg)
 			// Tight padding matching the window-edge inset (Top/Bottom 4,
 			// Left/Right 6) so the card content sits close to its border.
-			return layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			dims := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{
-							Axis:      layout.Horizontal,
-							Spacing:   layout.SpaceBetween,
-							Alignment: layout.Middle,
-						}.Layout(gtx,
+						return w.layoutContactPresenceAvatar(gtx, status, fingerprint)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return layout.Inset{Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									return w.layoutReachableIndicator(gtx, status, fingerprint)
-								})
+								return layout.Flex{
+									Axis:      layout.Horizontal,
+									Spacing:   layout.SpaceBetween,
+									Alignment: layout.Middle,
+								}.Layout(gtx,
+									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+										title := material.Body1(w.theme, w.peerDisplayName(fingerprint))
+										title.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+										title.Font.Weight = 600
+										title.MaxLines = 1
+										return title.Layout(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if !contactRow {
+											return layout.Dimensions{}
+										}
+										ps := w.snap.Peers[fingerprint]
+										if ps == nil || ps.Unread == 0 {
+											return layout.Dimensions{}
+										}
+										return layout.Inset{Left: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return w.layoutUnreadBadge(gtx, ps.Unread)
+										})
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										if !showLastOnlineLabel {
+											return layout.Dimensions{}
+										}
+										return layout.Inset{Left: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+											return w.layoutContactLastOnline(gtx, status, fingerprint)
+										})
+									}),
+									layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										// "⋯" — always-available touch path to the
+										// contact menu (long-press is limited by
+										// Gio's pointer-grab threshold).
+										mb := w.recipientMenuButton(fingerprint)
+										for mb.Clicked(gtx) {
+											openMenu(w.menuAnchorForClick(mb, gtx))
+										}
+										return w.menuDotsButton(gtx, mb, color.NRGBA{R: 160, G: 175, B: 195, A: 255}, w.t("context.menu_button_contact"))
+									}),
+								)
 							}),
-							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								title := material.Body1(w.theme, w.peerDisplayName(fingerprint))
-								title.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-								title.Font.Weight = 600
-								return title.Layout(gtx)
-							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								if !showUnread {
-									return layout.Dimensions{}
+								preview := w.snapPreview(fingerprint)
+								if strings.TrimSpace(preview) == "" {
+									preview = fpStr
 								}
-								ps := w.snap.Peers[fingerprint]
-								if ps == nil || ps.Unread == 0 {
-									return layout.Dimensions{}
-								}
-								return w.layoutUnreadBadge(gtx, ps.Unread)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								// "⋯" — always-available touch path to the
-								// contact menu (long-press is limited by
-								// Gio's pointer-grab threshold).
-								mb := w.recipientMenuButton(fingerprint)
-								for mb.Clicked(gtx) {
-									openMenu(w.menuAnchorForClick(mb, gtx))
-								}
-								return w.menuDotsButton(gtx, mb, color.NRGBA{R: 160, G: 175, B: 195, A: 255}, w.t("context.menu_button_contact"))
+								label := material.Body2(w.theme, ellipsize(preview, 44))
+								label.Color = color.NRGBA{R: 187, G: 197, B: 212, A: 255}
+								label.MaxLines = 1
+								return label.Layout(gtx)
 							}),
 						)
 					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						preview := w.snapPreview(fingerprint)
-						if strings.TrimSpace(preview) == "" {
-							preview = fpStr
-						}
-						label := material.Body2(w.theme, ellipsize(preview, 44))
-						label.Color = color.NRGBA{R: 187, G: 197, B: 212, A: 255}
-						label.MaxLines = 1
-						return label.Layout(gtx)
-					}),
 				)
 			})
+			// DescriptionOp is deliberately emitted after every child in the
+			// clickable area. Gio keeps one description per semantic area, so
+			// avatar/timestamp descriptions emitted earlier would overwrite one
+			// another depending on layout order.
+			semantic.DescriptionOp(w.contactPresenceDescription(gtx.Now, status, fingerprint, contactRow)).Add(gtx.Ops)
+			return dims
 		})
 	})
 }
@@ -5199,6 +5237,201 @@ func (w *Window) layoutUnreadBadge(gtx layout.Context, count int) layout.Dimensi
 			})
 		}),
 	)
+}
+
+type contactPresenceState uint8
+
+const (
+	contactPresenceUnknown contactPresenceState = iota
+	contactPresenceOffline
+	contactPresenceOnline
+)
+
+func contactPresence(status service.NodeStatus, fingerprint domain.PeerIdentity) contactPresenceState {
+	if status.ReachableIDs == nil {
+		return contactPresenceUnknown
+	}
+	if status.ReachableIDs[fingerprint] {
+		return contactPresenceOnline
+	}
+	return contactPresenceOffline
+}
+
+// layoutContactPresenceAvatar is the contact-list-specific replacement for
+// the old 10dp reachability dot. Other status surfaces intentionally keep
+// layoutReachableIndicator: this redesign belongs to the user list only.
+func (w *Window) layoutContactPresenceAvatar(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity) layout.Dimensions {
+	const avatarSize = unit.Dp(38)
+	const avatarIconSize = unit.Dp(23)
+
+	state := contactPresence(status, fingerprint)
+	background := color.NRGBA{R: 83, G: 101, B: 124, A: 255}
+	iconColor := color.NRGBA{R: 246, G: 249, B: 252, A: 255}
+	icon := w.personIcon
+
+	switch state {
+	case contactPresenceOnline:
+		background = color.NRGBA{R: 25, G: 137, B: 65, A: 255}
+	case contactPresenceUnknown:
+		iconColor = color.NRGBA{R: 174, G: 193, B: 216, A: 255}
+		icon = w.personOutlineIcon
+	}
+
+	side := gtx.Dp(avatarSize)
+	gtx.Constraints.Min = image.Pt(side, side)
+	gtx.Constraints.Max = image.Pt(side, side)
+	bounds := image.Pt(side, side)
+	// Explicit centering prevents the smaller foreground icon from inheriting
+	// Stack's north-west zero-value alignment inside the avatar circle.
+	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			if state == contactPresenceUnknown {
+				stroke := clip.Stroke{
+					Path:  clip.Ellipse{Max: bounds}.Path(gtx.Ops),
+					Width: float32(gtx.Dp(unit.Dp(1.5))),
+				}.Op().Push(gtx.Ops)
+				paint.ColorOp{Color: iconColor}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+				stroke.Pop()
+				return layout.Dimensions{Size: bounds}
+			}
+			defer clip.Ellipse{Max: bounds}.Push(gtx.Ops).Pop()
+			paint.ColorOp{Color: background}.Add(gtx.Ops)
+			paint.PaintOp{}.Add(gtx.Ops)
+			return layout.Dimensions{Size: bounds}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if icon == nil {
+				return layout.Dimensions{}
+			}
+			return layoutVectorIcon(gtx, icon, avatarIconSize, iconColor)
+		}),
+	)
+}
+
+func shouldShowContactLastOnlineLabel(gtx layout.Context, contactRow bool) bool {
+	return contactRow && gtx.Constraints.Max.X >= gtx.Dp(unit.Dp(280))
+}
+
+// contactLastOnlineAt returns the best identity-scoped activity timestamp the
+// desktop currently owns. A live route is represented by the online avatar,
+// so it returns no timestamp instead of a moving wall clock. For an offline
+// contact, durable presence, peer health and incoming activity are merged by
+// recency. Outgoing messages are not peer-presence evidence.
+func contactLastOnlineAt(status service.NodeStatus, state *service.RouterPeerState, fingerprint domain.PeerIdentity, peerHealthLastOnline time.Time) time.Time {
+	if status.ReachableIDs != nil && status.ReachableIDs[fingerprint] {
+		return time.Time{}
+	}
+	last := peerHealthLastOnline
+	if contact, ok := status.Contacts[fingerprint.String()]; ok && contact.LastOnlineAt.Valid() {
+		if persisted := contact.LastOnlineAt.Time(); persisted.After(last) {
+			last = persisted
+		}
+	}
+
+	if state == nil || state.Preview.Timestamp.IsZero() {
+		return last
+	}
+	if state.Preview.Sender == fingerprint && state.Preview.Timestamp.After(last) {
+		return state.Preview.Timestamp
+	}
+	return last
+}
+
+func (w *Window) rebuildPeerLastOnlineIndex() {
+	if w.peerLastOnlineByIdentity == nil {
+		w.peerLastOnlineByIdentity = make(map[domain.PeerIdentity]time.Time)
+	} else {
+		clear(w.peerLastOnlineByIdentity)
+	}
+	for _, peer := range w.snap.NodeStatus.PeerHealth {
+		identity := domain.PeerIdentityFromWire(peer.PeerID)
+		if identity.IsZero() {
+			continue
+		}
+		last := w.peerLastOnlineByIdentity[identity]
+		last = newerOptionalTime(last, peer.LastDisconnectedAt)
+		last = newerOptionalTime(last, peer.LastUsefulReceiveAt)
+		last = newerOptionalTime(last, peer.LastPongAt)
+		last = newerOptionalTime(last, peer.LastConnectedAt)
+		if !last.IsZero() {
+			w.peerLastOnlineByIdentity[identity] = last
+		}
+	}
+}
+
+func newerOptionalTime(current time.Time, candidate domain.OptionalTime) time.Time {
+	if candidate.Valid() && candidate.Time().After(current) {
+		return candidate.Time()
+	}
+	return current
+}
+
+func formatContactLastOnline(now, last time.Time, language string) string {
+	if now.IsZero() || last.IsZero() {
+		return ""
+	}
+	last = last.In(now.Location())
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	lastDay := time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, now.Location())
+
+	daysAgo := calendarDayDistance(today, lastDay)
+	switch {
+	case daysAgo <= 0:
+		return last.Format("15:04")
+	case daysAgo == 1:
+		return translate(language, "clients.last_online_yesterday")
+	case daysAgo <= 6:
+		return translateCount(language, "clients.last_online_days", daysAgo)
+	default:
+		return last.Format(translate(language, "clients.last_online_date_format"))
+	}
+}
+
+func calendarDayDistance(later, earlier time.Time) int {
+	laterYear, laterMonth, laterDay := later.Date()
+	earlierYear, earlierMonth, earlierDay := earlier.Date()
+	laterUTC := time.Date(laterYear, laterMonth, laterDay, 0, 0, 0, 0, time.UTC)
+	earlierUTC := time.Date(earlierYear, earlierMonth, earlierDay, 0, 0, 0, 0, time.UTC)
+	return int(laterUTC.Sub(earlierUTC) / (24 * time.Hour))
+}
+
+func (w *Window) contactPresenceDescription(now time.Time, status service.NodeStatus, fingerprint domain.PeerIdentity, includeLastOnline bool) string {
+	presence := contactPresence(status, fingerprint)
+	if presence == contactPresenceOnline {
+		return w.t("clients.presence.online")
+	}
+	if !includeLastOnline {
+		if presence == contactPresenceUnknown {
+			return w.t("clients.presence.unknown")
+		}
+		return w.t("clients.presence.offline")
+	}
+
+	last := contactLastOnlineAt(status, w.snap.Peers[fingerprint], fingerprint, w.peerLastOnlineByIdentity[fingerprint])
+	formatted := formatContactLastOnline(now, last, w.language)
+	if formatted == "" {
+		if presence == contactPresenceUnknown {
+			return w.t("clients.presence.unknown")
+		}
+		return w.t("clients.presence.offline")
+	}
+	if presence == contactPresenceUnknown {
+		return w.t("clients.presence.unknown_last_online", formatted)
+	}
+	return w.t("clients.last_online", formatted)
+}
+
+func (w *Window) layoutContactLastOnline(gtx layout.Context, status service.NodeStatus, fingerprint domain.PeerIdentity) layout.Dimensions {
+	last := contactLastOnlineAt(status, w.snap.Peers[fingerprint], fingerprint, w.peerLastOnlineByIdentity[fingerprint])
+	formatted := formatContactLastOnline(gtx.Now, last, w.language)
+	if formatted == "" {
+		return layout.Dimensions{}
+	}
+	label := material.Caption(w.theme, formatted)
+	label.Color = color.NRGBA{R: 162, G: 177, B: 198, A: 255}
+	label.MaxLines = 1
+	return label.Layout(gtx)
 }
 
 // layoutReachableIndicator draws a small circle reflecting the routing table

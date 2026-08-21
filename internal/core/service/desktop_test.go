@@ -26,13 +26,13 @@ func TestContactsFromFrame(t *testing.T) {
 	got := contactsFromFrame(protocol.Frame{
 		Type: "contacts",
 		Contacts: []protocol.ContactFrame{
-			{Address: "abc", BoxKey: "box1", PubKey: "pub1", BoxSig: "sig1"},
+			{Address: "abc", BoxKey: "box1", PubKey: "pub1", BoxSig: "sig1", LastOnlineAt: "2026-08-21T07:06:16Z"},
 			{Address: "def", BoxKey: "box2", PubKey: "pub2", BoxSig: "sig2"},
 		},
 	})
 
 	want := map[string]Contact{
-		"abc": {BoxKey: "box1", PubKey: "pub1", BoxSignature: "sig1"},
+		"abc": {BoxKey: "box1", PubKey: "pub1", BoxSignature: "sig1", LastOnlineAt: domain.TimeOf(time.Date(2026, time.August, 21, 7, 6, 16, 0, time.UTC))},
 		"def": {BoxKey: "box2", PubKey: "pub2", BoxSignature: "sig2"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1606,20 +1606,6 @@ func TestBuildReachableIDsEmptyTable(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("expected empty map (no reachable identities), got %v", got)
-	}
-}
-
-// TestReachableFromSnapshotFiltersWithdrawn verifies that reachableFromSnapshot
-// only includes identities with at least one live (non-withdrawn) route.
-func TestReachableFromSnapshotFiltersWithdrawn(t *testing.T) {
-	t.Parallel()
-	c, _ := newTestDesktopClientWithNode(t)
-
-	// With no routes added, snapshot should yield empty reachable set.
-	snap := c.localNode.RoutingSnapshot()
-	got := reachableFromSnapshot(snap)
-	if len(got) != 0 {
-		t.Fatalf("expected empty reachable set from empty snapshot, got %v", got)
 	}
 }
 

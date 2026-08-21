@@ -3555,6 +3555,86 @@ func TestPeerDialCandidatesIncludesPersistedPeers(t *testing.T) {
 	}
 }
 
+func TestNewServiceRestoresPeerIdentityFromPeerState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+	peerAddress := domain.PeerAddress("10.0.0.50:64646")
+	peerIdentity := domaintest.ID("persisted-peer-identity")
+	data, err := json.Marshal(peerStateFile{
+		Version: peerStateVersion,
+		Peers: []peerEntry{{
+			Address:  peerAddress,
+			Identity: peerIdentity,
+			Source:   domain.PeerSourcePeerExchange,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal peer state: %v", err)
+	}
+	if err := os.WriteFile(peersPath, data, 0o600); err != nil {
+		t.Fatalf("write peer state: %v", err)
+	}
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := NewService(config.Node{
+		ListenAddress:     ":0",
+		PeersStatePath:    peersPath,
+		TrustStorePath:    filepath.Join(dir, "trust.json"),
+		AllowPrivatePeers: true,
+	}, id, nil)
+
+	if got := svc.peerIDs[peerAddress]; got != peerIdentity {
+		t.Fatalf("restored peer identity = %s, want %s", got, peerIdentity)
+	}
+}
+
+func TestFlushPeerStatePersistsRuntimePeerIdentity(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	peersPath := filepath.Join(dir, "peers.json")
+	peerAddress := domain.PeerAddress("10.0.0.60:64646")
+	peerIdentity := domaintest.ID("runtime-peer-identity")
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	svc := NewService(config.Node{
+		ListenAddress:     ":0",
+		BootstrapPeers:    []string{string(peerAddress)},
+		PeersStatePath:    peersPath,
+		TrustStorePath:    filepath.Join(dir, "trust.json"),
+		AllowPrivatePeers: true,
+	}, id, nil)
+	svc.addPeerID(peerAddress, peerIdentity)
+	svc.peerMu.RLock()
+	dirty := svc.peerStateDirty
+	svc.peerMu.RUnlock()
+	if !dirty {
+		t.Fatal("new runtime peer identity did not schedule a debounced peer-state flush")
+	}
+
+	svc.flushPeerState()
+	state, err := loadPeerState(peersPath)
+	if err != nil {
+		t.Fatalf("load flushed peer state: %v", err)
+	}
+	for _, entry := range state.Peers {
+		if entry.Address == peerAddress {
+			if entry.Identity != peerIdentity {
+				t.Fatalf("persisted identity = %s, want %s", entry.Identity, peerIdentity)
+			}
+			return
+		}
+	}
+	t.Fatalf("flushed peer state has no row for %s", peerAddress)
+}
+
 // TestMaybeSavePeerStateRespectsInterval verifies that maybeSavePeerState
 // does not write more often than peerStateSaveMinutes.
 func TestMaybeSavePeerStateRespectsInterval(t *testing.T) {
@@ -7949,7 +8029,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 
 	// Close the first connection — peer should remain connected.
 	_ = conn1a.Close()
-	svc.trackInboundDisconnect(id1a, peer)
+	svc.trackInboundDisconnectWithPresenceEvidence(id1a, peer, nil)
 
 	svc.peerMu.RLock()
 	h = svc.health[peer]
@@ -7969,7 +8049,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 
 	// Close the second connection — now the peer should disconnect.
 	_ = conn2a.Close()
-	svc.trackInboundDisconnect(id2a, peer)
+	svc.trackInboundDisconnectWithPresenceEvidence(id2a, peer, nil)
 
 	svc.peerMu.RLock()
 	h = svc.health[peer]
@@ -8067,7 +8147,7 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 
 	idA, _ := svc.connIDFor(connA)
 	svc.trackInboundConnect(idA, peer, mapIdentity)
-	svc.trackInboundDisconnect(idA, peer)
+	svc.trackInboundDisconnectWithPresenceEvidence(idA, peer, nil)
 
 	select {
 	case hint := <-cm.hintEvents:
@@ -8117,7 +8197,7 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 
 	idA, _ := svc.connIDFor(connA)
 	svc.trackInboundConnect(idA, peer, mapIdentity)
-	svc.trackInboundDisconnect(idA, peer)
+	svc.trackInboundDisconnectWithPresenceEvidence(idA, peer, nil)
 
 	select {
 	case hint := <-cm.hintEvents:

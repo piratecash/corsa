@@ -47,6 +47,15 @@ func PublishIdentityAdded(bus *Bus, identity domain.PeerIdentity) {
 	bus.Publish(TopicIdentityAdded, identity)
 }
 
+// PublishIdentityPresenceChanged emits TopicIdentityPresenceChanged with a
+// typed identity-level offline transition batch.
+func PublishIdentityPresenceChanged(bus *Bus, change IdentityPresenceChange) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicIdentityPresenceChanged, change)
+}
+
 // PublishPeerConnected emits TopicPeerConnected with a typed
 // (address, identity) pair. Use this instead of bus.Publish at every new
 // call site so the compiler enforces the (PeerAddress, PeerIdentity)

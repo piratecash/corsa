@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -159,6 +160,21 @@ func sessionCloseCauseFromError(err error) sessionCloseCause {
 	return sessionClosePeerInitiated
 }
 
+// sessionCloseProvidesPeerOfflineEvidence is deliberately narrower than
+// sessionCloseCauseFromError. The quarantine classifier treats timeouts and
+// protocol failures as peer instability, but those failures do not prove that
+// the remote identity went offline: our own interface, route, or writer may
+// have failed. Durable last_online_at is therefore attributed only when the
+// transport reports a clean remote close. Explicit lifecycle callers that
+// already know the peer initiated the close pass that evidence directly via
+// onPeerSessionClosedWithCause.
+func sessionCloseProvidesPeerOfflineEvidence(err error) bool {
+	if err == nil || errors.Is(err, errPeerSessionInboxOverflow) {
+		return false
+	}
+	return errors.Is(err, io.EOF)
+}
+
 func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress) {
 	defer crashlog.DeferRecover()
 	for {
@@ -196,7 +212,7 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			// s.sessions and no other goroutine mutates session.capabilities
 			// after applyWelcomeMetadata.
 			if closedSession != nil && !closedSession.peerIdentity.IsZero() {
-				s.onPeerSessionClosedWithCause(closedSession.peerIdentity, closedSession.capabilities, sessionCloseCauseFromError(err))
+				s.onPeerSessionClosedWithError(closedSession.peerIdentity, closedSession.capabilities, err)
 			}
 			// Self-identity short-circuit — must run BEFORE the generic
 			// markPeerDisconnected penalty. openPeerSession surfaces the
@@ -1276,7 +1292,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		// Routing table: deregister direct peer only if this goroutine
 		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
 		if ownedCleanup && !session.peerIdentity.IsZero() {
-			s.onPeerSessionClosedWithCause(session.peerIdentity, session.capabilities, sessionCloseCauseFromError(err))
+			s.onPeerSessionClosedWithError(session.peerIdentity, session.capabilities, err)
 		}
 
 		// Accumulate traffic metrics from the metered connection.

@@ -5,9 +5,62 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
+
+func TestRecordLastOnlineAtPersistsAndDoesNotRegress(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trust.json")
+	self := domaintest.ID("last-online-self")
+	peer := domaintest.ID("last-online-peer")
+
+	store, err := loadTrustStore(path, trustedContact{Address: self.String(), PubKey: "pk-self"})
+	if err != nil {
+		t.Fatalf("loadTrustStore: %v", err)
+	}
+	if stored, err := store.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+
+	want := time.Date(2026, time.August, 21, 9, 6, 16, 123456789, time.FixedZone("test", 2*60*60))
+	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer, domaintest.ID("unknown")}, want); err != nil || updated != 1 {
+		t.Fatalf("recordLastOnlineAt: updated=%d err=%v", updated, err)
+	}
+	want = want.UTC()
+
+	// A delayed writer must not move the durable observation backwards.
+	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer}, want.Add(-time.Hour)); err != nil || updated != 0 {
+		t.Fatalf("older recordLastOnlineAt: updated=%d err=%v", updated, err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read trust file: %v", err)
+	}
+	var file trustFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("decode trust file: %v", err)
+	}
+	if file.Version != trustFileVersion {
+		t.Fatalf("trust version = %d, want %d", file.Version, trustFileVersion)
+	}
+	if got := file.Contacts[peer.String()].LastOnlineAt; !got.Equal(want) {
+		t.Fatalf("persisted last_online_at = %v, want %v", got, want)
+	}
+	if _, ok := file.Contacts[domaintest.ID("unknown").String()]; ok {
+		t.Fatal("last-online observation created an untrusted contact")
+	}
+
+	reloaded, err := loadTrustStore(path, trustedContact{Address: self.String(), PubKey: "pk-self"})
+	if err != nil {
+		t.Fatalf("reload trust store: %v", err)
+	}
+	if got := reloaded.trustedContacts()[peer.String()].LastOnlineAt; !got.Equal(want) {
+		t.Fatalf("reloaded last_online_at = %v, want %v", got, want)
+	}
+}
 
 // TestForgetRemovesContact verifies that forget deletes the contact from
 // the in-memory map and persists the change to disk.

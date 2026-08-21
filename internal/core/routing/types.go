@@ -608,8 +608,8 @@ type Snapshot struct {
 // route as "best" even when the relay path has already excluded
 // it from Lookup, leaving reachability counters in
 // fetchRouteSummary lying about a target the data plane cannot
-// reach. See PR 11.28 P2#2 for the symmetric fixes on
-// reachableIDsFrame and reachableFromSnapshot.
+// reach. Bulk projection uses the same selection rules through
+// ReachableIdentitiesWithTransit.
 //
 // The "best" comparator (isBetter) still uses by-hops + source
 // trust — this is observability-shape, not the production
@@ -633,31 +633,71 @@ func (s Snapshot) BestRoute(identity PeerIdentity) *RouteEntry {
 	// {Dead ∪ cooled} subset, this slice is GLOBAL (every Dead/cooled pair
 	// across all identities), not a per-identity slice — so the scan is
 	// O(total Dead∪cooled pairs), filtered down to this `identity`. That set
-	// is normally small (most routes are healthy), but callers that invoke
-	// BestRoute across many identities (reachableFromSnapshot /
-	// reachableIDsFrame) pay it per identity: O(identities × |Dead∪cooled|).
-	// If that ever shows up in a profile, build the per-identity Dead index
-	// once at the call site instead of re-scanning here.
+	// is normally small (most routes are healthy). Bulk consumers must use
+	// ReachableIdentitiesWithTransit, which builds the per-identity Dead index
+	// once instead of paying this scan for every destination.
 	deadUplinks := map[PeerIdentity]struct{}{}
 	for _, h := range s.Health {
 		if h.Identity == identity && h.Health == HealthDead {
 			deadUplinks[h.Uplink] = struct{}{}
 		}
 	}
+	return bestSnapshotRoute(routes, s.TakenAt, deadUplinks)
+}
+
+// ReachableIdentitiesWithTransit returns every remote identity with at least
+// one selectable route and classifies its route sources in the same O(routes +
+// health) pass. Map membership means reachable; the value is true when at
+// least one selectable non-direct route exists and false when reachability is
+// exclusively direct. The returned map is newly owned by the caller.
+func (s Snapshot) ReachableIdentitiesWithTransit() map[PeerIdentity]bool {
+	deadUplinksByIdentity := make(map[PeerIdentity]map[PeerIdentity]struct{})
+	for _, h := range s.Health {
+		if h.Health != HealthDead {
+			continue
+		}
+		deadUplinks := deadUplinksByIdentity[h.Identity]
+		if deadUplinks == nil {
+			deadUplinks = make(map[PeerIdentity]struct{})
+			deadUplinksByIdentity[h.Identity] = deadUplinks
+		}
+		deadUplinks[h.Uplink] = struct{}{}
+	}
+
+	reachable := make(map[PeerIdentity]bool, len(s.Routes))
+	for identity, routes := range s.Routes {
+		best, hasTransit := bestSnapshotRouteWithTransit(routes, s.TakenAt, deadUplinksByIdentity[identity])
+		if best != nil && best.Source != RouteSourceLocal {
+			reachable[identity] = hasTransit
+		}
+	}
+	return reachable
+}
+
+func bestSnapshotRoute(routes []RouteEntry, takenAt time.Time, deadUplinks map[PeerIdentity]struct{}) *RouteEntry {
+	best, _ := bestSnapshotRouteWithTransit(routes, takenAt, deadUplinks)
+	return best
+}
+
+func bestSnapshotRouteWithTransit(routes []RouteEntry, takenAt time.Time, deadUplinks map[PeerIdentity]struct{}) (*RouteEntry, bool) {
 	var best *RouteEntry
+	var hasTransit bool
 	for i := range routes {
 		r := &routes[i]
-		if r.IsWithdrawn() || r.IsExpired(s.TakenAt) {
+		if r.IsWithdrawn() || r.IsExpired(takenAt) {
 			continue
 		}
 		if _, dead := deadUplinks[r.NextHop]; dead && r.Source != RouteSourceDirect {
 			continue
 		}
+		if r.Source != RouteSourceDirect && r.Source != RouteSourceLocal {
+			hasTransit = true
+		}
 		if best == nil || isBetter(r, best) {
 			best = r
 		}
 	}
-	return best
+	return best, hasTransit
 }
 
 // AnnounceEntry is the wire-safe projection of a RouteEntry.

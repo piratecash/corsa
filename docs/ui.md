@@ -19,7 +19,7 @@ Window (Gio event loop)
   │   │       └── Centered modal on desktop; opaque full-screen view in compact mode
   │   ├── Identity search (short visual hint, descriptive accessibility label)
   │   ├── Known identity list (from router peers)
-  │   │   └── Reachable indicator (green/gray dot)
+  │   │   └── Presence avatar (green/gray/outline) + last-online timestamp
   │   └── Context menu (right-click, 500 ms long-press, or the card's ⋯ button: copy, alias, delete)
   ├── Chat area
   │   ├── Message list (scrollable)
@@ -304,15 +304,23 @@ snapRecipients()
 | `UIEventStatusUpdated` | Health poll completed | Network status indicator updates |
 | `UIEventBeep` | New incoming message (not during startup replay) | System notification sound |
 
-### Reachable indicator
+### Contact presence
 
-Each contact in the sidebar displays a small colored dot next to the peer name. The indicator has three states:
+Each contact in the sidebar displays a person avatar with three states:
 
-- **Green** — at least one route exists (identity is reachable through the mesh)
-- **Gray** — no route available (identity is unreachable)
+- **Green filled** — at least one route exists (identity is reachable through the mesh)
+- **Gray filled** — no route is available (identity is unreachable)
 - **Gray outline** — reachability data is unavailable (probe failed or node not connected)
 
-The reachability data is populated during each `ProbeNode` cycle. In embedded mode, `NodeProber.BuildReachableIDs()` (delegated from `DesktopClient.BuildReachableIDs()`) calls `node.Service.RoutingSnapshot()` directly (no RPC round-trip) and extracts all identities with a live `BestRoute`. In remote TCP mode (`localNode == nil`), it falls back to the `fetch_reachable_ids` frame, which performs the same logic on the node side. The reachable set covers all identities in the routing table — not just those from `fetch_identities` — so sidebar peers that entered via chatlog or DM headers also get correct status. Results are stored in `NodeStatus.ReachableIDs` and flow through the standard `RouterSnapshot` pipeline to the UI.
+The sidebar starts directly with “My identity”; there is intentionally no extra “Clients” heading above it. This keeps the hierarchy aligned with the compact design and avoids repeating what the panel already communicates.
+
+Reachability is computed once alongside every immutable routing snapshot and stored as a cached identity set. In embedded mode, `NodeProber.BuildReachableIDs()` clones that set directly (no RPC round-trip); remote TCP mode (`localNode == nil`) receives the same cached set through `fetch_reachable_ids`. It covers all identities in the routing table — not just those from `fetch_identities` — so sidebar peers that entered through chatlog or DM headers also get the correct status. Snapshot-published events keep `NodeStatus.ReachableIDs` current between full `ProbeNode` cycles.
+
+Offline rows also show the latest available online observation; online rows rely on the green avatar instead of displaying a moving current time. `identity.presence.changed` is an offline-only observation containing the observing node in `Source`, the affected identity batch, and the transition time. A clean remote EOF on the final direct session is attributed at the lifecycle path that performs `RemoveDirectPeer`, so the normal two-node Alice↔Bob topology records Bob even when the routing table becomes empty. The timestamp is captured when the session closes and carried through withdrawal grace; the grace delay never shifts `last_online_at`. A deliberate local eviction/shutdown, reset, and timeout are not attributed: they may mean that the observing node lost its own interface, NAT mapping, firewall path, or route. `RemoveDirectPeer` returns the peer's post-mutation reachability under the routing-table lock and with the same selectable-route predicate as `Snapshot.ReachableIdentitiesWithTransit`, avoiding a second clock read and a racy `Lookup`. For transit identities the routing-snapshot comparison remains necessary; it records a final-route loss only while another remote route witnesses that the local node still has network reachability, and never turns a total collapse into a mass offline event. A serialized presence projection remembers whether each previously reachable identity had selectable direct and/or transit sources. Direct removal consumes the direct source in the same serialized interval as snapshot capture: a clean EOF consumes the whole final transition only when lifecycle actually publishes it, while an ambiguous close leaves any transit source snapshot-owned. Therefore a direct loss and a later transit loss produce the same durable result whether they land in one snapshot generation or two, without a cross-goroutine dedup marker. Both paths timestamp their observations through the same `presenceClock` provider.
+
+The observing node queues `last_online_at` persistence exactly once in its tracked background runner before publishing the best-effort event; the event bus is a notification channel, not a command path back into the node. The desktop subscriber accepts only events whose `Source` equals its own node identity and updates contacts only. `ReachableIDs` has one writer: the snapshot-reason route event. If the desktop event is dropped, the next probe repairs the UI from durable state.
+
+The field survives a restart and is separate from `last_seen_at`, which describes key-material observation. `peers.json` v3 also persists each known address-to-identity binding, so identity-matched `PeerHealth` activity/disconnect evidence remains usable immediately after restart instead of waiting for a new handshake. Durable contact time, peer health, and the latest **incoming** conversation activity are compared by timestamp and the newest wins; an outgoing message is never evidence that its recipient was online. Today is shown as local `HH:MM`, then “Yesterday”, a localized plural phrase for 2–6 calendar days, and a locale-specific short date. On compact rows the visual timestamp is hidden before it can steal space from the contact name, while accessibility keeps the full value. The clickable contact row emits one authoritative description (“Online”, “Last online: …”, or an unknown-status combination), so child avatar and timestamp operations cannot overwrite each other. This avatar/timestamp treatment is scoped to contact rows; the compact chat header keeps its small reachability dot.
 
 ### Counted phrases (plural forms)
 
@@ -497,7 +505,7 @@ Window (Gio event loop)
   │   │       └── Центрированная модалка на desktop; непрозрачный полноэкранный вид в compact-режиме
   │   ├── Поиск identity (короткий визуальный hint, расширенный accessibility label)
   │   ├── Список известных identity (из peers роутера)
-  │   │   └── Индикатор достижимости (зеленая/серая точка)
+  │   │   └── Аватар присутствия (зелёный/серый/контурный) + время последнего online
   │   └── Контекстное меню (правый клик, долгое удержание 500 мс или кнопка ⋯ на карточке: копировать, псевдоним, удалить)
   ├── Область чата
   │   ├── Список сообщений (скроллируемый)
@@ -779,15 +787,23 @@ snapRecipients()
 | `UIEventStatusUpdated` | Завершен health poll | Обновление индикатора сети |
 | `UIEventBeep` | Новое входящее сообщение (не во время стартового replay) | Системный звук уведомления |
 
-### Индикатор достижимости
+### Статус присутствия контакта
 
-Каждый контакт в sidebar отображает маленькую цветную точку рядом с именем. Индикатор имеет три состояния:
+Каждый контакт в sidebar отображает аватар пользователя с тремя состояниями:
 
-- **Зелёный** — маршрут есть (identity достижим через mesh-сеть)
-- **Серый** — маршрутов нет (identity недоступен)
-- **Серый контур** — данные о достижимости недоступны (probe не удался или нода не подключена)
+- **Зелёный заполненный** — маршрут есть (identity достижим через mesh-сеть)
+- **Серый заполненный** — маршрутов нет (identity недоступен)
+- **Серый контурный** — данные о достижимости недоступны (probe не удался или нода не подключена)
 
-Данные о достижимости заполняются при каждом цикле `ProbeNode`. `NodeProber.BuildReachableIDs()` (делегация из `DesktopClient.BuildReachableIDs()`) вызывает `node.Service.RoutingSnapshot()` напрямую через embedded node (без RPC round-trip) и извлекает все identity с живым `BestRoute`. Набор достижимых identity строится из всей routing table — не только из `fetch_identities` — поэтому sidebar peers, попавшие через chatlog или DM headers, тоже получают корректный статус. Результат хранится в `NodeStatus.ReachableIDs` и проходит через стандартный pipeline `RouterSnapshot` до UI.
+Sidebar сразу начинается с карточки «Мой identity»: отдельного заголовка «Клиенты» над ней намеренно нет. Так иерархия соответствует компактному дизайну и не повторяет уже очевидное назначение панели.
+
+Достижимость вычисляется один раз вместе с каждым immutable routing snapshot и хранится как кэшированный набор identity. В embedded-режиме `NodeProber.BuildReachableIDs()` напрямую клонирует этот набор (без RPC round-trip), а remote TCP-режим (`localNode == nil`) получает тот же кэш через `fetch_reachable_ids`. Набор строится по всей routing table — не только из `fetch_identities` — поэтому sidebar peers, попавшие через chatlog или DM headers, тоже получают корректный статус. События публикации снапшота поддерживают `NodeStatus.ReachableIDs` актуальным между полными циклами `ProbeNode`.
+
+В offline-строке также показано последнее доступное наблюдение online; для online-контакта достаточно зелёного аватара, поэтому бегущие текущие часы не выводятся. `identity.presence.changed` — offline-only наблюдение: оно несёт ноду-наблюдателя в `Source`, батч затронутых identity и время перехода. Чистый удалённый EOF последней direct-сессии атрибутируется в lifecycle-пути, который выполняет `RemoveDirectPeer`: поэтому обычная двухузловая схема Алиса↔Боб записывает уход Боба даже при опустевшей routing table. Timestamp захватывается при закрытии сессии и переносится через withdrawal grace, поэтому задержка grace не сдвигает `last_online_at`. Намеренный local eviction/shutdown, reset и timeout не атрибутируются — они могут означать потерю интерфейса, NAT mapping, firewall-path или маршрута самой ноды-наблюдателя. `RemoveDirectPeer` возвращает post-mutation reachability peer-а под локом routing table и с тем же selectable-route предикатом, что `Snapshot.ReachableIdentitiesWithTransit`, поэтому второй clock-read и гоняющийся `Lookup` не нужны. Для transit identity сравнение routing snapshot по-прежнему нужно: исчезновение последнего маршрута записывается, только пока другой удалённый маршрут подтверждает сетевую доступность локальной ноды; тотальный коллапс не превращается в массовый offline. Сериализованная presence-проекция помнит, какие selectable-источники — direct и/или transit — обеспечивали достижимость каждой identity в предыдущем наблюдаемом состоянии. Direct removal потребляет direct-источник в том же сериализованном интервале, что и snapshot capture: clean EOF потребляет весь финальный переход только когда lifecycle действительно его публикует, а при ambiguous close остававшийся transit-источник сохраняется за snapshot-путём. Поэтому последовательность direct-loss, затем transit-loss даёт одинаковую durable-запись независимо от того, попали изменения в одно поколение снапшота или в два, без cross-goroutine dedup marker. Оба пути ставят время наблюдения через общий провайдер `presenceClock`.
+
+Нода-наблюдатель ровно один раз ставит `last_online_at` в свой tracked background runner до публикации best-effort события; event bus служит каналом уведомления, а не командным путём обратно в node. Desktop subscriber принимает только события, чей `Source` совпадает с identity его ноды, и меняет только контакты. У `ReachableIDs` остаётся единственный writer — route event с snapshot reason. Если desktop-событие потеряно, следующий probe восстановит UI из durable-состояния.
+
+Поле переживает перезапуск и не связано с `last_seen_at`, который описывает наблюдение ключевого материала. `peers.json` v3 дополнительно сохраняет связь address→identity, поэтому identity-связанные activity/disconnect timestamps из `PeerHealth` доступны сразу после рестарта, а не только после нового handshake. Durable timestamp контакта, PeerHealth и последняя **входящая** активность диалога сравниваются по времени — выбирается самое свежее значение; собственное исходящее сообщение никогда не доказывает, что получатель был online. Сегодняшнее время отображается локальным `HH:MM`, затем используются «Вчера», локализованная plural-форма для 2–6 календарных дней и соответствующая локали короткая дата. В компактной строке визуальный timestamp скрывается раньше, чем начнёт отнимать место у имени; accessibility по-прежнему получает полное значение. Clickable-строка контакта публикует одно итоговое описание («Онлайн», «Последний раз онлайн: …» либо комбинацию с неизвестным статусом), поэтому дочерние avatar/timestamp операции не затирают друг друга. Такой аватар и timestamp применяются только к строкам контактов; компактный заголовок чата сохраняет маленькую точку достижимости.
 
 ### Архитектура RPC
 

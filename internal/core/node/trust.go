@@ -23,9 +23,10 @@ var errTrustConflict = errors.New("trusted contact conflict")
 const trustContactSourceRecord = "identity_record"
 
 // trustFileVersion is the schema version this build writes. Version 2 added
-// the signed identity-record rows; a file without the field is the legacy
-// contacts-only layout and is migrated in place on the first save.
-const trustFileVersion = 2
+// the signed identity-record rows; version 3 added the independently tracked
+// last-online observation for trusted contacts. A file without either field is
+// a legacy layout and is upgraded in place on the first save.
+const trustFileVersion = 3
 
 type trustedContact struct {
 	Address      string    `json:"address"`
@@ -34,6 +35,7 @@ type trustedContact struct {
 	BoxSignature string    `json:"box_signature"`
 	FirstSeenAt  time.Time `json:"first_seen_at"`
 	LastSeenAt   time.Time `json:"last_seen_at"`
+	LastOnlineAt time.Time `json:"last_online_at,omitzero"`
 	Source       string    `json:"source"`
 }
 
@@ -147,6 +149,7 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 			// policy flip across restarts. FirstSeenAt is preserved as
 			// history.
 			self.FirstSeenAt = existing.FirstSeenAt
+			self.LastOnlineAt = existing.LastOnlineAt
 			self.LastSeenAt = now
 			store.contacts[self.Address] = self
 		} else {
@@ -161,6 +164,44 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	}
 
 	return store, nil
+}
+
+// recordLastOnlineAt stores the locally observed online→offline transition for
+// trusted identities. It deliberately does not create contacts: route gossip
+// can mention identities the user has never trusted, while this JSON is the
+// durable trusted-contact store. One transition batch produces one atomic
+// snapshot write, and an older observation can never move the timestamp back.
+func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at time.Time) (updated int, err error) {
+	if len(identities) == 0 || at.IsZero() {
+		return 0, nil
+	}
+	at = at.UTC()
+
+	s.mu.Lock()
+	for _, identity := range identities {
+		if identity.IsZero() {
+			continue
+		}
+		address := identity.String()
+		contact, ok := s.contacts[address]
+		if !ok || (!contact.LastOnlineAt.IsZero() && !at.After(contact.LastOnlineAt)) {
+			continue
+		}
+		contact.LastOnlineAt = at
+		s.contacts[address] = contact
+		updated++
+	}
+	if updated == 0 {
+		s.mu.Unlock()
+		return 0, nil
+	}
+	snapshot := s.snapshotLocked()
+	s.mu.Unlock()
+
+	if err := s.saveSnapshot(snapshot); err != nil {
+		return updated, fmt.Errorf("persist trust-store last-online observation: %w", err)
+	}
+	return updated, nil
 }
 
 // remember adds or refreshes a contact. stored reports whether the

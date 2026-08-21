@@ -71,7 +71,7 @@ Retrieves only verified and trusted contacts (subset of `fetch_contacts` where v
 ```
 
 **Response Format:**
-Same as `fetch_contacts`, but filtered to verified entries only.
+Same as `fetch_contacts`, but filtered to verified entries only. Each contact may additionally contain `last_online_at` (RFC3339 UTC). For a direct peer it is the session-close time of a clean remote EOF, captured before withdrawal grace; reset, timeout, and local shutdown are not identity-scoped evidence. For a transit identity it is the snapshot observation time at which its final live route was found gone while another remote route remained as a connectivity witness. Both observation paths use the node's presence clock provider. An unwitnessed total transit-route collapse does not update it. This field is local operational metadata persisted in `trust-{port}.json`; it is returned only by `fetch_trusted_contacts` and is not propagated in the P2P `fetch_contacts` response.
 
 ### import_contacts
 
@@ -369,7 +369,7 @@ sequenceDiagram
 ```
 
 **Формат ответа:**
-Аналогичен `fetch_contacts`, но отфильтрован только проверенные записи.
+Аналогичен `fetch_contacts`, но содержит только проверенные записи. У контакта также может быть `last_online_at` (RFC3339 UTC). Для direct peer это время закрытия сессии по чистому удалённому EOF, захваченное до withdrawal grace; reset, timeout и local shutdown не являются identity-scoped evidence. Для transit identity это snapshot-время наблюдения, когда последний живой маршрут уже исчез, а другой удалённый маршрут остался подтверждением связности. Оба пути наблюдения используют общий presence clock provider ноды. Неподтверждённый тотальный коллапс transit-маршрутов поле не обновляет. Это операционная metadata, сохраняемая в `trust-{port}.json`; она возвращается только из `fetch_trusted_contacts` и не передаётся в P2P-ответе `fetch_contacts`.
 
 ### import_contacts
 

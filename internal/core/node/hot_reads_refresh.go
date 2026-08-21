@@ -61,6 +61,13 @@ func (s *Service) primeHotReadSnapshots() {
 //     that is already happening because the table was dirty is upgraded to
 //     a full re-copy as a self-heal net — this rides an existing dirty
 //     rebuild, it does NOT wake a clean table.
+//     The same pass computes and stores the full reachable-identity set in
+//     O(routes+health), so cached consumers do not rescan the global health
+//     slice per identity. Any trusted-contact last-online persistence found
+//     by this comparison is queued by the observing node through
+//     Service.goBackground before its best-effort event notification; JSON
+//     marshal/write/rename never blocks this refresher and WaitBackground
+//     tracks completion during shutdown/tests.
 //
 // The snapshots feed different UI panels and there is no correctness
 // relationship between them, so this fan-out is safe.
@@ -87,15 +94,15 @@ func (s *Service) primeHotReadSnapshots() {
 //     until TickTTL rewrites it (every 10 s). `IsExpired` against
 //     `snap.TakenAt` and `ttl_seconds` therefore can lag up to
 //     TickTTL_interval (≈10 s) plus the structural publish bound
-//     (routingSnapshotMinInterval floor + a refresh tick, ~1–1.5 s),
-//     i.e. ≈11–11.5 s.
+//     (routingSnapshotMinInterval floor + a refresh tick, ~2–2.5 s),
+//     i.e. ≈12–12.5 s.
 //   - `FlapEntry.InHoldDown` flipping from true to false on hold-down
 //     expiry is also driven by wall-clock — `fs.holdDownUntil`
 //     elapsing. TickTTL clears the deadline on its 10 s cadence and
 //     marks the table dirty, so the transition is published within
-//     TickTTL_interval + the structural publish bound (~1–1.5 s), i.e.
-//     ≈11–11.5 s. (Hold-down ARMING is structural and falls under the
-//     ~1–1.5 s bound; the false→true transition is a writer event.)
+//     TickTTL_interval + the structural publish bound (~2–2.5 s), i.e.
+//     ≈12–12.5 s. (Hold-down ARMING is structural and falls under the
+//     ~2–2.5 s bound; the false→true transition is a writer event.)
 //
 // Consumers that depend on strict freshness for any time-derived field
 // must read the table directly via `routing.Table.Snapshot()` or

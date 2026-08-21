@@ -554,6 +554,11 @@ Implemented in `trustStore` (`trust.go`):
    `trust-{port}.json` (Trust On First Use).
 4. Later conflicting keys for the same address are rejected and recorded in
    the `"conflicts"` section for manual review.
+5. The same contact row carries an independent optional `last_online_at` local
+   observation. It is updated only when the identity's final live route
+   disappears while another remote route survives as a connectivity witness;
+   a total local route collapse is not attributed to every contact. The field
+   is not key-trust evidence and is never sent in P2P contact exchange.
 
 ### Gazeta — TTL-based encrypted notices
 
@@ -1301,6 +1306,12 @@ Peer'ы классифицируются по доступным сетевым 
    `trust-{port}.json` (Trust On First Use).
 4. Последующие конфликтующие ключи для того же адреса отклоняются и
    записываются в секцию `"conflicts"` для ручной проверки.
+5. В той же строке контакта хранится независимое optional-поле
+   `last_online_at`. Оно обновляется только при исчезновении последнего живого
+   маршрута identity, если другой удалённый маршрут остаётся подтверждением
+   связности; тотальный локальный коллапс маршрутов не приписывается всем
+   контактам. Поле не является trust-свидетельством для ключей и не передаётся
+   при P2P-обмене контактами.
 
 ### Gazeta — зашифрованные notice с TTL
 

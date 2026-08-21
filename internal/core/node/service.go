@@ -577,8 +577,9 @@ type Service struct {
 	lastPeerSave    time.Time
 	// peerStateDirty records that persisted peer state changed since the
 	// last successful flush. Every mutation outside the periodic catch-all
-	// — add_peer, remote-ban record (handlePeerBannedNotice) and remote-ban
-	// clear (clearRemoteBansOnAuth) — sets it via markPeerStateDirty instead
+	// — add_peer, a newly learned address→identity binding, remote-ban record
+	// (handlePeerBannedNotice) and remote-ban clear (clearRemoteBansOnAuth) —
+	// sets it directly while already under peerMu or via markPeerStateDirty
 	// of forcing a synchronous full snapshot+marshal+disk write per event,
 	// which during startup bootstrap priming made flushPeerState O(peers^2).
 	// maybeSavePeerState coalesces the marked changes into a single debounced
@@ -663,6 +664,7 @@ type Service struct {
 	identitySessions               map[domain.PeerIdentity]int                  // peer identity → active session count (multi-session awareness)
 	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
 	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
+	presenceClock                  func() time.Time                             // source for identity presence transition timestamps; immutable after construction, overridden only by tests
 	peerQuarantine                 map[domain.PeerIdentity]routeQuarantineEntry // per-peer route quarantine: peer in quarantine has inbound routing announcements dropped and is skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
 	peerDisconnectHistory          map[domain.PeerIdentity][]time.Time          // sliding window of disconnect timestamps per peer, drives quarantine trigger detection. Guarded by peerMu.
 	peerAnnounceHistory            map[domain.PeerIdentity][]time.Time          // sliding window of inbound DELTA announce-frame arrival timestamps per peer (routes_update / v3 kind="delta" only; baselines and request_resync excluded), drives chatty_routes quarantine trigger. Guarded by peerMu. See recordInboundAnnounceAndMaybeArm.
@@ -834,6 +836,13 @@ type Service struct {
 	// the same ticker shape as the four snapshots above; see
 	// routing_snapshot.go.
 	routingSnap routingSnapPtr
+	// presenceProjection owns the previous selectable direct/transit source
+	// classes used to assign offline-transition ownership. Its leaf mutex
+	// serializes routing snapshot capture with RemoveDirectPeer; the order is
+	// peerMu -> presenceProjection.mu -> routing.Table.t.mu. No event
+	// publication, persistence or I/O occurs while it is held. See
+	// routing_snapshot.go and docs/locking.md.
+	presenceProjection presenceProjectionState
 	// lastRoutingSnapAtNanos coalesces routingSnap rebuilds: under a steady
 	// route-announce stream the table is dirty on nearly every 500ms tick, so
 	// the dirty gate alone still rebuilt the full deep-copy snapshot 2x/s
@@ -1551,6 +1560,16 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		restoredHealth[addr] = h
 	}
 
+	// Restore the address-to-identity binding alongside peer health. Without
+	// this, PeerHealth.PeerID becomes empty after restart until the next
+	// handshake and cannot serve as last-online fallback evidence.
+	restoredPeerIDs := make(map[domain.PeerAddress]domain.PeerIdentity)
+	for addr, entry := range persistedByAddr {
+		if !entry.Identity.IsZero() {
+			restoredPeerIDs[addr] = entry.Identity
+		}
+	}
+
 	// Restore peerVersions from persisted lockout data so that
 	// peerHealthFrames() can surface ClientVersion for locked-out
 	// peers that haven't reconnected since restart. Without this,
@@ -1602,7 +1621,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		sessions:                 make(map[domain.PeerAddress]*peerSession),
 		health:                   restoredHealth,
 		peerTypes:                make(map[domain.PeerAddress]domain.NodeType),
-		peerIDs:                  make(map[domain.PeerAddress]domain.PeerIdentity),
+		peerIDs:                  restoredPeerIDs,
 		peerVersions:             restoredVersions,
 		peerBuilds:               make(map[domain.PeerAddress]int),
 		pending:                  pending,
@@ -1630,6 +1649,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		identitySessions:         make(map[domain.PeerIdentity]int),
 		identityRelaySessions:    make(map[domain.PeerIdentity]int),
 		pendingWithdrawals:       make(map[domain.PeerIdentity]*pendingWithdrawal),
+		presenceClock:            time.Now,
 		peerQuarantine:           make(map[domain.PeerIdentity]routeQuarantineEntry),
 		peerDisconnectHistory:    make(map[domain.PeerIdentity][]time.Time),
 		peerAnnounceHistory:      make(map[domain.PeerIdentity][]time.Time),
@@ -1641,7 +1661,6 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		aggregateStatus:          domain.AggregateStatusSnapshot{Status: domain.NetworkStatusOffline},
 		done:                     make(chan struct{}),
 	}
-
 	// Initialize PeerProvider (Stage 3: connection management integration).
 	svc.peerProvider = NewPeerProvider(PeerProviderConfig{
 		HealthFn: func(addr domain.PeerAddress) *PeerHealthView {
@@ -2472,6 +2491,7 @@ func (s *Service) handleConn(conn net.Conn) {
 	// registry (RemoteAddr, SendFrame, Close) instead of holding a
 	// *netcore.NetCore handle.
 	connID, _ := s.connIDFor(metered)
+	var peerOfflineEvidence *peerOfflineEvidence
 
 	// Capture lifecycle hook: notify manager about the new inbound
 	// connection so standing rules (by_ip, all) can auto-start capture.
@@ -2485,7 +2505,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		s.notifyCaptureConnClosed(connID)
 
 		if addr := s.inboundPeerAddress(connID); addr != "" {
-			s.trackInboundDisconnect(connID, addr)
+			s.trackInboundDisconnectWithPresenceEvidence(connID, addr, peerOfflineEvidence)
 		}
 		s.accumulateInboundTraffic(metered)
 		// Close TCP before waiting for the writer goroutine to drain.
@@ -2540,6 +2560,9 @@ func (s *Service) handleConn(conn net.Conn) {
 			continue
 		}
 		if err != nil {
+			if sessionCloseProvidesPeerOfflineEvidence(err) {
+				peerOfflineEvidence = s.observePeerOffline()
+			}
 			s.endInboundReadLoop(connID, conn.RemoteAddr().String(), err)
 			return
 		}
@@ -4932,7 +4955,7 @@ func (s *Service) trackInboundConnect(
 	return fullSync
 }
 
-// trackInboundDisconnect decrements the inbound connection reference count
+// trackInboundDisconnectWithPresenceEvidence decrements the inbound connection reference count
 // and removes the per-connection tracked flag.
 // Only when the last tracked connection for an address closes is the peer
 // marked as disconnected — earlier closes are silent so that the health
@@ -4940,7 +4963,9 @@ func (s *Service) trackInboundConnect(
 // If trackInboundConnect was never called for this connection (e.g. auth
 // failed), the disconnect is silently ignored to avoid creating phantom
 // health entries for unauthenticated connections.
-func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAddress) {
+// The explicit evidence argument prevents callers from manufacturing a remote
+// FIN when the teardown source was not observed.
+func (s *Service) trackInboundDisconnectWithPresenceEvidence(id domain.ConnID, address domain.PeerAddress, presenceEvidence *peerOfflineEvidence) {
 	log.Trace().Str("site", "trackInboundDisconnect").Str("phase", "lock_wait").Uint64("conn_id", uint64(id)).Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "trackInboundDisconnect").Str("phase", "lock_held").Uint64("conn_id", uint64(id)).Msg("peer_mu_writer")
@@ -5032,7 +5057,12 @@ func (s *Service) trackInboundDisconnect(id domain.ConnID, address domain.PeerAd
 	// only decrements total session counts, which is the safe default for
 	// a torn-down connection.
 	if wasTracked {
-		s.onPeerSessionClosed(peerIdentity, s.connCapabilitiesForID(id))
+		s.onPeerSessionClosedWithAttribution(
+			peerIdentity,
+			s.connCapabilitiesForID(id),
+			sessionClosePeerInitiated,
+			presenceEvidence,
+		)
 	}
 }
 
@@ -5489,11 +5519,16 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 		if boxKey == "" {
 			boxKey = contact.BoxKey
 		}
+		lastOnlineAt := ""
+		if !contact.LastOnlineAt.IsZero() {
+			lastOnlineAt = contact.LastOnlineAt.UTC().Format(time.RFC3339Nano)
+		}
 		contacts = append(contacts, protocol.ContactFrame{
-			Address: address,
-			PubKey:  pubKey,
-			BoxKey:  boxKey,
-			BoxSig:  contact.BoxSignature,
+			Address:      address,
+			PubKey:       pubKey,
+			BoxKey:       boxKey,
+			BoxSig:       contact.BoxSignature,
+			LastOnlineAt: lastOnlineAt,
 		})
 	}
 

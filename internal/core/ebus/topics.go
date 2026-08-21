@@ -230,6 +230,16 @@ const (
 	//   func(summary ebus.RouteTableChange)
 	TopicRouteTableChanged = "route.table.changed"
 
+	// TopicIdentityPresenceChanged reports an observed final-route loss. Direct
+	// peers are emitted by their attributed session-removal lifecycle; transit
+	// identities are emitted after a fresh routing snapshot is stored. It is
+	// offline-only: online reachability already belongs to TopicRouteTableChanged.
+	// A Source field isolates observers that share one Bus.
+	//
+	// Handler signature:
+	//   func(change ebus.IdentityPresenceChange)
+	TopicIdentityPresenceChanged = "identity.presence.changed"
+
 	// TopicPeerPendingChanged is emitted when the per-peer pending frame
 	// queue mutates (frame queued, flushed, or expired). Carries the peer
 	// address and the new queue length so subscribers can update the

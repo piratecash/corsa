@@ -3,9 +3,12 @@ package node
 import (
 	"errors"
 	"fmt"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -81,8 +84,46 @@ func TestSessionCloseCauseFromError(t *testing.T) {
 	if got := sessionCloseCauseFromError(reset); got != sessionClosePeerInitiated {
 		t.Fatalf("connection reset: got cause %v, want sessionClosePeerInitiated", got)
 	}
+	if sessionCloseProvidesPeerOfflineEvidence(reset) {
+		t.Fatal("connection reset is ambiguous and must not provide identity-scoped presence evidence")
+	}
+	if sessionCloseProvidesPeerOfflineEvidence(io.ErrUnexpectedEOF) {
+		t.Fatal("truncated-frame unexpected EOF must not be treated as a clean remote FIN")
+	}
+
+	timeout := errors.New("read tcp 10.0.0.1:1->10.0.0.2:2: i/o timeout")
+	if got := sessionCloseCauseFromError(timeout); got != sessionClosePeerInitiated {
+		t.Fatalf("timeout: got cause %v, want sessionClosePeerInitiated", got)
+	}
+	if sessionCloseProvidesPeerOfflineEvidence(timeout) {
+		t.Fatal("ambiguous timeout must not provide identity-scoped presence evidence")
+	}
 
 	if got := sessionCloseCauseFromError(nil); got != sessionCloseLocalEviction {
 		t.Fatalf("nil error (local ctx cancellation): got cause %v, want sessionCloseLocalEviction", got)
+	}
+	if sessionCloseProvidesPeerOfflineEvidence(nil) {
+		t.Fatal("local cancellation must not provide direct presence evidence")
+	}
+}
+
+func TestPendingWithdrawalPresenceEvidenceCanBeUpgraded(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		pendingWithdrawals:             make(map[domain.PeerIdentity]*pendingWithdrawal),
+		routeWithdrawalGracePeriodTest: time.Hour,
+	}
+	peer := domaintest.ID("presence-evidence-upgrade")
+	svc.maybeScheduleDeferredWithdrawalWithAttribution(peer, nil, nil)
+	t.Cleanup(svc.cancelAllPendingWithdrawalsForShutdown)
+	evidence := &peerOfflineEvidence{observedAt: time.Now().UTC()}
+	svc.maybeScheduleDeferredWithdrawalWithAttribution(peer, nil, evidence)
+
+	svc.peerMu.Lock()
+	entry := svc.pendingWithdrawals[peer]
+	svc.peerMu.Unlock()
+	if entry == nil || entry.presenceEvidence != evidence {
+		t.Fatal("later direct EOF did not upgrade pending withdrawal presence evidence")
 	}
 }

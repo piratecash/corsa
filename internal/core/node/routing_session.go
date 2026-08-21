@@ -154,7 +154,6 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 		log.Error().Err(err).Str("peer", peerIdentity.String()).Msg("routing_add_direct_peer_failed")
 		return
 	}
-
 	log.Info().
 		Str("peer", peerIdentity.String()).
 		Uint64("seq", result.Entry.SeqNo).
@@ -248,9 +247,56 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 
 // onPeerSessionClosedWithCause is onPeerSessionClosed with an explicit
 // teardown attribution. cause only gates the disconnect_storm
-// quarantine accounting; every other close-path effect is identical
-// for both causes.
+// quarantine accounting. For explicit callers it also carries presence
+// evidence: a peer-initiated close may update last_online_at, while a local
+// eviction may not.
 func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity, caps []domain.Capability, cause sessionCloseCause) {
+	var presenceEvidence *peerOfflineEvidence
+	if cause == sessionClosePeerInitiated {
+		presenceEvidence = s.observePeerOffline()
+	}
+	s.onPeerSessionClosedWithAttribution(peerIdentity, caps, cause, presenceEvidence)
+}
+
+// onPeerSessionClosedWithError keeps disconnect-storm classification and
+// durable presence attribution separate. A timeout is still useful quarantine
+// evidence, but only a confirmed clean remote EOF proves an
+// identity-scoped offline transition.
+func (s *Service) onPeerSessionClosedWithError(peerIdentity domain.PeerIdentity, caps []domain.Capability, err error) {
+	var presenceEvidence *peerOfflineEvidence
+	if sessionCloseProvidesPeerOfflineEvidence(err) {
+		presenceEvidence = s.observePeerOffline()
+	}
+	s.onPeerSessionClosedWithAttribution(
+		peerIdentity,
+		caps,
+		sessionCloseCauseFromError(err),
+		presenceEvidence,
+	)
+}
+
+type peerOfflineEvidence struct {
+	observedAt time.Time
+}
+
+func (s *Service) observePeerOffline() *peerOfflineEvidence {
+	return &peerOfflineEvidence{observedAt: s.presenceNow()}
+}
+
+func (s *Service) presenceNow() time.Time {
+	clock := s.presenceClock
+	if clock == nil {
+		clock = time.Now
+	}
+	return clock().UTC()
+}
+
+func (s *Service) onPeerSessionClosedWithAttribution(
+	peerIdentity domain.PeerIdentity,
+	caps []domain.Capability,
+	cause sessionCloseCause,
+	presenceEvidence *peerOfflineEvidence,
+) {
 	if peerIdentity.IsZero() {
 		return
 	}
@@ -375,7 +421,7 @@ func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity,
 	// (see tryCancelPendingWithdrawal in onPeerSessionEstablished),
 	// the direct route stays in the table, and no flap-signal frames
 	// reach the wire. See routing_withdrawal_grace.go.
-	s.maybeScheduleDeferredWithdrawal(peerIdentity, caps)
+	s.maybeScheduleDeferredWithdrawalWithAttribution(peerIdentity, caps, presenceEvidence)
 }
 
 // poisonReverseToOtherPeers emits poison-reverse about each lost transit

@@ -2683,6 +2683,8 @@ func (r *DMRouter) NotifyStatusDomainChanged(d NodeStatusDomain) {
 		r.cachedNS.PeerHealth = r.statusMonitor.PeerHealthSnapshot()
 	case NodeStatusDomainReachableIDs:
 		r.cachedNS.ReachableIDs = r.statusMonitor.ReachableIDsSnapshot()
+	case NodeStatusDomainPresence:
+		r.cachedNS.Contacts = r.statusMonitor.Contacts()
 	case NodeStatusDomainKnownIDs:
 		r.cachedNS.KnownIDs = r.statusMonitor.KnownIDsSnapshot()
 	case NodeStatusDomainAggregate:

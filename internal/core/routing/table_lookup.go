@@ -568,6 +568,27 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	return result
 }
 
+// snapshotIdentityReachableLocked evaluates one identity with the exact
+// selectable-route predicate used by Snapshot.ReachableIdentitiesWithTransit.
+// It exists so mutations can return an atomic post-state answer without
+// releasing t.mu and racing a second clock read or another route mutation.
+//
+// Caller must hold t.mu (reader or writer).
+func (t *Table) snapshotIdentityReachableLocked(identity PeerIdentity, now time.Time) bool {
+	if identity == t.localOrigin {
+		return false
+	}
+	routes := t.store.LookupActive(identity, now)
+	deadUplinks := make(map[PeerIdentity]struct{})
+	for i := range routes {
+		route := routes[i]
+		if route.Source != RouteSourceDirect && t.health.isDeadLocked(identity, route.NextHop) {
+			deadUplinks[route.NextHop] = struct{}{}
+		}
+	}
+	return bestSnapshotRoute(routes, now, deadUplinks) != nil
+}
+
 // LookupForRelay is the Phase 3 PR 12.6 multi-path traffic
 // shaping wrapper over Lookup. It returns the same ranked result
 // as Lookup, EXCEPT when (a) the supplied `hint` is divisible by

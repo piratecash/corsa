@@ -49,6 +49,13 @@ type RemoveDirectPeerResult struct {
 	// this to trigger event-driven pending queue drains — same semantics as
 	// TickTTL's exposed return value.
 	ExposedBackups []PeerIdentity
+
+	// PeerReachable reports whether the removed peer still had a selectable
+	// route immediately after the mutation. It is computed under the same table
+	// lock and with the same predicate as
+	// Snapshot.ReachableIdentitiesWithTransit, so the caller does not need a
+	// racy post-mutation Lookup.
+	PeerReachable bool
 }
 
 // TickTTLResult holds the outcome of a TTL sweep.
@@ -513,7 +520,10 @@ func (t *Table) AddDirectPeer(peerIdentity PeerIdentity) (AddDirectPeerResult, e
 		}
 	}
 
-	return AddDirectPeerResult{Entry: entry, Penalized: penalized}, nil
+	return AddDirectPeerResult{
+		Entry:     entry,
+		Penalized: penalized,
+	}, nil
 }
 
 // RemoveDirectPeer handles a peer disconnect. It withdraws the direct
@@ -574,11 +584,13 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 	for _, identity := range affected {
 		t.markRouteChangedLocked(identity, JournalCausePeerRemove)
 	}
+	peerReachable := t.snapshotIdentityReachableLocked(peerIdentity, now)
 
 	return RemoveDirectPeerResult{
 		Withdrawals:        withdrawals,
 		TransitInvalidated: transitInvalidated,
 		ExposedBackups:     exposed,
+		PeerReachable:      peerReachable,
 	}, nil
 }
 

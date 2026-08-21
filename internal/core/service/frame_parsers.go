@@ -13,7 +13,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
-	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // Package-level frame parsers and decode helpers shared by the sub-services
@@ -34,6 +33,7 @@ func contactsFromFrame(frame protocol.Frame) map[string]Contact {
 			BoxKey:       contact.BoxKey,
 			PubKey:       contact.PubKey,
 			BoxSignature: contact.BoxSig,
+			LastOnlineAt: parseOptionalTime(contact.LastOnlineAt),
 		}
 	}
 	return out
@@ -399,21 +399,6 @@ func pendingMessagesFromFrame(frame protocol.Frame) []PendingMessage {
 func isConversationMessage(message protocol.MessageFrame, self, counterparty string) bool {
 	return (message.Sender == self && message.Recipient == counterparty) ||
 		(message.Sender == counterparty && message.Recipient == self)
-}
-
-// reachableFromSnapshot extracts identities with at least one live route
-// from a routing snapshot. The synthetic local self-route
-// (RouteSourceLocal) is excluded because reachability is about remote
-// peers, not the node itself.
-func reachableFromSnapshot(snap routing.Snapshot) map[domain.PeerIdentity]bool {
-	reachable := make(map[domain.PeerIdentity]bool)
-	for id := range snap.Routes {
-		best := snap.BestRoute(id)
-		if best != nil && best.Source != routing.RouteSourceLocal {
-			reachable[id] = true
-		}
-	}
-	return reachable
 }
 
 // incomingContactsToTrust inspects a batch of already-decrypted incoming

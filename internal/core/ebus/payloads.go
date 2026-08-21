@@ -229,6 +229,16 @@ type RouteTableChange struct {
 	Withdrawn int                      // number of routes withdrawn
 }
 
+// IdentityPresenceChange is the payload for TopicIdentityPresenceChanged.
+// It carries a batch of identities whose final selectable route disappeared.
+// Source identifies the observing node so consumers sharing one Bus do not
+// apply another node's local view. ChangedAt is that node's observation time.
+type IdentityPresenceChange struct {
+	Source     domain.PeerIdentity
+	Identities []domain.PeerIdentity
+	ChangedAt  time.Time
+}
+
 // PeerPendingDelta is the payload for TopicPeerPendingChanged.
 // Carries the peer address and the current pending frame count after a
 // queue mutation (enqueue, flush, or expiry).

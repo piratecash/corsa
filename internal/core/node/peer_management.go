@@ -124,6 +124,8 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 // that mutates persisted peer state outside the periodic catch-all:
 //
 //   - add_peer (operator add and startup bootstrap priming),
+//   - a newly learned peers.json v3 address→identity binding (addPeerID sets
+//     the flag directly because it already holds peerMu),
 //   - remote-ban RECORD on a peer-banned notice (handlePeerBannedNotice),
 //   - remote-ban CLEAR on auth success (clearRemoteBansOnAuth).
 //
@@ -819,6 +821,7 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 			// Preserve stable metadata from the persisted snapshot.
 			entry = peerEntry{
 				Address:  peer.Address,
+				Identity: pm.Identity,
 				NodeType: pm.NodeType,
 				Network:  pm.Network,
 				Source:   pm.Source,
@@ -845,6 +848,7 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 			// New peer discovered at runtime — derive from live state.
 			entry = peerEntry{
 				Address:  peer.Address,
+				Identity: s.peerIDs[peer.Address],
 				NodeType: s.peerTypes[peer.Address],
 				Network:  classifyAddress(peer.Address),
 				Source:   peer.Source,
@@ -853,6 +857,9 @@ func (s *Service) buildPeerEntriesLocked(providerSnap map[domain.PeerAddress]kno
 			// Store so that subsequent flushes are stable.
 			clone := entry
 			s.persistedMeta[peer.Address] = &clone
+		}
+		if identity := s.peerIDs[peer.Address]; !identity.IsZero() {
+			entry.Identity = identity
 		}
 		if health := s.health[peer.Address]; health != nil {
 			if !health.LastConnectedAt.IsZero() {
@@ -2481,7 +2488,16 @@ func (s *Service) addPeerID(address domain.PeerAddress, peerID domain.PeerIdenti
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
-	s.peerIDs[address] = peerID
+	if s.peerIDs[address] != peerID {
+		s.peerIDs[address] = peerID
+		if persisted := s.persistedMeta[address]; persisted != nil {
+			persisted.Identity = peerID
+		}
+		// The binding now belongs to peers.json v3. Let bootstrapLoop
+		// debounce the full snapshot/write instead of waiting for the periodic
+		// catch-all; reconnects with the same identity do not re-mark it.
+		s.peerStateDirty = true
+	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "addPeerID").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 }

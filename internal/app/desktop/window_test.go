@@ -12,6 +12,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/service"
 
 	"gioui.org/f32"
+	"gioui.org/gpu/headless"
 	"gioui.org/io/input"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -86,17 +87,23 @@ func newIdentityLayoutTestWindow(t *testing.T) *Window {
 		t.Fatalf("load embedded UI icons: %v", err)
 	}
 	return &Window{
-		theme:             newAppTheme(),
-		language:          "en",
-		identityPanelList: layout.List{Axis: layout.Vertical},
-		searchIcon:        icons.search,
-		fingerprintIcon:   icons.fingerprint,
-		chevronIcon:       icons.chevron,
-		copyIcon:          icons.copy,
-		shareIcon:         icons.share,
-		closeIcon:         icons.close,
-		shieldIcon:        icons.shield,
-		consoleIcon:       icons.console,
+		theme:                    newAppTheme(),
+		language:                 "en",
+		recipientButtons:         make(map[domain.PeerIdentity]*widget.Clickable),
+		recipientRightClick:      make(map[domain.PeerIdentity]*rightClickState),
+		recipientMenuBtns:        make(map[domain.PeerIdentity]*widget.Clickable),
+		identityPanelList:        layout.List{Axis: layout.Vertical},
+		searchIcon:               icons.search,
+		fingerprintIcon:          icons.fingerprint,
+		personIcon:               icons.person,
+		personOutlineIcon:        icons.personOutline,
+		peerLastOnlineByIdentity: make(map[domain.PeerIdentity]time.Time),
+		chevronIcon:              icons.chevron,
+		copyIcon:                 icons.copy,
+		shareIcon:                icons.share,
+		closeIcon:                icons.close,
+		shieldIcon:               icons.shield,
+		consoleIcon:              icons.console,
 	}
 }
 
@@ -104,6 +111,269 @@ func TestLoadUIIconReturnsAnErrorForInvalidData(t *testing.T) {
 	if _, err := loadUIIcon("broken-test-icon", []byte("not IconVG")); err == nil {
 		t.Fatal("invalid embedded icon data was accepted")
 	}
+}
+
+func TestContactPresenceStates(t *testing.T) {
+	peer := domaintest.ID("presence-peer")
+	tests := []struct {
+		name   string
+		status service.NodeStatus
+		want   contactPresenceState
+	}{
+		{name: "probe unavailable", status: service.NodeStatus{}, want: contactPresenceUnknown},
+		{name: "reachable", status: service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{peer: true}}, want: contactPresenceOnline},
+		{name: "known unreachable", status: service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{}}, want: contactPresenceOffline},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := contactPresence(tt.status, peer); got != tt.want {
+				t.Fatalf("contactPresence() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContactPresenceAvatarUsesReferenceSize(t *testing.T) {
+	w := newIdentityLayoutTestWindow(t)
+	peer := domaintest.ID("avatar-peer")
+	for name, reachable := range map[string]map[domain.PeerIdentity]bool{
+		"online":  {peer: true},
+		"offline": {},
+		"unknown": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			gtx := layout.Context{
+				Ops:         new(op.Ops),
+				Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+				Constraints: layout.Constraints{Max: image.Pt(100, 100)},
+			}
+			dims := w.layoutContactPresenceAvatar(gtx, service.NodeStatus{ReachableIDs: reachable}, peer)
+			if dims.Size != image.Pt(38, 38) {
+				t.Fatalf("avatar size = %v, want 38x38", dims.Size)
+			}
+		})
+	}
+}
+
+func TestContactPresenceAvatarCentersPersonIcon(t *testing.T) {
+	const side = 38
+	window, err := headless.NewWindow(side, side)
+	if err != nil {
+		t.Skipf("no headless GPU context here: %v", err)
+	}
+	defer window.Release()
+
+	w := newIdentityLayoutTestWindow(t)
+	peer := domaintest.ID("centered-avatar-peer")
+	ops := new(op.Ops)
+	w.layoutContactPresenceAvatar(layout.Context{
+		Ops:         ops,
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Exact(image.Pt(side, side)),
+	}, service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{}}, peer)
+	if err := window.Frame(ops); err != nil {
+		t.Fatalf("render avatar: %v", err)
+	}
+	shot := image.NewRGBA(image.Rect(0, 0, side, side))
+	if err := window.Screenshot(shot); err != nil {
+		t.Fatalf("screenshot avatar: %v", err)
+	}
+
+	ink := brightPixelBounds(shot)
+	if ink.Empty() {
+		t.Fatal("person icon drew no bright pixels")
+	}
+	if got, want := ink.Min.X+ink.Max.X, side; got < want-2 || got > want+2 {
+		t.Fatalf("person icon spans x %d..%d: centre %.1f, want %.1f", ink.Min.X, ink.Max.X, float32(got)/2, float32(want)/2)
+	}
+	if got, want := ink.Min.Y+ink.Max.Y, side; got < want-2 || got > want+2 {
+		t.Fatalf("person icon spans y %d..%d: centre %.1f, want %.1f", ink.Min.Y, ink.Max.Y, float32(got)/2, float32(want)/2)
+	}
+}
+
+func brightPixelBounds(img *image.RGBA) image.Rectangle {
+	bounds := img.Bounds()
+	ink := image.Rectangle{Min: bounds.Max, Max: bounds.Min}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			if a < 0x2000 || r < 0xc000 || g < 0xc000 || b < 0xc000 {
+				continue
+			}
+			ink.Min.X = min(ink.Min.X, x)
+			ink.Min.Y = min(ink.Min.Y, y)
+			ink.Max.X = max(ink.Max.X, x+1)
+			ink.Max.Y = max(ink.Max.Y, y+1)
+		}
+	}
+	if ink.Min.X >= ink.Max.X || ink.Min.Y >= ink.Max.Y {
+		return image.Rectangle{}
+	}
+	return ink
+}
+
+func TestContactLastOnlineAtPrefersPresenceEvidence(t *testing.T) {
+	peer := domaintest.ID("last-online-peer")
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	preview := &service.RouterPeerState{Preview: service.ConversationPreview{
+		Sender:    peer,
+		Timestamp: now.Add(-2 * time.Hour),
+	}}
+
+	if got := contactLastOnlineAt(service.NodeStatus{
+		ReachableIDs: map[domain.PeerIdentity]bool{peer: true},
+	}, preview, peer, time.Time{}); !got.IsZero() {
+		t.Fatalf("online contact exposed a moving wall-clock timestamp: %v", got)
+	}
+
+	disconnected := now.Add(-30 * time.Minute)
+	persisted := now.Add(-10 * time.Minute)
+	status := service.NodeStatus{
+		ReachableIDs: map[domain.PeerIdentity]bool{},
+		Contacts: map[string]service.Contact{
+			peer.String(): {LastOnlineAt: domain.TimeOf(persisted)},
+		},
+		PeerHealth: []service.PeerHealth{{
+			PeerID:             peer.String(),
+			LastDisconnectedAt: domain.TimeOf(disconnected),
+		}},
+	}
+	if got := contactLastOnlineAt(status, preview, peer, disconnected); !got.Equal(persisted) {
+		t.Fatalf("offline timestamp = %v, want persisted transition %v", got, persisted)
+	}
+
+	newerHealth := now.Add(-5 * time.Minute)
+	if got := contactLastOnlineAt(status, preview, peer, newerHealth); !got.Equal(newerHealth) {
+		t.Fatalf("newer peer-health evidence = %v, want %v", got, newerHealth)
+	}
+
+	delete(status.Contacts, peer.String())
+	if got := contactLastOnlineAt(status, preview, peer, disconnected); !got.Equal(disconnected) {
+		t.Fatalf("legacy peer-health fallback = %v, want disconnect %v", got, disconnected)
+	}
+
+	if got := contactLastOnlineAt(service.NodeStatus{}, preview, peer, time.Time{}); !got.Equal(preview.Preview.Timestamp) {
+		t.Fatalf("routed fallback = %v, want preview %v", got, preview.Preview.Timestamp)
+	}
+
+	outgoingOnly := &service.RouterPeerState{Preview: service.ConversationPreview{
+		Sender:    domaintest.ID("self"),
+		Timestamp: now.Add(-5 * time.Minute),
+	}}
+	if got := contactLastOnlineAt(service.NodeStatus{}, outgoingOnly, peer, time.Time{}); !got.IsZero() {
+		t.Fatalf("outgoing message became peer presence evidence: got %v, want zero", got)
+	}
+}
+
+func TestCompactContactRowHidesLastOnlineBeforeContactName(t *testing.T) {
+	gtx := layout.Context{
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Constraints{Max: image.Pt(279, 100)},
+	}
+	if shouldShowContactLastOnlineLabel(gtx, true) {
+		t.Fatal("compact contact row kept the long visual last-online label")
+	}
+	gtx.Constraints.Max.X = 280
+	if !shouldShowContactLastOnlineLabel(gtx, true) {
+		t.Fatal("regular contact row hid the last-online label")
+	}
+	if shouldShowContactLastOnlineLabel(gtx, false) {
+		t.Fatal("non-contact row exposed a last-online label")
+	}
+}
+
+func TestRebuildPeerLastOnlineIndexKeepsNewestIdentityActivity(t *testing.T) {
+	peer := domaintest.ID("peer-health-index")
+	older := time.Date(2026, time.August, 21, 8, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	w := &Window{snap: service.RouterSnapshot{NodeStatus: service.NodeStatus{
+		PeerHealth: []service.PeerHealth{
+			{PeerID: peer.String(), LastDisconnectedAt: domain.TimeOf(older)},
+			{PeerID: peer.String(), LastUsefulReceiveAt: domain.TimeOf(newer)},
+			{PeerID: "not-an-identity", LastConnectedAt: domain.TimeOf(newer.Add(time.Hour))},
+		},
+	}}}
+
+	w.rebuildPeerLastOnlineIndex()
+	if got := w.peerLastOnlineByIdentity[peer]; !got.Equal(newer) {
+		t.Fatalf("indexed peer activity = %v, want newest %v", got, newer)
+	}
+	if len(w.peerLastOnlineByIdentity) != 1 {
+		t.Fatalf("peer activity index has %d rows, want only the valid identity", len(w.peerLastOnlineByIdentity))
+	}
+}
+
+func TestFormatContactLastOnline(t *testing.T) {
+	now := time.Date(2026, time.August, 21, 12, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		language string
+		last     time.Time
+		want     string
+	}{
+		{name: "today", language: "ru", last: now.Add(-time.Hour), want: "11:30"},
+		{name: "yesterday Russian", language: "ru", last: now.AddDate(0, 0, -1), want: "Вчера"},
+		{name: "three days Russian", language: "ru", last: now.AddDate(0, 0, -3), want: "3 дня назад"},
+		{name: "three days English", language: "en", last: now.AddDate(0, 0, -3), want: "3 days ago"},
+		{name: "three days Spanish", language: "es", last: now.AddDate(0, 0, -3), want: "hace 3 días"},
+		{name: "three days French", language: "fr", last: now.AddDate(0, 0, -3), want: "il y a 3 jours"},
+		{name: "three days Arabic", language: "ar", last: now.AddDate(0, 0, -3), want: "منذ 3 أيام"},
+		{name: "older", language: "ru", last: now.AddDate(0, 0, -7), want: "14.08.26"},
+		{name: "older English", language: "en", last: now.AddDate(0, 0, -7), want: "08/14/26"},
+		{name: "older Chinese", language: "zh", last: now.AddDate(0, 0, -7), want: "2026.08.14"},
+		{name: "missing", language: "ru", last: time.Time{}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatContactLastOnline(now, tt.last, tt.language); got != tt.want {
+				t.Fatalf("formatContactLastOnline() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatContactLastOnlineUsesCalendarDaysAcrossDST(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("timezone database unavailable: %v", err)
+	}
+	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, location)
+	last := time.Date(2026, time.March, 8, 12, 0, 0, 0, location)
+	if got := formatContactLastOnline(now, last, "en"); got != "2 days ago" {
+		t.Fatalf("DST-spanning calendar difference = %q, want %q", got, "2 days ago")
+	}
+}
+
+func TestOnlineContactRowHasOnePresenceDescription(t *testing.T) {
+	peer := domaintest.ID("semantic-online-peer")
+	w := newIdentityLayoutTestWindow(t)
+	w.snap.Peers = map[domain.PeerIdentity]*service.RouterPeerState{
+		peer: {Preview: service.ConversationPreview{Sender: peer, Timestamp: time.Date(2026, time.August, 21, 8, 14, 0, 0, time.UTC)}},
+	}
+
+	var router input.Router
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Source:      router.Source(),
+		Now:         time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Constraints{Max: image.Pt(320, 100)},
+	}
+	w.layoutRecipientButton(gtx, service.NodeStatus{
+		ReachableIDs: map[domain.PeerIdentity]bool{peer: true},
+	}, peer, true)
+	router.Frame(gtx.Ops)
+
+	for _, node := range router.AppendSemantics(nil) {
+		if node.Desc.Class != semantic.Button || node.Desc.Description == "Open contact menu" {
+			continue
+		}
+		if node.Desc.Description != "Online" {
+			t.Fatalf("online contact description = %q, want one authoritative presence description %q", node.Desc.Description, "Online")
+		}
+		return
+	}
+	t.Fatal("contact row button is absent from the semantic tree")
 }
 
 func TestIdentitySearchUsesCompactSingleRow(t *testing.T) {

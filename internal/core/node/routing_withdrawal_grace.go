@@ -112,10 +112,14 @@ func (s *Service) effectiveWithdrawalGracePeriod() time.Duration {
 // identity it is NOT reset — the first close starts the clock and
 // subsequent close events from the same identity reuse it.
 func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
+	s.maybeScheduleDeferredWithdrawalWithAttribution(peerIdentity, caps, s.observePeerOffline())
+}
+
+func (s *Service) maybeScheduleDeferredWithdrawalWithAttribution(peerIdentity domain.PeerIdentity, caps []domain.Capability, presenceEvidence *peerOfflineEvidence) {
 	grace := s.effectiveWithdrawalGracePeriod()
 	if grace <= 0 {
 		// Legacy synchronous path — call the body inline.
-		s.executeDeferredWithdrawal(peerIdentity, caps)
+		s.executeDeferredWithdrawal(peerIdentity, caps, presenceEvidence)
 		return
 	}
 
@@ -123,10 +127,13 @@ func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdenti
 	if s.pendingWithdrawals == nil {
 		s.pendingWithdrawals = make(map[domain.PeerIdentity]*pendingWithdrawal)
 	}
-	if _, alreadyPending := s.pendingWithdrawals[peerIdentity]; alreadyPending {
+	if entry, alreadyPending := s.pendingWithdrawals[peerIdentity]; alreadyPending {
 		// Another close already armed the timer for this identity.
 		// Keep the original timer running — restarting it would
 		// indefinitely defer withdrawal under a chatty close pattern.
+		if entry.presenceEvidence == nil && presenceEvidence != nil {
+			entry.presenceEvidence = presenceEvidence
+		}
 		s.peerMu.Unlock()
 		log.Trace().Str("peer", peerIdentity.String()).
 			Msg("routing_withdrawal_grace_already_pending")
@@ -138,8 +145,9 @@ func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdenti
 		s.firePendingWithdrawal(captured, capturedCaps)
 	})
 	s.pendingWithdrawals[peerIdentity] = &pendingWithdrawal{
-		timer: timer,
-		caps:  capturedCaps,
+		timer:            timer,
+		caps:             capturedCaps,
+		presenceEvidence: presenceEvidence,
 	}
 	s.peerMu.Unlock()
 
@@ -153,8 +161,9 @@ func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdenti
 // The caps slice is captured at close time so the timer callback
 // has all the inputs it needs without re-reading session state.
 type pendingWithdrawal struct {
-	timer *time.Timer
-	caps  []domain.Capability
+	timer            *time.Timer
+	caps             []domain.Capability
+	presenceEvidence *peerOfflineEvidence
 }
 
 // firePendingWithdrawal is the timer callback invoked when the
@@ -173,7 +182,8 @@ type pendingWithdrawal struct {
 // for the timer-fired path.
 func (s *Service) firePendingWithdrawal(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
 	s.peerMu.Lock()
-	if _, ok := s.pendingWithdrawals[peerIdentity]; !ok {
+	entry, ok := s.pendingWithdrawals[peerIdentity]
+	if !ok {
 		s.peerMu.Unlock()
 		log.Debug().
 			Str("peer", peerIdentity.String()).
@@ -186,7 +196,7 @@ func (s *Service) firePendingWithdrawal(peerIdentity domain.PeerIdentity, caps [
 	log.Info().
 		Str("peer", peerIdentity.String()).
 		Msg("routing_direct_peer_withdrawal_grace_elapsed")
-	s.executeDeferredWithdrawal(peerIdentity, caps)
+	s.executeDeferredWithdrawal(peerIdentity, caps, entry.presenceEvidence)
 }
 
 // tryCancelPendingWithdrawal is called from onPeerSessionEstablished
@@ -297,10 +307,10 @@ func (s *Service) cancelAllPendingWithdrawalsForShutdown() {
 //	      happened in firePendingWithdrawal), takes the normal
 //	      AddDirectPeer path, and the route is added back fresh.
 //
-//	Lock-order: peerMu → routingTable.mu. Safe because the routing
-//	package never reaches back into peerMu (see
+//	Lock-order: peerMu → presenceProjection.mu → routingTable.mu. Safe
+//	because the routing package never reaches back into Service locks (see
 //	internal/core/routing/).
-func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
+func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, caps []domain.Capability, presenceEvidence *peerOfflineEvidence) {
 	s.peerMu.Lock()
 
 	// Re-check: did a new RELAY-capable session for this identity
@@ -334,12 +344,30 @@ func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, ca
 	// comment in onPeerSessionClosed for the full rationale).
 	poisonTargets := s.routingTable.IdentitiesViaUplink(routing.PeerIdentity(peerIdentity))
 
+	source, canPublishPresence := s.identityPresenceSource()
+	s.presenceProjection.mu.Lock()
 	result, err := s.routingTable.RemoveDirectPeer(peerIdentity)
+	var presenceChange *ebus.IdentityPresenceChange
+	if err == nil && presenceEvidence != nil && canPublishPresence && !result.PeerReachable {
+		presenceChange = &ebus.IdentityPresenceChange{
+			Source:     source,
+			Identities: []domain.PeerIdentity{peerIdentity},
+			ChangedAt:  presenceEvidence.observedAt,
+		}
+	}
+	if err == nil {
+		s.presenceProjection.removeDirectSourceLocked(peerIdentity, presenceChange != nil)
+	}
+	s.presenceProjection.mu.Unlock()
 	s.peerMu.Unlock()
 
 	if err != nil {
 		log.Error().Err(err).Str("peer", peerIdentity.String()).Msg("routing_remove_direct_peer_failed")
 		return
+	}
+
+	if presenceChange != nil {
+		s.publishIdentityPresenceChanged(*presenceChange)
 	}
 
 	if s.announceLoop != nil {
