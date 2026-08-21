@@ -1250,9 +1250,23 @@ func pendingRingSizeFromEnv() int {
 	return value
 }
 
+// MaxDeliveryRetryAttempts is the ceiling on CORSA_DELIVERY_RETRY_MAX_ATTEMPTS.
+//
+// It is not a resource limit but a correctness one. A deleted message is
+// refused for a fixed window on the receiving side, and that window has to
+// outlast the sending. The retry schedule caps at 11 minutes per attempt,
+// so 120 attempts is a little under a day — well inside the refusal, which
+// is sized to the reseed horizon (a week) rather than to this number,
+// because a restart resets the counter anyway.
+//
+// The clamp is what keeps a single uninterrupted run from outlasting the
+// refusal on its own.
+const MaxDeliveryRetryAttempts = 120
+
 // deliveryRetryMaxAttemptsFromEnv reads CORSA_DELIVERY_RETRY_MAX_ATTEMPTS —
 // the cap on sender-side end-to-end delivery retries. Empty, non-numeric or
-// non-positive values select the node-package default.
+// non-positive values select the node-package default; anything above
+// MaxDeliveryRetryAttempts is clamped to it, for the reason given there.
 func deliveryRetryMaxAttemptsFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv("CORSA_DELIVERY_RETRY_MAX_ATTEMPTS"))
 	if raw == "" {
@@ -1261,6 +1275,9 @@ func deliveryRetryMaxAttemptsFromEnv() int {
 	value, err := strconv.Atoi(raw)
 	if err != nil || value <= 0 {
 		return 0
+	}
+	if value > MaxDeliveryRetryAttempts {
+		return MaxDeliveryRetryAttempts
 	}
 	return value
 }

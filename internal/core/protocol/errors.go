@@ -26,11 +26,16 @@ const (
 	ErrCodeInvalidAuthSignature       = "invalid-auth-signature"
 	ErrCodeBlacklisted                = "blacklisted"
 	ErrCodeInvalidAckDelete           = "invalid-ack-delete"
-	ErrCodeFrameTooLarge              = "frame-too-large"
-	ErrCodeDuplicateConnection        = "duplicate-connection"
-	ErrCodeRateLimited                = "rate-limited"
-	ErrCodeHelloAfterAuth             = "hello-after-auth"
-	ErrCodeSenderIdentityNotVerified  = "sender-identity-not-verified"
+	ErrCodeInvalidCancelDelivery      = "invalid-cancel-delivery"
+	// ErrCodeStoreDeferred is a TRANSIENT refusal: the receiving node
+	// could not decide whether it may keep the message and asks for it
+	// again rather than acknowledging one it did not store.
+	ErrCodeStoreDeferred             = "store-deferred"
+	ErrCodeFrameTooLarge             = "frame-too-large"
+	ErrCodeDuplicateConnection       = "duplicate-connection"
+	ErrCodeRateLimited               = "rate-limited"
+	ErrCodeHelloAfterAuth            = "hello-after-auth"
+	ErrCodeSenderIdentityNotVerified = "sender-identity-not-verified"
 
 	// ErrCodePeerBanned is returned by the responder when the inbound peer
 	// is on the local ban list (IP-wide blacklist or per-peer timed ban).
@@ -77,11 +82,19 @@ var (
 	ErrInvalidAuthSignature       = errors.New(ErrCodeInvalidAuthSignature)
 	ErrBlacklisted                = errors.New(ErrCodeBlacklisted)
 	ErrInvalidAckDelete           = errors.New(ErrCodeInvalidAckDelete)
-	ErrFrameTooLarge              = errors.New(ErrCodeFrameTooLarge)
-	ErrDuplicateConnection        = errors.New(ErrCodeDuplicateConnection)
-	ErrRateLimited                = errors.New(ErrCodeRateLimited)
-	ErrHelloAfterAuth             = errors.New(ErrCodeHelloAfterAuth)
-	ErrSenderIdentityNotVerified  = errors.New(ErrCodeSenderIdentityNotVerified)
+	ErrInvalidCancelDelivery      = errors.New(ErrCodeInvalidCancelDelivery)
+	// ErrStoreDeferred is the sentinel for ErrCodeStoreDeferred, and it
+	// carries the only thing about that refusal a caller needs to know:
+	// it is TRANSIENT. The node could not decide whether it may keep the
+	// message and asks for it again, so the honest answer to the user is
+	// "not now", not "this failed" — and errors.Is is how a UI layer that
+	// never sees frames can tell the two apart.
+	ErrStoreDeferred             = errors.New(ErrCodeStoreDeferred)
+	ErrFrameTooLarge             = errors.New(ErrCodeFrameTooLarge)
+	ErrDuplicateConnection       = errors.New(ErrCodeDuplicateConnection)
+	ErrRateLimited               = errors.New(ErrCodeRateLimited)
+	ErrHelloAfterAuth            = errors.New(ErrCodeHelloAfterAuth)
+	ErrSenderIdentityNotVerified = errors.New(ErrCodeSenderIdentityNotVerified)
 	// ErrPeerBanned is the sentinel for ErrCodePeerBanned. Callers use
 	// errors.Is to distinguish a ban-rejection from other pre-welcome
 	// failures so that the dialler can honour the carried expiration
@@ -157,6 +170,8 @@ func ErrorCode(err error) string {
 		return ErrCodePeerBanned
 	case errors.Is(err, ErrSelfIdentity):
 		return ErrCodeSelfIdentity
+	case errors.Is(err, ErrStoreDeferred):
+		return ErrCodeStoreDeferred
 	default:
 		return ErrCodeProtocol
 	}
@@ -222,6 +237,8 @@ func ErrorFromCode(code string) error {
 		return ErrPeerBanned
 	case ErrCodeSelfIdentity:
 		return ErrSelfIdentity
+	case ErrCodeStoreDeferred:
+		return ErrStoreDeferred
 	default:
 		return ErrProtocol
 	}

@@ -33,9 +33,10 @@ const (
 	// mattn/go-sqlite3.
 	sqliteDriverName = "sqlite3"
 
-	// sqliteDSNOptions configures a 5s busy timeout and foreign-key
-	// enforcement on every pooled connection (mattn/go-sqlite3
-	// underscore-parameter DSN syntax). journal_mode is set once by
-	// ensureWALMode instead — see driver_purego.go for why.
-	sqliteDSNOptions = "?_busy_timeout=5000&_foreign_keys=1"
+	// sqliteDSNOptions configures a 5s busy timeout, foreign-key
+	// enforcement and secure deletion on every pooled connection
+	// (mattn/go-sqlite3 underscore-parameter DSN syntax). journal_mode is
+	// set once by ensureWALMode instead — see driver_purego.go for why,
+	// and for why secure_delete is on.
+	sqliteDSNOptions = "?_busy_timeout=5000&_foreign_keys=1&_secure_delete=1"
 )

@@ -314,6 +314,25 @@ Each contact in the sidebar displays a small colored dot next to the peer name. 
 
 The reachability data is populated during each `ProbeNode` cycle. In embedded mode, `NodeProber.BuildReachableIDs()` (delegated from `DesktopClient.BuildReachableIDs()`) calls `node.Service.RoutingSnapshot()` directly (no RPC round-trip) and extracts all identities with a live `BestRoute`. In remote TCP mode (`localNode == nil`), it falls back to the `fetch_reachable_ids` frame, which performs the same logic on the node side. The reachable set covers all identities in the routing table — not just those from `fetch_identities` — so sidebar peers that entered via chatlog or DM headers also get correct status. Results are stored in `NodeStatus.ReachableIDs` and flow through the standard `RouterSnapshot` pipeline to the UI.
 
+### Counted phrases (plural forms)
+
+A caption that contains a number has to agree with it, and which words
+change is a property of the language: Russian needs three forms
+("1 сообщение ждёт", "2 сообщения ждут", "5 сообщений ждут"), Arabic six,
+Chinese one. `Window.tCount(key, count, …)` picks the catalogue entry for
+the count's plural form — `key.one`, `key.few`, `key.many`, `key.other` —
+and formats it with the count as the first argument. The rules live in
+`i18n_plural.go` and follow the CLDR categories for the shipped languages.
+
+A missing form falls back to `key.other` in the same language, then to
+English, so a half-translated catalogue renders an awkward sentence rather
+than a raw key; a key with no plural entries at all falls through to the
+plain `translate`, so `tCount` is safe to use on any key.
+
+Adding a language means adding its rule to `pluralFormFor` and its forms to
+the catalogue. Only phrases whose wording actually changes need forms —
+`"Known peers: %d"` reads correctly at any count and stays a plain entry.
+
 ### Contact list sorting
 
 The sidebar contact list uses 4-tier priority sorting. This is a UI/product concern — the router provides data (peers, unread counts, reachability), and the presentation layer (`sidebar_sort.go`) decides display order. Sorting runs on every frame render using the current `RouterSnapshot`, so any state change (unread cleared, preview refreshed, reachability updated) is immediately reflected without explicit re-sort triggers.
@@ -333,6 +352,26 @@ The sort pipeline in `snapRecipients()`:
 2. `sortSidebarPeers()` — applies 4-tier sort using `RouterSnapshot.Peers` and `RouterSnapshot.NodeStatus.ReachableIDs`
 
 When `ReachableIDs` is nil (probe not completed or failed), all peers are treated as offline, and the sort degrades gracefully to 2-tier (unread first, then by timestamp).
+
+### Фразы со счётчиком (формы множественного числа)
+
+Подпись, в которой есть число, обязана с ним согласовываться, и какие
+именно слова меняются — свойство языка: русскому нужны три формы
+(«1 сообщение ждёт», «2 сообщения ждут», «5 сообщений ждут»), арабскому
+шесть, китайскому одна. `Window.tCount(key, count, …)` выбирает запись
+каталога под нужную форму — `key.one`, `key.few`, `key.many`, `key.other`
+— и форматирует её, подставляя счётчик первым аргументом. Правила лежат в
+`i18n_plural.go` и следуют категориям CLDR для поддерживаемых языков.
+
+Отсутствующая форма откатывается к `key.other` того же языка, затем к
+английскому, поэтому недопереведённый каталог даёт корявую фразу, а не
+голый ключ; ключ, у которого форм нет вовсе, уходит в обычный `translate`,
+поэтому `tCount` безопасен для любого ключа.
+
+Добавить язык — значит добавить его правило в `pluralFormFor` и его формы
+в каталог. Формы нужны только фразам, у которых действительно меняются
+слова: `«Известных пиров: %d»` читается при любом числе и остаётся обычной
+записью.
 
 ### Сортировка списка контактов
 

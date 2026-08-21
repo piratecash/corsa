@@ -80,52 +80,38 @@ const (
 	// MessageDeleteStatus values, or the sender's retry budget was
 	// exhausted (Abandoned). Subscribers use this to differentiate a
 	// successful deletion (deleted / not_found) from a peer rejection
-	// (denied / immutable) or transport abandonment, all of which look
-	// identical to the synchronous SendMessageDelete return.
+	// (denied / immutable) or an expired request, all of which look
+	// identical on the wire.
+	//
+	// A route that owes the peer nothing — a local incoming delete, or a
+	// recall of a message the node proved never went out — publishes
+	// "deleted" here before SendMessageDelete returns. The scheduled
+	// routes publish nothing then: the deletion is not finished, and the
+	// outcome arrives with the peer's ack or with the intent's expiry,
+	// possibly days later.
 	//
 	// Handler signature:
 	//   func(outcome ebus.MessageDeleteOutcome)
 	TopicMessageDeleteCompleted = "message.delete.completed"
 
-	// TopicConversationDeleteCompleted is emitted by DMRouter only
-	// when an in-flight conversation_delete (the bulk wipe-the-thread
-	// control DM) reaches a TERMINAL state. Subscribers see exactly
-	// two paths:
+	// TopicConversationDeleteCompleted is emitted by DMRouter ONCE, at
+	// click time, when a "delete chat for everyone" finishes locally.
 	//
-	//   - Status=applied: the peer's conversation_delete_ack arrived
-	//     with applied; the sender's local mirror has just run.
-	//     LocalCleanupFailed=true means "peer is consistent but at
-	//     least one in-scope row survived locally" (UI must surface
-	//     the partial-cleanup caveat). LocalCleanupFailed=false
-	//     means the sender-side sweep over rows in localKnownIDs
-	//     succeeded — this is the correct UI signal for "wipe
-	//     applied; peer confirmed" but is NOT a guarantee that the
-	//     conversation is empty on both sides: rows OUTSIDE the
-	//     localKnownIDs snapshot can still survive asymmetrically
-	//     by design (self-authored "sent" outbound rows are
-	//     deliberately excluded from localKnownIDs to close the
-	//     receiver-only-row hole, and late in-flight rows on
-	//     either side are documented asymmetry — see
-	//     snapshotLocalKnownConversationIDs and the dm_command.go
-	//     payload comment for the full contract). Subscribers
-	//     should map LocalCleanupFailed=false to "wipe applied,
-	//     local cleanup clean" rather than "both sides empty".
-	//   - Abandoned=true: the sender's retry budget for this peer
-	//     was exhausted with no terminal applied ack. Local rows
-	//     survive so the user can re-issue the wipe.
+	// There is no peer-side status on this topic and no second event
+	// later, because there is no bulk request on the wire: a wipe is N
+	// message deletions, each settled by its own ack through
+	// TopicMessageDeleteCompleted and counted in the per-peer pending
+	// total. What this event describes is the local half — the only part
+	// that is finished when the user lets go of the button:
 	//
-	// A ConversationDeleteStatusError ack is NOT terminal: the ack
-	// handler keeps the pending entry alive so the retry loop can
-	// keep chasing the peer, and nothing is published until the
-	// next attempt resolves to applied or the budget runs out
-	// (Abandoned). Subscribers must treat the absence of an event
-	// as "still in flight"; a "transient error → retrying" UI hint
-	// has to be sourced from the request lifecycle itself, not
-	// from this topic.
+	//   - Deleted / Owed: rows removed here, and how many deletions the
+	//     peer now owes. Owed=0 means the thread was already empty.
+	//   - LocalCleanupFailed: the wipe did not run at all. It is
+	//     all-or-nothing, so the thread is untouched here AND nothing was
+	//     recorded for the peer; the user has to re-issue.
 	//
-	// Pessimistic ordering: the sender's local chatlog wipe runs
-	// inside the ack handler ONLY on the applied path above; on
-	// Abandoned the local rows survive untouched.
+	// The payload contract lives on the struct — see
+	// ebus.ConversationDeleteOutcome.
 	//
 	// Handler signature:
 	//   func(outcome ebus.ConversationDeleteOutcome)

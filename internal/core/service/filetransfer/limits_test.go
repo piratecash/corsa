@@ -533,13 +533,17 @@ func TestCommitReleasesPending(t *testing.T) {
 		t.Fatalf("refs after Commit = %d, want 1", refs)
 	}
 
-	// After Release (simulating transfer completion), RemoveUnreferenced
-	// must be able to delete the blob — no leaked pending blocks it.
-	store.Release(hash)
+	// After the ref drop (simulating transfer completion),
+	// RemoveUnreferenced must be able to delete the blob — no leaked
+	// pending blocks it.
+	store.DropRef(hash)
+	if err := store.PurgeUnreferenced(hash); err != nil {
+		t.Fatalf("PurgeUnreferenced: %v", err)
+	}
 	store.RemoveUnreferenced(hash)
 
 	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
-		t.Fatal("transmit file should be deleted after Release+RemoveUnreferenced — leaked pending blocked cleanup")
+		t.Fatal("transmit file should be deleted after the ref drop + purge — leaked pending blocked cleanup")
 	}
 }
 
@@ -977,15 +981,20 @@ func TestTickSenderMappingsCompletedTTLReleasesRef(t *testing.T) {
 	}
 	m.mu.Unlock()
 
+	// Expiry drops the ref in memory and records what has to be erased;
+	// the erasure itself is a separate, durable stage, so that a failed
+	// unlink leaves something behind that knows to try again. Both run in
+	// the same maintenance tick (see retryLoop).
 	m.tickSenderMappings()
 
-	// Ref must be released → 0 → blob deleted.
 	store.mu.Lock()
 	refCount := store.refs[hash]
 	store.mu.Unlock()
 	if refCount != 0 {
 		t.Fatalf("ref count should be 0 (completed TTL must release), got %d", refCount)
 	}
+
+	m.tickPendingCleanups()
 
 	if _, err := os.Stat(filepath.Join(dir, hash+".bin")); !os.IsNotExist(err) {
 		t.Fatal("blob should be deleted after completed mapping TTL expiry released the last ref")

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
@@ -237,49 +239,77 @@ func (fs *FileStore) RemoveUnreferenced(fileHash string) {
 	}
 	delete(fs.refs, fileHash)
 	delete(fs.pending, fileHash)
-	fs.removeAllForHash(fileHash)
+	if err := fs.removeAllForHash(fileHash); err != nil {
+		log.Warn().Err(err).Str("file_hash", fileHash).
+			Msg("file_store: rollback could not erase the reserved transmit file")
+	}
 }
 
-// Release decrements the ref count for a file hash. When ref count reaches
-// zero AND no pending announce reservation exists, all files matching the
-// hash are deleted from the transmit directory. If a pending reservation
-// is active (another announce for the same content is between
-// PrepareFileAnnounce and Commit), the blob is preserved — the pending
-// goroutine will either Acquire a new ref or Rollback and clean up itself.
-// Removing all matches (not just the first glob result) handles orphaned
-// duplicates that may exist from earlier versions where the same content
-// could be stored under multiple extensions.
-func (fs *FileStore) Release(fileHash string) {
+// DropRef decrements the ref count for a file hash and does NOT touch the
+// disk. Releasing a reference and erasing the content are deliberately two
+// operations: the drop belongs in the same lock hold that removes the
+// mapping (both in-memory, so a persist that then fails leaves nothing
+// inconsistent — a restart rebuilds the ref table from the mappings it
+// restores), while the erasure has to be recorded as a durable intent
+// before it is attempted and retried until it succeeds. PurgeUnreferenced
+// is the other half.
+func (fs *FileStore) DropRef(fileHash string) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-
 	fs.refs[fileHash]--
 	if fs.refs[fileHash] <= 0 {
 		delete(fs.refs, fileHash)
-		if fs.pending[fileHash] > 0 {
-			return
-		}
-		fs.removeAllForHash(fileHash)
 	}
+}
+
+// PurgeUnreferenced erases the transmit files for a hash that nothing
+// holds any more. It touches no ref count, so it is safe to call again
+// after a failed unlink — which is what a durable cleanup intent does.
+// Removing all matches (not just the first glob result) handles orphaned
+// duplicates from earlier versions that stored the same content under
+// several extensions. A hash something still references — another
+// message's copy, or a pending announce reservation between
+// PrepareFileAnnounce and Commit — is left alone and reported as done: the
+// content is owed elsewhere.
+func (fs *FileStore) PurgeUnreferenced(fileHash string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.refs[fileHash] > 0 || fs.pending[fileHash] > 0 {
+		return nil
+	}
+	return fs.removeAllForHash(fileHash)
 }
 
 // removeAllForHash deletes every file matching <hash>.* inside the transmit
 // directory. Must be called with fs.mu held.
-func (fs *FileStore) removeAllForHash(fileHash string) {
-	if domain.ValidateFileHash(fileHash) != nil {
-		return
+func (fs *FileStore) removeAllForHash(fileHash string) error {
+	if err := domain.ValidateFileHash(fileHash); err != nil {
+		return fmt.Errorf("file_store: purge %q: %w", fileHash, err)
 	}
 	pattern := filepath.Join(fs.baseDir, fileHash+".*")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return
+		return fmt.Errorf("file_store: list transmit files for %s: %w", fileHash, err)
 	}
+	var failed error
 	for _, path := range matches {
 		if err := ensureWithinDir(fs.baseDir, path); err != nil {
+			// Not a file this store may delete. Counted as DONE rather
+			// than as a failure, the same call the download cleanup
+			// makes: it is corrupt state, and an intent that retries it
+			// is one no attempt can ever satisfy. The glob is rooted at
+			// baseDir, so reaching here at all means the directory
+			// itself moved under us.
+			log.Warn().Err(err).Str("path", path).
+				Msg("file_store: purge skipped — path escapes the transmit dir")
 			continue
 		}
-		_ = os.Remove(path)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			failed = errors.Join(failed, fmt.Errorf("file_store: remove %s: %w", path, err))
+		}
 	}
+	return failed
 }
 
 // HasFile returns true if the file with the given hash exists in the store.

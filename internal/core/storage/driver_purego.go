@@ -27,9 +27,17 @@ const (
 	// modernc.org/sqlite.
 	sqliteDriverName = "sqlite"
 
-	// sqliteDSNOptions configures a 5s busy timeout and foreign-key
-	// enforcement on every pooled connection (modernc.org/sqlite `_pragma`
-	// DSN syntax).
+	// sqliteDSNOptions configures a 5s busy timeout, foreign-key
+	// enforcement and secure deletion on every pooled connection
+	// (modernc.org/sqlite `_pragma` DSN syntax).
+	//
+	// secure_delete overwrites the content of a freed page instead of
+	// merely unlinking it. This database holds chat history, and a
+	// message the user deleted must not stay legible in slack space of
+	// the file — the whole point of deleting it. The cost is one extra
+	// write per freed page on DELETE, which is invisible next to the
+	// per-message work around it. See docs/storage.md for the residual
+	// -wal window and what closes it.
 	//
 	// journal_mode is deliberately NOT here. It is a property of the FILE,
 	// not of a connection, and switching it needs an exclusive lock that
@@ -38,5 +46,5 @@ const (
 	// every pooled connection retry that switch and made two processes
 	// starting against the same fresh file race, with the loser failing to
 	// start at all. ensureWALMode does it once, with a retry.
-	sqliteDSNOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	sqliteDSNOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=secure_delete(1)"
 )

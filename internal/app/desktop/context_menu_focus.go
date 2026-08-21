@@ -159,7 +159,7 @@ func (m *menuFocusState) drive(gtx layout.Context, items []event.Tag, arrows boo
 		//
 		// Or the menu HELD focus and the item holding it is no longer in the
 		// list. That is not an edge case: items is rebuilt every frame from
-		// live state, so "Delete chat for everyone" leaves the moment the peer
+		// live state, so "Delete chat and ask the peer" leaves the moment the peer
 		// goes offline, "Delete message" the moment contextMenuDeleteEnabled
 		// stops agreeing, and choosing a row that opens a confirmation swaps
 		// the whole set. Whatever the cause, the frame is about to end without
@@ -330,10 +330,6 @@ func readMenuNavKeys(gtx layout.Context, arrows bool) (escape bool, step int) {
 // order they are drawn, for whichever sub-view is showing. The precedence
 // mirrors contextMenuCard exactly, so the list can never describe a sub-view
 // other than the one on screen.
-//
-// The offline "Delete chat for everyone" row is deliberately absent:
-// contextMenuItemDisabled draws it as a bare label with no Clickable, so it
-// owns no hit area and no focus target.
 func (w *Window) peerMenuItems() []event.Tag {
 	switch {
 	case w.showDeleteConfirm:
@@ -345,11 +341,7 @@ func (w *Window) peerMenuItems() []event.Tag {
 		// the click handler for "Set alias" already focuses it directly.
 		return []event.Tag{&w.aliasEditor, &w.ctxMenuAliasSave, &w.ctxMenuAliasCancel}
 	}
-	items := []event.Tag{&w.ctxMenuAlias, &w.ctxMenuCopy, &w.ctxMenuDelete}
-	if w.peerOnline(w.contextMenuPeer) {
-		items = append(items, &w.ctxMenuClearChat)
-	}
-	return items
+	return []event.Tag{&w.ctxMenuAlias, &w.ctxMenuCopy, &w.ctxMenuDelete, &w.ctxMenuClearChat}
 }
 
 // msgMenuItems mirrors peerMenuItems for the message context menu. Delete drops

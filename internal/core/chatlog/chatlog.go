@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/storage"
 )
@@ -389,18 +391,90 @@ func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
 	}
 
 	n, _ := res.RowsAffected()
+	if n > 0 {
+		// Same class of deletion as a user-issued one — a message whose
+		// lifetime ran out is supposed to stop existing — so the pages
+		// that held it leave the write-ahead log here rather than at the
+		// next automatic checkpoint. Best-effort; see CheckpointWAL.
+		if err := s.CheckpointWAL(ctx); err != nil {
+			log.Debug().Err(err).Msg("chatlog: wal checkpoint after the TTL sweep did not complete")
+		}
+	}
 	return n, nil
 }
 
-// DeleteByPeer removes all messages for a conversation with the given identity.
-// Returns the number of deleted rows.
+// DeleteByPeer removes all messages for a conversation with the given
+// identity, along with every per-message trace those rows left in the other
+// tables. Returns the number of deleted message rows.
+//
+// Everything else naming this peer goes with them: the delete requests
+// still owed by them and the tombstones of the rows being removed. They are
+// the last things left naming a conversation the user has erased,
+// and a client that keeps phoning a peer about a thread its owner destroyed
+// — or keeps a row with their address in it — is carrying exactly the
+// metadata the deletion was for. The cost is stated plainly: peer-side
+// deletions that had been scheduled and not yet acknowledged are abandoned,
+// so the peer keeps whatever it still holds. Asking both sides to forget
+// the thread first is what "Delete chat and ask the peer" is for; this is the
+// user erasing their own side of it.
+//
+// What cannot be cleaned here is a tombstone for a row the peer's own wipe
+// already removed: those name a message id and nothing else, no longer
+// resolve to any conversation, and expire on their own hour.
+//
+// One transaction: a wipe that removed the rows but left their journals (or
+// the reverse) is a half-erased conversation, and nothing downstream could
+// tell which half it got.
 func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) (int64, error) {
 	id := identity.String()
 	if strings.TrimSpace(id) == "" {
 		return 0, fmt.Errorf("chatlog: empty identity")
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("chatlog: begin delete identity %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const conversationFilter = `
+		SELECT id FROM messages
+		WHERE topic = 'dm'
+		  AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`
+
+	// Each occurrence of the sub-select needs its own copy of the four
+	// conversation parameters, so the argument list is built per statement
+	// rather than shared.
+	conversationArgs := []any{s.identityAddr, id, id, s.identityAddr}
+	twoFilters := append(append([]any{}, conversationArgs...), conversationArgs...)
+
+	journalDeletes := []struct {
+		statement string
+		args      []any
+	}{
+		{`DELETE FROM seen_ack WHERE id IN (` + conversationFilter + `)`, conversationArgs},
+		{`DELETE FROM delivery_failed WHERE id IN (` + conversationFilter + `)`, conversationArgs},
+		{`DELETE FROM decrypt_resend_intents WHERE original_id IN (` + conversationFilter +
+			`) OR replacement_id IN (` + conversationFilter + `)`, twoFilters},
+	}
+	for _, deletion := range journalDeletes {
+		if _, err := tx.ExecContext(ctx, deletion.statement, deletion.args...); err != nil {
+			return 0, fmt.Errorf("chatlog: delete identity %s journals: %w", id, err)
+		}
+	}
+
+	// Both halves of the deletion table go: the requests still owed by
+	// this peer, and the refusals of the ids of the conversation being
+	// erased. A refusal names no peer, so it is found through the rows it
+	// belongs to — which are still here, this statement running before
+	// they are removed.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM message_delete_intents WHERE peer = ? OR message_id IN (`+conversationFilter+`)`,
+		append([]any{id}, conversationArgs...)...); err != nil {
+		return 0, fmt.Errorf("chatlog: delete identity %s deletion rows: %w", id, err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		DELETE FROM messages
 		WHERE topic = 'dm'
 		  AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`,
@@ -408,9 +482,46 @@ func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) 
 	if err != nil {
 		return 0, fmt.Errorf("chatlog: delete identity %s: %w", id, err)
 	}
-
 	n, _ := res.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("chatlog: commit delete identity %s: %w", id, err)
+	}
+
+	// Same on-disk treatment as every other deletion: secure_delete
+	// overwrites the freed page, but in WAL mode that overwrite is itself
+	// a log frame, so the original bytes live in the -wal file until a
+	// checkpoint. Erasing a whole conversation and leaving it readable
+	// there would be the loudest place to skip this.
+	if err := s.CheckpointWAL(ctx); err != nil {
+		log.Debug().Err(err).Msg("chatlog: wal checkpoint after deleting an identity did not complete")
+	}
 	return n, nil
+}
+
+// CheckpointWAL folds the write-ahead log back into the database file and
+// truncates it.
+//
+// DELETE with secure_delete on zeroes the freed pages, but in WAL mode the
+// page that HELD the message is only overwritten in the log — the original
+// bytes stay in the -wal file until a checkpoint retires them. For a routine
+// write that is fine; for a deletion whose entire purpose is that the
+// content stops existing, it is the difference between the promise and the
+// file on disk.
+//
+// Best-effort by contract: TRUNCATE waits for readers and can report busy,
+// which is not a failure of the deletion — the next checkpoint (automatic at
+// ~4 MB of log, or at close) still retires the pages. Callers log and move
+// on.
+func (s *Store) CheckpointWAL(ctx context.Context) error {
+	var busy, logFrames, checkpointed int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return fmt.Errorf("chatlog: wal checkpoint: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("chatlog: wal checkpoint busy: %d frames left", logFrames)
+	}
+	return nil
 }
 
 // UnreadCountFor returns the number of unread messages in the
@@ -479,12 +590,135 @@ func (s *Store) EntryByID(ctx context.Context, messageID domain.MessageID) (Entr
 
 // Returns true if a row was deleted.
 func (s *Store) DeleteByID(ctx context.Context, messageID domain.MessageID) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, messageID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("chatlog: begin delete %s: %w", messageID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	removed, err := deleteMessageTx(ctx, tx, messageID)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("chatlog: commit delete %s: %w", messageID, err)
+	}
+	return removed, nil
+}
+
+// DeleteMessages removes a batch of messages in ONE transaction and reports
+// which of them were actually there. Each row still goes through
+// deleteMessageTx, so the journal traces leave with it; what changes is the
+// number of commits.
+//
+// The receiver of a conversation wipe deletes a whole thread this way. One
+// transaction per row meant a thread of a few thousand messages cost a few
+// thousand commits, each an fsync the caller waits on while holding the
+// locks the inbound path also needs — an order of magnitude more expensive
+// than the sender's side of the same wipe, for the same work.
+//
+// All-or-nothing per batch: a failure rolls back the whole chunk and
+// reports the error, so the caller can retry those ids (delete is
+// idempotent) or fall back to one at a time to isolate the row that fails.
+func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID, tombstoneUntil time.Time) ([]domain.MessageID, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: begin batch delete of %d messages: %w", len(ids), err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	removed := make([]domain.MessageID, 0, len(ids))
+	for _, id := range ids {
+		gone, err := deleteMessageTx(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		if gone {
+			removed = append(removed, id)
+		}
+	}
+	// Every id in the batch is refused from here on, not just the ones
+	// that were still present: an id already gone can still be replayed,
+	// and the caller asked for it to stay gone.
+	if err := noteWipeTombstones(ctx, tx, ids, tombstoneUntil); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("chatlog: commit batch delete of %d messages: %w", len(ids), err)
+	}
+	return removed, nil
+}
+
+// DeleteMessageWithTombstone removes one message and plants the refusal of
+// its id in the same commit. The pair is the point: a row deleted without
+// its tombstone can be put straight back by a replay of the same envelope,
+// and a tombstone written after the commit leaves that window open for as
+// long as the second write takes — or forever, if the process dies in it.
+func (s *Store) DeleteMessageWithTombstone(ctx context.Context, messageID domain.MessageID, tombstoneUntil time.Time) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("chatlog: begin delete %s: %w", messageID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	removed, err := deleteMessageTx(ctx, tx, messageID)
+	if err != nil {
+		return false, err
+	}
+	if err := noteWipeTombstones(ctx, tx, []domain.MessageID{messageID}, tombstoneUntil); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("chatlog: commit delete %s: %w", messageID, err)
+	}
+	return removed, nil
+}
+
+// deleteMessageTx removes the message row AND every per-message trace the
+// other repositories keep under the same id. It takes an executor rather
+// than the store handle so both the standalone delete and the
+// delete-and-schedule transaction run it inside a transaction of their own:
+// a row removed while its journals survived is exactly the half-erased
+// state this function exists to prevent, and its name would be a lie if the
+// two halves could commit apart.
+//
+// The journals are the point: `seen_ack` and `delivery_failed` (migration
+// 0003) and the resend intents keyed on the id (migration 0004) outlive the
+// row they describe, and each of them is a record that a message with this
+// id existed and how it went. Leaving them behind after a user deletes the
+// message keeps exactly the metadata the deletion was supposed to remove,
+// and re-seeds retry schedulers with ids that no longer resolve.
+//
+// Per-PEER state (`decrypt_recovery_jobs`, `peer_established`,
+// `decrypt_recovery_cycles`) is deliberately untouched: it describes the
+// conversation, not this message, and survives it by design. The recovery
+// marks of the row itself live in its `metadata` column and go with it.
+func deleteMessageTx(ctx context.Context, db execContext, messageID domain.MessageID) (bool, error) {
+	res, err := db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, messageID)
 	if err != nil {
 		return false, fmt.Errorf("chatlog: delete %s: %w", messageID, err)
 	}
-
 	n, _ := res.RowsAffected()
+
+	for _, statement := range []string{
+		`DELETE FROM seen_ack WHERE id = ?`,
+		`DELETE FROM delivery_failed WHERE id = ?`,
+	} {
+		if _, err := db.ExecContext(ctx, statement, messageID); err != nil {
+			return false, fmt.Errorf("chatlog: delete %s journals: %w", messageID, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM decrypt_resend_intents WHERE original_id = ? OR replacement_id = ?`,
+		messageID, messageID); err != nil {
+		return false, fmt.Errorf("chatlog: delete %s resend intents: %w", messageID, err)
+	}
+
 	return n > 0, nil
 }
 

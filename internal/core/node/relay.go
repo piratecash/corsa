@@ -808,7 +808,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		// envelope behind, and we would falsely ack "stored" upstream
 		// — the previous hop would consider relay successful while
 		// the control envelope is in fact lost. The application-level
-		// retry on the sender (DMRouter.pendingDelete in slice B) is
+		// retry on the sender (the DMRouter delete intent) is
 		// the canonical recovery for this case; signalling failure
 		// upstream lets the sender's retry budget treat this attempt
 		// as a miss and try again.
@@ -1772,7 +1772,7 @@ func (s *Service) noteRelayAttempt(key string, now time.Time) int {
 func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 	// Control DMs (TopicControlDM) intentionally bypass the node-level
 	// relayRetry tracker: their retry policy lives at the application
-	// layer (DMRouter.pendingDelete with exponential backoff). That
+	// layer (the DMRouter delete intent, with exponential backoff). That
 	// retry queue is in-memory only in the current implementation —
 	// see docs/dm-commands.md §"Acknowledgement and retry"; restart
 	// abandons in-flight retries, and JSON persistence is a tracked

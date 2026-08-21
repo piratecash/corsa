@@ -63,8 +63,30 @@ type DesktopClient struct {
 	rpc     *LocalRPCClient
 	chatlog *ChatlogGateway
 	store   *MessageStoreAdapter
-	dm      *DMCrypto
-	prober  *NodeProber
+
+	// wipeTombstones refuses a re-delivery of a message this node has
+	// deleted. Owned here, not by the DMRouter, because it guards the
+	// door into the chatlog and has to be loaded before the node starts;
+	// see wireSubServices.
+	wipeTombstones *wipeTombstoneSet
+
+	// cancelConversationDeliveryFn is a test-only override for the node
+	// round-trip: what a wipe does with the answer — which messages the
+	// peer is asked about — cannot be exercised without controlling
+	// which of them the node claims never went out.
+	cancelConversationDeliveryFn func(context.Context, domain.PeerIdentity) (ConversationCancellation, error)
+	// freezeConversationDeliveryFn / thawConversationDeliveryFn are the
+	// same seam for the two halves that bracket it: a test has to be able
+	// to say what the node knew when it stopped sending, and to observe
+	// that an aborted wipe puts the deliveries back.
+	freezeConversationDeliveryFn func(context.Context, domain.PeerIdentity, []domain.MessageID) (ConversationFreeze, error)
+	// freezeMessageDeliveryFn is the single-message half: the delete
+	// classifies under it, so a test that wants to say "this one never
+	// went out" has to say it here.
+	freezeMessageDeliveryFn    func(context.Context, domain.MessageID) (bool, error)
+	thawConversationDeliveryFn func(context.Context, domain.PeerIdentity, []domain.MessageID) error
+	dm                         *DMCrypto
+	prober                     *NodeProber
 }
 
 // Contact is the service-layer view of a trusted peer's cryptographic
@@ -365,7 +387,25 @@ func (c *DesktopClient) wireSubServices() {
 	c.info = NewAppInfo(c.appCfg, c.nodeCfg, c.id)
 	c.rpc = NewLocalRPCClient(c.info, c.localNode)
 	c.chatlog = NewChatlogGateway(c.chatLog, c.info.Address())
-	c.store = NewMessageStoreAdapter(c.chatlog, c.id)
+	// The refusal set is built and LOADED here, before the node is
+	// started and before anything can hand this process a message. It
+	// belongs to the client rather than to the DMRouter because it
+	// guards the chatlog, and the router is constructed later — a set
+	// wired after the node is already accepting connections would be
+	// empty for exactly the window in which a replay of a message
+	// deleted before the restart arrives.
+	c.wipeTombstones = newWipeTombstoneSet(func() wipeTombstoneJournal {
+		if c.chatlog == nil {
+			return nil
+		}
+		store := c.chatlog.Store()
+		if store == nil {
+			return nil
+		}
+		return store
+	})
+	c.wipeTombstones.Hydrate(context.Background(), time.Now().UTC())
+	c.store = NewMessageStoreAdapter(c.chatlog, c.id, c.wipeTombstones)
 	c.dm = NewDMCrypto(c.rpc, c.chatlog, c.id)
 	c.prober = NewNodeProber(c.rpc, c.dm, c.info)
 }
@@ -609,6 +649,49 @@ func (c *DesktopClient) FetchMessage(ctx context.Context, topic, messageID strin
 // SendDirectMessage encrypts and submits a DM.
 func (c *DesktopClient) SendDirectMessage(ctx context.Context, to domain.PeerIdentity, msg domain.OutgoingDM) (*DirectMessage, error) {
 	return c.dm.SendDirectMessage(ctx, to, msg)
+}
+
+// CancelMessageDelivery asks the node to stop delivering a DM we sent
+// earlier, so the local row can be removed without the message reaching
+// the recipient later.
+func (c *DesktopClient) CancelMessageDelivery(ctx context.Context, to domain.PeerIdentity, messageID domain.MessageID) (DeliveryCancellation, error) {
+	return c.dm.CancelMessageDelivery(ctx, to, messageID)
+}
+
+// CancelConversationDelivery asks the node to stop delivering everything
+// we still owe the peer, so a wiped thread cannot be handed over later.
+func (c *DesktopClient) CancelConversationDelivery(ctx context.Context, peer domain.PeerIdentity, scope []domain.MessageID) (ConversationCancellation, error) {
+	if c.cancelConversationDeliveryFn != nil {
+		return c.cancelConversationDeliveryFn(ctx, peer)
+	}
+	return c.dm.CancelConversationDelivery(ctx, peer, scope)
+}
+
+// FreezeMessageDelivery stops the node from sending one message so a
+// delete can classify from its row.
+func (c *DesktopClient) FreezeMessageDelivery(ctx context.Context, messageID domain.MessageID) (bool, error) {
+	if c.freezeMessageDeliveryFn != nil {
+		return c.freezeMessageDeliveryFn(ctx, messageID)
+	}
+	return c.dm.FreezeMessageDelivery(ctx, messageID)
+}
+
+// FreezeConversationDelivery stops the node from sending anything we still
+// owe the peer, without withdrawing it, so a wipe can classify against a
+// state that cannot move under it.
+func (c *DesktopClient) FreezeConversationDelivery(ctx context.Context, peer domain.PeerIdentity, scope []domain.MessageID) (ConversationFreeze, error) {
+	if c.freezeConversationDeliveryFn != nil {
+		return c.freezeConversationDeliveryFn(ctx, peer, scope)
+	}
+	return c.dm.FreezeConversationDelivery(ctx, peer, scope)
+}
+
+// ThawConversationDelivery ends a freeze whose wipe did not commit.
+func (c *DesktopClient) ThawConversationDelivery(ctx context.Context, peer domain.PeerIdentity, scope []domain.MessageID) error {
+	if c.thawConversationDeliveryFn != nil {
+		return c.thawConversationDeliveryFn(ctx, peer, scope)
+	}
+	return c.dm.ThawConversationDelivery(ctx, peer, scope)
 }
 
 // DecryptIncomingMessage decrypts a local-change event into a DirectMessage.

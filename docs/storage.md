@@ -580,9 +580,25 @@ cross-compilation. So the unification is of the *contract*, not the
 implementation: one catalog, one set of repository statements, two thin
 platform configurations.
 
-Both DSNs set the same per-connection semantics — `busy_timeout=5000` and
-`foreign_keys=ON` — and the driver contract suite asserts them together with
-the journal mode.
+Both DSNs set the same per-connection semantics — `busy_timeout=5000`,
+`foreign_keys=ON` and `secure_delete=ON` — and the driver contract suite
+asserts them together with the journal mode.
+
+`secure_delete` is here because this file holds chat history. Without it a
+`DELETE` only unlinks the page, and the message body stays legible in the
+free space of the database file — which would make deleting a message a
+promise kept against SQL queries and broken against anyone who reads the
+file. The cost is one extra write per freed page, invisible next to the work
+around it.
+
+WAL adds a second half to that promise: the zeroing of a freed page is itself
+a log frame, so the ORIGINAL page content survives in the `-wal` file until a
+checkpoint retires it. Automatic checkpoints happen at ~4 MB of log and at
+close, which is fine for ordinary writes and not fine for a deletion whose
+whole point is that the content stops existing. The delete paths therefore
+follow their commit with an explicit `wal_checkpoint(TRUNCATE)`
+(`chatlog.CheckpointWAL`), best-effort: a busy checkpoint is not a failed
+deletion, and the automatic one still comes.
 
 `journal_mode` is deliberately **not** in either DSN. It is a property of the
 file rather than of a connection, so setting it there made every pooled
@@ -1235,8 +1251,25 @@ build tag `linux`; платформы нет в матрице поддержк�
 унифицирован *контракт*, а не реализация: один каталог, один набор
 repository-запросов и две тонкие платформенные конфигурации.
 
-Оба DSN задают одинаковую посоединительную семантику — `busy_timeout=5000` и
-`foreign_keys=ON`, — и это проверяется contract-тестами вместе с journal mode.
+Оба DSN задают одинаковую посоединительную семантику — `busy_timeout=5000`,
+`foreign_keys=ON` и `secure_delete=ON`, — и это проверяется contract-тестами
+вместе с journal mode.
+
+`secure_delete` здесь потому, что в этом файле лежит история переписки. Без
+него `DELETE` только отвязывает страницу, и тело сообщения остаётся читаемым
+в свободном пространстве файла — то есть удаление было бы обещанием,
+выполненным для SQL-запросов и нарушенным для любого, кто откроет файл. Цена
+— одна дополнительная запись на освобождённую страницу, незаметная на фоне
+всего остального.
+
+У WAL есть вторая половина этой истории: обнуление освобождённой страницы —
+это тоже фрейм лога, поэтому ИСХОДНОЕ содержимое страницы живёт в файле
+`-wal` до чекпойнта. Автоматические чекпойнты происходят примерно на 4 МБ
+лога и при закрытии — для обычных записей нормально, для удаления, весь
+смысл которого в том, что содержимое перестаёт существовать, — нет. Поэтому
+пути удаления после коммита выполняют явный `wal_checkpoint(TRUNCATE)`
+(`chatlog.CheckpointWAL`), best-effort: busy — это не провал удаления, а
+автоматический чекпойнт всё равно придёт.
 
 `journal_mode` намеренно **не** в DSN. Это свойство файла, а не соединения,
 поэтому установка там заставляла каждое соединение пула пытаться переключить

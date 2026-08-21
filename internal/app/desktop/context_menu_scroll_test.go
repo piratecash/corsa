@@ -491,7 +491,7 @@ func TestFocusReclaimedAfterADeferredDrawIsScrolledIntoView(t *testing.T) {
 
 // Focus can leave the menu without the menu having moved it. items is rebuilt
 // every frame from live state, so the row holding focus can simply stop being in
-// the list — the peer goes offline and "Delete chat for everyone" leaves, a row
+// the list — the peer goes offline and "Delete chat and ask the peer" leaves, a row
 // opens a confirmation and the whole set is swapped. drive pulls focus back to
 // the first row, and the list has to follow it there for the same reason it
 // follows a Tab.
@@ -571,6 +571,10 @@ func newOverlayHarness(msg bool, height int) *menuOverlayHarness {
 	w.msgCtxMenuList.Axis = layout.Vertical
 	h := &menuOverlayHarness{w: w, router: new(input.Router), ops: new(op.Ops), height: height}
 	if msg {
+		// The message menu's Delete row is actionable whenever a menu is
+		// open and a router exists to carry the action out, so the
+		// harness needs one to lay out the real set of rows.
+		w.router = &service.DMRouter{}
 		w.msgContextMsg = &service.DirectMessage{ID: "m1", Body: "hi"}
 		w.msgContextPos = image.Pt(300, 400)
 		w.msgMenuFocus.open(new(int))
@@ -705,15 +709,16 @@ func TestTheRealMenusScrollTheirFocusedRowIntoView(t *testing.T) {
 		if got := h.list.Position.Offset; got != 0 {
 			t.Fatalf("open offset = %d, want 0", got)
 		}
-		// Delete is a disabled label on a bare message, so Copy is the last
-		// focusable row and Shift+Tab off the top wraps straight to it.
+		// Delete is the last row and is always actionable, so Shift+Tab
+		// off the top wraps straight to it — below the fold, which is
+		// exactly the row this scrolling exists for.
 		h.frame(keyShiftTab)
-		if !h.focused(&h.w.msgCtxCopy) {
+		if !h.focused(&h.w.msgCtxDelete) {
 			t.Fatal("Shift+Tab from the first row must wrap to the last")
 		}
 		if h.list.Position.Offset == 0 {
 			t.Fatal("the list never moved: focus wrapped to a row below the fold")
 		}
-		h.onScreen(t, "Copy", &h.w.msgCtxCopy)
+		h.onScreen(t, "Delete message", &h.w.msgCtxDelete)
 	})
 }

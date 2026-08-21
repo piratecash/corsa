@@ -292,44 +292,6 @@ func TestStateBadgeKey(t *testing.T) {
 	}
 }
 
-// TestDeleteEnabledRule pins the direction-aware offline-gate
-// predicate that drives Delete-button visibility on every surface
-// (chat context menu via Window.contextMenuDeleteEnabled,
-// chat-thread file-card via Window.layoutFileCardDeleteButton,
-// file-tab row via ConsoleWindow.layoutFileRowDeleteAction). The
-// rule is tiny but load-bearing: getting it wrong either blocks
-// users from cleaning up incoming messages while the peer is
-// offline (the P2 reviewer item that motivated this slice) or
-// burns the entire SendMessageDelete retry budget waiting for an
-// ack from an offline outbound peer.
-//
-// Contract: enabled = isIncoming || peerOnline.
-func TestDeleteEnabledRule(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name       string
-		isOutgoing bool
-		peerOnline bool
-		want       bool
-	}{
-		// Outgoing: gated on peer reachability because the wire
-		// delete needs an ack.
-		{"outgoing_offline_disabled", true, false, false},
-		{"outgoing_online_enabled", true, true, true},
-		// Incoming: local-only delete path bypasses the peer
-		// check entirely. Always enabled.
-		{"incoming_offline_enabled", false, false, true},
-		{"incoming_online_enabled", false, true, true},
-	}
-	for _, tc := range cases {
-		got := !tc.isOutgoing || tc.peerOnline
-		if got != tc.want {
-			t.Errorf("%s: enabled = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
 // TestShowDiskActionsForRow pins the visibility of Show in Folder
 // + Open buttons. Sender rows: only state="completed" qualifies
 // (recipient acked, file still on disk). Receiver rows:

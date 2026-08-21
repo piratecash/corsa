@@ -175,15 +175,15 @@ func TestBuildControlMessageFrame(t *testing.T) {
 		t.Errorf("frame.CreatedAt %q does not parse as RFC3339: %v", frame.CreatedAt, err)
 	}
 
-	// Flag must be one of the four MessageFlag values that
-	// MessageFlag.Valid accepts. SendDirectMessage stamps
-	// MessageFlagSenderDelete; control DMs follow the same default.
+	// Flag must be one of the MessageFlag values that MessageFlag.Valid
+	// accepts. Control DMs carry sender-delete: they are protocol
+	// traffic, not conversation, and no user ever deletes one.
 	if !protocol.MessageFlag(frame.Flag).Valid() {
 		t.Errorf("frame.Flag = %q is not a valid MessageFlag — node would reject the frame", frame.Flag)
 	}
 
 	// TTLSeconds must be non-negative; AutoDeleteTTL would additionally
-	// require a positive value, but the default flag is sender-delete.
+	// require a positive value, which the control flag is not.
 	if frame.TTLSeconds < 0 {
 		t.Errorf("frame.TTLSeconds = %d, want >= 0", frame.TTLSeconds)
 	}

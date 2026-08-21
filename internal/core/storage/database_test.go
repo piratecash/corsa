@@ -1177,3 +1177,23 @@ VALUES (1, NULL, 'not a number', NULL)`,
 		})
 	}
 }
+
+// TestOpenEnablesSecureDelete pins the pragma that makes a deletion mean
+// something on disk. Without secure_delete a DELETE only unlinks the page,
+// leaving the message body legible in the file's free space — which would
+// make the whole delete-and-schedule design protect against reading the
+// database through SQL and nothing else. It lives in the DSN, so this test
+// is what stops a future edit of the option string from quietly dropping it.
+func TestOpenEnablesSecureDelete(t *testing.T) {
+	t.Parallel()
+
+	database := openTest(t, filepath.Join(t.TempDir(), "state.db"), testCatalog())
+
+	var secureDelete int
+	if err := database.Executor().QueryRowContext(context.Background(), `PRAGMA secure_delete`).Scan(&secureDelete); err != nil {
+		t.Fatalf("read secure_delete: %v", err)
+	}
+	if secureDelete == 0 {
+		t.Fatal("secure_delete is off: deleted message bodies stay readable in the free pages of the file")
+	}
+}

@@ -57,6 +57,17 @@ const (
 	// but the caller should still keep it in-memory (s.topics) so it is not
 	// lost from the network.
 	StoreFailed
+	// StoreDeferred means the store cannot decide yet — not that the write
+	// failed. The message is NOT persisted and must NOT be treated as
+	// received: it stays out of s.topics and out of the dedup mark, no
+	// delivery receipt is sent, and the frame is not acked, so the SENDER
+	// keeps it and tries again. Anything else silently loses a message the
+	// user was never shown.
+	//
+	// The one producer today is the refusal gate on deleted ids: when the
+	// refusals cannot be read, storing on a guess is how a row the user
+	// deleted comes back for good.
+	StoreDeferred
 )
 
 // MessageStore allows the desktop layer to own message persistence, while
@@ -205,6 +216,21 @@ type Service struct {
 	// canonical lock order.
 	sendAdmissionBarrier func()
 
+	// retryDispatchBarrier is a TEST-ONLY synchronisation point, nil in
+	// production, run by retryDueDeliveries between its planning phases
+	// and the dispatch loop (runRetryDispatchBarrier, delivery_retry.go).
+	//
+	// It exists because a deletion's freeze landing in exactly that window
+	// is what the last-boundary claim defends against, and the window is
+	// two statements of one function with no observable edge from outside:
+	// a test that froze before the tick proves only that a freeze taken
+	// EARLIER is honoured, which is the easy half.
+	//
+	// Installed before the first tick on this Service and never changed
+	// afterwards, so it takes part in no domain and adds no edge to the
+	// canonical lock order. It is fired with no mutex held.
+	retryDispatchBarrier func()
+
 	// peerTeardownBarrier is the TEARDOWN half of the same window, nil in
 	// production, run by BOTH teardowns that own a queue (retirePeerSession on
 	// the dialled tier, trackInboundDisconnect on the accepted one) BETWEEN
@@ -314,7 +340,36 @@ type Service struct {
 	lastOutboundTerminalSweep time.Time
 	relayRetry                map[string]relayAttempt
 	awaitingDelivered         map[protocol.MessageID]*deliveryRetryEntry
-	awaitingSeenAck           map[protocol.MessageID]*seenAckRetryEntry
+	// cancelledDeliveries remembers ids whose delivery the sender
+	// withdrew, so a backlog push that took its snapshot a moment earlier
+	// does not hand the envelope over anyway. Guarded by deliveryMu, like
+	// the retry state it shadows.
+	//
+	// The snapshot and the emission mark cannot be taken in one lock hold
+	// — building the inbox frame reads the gossip domain and then the
+	// delivery domain, in that order, and the canonical order runs the
+	// other way — so a cancellation can land between them. Without this,
+	// that cancellation reports "never emitted", the router recalls the
+	// message and schedules nothing, and the snapshot then sends it.
+	//
+	// Entries are pruned by age on write; the window that matters is the
+	// life of one backlog push.
+	cancelledDeliveries map[protocol.MessageID]time.Time
+	// frozenDeliveries are ids a conversation wipe is deciding about. No
+	// path may put them on the wire while they are here, and unlike
+	// cancelledDeliveries they never expire: the freeze ends when the
+	// wipe commits (the cancellation withdraws them) or aborts (a thaw
+	// puts them back), and nothing else. See delivery_freeze.go.
+	frozenDeliveries map[protocol.MessageID]struct{}
+	// markedNeverEmitted are the ids this process has a durable
+	// never-emitted claim standing for. It exists because the backlog
+	// replay reaches past the retry engine: it can emit a message whose
+	// awaitingDelivered entry was dropped when the attempts ran out, and
+	// without this the claim would stay on the row while the peer holds
+	// the message. Rebuilt implicitly after a restart — the reseed makes
+	// entries out of the same marks. See delivery_retry.go.
+	markedNeverEmitted map[protocol.MessageID]struct{}
+	awaitingSeenAck    map[protocol.MessageID]*seenAckRetryEntry
 	// sentDMIDs is a bounded LRU of message IDs this node has originated as
 	// DMs (populated when registering the end-to-end delivery retry). It is
 	// the "did we send this?" signal storeDeliveryReceipt uses to reject
@@ -336,6 +391,17 @@ type Service struct {
 	// idempotent seen re-send after restart).
 	seenAckJournal         SeenAckJournal
 	deliveryFailureJournal DeliveryFailureJournal
+	// emissionJournal is the durable half of deliveryRetryEntry.Emitted.
+	// Set once by RegisterDeliveryOutbox before Run, like the two above,
+	// so reads need no mutex.
+	emissionJournal DeliveryEmissionJournal
+	// emissionMu serializes decide-then-write on emissionJournal so two
+	// goroutines cannot land a mark and a clear for the same message in
+	// the wrong order. It is NOT one of the seven domain mutexes: it is
+	// acquired OUTSIDE all of them and never while one is held, and it is
+	// the only lock held across the journal's SQLite I/O. docs/locking.md
+	// carries the contract.
+	emissionMu sync.Mutex
 	// relayRetryScratch is a reusable buffer for the topics["dm"] snapshot
 	// taken on each 2s relay-retry cycle (retryableRelayMessages). Copying the
 	// whole topics["dm"] slice into a fresh allocation every cycle was a steady
@@ -1545,6 +1611,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		relayDeliveredTo:         make(map[protocol.MessageID]map[domain.PeerIdentity]struct{}),
 		outbound:                 make(map[string]outboundDelivery),
 		awaitingDelivered:        make(map[protocol.MessageID]*deliveryRetryEntry),
+		cancelledDeliveries:      make(map[protocol.MessageID]time.Time),
 		awaitingSeenAck:          make(map[protocol.MessageID]*seenAckRetryEntry),
 		sentDMIDs:                newBoundedKnownIdentities(maxSentDMIDs),
 		senderKeySyncInFlight:    make(map[string]struct{}),
@@ -3763,6 +3830,16 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.importMessageFrame(frame)
 	case "send_delivery_receipt":
 		return s.storeDeliveryReceiptFrame(frame)
+	case "cancel_message_delivery":
+		return s.cancelMessageDeliveryFrame(frame)
+	case "cancel_conversation_delivery":
+		return s.cancelConversationDeliveryFrame(frame)
+	case "freeze_message_delivery":
+		return s.freezeMessageDeliveryFrame(frame)
+	case "freeze_conversation_delivery":
+		return s.freezeConversationDeliveryFrame(frame)
+	case "thaw_conversation_delivery":
+		return s.thawConversationDeliveryFrame(frame)
 	case "fetch_messages":
 		return s.fetchMessagesFrame(frame.Topic)
 	case "fetch_message_ids":
@@ -6146,7 +6223,13 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			return false, count, ""
 		}
 	}
-	s.seen.Add(string(msg.ID))
+	// The dedup mark is NOT set here. It is set after the store has
+	// answered, because one answer — StoreDeferred — means "ask me again":
+	// the message is not persisted, and a mark set now would make the
+	// sender's next attempt look like a duplicate and be dropped in
+	// silence. Between the check above and the mark below the exact-ID
+	// admission scan and the chatlog primary key still catch a genuine
+	// concurrent duplicate, so nothing is lost by waiting.
 
 	// Hop budget at admission (transit_retention.go): a frame without
 	// the Hops field — legacy peer or local send — is treated as if
@@ -6194,6 +6277,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	//                     via repairUnreadFromHeaders after a restart.
 	//   StoreFailed    → add to s.topics (don't lose the message from
 	//                     the network), skip event (stale data).
+	//   StoreDeferred  → return immediately, before any routing: no dedup
+	//                     mark, no s.topics, no push/gossip/relay, no
+	//                     sender-side retry, no event, no receipt, and the
+	//                     frame is not acked. The store could not decide,
+	//                     so the message is left with the sender.
 	//
 	// When no store is registered (relay-only node) or for transit messages,
 	// the message always enters s.topics.
@@ -6221,7 +6309,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	//
 	// Control DMs (TopicControlDM) ALSO never enter s.topics: their
 	// retry/persistence story lives at the application layer
-	// (DMRouter.pendingDelete in slice B), not at the node level.
+	// (DMRouter delete intents), not at the node level.
 	// Putting them in topics["dm-control"] would (a) be unread by any
 	// retry path — retryableRelayMessages reads only topics["dm"] — so the
 	// envelopes accumulate forever, and (b) blur the design boundary
@@ -6230,6 +6318,28 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// works because executeGossipTargets and the table-directed relay
 	// path send frames on the wire on the fly without depending on
 	// s.topics as a backing store.
+	if storeResult == StoreDeferred {
+		// Out BEFORE any routing. The store could not decide whether this
+		// node may keep the message, so this node has not received it:
+		// nothing is marked seen, nothing enters the backlog, nothing is
+		// pushed, gossiped or relayed, and no sender-side retry is
+		// registered. Returning further down would leave the peer holding
+		// a message whose local RPC reported an error and whose row is on
+		// no disk anywhere.
+		count := len(s.topics[msg.Topic])
+		s.gossipMu.Unlock()
+		log.Info().
+			Str("id", string(msg.ID)).
+			Str("topic", msg.Topic).
+			Msg("store_incoming_message_deferred")
+		// Reported as a REFUSAL, not as an arrival: the error code is what
+		// keeps shouldAckOnStoreResult from acking the frame, so the
+		// previous hop re-attempts and the original sender keeps the
+		// message until this node can answer for it.
+		return false, count, protocol.ErrCodeStoreDeferred
+	}
+	s.seen.Add(string(msg.ID))
+
 	beforeCount := len(s.topics[msg.Topic])
 	// evictedIDs collects messages displaced by the transit caps; their
 	// relayRetry entries are dropped AFTER gossipMu is released (the
@@ -6303,7 +6413,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		if msg.Topic == protocol.TopicControlDM {
 			// Control DMs publish onto the dedicated ebus topic only
 			// for the FINAL RECIPIENT — the side that will execute the
-			// inner command (delete a message, clear pendingDelete on
+			// inner command (delete a message, retire a delete intent on
 			// ack, etc.). The sender side has already done all the
 			// local bookkeeping it needs synchronously inside
 			// SendControlMessage / DeleteDM and must NOT receive its
@@ -6458,6 +6568,14 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// kickDeliveryRetriesForReachable when a route/connection appears.
 		s.registerAwaitingDeliveredLocked(envelope, time.Now().UTC(), originUnreachableHold)
 		s.deliveryMu.Unlock()
+		// A withheld send is the one case worth writing down: it is the
+		// only proof that survives a restart that the peer cannot have
+		// this message. Written AFTER the register and outside the
+		// mutex — losing it to a crash here reads as "may have gone out",
+		// which is the harmless direction.
+		if originUnreachableHold {
+			s.syncEmissionMarks([]protocol.MessageID{envelope.ID})
+		}
 	}
 
 	// A chatlog duplicate (StoreDuplicate) is a sender retry whose original
@@ -7370,6 +7488,14 @@ func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscr
 	// triple to verify a first-contact DM (see attachKnownSenderKeys).
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
+	if len(subs) > 0 && !s.noteOwnEnvelopeEmitted(msg.Sender, msg.ID) {
+		// Withdrawn while we were building the frame, or the durable
+		// "never emitted" claim could not be withdrawn — either way this
+		// push must not happen. The retry engine still owns the message.
+		log.Info().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).
+			Msg("push_message_withheld")
+		return
+	}
 	for _, sub := range subs {
 		s.goBackground(func() { s.writePushFrame(sub, frame) })
 	}
@@ -7414,7 +7540,37 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 
 	inbox := s.fetchInboxFrame("dm", sub.recipient)
 	log.Info().Str("node", s.identity.Address).Str("recipient", sub.recipient).Int("backlog_count", len(inbox.Messages)).Msg("pushBacklogToSubscriber")
+
+	// Record the whole batch as emitted in ONE delivery-domain section,
+	// before any frame goes out. Marking per message would take the
+	// writer mutex once per row of the backlog from this background
+	// goroutine; the answer is the same either way, and it has to be
+	// written first — see noteOwnEnvelopesEmitted.
+	own := make([]protocol.MessageID, 0, len(inbox.Messages))
 	for _, item := range inbox.Messages {
+		if item.Sender == s.identity.Address {
+			own = append(own, protocol.MessageID(item.ID))
+		}
+	}
+	// Marking and asking "was any of this withdrawn while we were
+	// building the snapshot" happen under the delivery mutex, so a
+	// cancellation is either visible here or has not run yet — and if it
+	// has not, it will find the entry already marked emitted and report
+	// the message as possibly-out, which schedules the peer-side delete.
+	// Either way the user is never told a message was recalled and then
+	// handed it to the peer anyway. The same return also names the ids
+	// whose durable never-emitted claim could not be withdrawn: those are
+	// not ours to send yet either.
+	withheld := s.noteOwnEnvelopesEmitted(own)
+
+	for _, item := range inbox.Messages {
+		if _, skip := withheld[protocol.MessageID(item.ID)]; skip {
+			log.Info().
+				Str("recipient", sub.recipient).
+				Str("message_id", item.ID).
+				Msg("backlog_push_withheld")
+			continue
+		}
 		if createdAt, err := time.Parse(time.RFC3339, item.CreatedAt); err == nil && s.messageDeliveryExpired(createdAt.UTC(), item.TTLSeconds) {
 			continue
 		}

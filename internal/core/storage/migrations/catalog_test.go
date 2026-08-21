@@ -416,6 +416,7 @@ var chatlogTables = []string{
 	"peer_established",
 	"decrypt_recovery_cycles",
 	"decrypt_resend_intents",
+	"message_delete_intents",
 }
 
 // tableDump renders the given tables as sorted text so the comparison covers

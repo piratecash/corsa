@@ -460,7 +460,7 @@ func internalError(err error) CommandResponse {
 // unavailableError creates a CommandResponse for transient
 // service-state rejections (503): the command exists and the
 // input is well-formed, but the call cannot be served right now
-// (e.g. an in-flight conversation_delete is blocking sends to the
+// (e.g. a wipe in progress is blocking sends to the
 // peer). Callers can retry once the underlying state clears.
 func unavailableError(err error) CommandResponse {
 	return CommandResponse{Error: err, ErrorKind: ErrUnavailable}
@@ -1207,12 +1207,20 @@ func RegisterMessageCommands(t *CommandTable, node NodeProvider, dmRouter DMRout
 				if !targetID.IsValid() {
 					return validationError(fmt.Errorf("message_id must be a valid UUID v4"))
 				}
-				if err := dmRouter.SendMessageDelete(req.Ctx, recipient, targetID); err != nil {
+				route, err := dmRouter.SendMessageDelete(req.Ctx, recipient, targetID)
+				if err != nil {
 					return internalError(fmt.Errorf("delete dm: %w", err))
 				}
+				status := "deleted"
+				message := "the local copy is gone; nothing is owed to the peer"
+				if route.SchedulesPeerDeletion() {
+					status = "deleted_pending_peer"
+					message = "the local copy is gone; the peer-side deletion is scheduled and retried until they acknowledge it"
+				}
 				return jsonResponse(map[string]interface{}{
-					"status":     "pending",
-					"message":    "delete request dispatched; local row is kept for an outgoing DM until the peer's ack confirms a successful deletion (incoming local-only deletes complete synchronously)",
+					"status":     status,
+					"message":    message,
+					"route":      string(route),
 					"peer":       peer,
 					"message_id": messageID,
 				})

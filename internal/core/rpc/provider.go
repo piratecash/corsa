@@ -94,7 +94,7 @@ type DMRouterProvider interface {
 	Snapshot() service.RouterSnapshot
 	// SendMessage queues a text DM. Returns
 	// service.ErrConversationDeleteInflight when an in-flight
-	// conversation_delete is pending for the peer; the caller
+	// wipe is in progress for the peer; the caller
 	// should surface a localised "wipe in progress" hint and
 	// refuse the attempt.
 	SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) error
@@ -102,7 +102,7 @@ type DMRouterProvider interface {
 	// sends a file_announce DM and registers the sender-side mapping
 	// using the real DM message ID. Returns an error synchronously if
 	// pre-send validation fails (e.g. transmit file missing) or if a
-	// conversation_delete wipe is in-flight for this peer — the
+	// wipe is in progress for this peer — the
 	// outgoing barrier returns service.ErrConversationDeleteInflight
 	// (mapped to RPC ErrUnavailable / 503 in command_table) so the
 	// caller can render the same "wipe in progress" hint as for
@@ -111,13 +111,12 @@ type DMRouterProvider interface {
 	// when the async delivery fails, giving the caller a chance to
 	// restore UI state (e.g. re-attach the file for retry).
 	SendFileAnnounce(to domain.PeerIdentity, msg domain.OutgoingDM, meta domain.FileAnnouncePayload, onAsyncFailure func()) error
-	// SendMessageDelete deletes the target message locally (chatlog +
-	// file-transfer cleanup hook) and asks the peer to mirror the
-	// deletion via the message_delete control DM. Application-level
-	// retry on the sender side carries the request until the peer's
-	// message_delete_ack arrives or the retry budget is exhausted.
-	// See docs/dm-commands.md.
-	SendMessageDelete(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) error
+	// SendMessageDelete removes the local copy of the target message —
+	// chatlog row and file-transfer state — and returns the route it
+	// took. Outgoing routes also leave a durable intent behind: the peer
+	// is asked to mirror the deletion now if reachable, and otherwise as
+	// soon as they are, across restarts. See docs/dm-commands.md.
+	SendMessageDelete(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) (domain.MessageDeleteRoute, error)
 }
 
 // MetricsProvider abstracts access to the metrics collector.

@@ -166,20 +166,29 @@ func (_c *MockDMRouterProvider_SendMessage_Call) RunAndReturn(run func(to domain
 }
 
 // SendMessageDelete provides a mock function for the type MockDMRouterProvider
-func (_mock *MockDMRouterProvider) SendMessageDelete(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) error {
+func (_mock *MockDMRouterProvider) SendMessageDelete(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) (domain.MessageDeleteRoute, error) {
 	ret := _mock.Called(ctx, peer, target)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SendMessageDelete")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.PeerIdentity, domain.MessageID) error); ok {
+	var r0 domain.MessageDeleteRoute
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.PeerIdentity, domain.MessageID) (domain.MessageDeleteRoute, error)); ok {
+		return returnFunc(ctx, peer, target)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, domain.PeerIdentity, domain.MessageID) domain.MessageDeleteRoute); ok {
 		r0 = returnFunc(ctx, peer, target)
 	} else {
-		r0 = ret.Error(0)
+		r0 = ret.Get(0).(domain.MessageDeleteRoute)
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context, domain.PeerIdentity, domain.MessageID) error); ok {
+		r1 = returnFunc(ctx, peer, target)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockDMRouterProvider_SendMessageDelete_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SendMessageDelete'
@@ -218,12 +227,12 @@ func (_c *MockDMRouterProvider_SendMessageDelete_Call) Run(run func(ctx context.
 	return _c
 }
 
-func (_c *MockDMRouterProvider_SendMessageDelete_Call) Return(err error) *MockDMRouterProvider_SendMessageDelete_Call {
-	_c.Call.Return(err)
+func (_c *MockDMRouterProvider_SendMessageDelete_Call) Return(messageDeleteRoute domain.MessageDeleteRoute, err error) *MockDMRouterProvider_SendMessageDelete_Call {
+	_c.Call.Return(messageDeleteRoute, err)
 	return _c
 }
 
-func (_c *MockDMRouterProvider_SendMessageDelete_Call) RunAndReturn(run func(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) error) *MockDMRouterProvider_SendMessageDelete_Call {
+func (_c *MockDMRouterProvider_SendMessageDelete_Call) RunAndReturn(run func(ctx context.Context, peer domain.PeerIdentity, target domain.MessageID) (domain.MessageDeleteRoute, error)) *MockDMRouterProvider_SendMessageDelete_Call {
 	_c.Call.Return(run)
 	return _c
 }

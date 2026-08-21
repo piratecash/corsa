@@ -110,7 +110,7 @@ func TestStoreMessageFrameTypeTopicMismatch(t *testing.T) {
 // envelope land anywhere, yet still pass the wire-dedup check and
 // return stored=true; the relay would then ack "stored" upstream
 // while the control envelope is in fact lost. The application-level
-// retry on the sender (DMRouter.pendingDelete in slice B) is the
+// retry on the sender (the DMRouter delete intent) is the
 // canonical recovery, but only fires if upstream learns the attempt
 // failed.
 //
@@ -152,7 +152,7 @@ func TestHandleRelayMessageControlDMNoNextHopReturnsEmpty(t *testing.T) {
 	//   - status MUST NOT be "stored" — that would falsely tell the
 	//     previous hop the relay succeeded.
 	//   - status SHOULD be "" — the no-ack signal that lets the
-	//     sender's pendingDelete retry treat this attempt as a miss.
+	//     sender's delete intent treat this attempt as a miss.
 	if status == "stored" {
 		t.Fatalf("control DM with no next-hop returned %q — upstream would believe relay succeeded while envelope is lost", status)
 	}

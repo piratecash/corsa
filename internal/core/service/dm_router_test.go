@@ -2132,11 +2132,28 @@ func TestSelectPeerRestoresUnreadOnFailure(t *testing.T) {
 	}
 }
 
+// closeBackgroundOps makes selectPeerCore's background goroutine never
+// start, so a test about its SYNCHRONOUS half is decided by the code under
+// test rather than by the scheduler.
+//
+// Both unread tests below assert the OPTIMISTIC clear — the one that
+// happens before the goroutine is spawned. The goroutine then finds no
+// chatlog in the fixture, fails the load, and restores the badge; whether
+// it does so before or after the assertion is a coin flip, and the flip
+// changes with unrelated additions elsewhere in the package. Closing the
+// op gate removes the coin.
+func closeBackgroundOps(r *DMRouter) {
+	r.opMu.Lock()
+	r.opClosed = true
+	r.opMu.Unlock()
+}
+
 // TestAutoSelectPeerNewPeerClearsUnread verifies that AutoSelectPeer clears
 // the unread badge when switching to a new peer (changed=true). Same-peer
 // re-selection is a true no-op — see TestAutoSelectPeerSamePeerIsNoOp.
 func TestAutoSelectPeerNewPeerClearsUnread(t *testing.T) {
 	r := newTestRouter()
+	closeBackgroundOps(r)
 
 	r.mu.Lock()
 	r.ensurePeerLocked(domaintest.ID("peer-1"))
@@ -2998,6 +3015,7 @@ func TestRepairPathActivePeerDoesNotBeep(t *testing.T) {
 // same-peer AutoSelectPeer is a true no-op tested by TestAutoSelectPeerSamePeerIsNoOp.
 func TestAutoSelectPeerNewPeerClearsUnreadOptimistically(t *testing.T) {
 	r := newTestRouter()
+	closeBackgroundOps(r)
 
 	r.mu.Lock()
 	r.ensurePeerLocked(domaintest.ID("peer-1"))
@@ -4859,6 +4877,7 @@ func newTestRouter() *DMRouter {
 		seenMessageIDs:  make(map[string]struct{}),
 		peerGen:         make(map[domain.PeerIdentity]uint64),
 		cache:           NewConversationCache(),
+		withdrawals:     newWithdrawalBacklog(),
 		uiEvents:        make(chan UIEvent, 32),
 		startupDone:     done,
 		startupComplete: true, // most tests assume post-startup behavior

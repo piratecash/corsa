@@ -157,10 +157,13 @@ The `message.delete.completed` topic carries a `MessageDeleteOutcome`
 payload (target ID, peer, status, abandoned-flag, attempts) so UI
 subscribers can differentiate a successful peer-side deletion from
 a denied / immutable / abandoned outcome — all four look identical
-at the wire level. See [`dm-commands.md`](dm-commands.md) for the
-control-DM contract; the topic is the single observable that drives
-the chat-thread row eviction and the file-tab Delete-button state
-transition. `file.received` is published when DMRouter registers a
+at the wire level. `Abandoned=true` now means the delete intent
+was written off after its full attempt budget (720 unanswered
+dispatches) —
+the local copy went at request time either way. See
+[`dm-commands.md`](dm-commands.md) for the control-DM contract; the
+topic is the single observable that drives the chat-thread row
+eviction. `file.received` is published when DMRouter registers a
 receiver-side mapping from an inbound `file_announce` decrypt,
 regardless of whether that conversation is currently active —
 without this event the Desktop file tab would miss inbound rows
@@ -434,9 +437,11 @@ flowchart LR
 (target ID, peer, status, abandoned-flag, attempts), чтобы UI-подписчики
 могли отличить успешное удаление на стороне получателя от
 denied / immutable / abandoned — все четыре исхода неотличимы на уровне
-wire. См. контракт control-DM в [`dm-commands.md`](dm-commands.md);
-этот топик — единственный observable, по которому драйвится eviction
-строки в чате и переход состояния кнопки Delete на file-вкладке.
+wire. `Abandoned=true` теперь означает, что delete intent истёк без
+ответа за весь бюджет попыток (720 неотвеченных отправок) — локальная копия
+в любом случае удалена ещё в момент запроса. См. контракт control-DM в
+[`dm-commands.md`](dm-commands.md); этот топик — единственный
+observable, по которому драйвится eviction строки в чате.
 `file.received` публикуется, когда DMRouter регистрирует receiver-mapping
 из входящего decrypt'а `file_announce`, независимо от того, активен ли
 сейчас этот разговор — без этого события Desktop-вкладка файлов

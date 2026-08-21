@@ -63,7 +63,35 @@ import (
 type DeliveryOutbox interface {
 	// UndeliveredOutgoing returns the sealed envelopes of locally-sent DMs
 	// whose delivery status is still "sent".
-	UndeliveredOutgoing() ([]protocol.Envelope, error)
+	UndeliveredOutgoing() ([]OutboxEntry, error)
+}
+
+// OutboxEntry is one reseeded row: the envelope, plus the durable answer
+// to the only thing about its past the scheduler cannot re-derive.
+type OutboxEntry struct {
+	Envelope protocol.Envelope
+	// Emitted carries deliveryRetryEntry.Emitted across the restart. The
+	// outbox reports FALSE only when it can prove the envelope never
+	// reached the wire; anything it does not know is true, because the
+	// claim a deletion makes with false is "the peer cannot have this",
+	// and an unprovable one there leaves a delivered message with them.
+	Emitted bool
+}
+
+// DeliveryEmissionJournal is the optional durable record behind
+// deliveryRetryEntry.Emitted. Implemented by the desktop chatlog adapter;
+// without it the flag is memory-only and every restart answers "emitted".
+//
+// The two calls are not symmetric in urgency. A lost mark costs the peer
+// one control DM naming an id they cannot resolve; a stale mark costs the
+// user a deletion that is never asked for. So ClearNeverEmitted has to be
+// durable BEFORE the frame goes out, while MarkNeverEmitted may land after
+// the hold it describes.
+type DeliveryEmissionJournal interface {
+	// MarkNeverEmitted records that the messages have not reached the wire.
+	MarkNeverEmitted(ids []protocol.MessageID) error
+	// ClearNeverEmitted withdraws that claim.
+	ClearNeverEmitted(ids []protocol.MessageID) error
 }
 
 // DeliveryFailureJournal is the optional durable journal for messages the
@@ -130,6 +158,17 @@ type deliveryRetryEntry struct {
 	// on the exponential schedule must NOT be pulled forward by an unrelated
 	// route refresh (that would burn attempts and produce early duplicates).
 	Held bool
+	// Emitted is monotone: it turns true the first time an attempt actually
+	// puts the envelope on the wire and never goes back. Held cannot answer
+	// "did the recipient ever have a chance to see this?" — it flips back to
+	// true whenever a later tick finds the peer unreachable, long after the
+	// message went out.
+	//
+	// A cancellation reads it to tell "this never left the node" (the peer
+	// has nothing, so asking them to delete it would announce a message
+	// they never received) from "we cannot know" (the default, which keeps
+	// the peer-side deletion scheduled).
+	Emitted bool
 }
 
 // seenAckRetryEntry tracks one locally-sent seen receipt awaiting the
@@ -139,6 +178,279 @@ type seenAckRetryEntry struct {
 	Attempts      int
 	NextAttemptAt time.Time
 }
+
+// noteOwnEnvelopeEmitted records that a frame carrying one of THIS node's
+// own DMs has been handed to the wire. It is the single accounting point
+// for emission, and every path that can put an origin envelope in front
+// of a peer has to go through it:
+//
+//   - the live push at store time and at every retry tick;
+//   - the auth-time backlog replay (pushBacklogToSubscriber), which
+//     serves s.topics["dm"] to a recipient that dials US. That path is
+//     independent of the retry engine: the backlog append is not gated
+//     on the reachability hold, so a HELD message — one the sender-side
+//     scheduler never dispatched — is handed over in full the moment the
+//     recipient connects.
+//
+// Gossip and relay emissions need no call of their own: they only run
+// from the origin send and the retry tick, both of which record the
+// attempt themselves.
+//
+// Marked BEFORE the write, not after: the question this answers is "can
+// the peer possibly have it?", and an over-cautious yes costs one control
+// DM that the peer answers not_found, while a wrong no silently leaves
+// their copy in place with nothing left to retry it.
+//
+// Returns false when the message must NOT go out after all — it was
+// withdrawn while this ran, or the durable claim that it never went out
+// could not be withdrawn. Both make the caller drop the frame; the retry
+// engine still owns the message and tries again.
+func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.MessageID) bool {
+	if s.identity == nil || sender != s.identity.Address {
+		return true
+	}
+	withheld := s.noteOwnEnvelopesEmitted([]protocol.MessageID{messageID})
+	_, blocked := withheld[messageID]
+	return !blocked
+}
+
+// noteOwnEnvelopesEmitted is the batch form, for a caller that is about
+// to put many of our envelopes on the wire at once (the backlog replay).
+// One section instead of one per message: the writer mutex is the
+// delivery domain's, and a large backlog would otherwise take it once
+// per row from a background goroutine.
+//
+// The ids must be ours; the batch caller filters by sender before
+// calling, since it already walks the list.
+//
+// Returns the ids the caller must NOT write: withdrawn while this ran, or
+// still carrying a durable never-emitted claim the journal refused to
+// withdraw.
+func (s *Service) noteOwnEnvelopesEmitted(ids []protocol.MessageID) map[protocol.MessageID]struct{} {
+	if len(ids) == 0 {
+		return nil
+	}
+	blocked, unproven := s.claimEmissionLocked(ids)
+	if len(unproven) == 0 {
+		return blocked
+	}
+	// Outside the delivery mutex (SQLite) and BEFORE the caller writes a
+	// frame: an id whose claim is still on disk has not been cleared to go
+	// out. Ids the clear could not reach join the withheld set — the caller
+	// drops them, their entry keeps its schedule, and the next retry tick
+	// tries the whole thing again.
+	stranded := s.clearEmissionMarks(unproven)
+	return s.confirmEmission(unproven, stranded, blocked)
+}
+
+// claimEmissionLocked is the first half of noteOwnEnvelopesEmitted: it
+// takes the delivery domain once, reports the ids a withdrawal has
+// shadowed, and separates the ids that still carry a durable never-emitted
+// claim from the ones already accounted for.
+//
+// The ordinary send has nothing unproven — the entry was born emitted — so
+// it takes this one lock hold and no disk write at all, which is what the
+// two-phase form exists to preserve.
+func (s *Service) claimEmissionLocked(ids []protocol.MessageID) (map[protocol.MessageID]struct{}, []protocol.MessageID) {
+	var blocked map[protocol.MessageID]struct{}
+	var unproven []protocol.MessageID
+	s.deliveryMu.Lock()
+	for _, id := range ids {
+		if _, withdrawn := s.cancelledDeliveries[id]; withdrawn {
+			blocked = withhold(blocked, id)
+			continue
+		}
+		if s.deliveryFrozenLocked(id) {
+			// A wipe is deciding whether the peer may ever hold this
+			// message. Emitting now would answer the question behind its
+			// back — and it is deciding from a row it is about to delete.
+			blocked = withhold(blocked, id)
+			continue
+		}
+		entry, awaiting := s.awaitingDelivered[id]
+		if !awaiting {
+			// No entry does NOT mean nothing to withdraw. The backlog
+			// replay reaches past the retry engine entirely, so it can
+			// emit a message whose entry was dropped when its attempts
+			// ran out — while the durable claim that it never went out
+			// still stands on the row. s.markedNeverEmitted remembers
+			// exactly those ids, so the ordinary case still costs no
+			// lookup and no write.
+			if _, marked := s.markedNeverEmitted[id]; marked {
+				unproven = append(unproven, id)
+			}
+			continue
+		}
+		if entry.Emitted || s.emissionJournal == nil {
+			// Nothing on disk to withdraw: either this message has gone
+			// out before, or the flag has no durable half on this node.
+			entry.Emitted = true
+			entry.Held = false
+			continue
+		}
+		unproven = append(unproven, id)
+	}
+	s.deliveryMu.Unlock()
+	return blocked, unproven
+}
+
+// confirmEmission is the second half: the ids whose claim is now off the
+// disk become emitted, and the ones that failed join the withheld set.
+//
+// The withdrawal shadow is re-read here, not carried over from the first
+// hold: the durable write happened between the two, and a cancellation
+// landing in that gap has already told the user the message was recalled.
+func (s *Service) confirmEmission(unproven []protocol.MessageID, stranded, blocked map[protocol.MessageID]struct{}) map[protocol.MessageID]struct{} {
+	s.deliveryMu.Lock()
+	for _, id := range unproven {
+		if _, failed := stranded[id]; failed {
+			blocked = withhold(blocked, id)
+			continue
+		}
+		if _, withdrawn := s.cancelledDeliveries[id]; withdrawn {
+			blocked = withhold(blocked, id)
+			continue
+		}
+		if s.deliveryFrozenLocked(id) {
+			blocked = withhold(blocked, id)
+			continue
+		}
+		if entry, awaiting := s.awaitingDelivered[id]; awaiting {
+			entry.Emitted = true
+			entry.Held = false
+		}
+	}
+	s.deliveryMu.Unlock()
+	return blocked
+}
+
+func withhold(set map[protocol.MessageID]struct{}, id protocol.MessageID) map[protocol.MessageID]struct{} {
+	if set == nil {
+		set = make(map[protocol.MessageID]struct{}, 1)
+	}
+	set[id] = struct{}{}
+	return set
+}
+
+// syncEmissionMarks records the durable claim for whichever of the ids the
+// delivery domain still says has never reached the wire. It writes in ONE
+// direction only — the claim is never withdrawn here, that belongs to
+// clearEmissionMarks, which reports its failures instead of swallowing
+// them.
+//
+// The ordering that keeps a mark from landing on top of a clear is the
+// re-read: s.emissionMu is held across decide-and-write, and the decision
+// reads the delivery domain, so an id another goroutine has just emitted
+// is seen as emitted here and skipped rather than re-marked.
+//
+// s.emissionMu is NOT one of the seven domain mutexes: it is taken OUTSIDE
+// all of them, never while one is held, and is the only lock held across
+// the journal's disk I/O. See docs/locking.md.
+//
+// An id with no entry left counts as emitted: the entry is deleted when
+// the receipt arrives, and a row that has been delivered is never reseeded.
+func (s *Service) syncEmissionMarks(ids []protocol.MessageID) {
+	if len(ids) == 0 || s.emissionJournal == nil {
+		return
+	}
+	s.emissionMu.Lock()
+	defer s.emissionMu.Unlock()
+
+	never := make([]protocol.MessageID, 0, len(ids))
+	s.deliveryMu.RLock()
+	for _, id := range ids {
+		if entry, awaiting := s.awaitingDelivered[id]; awaiting && !entry.Emitted {
+			never = append(never, id)
+		}
+	}
+	s.deliveryMu.RUnlock()
+	if len(never) == 0 {
+		return
+	}
+	if err := s.emissionJournal.MarkNeverEmitted(never); err != nil {
+		// The harmless direction: without the mark the message reads as
+		// possibly-sent, so a later deletion asks the peer rather than
+		// skipping them.
+		log.Warn().Err(err).Int("count", len(never)).
+			Msg("emission_journal_mark_failed")
+		return
+	}
+	s.rememberMarkedNeverEmitted(never)
+}
+
+// rememberMarkedNeverEmitted / forgetMarkedNeverEmitted track which ids
+// this process has a durable claim standing for, so an emission can
+// withdraw it even after the retry entry is gone. Memory-only and bounded
+// by the number of withheld messages: after a restart the reseed rebuilds
+// the entries themselves from the same marks.
+func (s *Service) rememberMarkedNeverEmitted(ids []protocol.MessageID) {
+	s.deliveryMu.Lock()
+	if s.markedNeverEmitted == nil {
+		s.markedNeverEmitted = make(map[protocol.MessageID]struct{}, len(ids))
+	}
+	for _, id := range ids {
+		s.markedNeverEmitted[id] = struct{}{}
+	}
+	s.deliveryMu.Unlock()
+}
+
+func (s *Service) forgetMarkedNeverEmitted(ids []protocol.MessageID) {
+	s.deliveryMu.Lock()
+	for _, id := range ids {
+		delete(s.markedNeverEmitted, id)
+	}
+	s.deliveryMu.Unlock()
+}
+
+// clearEmissionMarks withdraws the durable claim for the ids and reports
+// the ones it could NOT reach. A stranded id must not go on the wire: the
+// disk would keep saying the message never went out while the peer holds
+// it, and after a restart the deletion would skip them.
+//
+// The journal call is all-or-nothing, so a failure strands the whole
+// batch. Nothing is retried here — the caller withholds the frames, the
+// entries keep their schedule, and the next retry tick repeats both the
+// clear and the send.
+func (s *Service) clearEmissionMarks(ids []protocol.MessageID) map[protocol.MessageID]struct{} {
+	if len(ids) == 0 || s.emissionJournal == nil {
+		return nil
+	}
+	s.emissionMu.Lock()
+	defer s.emissionMu.Unlock()
+
+	if err := s.emissionJournal.ClearNeverEmitted(ids); err == nil {
+		s.forgetMarkedNeverEmitted(ids)
+		return nil
+	} else {
+		log.Error().Err(err).Int("count", len(ids)).
+			Msg("emission_journal_clear_failed_send_withheld")
+	}
+	stranded := make(map[protocol.MessageID]struct{}, len(ids))
+	for _, id := range ids {
+		stranded[id] = struct{}{}
+	}
+	return stranded
+}
+
+// noteDeliveryCancelledLocked remembers a withdrawn delivery for as long
+// as a backlog push built just before it could still be writing frames.
+// Caller MUST hold s.deliveryMu.Lock.
+func (s *Service) noteDeliveryCancelledLocked(id protocol.MessageID, now time.Time) {
+	if s.cancelledDeliveries == nil {
+		s.cancelledDeliveries = make(map[protocol.MessageID]time.Time, 1)
+	}
+	for old, at := range s.cancelledDeliveries {
+		if now.Sub(at) > cancelledDeliveryMemory {
+			delete(s.cancelledDeliveries, old)
+		}
+	}
+	s.cancelledDeliveries[id] = now
+}
+
+// cancelledDeliveryMemory is how long a withdrawal shadows a backlog
+// push. It only has to outlast one push of one subscriber's inbox, which
+// is bounded by the write path, not by the peer's schedule.
+const cancelledDeliveryMemory = 5 * time.Minute
 
 func (s *Service) deliveryRetryMaxAttempts() int {
 	if s.cfg.DeliveryRetryMaxAttempts > 0 {
@@ -168,6 +480,14 @@ func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, no
 		Envelope:      envelope,
 		NextAttemptAt: now.Add(deliveryRetryBackoff(0)),
 		Held:          held,
+		// A send that was not withheld went out on the caller's own
+		// gossip/relay pass. Anything else counts as emitted too: the
+		// conservative answer to "might the peer have it?" is yes, and
+		// only an explicit hold proves otherwise. A held entry can still
+		// be marked later by noteOwnEnvelopeEmitted — the backlog replay
+		// reaches past this scheduler entirely. The startup reseed, which
+		// has a durable answer, overwrites this one right after the call.
+		Emitted: !held,
 	}
 }
 
@@ -202,6 +522,9 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 	if failureJournal, ok := outbox.(DeliveryFailureJournal); ok {
 		s.deliveryFailureJournal = failureJournal
 	}
+	if emissionJournal, ok := outbox.(DeliveryEmissionJournal); ok {
+		s.emissionJournal = emissionJournal
+	}
 	seenJournal, hasSeenJournal := outbox.(SeenAckJournal)
 	if hasSeenJournal {
 		s.seenAckJournal = seenJournal
@@ -221,26 +544,34 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 
 	now := time.Now().UTC()
 
-	envelopes, err := outbox.UndeliveredOutgoing()
+	entries, err := outbox.UndeliveredOutgoing()
 	if err != nil {
 		log.Error().Err(err).Msg("delivery_retry_outbox_reseed_failed")
-	} else if len(envelopes) > 0 {
+	} else if len(entries) > 0 {
 		s.deliveryMu.Lock()
-		for _, envelope := range envelopes {
+		for _, row := range entries {
 			// Reseeded from chatlog on restart: held=false, and DUE
-			// IMMEDIATELY (NextAttemptAt=now) rather than now+first-backoff.
-			// The very first retry tick after restart then evaluates
-			// reachability and either sends (recipient already reachable) or
-			// flips Held — instead of every reseeded undelivered DM idling a
-			// full backoff interval before its first attempt.
-			s.registerAwaitingDeliveredLocked(envelope, now, false)
-			if e, ok := s.awaitingDelivered[envelope.ID]; ok {
-				e.NextAttemptAt = now
+			// IMMEDIATELY (NextAttemptAt=now) rather than now+first-backoff,
+			// so the first retry tick evaluates reachability and either
+			// sends or flips Held, instead of every reseeded undelivered DM
+			// idling a full backoff interval before its first attempt.
+			s.registerAwaitingDeliveredLocked(row.Envelope, now, false)
+			e, ok := s.awaitingDelivered[row.Envelope.ID]
+			if !ok {
+				continue
 			}
+			e.NextAttemptAt = now
+			// Emitted comes from the OUTBOX, not from held: held answers
+			// "should the reachability kick wake this", which after a
+			// restart is no, while Emitted answers "can the peer possibly
+			// have it", which the outbox is the only surviving witness of.
+			// Deriving one from the other is what made every restart
+			// announce ids for messages that never left the machine.
+			e.Emitted = row.Emitted
 		}
 		count := len(s.awaitingDelivered)
 		s.deliveryMu.Unlock()
-		log.Info().Int("reseeded", len(envelopes)).Int("awaiting_delivered", count).Msg("delivery_retry_outbox_reseeded")
+		log.Info().Int("reseeded", len(entries)).Int("awaiting_delivered", count).Msg("delivery_retry_outbox_reseeded")
 	}
 
 	if !hasSeenJournal {
@@ -270,7 +601,16 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 func (s *Service) retryDueDeliveries(now time.Time) {
 	maxAttempts := s.deliveryRetryMaxAttempts()
 
-	var dueMessages []protocol.Envelope
+	// dueDispatch is one envelope the tick may put on the wire. Whether it
+	// actually goes out is decided at the last boundary, not here: see the
+	// claim in the dispatch loop — which is why the schedule this pass
+	// SPENT travels with it, so an attempt the wire never saw can be
+	// given back.
+	type dueDispatch struct {
+		env   protocol.Envelope
+		spent deliveryAttemptCharge
+	}
+	var dueMessages []dueDispatch
 	var dueReceipts []protocol.DeliveryReceipt
 	type abandonedDelivery struct {
 		envelope protocol.Envelope
@@ -294,6 +634,12 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 	log.Trace().Str("site", "retryDueDeliveries").Str("phase", "lock_held").Msg("delivery_mu_writer")
 	for id, entry := range s.awaitingDelivered {
 		if entry.NextAttemptAt.After(now) {
+			continue
+		}
+		if s.deliveryFrozenLocked(id) {
+			// Held by a wipe. Not even the attempt counter moves: the
+			// freeze is a pause, and charging it would abandon the
+			// delivery for a reason that has nothing to do with the peer.
 			continue
 		}
 		// TTL bounds the delivery lifetime (docs/protocol/messaging.md) —
@@ -358,11 +704,12 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 			if !ok {
 				continue // delivered/removed in the unlocked gap
 			}
+			spent := deliveryAttemptCharge{Attempts: entry.Attempts, NextAttemptAt: entry.NextAttemptAt}
 			entry.Attempts++
 			entry.NextAttemptAt = now.Add(deliveryRetryBackoff(entry.Attempts))
 			if reachable[c.id] {
 				entry.Held = false
-				dueMessages = append(dueMessages, entry.Envelope)
+				dueMessages = append(dueMessages, dueDispatch{env: entry.Envelope, spent: spent})
 			} else {
 				entry.Held = true
 			}
@@ -373,27 +720,107 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 	for _, entry := range abandoned {
 		s.failDelivery(entry.envelope, entry.status, entry.reason)
 	}
-	for _, envelope := range dueMessages {
-		// dueMessages were reachable at plan time (Phase 3), so dispatch
-		// normally emits. If the route vanished in the tiny Phase2→dispatch
-		// gap, dispatchEnvelopeRetry HOLDS (emitted=false) — re-mark the entry
-		// Held so a later kickDeliveryRetriesForReachable can wake it the
-		// moment a route returns, instead of leaving it Held=false (which the
-		// kick filters out) to wait the full backoff. Rare double-race; the
-		// entry may already be gone (receipt arrived) — skip if so.
+	// TEST-ONLY interleaving point: everything above ran under the
+	// delivery mutex, everything below decides at the last boundary
+	// whether the frame may go out. The window between them is where a
+	// deletion's freeze lands, and it lives entirely between two
+	// statements of this function — a test that approximated it with a
+	// sleep would pin the scheduler instead. No mutex is held here.
+	s.runRetryDispatchBarrier()
+	for _, due := range dueMessages {
+		envelope := due.env
+		// The candidate was chosen three phases ago, and a deletion can
+		// have frozen it since — the wipe classifies against the delivery
+		// domain and then destroys the row, so an envelope that goes out
+		// after that classification stays with the peer with nothing left
+		// to recall it.
+		//
+		// So the claim is taken HERE, immediately before the wire, in the
+		// same lock hold that reads the freeze and the withdrawal shadow.
+		// It also withdraws the durable never-emitted claim, and refuses
+		// the attempt when that write fails: sending anyway would leave
+		// the disk saying the message never left while the peer holds it.
+		//
+		// Claiming BEFORE the attempt rather than after costs one thing,
+		// deliberately: a dispatch that then fails to emit (its route
+		// vanished in the microsecond gap) leaves the entry counted as
+		// possibly-out, so a later deletion asks the peer about an id
+		// they may not have. That is the harmless direction, and it is
+		// the price of the freeze meaning anything at all.
 		log.Info().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).Msg("delivery_retry_resend")
-		if !s.dispatchEnvelopeRetry(envelope) {
-			s.deliveryMu.Lock()
-			if e, ok := s.awaitingDelivered[envelope.ID]; ok {
-				e.Held = true
-			}
-			s.deliveryMu.Unlock()
+		if !s.noteOwnEnvelopeEmitted(envelope.Sender, envelope.ID) {
+			// Frozen by a deletion, withdrawn, or its durable claim could
+			// not be withdrawn. Nothing reached the wire, so the attempt
+			// this tick charged is GIVEN BACK: a freeze is this node
+			// pausing itself, and a message that comes back from a thaw
+			// carrying a spent attempt and an 11-minute backoff can be
+			// abandoned by the very next tick without the network having
+			// been used once.
+			//
+			// A dispatch that runs and finds no route is the opposite
+			// case and keeps its charge: an unreachable recipient is
+			// exactly what the attempt budget measures, which is why
+			// Phase 3 charges the unreachable candidates too.
+			s.refundDeliveryAttempt(envelope.ID, due.spent)
+			continue
 		}
+		if s.dispatchEnvelopeRetry(envelope) {
+			continue
+		}
+		// The attempt did not go out after all. Held so a reachability
+		// kick can wake it; Emitted stays true, per the trade above.
+		s.holdDeliveryRetry(envelope.ID)
 	}
 	for _, receipt := range dueReceipts {
 		log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("seen_receipt_retry_resend")
 		s.distributeReceipt(receipt)
 	}
+}
+
+// deliveryAttemptCharge is what one retry pass spent on an entry before
+// the wire had its say.
+type deliveryAttemptCharge struct {
+	Attempts      int
+	NextAttemptAt time.Time
+}
+
+// refundDeliveryAttempt gives back a charge whose frame never went out and
+// holds the entry so a reachability kick can wake it.
+//
+// The refund is conditional on the entry still carrying exactly what this
+// pass charged: anything else means another path has moved the schedule
+// since, and restoring a stale snapshot over it would undo a decision this
+// pass knows nothing about.
+func (s *Service) refundDeliveryAttempt(id protocol.MessageID, spent deliveryAttemptCharge) {
+	s.deliveryMu.Lock()
+	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
+		if entry.Attempts == spent.Attempts+1 {
+			entry.Attempts = spent.Attempts
+			entry.NextAttemptAt = spent.NextAttemptAt
+		}
+		entry.Held = true
+	}
+	s.deliveryMu.Unlock()
+}
+
+// runRetryDispatchBarrier fires the test-only seam between the retry
+// tick's planning and its dispatch. Nil in production.
+func (s *Service) runRetryDispatchBarrier() {
+	if s.retryDispatchBarrier != nil {
+		s.retryDispatchBarrier()
+	}
+}
+
+// holdDeliveryRetry marks the entry held so a later reachability kick can
+// wake it, instead of leaving it Held=false (which the kick filters out) to
+// wait out the full backoff. The entry may already be gone — a receipt that
+// landed in the gap — in which case there is nothing to hold.
+func (s *Service) holdDeliveryRetry(id protocol.MessageID) {
+	s.deliveryMu.Lock()
+	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
+		entry.Held = true
+	}
+	s.deliveryMu.Unlock()
 }
 
 // kickDeliveryRetriesForReachable re-arms held sender-owned delivery retries

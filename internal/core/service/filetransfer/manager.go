@@ -116,9 +116,19 @@ const (
 // transition. On startup, the mappings are loaded from disk and the FileStore
 // ref counts are rebuilt from active sender entries.
 type Manager struct {
-	mu                 sync.Mutex
-	senderMaps         map[domain.FileID]*senderFileMapping
-	receiverMaps       map[domain.FileID]*receiverFileMapping
+	mu           sync.Mutex
+	senderMaps   map[domain.FileID]*senderFileMapping
+	receiverMaps map[domain.FileID]*receiverFileMapping
+	// pendingCleanups are the erasures a deletion still owes: the files
+	// of a message whose mapping is already gone but whose bytes are not.
+	// Persisted with the mappings, in the same write, and retried by the
+	// maintenance tick. See cleanup_intents.go.
+	pendingCleanups map[domain.FileID]*pendingCleanup
+	// cleanupsDirty means the intents in memory are ahead of the file. No
+	// file may be unlinked while it is set: the whole guarantee is that
+	// the record of what must be erased reaches the disk BEFORE the
+	// erasure that makes the files unreachable.
+	cleanupsDirty      bool
 	pendingSenderSlots int    // sender slots reserved via PrepareFileAnnounce but not yet committed; protected by mu
 	nextGeneration     uint64 // monotonic counter for receiver mapping generations; protected by mu
 	store              *FileStore
@@ -874,6 +884,7 @@ func (m *Manager) retryLoop() {
 		case <-ticker.C:
 			m.tickSenderMappings()
 			m.tickReceiverMappings()
+			m.tickPendingCleanups()
 		case <-m.stopCh:
 			return
 		}
@@ -937,7 +948,13 @@ func (m *Manager) tickSenderMappings() {
 				// a tombstone here would decrement the ref count of another
 				// live mapping that reintroduced the same hash via a new send.
 				if m.store != nil && sm.State == senderCompleted {
-					m.store.Release(sm.FileHash)
+					// In-memory only under the mutex; the erasure itself
+					// is the intent's, on the next pass of this same tick.
+					m.store.DropRef(sm.FileHash)
+					m.noteCleanupLocked(pendingCleanup{
+						FileID: id, TransmitHash: sm.FileHash, NotedAt: now,
+					})
+					m.cleanupsDirty = true
 				}
 				delete(m.senderMaps, id)
 				changed = true
@@ -1056,11 +1073,32 @@ func (m *Manager) RemoveSenderMapping(fileID domain.FileID) bool {
 	}
 
 	delete(m.senderMaps, fileID)
-	m.saveMappingsLocked()
+	intent := pendingCleanup{FileID: fileID, TransmitHash: releaseHash, NotedAt: time.Now()}
+	if releaseHash != "" && m.store != nil {
+		m.store.DropRef(releaseHash)
+	}
+	if releaseHash != "" {
+		m.noteCleanupLocked(intent)
+	}
+	// Same ordering rule as the deletion paths: nothing is erased until
+	// the record of what has to be erased is on disk.
+	persisted := m.saveMappingsLockedErr()
+	if persisted != nil {
+		m.cleanupsDirty = true
+	}
 	m.mu.Unlock()
 
-	if releaseHash != "" && m.store != nil {
-		m.store.Release(releaseHash)
+	if persisted != nil {
+		log.Error().Err(persisted).Str("file_id", string(fileID)).
+			Msg("file_transfer: could not record the erasure of an orphaned mapping; deferring it to the maintenance tick")
+		return true
+	}
+
+	if releaseHash != "" {
+		remaining, done := m.runCleanupIntent(intent)
+		m.mu.Lock()
+		m.settleCleanupLocked(remaining, done)
+		m.mu.Unlock()
 	}
 
 	log.Info().
@@ -1110,35 +1148,60 @@ func (m *Manager) CleanupTransferByMessageID(fileID domain.FileID) {
 		delete(m.receiverMaps, fileID)
 	}
 
-	if senderFound || receiverFound {
-		m.saveMappingsLocked()
+	// The erasure the unlinks below still owe is written HERE, in the same
+	// persisted state that drops the mappings. Dropping a mapping is what
+	// makes the files unreachable, so if the write that erases them then
+	// fails, this intent is the only thing left that knows they should be
+	// gone — and it outlives the process, unlike the unlink about to be
+	// attempted.
+	intent := pendingCleanup{FileID: fileID, NotedAt: time.Now()}
+	if releaseHash != "" {
+		intent.TransmitHash = releaseHash
+	}
+	if receiverFound {
+		intent.CompletedPath = receiverCompletedPath
+		intent.PartialPath = partialDownloadPath(m.downloadDir, fileID)
+	}
+	if !senderFound && !receiverFound {
+		m.mu.Unlock()
+		return
+	}
+	if releaseHash != "" && m.store != nil {
+		// The ref count drops HERE, with the mapping, because both are
+		// in-memory: a persist that fails leaves them consistent, and a
+		// restart rebuilds the table from the mappings it restores.
+		// Erasing files is the intent's job, and it uses
+		// PurgeUnreferenced, which is safe to repeat.
+		m.store.DropRef(releaseHash)
+	}
+	m.noteCleanupLocked(intent)
+	if err := m.saveMappingsLockedErr(); err != nil {
+		// The record did not reach the disk, so nothing may be erased:
+		// unlinking now would make the files unreachable with only an
+		// in-memory note that they should be gone, and a crash would lose
+		// that note while restoring the mappings and the files it names.
+		// Both halves stay in memory — the mappings are already dropped
+		// there, and the tick re-persists before it touches a file.
+		m.cleanupsDirty = true
+		m.mu.Unlock()
+		log.Error().Err(err).Str("file_id", string(fileID)).
+			Msg("file_transfer: could not record the erasure of a deleted message; deferring it to the maintenance tick")
+		return
 	}
 	m.mu.Unlock()
 
-	// Release transmit blob ref (may delete the file if last ref).
-	if releaseHash != "" && m.store != nil {
-		m.store.Release(releaseHash)
-	}
+	remaining, done := m.runCleanupIntent(intent)
+	m.mu.Lock()
+	m.settleCleanupLocked(remaining, done)
+	m.mu.Unlock()
 
-	// Delete completed and partial download files for the receiver
-	// mapping. partialDownloadPath always returns a path; os.Remove
-	// returning ErrNotExist is fine — no partial existed.
-	if receiverFound {
-		m.safeRemoveInDownloadDir(receiverCompletedPath, "message-delete cleanup")
-		partial := partialDownloadPath(m.downloadDir, fileID)
-		if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
-			log.Warn().Err(err).Str("path", partial).Msg("file_transfer: cleanup partial download failed (message-delete)")
-		}
-	}
-
-	if senderFound || receiverFound {
-		log.Info().
-			Str("file_id", string(fileID)).
-			Bool("sender_removed", senderFound).
-			Bool("sender_ref_released", releaseHash != "").
-			Bool("receiver_removed", receiverFound).
-			Msg("file_transfer: transfer cleaned up by message id")
-	}
+	log.Info().
+		Str("file_id", string(fileID)).
+		Bool("sender_removed", senderFound).
+		Bool("sender_ref_released", releaseHash != "").
+		Bool("receiver_removed", receiverFound).
+		Bool("erased", done).
+		Msg("file_transfer: transfer cleaned up by message id")
 }
 
 // CleanupPeerTransfers removes all sender and receiver mappings associated
@@ -1154,11 +1217,14 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 	// Collect sender mappings to remove.
 	var senderHashes []string
 	var senderIDs []domain.FileID
+	intents := make(map[domain.FileID]pendingCleanup)
+	notedAt := time.Now()
 	for id, mapping := range m.senderMaps {
 		if mapping.Recipient == peer {
 			// All states except tombstone hold a ref to the transmit blob.
 			if mapping.State != senderTombstone {
 				senderHashes = append(senderHashes, mapping.FileHash)
+				intents[id] = pendingCleanup{FileID: id, TransmitHash: mapping.FileHash, NotedAt: notedAt}
 			}
 			senderIDs = append(senderIDs, id)
 		}
@@ -1189,40 +1255,60 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 	for _, entry := range receiverEntries {
 		delete(m.receiverMaps, entry.fileID)
 	}
+	for _, entry := range receiverEntries {
+		intent := intents[entry.fileID]
+		intent.FileID = entry.fileID
+		intent.NotedAt = notedAt
+		intent.CompletedPath = entry.completedPath
+		intent.PartialPath = partialDownloadPath(m.downloadDir, entry.fileID)
+		intents[entry.fileID] = intent
+	}
 
 	changed := len(senderIDs) > 0 || len(receiverEntries) > 0
-	if changed {
-		m.saveMappingsLocked()
+	if !changed {
+		m.mu.Unlock()
+		return
+	}
+	// Same rule as the per-message cleanup: what the unlinks below owe is
+	// durable BEFORE they are attempted, because dropping the mapping is
+	// what makes the files unreachable.
+	if m.store != nil {
+		for _, hash := range senderHashes {
+			m.store.DropRef(hash)
+		}
+	}
+	for _, intent := range intents {
+		m.noteCleanupLocked(intent)
+	}
+	if err := m.saveMappingsLockedErr(); err != nil {
+		m.cleanupsDirty = true
+		m.mu.Unlock()
+		log.Error().Err(err).Str("peer", peer.String()).
+			Msg("file_transfer: could not record the erasures of a removed peer; deferring them to the maintenance tick")
+		return
 	}
 	m.mu.Unlock()
 
-	// Release transmit file refs outside the lock (may trigger file I/O).
-	if m.store != nil {
-		for _, hash := range senderHashes {
-			m.store.Release(hash)
-		}
+	// One write for the whole peer, not one per attachment: the file is
+	// rewritten whole either way.
+	settled := make([]pendingCleanup, 0, len(intents))
+	outcomes := make([]bool, 0, len(intents))
+	for _, intent := range intents {
+		remaining, done := m.runCleanupIntent(intent)
+		settled = append(settled, remaining)
+		outcomes = append(outcomes, done)
 	}
-
-	// Delete downloaded and partial files.
-	for _, entry := range receiverEntries {
-		// Delete completed download — safeRemoveInDownloadDir verifies the
-		// path stays within the download directory before removing.
-		m.safeRemoveInDownloadDir(entry.completedPath, "peer cleanup")
-
-		// Delete partial download (may exist if download was in progress).
-		partial := partialDownloadPath(m.downloadDir, entry.fileID)
-		if err := os.Remove(partial); err != nil && !os.IsNotExist(err) {
-			log.Warn().Err(err).Str("path", partial).Msg("file_transfer: cleanup partial download failed")
-		}
+	m.mu.Lock()
+	for i, remaining := range settled {
+		m.settleCleanupLocked(remaining, outcomes[i])
 	}
+	m.mu.Unlock()
 
-	if changed {
-		log.Info().
-			Str("peer", peer.String()).
-			Int("sender_removed", len(senderIDs)).
-			Int("receiver_removed", len(receiverEntries)).
-			Msg("file_transfer: peer transfers cleaned up")
-	}
+	log.Info().
+		Str("peer", peer.String()).
+		Int("sender_removed", len(senderIDs)).
+		Int("receiver_removed", len(receiverEntries)).
+		Msg("file_transfer: peer transfers cleaned up")
 }
 
 // SenderProgress returns the transfer progress for an outgoing file.

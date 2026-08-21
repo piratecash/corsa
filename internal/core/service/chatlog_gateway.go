@@ -185,6 +185,24 @@ func (g *ChatlogGateway) UndeliveredOutgoing(ctx context.Context, since time.Tim
 	return g.store.UndeliveredOutgoing(ctx, g.SelfAddress(), since)
 }
 
+// MarkNeverEmitted records that the locally-sent messages have not reached
+// the wire, so a restart can still tell "the peer cannot have this" from
+// "we cannot know".
+func (g *ChatlogGateway) MarkNeverEmitted(ctx context.Context, ids []domain.MessageID) error {
+	if g == nil || g.store == nil {
+		return fmt.Errorf("chatlog not available")
+	}
+	return g.store.MarkNeverEmitted(ctx, ids)
+}
+
+// ClearNeverEmitted withdraws that claim once the messages go out.
+func (g *ChatlogGateway) ClearNeverEmitted(ctx context.Context, ids []domain.MessageID) error {
+	if g == nil || g.store == nil {
+		return fmt.Errorf("chatlog not available")
+	}
+	return g.store.ClearNeverEmitted(ctx, ids)
+}
+
 // UnconfirmedSeen returns the inbound DM entries marked "seen" whose seen
 // receipt the original sender has not confirmed yet (since bounds the scan).
 func (g *ChatlogGateway) UnconfirmedSeen(ctx context.Context, since time.Time) ([]chatlog.Entry, error) {

@@ -660,11 +660,16 @@ func TestLocalSendDeliveryReceiptRejectsSeenAck(t *testing.T) {
 	}
 }
 
-// stubDeliveryOutbox is a DeliveryOutbox stub serving a fixed slice.
+// stubDeliveryOutbox is a DeliveryOutbox stub serving a fixed slice. The
+// rows report themselves emitted, matching a store that carries no mark.
 type stubDeliveryOutbox struct{ envelopes []protocol.Envelope }
 
-func (s stubDeliveryOutbox) UndeliveredOutgoing() ([]protocol.Envelope, error) {
-	return s.envelopes, nil
+func (s stubDeliveryOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
+	rows := make([]OutboxEntry, 0, len(s.envelopes))
+	for _, envelope := range s.envelopes {
+		rows = append(rows, OutboxEntry{Envelope: envelope, Emitted: true})
+	}
+	return rows, nil
 }
 
 // panicDeliveryOutbox fails the test if UndeliveredOutgoing is ever called —
@@ -673,7 +678,7 @@ func (s stubDeliveryOutbox) UndeliveredOutgoing() ([]protocol.Envelope, error) {
 // lightweight journal ref is still wired up under opt-out.
 type panicDeliveryOutbox struct{ t *testing.T }
 
-func (p panicDeliveryOutbox) UndeliveredOutgoing() ([]protocol.Envelope, error) {
+func (p panicDeliveryOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
 	p.t.Fatal("UndeliveredOutgoing must NOT be called when the node opted out of DMs (guard must skip the scan)")
 	return nil, nil
 }
@@ -746,7 +751,7 @@ type stubSeenAckJournal struct {
 	confirmed   []protocol.MessageID
 }
 
-func (s *stubSeenAckJournal) UndeliveredOutgoing() ([]protocol.Envelope, error) { return nil, nil }
+func (s *stubSeenAckJournal) UndeliveredOutgoing() ([]OutboxEntry, error) { return nil, nil }
 
 func (s *stubSeenAckJournal) UnconfirmedSeen() ([]protocol.DeliveryReceipt, error) {
 	s.mu.Lock()

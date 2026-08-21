@@ -112,6 +112,21 @@ func (f MessageFlag) Valid() bool {
 	}
 }
 
+// ReceiptStatusConfirmsDelivery reports whether a stored delivery status
+// means the recipient demonstrably holds the message. Only the two
+// statuses a chatlog row can carry qualify: seen_ack is scheduler
+// plumbing for our own outgoing seen receipt and never lands on a row.
+//
+// Callers use it to tell a message that is still ours to withdraw from
+// one the recipient has already acknowledged.
+func ReceiptStatusConfirmsDelivery(status string) bool {
+	switch status {
+	case ReceiptStatusDelivered, ReceiptStatusSeen:
+		return true
+	}
+	return false
+}
+
 // IsValidReceiptStatus reports whether the wire receipt status is one of
 // the protocol-defined values.
 func IsValidReceiptStatus(status string) bool {

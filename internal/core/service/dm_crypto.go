@@ -14,6 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -67,6 +68,13 @@ type DMCrypto struct {
 	// fact must not depend on WHICH surface the user sent from.
 	onSendSuccess func(peer string)
 }
+
+// defaultOutgoingMessageFlag is the deletion policy this build stamps on
+// the direct messages it sends. It is the author's own answer to "may my
+// counterpart erase this from their side too", and it decides, on the
+// receiving end, whether deleting a message someone wrote to you also
+// asks them to drop their copy (authorizedToDelete).
+const defaultOutgoingMessageFlag = protocol.MessageFlagAnyDelete
 
 // DecryptFailureClass separates the §4.10 outcome classes: only the
 // CONFIRMED crypto-fail (authenticated envelope, unreadable sealed parts)
@@ -221,12 +229,31 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 	createdAt := now.Format(time.RFC3339)
 
 	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
-		Type:       "send_message",
-		Topic:      "dm",
-		ID:         string(messageID),
-		Address:    d.id.Address,
-		Recipient:  to.String(),
-		Flag:       string(protocol.MessageFlagSenderDelete),
+		Type:      "send_message",
+		Topic:     "dm",
+		ID:        string(messageID),
+		Address:   d.id.Address,
+		Recipient: to.String(),
+		// defaultOutgoingMessageFlag: either participant may have this
+		// message removed
+		// from BOTH sides. The flag is the author's own answer to "may
+		// my counterpart erase this from their side too", and the
+		// product answer is yes: a conversation is shared, and a user
+		// deleting a message from it expects it gone, not gone from
+		// their own screen while the other copy stands.
+		//
+		// It is the per-message form of an authority that already
+		// exists one level up — the bulk wipe erases the whole
+		// thread on both sides regardless of authorship — so refusing
+		// it one message at a time meant the user could erase
+		// everything but not one line.
+		//
+		// The flag travels with the row and is read on receipt
+		// (authorizedToDelete), so this decides only messages sent from
+		// here on. A row an older build stamped sender-delete stays
+		// deletable by its author alone, and deleting our view of one
+		// remains a local act.
+		Flag:       string(defaultOutgoingMessageFlag),
 		CreatedAt:  createdAt,
 		TTLSeconds: 0,
 		Body:       ciphertext,
@@ -236,7 +263,7 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 	}
 
 	if reply.Type != "message_stored" && reply.Type != "message_known" {
-		return nil, fmt.Errorf("unexpected send reply: %s", reply.Type)
+		return nil, sendRejection(reply)
 	}
 
 	if d.onSendSuccess != nil {
@@ -253,6 +280,232 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		Timestamp:     now,
 		ReceiptStatus: "sent",
 	}, nil
+}
+
+// DeliveryCancellation is what the node could establish while stopping a
+// delivery. HooksRemoved is for the log; NeverEmitted is the one the
+// caller acts on.
+type DeliveryCancellation struct {
+	// NeverEmitted reports that the envelope provably never reached the
+	// wire, so the recipient cannot hold a copy. False means "not
+	// knowable", never "it was delivered".
+	NeverEmitted bool
+	// HooksRemoved counts the delivery hooks the node actually dropped.
+	HooksRemoved int
+}
+
+// CancelMessageDelivery asks the node to stop delivering a DM we sent
+// earlier: the envelope leaves the store-and-forward backlog and every
+// queue that could still emit it (node.Service.CancelOutgoingDelivery).
+//
+// It is the undo of SendDirectMessage above, and lives beside it for that
+// reason.
+func (d *DMCrypto) CancelMessageDelivery(ctx context.Context, to domain.PeerIdentity, messageID domain.MessageID) (DeliveryCancellation, error) {
+	if to.IsZero() {
+		return DeliveryCancellation{}, fmt.Errorf("cancel delivery: recipient is required")
+	}
+	if !messageID.IsValid() {
+		return DeliveryCancellation{}, fmt.Errorf("cancel delivery: message id %q is not a valid UUID v4", messageID)
+	}
+
+	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
+		Type:      "cancel_message_delivery",
+		Topic:     "dm",
+		ID:        string(messageID),
+		Recipient: to.String(),
+	})
+	if err != nil {
+		return DeliveryCancellation{}, fmt.Errorf("cancel delivery of %s: %w", messageID, err)
+	}
+	if reply.Type == "error" {
+		return DeliveryCancellation{}, fmt.Errorf("cancel delivery of %s: node refused: %s (%s)", messageID, reply.Error, reply.Code)
+	}
+
+	cancellation := DeliveryCancellation{
+		NeverEmitted: reply.Status == node.CancelStatusNeverEmitted,
+		HooksRemoved: reply.Count,
+	}
+	log.Debug().
+		Str("message_id", string(messageID)).
+		Str("recipient", to.String()).
+		Int("hooks_removed", cancellation.HooksRemoved).
+		Bool("never_emitted", cancellation.NeverEmitted).
+		Msg("dm_crypto: outgoing delivery cancelled")
+	return cancellation, nil
+}
+
+// FreezeMessageDelivery stops the node from sending one message without
+// withdrawing it, and reports whether it provably never reached the wire.
+//
+// A single delete classifies from the ROW — its durable never-emitted mark
+// — and that mark only means something while nothing can emit the message
+// behind the reader's back. The freeze is ended by CancelMessageDelivery,
+// which every route that takes it runs immediately afterwards.
+func (d *DMCrypto) FreezeMessageDelivery(ctx context.Context, messageID domain.MessageID) (bool, error) {
+	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
+		Type:  "freeze_message_delivery",
+		Topic: "dm",
+		ID:    string(messageID),
+	})
+	if err != nil {
+		return false, fmt.Errorf("freeze delivery of %s: %w", messageID, err)
+	}
+	if reply.Type == "error" {
+		return false, fmt.Errorf("freeze delivery of %s: node refused: %s (%s)", messageID, reply.Error, reply.Code)
+	}
+	return reply.Status == node.CancelStatusNeverEmitted, nil
+}
+
+// CancelConversationDelivery asks the node to stop delivering everything
+// we still owe the peer: the bulk form of CancelMessageDelivery, used
+// when the user wipes the whole thread.
+//
+// Returns how many messages were withdrawn. The count is for the log —
+// the wipe proceeds either way, for the reason given at its call site.
+func (d *DMCrypto) CancelConversationDelivery(ctx context.Context, peer domain.PeerIdentity, scope []domain.MessageID) (ConversationCancellation, error) {
+	var result ConversationCancellation
+	if peer.IsZero() {
+		return result, fmt.Errorf("cancel conversation delivery: peer is required")
+	}
+
+	ids := make([]string, 0, len(scope))
+	for _, id := range scope {
+		ids = append(ids, string(id))
+	}
+	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
+		Type:      "cancel_conversation_delivery",
+		Topic:     "dm",
+		Recipient: peer.String(),
+		IDs:       ids,
+	})
+	if err != nil {
+		return result, fmt.Errorf("cancel conversation delivery to %s: %w", peer, err)
+	}
+	if reply.Type == "error" {
+		return result, fmt.Errorf("cancel conversation delivery to %s: node refused: %s (%s)", peer, reply.Error, reply.Code)
+	}
+
+	result.Cancelled = reply.Count
+	result.NeverEmitted = make(map[domain.MessageID]struct{}, len(reply.IDs))
+	for _, id := range reply.IDs {
+		result.NeverEmitted[domain.MessageID(id)] = struct{}{}
+	}
+
+	log.Debug().
+		Str("peer", peer.String()).
+		Int("messages", result.Cancelled).
+		Int("never_emitted", len(result.NeverEmitted)).
+		Msg("dm_crypto: outgoing deliveries to the peer cancelled")
+	return result, nil
+}
+
+// FreezeConversationDelivery asks the node to stop sending everything we
+// still owe the peer WITHOUT withdrawing it, and reports which of the ids
+// provably never reached the wire.
+//
+// The wipe classifies against this answer and against the rows' own marks,
+// then either commits — CancelConversationDelivery withdraws for real — or
+// aborts, and ThawConversationDelivery puts everything back. Freezing
+// rather than cancelling up front is what makes the abort possible: a
+// cancellation cannot be undone, so a transaction that then failed would
+// leave the user with messages on screen that will never be sent.
+func (d *DMCrypto) FreezeConversationDelivery(ctx context.Context, peer domain.PeerIdentity, scope []domain.MessageID) (ConversationFreeze, error) {
+	var result ConversationFreeze
+	if peer.IsZero() {
+		return result, fmt.Errorf("freeze conversation delivery: peer is required")
+	}
+
+	ids := make([]string, 0, len(scope))
+	for _, id := range scope {
+		ids = append(ids, string(id))
+	}
+	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
+		Type:      "freeze_conversation_delivery",
+		Topic:     "dm",
+		Recipient: peer.String(),
+		IDs:       ids,
+	})
+	if err != nil {
+		return result, fmt.Errorf("freeze conversation delivery to %s: %w", peer, err)
+	}
+	if reply.Type == "error" {
+		return result, fmt.Errorf("freeze conversation delivery to %s: node refused: %s (%s)", peer, reply.Error, reply.Code)
+	}
+
+	result.Frozen = reply.Count
+	result.NeverEmitted = make(map[domain.MessageID]struct{}, len(reply.IDs))
+	for _, id := range reply.IDs {
+		result.NeverEmitted[domain.MessageID(id)] = struct{}{}
+	}
+	log.Debug().
+		Str("peer", peer.String()).
+		Int("frozen", result.Frozen).
+		Int("never_emitted", len(result.NeverEmitted)).
+		Msg("dm_crypto: deliveries to the peer frozen for a wipe")
+	return result, nil
+}
+
+// ThawConversationDelivery ends a freeze the wipe did not commit.
+func (d *DMCrypto) ThawConversationDelivery(ctx context.Context, peer domain.PeerIdentity, scope []domain.MessageID) error {
+	if len(scope) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(scope))
+	for _, id := range scope {
+		ids = append(ids, string(id))
+	}
+	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
+		Type:      "thaw_conversation_delivery",
+		Topic:     "dm",
+		Recipient: peer.String(),
+		IDs:       ids,
+	})
+	if err != nil {
+		return fmt.Errorf("thaw conversation delivery to %s: %w", peer, err)
+	}
+	if reply.Type == "error" {
+		return fmt.Errorf("thaw conversation delivery to %s: node refused: %s (%s)", peer, reply.Error, reply.Code)
+	}
+	return nil
+}
+
+// ConversationFreeze is what the node knew when it stopped sending. The
+// answer is authoritative for as long as the freeze holds: nothing can
+// emit a frozen message, so it cannot go stale while the wipe decides.
+type ConversationFreeze struct {
+	Frozen       int
+	NeverEmitted map[domain.MessageID]struct{}
+}
+
+// sendRejection turns a refused send into an error that keeps the node's
+// REASON. Collapsing every refusal into "unexpected send reply: error"
+// threw away the one bit that decides what to tell the user: whether the
+// refusal is transient. The store-deferred case makes that visible —
+// while the refusals of deleted ids cannot be read, the node declines to
+// store anything in the conversation, sending included, and "try again in
+// a moment" is a very different message from "this failed".
+//
+// The sentinel is wrapped, not returned bare, so errors.Is keeps working
+// while the text still names what happened.
+func sendRejection(reply protocol.Frame) error {
+	if reply.Type != "error" {
+		return fmt.Errorf("unexpected send reply: %s", reply.Type)
+	}
+	sentinel := protocol.ErrorFromCode(reply.Code)
+	if detail := strings.TrimSpace(reply.Error); detail != "" {
+		return fmt.Errorf("send refused: %s: %w", detail, sentinel)
+	}
+	return fmt.Errorf("send refused: %w", sentinel)
+}
+
+// ConversationCancellation is what a whole-conversation withdrawal took
+// back. NeverEmitted names the ids the node can prove never reached the
+// wire — the same claim a single withdrawal makes, and used for the same
+// reason: a message nobody has ever seen is not requested from the peer,
+// because the request would be how they learn it existed.
+type ConversationCancellation struct {
+	Cancelled    int
+	NeverEmitted map[domain.MessageID]struct{}
 }
 
 // DecryptIncomingMessage turns a local-change event into a typed

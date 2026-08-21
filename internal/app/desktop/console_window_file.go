@@ -74,20 +74,11 @@ const fileTabThumbHeightMax = unit.Dp(72)
 // tuned for the narrower chat-bubble width and would float
 // elements off-centre on a full-width row.
 //
-// The Delete button is direction-aware:
-//
-//   - Direction == "send": gated on peer online state because
-//     SendMessageDelete dispatches a message_delete control DM
-//     and waits for the peer's ack (pessimistic ordering). When
-//     offline the button renders dimmed and the click is silently
-//     drained — issuing a delete to an offline peer would burn the
-//     entire retry budget waiting for an ack that cannot come.
-//
-//   - Direction == "receive": always enabled. The local-only
-//     delete path inside DMRouter.SendMessageDelete removes the
-//     local row and any backing on-disk file synchronously
-//     without a wire round-trip, so peer reachability is
-//     irrelevant for inbound rows.
+// The Delete button is always actionable (except on a tombstone,
+// which has nothing left to delete): DMRouter.SendMessageDelete
+// removes the local row and any backing on-disk file at once, and
+// an outgoing row's peer-side deletion is scheduled and retried
+// until the peer acknowledges it.
 func (c *ConsoleWindow) layoutFileTab(gtx layout.Context) layout.Dimensions {
 	transfers := c.collectFileTransfers()
 	c.pruneFileTabButtons(transfers)
@@ -388,7 +379,7 @@ func (c *ConsoleWindow) layoutFileTransferRow(gtx layout.Context, t filetransfer
 				return layout.Dimensions{Size: image.Pt(gtx.Constraints.Min.X, gtx.Constraints.Min.Y)}
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return c.layoutFileRowDeleteAction(gtx, t, peerOnline)
+				return c.layoutFileRowDeleteAction(gtx, t)
 			}),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				return layout.Dimensions{Size: image.Pt(gtx.Constraints.Min.X, gtx.Constraints.Min.Y)}
@@ -438,7 +429,7 @@ func (c *ConsoleWindow) layoutFileTransferRow(gtx layout.Context, t filetransfer
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return c.layoutFileRowDeleteAction(gtx, t, peerOnline)
+							return c.layoutFileRowDeleteAction(gtx, t)
 						}),
 					)
 				}),
@@ -1054,28 +1045,14 @@ func showDiskActionsForRow(t filetransfer.TransferSnapshot) bool {
 // lives in the row's right action column (see actionColumn in
 // layoutFileTransferRow), directly under the state badge.
 //
-// Tombstones get nothing (the file is already gone).
-//
-// Direction-aware offline gate, matching DMRouter.SendMessageDelete:
-//
-//   - Direction == "receive": local-only delete path. The router
-//     removes the local row and the on-disk file synchronously
-//     without a wire round-trip; peer reachability is irrelevant.
-//     The button is always actionable for incoming rows.
-//
-//   - Direction == "send": needs the peer to ack. Issuing a delete
-//     to an offline peer would burn the entire retry budget waiting
-//     for an ack that cannot come. Render as a static gray
-//     "disabled" box (no Clickable, no hover ripple) so the
-//     control is unmistakably non-interactive.
-func (c *ConsoleWindow) layoutFileRowDeleteAction(gtx layout.Context, t filetransfer.TransferSnapshot, peerOnline bool) layout.Dimensions {
+// Tombstones get nothing (the file is already gone). Everything else
+// is always actionable, in both directions: the delete removes the
+// local row and the on-disk file at once, and any peer-side half is
+// scheduled by the router rather than refused, so peer reachability
+// never gates this control.
+func (c *ConsoleWindow) layoutFileRowDeleteAction(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
 	if t.State == "tombstone" {
 		return layout.Dimensions{}
-	}
-	// Receive-direction deletes are local-only; ignore peerOnline.
-	deleteEnabled := t.Direction != "send" || peerOnline
-	if !deleteEnabled {
-		return c.layoutFileRowDeleteDisabled(gtx)
 	}
 	btn := c.fileDeleteButton(t.FileID)
 	for btn.Clicked(gtx) {
@@ -1093,21 +1070,9 @@ func (c *ConsoleWindow) layoutFileRowDeleteAction(gtx layout.Context, t filetran
 	return label.Layout(gtx)
 }
 
-// layoutFileRowDeleteDisabled renders the offline-state Delete pill
-// via the shared layoutDisabledDeletePill helper (see window.go).
-// Both surfaces — the chat-thread file card and this file tab —
-// must show the same visual for "Delete is unavailable because the
-// peer is offline", so the visual is owned in one place.
-func (c *ConsoleWindow) layoutFileRowDeleteDisabled(gtx layout.Context) layout.Dimensions {
-	return layoutDisabledDeletePill(gtx, c.theme, c.parent.t("console.file.delete"))
-}
-
 // dispatchFileDeleteAsync runs SendMessageDelete on a background
-// goroutine. Mirrors the pattern in window.go's context-menu
-// delete handler. Local row stays alive until the peer's ack
-// confirms the deletion; the terminal status arrives via
-// TopicMessageDeleteCompleted and the existing subscription
-// invalidates the file tab.
+// goroutine. Mirrors the pattern in window.go's context-menu delete
+// handler, caption rule included (messageDeleteStatusFor).
 func (c *ConsoleWindow) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot) {
 	if c.parent == nil || c.parent.router == nil {
 		return
@@ -1117,7 +1082,6 @@ func (c *ConsoleWindow) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot)
 
 	peer := t.Peer
 	target := domain.MessageID(t.FileID)
-	outgoing := t.Direction == "send"
 	if !c.parent.beginUIOp() {
 		return
 	}
@@ -1125,30 +1089,16 @@ func (c *ConsoleWindow) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot)
 		defer c.parent.endUIOp()
 		ctx, cancel := context.WithTimeout(context.Background(), fileDeleteTimeout)
 		defer cancel()
-		if err := router.SendMessageDelete(ctx, peer, target); err != nil {
+		route, err := router.SendMessageDelete(ctx, peer, target)
+		if err != nil {
 			router.SetSendStatus(c.parent.t("status.message_delete_failed", err.Error()))
 			return
 		}
-		if !outgoing {
-			// Receive direction = local-only path inside
-			// SendMessageDelete. The router has already removed
-			// the local row, run the file-transfer cleanup hook,
-			// and published TopicMessageDeleteCompleted with the
-			// terminal "deleted" outcome. The Window's async
-			// handleMessageDeleteOutcome subscriber may have
-			// already written the final status before this
-			// goroutine resumes; writing "Delete request sent;
-			// waiting for peer…" here would race-overwrite that
-			// terminal status with a misleading caption (no peer
-			// ack is coming because no wire round-trip happened).
+		caption := c.parent.messageDeleteStatusFor(route, c.parent.peerOnline(peer))
+		if caption == "" {
 			return
 		}
-		// Outgoing: pessimistic ordering — local row stays alive
-		// until the peer's message_delete_ack arrives. The
-		// terminal UI status surfaces via TopicMessageDeleteCompleted
-		// and handleMessageDeleteOutcome; this caption is the
-		// transient "in flight" hint.
-		router.SetSendStatus(c.parent.t("status.message_delete_dispatched"))
+		router.SetSendStatusIfCurrent(c.parent.t("status.message_deleting"), caption)
 	}()
 }
 

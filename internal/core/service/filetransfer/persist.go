@@ -70,11 +70,30 @@ type persistedTransferEntry struct {
 	ServingEpoch uint64 `json:"serving_epoch,omitempty"`
 }
 
+// persistedCleanup is one erasure a deletion still owes — see
+// cleanup_intents.go. It rides the same file as the mappings so that
+// dropping a mapping and recording what must now be erased are ONE write:
+// any other arrangement has a window in which the files are unreachable
+// and nothing knows they should be gone.
+type persistedCleanup struct {
+	FileID        domain.FileID `json:"file_id"`
+	TransmitHash  string        `json:"transmit_hash,omitempty"`
+	CompletedPath string        `json:"completed_path,omitempty"`
+	PartialPath   string        `json:"partial_path,omitempty"`
+	NotedAt       time.Time     `json:"noted_at"`
+	Attempts      int           `json:"attempts,omitempty"`
+	NextAttemptAt time.Time     `json:"next_attempt_at,omitempty"`
+}
+
 // persistedTransferFile is the top-level JSON structure written to disk.
 type persistedTransferFile struct {
 	Version   int                      `json:"version"`
 	UpdatedAt time.Time                `json:"updated_at"`
 	Transfers []persistedTransferEntry `json:"transfers"`
+	// Cleanups is absent in files written before durable cleanup existed;
+	// an older binary reading a newer file ignores it, which costs it
+	// nothing it had before.
+	Cleanups []persistedCleanup `json:"cleanups,omitempty"`
 }
 
 const persistVersion = 1
@@ -213,10 +232,24 @@ func (m *Manager) saveMappingsLockedErr() error {
 		entries = append(entries, receiverMappingToEntry(rm))
 	}
 
+	cleanups := make([]persistedCleanup, 0, len(m.pendingCleanups))
+	for _, intent := range m.pendingCleanups {
+		cleanups = append(cleanups, persistedCleanup{
+			FileID:        intent.FileID,
+			TransmitHash:  intent.TransmitHash,
+			CompletedPath: intent.CompletedPath,
+			PartialPath:   intent.PartialPath,
+			NotedAt:       intent.NotedAt,
+			Attempts:      intent.Attempts,
+			NextAttemptAt: intent.NextAttemptAt,
+		})
+	}
+
 	pf := persistedTransferFile{
 		Version:   persistVersion,
 		UpdatedAt: time.Now(),
 		Transfers: entries,
+		Cleanups:  cleanups,
 	}
 
 	return atomicWriteJSON(m.mappingsPath, pf)
@@ -260,6 +293,29 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 
 	activeHashes = make(map[string]int)
 	senderRepaired := false
+
+	// The erasures the last process did not finish. Restored before any
+	// mapping, so nothing can re-acquire a blob an intent is about to
+	// purge without first taking a ref — which is exactly what
+	// PurgeUnreferenced then declines to touch.
+	for _, entry := range pf.Cleanups {
+		if m.pendingCleanups == nil {
+			m.pendingCleanups = make(map[domain.FileID]*pendingCleanup, len(pf.Cleanups))
+		}
+		m.pendingCleanups[entry.FileID] = &pendingCleanup{
+			FileID:        entry.FileID,
+			TransmitHash:  entry.TransmitHash,
+			CompletedPath: entry.CompletedPath,
+			PartialPath:   entry.PartialPath,
+			NotedAt:       entry.NotedAt,
+			Attempts:      entry.Attempts,
+			NextAttemptAt: entry.NextAttemptAt,
+		}
+	}
+	if len(pf.Cleanups) > 0 {
+		log.Info().Int("pending", len(pf.Cleanups)).
+			Msg("file_transfer: restored unfinished attachment erasures")
+	}
 
 	for _, entry := range pf.Transfers {
 		switch entry.Role {

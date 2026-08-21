@@ -525,7 +525,7 @@ func TestMenuFocusWaitsOutTheFrameItsOwnFocusIsDroppedIn(t *testing.T) {
 // different sub-view would focus a widget the user cannot see.
 func TestPeerMenuItemsFollowTheVisibleSubview(t *testing.T) {
 	w := &Window{}
-	base := []event.Tag{&w.ctxMenuAlias, &w.ctxMenuCopy, &w.ctxMenuDelete}
+	base := []event.Tag{&w.ctxMenuAlias, &w.ctxMenuCopy, &w.ctxMenuDelete, &w.ctxMenuClearChat}
 	for _, tc := range []struct {
 		name  string
 		setup func()
@@ -564,18 +564,14 @@ func TestPeerMenuItemsFollowTheVisibleSubview(t *testing.T) {
 	}
 }
 
-// "Clear chat" is only drawn as a real, clickable row for an online peer;
-// offline it is contextMenuItemDisabled, a bare label with no Clickable and so
-// no focus target at all. Focusing it would strand Tab on a widget that cannot
-// be activated and cannot be seen to be focused.
+// A row drawn as contextMenuItemDisabled is a bare label with no Clickable
+// and so no focus target at all; focusing it would strand Tab on a widget
+// that cannot be activated and cannot be seen to be focused. The message
+// menu's Delete row is the remaining case: it is inert only on a window with
+// no router, since neither an offline peer nor the message's direction can
+// stop a deletion any more.
 func TestMenuItemsExcludeRowsThatHaveNoFocusTarget(t *testing.T) {
 	w := &Window{contextMenuPeer: domain.PeerIdentity{}}
-	for _, it := range w.peerMenuItems() {
-		if it == &w.ctxMenuClearChat {
-			t.Fatal("the offline peer's Clear chat row is a disabled label with no Clickable; it must not be in the focus ring")
-		}
-	}
-	// Same rule for the message menu's Delete row.
 	if w.contextMenuDeleteEnabled() {
 		t.Fatal("harness bug: Delete was supposed to be disabled here")
 	}
