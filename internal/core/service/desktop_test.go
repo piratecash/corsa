@@ -18,6 +18,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/storage"
 )
 
 func TestContactsFromFrame(t *testing.T) {
@@ -922,6 +923,15 @@ func TestParseTimestampFormats(t *testing.T) {
 // HandleLocalFrame is used.
 func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Identity) {
 	t.Helper()
+	c, id, _ := newTestDesktopClientWithNodeAndDB(t)
+	return c, id
+}
+
+// newTestDesktopClientWithNodeAndDB additionally hands back the database
+// behind the client, for tests that need to hold its write lock and observe
+// what a blocked write does to the paths above it.
+func newTestDesktopClientWithNodeAndDB(t *testing.T) (*DesktopClient, *identity.Identity, storage.Executor) {
+	t.Helper()
 	dir := t.TempDir()
 
 	id, err := identity.Generate()
@@ -936,7 +946,8 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 	}
 
 	svc := node.NewService(cfg, id, ebus.New())
-	store := newTestChatlogStore(t, domain.PeerIdentityFromWire(id.Address))
+	database := newTestStateDB(t, domain.PeerIdentityFromWire(id.Address))
+	store := chatlog.NewStore(database.Executor(), domain.PeerIdentityFromWire(id.Address))
 
 	// WaitBackground must run before TempDir cleanup to avoid
 	// "directory not empty" races caused by async disk writes
@@ -950,7 +961,7 @@ func newTestDesktopClientWithNode(t *testing.T) (*DesktopClient, *identity.Ident
 		chatLog:   store,
 	}
 	c.wireSubServices()
-	return c, id
+	return c, id, database.Executor()
 }
 
 // TestFetchConversationReturnsDecryptedMessages verifies the full path:

@@ -40,12 +40,20 @@ type MessageStoreAdapter struct {
 	// back in the database. Refusing at the door is the only place that
 	// covers every path that stores.
 	refusals *wipeTombstoneSet
+
+	// removals names the conversations being removed right now. Checked
+	// here for the same reason refusals are: this is the only door into the
+	// chatlog, and the node writes through it before the router learns
+	// anything. A message stored during a removal survives it — the
+	// deletion cannot see a row that is not there yet — and rebuilds the
+	// conversation on the next start.
+	removals *removalGate
 }
 
 // NewMessageStoreAdapter binds a ChatlogGateway to a MessageStore surface.
 // The returned adapter is ready to be handed to node.Service.RegisterMessageStore.
-func NewMessageStoreAdapter(chatlog *ChatlogGateway, id *identity.Identity, refusals *wipeTombstoneSet) *MessageStoreAdapter {
-	return &MessageStoreAdapter{chatlog: chatlog, id: id, refusals: refusals}
+func NewMessageStoreAdapter(chatlog *ChatlogGateway, id *identity.Identity, refusals *wipeTombstoneSet, removals *removalGate) *MessageStoreAdapter {
+	return &MessageStoreAdapter{chatlog: chatlog, id: id, refusals: refusals, removals: removals}
 }
 
 // opContext is the context every repository call from this adapter runs with.
@@ -96,6 +104,27 @@ func (a *MessageStoreAdapter) refusesDeletedID(envelope protocol.Envelope) (refu
 	return a.refusals.Refuses(domain.MessageID(envelope.ID), time.Now().UTC())
 }
 
+// admitWrite takes a lease on writing this envelope's conversation, held
+// until the row is committed. It reports false when a removal of that
+// conversation is running.
+//
+// A check would not do: between checking and appending, a whole removal can
+// start and finish, and the row would land behind both of its history
+// deletes — exactly the row the next startup rebuilds the deleted
+// conversation from. The lease closes that gap from the other side: the
+// removal waits for it.
+func (a *MessageStoreAdapter) admitWrite(envelope protocol.Envelope) (func(), bool) {
+	if a.removals == nil || envelope.Topic != "dm" || a.id == nil {
+		return func() {}, true
+	}
+	self := a.id.Address
+	peer := envelope.Sender
+	if peer == self {
+		peer = envelope.Recipient
+	}
+	return a.removals.admitWrite(domain.PeerIdentityFromWire(peer))
+}
+
 // StoreMessage persists an inbound or outbound envelope and classifies the
 // outcome so the node can decide whether it saw a new message or a
 // duplicate. Matches the node.MessageStore contract.
@@ -103,6 +132,24 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 	if a == nil || a.chatlog == nil {
 		return node.StoreFailed
 	}
+	// The lease is taken before anything else this function does and held
+	// until the row is committed, so a removal either sees this write and
+	// waits for it, or starts after it and sweeps the row it left.
+	releaseWrite, admitted := a.admitWrite(envelope)
+	if !admitted {
+		// DEFERRED, not stored and not dropped: the sender keeps the
+		// message and re-delivers it once the removal is over, at which
+		// point it is simply a new message to a conversation that no
+		// longer exists — and opens it again, as a message from any
+		// stranger would. Storing it now would leave a row the deletion
+		// has already looked past.
+		log.Debug().
+			Str("id", string(envelope.ID)).
+			Msg("chatlog store deferred a message: its conversation is being removed")
+		return node.StoreDeferred
+	}
+	defer releaseWrite()
+
 	refused, known := a.refusesDeletedID(envelope)
 	switch {
 	case refused:

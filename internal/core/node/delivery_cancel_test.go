@@ -117,6 +117,7 @@ func TestCancelOutgoingDeliveryClearsEveryDeliveryHook(t *testing.T) {
 // TestCancelOutgoingDeliveryRejectsForeignEnvelope pins the authorship
 // gate: a transit envelope belongs to its sender's delivery contract, so
 // a local caller must not be able to purge it by guessing an id.
+
 func TestCancelOutgoingDeliveryRejectsForeignEnvelope(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)

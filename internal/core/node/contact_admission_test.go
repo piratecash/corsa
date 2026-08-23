@@ -345,7 +345,7 @@ func TestLastOnlineIsLocalTrustedContactMetadata(t *testing.T) {
 		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
 	}
 	want := time.Date(2026, time.August, 21, 7, 6, 16, 123456789, time.UTC)
-	if updated, err := svc.trust.recordLastOnlineAt([]domain.PeerIdentity{peer}, want); err != nil || updated != 1 {
+	if updated, err := svc.trust.recordLastOnlineAt([]domain.PeerIdentity{peer}, want, 0); err != nil || updated != 1 {
 		t.Fatalf("record last online: updated=%d err=%v", updated, err)
 	}
 	svc.addKnownPubKey(peer.String(), "pubkey")

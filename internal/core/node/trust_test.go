@@ -25,13 +25,13 @@ func TestRecordLastOnlineAtPersistsAndDoesNotRegress(t *testing.T) {
 	}
 
 	want := time.Date(2026, time.August, 21, 9, 6, 16, 123456789, time.FixedZone("test", 2*60*60))
-	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer, domaintest.ID("unknown")}, want); err != nil || updated != 1 {
+	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer, domaintest.ID("unknown")}, want, 0); err != nil || updated != 1 {
 		t.Fatalf("recordLastOnlineAt: updated=%d err=%v", updated, err)
 	}
 	want = want.UTC()
 
 	// A delayed writer must not move the durable observation backwards.
-	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer}, want.Add(-time.Hour)); err != nil || updated != 0 {
+	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer}, want.Add(-time.Hour), 0); err != nil || updated != 0 {
 		t.Fatalf("older recordLastOnlineAt: updated=%d err=%v", updated, err)
 	}
 
@@ -59,6 +59,46 @@ func TestRecordLastOnlineAtPersistsAndDoesNotRegress(t *testing.T) {
 	}
 	if got := reloaded.trustedContacts()[peer.String()].LastOnlineAt; !got.Equal(want) {
 		t.Fatalf("reloaded last_online_at = %v, want %v", got, want)
+	}
+}
+
+// TestLastOnlineThrottleRefusesSmallAdvances pins the throttle where the DM
+// path relies on it: inside the store, under the same lock as the update. A
+// caller that compared first and wrote after would let every message of a
+// burst read the same stored stamp and buy its own rewrite of the whole file.
+func TestLastOnlineThrottleRefusesSmallAdvances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trust.json")
+	peer := domaintest.ID("throttled-contact")
+	store, err := loadTrustStore(path, trustedContact{Address: domaintest.ID("throttle-self").String(), PubKey: "pk-self"})
+	if err != nil {
+		t.Fatalf("loadTrustStore: %v", err)
+	}
+	if stored, err := store.remember(trustedContact{Address: peer.String(), PubKey: "pk-peer"}); err != nil || !stored {
+		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
+	}
+	base := time.Date(2026, time.August, 21, 10, 0, 0, 0, time.UTC)
+
+	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer}, base, time.Minute); err != nil || updated != 1 {
+		t.Fatalf("first write: updated=%d err=%v", updated, err)
+	}
+	genAfterFirst := store.snapshotGen
+
+	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer}, base.Add(30*time.Second), time.Minute); err != nil || updated != 0 {
+		t.Fatalf("advance inside the interval: updated=%d err=%v, want 0", updated, err)
+	}
+	if store.snapshotGen != genAfterFirst {
+		t.Fatalf("an advance inside the interval rewrote the file: gen %d → %d", genAfterFirst, store.snapshotGen)
+	}
+	if got := store.trustedContacts()[peer.String()].LastOnlineAt; !got.Equal(base) {
+		t.Fatalf("stamp = %v, want it held at %v", got, base)
+	}
+
+	past := base.Add(time.Minute + time.Second)
+	if updated, err := store.recordLastOnlineAt([]domain.PeerIdentity{peer}, past, time.Minute); err != nil || updated != 1 {
+		t.Fatalf("advance past the interval: updated=%d err=%v", updated, err)
+	}
+	if got := store.trustedContacts()[peer.String()].LastOnlineAt; !got.Equal(past) {
+		t.Fatalf("stamp = %v, want %v", got, past)
 	}
 }
 

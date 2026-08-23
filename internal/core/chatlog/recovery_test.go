@@ -61,9 +61,9 @@ func TestRecoveryMarksLifecycle(t *testing.T) {
 		t.Fatalf("marks = %+v", marks)
 	}
 
-	unreadBefore, err := store.UnreadCountFor(context.Background(), peer)
-	if err != nil || unreadBefore != 1 {
-		t.Fatalf("unread before = %d err=%v, want 1", unreadBefore, err)
+	unreadBefore, err := store.UnseenIncomingIDsFor(context.Background(), peer)
+	if err != nil || len(unreadBefore) != 1 {
+		t.Fatalf("unread before = %v err=%v, want one message", unreadBefore, err)
 	}
 
 	const replacementID = "0b7d81f2-9c48-4a6e-9d10-000000000002"
@@ -80,9 +80,9 @@ func TestRecoveryMarksLifecycle(t *testing.T) {
 	}
 
 	// The unread collapse: the unreadable original no longer counts.
-	unreadAfter, err := store.UnreadCountFor(context.Background(), peer)
-	if err != nil || unreadAfter != 0 {
-		t.Fatalf("unread after = %d err=%v, want 0 (collapse failed)", unreadAfter, err)
+	unreadAfter, err := store.UnseenIncomingIDsFor(context.Background(), peer)
+	if err != nil || len(unreadAfter) != 0 {
+		t.Fatalf("unread after = %v err=%v, want none (collapse failed)", unreadAfter, err)
 	}
 
 	// Foreign metadata survived every merge.

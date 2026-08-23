@@ -555,10 +555,27 @@ Implemented in `trustStore` (`trust.go`):
 4. Later conflicting keys for the same address are rejected and recorded in
    the `"conflicts"` section for manual review.
 5. The same contact row carries an independent optional `last_online_at` local
-   observation. It is updated only when the identity's final live route
-   disappears while another remote route survives as a connectivity witness;
-   a total local route collapse is not attributed to every contact. The field
-   is not key-trust evidence and is never sent in P2P contact exchange.
+   observation, written from two places and never from anywhere else. Route
+   loss updates it when the identity's final live route disappears while
+   another remote route survives as a connectivity witness; a total local
+   route collapse is not attributed to every contact. A DM the sender
+   delivered over its OWN authenticated session updates it too — the envelope
+   signature proves authorship and the arrival is timestamped by this node's
+   clock — while a relayed envelope is not counted, since it may have waited
+   in transit for days and proves only that the relay is up. That path also
+   publishes `identity.presence.observed` so a running UI sees the write: the
+   desktop probes the node once at startup and lives on events afterwards. The
+   durable write is throttled to one per contact per minute — it rewrites the
+   whole trust file, and inbound DMs (retries and re-gossip included) would
+   otherwise buy one each — while the event is published on every arrival.
+   The interval is compared inside the trust store, under the same lock that
+   updates the stamp: comparing first and writing after leaves a window in
+   which every message of a burst reads the same stored value.
+   What local chat history says about a contact is deliberately NOT stored
+   here — it carries the sender's own timestamp, and the application layer
+   recomputes it at startup instead of keeping a second copy in step with this
+   one. The field is not key-trust evidence and is never sent in P2P contact
+   exchange.
 
 ### Gazeta — TTL-based encrypted notices
 
@@ -1307,11 +1324,26 @@ Peer'ы классифицируются по доступным сетевым 
 4. Последующие конфликтующие ключи для того же адреса отклоняются и
    записываются в секцию `"conflicts"` для ручной проверки.
 5. В той же строке контакта хранится независимое optional-поле
-   `last_online_at`. Оно обновляется только при исчезновении последнего живого
-   маршрута identity, если другой удалённый маршрут остаётся подтверждением
-   связности; тотальный локальный коллапс маршрутов не приписывается всем
-   контактам. Поле не является trust-свидетельством для ключей и не передаётся
-   при P2P-обмене контактами.
+   `last_online_at`, у которого ровно два писателя и никаких других. Потеря
+   маршрута обновляет его при исчезновении последнего живого маршрута
+   identity, если другой удалённый маршрут остаётся подтверждением связности;
+   тотальный локальный коллапс маршрутов не приписывается всем контактам. DM,
+   доставленный отправителем по ЕГО собственной аутентифицированной сессии,
+   тоже обновляет поле — подпись конверта доказывает авторство, а время
+   прихода ставит нода своими часами, — тогда как реле-конверт не
+   засчитывается: он мог ждать в транзите сутками и доказывает лишь то, что
+   живо реле. Этот же путь публикует `identity.presence.observed`, чтобы
+   запись увидел работающий UI: desktop опрашивает ноду один раз при старте и
+   дальше живёт на событиях. Сама durable-запись троттлится до одной на контакт
+   в минуту — она перезаписывает весь trust-файл, а входящие DM (включая ретраи
+   и повторный gossip) покупали бы по записи каждый, — тогда как событие
+   публикуется на каждый приход. Интервал сверяется внутри trust store, под тем
+   же замком, что обновляет отметку: сверка снаружи оставляет окно, в котором
+   все сообщения всплеска читают одно и то же сохранённое значение. То, что говорит локальная история переписки, тут
+   намеренно НЕ хранится: там время самого отправителя, и прикладной слой
+   пересчитывает это при старте, а не держит вторую копию, которую надо
+   согласовывать с первой. Поле не является trust-свидетельством для ключей и
+   не передаётся при P2P-обмене контактами.
 
 ### Gazeta — зашифрованные notice с TTL
 

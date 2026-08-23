@@ -215,10 +215,13 @@ func brightPixelBounds(img *image.RGBA) image.Rectangle {
 func TestContactLastOnlineAtPrefersPresenceEvidence(t *testing.T) {
 	peer := domaintest.ID("last-online-peer")
 	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
-	preview := &service.RouterPeerState{Preview: service.ConversationPreview{
-		Sender:    peer,
-		Timestamp: now.Add(-2 * time.Hour),
-	}}
+	preview := &service.RouterPeerState{
+		Preview: service.ConversationPreview{
+			Sender:    peer,
+			Timestamp: now.Add(-2 * time.Hour),
+		},
+		LastIncomingAt: domain.TimeOf(now.Add(-2 * time.Hour)),
+	}
 
 	if got := contactLastOnlineAt(service.NodeStatus{
 		ReachableIDs: map[domain.PeerIdentity]bool{peer: true},
@@ -252,16 +255,88 @@ func TestContactLastOnlineAtPrefersPresenceEvidence(t *testing.T) {
 		t.Fatalf("legacy peer-health fallback = %v, want disconnect %v", got, disconnected)
 	}
 
-	if got := contactLastOnlineAt(service.NodeStatus{}, preview, peer, time.Time{}); !got.Equal(preview.Preview.Timestamp) {
-		t.Fatalf("routed fallback = %v, want preview %v", got, preview.Preview.Timestamp)
+	if got := contactLastOnlineAt(service.NodeStatus{}, preview, peer, time.Time{}); !got.Equal(preview.LastIncomingAt.Time()) {
+		t.Fatalf("fallback with no node observation = %v, want the peer's message %v", got, preview.LastIncomingAt.Time())
 	}
 
+	// A conversation where only we have written carries no incoming stamp, so
+	// our own message must not become evidence about the peer.
 	outgoingOnly := &service.RouterPeerState{Preview: service.ConversationPreview{
 		Sender:    domaintest.ID("self"),
 		Timestamp: now.Add(-5 * time.Minute),
 	}}
 	if got := contactLastOnlineAt(service.NodeStatus{}, outgoingOnly, peer, time.Time{}); !got.IsZero() {
 		t.Fatalf("outgoing message became peer presence evidence: got %v, want zero", got)
+	}
+}
+
+// TestContactLastOnlineAtUsesLastIncomingBehindOwnReply covers the ordinary
+// conversation shape: the peer wrote, we answered. The thread's last message is
+// then ours, so a preview-derived fallback sees no peer evidence at all and the
+// row goes blank — while the peer's own message is still the newest thing we
+// know about them.
+func TestContactLastOnlineAtUsesLastIncomingBehindOwnReply(t *testing.T) {
+	peer := domaintest.ID("replied-peer")
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	incoming := now.Add(-3 * time.Hour)
+
+	state := &service.RouterPeerState{
+		Preview: service.ConversationPreview{
+			Sender:    domaintest.ID("self"),
+			Timestamp: now.Add(-1 * time.Hour),
+		},
+		LastIncomingAt: domain.TimeOf(incoming),
+	}
+
+	if got := contactLastOnlineAt(service.NodeStatus{}, state, peer, time.Time{}); !got.Equal(incoming) {
+		t.Fatalf("last-online behind own reply = %v, want the peer's message %v", got, incoming)
+	}
+
+	// A node-owned observation wins outright — not by being newer. The chat
+	// stamp comes from the sender's clock, so letting it compete would let a
+	// peer overwrite what this node itself observed by claiming a later time.
+	staleHealth := now.Add(-9 * time.Hour)
+	if got := contactLastOnlineAt(service.NodeStatus{}, state, peer, staleHealth); !got.Equal(staleHealth) {
+		t.Fatalf("chat activity overrode an older node observation: got %v, want %v", got, staleHealth)
+	}
+	observedContact := service.NodeStatus{Contacts: map[string]service.Contact{
+		peer.String(): {LastOnlineAt: domain.TimeOf(staleHealth)},
+	}}
+	if got := contactLastOnlineAt(observedContact, state, peer, time.Time{}); !got.Equal(staleHealth) {
+		t.Fatalf("chat activity overrode an older durable observation: got %v, want %v", got, staleHealth)
+	}
+	online := service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{peer: true}}
+	if got := contactLastOnlineAt(online, state, peer, time.Time{}); !got.IsZero() {
+		t.Fatalf("online contact exposed a timestamp: %v", got)
+	}
+}
+
+// TestContactLastOnlineAtRanksChatBelowObservations pins the class boundary.
+// Chat activity carries the SENDER's timestamp, so it must not outrank what
+// this node saw with its own clock — otherwise dating a message forward would
+// beat a route loss the node actually witnessed.
+func TestContactLastOnlineAtRanksChatBelowObservations(t *testing.T) {
+	peer := domaintest.ID("chatty-but-unseen-peer")
+	now := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+
+	observed := now.Add(-6 * time.Hour)
+	claimed := now.Add(-1 * time.Hour)
+	state := &service.RouterPeerState{LastIncomingAt: domain.TimeOf(claimed)}
+
+	// No observation anywhere: the message is what the row has.
+	if got := contactLastOnlineAt(service.NodeStatus{}, state, peer, time.Time{}); !got.Equal(claimed) {
+		t.Fatalf("chat-only contact = %v, want %v", got, claimed)
+	}
+
+	// An OLDER observation still wins — the ranking is by class, not by time.
+	if got := contactLastOnlineAt(service.NodeStatus{}, state, peer, observed); !got.Equal(observed) {
+		t.Fatalf("newer chat activity beat an older peer-health observation: got %v, want %v", got, observed)
+	}
+	withObservation := service.NodeStatus{Contacts: map[string]service.Contact{
+		peer.String(): {LastOnlineAt: domain.TimeOf(observed)},
+	}}
+	if got := contactLastOnlineAt(withObservation, state, peer, time.Time{}); !got.Equal(observed) {
+		t.Fatalf("newer chat activity beat the durable observation: got %v, want %v", got, observed)
 	}
 }
 

@@ -458,17 +458,43 @@ func (r *DMRouter) removeLocalMessage(ctx context.Context, store *chatlog.Store,
 	// as the row.
 	expiry := r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC())
 
+	// removed says whether a row actually went. A re-issued delete finds
+	// nothing to remove, and moving the version for it would mark every
+	// load and decrypt in flight as stale for nothing.
+	var removed bool
 	if route.SchedulesPeerDeletion() {
-		if _, err := store.DeleteWithIntent(ctx, intent, expiry); err != nil {
+		var err error
+		if removed, err = store.DeleteWithIntent(ctx, intent, expiry); err != nil {
 			return fmt.Errorf("delete %s and schedule the peer-side removal: %w", target, err)
 		}
-	} else if _, err := store.DeleteMessageWithTombstone(ctx, target, expiry); err != nil {
-		return fmt.Errorf("delete chatlog entry %s: %w", target, err)
+	} else {
+		var err error
+		if removed, err = store.DeleteMessageWithTombstone(ctx, target, expiry); err != nil {
+			return fmt.Errorf("delete chatlog entry %s: %w", target, err)
+		}
 	}
 
-	if r.fileBridge != nil {
-		r.fileBridge.OnMessageDeleted(target)
+	// Under the file barrier, which moves the version first: a registration
+	// in flight either finishes before this begins or finds the deletion
+	// and stands down.
+	r.withFileOps(peer, removed, func() {
+		if r.fileBridge != nil {
+			r.fileBridge.OnMessageDeleted(target)
+		}
+	})
+	if !removed {
+		// The row was already gone — a re-issued request, a race with the
+		// peer's own delete. There is nothing to evict from the UI and
+		// nothing to recompute; doing it anyway would move the version for
+		// a deletion that did not happen and mark every read in flight as
+		// stale.
+		log.Debug().
+			Str("target", string(target)).
+			Str("peer", peer.String()).
+			Msg("dm_router: local copy of the message was already gone")
+		return nil
 	}
+
 	r.evictDeletedMessageFromUI(peer, target)
 	r.checkpointAfterDelete(ctx, store)
 
@@ -559,6 +585,15 @@ func (r *DMRouter) evictDeletedMessageFromUI(peer domain.PeerIdentity, target do
 	// keep the just-deleted message visible in the sidebar/file-tab
 	// preview row even though the bubble has been removed from the
 	// active conversation.
+
+	// The badge is a set of ids, and this id is gone. The history move was
+	// already recorded by the file barrier when the row was removed — one
+	// deletion is one move, and a second bump would make every read that
+	// started in between look stale for nothing.
+	r.mu.Lock()
+	r.dropUnreadLocked(peer, target)
+	r.mu.Unlock()
+
 	r.refreshPreviewAfterDelete(peer)
 
 	if cacheRemoved {
@@ -583,67 +618,167 @@ func (r *DMRouter) evictDeletedMessageFromUI(peer domain.PeerIdentity, target do
 //     stale preview behind keeps the deleted message visible in the
 //     sidebar even after the active-conversation bubble disappears.
 //
-// Unread badge: deleting an unread incoming message decrements the
-// per-peer unread count in SQLite (the row is gone — no longer
-// counted). The in-memory RouterPeerState.Unread is event-driven via
-// Unread++ / Unread=0 transitions and never spontaneously
-// recalculates from SQL outside of seedPreviews. Without an explicit
-// refresh here the sidebar badge stays at the pre-delete value, even
-// down to "5 unread" after the only 5 unread messages have been
-// deleted. We pull the authoritative count from chatlog and overwrite.
+// Unread badge: deleting an unread incoming message removes its row, and
+// with it the only record of its delivery status. The event stream carries
+// no status, so nothing else can ever take an id OUT of the badge set —
+// which is why this path re-derives the set from the database instead of
+// subtracting from it. Without that the sidebar would keep reading "5
+// unread" after the only five unread messages were deleted.
 //
 // The peer entry itself stays in the sidebar — only the preview body
 // goes blank and the unread badge resets to whatever chatlog reports.
 // Removing the peer outright is a separate user action
 // (DeletePeerHistory).
 func (r *DMRouter) refreshPreviewAfterDelete(peer domain.PeerIdentity) {
-	if r.client == nil {
+	r.refreshPreviewAfterDeleteCtx(r.opContext(), peer)
+}
+
+// refreshPreviewAfterDeleteCtx is the same work on a caller-supplied context,
+// so the retry sweep can bound itself by the loop it runs in rather than by
+// the router's process-lifetime context.
+func (r *DMRouter) refreshPreviewAfterDeleteCtx(ctx context.Context, peer domain.PeerIdentity) {
+	// afterDelete=true: an empty conversation here means the user removed the
+	// last row, so the preview is cleared and the badge forced to zero. The
+	// ordering rules — one reconciliation per peer at a time, and a revision
+	// that rejects an answer the event path has already overtaken — live in
+	// reconcilePeerFromStore, because every SQL recomputation needs them and
+	// three copies of them would be three chances to get them wrong.
+	// TryLock, never Lock: this runs on the ebus subscriber goroutine that
+	// carries control DMs, and that goroutine has a 64-slot inbox which
+	// DROPS its overflow. Waiting behind another reconciliation's two query
+	// timeouts would cost incoming control messages, so a contended peer is
+	// handed to the sweep instead.
+	switch r.reconcilePeerFromStore(ctx, peer, true, false) {
+	case reconcileApplied, reconcilePeerGone, reconcileNoHistory:
+		r.clearPendingDeleteReconcile(peer)
+	case reconcileRetry, reconcileBusy:
+		// The one recomputation nobody repeats. A new message reconciles its
+		// own peer, and the startup scan runs once; a deletion whose
+		// reconciliation failed has no second chance, so the sidebar would go
+		// on quoting the message the user destroyed. The sweep below owes it
+		// one.
+		r.queueDeleteReconcile(peer)
+	}
+}
+
+// deleteReconcileSweepBudget is the wall-clock share of one tick the owed
+// reconciliations may take. The tick period is five seconds and the
+// scheduler behind it has its own deadlines to keep.
+const deleteReconcileSweepBudget = 2 * time.Second
+
+// deleteReconcileSweepLimit bounds how many owed reconciliations one tick
+// takes on. They share a goroutine with the delete-intent scheduler, and a
+// long queue of peers whose chatlog is slow would otherwise hold up the
+// deletions themselves.
+const deleteReconcileSweepLimit = 8
+
+// deleteReconcileRetries bounds the retries of one deletion's reconciliation.
+// The sweep runs every few seconds, so this is a minute of a chatlog that
+// cannot answer — long past the transient failures this exists for, and short
+// of retrying a broken database until the process ends.
+const deleteReconcileRetries = 12
+
+// queueDeleteReconcile records that a peer still owes a post-deletion
+// reconciliation.
+func (r *DMRouter) queueDeleteReconcile(peer domain.PeerIdentity) {
+	if peer.IsZero() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	preview, err := r.client.FetchSinglePreview(ctx, peer)
-	cancel()
-	if err != nil {
-		// Transient chatlog error — fall back to leaving the preview
-		// as-is rather than wiping it on a flaky read. The next
-		// successful sidebar refresh will pick up the correct state.
-		return
-	}
-
-	// Fetch the authoritative unread count for this peer from chatlog.
-	// Done outside the router lock because it is SQL I/O. UnreadCountFor
-	// is a no-op when chatlog is unavailable, so an unset count means
-	// "leave Unread untouched".
-	var (
-		unreadCount    int
-		unreadResolved bool
-	)
-	if r.client.chatlog != nil {
-		if store := r.client.chatlog.Store(); store != nil {
-			n, err := store.UnreadCountFor(r.opContext(), peer)
-			if err == nil {
-				unreadCount = n
-				unreadResolved = true
-			}
-		}
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ensurePeerLocked(peer)
-	if preview != nil {
-		r.peers[peer].Preview = *preview
-	} else {
-		// nil preview during delete = "no chatlog rows left for this
-		// peer". Clear preview explicitly + force unread to 0; an
-		// empty conversation cannot have unread messages.
-		r.peers[peer].Preview = ConversationPreview{PeerAddress: peer}
-		r.peers[peer].Unread = 0
-		return
+	if r.pendingDeleteReconcile == nil {
+		r.pendingDeleteReconcile = make(map[domain.PeerIdentity]int)
 	}
-	if unreadResolved {
-		r.peers[peer].Unread = unreadCount
+	if _, queued := r.pendingDeleteReconcile[peer]; !queued {
+		r.pendingDeleteReconcile[peer] = deleteReconcileRetries
 	}
+}
+
+// clearPendingDeleteReconcile forgets an owed reconciliation.
+func (r *DMRouter) clearPendingDeleteReconcile(peer domain.PeerIdentity) {
+	r.mu.Lock()
+	delete(r.pendingDeleteReconcile, peer)
+	r.mu.Unlock()
+}
+
+// retryPendingDeleteReconcile is one sweep of the owed reconciliations. A peer
+// that has run out of attempts is dropped with a warning: the sidebar is
+// wrong for that conversation until something else touches it, and saying so
+// beats a queue that retries a broken database forever.
+func (r *DMRouter) retryPendingDeleteReconcile(ctx context.Context) {
+	r.mu.RLock()
+	owed := make([]domain.PeerIdentity, 0, len(r.pendingDeleteReconcile))
+	for peer := range r.pendingDeleteReconcile {
+		owed = append(owed, peer)
+		if len(owed) >= deleteReconcileSweepLimit {
+			break
+		}
+	}
+	r.mu.RUnlock()
+
+	// A budget in TIME, not only in peers: one reconciliation can wait out
+	// two query timeouts, so eight of them would hold the shared scheduler
+	// goroutine for half a minute while delete intents and withdrawals wait
+	// behind it. Whatever does not fit stays queued for the next tick.
+	sweepCtx, cancelSweep := context.WithTimeout(ctx, deleteReconcileSweepBudget)
+	defer cancelSweep()
+
+	for _, peer := range owed {
+		if sweepCtx.Err() != nil {
+			return
+		}
+		// TryLock, not Lock: the sweep shares its goroutine with the
+		// delete-intent scheduler, and a peer whose reconciliation is
+		// already running would hold it past any budget.
+		outcome := r.reconcilePeerFromStore(sweepCtx, peer, true, false)
+		if outcome == reconcileRetry && sweepCtx.Err() != nil {
+			// The tick's own budget expired under it, not the database. The
+			// peer stays queued with its attempts intact: charging it here
+			// would write off a healthy conversation after twelve busy
+			// ticks.
+			continue
+		}
+		switch outcome {
+		case reconcileApplied:
+			// Publish it. The first attempt was published by its caller,
+			// this one has no caller waiting: Snapshot() serves a cache only
+			// notify rebuilds, so a retry that lands silently leaves the
+			// deleted message quoted on screen — the exact outcome the queue
+			// exists to prevent.
+			r.clearPendingDeleteReconcile(peer)
+			r.notify(UIEventSidebarUpdated)
+			continue
+		case reconcilePeerGone, reconcileNoHistory:
+			r.clearPendingDeleteReconcile(peer)
+			continue
+		case reconcileBusy:
+			// Contention is not failure: nothing was read, so nothing went
+			// wrong. Spending an attempt here would write off a busy
+			// conversation after twelve ticks of perfectly healthy work.
+			continue
+		}
+		r.mu.Lock()
+		left := r.pendingDeleteReconcile[peer] - 1
+		if left <= 0 {
+			delete(r.pendingDeleteReconcile, peer)
+		} else {
+			r.pendingDeleteReconcile[peer] = left
+		}
+		r.mu.Unlock()
+		if left <= 0 {
+			log.Warn().Str("peer", peer.String()).Msg("dm_router: giving up on the post-deletion sidebar refresh; the row keeps the deleted message until something else touches this conversation")
+		}
+	}
+}
+
+// optionalTimeOrUnset keeps the zero time out of an OptionalTime: "no
+// incoming message survived" has to read as absent, not as an observation
+// made in year 1.
+func optionalTimeOrUnset(at time.Time) domain.OptionalTime {
+	if at.IsZero() {
+		return domain.OptionalTime{}
+	}
+	return domain.TimeOf(at)
 }
 
 // dispatchMessageDelete encodes the MessageDeletePayload and submits it
@@ -810,8 +945,9 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 		return domain.MessageDeleteStatusDenied
 	}
 
-	if _, err := store.DeleteMessageWithTombstone(r.opContext(), target,
-		r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC())); err != nil {
+	inboundRemoved, err := store.DeleteMessageWithTombstone(r.opContext(), target,
+		r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC()))
+	if err != nil {
 		log.Warn().Err(err).
 			Str("target", string(target)).
 			Msg("dm_router: applyInboundDelete: chatlog DeleteByID failed")
@@ -822,9 +958,11 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 		return domain.MessageDeleteStatusError
 	}
 
-	if r.fileBridge != nil {
-		r.fileBridge.OnMessageDeleted(target)
-	}
+	r.withFileOps(envelopeSender, inboundRemoved, func() {
+		if r.fileBridge != nil {
+			r.fileBridge.OnMessageDeleted(target)
+		}
+	})
 	// The peer asked us to destroy this message — the deletion the
 	// protocol exists to deliver, and it gets the same on-disk treatment
 	// as our own. Coalesced rather than immediate: a thread wipe arrives
@@ -998,14 +1136,21 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	}
 
 	if ack.Status.IsTerminalSuccess() {
-		if _, err := store.DeleteByID(ctx, ack.TargetID); err != nil {
+		// Whether this defensive delete actually removed anything decides
+		// the version move: an ack usually names a row deleted when the
+		// intent was written, and moving the counter for it would mark
+		// every current read stale for nothing.
+		removed, err := store.DeleteByID(ctx, ack.TargetID)
+		if err != nil {
 			log.Warn().Err(err).
 				Str("target", string(ack.TargetID)).
 				Msg("dm_router: message_delete_ack: defensive DeleteByID failed")
 		}
-		if r.fileBridge != nil {
-			r.fileBridge.OnMessageDeleted(ack.TargetID)
-		}
+		r.withFileOps(envelopeSender, removed, func() {
+			if r.fileBridge != nil {
+				r.fileBridge.OnMessageDeleted(ack.TargetID)
+			}
+		})
 		r.evictDeletedMessageFromUI(envelopeSender, ack.TargetID)
 	}
 
@@ -1070,6 +1215,9 @@ func (r *DMRouter) deleteRetryLoop(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			r.processDeleteRetryDue(ctx, now.UTC())
+			// Same tick, same cause: a deletion whose sidebar refresh did
+			// not land is still showing the message it removed.
+			r.retryPendingDeleteReconcile(ctx)
 			// Same tick, same reason: something a deletion set in motion
 			// is still outstanding. A withdrawal the node refused earlier
 			// keeps the payload of a deleted message in this process.

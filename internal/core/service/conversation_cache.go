@@ -62,6 +62,25 @@ func (c *ConversationCache) Len() int {
 
 // AppendMessage ensures idempotency by message ID: only unique messages are stored.
 // Returns true if the message was new, false if it was a duplicate.
+// AppendForPeer appends msg only if the cache still belongs to peer, and
+// reports whether it did. The pair has to be atomic: checking the owner and
+// appending in two acquisitions leaves a window in which the cache is loaded
+// for someone else, and the message is spliced into their thread.
+func (c *ConversationCache) AppendForPeer(peer domain.PeerIdentity, msg DirectMessage) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.peerAddress != peer {
+		return false
+	}
+	if _, exists := c.index[msg.ID]; exists {
+		return true
+	}
+	c.index[msg.ID] = len(c.messages)
+	c.messages = append(c.messages, msg)
+	return true
+}
+
 func (c *ConversationCache) AppendMessage(msg DirectMessage) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

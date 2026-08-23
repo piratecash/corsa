@@ -410,10 +410,51 @@ On startup, `DMRouter.initializeFromDB()` restores sidebar state from the chatlo
 - **Sidebar peers**: all chatlog conversation peers are added to the
   `peers` map (`RouterPeerState` entries), so they appear in the sidebar
   even if the peer is not in trusted/network contacts.
-- **Unread badges**: `UnreadCount` from `ListConversations()` (SQL-level
-  count of incoming DMs with `delivery_status != 'seen'`) is stored in
-  `RouterPeerState.Unread`. Peers with unread messages are promoted to the
-  front of `peerOrder`.
+- **Unread badges**: `UnseenIncomingIDs()` returns the IDS of unseen incoming
+  DMs per peer, and the router keeps them as a set whose size is the badge.
+  IDs rather than a count because the database is ahead of the event stream —
+  the same message arrives from both — and adding an id twice changes nothing.
+  Peers with unread messages are promoted to the front of `peerOrder`.
+- **Last-online evidence**: `LastIncomingAtPerPeer()` returns, per
+  conversation, the creation time of the newest message the peer wrote. The
+  sidebar spends it as the weakest form of "last online" — a message can only
+  have been written by a node that was running — so the query excludes our own
+  rows: an outgoing message says nothing about the recipient. A conversation
+  with no incoming message is absent from the map rather than present with a
+  zero time. Both forms take `now` and refuse rows dated after it — created_at
+  is what the SENDER's node printed — and refusing one does not refuse the
+  conversation: the honest message behind a forged future date is still the
+  answer. Both also pick the winner in Go rather than in SQL, because neither
+  SQL ordering is trustworthy for this column: text order is not time order
+  ("…00Z" sorts above the later "…00.5Z", and a zone offset moves the instant
+  by hours while the digits keep their printed order), and `julianday` is a
+  float that collapses timestamps inside one microsecond, leaving the winner
+  to a `rowid` tie-break — insertion order, which for out-of-order arrivals is
+  not time order either. The scan stays inside `idx_messages_peer`, which
+  covers every column read. The result is held in memory as
+  `RouterPeerState.LastIncomingAt` and deliberately not persisted: it is
+  derived from these very rows, so a durable copy would be a second value to
+  keep in step with the first, and ordering its writers needs a version that a
+  sidebar label does not justify. Recomputing it costs this one scan per
+  launch. `LastIncomingAtFor()` is the single-conversation form
+  used by the delete path, where a removed row can legitimately move the
+  in-memory value backwards; it is one unordered pass over the peer's rows,
+  because asking SQLite to order by `julianday(created_at)` is ordering by a
+  function of a column and costs a temp b-tree over the same rows it was
+  meant to avoid reading.
+- **Read state for headers and for the delete path**:
+  `StoredMessageStatuses()` returns the `delivery_status` of every one of a
+  list of ids the database holds; an absent id is one it does not hold at
+  all. One query answers both callers, about the same moment. The header path
+  (`repairUnreadFromHeaders`) learns about messages from the node's in-memory
+  topic, which carries no status, so a header cannot say whether the user
+  already read the message — and on the first sync after launch that matters,
+  because a desktop attaching to a long-running node is offered back every
+  message of the previous session. It suppresses exactly the ids the database
+  calls `seen` and decides for the rest itself, so no other read has to
+  succeed first. The delete path asks the same query the opposite question:
+  an id absent from the result is not "read", it is "not written yet", and
+  keeps its badge.
 - **Auto-selection**: the first peer in `peerOrder` is auto-selected as
   `activePeer` (with `peerClicked = false`), and its conversation is loaded
   via `loadConversation()`.
@@ -1364,10 +1405,50 @@ stateDiagram-v2
 - **Peers в боковой панели**: все peers из chatlog добавляются в map `peers`
   (записи `RouterPeerState`), чтобы они появились в sidebar даже если peer
   не в trusted/network contacts.
-- **Unread badges**: `UnreadCount` из `ListConversations()` (SQL-подсчёт
-  входящих DM с `delivery_status != 'seen'`) сохраняется в
-  `RouterPeerState.Unread`. Peers с непрочитанными продвигаются в начало
-  `peerOrder`.
+- **Unread badges**: `UnseenIncomingIDs()` возвращает ID непрочитанных
+  входящих DM по каждому peer-у, и роутер держит их множеством, размер
+  которого и есть бейдж. Именно ID, а не счёт: база опережает поток событий —
+  одно сообщение приходит из обоих источников, — а повторное добавление id
+  ничего не меняет. Peers с непрочитанными продвигаются в начало `peerOrder`.
+- **Свидетельство last-online**: `LastIncomingAtPerPeer()` возвращает по
+  каждому диалогу время создания самого свежего сообщения, написанного
+  собеседником. Sidebar тратит это как самую слабую форму «последний раз
+  онлайн» — сообщение мог написать только работающий узел, — поэтому запрос
+  исключает наши строки: исходящее сообщение ничего не говорит о получателе.
+  Диалог без входящих сообщений отсутствует в map, а не присутствует с нулевым
+  временем. Обе формы принимают `now` и отвергают строки с датой позже него —
+  created_at печатает нода ОТПРАВИТЕЛЯ, — причём отказ от строки не означает
+  отказа от диалога: честное сообщение за поддельной будущей датой остаётся
+  ответом. Победитель выбирается в Go, а не в SQL, потому что для этой колонки
+  ни один SQL-порядок не надёжен: текстовый порядок не равен временному («…00Z»
+  сортируется выше более позднего «…00.5Z», а смещение зоны сдвигает момент на
+  часы, пока цифры сохраняют печатный порядок), а `julianday` — float, который
+  схлопывает timestamps внутри одной микросекунды, оставляя выбор за tie-break
+  по `rowid`, то есть за порядком вставки, который при приходе не по порядку
+  тоже не является временным. Скан остаётся внутри `idx_messages_peer`,
+  покрывающего все читаемые колонки. Результат живёт в памяти как
+  `RouterPeerState.LastIncomingAt` и намеренно не сохраняется: он выведен из
+  этих же строк, поэтому durable-копия была бы вторым значением, которое надо
+  согласовывать с первым, а упорядочивание её писателей требует версии,
+  которой строчка в сайдбаре не оправдывает. Пересчёт стоит одного этого скана
+  на запуск. `LastIncomingAtFor()` — форма для одного диалога,
+  используемая на пути удаления, где удалённая строка законно уводит значение
+  в памяти назад; это один неупорядоченный проход по строкам диалога, потому
+  что `ORDER BY julianday(created_at)` — сортировка по функции от колонки, и
+  она стоит temp b-tree по тем же строкам, чтения которых должна была
+  избежать.
+- **Состояние прочитанности для headers и для пути удаления**:
+  `StoredMessageStatuses()` возвращает `delivery_status` всех переданных id,
+  которые база держит; отсутствующий id — тот, которого у неё нет вовсе. Один
+  запрос отвечает обоим вызывающим и про один и тот же момент. Путь headers
+  (`repairUnreadFromHeaders`) узнаёт о сообщениях из in-memory топика ноды, а
+  тот статуса не несёт, поэтому header не может сказать, прочитал ли
+  пользователь сообщение — и на первом синке после запуска это важно: desktop,
+  подключившийся к долгоживущей ноде, получает назад все сообщения прошлой
+  сессии. Он гасит ровно те id, которые база называет `seen`, а про остальные
+  решает сам, так что ждать успеха другого чтения ему не нужно. Путь удаления
+  задаёт тому же запросу обратный вопрос: id, которого в ответе нет, — не
+  «прочитан», а «ещё не записан», и бейдж сохраняет.
 - **Авто-выбор**: первый peer в `peerOrder` авто-выбирается как `activePeer`
   (с `peerClicked = false`), и его диалог загружается через `loadConversation()`.
 

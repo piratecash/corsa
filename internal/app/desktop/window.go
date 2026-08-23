@@ -1827,6 +1827,16 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 		wasActive, err := w.router.RemovePeer(peer)
 		if err != nil {
 			w.router.SetSendStatus(w.t("status.delete_failed", err))
+		}
+		// Two different failures. A history delete that fails before
+		// anything is touched leaves the contact where it was — the
+		// composer state, the alias and the selection must stay with it.
+		// A final sweep that fails leaves the contact GONE from the
+		// sidebar, the cache and the trust store, and only its history in
+		// doubt: stopping here would strand the draft, the attachment and
+		// the alias of a conversation the user can no longer open, and
+		// leave the deleted chat selected.
+		if err != nil && !errors.Is(err, service.ErrHistorySweepFailed) {
 			if w.window != nil {
 				w.window.Invalidate()
 			}
@@ -5315,27 +5325,52 @@ func shouldShowContactLastOnlineLabel(gtx layout.Context, contactRow bool) bool 
 
 // contactLastOnlineAt returns the best identity-scoped activity timestamp the
 // desktop currently owns. A live route is represented by the online avatar,
-// so it returns no timestamp instead of a moving wall clock. For an offline
-// contact, durable presence, peer health and incoming activity are merged by
-// recency. Outgoing messages are not peer-presence evidence.
+// so it returns no timestamp instead of a moving wall clock. Outgoing
+// messages are never peer-presence evidence.
+//
+// Evidence comes in two classes, and they are ranked rather than compared.
+//
+// OBSERVATIONS are what this node saw with its own clock: Contact.LastOnlineAt
+// (a lost route, or a DM the sender handed us over its own session) and the
+// peer-health timestamps. Within the class the newest wins.
+//
+// MESSAGE-DERIVED evidence is RouterPeerState.LastIncomingAt: the newest
+// message this contact wrote, recomputed by the router from the chatlog and
+// never persisted. It carries the SENDER's clock — the one party who gains
+// from appearing recently online — so it is spent only when no observation
+// exists at all.
+//
+// The trade that ranking makes, stated plainly: freshness is given up for
+// provenance. A week-old peer-health stamp beats a message the contact sent
+// an hour ago through a relay, so a contact who is only ever reachable
+// indirectly can read as older than they are. Forward-dated timestamps are
+// already refused on the way in (the store skips rows dated after now, and
+// the router's merge refuses them again), so this is not about the lie a
+// sender can tell in one message — it is about not letting a value the peer
+// chose outrank one this node witnessed.
+//
+// None of them is the preview. The preview is the last row of the thread,
+// which is our own message in every conversation we answered last — the
+// ordinary case — and reading presence from it silently loses the contact's
+// own message behind our reply.
 func contactLastOnlineAt(status service.NodeStatus, state *service.RouterPeerState, fingerprint domain.PeerIdentity, peerHealthLastOnline time.Time) time.Time {
 	if status.ReachableIDs != nil && status.ReachableIDs[fingerprint] {
 		return time.Time{}
 	}
-	last := peerHealthLastOnline
+	observed := peerHealthLastOnline
 	if contact, ok := status.Contacts[fingerprint.String()]; ok && contact.LastOnlineAt.Valid() {
-		if persisted := contact.LastOnlineAt.Time(); persisted.After(last) {
-			last = persisted
+		if persisted := contact.LastOnlineAt.Time(); persisted.After(observed) {
+			observed = persisted
 		}
 	}
+	if !observed.IsZero() {
+		return observed
+	}
 
-	if state == nil || state.Preview.Timestamp.IsZero() {
-		return last
+	if state != nil && state.LastIncomingAt.Valid() {
+		return state.LastIncomingAt.Time()
 	}
-	if state.Preview.Sender == fingerprint && state.Preview.Timestamp.After(last) {
-		return state.Preview.Timestamp
-	}
-	return last
+	return time.Time{}
 }
 
 func (w *Window) rebuildPeerLastOnlineIndex() {

@@ -6180,6 +6180,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// recipient could otherwise read but never reply, and the
 		// fallback sync no longer triggers once the pubkey exists).
 		s.importVerifiedSenderKeys(msg)
+		// The envelope signature has just proven who wrote this message.
+		// If they also handed it to us themselves, their node was up a
+		// moment ago — evidence this node observed with its own clock,
+		// which is what the durable presence field is allowed to hold.
+		s.recordDirectArrivalPresence(msg)
 	}
 
 	s.cleanupExpiredMessages()
@@ -6665,6 +6670,82 @@ func (s *Service) dropsInboundDM(msg incomingMessage) bool {
 	}
 	return msg.Recipient == s.identity.Address && msg.Sender != s.identity.Address
 }
+
+// recordDirectArrivalPresence persists "this identity was online just now"
+// for a DM the sender delivered over its OWN authenticated session.
+//
+// Three conditions, and each of them is load-bearing:
+//
+//   - the message is addressed to us, so we are its recipient rather than a
+//     relay carrying someone else's traffic;
+//   - the ingress peer IS the sender. A relayed envelope proves only that a
+//     relay is up: the message may have waited in transit for days, and
+//     stamping the sender online now would invent an observation;
+//   - the caller has verified the envelope signature, so the sender field is
+//     not something an attacker chose.
+//
+// The timestamp is ours, never the sender's `CreatedAt`: a durable field that
+// otherwise means "we observed it" must not accept a number the observed
+// party picked. recordLastOnlineAt keeps it monotone and creates no contacts,
+// so an untrusted identity is silently skipped.
+func (s *Service) recordDirectArrivalPresence(msg incomingMessage) {
+	if s.identity == nil || s.trust == nil {
+		return
+	}
+	if msg.Recipient != s.identity.Address || msg.Sender == s.identity.Address {
+		return
+	}
+	sender := domain.PeerIdentityFromWire(msg.Sender)
+	if sender.IsZero() || msg.ViaIdentity != sender {
+		return
+	}
+
+	observedAt := s.presenceClock().UTC()
+	local, hasSource := s.identityPresenceSource()
+
+	if !s.trust.isTrustedContact(sender) {
+		// The trust store creates no contacts on this path, so there is
+		// nothing to store and nothing to announce: a consumer that held this
+		// observation would be holding it for a contact-added event that is
+		// never coming.
+		return
+	}
+
+	// The durable write alone would not reach the running UI: the desktop
+	// probes the node once at startup and lives on events afterwards, so
+	// without this the sidebar would keep the pre-arrival timestamp until the
+	// next launch. It is published on every arrival, unthrottled — an event
+	// costs a channel send, and the throttle below exists for the file.
+	if hasSource {
+		ebus.PublishIdentityPresenceObserved(s.eventBus, ebus.IdentityPresenceChange{
+			Source:     local,
+			Identities: []domain.PeerIdentity{sender},
+			ChangedAt:  observedAt,
+		})
+	}
+
+	// Persisting is throttled INSIDE the store, where the comparison and the
+	// update share one lock. A trust-store write is a full marshal of every
+	// contact plus a temp-write and rename, and this runs on every inbound DM
+	// — including the retries and re-gossips that arrive before the dedup
+	// gate downstream — so a burst that all read the same stale stamp before
+	// any of them wrote would buy one rewrite each. The durable field only
+	// has to survive a restart, so second-level precision is worth nothing
+	// there.
+	s.goBackground(func() {
+		if _, err := s.trust.recordLastOnlineAt([]domain.PeerIdentity{sender}, observedAt, arrivalPresencePersistInterval); err != nil {
+			log.Warn().Err(err).
+				Str("identity", sender.String()).
+				Str("message_id", string(msg.ID)).
+				Msg("trust_store_last_online_persist_failed_on_dm_arrival")
+		}
+	})
+}
+
+// arrivalPresencePersistInterval is how coarse the durable last-online stamp
+// is allowed to be on the DM path. It bounds trust-store rewrites to one per
+// contact per interval under any message rate.
+const arrivalPresencePersistInterval = time.Minute
 
 // isLocalMessage returns true if this node is a party to the message
 // (sender or recipient), meaning the message should be persisted locally.

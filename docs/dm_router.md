@@ -196,8 +196,9 @@ type RouterSnapshot struct {
 }
 
 type RouterPeerState struct {
-    Preview ConversationPreview
-    Unread  int
+    Preview        ConversationPreview
+    LastIncomingAt domain.OptionalTime // when the peer last wrote to us
+    Unread         int
 }
 
 type PendingActions struct {
@@ -216,6 +217,199 @@ const (
 )
 ```
 
+`LastIncomingAt` is the sidebar's chat-derived half of "last online": the
+newest message this peer wrote. It lives only in memory — `seedHistoryEvidence`
+recomputes it from the chatlog at startup (off the startup path, in its own
+goroutine, retrying a failed read three times, and it publishes a snapshot
+itself: `Snapshot()` serves a cache only `notify` rebuilds, and on the retry
+path there is no later event to ride on — the same rule the post-delete retry
+sweep follows),
+every incoming message advances it, and the delete path recomputes it — because a durable copy would be a second
+value to keep in step with the rows it comes from. It is not an observation
+and ranks below anything the node saw itself. `Preview` and `LastIncomingAt`
+answer different questions and are written by one helper,
+`setPeerPreviewLocked`. `Preview` is the last row of the thread,
+whoever wrote it; `LastIncomingAt` moves only when the peer is the sender, and
+only forward, so out-of-order history (startup replay, a relayed message that
+took the long way) cannot walk it backwards. Every path that learns of a new
+message goes through that helper — assigning `Preview` alone would leave the
+presence evidence behind on whichever path forgot it. The delete path is the
+single exception and assigns `LastIncomingAt` directly: it recomputes the
+value from SQL through `LastIncomingAtFor`, because the message that carried
+the evidence may be the row the user just removed, and clears the field when
+no incoming message survives.
+
+`Preview`, `Unread` and `LastIncomingAt` are the peer state DERIVED from the
+chatlog, and they are fed by two sources that cannot be ordered against each
+other: a SQL read and the event stream. The database is AHEAD of the events —
+a message is committed before the event announcing it is delivered — so the
+same message reaches the sidebar twice, in either order. Rather than policing
+that with versions, the merges are made idempotent, which removes the ordering
+question instead of answering it:
+
+- **Unread is a set of message ids**, not a counter. `RouterPeerState.Unread`
+  is its size. Adding an id the set already holds changes nothing, so a
+  message counted by both the startup read and its own event is one unread
+  message. Reading (only the ids whose receipts were actually sent), deleting
+  and the post-delete reconciliation remove ids. Two places re-derive the set
+  from `delivery_status`, because the event stream carries no status and can
+  therefore only ever add: the post-delete reconciliation, and the rebuild
+  after a conversation failed to open (`repairBadgeFromStore`, where the
+  rollback has only what was in memory to restore and a half-completed
+  mark-seen may have left ids the database now calls read). Both keep the ids
+  the database does not hold at all, and the rebuild also keeps whatever
+  arrived while it was reading — additions move no counter, so its epoch
+  check cannot see them. It keeps the
+  badged ids the database does not hold AT ALL (`StoredMessageStatuses`): a header
+  can badge a message before its row is written, and "absent from the unseen
+  list" would otherwise read as "read" for an id nothing can re-add.
+- **LastIncomingAt is a maximum** over the incoming timestamps, so a late
+  reader can only lose.
+- **Preview takes the newer message**, comparing timestamps; an older read
+  never overwrites a newer one.
+
+Idempotent merges order ADDITIONS against each other and nothing else. A read
+taken before something moved the peer BACKWARDS — a deletion, a mark-seen, an
+optimistic clear, a removal — and applied after it puts back exactly what was
+removed, and no rule about maxima or sets prevents that. So every peer carries
+`backwardsEpoch`, bumped by each of those movers, and every chatlog-derived
+write follows one rule: **capture the epoch before its own query, apply only
+if it is unchanged.** A changed epoch means the answer describes a
+conversation that no longer exists in that form, and the work is redone rather
+than merged. Each read captures its own snapshot immediately before its own
+query: two reads sharing one baseline would make the second refuse everything
+the first one's retries allowed to change.
+
+It is TWO counters, because the two kinds of backwards move are not the same.
+`unread` counts what lowers only the BADGE — a mark-seen, the optimistic clear
+when a conversation is opened — and `history` counts what removes ROWS: a
+message deletion, a conversation wipe, a contact removal, an identity reset. A
+history move bumps both; a mark-seen bumps only `unread`, because it cannot
+make a last-incoming answer wrong. One counter for both would cost the feature
+its most common case: the conversation that opens automatically at launch is
+marked read while the startup scan is still running, so its contact — the
+first row in the sidebar — would spend the whole session with no "last online"
+line. The startup scan, `seedPreviews`, the post-delete reconciliation, the
+header repair and the badge rebuild after a failed open all go through this
+check; the
+`peerGen` lifecycle generation answers the narrower question of whether the
+contact still exists at all, and is captured before any slow step (a decrypt
+RPC, a header scan) that would otherwise recreate its row — including the
+side effects, not just the row: an inbound file announcement is registered
+only after that check, and never speculatively-then-rolled-back, because a
+rollback by message id cannot tell its own registration from an identical
+one made by a newer generation and would take that one's downloaded file
+with it. Every slow step carries the same pair — the
+generation AND the history counter — as one `peerStamp`, because the two
+answer different questions and a branch that checks half of it is a branch
+that applies a message whose row is already gone. A step that ASKS the
+database something and then acts on the answer takes its stamp BEFORE the
+question and checks it at the commit: a fresh stamp would describe the wrong
+moment.
+
+The version check and the file registration cannot be one atomic step by
+themselves — the check needs the router lock and the registration goes
+through the file bridge, which a domain mutex may never be held across. They
+are made atomic against DELETION instead, by a per-peer file barrier: every
+path that cleans transfers up takes it, moves the history counter under it,
+and only then cleans up, while a registration holds it from its check until
+the mapping exists. A registration already in flight therefore either
+finishes first or finds the moved counter and stands down. One deletion is
+one move of that counter, and a cleanup that removed nothing does not move
+it at all — an ack usually names a row deleted long ago, and every false move
+marks a load or a decrypt that is perfectly current as stale.
+
+Removing a contact holds that same barrier across its whole tail: the version
+move, the transfer cleanup and the drop of the in-memory state. A
+registration that was already waiting on it therefore resumes after the last
+cleanup and finds both a new generation and no row — which is why the
+registration checks the row's existence too, not only the stamp. The mutex
+itself is never dropped when the contact is: a waiter already holds a pointer
+to it, and replacing it on re-add would leave the old cleanup and the new
+registration excluding nobody.
+
+One more thing is needed while a removal runs, because no stamp can express
+it: the removal bumps the counters itself, so a message arriving right after
+that carries a stamp which MATCHES, and the apply would create the row again
+— behind the removal, for the cleanup to leave orphaned.
+
+That is the job of the **removal gate** (`removalGate`) — one object with two
+doors. `tryEnsurePeerLocked` consults it before creating a sidebar row, and
+the message store adapter consults it before writing an inbound DM, because
+the store is the door the node's own writes go through: the node persists a
+message BEFORE the router hears about it, so a message accepted mid-removal
+would land in the database no matter what the router refuses afterwards, and
+the next startup would rebuild the deleted conversation out of that row. The
+store answers `StoreDeferred` — not stored and not dropped: the sender keeps
+the message and re-delivers it once the removal is over, at which point it is
+simply a new message to a conversation that no longer exists, and opens it
+again as a message from any stranger would. This is a window, not a ban.
+
+The store's door is a **lease**, not a check. Checking is not writing: a
+store let through can be stopped for as long as the database takes, and a
+removal that only read a flag would run both of its history deletes in that
+gap, leaving the row behind them where nothing looks again. So the store
+takes the lease (`admitWrite`) before anything else and holds it until its
+row is committed, and `begin` does not return until every lease already
+handed out for that conversation is back. After `begin` returns, the removal
+knows two things it could not know from a flag: no write is in progress, and
+no new one will be admitted. The router's row check needs no lease — it
+decides and acts under one lock, with no I/O in between.
+
+The gate goes up as the FIRST statement of `RemovePeer`, before the history
+delete and before the file barrier: raised later, it would be open for
+exactly the length of those waits, and that is the window a concurrent write
+walks through. It is counted, not flagged, because two removals of the same
+contact can overlap and the first to finish must not open the door under the
+second. A write that was already past the store door when the gate went up is
+covered by one last history sweep at the end of the removal — and if that
+sweep FAILS, `RemovePeer` returns the error: the in-memory state is gone
+either way and the UI is told either way, but reporting a contact as removed
+while its history may still be on disk is the one answer this function must
+not give.
+
+The two failures a removal can report are not the same failure, so callers
+can tell them apart with `errors.Is(err, ErrHistorySweepFailed)`. The FIRST
+history delete fails before anything is touched: the contact is still there,
+and the caller must leave its own state alone. The FINAL sweep fails when the
+contact is already out of the sidebar, the cache and the trust store, with
+only its history in doubt: the caller has to finish its own cleanup — drafts,
+attachments, aliases, picking the next conversation — and report the failure,
+because stopping there would strand the composer state of a conversation the
+user can no longer open and leave the deleted chat selected. Only the HISTORY half is
+compared: marking a conversation read bumps the unread counter and removes
+no rows, so comparing the whole pair would make opening a chat discard the
+messages arriving into it and refuse its own file transfers.
+
+A history conflict is not a reason to DROP the message. The counter is per
+peer, so a deletion anywhere in the conversation looks exactly like the
+deletion of the row being decrypted — and the message's id is already
+through the dedup gate, so a wrong guess loses it for good. The conversation
+is re-read from the database instead: the reconciliation restores the
+preview and the last-online evidence, the badge is re-derived from
+`delivery_status`, and the message either comes back with them or does not,
+which is the distinction the counter could not make.
+
+The same "the answer is older than the work" rule governs a message being
+decrypted: which conversation is on screen is re-read after the decrypt
+(against the selection AND the cache), because appending to a cache that
+has since been loaded for someone else splices the message into the wrong
+thread, and treating it as visible skips its badge for good.
+
+Deletion is the single exception: it is the only step that legitimately moves
+these values BACKWARDS, because the row they described is gone. It is
+therefore the only path that needs ordering, and it gets it from a per-peer
+refresh lock — two deletions in one conversation run in their own goroutines,
+and the slower query must not land last with the older answer. Its reads are
+all-or-nothing (half a read publishes a moment that never existed), and a
+failed one is queued and retried by the delete sweep, because nothing else
+re-reads a peer's history.
+
+A reconciliation UPDATES a peer and never CREATES one. It runs asynchronously,
+so the conversation may have been removed before it was scheduled; callers
+that introduce a new one create the row themselves, synchronously with the
+event that justifies it.
+
 ### Concurrency protection
 
 The DMRouter runs two background goroutines:
@@ -224,12 +418,13 @@ The DMRouter runs two background goroutines:
   previews, contacts, identities, and diagnostic fields from SQL. While
   startup is in progress, ebus events are buffered in `startupEventBuf`
   (capped at 256 entries to prevent memory spikes). After initialization,
-  buffered events are replayed under `replayingStartup=true` to suppress
-  `Unread++` and `UIEventBeep` (because `seedPreviews()` already loaded
-  the correct unread counts from SQL). Events that arrive during Phase 1
-  replay are re-buffered and then processed as live in Phase 2 (with
-  `replayingStartup=false`), correctly triggering `Unread++` and
-  `UIEventBeep`.
+  buffered events are replayed under `replayingStartup=true`, which
+  suppresses the BEEP and nothing else: the badge is a set, so a message
+  counted by both a SQL read and its own replayed event is one unread
+  message, while suppressing the replay would lose the messages stored
+  after the read was taken. Events that arrive during Phase 1 replay are
+  re-buffered and processed as live in Phase 2 (`replayingStartup=false`),
+  where the beep is no longer suppressed.
 - **ebus subscriptions** — DMRouter subscribes only to DM-specific topics
   in `subscribeEvents()` before startup so no events are missed:
   - `TopicMessageNew` / `TopicReceiptUpdated` — new DMs and delivery
@@ -344,8 +539,17 @@ To prevent data races (which cause Go runtime fatals that are uncatchable):
    `activePeer`, `peerClicked`, `peers`, `peerOrder`, `activeMessages`,
    `seenMessageIDs`, `initialSynced`, `replayingStartup`,
    `sendStatus`, `pendingScrollToEnd`, `pendingClearEditor`,
-   `pendingRecipientText`. Note: `NodeStatus` is owned by
+   `pendingRecipientText`, and the four per-peer maps: `unreadIDs`
+   (the badge sets), `peerGen` (lifecycle generations), `backwardsEpoch`
+   (the two backwards-move counters, see below), `pendingDeleteReconcile` (the delete retry queue) and
+   `peerRefreshMu` (the per-peer reconciliation locks — the MAP is guarded
+   by `mu`, the mutexes in it are not). Note: `NodeStatus` is owned by
    `NodeStatusMonitor` (with its own `mu`), not by DMRouter.
+
+   **Ordering rule**: a per-peer reconciliation lock from `peerRefreshMu` is
+   held across SQL reads, so it must never be taken while `mu` is held.
+   `peerRefreshLock` looks the mutex up under `mu`, releases `mu`, and only
+   then locks it.
 
    Background goroutines acquire `mu.Lock()` for writes and `mu.RLock()` for
    reads. `Snapshot()` acquires `mu.RLock()` and returns a deep copy.
@@ -462,13 +666,32 @@ To prevent data races (which cause Go runtime fatals that are uncatchable):
 
    **Startup `pollHealth`**: runs `ProbeNode` + `repairUnreadFromHeaders`.
    `repairUnreadFromHeaders` scans DMHeaders for message IDs not yet seen in
-   `seenMessageIDs`, increments unread counts for non-active incoming messages,
-   and triggers `loadConversation` + `doMarkSeen` if the active chat has
-   messages missing from cache. On the first sync (`initialSynced = false`),
-   `Unread++` is skipped — `seedPreviews()` already set correct counts from
-   SQL (`delivery_status != 'seen'`). DMHeaders don't carry delivery status,
-   so incrementing on first sync would double-count every incoming message
-   regardless of whether it's actually unread. To prevent double-counting
+   `seenMessageIDs`, adds non-active incoming ones to the unread SET, and
+   triggers `loadConversation` + `doMarkSeen` if the active chat has
+   messages missing from cache. Since the badge became a set, no first-sync
+   rule is needed against double counting — the same message from the SQL
+   read and from a header is one member. What a header still cannot say is
+   whether the message was already READ: DMHeaders carry no
+   `delivery_status`, and the node's in-memory topic outlives a desktop
+   session, so on the first sync a UI attaching to a running node is offered
+   back every message of the previous session. On that sync only,
+   `alreadyReadHeaderIDs` asks the database for the stored status of the
+   candidate ids (`StoredMessageStatuses`) and suppresses exactly those it
+   calls `seen`; a stored-but-unread id and an id the database does not hold
+   at all are both badged from the header. That independence is deliberate —
+   an earlier version deferred to the startup badge seed, and a seed that
+   never ran left every stored message badgeless for the session. A failed
+   read suppresses nothing: a badge too many clears by opening the
+   conversation, a badge lost does not.
+   Two more rules govern this path, both about work that outlives the
+   answer it was based on. Which conversation is on screen is decided in
+   phase 3, under the lock, and NOT during the scan: the header scan and
+   the stored-status query both run outside the lock, and a message
+   classified as visible after the user has left it loses its badge for
+   good — its id passes the dedup gate either way, and this repair runs
+   once per process.
+
+   To prevent double-counting
    with the event-path, `onNewMessage()` registers `event.MessageID` in
    `seenMessageIDs` up-front — before any other processing — so the
    repair-path skips messages already handled by the event-path.
@@ -752,8 +975,9 @@ type RouterSnapshot struct {
 }
 
 type RouterPeerState struct {
-    Preview ConversationPreview
-    Unread  int
+    Preview        ConversationPreview
+    LastIncomingAt domain.OptionalTime // when the peer last wrote to us
+    Unread         int
 }
 
 type PendingActions struct {
@@ -772,6 +996,204 @@ const (
 )
 ```
 
+`LastIncomingAt` — выведенная из переписки половина «последний раз онлайн»:
+самое свежее написанное этим peer-ом сообщение. Оно живёт только в памяти —
+`seedHistoryEvidence` пересчитывает его из chatlog при старте (вне стартового
+пути, в своей горутине, с тремя попытками на неудачное чтение, и сам публикует
+снапшот: `Snapshot()` отдаёт кэш, который перестраивает только `notify`, а на
+пути ретраев позднего события, на котором можно было бы уехать, уже нет; тому
+же правилу следует и sweep повторных сверок после удаления), каждое входящее двигает вперёд, путь
+удаления пересчитывает заново, — потому что durable-копия
+была бы вторым значением, которое надо согласовывать со строками, из которых
+оно выведено. Наблюдением оно не является и стоит ниже всего, что нода видела
+сама. `Preview` и `LastIncomingAt` отвечают на разные вопросы и пишутся одним
+хелпером `setPeerPreviewLocked`. `Preview` — последняя строка треда, кто бы её
+ни написал; `LastIncomingAt` двигается только когда отправитель — сам
+собеседник, и только вперёд, поэтому история, пришедшая не по порядку (startup
+replay, реле-сообщение, шедшее долгим путём), не уводит значение назад. Все
+пути, узнающие о новом сообщении, идут через этот хелпер: присваивание одного
+`Preview` оставило бы свидетельство присутствия позади на том пути, который о
+нём забыл. Единственное исключение — путь удаления, который присваивает
+`LastIncomingAt` напрямую: он пересчитывает значение из SQL через
+`LastIncomingAtFor`, потому что подтверждавшим его сообщением могла быть
+только что удалённая строка, и очищает поле, если входящих сообщений не
+осталось.
+
+`Preview`, `Unread` и `LastIncomingAt` — это состояние peer-а, ВЫВЕДЕННОЕ из
+chatlog, и питают его два источника, которые невозможно упорядочить друг
+относительно друга: SQL-чтение и поток событий. База ОПЕРЕЖАЕТ события —
+сообщение коммитится раньше, чем доставляется извещающее о нём событие, — то
+есть одно и то же сообщение приходит в сайдбар дважды и в любом порядке.
+Вместо того чтобы сторожить это версиями, слияния сделаны идемпотентными: так
+вопрос порядка исчезает, а не решается.
+
+- **Unread — множество id сообщений**, а не счётчик; `RouterPeerState.Unread`
+  это его размер. Добавление уже имеющегося id ничего не меняет, поэтому
+  сообщение, посчитанное и стартовым чтением, и собственным событием, остаётся
+  одним непрочитанным. Убирают id: чтение диалога (только те, по которым
+  квитанции реально ушли), удаление и сверка после удаления. Пересчитывают
+  множество из `delivery_status` два места — поток событий статуса не несёт и
+  умеет только добавлять: сверка после удаления и перестройка после
+  неудавшегося открытия диалога (`repairBadgeFromStore`, где откату нечего
+  восстанавливать, кроме того, что было в памяти, а наполовину прошедший
+  mark-seen мог оставить id, которые база уже считает прочитанными). Оба
+  сохраняют id, которых база не держит вовсе, а перестройка — ещё и то, что
+  пришло, пока она читала: добавления не двигают счётчик, и её проверка эпохи
+  их не видит. При этом сверка сохраняет
+  id, которых база не держит ВООБЩЕ (`StoredMessageStatuses`): header может
+  забейджить сообщение раньше, чем запишется строка, а «нет в списке
+  непрочитанных» иначе прочиталось бы как «прочитано» для id, который уже
+  некому вернуть.
+- **LastIncomingAt — максимум** по временам входящих, поэтому опоздавший
+  читатель может только проиграть.
+- **Preview берёт более новое сообщение** по timestamp; старое чтение никогда
+  не затирает более новое.
+
+Идемпотентные слияния упорядочивают между собой только ДОБАВЛЕНИЯ. Чтение,
+снятое до того, как что-то сдвинуло peer-а НАЗАД — удаление, mark-seen,
+оптимистичная очистка, удаление контакта, — и применённое после, возвращает
+ровно то, что было убрано, и никакой максимум или множество этого не
+предотвращают. Поэтому у каждого peer-а есть `backwardsEpoch`, который бампает
+каждый такой движитель, и любая запись, выведенная из chatlog, следует одному
+правилу: **снять эпоху перед СВОИМ запросом и применить, только если она не
+изменилась.** Изменившаяся эпоха означает, что ответ описывает диалог,
+которого в таком виде больше нет, и работу надо переделать, а не сливать.
+Каждое чтение снимает свой снимок непосредственно перед своим запросом: один
+базис на два чтения заставил бы второе отвергать всё, что первому позволили
+изменить его же ретраи.
+
+Счётчиков ДВА, потому что движения назад бывают двух разных родов. `unread`
+считает то, что опускает только БЕЙДЖ — mark-seen, оптимистичную очистку при
+открытии диалога, — а `history` считает то, что убирает СТРОКИ: удаление
+сообщения, зачистку диалога, удаление контакта, сброс identity. Движение
+history бампает оба; mark-seen бампает только `unread`, потому что сделать
+ответ про last-incoming неверным оно не может. Один общий счётчик стоил бы
+фиче самого частого случая: диалог, открывающийся при запуске автоматически,
+помечается прочитанным, пока стартовый скан ещё идёт, — и его контакт, первая
+строка сайдбара, всю сессию оставался бы без строки «последний раз онлайн».
+Через эту проверку идут стартовый скан, `seedPreviews`, сверка после удаления,
+ремонт по headers и восстановление бейджа после неудачного открытия;
+поколение `peerGen` отвечает на более узкий
+вопрос — существует ли контакт вообще — и снимается перед любым медленным
+шагом (RPC расшифровки, скан headers), который иначе создал бы его строку
+заново, — причём это касается и побочных эффектов, а не только строки:
+входящее файловое объявление регистрируется только после этой проверки, а
+удаление, успевшее пройти всё равно, компенсируется повторной очисткой
+трансфера, потому что file bridge нельзя звать под замком роутера.
+
+Поколение — ответ длиной в процесс, и после рестарта оно не значит ничего.
+Проверка охватывает и побочные эффекты, а не только строку: входящее файловое
+объявление регистрируется только после неё и никогда не «сначала
+зарегистрируем, потом откатим» — откат по id сообщения не отличает свою
+регистрацию от такой же, сделанной новым поколением, и утащил бы вместе с ней
+уже скачанный файл. Каждый медленный шаг несёт одну и ту же пару —
+поколение И счётчик history — как единый `peerStamp`: они отвечают на разные
+вопросы, и ветка, проверяющая половину, применяет сообщение, строки которого
+уже нет. Шаг, который СПРАШИВАЕТ базу и потом действует по ответу, снимает
+stamp ДО вопроса и сверяет его на коммите: свежий stamp описывал бы уже
+другой момент.
+
+Проверку версии и регистрацию файла нельзя сделать одним атомарным шагом:
+проверке нужен замок роутера, а регистрация идёт через file bridge, под
+доменным мьютексом которого звать нельзя. Поэтому их делают атомарными
+относительно УДАЛЕНИЯ — per-peer файловым барьером: каждый путь очистки
+берёт его, двигает под ним счётчик history и только потом чистит, а
+регистрация держит его от своей проверки до появления mapping. Регистрация,
+уже летящая, либо успевает раньше, либо видит сдвинутый счётчик и отступает.
+Одно удаление — одно движение счётчика, а очистка, которая ничего не удалила,
+не двигает его вовсе: ack обычно называет строку, удалённую давно, и каждое
+ложное движение помечает устаревшими совершенно актуальные загрузку или
+расшифровку.
+
+Удаление контакта держит тот же барьер на всём хвосте: движение версии,
+очистка трансферов и сброс состояния в памяти. Регистрация, ждавшая барьер,
+продолжится уже после последней очистки и найдёт и новое поколение, и
+отсутствие строки — поэтому она проверяет и наличие строки, а не только
+stamp. Сам мьютекс при удалении контакта не выбрасывается: указатель на него
+уже держит ожидающий, и замена при повторном добавлении оставила бы старую
+очистку и новую регистрацию без взаимного исключения.
+
+Пока удаление идёт, нужна ещё одна вещь, которую stamp выразить не может:
+удаление само двигает счётчики, поэтому сообщение, пришедшее сразу после,
+несёт stamp, который СОВПАДАЕТ, — и apply создал бы строку заново, за спиной
+удаления, чтобы очистка оставила её сиротой.
+
+Этим занят **шлюз удаления** (`removalGate`) — один объект с двумя дверьми.
+`tryEnsurePeerLocked` сверяется с ним перед созданием строки сайдбара, а
+адаптер хранилища сообщений — перед записью входящего DM, потому что
+хранилище и есть та дверь, через которую идут собственные записи ноды: нода
+сохраняет сообщение РАНЬШЕ, чем о нём узнаёт роутер, поэтому сообщение,
+принятое во время удаления, попадёт в базу независимо от того, что роутер
+откажется делать потом, — и следующий запуск соберёт удалённый диалог из этой
+строки. Хранилище отвечает `StoreDeferred` — не сохранено и не выброшено:
+сообщение остаётся у отправителя, который доставит его повторно после
+удаления, и тогда это просто новое сообщение в несуществующий диалог,
+открывающее его так же, как сообщение любого незнакомца. Это окно, а не
+запрет.
+
+Дверь хранилища — это **аренда** (lease), а не проверка. Проверить не значит
+записать: пропущенное хранилище может встать ровно на столько, сколько займёт
+база, и удаление, прочитавшее лишь флаг, выполнит в этот промежуток оба
+удаления истории, оставив строку позади них — там, куда больше никто не
+смотрит. Поэтому хранилище берёт аренду (`admitWrite`) раньше всего
+остального и держит её до коммита своей строки, а `begin` не возвращается,
+пока не вернутся все выданные по этому диалогу аренды. После возврата `begin`
+удаление знает то, чего флаг сказать не мог: ни одна запись не идёт и ни одна
+новая допущена не будет. Проверке строки в роутере аренда не нужна — он
+решает и действует под одним замком, без I/O между решением и действием.
+
+Шлюз поднимается ПЕРВЫМ оператором `RemovePeer` — до удаления истории и до
+файлового барьера: поднятый позже, он был бы открыт ровно на длину этих
+ожиданий, а это и есть окно для параллельной записи. Он считающий, а не
+флаг: два удаления одного контакта могут пересечься, и первое завершившееся
+не вправе открыть дверь под вторым. Запись, успевшая пройти дверь хранилища
+до подъёма шлюза, закрывается последней зачисткой истории в конце удаления —
+и если эта зачистка ПАДАЕТ, `RemovePeer` возвращает ошибку: состояние в
+памяти снято в любом случае и UI уведомляется в любом случае, но сообщить об
+удалении контакта, чья история, возможно, осталась на диске, — единственный
+ответ, который эта функция давать не должна.
+
+Две ошибки, которые может вернуть удаление, — разные ошибки, и вызывающий
+различает их через `errors.Is(err, ErrHistorySweepFailed)`. ПЕРВОЕ удаление
+истории падает до того, как что-либо тронуто: контакт на месте, и вызывающий
+обязан не трогать своё состояние. ФИНАЛЬНАЯ зачистка падает, когда контакта
+уже нет ни в сайдбаре, ни в кэше, ни в trust store, и под вопросом только его
+история: вызывающий обязан довести свою очистку — черновик, вложение, алиас,
+выбор следующего диалога — и сообщить об ошибке, потому что остановка здесь
+оставит состояние композера у диалога, который пользователь уже не может
+открыть, и удалённый чат выбранным. Сверяется именно половина history: пометка диалога прочитанным
+двигает счётчик unread и не убирает строк, поэтому сравнение всей пары
+заставляло бы открытие чата выбрасывать приходящие в него сообщения и
+отклонять его же файловые трансферы.
+
+Конфликт по history — не повод ВЫБРОСИТЬ сообщение. Счётчик один на peer-а,
+поэтому удаление любой строки диалога выглядит ровно как удаление той, что
+сейчас расшифровывается, а id сообщения уже прошёл dedup-гейт: неверная
+догадка теряет его насовсем. Вместо этого диалог перечитывается из базы:
+сверка восстанавливает превью и свидетельство last-online, бейдж
+пересчитывается из `delivery_status`, и сообщение либо возвращается вместе с
+ними, либо нет — то самое различение, которого счётчик сделать не мог.
+
+То же правило «ответ старше работы» действует и для расшифровываемого
+сообщения: какой диалог на экране, перечитывается ПОСЛЕ расшифровки — и по
+выбору, и по кэшу, — потому что добавление в кэш, уже загруженный для другого
+собеседника, вклеивает сообщение в чужой тред, а признание его видимым
+навсегда съедает его бейдж.
+
+Единственное исключение — удаление: только оно законно двигает эти значения
+НАЗАД, потому что описанной ими строки больше нет. Поэтому упорядочивание
+нужно только ему, и оно получает его от per-peer refresh lock: два удаления в
+одном диалоге работают каждый в своей горутине, и более медленный запрос не
+должен приземлиться последним со старым ответом. Его чтения работают по
+принципу «всё или ничего» (половина чтения публикует момент, которого не
+было), а неудавшееся ставится в очередь и добивается delete-петлёй — историю
+peer-а больше никто не перечитывает.
+
+Пересчёт ОБНОВЛЯЕТ peer-а и никогда его не СОЗДАЁТ. Он работает асинхронно,
+поэтому диалог мог быть удалён ещё до того, как его запланировали; вызывающие,
+вводящие новый диалог, создают строку сами — синхронно с событием, которое её
+оправдывает.
+
 ### Защита конкурентного доступа
 
 DMRouter запускает две фоновые горутины:
@@ -780,11 +1202,13 @@ DMRouter запускает две фоновые горутины:
   загрузки превью, контактов, identity и диагностических полей из SQL. Пока
   startup выполняется, ebus-события буферизуются в `startupEventBuf` (лимит
   256 записей для предотвращения memory spike). После инициализации
-  буферизованные события воспроизводятся под `replayingStartup=true` для
-  подавления `Unread++` и `UIEventBeep` (т.к. `seedPreviews()` уже загрузил
-  правильные unread-счётчики из SQL). События, пришедшие во время Phase 1
+  буферизованные события воспроизводятся под `replayingStartup=true`, и это
+  подавляет ТОЛЬКО звук: бейдж — множество, поэтому сообщение, посчитанное и
+  SQL-чтением, и собственным повторным событием, остаётся одним непрочитанным,
+  а подавление replay, наоборот, теряло бы сообщения, записанные после
+  чтения. События, пришедшие во время Phase 1
   replay, ре-буферизуются и затем обрабатываются как live в Phase 2 (с
-  `replayingStartup=false`), корректно вызывая `Unread++` и `UIEventBeep`.
+  `replayingStartup=false`), где звук больше не подавляется.
 - **ebus подписки** — DMRouter подписывается только на DM-специфичные
   топики в `subscribeEvents()` до startup, чтобы не пропустить события:
   - `TopicMessageNew` / `TopicReceiptUpdated` — новые DM и изменения
@@ -903,8 +1327,16 @@ DMRouter запускает две фоновые горутины:
    `activePeer`, `peerClicked`, `peers`, `peerOrder`, `activeMessages`,
    `seenMessageIDs`, `initialSynced`, `replayingStartup`,
    `sendStatus`, `pendingScrollToEnd`, `pendingClearEditor`,
-   `pendingRecipientText`. Примечание: `NodeStatus` принадлежит
+   `pendingRecipientText`, а также per-peer карты: `unreadIDs` (множества
+   бейджа), `peerGen` (поколения жизненного цикла), `backwardsEpoch` (два счётчика
+   движений назад, см. ниже), `pendingDeleteReconcile` (очередь ретраев удаления) и
+   `peerRefreshMu` (per-peer замки сверки — под `mu` защищена КАРТА, но не
+   сами мьютексы в ней). Примечание: `NodeStatus` принадлежит
    `NodeStatusMonitor` (со своим `mu`), а не DMRouter.
+
+   **Правило порядка**: per-peer замок сверки из `peerRefreshMu` удерживается
+   через SQL-чтения, поэтому его нельзя брать под `mu`. `peerRefreshLock`
+   находит мьютекс под `mu`, отпускает `mu` и только затем запирает его.
 
    Фоновые горутины берут `mu.Lock()` для записи и `mu.RLock()` для чтения.
    `Snapshot()` берёт `mu.RLock()` и возвращает глубокую копию.
@@ -1020,13 +1452,31 @@ DMRouter запускает две фоновые горутины:
 
    **Стартовый `pollHealth`**: `ProbeNode` + `repairUnreadFromHeaders`.
    `repairUnreadFromHeaders` сканирует DMHeaders на предмет ID сообщений,
-   ещё не виденных в `seenMessageIDs`, увеличивает unread для неактивных
-   входящих сообщений и запускает `loadConversation` + `doMarkSeen` если
-   в активном чате есть сообщения, отсутствующие в cache. При первом sync
-   (`initialSynced = false`) `Unread++` пропускается — `seedPreviews()`
-   уже установила корректные счётчики из SQL (`delivery_status != 'seen'`).
-   DMHeaders не содержат delivery status, поэтому инкремент при первом sync
-   считал бы каждое входящее сообщение как непрочитанное. Для предотвращения
+   ещё не виденных в `seenMessageIDs`, добавляет неактивные входящие в
+   МНОЖЕСТВО непрочитанных и запускает `loadConversation` + `doMarkSeen`,
+   если в активном чате есть сообщения, отсутствующие в cache. С тех пор как
+   бейдж стал множеством, отдельное правило про первый sync не нужно: одно и
+   то же сообщение из SQL-чтения и из header — один элемент. Чего header
+   по-прежнему не может сказать — было ли сообщение ПРОЧИТАНО: DMHeaders не
+   несут `delivery_status`, а in-memory топик ноды переживает сессию
+   desktop-а, поэтому на первом синке UI, подключившийся к работающей ноде,
+   получает назад все сообщения прошлой сессии. Только на этом синке
+   `alreadyReadHeaderIDs` спрашивает у базы сохранённый статус кандидатов
+   (`StoredMessageStatuses`) и гасит ровно те, которые она называет `seen`;
+   id, сохранённый но непрочитанный, и id, которого база не держит вовсе,
+   одинаково бейджатся из header. Независимость эта намеренная: прежняя
+   версия полагалась на стартовый seed бейджей, и seed, который не отработал,
+   оставлял все сохранённые сообщения без бейджа на всю сессию. Неудавшееся
+   чтение не гасит ничего: лишний бейдж снимается открытием диалога,
+   потерянный — нет. Ещё два правила на этом пути — оба про работу, которая переживает
+   ответ, на котором была основана. Какой диалог на экране, решается в
+   фазе 3 под замком, а НЕ во время скана: и скан headers, и запрос
+   статусов идут вне замка, а сообщение, классифицированное как видимое
+   после того, как пользователь ушёл из диалога, теряет бейдж навсегда —
+   его id всё равно проходит dedup-гейт, а этот ремонт выполняется один
+   раз за процесс.
+
+   Для предотвращения
    двойного подсчёта с event-path `onNewMessage()` регистрирует
    `event.MessageID` в `seenMessageIDs` в самом начале — до любой другой
    обработки — так repair-path пропускает сообщения, уже обработанные

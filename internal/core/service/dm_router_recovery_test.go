@@ -408,8 +408,8 @@ func TestDecryptRecoveryFullCycle(t *testing.T) {
 	if jobs, _ := clientB.chatLog.RecoveryJobs(context.Background()); len(jobs) != 0 {
 		t.Fatalf("B's job survived the recovery: %v", jobs)
 	}
-	if unread, _ := clientB.chatLog.UnreadCountFor(context.Background(), selfA); unread != 1 {
-		t.Fatalf("unread = %d, want 1 (original collapsed, re-send counts once)", unread)
+	if unread, _ := clientB.chatLog.UnseenIncomingIDsFor(context.Background(), selfA); len(unread) != 1 {
+		t.Fatalf("unread = %v, want one message (original collapsed, re-send counts once)", unread)
 	}
 }
 

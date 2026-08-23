@@ -240,6 +240,19 @@ const (
 	//   func(change ebus.IdentityPresenceChange)
 	TopicIdentityPresenceChanged = "identity.presence.changed"
 
+	// TopicIdentityPresenceObserved reports positive evidence that an identity
+	// was up: today, a DM its sender delivered over its OWN authenticated
+	// session, timestamped by the observing node's clock. It is deliberately
+	// separate from TopicIdentityPresenceChanged, which means one specific
+	// thing — the final route to an identity was lost — and whose contract the
+	// routing documentation leans on. Subscribers apply the timestamp
+	// monotonically and touch nothing else; reachability still has exactly one
+	// writer in TopicRouteTableChanged.
+	//
+	// Handler signature:
+	//   func(change ebus.IdentityPresenceChange)
+	TopicIdentityPresenceObserved = "identity.presence.observed"
+
 	// TopicPeerPendingChanged is emitted when the per-peer pending frame
 	// queue mutates (frame queued, flushed, or expired). Carries the peer
 	// address and the new queue length so subscribers can update the

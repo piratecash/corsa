@@ -163,8 +163,8 @@ func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress doma
 	if err != nil {
 		return false, fmt.Errorf("chatlog: update status %s: %w", messageID, err)
 	}
-
 	n, _ := res.RowsAffected()
+
 	return n > 0, nil
 }
 
@@ -309,15 +309,270 @@ func (s *Store) ListConversations(ctx context.Context) ([]ConversationSummary, e
 		if err := rows.Scan(&cs.PeerAddress, &lastMsg, &cs.Count, &cs.UnreadCount); err != nil {
 			continue
 		}
-		if t, err := time.Parse(time.RFC3339Nano, lastMsg); err == nil {
-			cs.LastMessage = t
-		} else if t, err := time.Parse(time.RFC3339, lastMsg); err == nil {
+		if t, ok := parseStoredTimestamp(lastMsg); ok {
 			cs.LastMessage = t
 		}
 		result = append(result, cs)
 	}
 
 	return result, rows.Err()
+}
+
+// UnseenIncomingIDs returns, per conversation peer, the ids of the incoming
+// messages that have not been marked seen.
+//
+// IDs rather than a count, because the consumer keeps a SET. A count has to be
+// reconciled against a stream of events that arrive after it was taken — the
+// database is ahead of that stream, so the same message can be in both and be
+// counted twice — while adding an id to a set the message is already in
+// changes nothing. Sets make the badge independent of ordering.
+func (s *Store) UnseenIncomingIDs(ctx context.Context) (map[domain.PeerIdentity][]domain.MessageID, error) {
+	selfAddr := s.identityAddr
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT sender, id
+		FROM messages
+		WHERE topic = 'dm' AND recipient = ? AND sender != ? AND delivery_status != ?`,
+		selfAddr, selfAddr, StatusSeen,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: unseen incoming ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[domain.PeerIdentity][]domain.MessageID)
+	for rows.Next() {
+		var sender, id string
+		if err := rows.Scan(&sender, &id); err != nil {
+			continue
+		}
+		peer := domain.PeerIdentityFromWire(sender)
+		if peer.IsZero() {
+			continue
+		}
+		result[peer] = append(result[peer], domain.MessageID(id))
+	}
+
+	return result, rows.Err()
+}
+
+// storedStatusChunk keeps each IN (...) list clear of SQLite's bound
+// parameter limit, which is 999 on the default build.
+const storedStatusChunk = 500
+
+// StoredMessageStatuses returns the delivery status of every one of these ids
+// the database holds. An id absent from the result is one the database does
+// not have at all.
+//
+// One query answers both questions the callers have, and answers them about
+// the same moment. The header path needs "did the user already read this" —
+// DMHeaders carry no delivery_status, and the node's in-memory topic outlives
+// a desktop session, so on the first sync it is offered back every message of
+// the previous session. The delete path needs "is this id merely not written
+// yet", because a badge can be raised from a header before the row lands and
+// re-deriving the badge from the database alone would read that as "read".
+// Two separate queries would let one of them succeed while the other fails,
+// and the caller would have to invent an answer for the half it did not get.
+func (s *Store) StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error) {
+	statuses := make(map[domain.MessageID]string, len(ids))
+	for start := 0; start < len(ids); start += storedStatusChunk {
+		end := start + storedStatusChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, string(id))
+		}
+		query := `SELECT id, delivery_status FROM messages WHERE id IN (?` + strings.Repeat(",?", len(chunk)-1) + `)`
+
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("chatlog: stored message statuses: %w", err)
+		}
+		for rows.Next() {
+			var id, status string
+			if err := rows.Scan(&id, &status); err != nil {
+				continue
+			}
+			statuses[domain.MessageID(id)] = status
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("chatlog: stored message statuses: %w", err)
+		}
+	}
+	return statuses, nil
+}
+
+// UnseenIncomingIDsFor is the single-conversation form of UnseenIncomingIDs.
+// The delete path uses it to re-derive one peer's badge from the database,
+// which is the only place the set is reconciled against delivery_status:
+// headers carry no status, so the event stream can only ever ADD ids.
+func (s *Store) UnseenIncomingIDsFor(ctx context.Context, peerAddress domain.PeerIdentity) ([]domain.MessageID, error) {
+	if peerAddress.IsZero() {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id
+		FROM messages
+		WHERE topic = 'dm' AND sender = ? AND recipient = ? AND delivery_status != ?`,
+		peerAddress.String(), s.identityAddr, StatusSeen,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: unseen incoming ids for %s: %w", peerAddress, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []domain.MessageID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, domain.MessageID(id))
+	}
+	return ids, rows.Err()
+}
+
+// LastIncomingAtPerPeer returns, for every DM conversation, the creation time
+// of the newest message the PEER wrote — never one of ours. The last row of a
+// thread answers "when did anything happen here"; presence needs "when did this
+// contact last do something", and in an ordinary conversation those differ:
+// the peer writes, we reply, and the newest row is ours.
+//
+// Peers whose entire history is outgoing are absent from the map rather than
+// present with a zero time — no incoming message is no evidence.
+//
+// Rows dated after `now` are skipped, and skipping one does NOT skip the
+// conversation: the newest message a peer wrote is the one they chose the
+// timestamp for, so a forged future date would otherwise hide the honest
+// message behind it and leave the contact reading as never seen.
+//
+// The comparison happens in Go, over every candidate row, and deliberately
+// not in SQL. created_at is RFC3339 text, and neither available SQL ordering
+// is trustworthy here: text order is not time order ("…00Z" sorts ABOVE the
+// later "…00.5Z" because 'Z' > '.', and a zone offset shifts the instant by
+// hours while the digits keep their printed order), while julianday is a
+// float that collapses timestamps inside the same microsecond, leaving the
+// winner to a tie-break on rowid — insertion order, which for out-of-order
+// arrivals is not time order either. RFC3339Nano stores nanoseconds, so
+// nanoseconds decide. The scan stays inside idx_messages_peer, which covers
+// every column this reads.
+func (s *Store) LastIncomingAtPerPeer(ctx context.Context, now time.Time) (map[domain.PeerIdentity]time.Time, error) {
+	selfAddr := s.identityAddr
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT sender, created_at
+		FROM messages
+		WHERE topic = 'dm' AND recipient = ? AND sender != ?`,
+		selfAddr, selfAddr,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: last incoming per peer: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[domain.PeerIdentity]time.Time)
+	for rows.Next() {
+		var (
+			sender string
+			raw    string
+		)
+		if err := rows.Scan(&sender, &raw); err != nil {
+			continue
+		}
+		at, ok := usableIncomingTimestamp(raw, now)
+		if !ok {
+			continue
+		}
+		peer := domain.PeerIdentityFromWire(sender)
+		if peer.IsZero() {
+			continue
+		}
+		if current, seen := result[peer]; seen && !at.After(current) {
+			continue
+		}
+		result[peer] = at
+	}
+
+	return result, rows.Err()
+}
+
+// LastIncomingAtFor is the single-conversation form of
+// LastIncomingAtPerPeer, used by the delete path to recompute presence
+// evidence after rows leave the conversation. Returns the zero time when the
+// peer has written nothing usable that is still stored. Same rules: future
+// rows are skipped without hiding the ones behind them, and the winner is
+// decided in Go at full precision.
+func (s *Store) LastIncomingAtFor(ctx context.Context, peerAddress domain.PeerIdentity, now time.Time) (time.Time, error) {
+	if peerAddress.IsZero() {
+		return time.Time{}, nil
+	}
+
+	// One pass over the conversation, unordered, decided in Go. SQL cannot
+	// help here: the stored text does not sort as time, and asking SQLite to
+	// order by julianday(created_at) is ordering by a function of a column,
+	// which costs a temp b-tree over the whole conversation — strictly more
+	// than the scan it was meant to replace. Unordered, this is a covering
+	// index scan of one peer's rows and the comparison is exact.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT created_at
+		FROM messages
+		WHERE topic = 'dm' AND sender = ? AND recipient = ?`,
+		peerAddress.String(), s.identityAddr,
+	)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("chatlog: last incoming for %s: %w", peerAddress, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var newest time.Time
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		at, ok := usableIncomingTimestamp(raw, now)
+		if !ok || !at.After(newest) {
+			continue
+		}
+		newest = at
+	}
+	if err := rows.Err(); err != nil {
+		return time.Time{}, fmt.Errorf("chatlog: last incoming for %s: %w", peerAddress, err)
+	}
+	return newest, nil
+}
+
+// usableIncomingTimestamp decodes a created_at that may serve as presence
+// evidence. Unparsable values and values after now are refused: the column
+// holds what the SENDER's node printed, and the sender is the one party who
+// gains from appearing recently online.
+func usableIncomingTimestamp(raw string, now time.Time) (time.Time, bool) {
+	at, ok := parseStoredTimestamp(raw)
+	if !ok {
+		return time.Time{}, false
+	}
+	if !now.IsZero() && at.After(now) {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// parseStoredTimestamp decodes a created_at column. Rows written by older
+// builds carry second-resolution RFC3339, so both layouts are accepted; an
+// unparsable value reports failure instead of the zero time, which a caller
+// would otherwise store as a real "January 1, year 1" observation.
+func parseStoredTimestamp(raw string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 // ReadLastEntry returns the newest entry of a conversation, nil when empty.
@@ -522,41 +777,6 @@ func (s *Store) CheckpointWAL(ctx context.Context) error {
 		return fmt.Errorf("chatlog: wal checkpoint busy: %d frames left", logFrames)
 	}
 	return nil
-}
-
-// UnreadCountFor returns the number of unread messages in the
-// conversation with peerAddress. Mirrors the unread_count column
-// computed by ListConversations for a single conversation, used by
-// the DM-router delete path to refresh the in-memory sidebar badge
-// after a row is removed (otherwise the badge would stay at the
-// stale pre-delete count).
-//
-// Returns (0, nil) when the conversation has no unread messages or
-// when the database is not available; the latter mirrors the contract
-// of the surrounding chatlog Read* helpers (transient unavailability
-// is not an error).
-func (s *Store) UnreadCountFor(ctx context.Context, peerAddress domain.PeerIdentity) (int, error) {
-	if peerAddress.IsZero() {
-		return 0, nil
-	}
-	selfAddr := s.identityAddr
-	var n int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM messages
-		WHERE topic = 'dm'
-		  AND sender = ?
-		  AND recipient = ?
-		  AND delivery_status != 'seen'`,
-		peerAddress.String(), selfAddr,
-	).Scan(&n)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("chatlog: unread count for %s: %w", peerAddress, err)
-	}
-	return n, nil
 }
 
 // EntryByID fetches a single chatlog entry by message ID across all

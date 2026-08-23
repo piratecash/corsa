@@ -12,7 +12,7 @@ datagram transport plane (`docs/protocol/datagram.md`).
 Status of this revision: the record format, its verification, its merge
 contract, its storage and the identity backup are **implemented**. The
 discovery datagram types (`get_identity`, `post_identity`, `push_identity`)
-are specified by the design note `docs/refactoring/identity-discovery-lookup.md`
+are specified by the design note `../refactoring/done/identity-discovery-lookup.md`
 and land in the next stage; their sections will be added here when they do.
 
 Motivation, alternatives considered and the full design rationale live in
@@ -552,7 +552,7 @@ keeps working through the lookup.
 Статус ревизии: формат записи, её верификация, merge-контракт, хранение и
 backup identity **реализованы**. Типы датаграмм discovery (`get_identity`,
 `post_identity`, `push_identity`) специфицированы рабочей заметкой
-`docs/refactoring/identity-discovery-lookup.md` и приходят следующим этапом;
+`../refactoring/done/identity-discovery-lookup.md` и приходят следующим этапом;
 их разделы появятся здесь вместе с реализацией.
 
 Мотивация, отвергнутые альтернативы и полное обоснование — в рабочей

@@ -371,7 +371,7 @@ func TestApplyDecryptedMessageToSidebarRegistersFileReceiveForNonActive(t *testi
 	// Drive the same code path the production inline-decrypt branch
 	// runs. If a future regression removes tryRegisterFileReceive
 	// from this path, the snapshot assertion below will fail.
-	r.applyDecryptedMessageToSidebar(msg, peerID)
+	r.applyDecryptedMessageToSidebar(msg, peerID, peerStamp{})
 
 	// Snapshot-level invariant: the file tab (which reads
 	// AllTransfersSnapshot) sees the receiver row even though the
@@ -456,5 +456,213 @@ func TestTryRegisterFileReceiveDefensiveNils(t *testing.T) {
 
 	if got := atomic.LoadInt32(&seen); got != 0 {
 		t.Fatalf("TopicFileReceived fired %d times for nil/no-bridge cases; want 0", got)
+	}
+}
+
+// TestFileRegistrationRefusesAConversationThatMovedBackwards covers the half
+// a lifecycle generation cannot answer. The contact is still there — the
+// generation is unchanged — but the message the announcement names has been
+// deleted, or the thread wiped, since the snapshot that carried it was read.
+// Registering it then would put a transfer back for a row that is gone.
+func TestFileRegistrationRefusesAConversationThatMovedBackwards(t *testing.T) {
+	mgr := newTestFileTransferManager(t)
+	r := newTestRouter()
+	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
+
+	peer := domaintest.ID("thread-wiped-mid-load")
+	msg := &DirectMessage{
+		ID:        "announce-of-a-deleted-row",
+		Sender:    peer,
+		Recipient: r.client.Address(),
+		Command:   domain.DMCommandFileAnnounce,
+		CommandData: `{"file_hash":"` + validTestFileHash +
+			`","file_name":"gone.pdf","content_type":"application/pdf","file_size":4096}`,
+		Timestamp: time.Now(),
+	}
+
+	r.mu.Lock()
+	r.tryEnsurePeerLocked(peer)
+	stamp := peerStamp{gen: r.peerGen[peer], epochs: r.backwardsEpoch[peer]}
+	// The deletion lands while the message is on its way here. The contact
+	// stays: only the history moved.
+	r.moveHistoryBackwardsLocked(peer)
+	r.mu.Unlock()
+
+	r.registerFileReceiveForLivePeer(msg, peer, stamp)
+
+	if snap := mgr.AllTransfersSnapshot(); len(snap) != 0 {
+		t.Fatalf("a transfer was registered for a message that had been deleted: %+v", snap)
+	}
+}
+
+// TestOpeningAChatStillRestoresItsFileTransfers covers the difference between
+// the two backwards counters. Opening a conversation clears its badge, which
+// bumps the UNREAD counter and removes no rows — so it says nothing about
+// whether a file announcement is still valid. Comparing the whole pair made
+// every transfer in a freshly opened chat look stale, which is the one moment
+// they all have to be restored.
+func TestOpeningAChatStillRestoresItsFileTransfers(t *testing.T) {
+	mgr := newTestFileTransferManager(t)
+	r := newTestRouter()
+	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
+
+	peer := domaintest.ID("chat-being-opened")
+	msg := &DirectMessage{
+		ID:        "announce-in-an-opened-chat",
+		Sender:    peer,
+		Recipient: r.client.Address(),
+		Command:   domain.DMCommandFileAnnounce,
+		CommandData: `{"file_hash":"` + validTestFileHash +
+			`","file_name":"restored.pdf","content_type":"application/pdf","file_size":4096}`,
+		Timestamp: time.Now(),
+	}
+
+	r.mu.Lock()
+	r.tryEnsurePeerLocked(peer)
+	r.markUnreadLocked(peer, domain.MessageID("something-unread"))
+	stamp := peerStamp{gen: r.peerGen[peer], epochs: r.backwardsEpoch[peer]}
+	r.mu.Unlock()
+
+	// What opening the conversation does: the optimistic clear.
+	r.clearPeerUnread(peer)
+
+	r.registerFileReceiveForLivePeer(msg, peer, stamp)
+
+	if snap := mgr.AllTransfersSnapshot(); len(snap) != 1 {
+		t.Fatalf("opening the chat refused its own transfer: snapshot has %d rows, want 1", len(snap))
+	}
+}
+
+// TestFileRegistrationExcludesCleanupWhileItRuns pins the barrier that makes
+// the version check and the registration one step against the cleanups. The
+// check needs the router lock, the registration goes through the file
+// bridge, and a domain mutex may not be held across an external component —
+// so the two are made atomic with respect to deletion instead. Without it a
+// cleanup lands between the check and the registration, and the mapping it
+// removed comes straight back.
+func TestFileRegistrationExcludesCleanupWhileItRuns(t *testing.T) {
+	r := newTestRouter()
+	peer := domaintest.ID("registering-while-deleting")
+
+	// Observed from INSIDE the registration: every cleanup path takes this
+	// lock before it removes anything, so it cannot be free here.
+	cleanupCouldRun := false
+	r.fileBridge.registerIncomingFn = func(domain.FileID, string, string, string, uint64, domain.PeerIdentity) error {
+		cleanupCouldRun = r.fileOpLock(peer).TryLock()
+		if cleanupCouldRun {
+			r.fileOpLock(peer).Unlock()
+		}
+		return nil
+	}
+
+	r.mu.Lock()
+	r.tryEnsurePeerLocked(peer)
+	stamp := peerStamp{gen: r.peerGen[peer], epochs: r.backwardsEpoch[peer]}
+	r.mu.Unlock()
+
+	r.registerFileReceiveForLivePeer(&DirectMessage{
+		ID: "announce-under-the-barrier", Sender: peer, Recipient: r.client.Address(),
+		Command: domain.DMCommandFileAnnounce,
+		CommandData: `{"file_hash":"` + validTestFileHash +
+			`","file_name":"guarded.pdf","content_type":"application/pdf","file_size":4096}`,
+		Timestamp: time.Now(),
+	}, peer, stamp)
+
+	if cleanupCouldRun {
+		t.Fatal("a cleanup could have run in the middle of the registration: the barrier is not held")
+	}
+}
+
+// TestRegistrationRefusesAPeerWhoseRowIsGone covers the removal that is
+// running right now. It bumps the counters and cleans the transfers up under
+// the file barrier, so a registration that was already waiting for that
+// barrier resumes AFTER the last cleanup — and must find no row rather than
+// register a mapping that would outlive the deleted contact.
+func TestRegistrationRefusesAPeerWhoseRowIsGone(t *testing.T) {
+	mgr := newTestFileTransferManager(t)
+	r := newTestRouter()
+	r.fileBridge.registerIncomingFn = fakeManagerRegisterIncoming(mgr)
+
+	peer := domaintest.ID("row-already-dropped")
+	r.mu.Lock()
+	r.tryEnsurePeerLocked(peer)
+	stamp := peerStamp{gen: r.peerGen[peer], epochs: r.backwardsEpoch[peer]}
+	// What the tail of RemovePeer leaves behind. The stamp still matches:
+	// only the missing row says the conversation is gone.
+	delete(r.peers, peer)
+	r.removePeerLocked(peer)
+	r.mu.Unlock()
+
+	r.registerFileReceiveForLivePeer(&DirectMessage{
+		ID: "announce-after-removal", Sender: peer, Recipient: r.client.Address(),
+		Command: domain.DMCommandFileAnnounce,
+		CommandData: `{"file_hash":"` + validTestFileHash +
+			`","file_name":"orphan.pdf","content_type":"application/pdf","file_size":4096}`,
+		Timestamp: time.Now(),
+	}, peer, stamp)
+
+	if snap := mgr.AllTransfersSnapshot(); len(snap) != 0 {
+		t.Fatalf("a transfer was registered for a conversation that no longer exists: %+v", snap)
+	}
+}
+
+// TestFileBarrierSurvivesRemoveAndReAdd covers the keyed mutex itself.
+// Dropping it on removal would hand a waiting cleanup one mutex and the next
+// registration another — mutual exclusion between exactly the two operations
+// it exists to separate, gone.
+func TestFileBarrierSurvivesRemoveAndReAdd(t *testing.T) {
+	client, _ := newTestDesktopClientWithNode(t)
+	r := newSyncTestRouter()
+	r.client = client
+	peer := domaintest.ID("removed-then-added-again")
+
+	before := r.fileOpLock(peer)
+
+	r.mu.Lock()
+	r.tryEnsurePeerLocked(peer)
+	r.mu.Unlock()
+
+	// The real removal, which is what used to drop the mutex.
+	if _, err := r.RemovePeer(peer); err != nil {
+		t.Fatalf("RemovePeer: %v", err)
+	}
+
+	r.mu.Lock()
+	r.tryEnsurePeerLocked(peer)
+	r.mu.Unlock()
+
+	if after := r.fileOpLock(peer); after != before {
+		t.Fatal("the file barrier was replaced across a remove/re-add: a waiter holds the old mutex and excludes nobody")
+	}
+}
+
+// TestCleanupThatRemovedNothingDoesNotMoveTheVersion covers the false stale.
+// An ack usually names a row deleted long ago, and a wipe can match nothing;
+// moving the version for those marks loads and decrypts that are perfectly
+// current as stale and sends them through recovery for nothing.
+func TestCleanupThatRemovedNothingDoesNotMoveTheVersion(t *testing.T) {
+	r := newTestRouter()
+	peer := domaintest.ID("cleanup-without-a-deletion")
+
+	r.mu.Lock()
+	r.tryEnsurePeerLocked(peer)
+	before := r.backwardsEpoch[peer].history
+	r.mu.Unlock()
+
+	r.withFileOps(peer, false, func() {})
+
+	r.mu.RLock()
+	after := r.backwardsEpoch[peer].history
+	r.mu.RUnlock()
+	if after != before {
+		t.Fatalf("a cleanup that removed nothing moved the history counter %d → %d", before, after)
+	}
+
+	r.withFileOps(peer, true, func() {})
+	r.mu.RLock()
+	moved := r.backwardsEpoch[peer].history
+	r.mu.RUnlock()
+	if moved != before+1 {
+		t.Fatalf("a cleanup that removed rows moved the counter to %d, want %d", moved, before+1)
 	}
 }

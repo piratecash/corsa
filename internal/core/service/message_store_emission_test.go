@@ -27,7 +27,7 @@ func TestOutboxCarriesTheEmissionProofAcrossAReopen(t *testing.T) {
 	owner := domain.PeerIdentityFromWire(self.Address)
 	database := newTestStateDB(t, owner)
 	store := chatlog.NewStore(database.Executor(), owner)
-	adapter := NewMessageStoreAdapter(NewChatlogGateway(store, owner), self, nil)
+	adapter := NewMessageStoreAdapter(NewChatlogGateway(store, owner), self, nil, nil)
 
 	const (
 		withheld = protocol.MessageID("11111111-1111-4111-8111-111111111111")
@@ -51,7 +51,7 @@ func TestOutboxCarriesTheEmissionProofAcrossAReopen(t *testing.T) {
 	// A second repository over the same database is what the node meets
 	// after a restart.
 	reopened := NewMessageStoreAdapter(
-		NewChatlogGateway(chatlog.NewStore(database.Executor(), owner), owner), self, nil)
+		NewChatlogGateway(chatlog.NewStore(database.Executor(), owner), owner), self, nil, nil)
 	rows, err := reopened.UndeliveredOutgoing()
 	if err != nil {
 		t.Fatalf("UndeliveredOutgoing: %v", err)

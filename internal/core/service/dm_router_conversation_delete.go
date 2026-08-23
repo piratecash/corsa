@@ -891,11 +891,18 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 	// retries it until it succeeds.
 	_ = r.withdrawDeletedDeliveries(ctx, peer, scope.IDs)
 
-	if r.fileBridge != nil {
+	// Under the file barrier: it moves the peer's history counter first, so
+	// a registration in flight stands down instead of re-creating a mapping
+	// this is about to remove. Taken even with no bridge, because the
+	// version move is what every chatlog read in flight checks.
+	r.withFileOps(peer, len(wiped.Removed) > 0, func() {
+		if r.fileBridge == nil {
+			return
+		}
 		for _, id := range wiped.Removed {
 			r.fileBridge.OnMessageDeleted(id)
 		}
-	}
+	})
 
 	r.evictWipedConversationFromUI(peer, wiped.Removed)
 	if len(wiped.Removed) > 0 {
@@ -960,6 +967,11 @@ func (r *DMRouter) evictWipedConversationFromUI(peer domain.PeerIdentity, remove
 	for _, id := range removedIDs {
 		delete(r.seenMessageIDs, string(id))
 	}
+	// A deleted message is not an unread message. The set is authoritative
+	// for the badge, and the ids are right here — no query needed. The
+	// history move was recorded by the file barrier when the rows went;
+	// one deletion is one move.
+	r.dropUnreadLocked(peer, removedIDs...)
 	r.mu.Unlock()
 
 	r.refreshPreviewAfterDelete(peer)
@@ -1358,10 +1370,13 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	// falls through, since in that case the row is genuinely on
 	// disk and the user needs the manual-delete UI.
 
-	if r.fileBridge != nil {
-		r.fileBridge.OnMessageDeleted(id)
-	}
-	r.evictWipedConversationFromUI(r.peerForMessage(event), []domain.MessageID{id})
+	wipedPeer := r.peerForMessage(event)
+	r.withFileOps(wipedPeer, removed, func() {
+		if r.fileBridge != nil {
+			r.fileBridge.OnMessageDeleted(id)
+		}
+	})
+	r.evictWipedConversationFromUI(wipedPeer, []domain.MessageID{id})
 
 	// Nothing to credit anywhere: a wipe is N ordinary deletions, each
 	// settled by its own ack, so a re-delete here is just this guard

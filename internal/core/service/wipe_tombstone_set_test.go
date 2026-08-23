@@ -140,7 +140,7 @@ func TestUnknownRefusalDefersTheMessage(t *testing.T) {
 	set.Hydrate(context.Background(), time.Now().UTC())
 
 	adapter := NewMessageStoreAdapter(
-		NewChatlogGateway(newTestChatlogStore(t, owner), owner), self, set)
+		NewChatlogGateway(newTestChatlogStore(t, owner), owner), self, set, nil)
 
 	envelope := protocol.Envelope{
 		ID:        "33333333-3333-4333-8333-333333333333",
@@ -215,7 +215,7 @@ func TestNonDMTopicIsNotGatedByRefusals(t *testing.T) {
 	set.Hydrate(context.Background(), time.Now().UTC())
 
 	adapter := NewMessageStoreAdapter(
-		NewChatlogGateway(newTestChatlogStore(t, owner), owner), self, set)
+		NewChatlogGateway(newTestChatlogStore(t, owner), owner), self, set, nil)
 
 	envelope := protocol.Envelope{
 		ID:        "66666666-6666-4666-8666-666666666666",

@@ -388,7 +388,7 @@ func (s *Service) persistIdentityPresenceChange(change ebus.IdentityPresenceChan
 	identities := append([]domain.PeerIdentity(nil), change.Identities...)
 	observedAt := change.ChangedAt.UTC()
 	s.goBackground(func() {
-		if updated, err := s.trust.recordLastOnlineAt(identities, observedAt); err != nil {
+		if updated, err := s.trust.recordLastOnlineAt(identities, observedAt, 0); err != nil {
 			log.Warn().Err(err).
 				Str("identity_sample", identities[0].String()).
 				Int("updated", updated).

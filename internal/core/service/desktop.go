@@ -70,6 +70,12 @@ type DesktopClient struct {
 	// see wireSubServices.
 	wipeTombstones *wipeTombstoneSet
 
+	// removals names the conversations being removed right now. Owned here
+	// rather than by the router for the same reason the refusals are: the
+	// node holds the store adapter from the moment it is registered, and a
+	// gate wired later is open for exactly the window it exists to close.
+	removals *removalGate
+
 	// cancelConversationDeliveryFn is a test-only override for the node
 	// round-trip: what a wipe does with the answer — which messages the
 	// peer is asked about — cannot be exercised without controlling
@@ -96,6 +102,9 @@ type Contact struct {
 	BoxKey       string
 	PubKey       string
 	BoxSignature string
+	// LastOnlineAt is the node's own observation of this identity being up.
+	// What chat history says lives only in memory (RouterPeerState) and is
+	// recomputed at startup — one writer, one source of truth.
 	LastOnlineAt domain.OptionalTime
 }
 
@@ -406,7 +415,8 @@ func (c *DesktopClient) wireSubServices() {
 		return store
 	})
 	c.wipeTombstones.Hydrate(context.Background(), time.Now().UTC())
-	c.store = NewMessageStoreAdapter(c.chatlog, c.id, c.wipeTombstones)
+	c.removals = newRemovalGate()
+	c.store = NewMessageStoreAdapter(c.chatlog, c.id, c.wipeTombstones, c.removals)
 	c.dm = NewDMCrypto(c.rpc, c.chatlog, c.id)
 	c.prober = NewNodeProber(c.rpc, c.dm, c.info)
 }

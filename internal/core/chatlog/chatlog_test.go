@@ -1287,3 +1287,313 @@ func TestCtxReadersRespectCancellation(t *testing.T) {
 		t.Fatal("ReadLastEntryPerPeer should return error on cancelled context")
 	}
 }
+
+// TestLastIncomingAtIgnoresOwnMessages covers the presence question the
+// sidebar asks: when did this peer last write to us? The thread's newest row
+// is our own reply, so anything derived from "the last message" would report
+// no peer activity at all.
+func TestLastIncomingAtIgnoresOwnMessages(t *testing.T) {
+	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
+	s := storeFor(t, selfAddr)
+
+	peerReplied := "1111111111111111111111111111111111111111"
+	peerSilent := "2222222222222222222222222222222222222222"
+	ctx := context.Background()
+	self := domain.PeerIdentityFromWire(selfAddr)
+
+	// The ordinary shape: they wrote twice, we answered last.
+	_ = s.Append(ctx, "dm", self, Entry{ID: "r1", Sender: peerReplied, Recipient: selfAddr, Body: "hi", CreatedAt: "2026-01-01T10:00:00Z"})
+	_ = s.Append(ctx, "dm", self, Entry{ID: "r2", Sender: peerReplied, Recipient: selfAddr, Body: "you there?", CreatedAt: "2026-01-01T11:00:00Z"})
+	_ = s.Append(ctx, "dm", self, Entry{ID: "r3", Sender: selfAddr, Recipient: peerReplied, Body: "yes", CreatedAt: "2026-01-02T09:00:00Z"})
+
+	// A contact we wrote to who never answered has no evidence at all.
+	_ = s.Append(ctx, "dm", self, Entry{ID: "s1", Sender: selfAddr, Recipient: peerSilent, Body: "hello?", CreatedAt: "2026-01-03T09:00:00Z"})
+
+	wantReplied := time.Date(2026, time.January, 1, 11, 0, 0, 0, time.UTC)
+
+	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	perPeer, err := s.LastIncomingAtPerPeer(ctx, now)
+	if err != nil {
+		t.Fatalf("last incoming per peer: %v", err)
+	}
+	if got, ok := perPeer[domain.PeerIdentityFromWire(peerReplied)]; !ok || !got.Equal(wantReplied) {
+		t.Fatalf("per-peer last incoming = %v (present=%v), want %v", got, ok, wantReplied)
+	}
+	if got, ok := perPeer[domain.PeerIdentityFromWire(peerSilent)]; ok {
+		t.Fatalf("outgoing-only conversation reported peer activity: %v", got)
+	}
+
+	got, err := s.LastIncomingAtFor(ctx, domain.PeerIdentityFromWire(peerReplied), now)
+	if err != nil {
+		t.Fatalf("last incoming for: %v", err)
+	}
+	if !got.Equal(wantReplied) {
+		t.Fatalf("single-peer last incoming = %v, want %v", got, wantReplied)
+	}
+
+	// MAX over no rows is a NULL row, not zero rows: the empty case must come
+	// back as "no evidence", not as an error.
+	silent, err := s.LastIncomingAtFor(ctx, domain.PeerIdentityFromWire(peerSilent), now)
+	if err != nil {
+		t.Fatalf("last incoming for silent peer: %v", err)
+	}
+	if !silent.IsZero() {
+		t.Fatalf("outgoing-only conversation reported %v, want zero", silent)
+	}
+}
+
+// TestLastIncomingAtOrdersChronologically pins the comparison to real time
+// rather than to string order. created_at is stored as RFC3339 text, and text
+// order is not time order:
+//
+//   - "…00Z" sorts ABOVE "…00.5Z", because 'Z' > '.', so a whole second beats
+//     the later half-second that follows it;
+//   - a zone offset shifts the instant by hours while the text still sorts by
+//     its printed digits, so "…23:00:00+03:00" (20:00Z) sorts above "…21:00Z"
+//     which actually came later.
+//
+// Both forms reach the table: incoming rows carry the timestamp the sender
+// printed, in whatever zone their node used.
+func TestLastIncomingAtOrdersChronologically(t *testing.T) {
+	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
+	s := storeFor(t, selfAddr)
+
+	subsecond := "1111111111111111111111111111111111111111"
+	offset := "2222222222222222222222222222222222222222"
+	ctx := context.Background()
+	self := domain.PeerIdentityFromWire(selfAddr)
+
+	appendIncoming := func(id, sender, createdAt string) {
+		t.Helper()
+		if err := s.Append(ctx, "dm", self, Entry{
+			ID: id, Sender: sender, Recipient: selfAddr, Body: "sealed", CreatedAt: createdAt,
+		}); err != nil {
+			t.Fatalf("append %s: %v", id, err)
+		}
+	}
+
+	// Same second, the later one carrying a fraction.
+	appendIncoming("s1", subsecond, "2026-01-01T10:00:00Z")
+	appendIncoming("s2", subsecond, "2026-01-01T10:00:00.5Z")
+	wantSubsecond := time.Date(2026, time.January, 1, 10, 0, 0, 500000000, time.UTC)
+
+	// Different zones: 21:00Z is 22 minutes after 23:22:00+03:00.
+	appendIncoming("o1", offset, "2026-01-01T23:22:00+03:00")
+	appendIncoming("o2", offset, "2026-01-01T21:00:00Z")
+	wantOffset := time.Date(2026, time.January, 1, 21, 0, 0, 0, time.UTC)
+
+	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	perPeer, err := s.LastIncomingAtPerPeer(ctx, now)
+	if err != nil {
+		t.Fatalf("last incoming per peer: %v", err)
+	}
+	if got := perPeer[domain.PeerIdentityFromWire(subsecond)]; !got.Equal(wantSubsecond) {
+		t.Fatalf("per-peer sub-second: got %v, want %v", got, wantSubsecond)
+	}
+	if got := perPeer[domain.PeerIdentityFromWire(offset)]; !got.Equal(wantOffset) {
+		t.Fatalf("per-peer zone offset: got %v, want %v", got, wantOffset)
+	}
+
+	got, err := s.LastIncomingAtFor(ctx, domain.PeerIdentityFromWire(subsecond), now)
+	if err != nil {
+		t.Fatalf("last incoming for: %v", err)
+	}
+	if !got.Equal(wantSubsecond) {
+		t.Fatalf("single-peer sub-second: got %v, want %v", got, wantSubsecond)
+	}
+	got, err = s.LastIncomingAtFor(ctx, domain.PeerIdentityFromWire(offset), now)
+	if err != nil {
+		t.Fatalf("last incoming for: %v", err)
+	}
+	if !got.Equal(wantOffset) {
+		t.Fatalf("single-peer zone offset: got %v, want %v", got, wantOffset)
+	}
+}
+
+// TestLastIncomingAtSkipsFutureRows covers the timestamp a sender can choose
+// freely. A future-dated message must not become presence evidence — but it
+// must also not HIDE the valid evidence behind it. Returning only the newest
+// row and letting the caller reject it loses the older, honest message: the
+// contact reads as "never seen" while its proof sits in the history.
+func TestLastIncomingAtSkipsFutureRows(t *testing.T) {
+	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
+	s := storeFor(t, selfAddr)
+
+	liar := "1111111111111111111111111111111111111111"
+	onlyFuture := "2222222222222222222222222222222222222222"
+	ctx := context.Background()
+	self := domain.PeerIdentityFromWire(selfAddr)
+	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+
+	appendIncoming := func(id, sender string, at time.Time) {
+		t.Helper()
+		if err := s.Append(ctx, "dm", self, Entry{
+			ID: id, Sender: sender, Recipient: selfAddr, Body: "sealed",
+			CreatedAt: at.Format(time.RFC3339Nano),
+		}); err != nil {
+			t.Fatalf("append %s: %v", id, err)
+		}
+	}
+
+	honest := now.Add(-4 * time.Hour)
+	appendIncoming("l1", liar, honest)
+	appendIncoming("l2", liar, now.Add(72*time.Hour))
+	appendIncoming("f1", onlyFuture, now.Add(48*time.Hour))
+
+	perPeer, err := s.LastIncomingAtPerPeer(ctx, now)
+	if err != nil {
+		t.Fatalf("last incoming per peer: %v", err)
+	}
+	if got := perPeer[domain.PeerIdentityFromWire(liar)]; !got.Equal(honest) {
+		t.Fatalf("per-peer: got %v, want the honest message behind the forged one (%v)", got, honest)
+	}
+	if got, ok := perPeer[domain.PeerIdentityFromWire(onlyFuture)]; ok {
+		t.Fatalf("a peer whose only message is future-dated reported evidence: %v", got)
+	}
+
+	got, err := s.LastIncomingAtFor(ctx, domain.PeerIdentityFromWire(liar), now)
+	if err != nil {
+		t.Fatalf("last incoming for: %v", err)
+	}
+	if !got.Equal(honest) {
+		t.Fatalf("single-peer: got %v, want %v", got, honest)
+	}
+	got, err = s.LastIncomingAtFor(ctx, domain.PeerIdentityFromWire(onlyFuture), now)
+	if err != nil {
+		t.Fatalf("last incoming for: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("single-peer future-only: got %v, want zero", got)
+	}
+}
+
+// TestLastIncomingAtKeepsNanosecondOrder pins the comparison to the full
+// stored precision. julianday is a float: two timestamps inside the same
+// microsecond collapse to one value, and whatever tie-breaks them next
+// (rowid — insertion order, not time order) can hand back the older message.
+// RFC3339Nano stores nanoseconds, so nanoseconds are what has to decide.
+func TestLastIncomingAtKeepsNanosecondOrder(t *testing.T) {
+	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
+	s := storeFor(t, selfAddr)
+
+	peer := "1111111111111111111111111111111111111111"
+	ctx := context.Background()
+	self := domain.PeerIdentityFromWire(selfAddr)
+	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+
+	base := time.Date(2026, time.August, 20, 10, 0, 0, 0, time.UTC)
+	newest := base.Add(2 * time.Nanosecond)
+	// The insertion order is fixed and deliberately the REVERSE of time
+	// order, so a rowid tie-break has to pick the wrong row rather than
+	// getting it right by luck. Ranging over a map here would randomise that
+	// order and let the regression pass on roughly half the runs.
+	ordered := []struct {
+		id string
+		at time.Time
+	}{
+		{id: "n2", at: newest},
+		{id: "n1", at: base.Add(1 * time.Nanosecond)},
+	}
+	for _, entry := range ordered {
+		if err := s.Append(ctx, "dm", self, Entry{
+			ID: entry.id, Sender: peer, Recipient: selfAddr, Body: "sealed",
+			CreatedAt: entry.at.Format(time.RFC3339Nano),
+		}); err != nil {
+			t.Fatalf("append %s: %v", entry.id, err)
+		}
+	}
+
+	perPeer, err := s.LastIncomingAtPerPeer(ctx, now)
+	if err != nil {
+		t.Fatalf("last incoming per peer: %v", err)
+	}
+	if got := perPeer[domain.PeerIdentityFromWire(peer)]; !got.Equal(newest) {
+		t.Fatalf("per-peer nanosecond order: got %v, want %v", got, newest)
+	}
+	got, err := s.LastIncomingAtFor(ctx, domain.PeerIdentityFromWire(peer), now)
+	if err != nil {
+		t.Fatalf("last incoming for: %v", err)
+	}
+	if !got.Equal(newest) {
+		t.Fatalf("single-peer nanosecond order: got %v, want %v", got, newest)
+	}
+}
+
+// TestUnseenIncomingIDsReportsOnlyUnseenIncoming pins the query that seeds the
+// sidebar badge. It answers with IDS rather than a count because the consumer
+// keeps a set: the database is ahead of the event stream, so the same message
+// arrives from both, and only an id can be recognised as already counted.
+func TestUnseenIncomingIDsReportsOnlyUnseenIncoming(t *testing.T) {
+	selfAddr := "aabbccdd11223344aabbccdd11223344aabbccdd"
+	s := storeFor(t, selfAddr)
+
+	peer := "1111111111111111111111111111111111111111"
+	other := "2222222222222222222222222222222222222222"
+	ctx := context.Background()
+	self := domain.PeerIdentityFromWire(selfAddr)
+
+	add := func(id, sender, recipient, status string) {
+		t.Helper()
+		if err := s.Append(ctx, "dm", self, Entry{
+			ID: id, Sender: sender, Recipient: recipient, Body: "sealed",
+			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), DeliveryStatus: status,
+		}); err != nil {
+			t.Fatalf("append %s: %v", id, err)
+		}
+	}
+	add("in-unseen", peer, selfAddr, StatusDelivered)
+	add("in-seen", peer, selfAddr, StatusSeen)
+	add("out-1", selfAddr, peer, StatusSent) // ours: never unread
+	add("other-unseen", other, selfAddr, StatusDelivered)
+
+	byPeer, err := s.UnseenIncomingIDs(ctx)
+	if err != nil {
+		t.Fatalf("unseen incoming ids: %v", err)
+	}
+	if got := byPeer[domain.PeerIdentityFromWire(peer)]; len(got) != 1 || got[0] != "in-unseen" {
+		t.Fatalf("peer ids = %v, want only the unseen incoming one", got)
+	}
+	if got := byPeer[domain.PeerIdentityFromWire(other)]; len(got) != 1 {
+		t.Fatalf("other peer ids = %v, want one", got)
+	}
+	if _, ours := byPeer[self]; ours {
+		t.Fatal("our own outgoing message was reported as unread")
+	}
+
+	// The same question about ids the database does not hold: the header path
+	// asks it to learn that a message's read state is not the header's to
+	// decide.
+	statuses, err := s.StoredMessageStatuses(ctx, []domain.MessageID{"in-seen", "in-unseen", "never-stored"})
+	if err != nil {
+		t.Fatalf("stored message statuses: %v", err)
+	}
+	if got := statuses["in-seen"]; got != StatusSeen {
+		t.Fatalf("status of the read message = %q, want %q", got, StatusSeen)
+	}
+	if got, ok := statuses["in-unseen"]; !ok || got == StatusSeen {
+		t.Fatalf("status of the unread message = %q (stored=%v), want a stored non-seen status", got, ok)
+	}
+	if _, ok := statuses["never-stored"]; ok {
+		t.Fatal("an id the database never stored was reported as stored")
+	}
+
+	ids, err := s.UnseenIncomingIDsFor(ctx, domain.PeerIdentityFromWire(peer))
+	if err != nil {
+		t.Fatalf("unseen incoming ids for: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "in-unseen" {
+		t.Fatalf("single-peer ids = %v, want only the unseen incoming one", ids)
+	}
+
+	// After the conversation is read, the badge query has nothing to report.
+	if _, err := s.UpdateStatus(ctx, "dm", domain.PeerIdentityFromWire(peer), domain.MessageID("in-unseen"), StatusSeen); err != nil {
+		t.Fatalf("mark seen: %v", err)
+	}
+	ids, err = s.UnseenIncomingIDsFor(ctx, domain.PeerIdentityFromWire(peer))
+	if err != nil {
+		t.Fatalf("unseen incoming ids for: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ids after marking seen = %v, want none", ids)
+	}
+}

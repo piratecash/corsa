@@ -144,6 +144,15 @@ type NodeStatusMonitor struct {
 	// health delta) are safe to enrich.
 	ebusHealthSeeded map[string]struct{}
 
+	// heldPresence keeps last-online observations whose identity had no
+	// contact row when they arrived, keyed by address. The presence topics
+	// and TopicContactAdded are independent subscriber goroutines, so a DM
+	// from a contact being added right now can be applied first; the
+	// contact-added handler claims the held value. Bounded by
+	// maxHeldPresenceObservations — the identities are remote parties.
+	// Guarded by mu, like status.
+	heldPresence map[string]heldPresenceObservation
+
 	// Ebus-seeded flags: true once the corresponding handler has written
 	// at least once. Used by mergeNodeStatusLocked to decide whether to
 	// preserve ebus state or let the ProbeNode snapshot seed the field.
@@ -369,6 +378,10 @@ func (m *NodeStatusMonitor) Reset() {
 	m.ebusHealthSeeded = nil
 	m.ebusAggregateCountersSeeded = false
 	m.ebusVersionPolicySeeded = false
+	// Held observations belong to the identity that made them. Kept across a
+	// reset they would be claimed by whatever contact the NEXT session
+	// happens to add under the same address.
+	m.heldPresence = nil
 	m.mu.Unlock()
 }
 
@@ -380,6 +393,11 @@ func (m *NodeStatusMonitor) Reset() {
 func (m *NodeStatusMonitor) SeedFromProbe(s NodeStatus) {
 	m.mu.Lock()
 	m.mergeNodeStatusLocked(s)
+	// The probe is the other way a contact first appears in this snapshot, so
+	// it claims held observations exactly like the contact-added handler.
+	// Without this the startup race simply moved: an observation that landed
+	// before the first probe would be held forever.
+	m.claimHeldPresenceForKnownContactsLocked()
 	m.mu.Unlock()
 
 	m.notifyChanged()
@@ -462,26 +480,20 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		m.notifyPartial(NodeStatusDomainReachableIDs)
 	})
 
-	// Identity presence changed — apply only the transition timestamp from the
-	// dedicated identity-domain event. ReachableIDs is deliberately untouched:
-	// the route-snapshot event above is its single writer, avoiding cross-topic
+	// Identity presence — apply only the timestamp from the dedicated
+	// identity-domain events. ReachableIDs is deliberately untouched: the
+	// route-snapshot event above is its single writer, avoiding cross-topic
 	// generation races between independent ebus subscriber goroutines.
+	//
+	// Two topics, one rule. They differ in what the node observed — a final
+	// route lost, or a DM handed to us by its own sender — and not at all in
+	// what the UI does with it, which is why they share this handler instead
+	// of having the same monotone apply written twice.
 	m.eventBus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
-		if change.Source != m.client.Address() || len(change.Identities) == 0 || change.ChangedAt.IsZero() {
-			return
-		}
-		m.mu.Lock()
-		observedAt := change.ChangedAt.UTC()
-		for _, identity := range change.Identities {
-			contact, ok := m.status.Contacts[identity.String()]
-			if !ok || (contact.LastOnlineAt.Valid() && !observedAt.After(contact.LastOnlineAt.Time())) {
-				continue
-			}
-			contact.LastOnlineAt = domain.TimeOf(observedAt)
-			m.status.Contacts[identity.String()] = contact
-		}
-		m.mu.Unlock()
-		m.notifyPartial(NodeStatusDomainPresence)
+		m.applyIdentityPresence(change, presenceFromRouting)
+	})
+	m.eventBus.Subscribe(ebus.TopicIdentityPresenceObserved, func(change ebus.IdentityPresenceChange) {
+		m.applyIdentityPresence(change, presenceFromDirectMessage)
 	})
 
 	// Individual peer health changed — apply state delta directly.
@@ -511,6 +523,15 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 			m.status.Contacts = make(map[string]Contact)
 		}
 		lastOnlineAt := m.status.Contacts[c.Address.String()].LastOnlineAt
+		// An observation that arrived before this contact existed is claimed
+		// here: the presence handler holds one aside precisely because these
+		// two topics are independent subscriber goroutines and can land in
+		// either order.
+		if held, ok := m.claimHeldPresenceLocked(c.Address.String()); ok {
+			if !lastOnlineAt.Valid() || held.After(lastOnlineAt.Time()) {
+				lastOnlineAt = domain.TimeOf(held)
+			}
+		}
 		m.status.Contacts[c.Address.String()] = Contact{
 			PubKey:       string(c.PubKey),
 			BoxKey:       string(c.BoxKey),
@@ -574,27 +595,188 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 
 // ── Delta applicators ──
 
-// applyPeerHealthDelta updates discrete health fields for a single peer
-// address. The delta carries the outbound session ConnID and the full set
-// of active inbound ConnIDs, enabling the monitor to maintain one row per
-// live connection and automatically prune rows for dead connections.
+// applyIdentityPresence records an identity-level presence observation on the
+// cached contacts. Observations from another node sharing the same Bus are
+// ignored, and an older one never moves a contact's timestamp backwards —
+// events from independent subscriber goroutines arrive in no guaranteed
+// order, so "latest received" is not "latest observed".
 //
-// Reconciliation model:
-//  1. Build expectedConnIDs from delta (outbound ConnID + InboundConnIDs).
-//  2. Update existing rows: outbound row gets full session-scoped write;
-//     inbound rows receive address-level fields only (their ConnID and
-//     Direction are immutable row identifiers). A ConnID=0 placeholder
-//     is left untouched when the delta carries live InboundConnIDs —
-//     its address-level slot metadata will be migrated onto the surviving
-//     per-ConnID rows before it is pruned.
-//  3. Create new rows for InboundConnIDs not yet present.
-//  4. Prune rows whose ConnID is no longer in expectedConnIDs (dead
-//     connections). A ConnID=0 "address row" is pruned when per-ConnID
-//     rows authoritatively represent the address (expectedConnIDs
-//     non-empty) and survives otherwise. Before pruning the placeholder,
-//     its SlotState and PendingCount (which ride on separate ebus
-//     topics, not on PeerHealthDelta) are migrated onto surviving
-//     per-ConnID rows where those fields are still empty.
+// Contacts are only updated, never created: the trust store decides who is a
+// contact. An observation about an identity that is not in the map yet is
+// therefore held aside rather than dropped, because the two topics run on
+// independent subscriber goroutines and a DM can be applied before the
+// contact-added event that introduces its sender. Dropping it used to be
+// invisible and permanent: the contact would arrive with no timestamp, and
+// with the periodic full probe gone nothing would ever fill it in.
+func (m *NodeStatusMonitor) applyIdentityPresence(change ebus.IdentityPresenceChange, source presenceSource) {
+	if change.Source != m.client.Address() || len(change.Identities) == 0 || change.ChangedAt.IsZero() {
+		return
+	}
+	observedAt := change.ChangedAt.UTC()
+
+	m.mu.Lock()
+	applied := 0
+	for _, identity := range change.Identities {
+		address := identity.String()
+		contact, ok := m.status.Contacts[address]
+		if !ok {
+			m.holdPresenceForUnknownContactLocked(address, observedAt, source)
+			continue
+		}
+		if contact.LastOnlineAt.Valid() && !observedAt.After(contact.LastOnlineAt.Time()) {
+			continue
+		}
+		contact.LastOnlineAt = domain.TimeOf(observedAt)
+		m.status.Contacts[address] = contact
+		applied++
+	}
+	m.mu.Unlock()
+
+	if applied == 0 {
+		return
+	}
+	m.notifyPartial(NodeStatusDomainPresence)
+}
+
+// maxHeldPresenceObservations bounds the hold-aside map. Observations are
+// published for whoever sent us an authenticated DM, contact or not, so the
+// map is fed by remote parties and cannot be allowed to grow with them. The
+// cap is generous next to any real address book and small next to the memory
+// a flood would need to matter.
+const maxHeldPresenceObservations = 512
+
+// presenceSource says which topic an observation came from, because the two
+// differ in how likely they are ever to be claimed. The routing topic reports
+// identities from the ROUTING TABLE — peers, most of which the user has never
+// trusted — while the DM topic reports the sender of a message we accepted,
+// which the node publishes only for a contact. When the hold is full, that
+// difference decides who leaves.
+type presenceSource uint8
+
+const (
+	// presenceFromRouting — a route transition. The identity may never be a
+	// contact, so the hold may never be claimed.
+	presenceFromRouting presenceSource = iota
+	// presenceFromDirectMessage — an authenticated DM from a contact. The
+	// contact-added event that claims this is already on its way.
+	presenceFromDirectMessage
+)
+
+// heldPresenceObservation is one waiting observation and where it came from.
+type heldPresenceObservation struct {
+	at     time.Time
+	source presenceSource
+}
+
+// holdPresenceForUnknownContactLocked remembers an observation whose identity
+// has no contact row yet, so the contact-added handler can claim it. Caller
+// holds m.mu.
+func (m *NodeStatusMonitor) holdPresenceForUnknownContactLocked(address string, observedAt time.Time, source presenceSource) {
+	if m.heldPresence == nil {
+		m.heldPresence = make(map[string]heldPresenceObservation)
+	}
+	if current, ok := m.heldPresence[address]; ok {
+		if !observedAt.After(current.at) {
+			return
+		}
+		m.heldPresence[address] = heldPresenceObservation{at: observedAt, source: source}
+		return
+	}
+	if len(m.heldPresence) >= maxHeldPresenceObservations {
+		// A contact-added event that never comes would otherwise pin its slot
+		// for the life of the process, so the cap is swept before it is
+		// enforced: an entry only waits for the event that claims it.
+		m.expireHeldPresenceLocked(observedAt)
+	}
+	if len(m.heldPresence) >= maxHeldPresenceObservations {
+		// Evict rather than refuse the newcomer, and evict a routing-sourced
+		// entry first. A churning mesh fills this map with identities no
+		// contact-added event will ever claim; dropping the oldest entry
+		// regardless of source would hand those churn entries the slots and
+		// throw out the DM observation for the contact that genuinely is
+		// being added — the case the hold exists for.
+		m.evictHeldPresenceLocked()
+	}
+	m.heldPresence[address] = heldPresenceObservation{at: observedAt, source: source}
+}
+
+// evictHeldPresenceLocked drops one entry: the oldest routing-sourced
+// observation if there is one, otherwise the oldest overall. Callers hold
+// m.mu.
+func (m *NodeStatusMonitor) evictHeldPresenceLocked() {
+	var (
+		victim      string
+		victimEntry heldPresenceObservation
+	)
+	for address, entry := range m.heldPresence {
+		if victim == "" {
+			victim, victimEntry = address, entry
+			continue
+		}
+		// A routing entry always loses to a DM entry; within one source the
+		// older one loses.
+		if victimEntry.source != entry.source {
+			if entry.source == presenceFromRouting {
+				victim, victimEntry = address, entry
+			}
+			continue
+		}
+		if entry.at.Before(victimEntry.at) {
+			victim, victimEntry = address, entry
+		}
+	}
+	if victim != "" {
+		delete(m.heldPresence, victim)
+	}
+}
+
+// heldPresenceTTL is how long an observation waits for the contact-added
+// event or probe that claims it. The window only has to cover the gap between
+// two subscriber goroutines; anything still waiting minutes later is waiting
+// for an event that is not coming.
+const heldPresenceTTL = 5 * time.Minute
+
+// expireHeldPresenceLocked drops observations older than heldPresenceTTL,
+// measured against the newest observation seen rather than the wall clock —
+// the values are event timestamps, and tests drive them from an injected
+// clock. Caller holds m.mu.
+func (m *NodeStatusMonitor) expireHeldPresenceLocked(now time.Time) {
+	for address, entry := range m.heldPresence {
+		if now.Sub(entry.at) > heldPresenceTTL {
+			delete(m.heldPresence, address)
+		}
+	}
+}
+
+// claimHeldPresenceLocked hands over the observation held for an identity, if
+// any, and forgets it. Caller holds m.mu.
+func (m *NodeStatusMonitor) claimHeldPresenceLocked(address string) (time.Time, bool) {
+	entry, ok := m.heldPresence[address]
+	if !ok {
+		return time.Time{}, false
+	}
+	delete(m.heldPresence, address)
+	return entry.at, true
+}
+
+// claimHeldPresenceForKnownContactsLocked applies every held observation whose
+// contact now exists. Used by the probe path, which introduces contacts in
+// bulk rather than one event at a time. Caller holds m.mu.
+func (m *NodeStatusMonitor) claimHeldPresenceForKnownContactsLocked() {
+	for address, entry := range m.heldPresence {
+		contact, ok := m.status.Contacts[address]
+		if !ok {
+			continue
+		}
+		delete(m.heldPresence, address)
+		if contact.LastOnlineAt.Valid() && !entry.at.After(contact.LastOnlineAt.Time()) {
+			continue
+		}
+		contact.LastOnlineAt = domain.TimeOf(entry.at)
+		m.status.Contacts[address] = contact
+	}
+}
+
 func (m *NodeStatusMonitor) applyPeerHealthDelta(delta ebus.PeerHealthDelta) {
 	m.mu.Lock()
 	if m.ebusHealthSeeded == nil {
@@ -1475,14 +1657,26 @@ func mergeContacts(ebusCt, probeCt map[string]Contact) map[string]Contact {
 	}
 	for address, ebusContact := range ebusCt {
 		probeContact, exists := probeCt[address]
-		probeNewer := exists && probeContact.LastOnlineAt.Valid() &&
-			(!ebusContact.LastOnlineAt.Valid() || probeContact.LastOnlineAt.After(ebusContact.LastOnlineAt.Time()))
-		if probeNewer {
-			ebusContact.LastOnlineAt = probeContact.LastOnlineAt
+		if exists {
+			// Observations accumulate: each is a fact that happened, so the
+			// newest of the two wins and neither side can erase the other's.
+			ebusContact.LastOnlineAt = newerOptional(ebusContact.LastOnlineAt, probeContact.LastOnlineAt)
 		}
 		merged[address] = ebusContact
 	}
 	return merged
+}
+
+// newerOptional returns whichever of the two optional timestamps is later,
+// treating "unset" as older than any value.
+func newerOptional(current, candidate domain.OptionalTime) domain.OptionalTime {
+	if !candidate.Valid() {
+		return current
+	}
+	if !current.Valid() || candidate.Time().After(current.Time()) {
+		return candidate
+	}
+	return current
 }
 
 // mergeKnownIDs appends probe IDs that are not already in the ebus list.

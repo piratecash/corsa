@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -42,7 +43,19 @@ type UIEvent struct {
 
 type RouterPeerState struct {
 	Preview ConversationPreview
-	Unread  int
+	// LastIncomingAt is when this peer last wrote to us, as recorded in the
+	// chatlog. Preview answers a different question — it is the last row of
+	// the thread, which in an ordinary conversation is our own reply — so a
+	// consumer looking for evidence about the PEER cannot use it. The UI
+	// spends this as the weakest form of "last online": a message can only
+	// have been written by a node that was running.
+	//
+	// Held next to Preview rather than inside it because the two have
+	// different update rules: Preview is replaced wholesale on every new
+	// message, while this one advances only on incoming ones and is
+	// recomputed from SQL when messages are deleted.
+	LastIncomingAt domain.OptionalTime
+	Unread         int
 	// PendingDeletes is how many of this peer's messages the user has
 	// deleted here and the peer has not confirmed deleting yet. It is the
 	// only lasting trace of a deletion in the UI — the row itself is gone
@@ -134,19 +147,99 @@ type DMRouter struct {
 	opCancel   context.CancelFunc
 	loopCancel context.CancelFunc
 
-	mu               sync.RWMutex
-	activePeer       domain.PeerIdentity
-	peerClicked      bool
-	peers            map[domain.PeerIdentity]*RouterPeerState
-	peerOrder        []domain.PeerIdentity
-	activeMessages   []DirectMessage
-	cache            *ConversationCache
-	sendStatus       string
-	seenMessageIDs   map[string]struct{}
-	peerGen          map[domain.PeerIdentity]uint64 // bumped by RemovePeer; goroutines compare to detect stale sends
-	initialSynced    bool
-	previewsSeeded   bool // true after seedPreviews() successfully set unread counts from SQL
-	replayingStartup bool // true during buffered-event replay; suppresses Unread++ in updateSidebarFromEvent
+	// presenceClock is the source of "now" for last-online evidence: a
+	// message dated after it is refused as evidence, so the value has to be
+	// injectable for a test to place one in the future without waiting for
+	// one. An injected func rather than a Clock interface is the project
+	// convention (routing.Table, node.Service, datagram.Config), and it
+	// defaults to time.Now in the constructor — a nil check at every call
+	// site is a default nobody can see.
+	presenceClock func() time.Time
+
+	// history is where the sidebar's chatlog-derived state is read from. It is
+	// the chatlog store in production and is injected here so a test can
+	// supply a reader that fails — a read that fails while its siblings
+	// succeed, or once and then not, is what the all-or-nothing rule and the
+	// startup retry exist for, and a working SQLite produces neither on
+	// demand.
+	history chatHistoryReader
+
+	// removals is the shared removal gate — the same object the message
+	// store consults, so the router's rule ("no row while a removal runs")
+	// and the store's rule ("no write while a removal runs") can never
+	// disagree. Owned by the client, which builds it before the node holds
+	// the store adapter.
+	removals *removalGate
+
+	// fileOpMu serializes file-transfer registration against the cleanups.
+	// The map is guarded by mu; the mutexes in it are not — they are held
+	// across the file bridge, which mu never is.
+	fileOpMu map[domain.PeerIdentity]*sync.Mutex
+
+	// backwardsEpoch counts, per peer, how many times something moved this
+	// peer's derived state BACKWARDS. It exists because idempotent merges
+	// only order ADDITIONS against each other — two writers adding the same
+	// message end up in the same place whatever the order, but a read taken
+	// before a deletion and applied after it puts the deleted message back,
+	// and no amount of "take the maximum" prevents that.
+	//
+	// The rule every chatlog-derived write follows: capture the epoch BEFORE
+	// the query, apply only if it is unchanged. A changed epoch means the
+	// answer describes a conversation that no longer exists in that form,
+	// and the work has to be redone rather than merged.
+	//
+	// Two counters, because the two things that move backwards are not the
+	// same thing. Marking a conversation read lowers the BADGE and removes
+	// no rows, so it cannot make a last-incoming answer wrong; a deletion
+	// removes rows and invalidates both. One counter for both would make
+	// every launch invalidate its own history scan — the conversation that
+	// opens automatically is marked read while the scan is still running.
+	//
+	// Guarded by mu.
+	backwardsEpoch map[domain.PeerIdentity]peerEpochs
+
+	// unreadIDs is the set of unseen incoming message ids per peer, and
+	// RouterPeerState.Unread is its size. A SET rather than a counter because
+	// the two things that feed it — a SQL read and the event stream — cannot
+	// be ordered against each other: the database is ahead of the events, so
+	// the same message appears in both. Adding an id twice changes nothing,
+	// which makes the badge independent of who saw the message first.
+	// Guarded by mu.
+	unreadIDs map[domain.PeerIdentity]map[domain.MessageID]struct{}
+
+	// pendingDeleteReconcile holds peers whose post-deletion reconciliation
+	// did not land: a transient chatlog error, or an answer the event path
+	// kept overtaking. Nothing else re-reads a peer's history, so without
+	// this the sidebar would quote the deleted message until the next launch.
+	// Drained by the delete sweep. Guarded by mu.
+	pendingDeleteReconcile map[domain.PeerIdentity]int
+
+	// peerRefreshMu serializes recomputation per peer. The revision alone
+	// cannot order two readers that started together: both would see the
+	// same revision, and the slower query — holding the older answer — would
+	// land last. Two deletions of two messages in one conversation are
+	// exactly that case, and the UI runs each in its own goroutine.
+	// The map itself is guarded by mu; the mutexes inside it are held across
+	// SQL I/O and must never be taken while mu is held.
+	peerRefreshMu map[domain.PeerIdentity]*sync.Mutex
+
+	mu             sync.RWMutex
+	activePeer     domain.PeerIdentity
+	peerClicked    bool
+	peers          map[domain.PeerIdentity]*RouterPeerState
+	peerOrder      []domain.PeerIdentity
+	activeMessages []DirectMessage
+	cache          *ConversationCache
+	sendStatus     string
+	seenMessageIDs map[string]struct{}
+	peerGen        map[domain.PeerIdentity]uint64 // bumped by RemovePeer; goroutines compare to detect stale sends
+	initialSynced  bool
+	// replayingStartup is true while the startup buffer is being drained. It
+	// suppresses the notification SOUND only: history is not news. The unread
+	// badge is deliberately NOT suppressed — it is a set of ids, so a message
+	// the startup read also reported costs nothing, while skipping the replay
+	// loses every message stored after that read.
+	replayingStartup bool
 
 	// startupComplete gates ebus message/receipt handlers. While false,
 	// events are buffered in startupEventBuf. Set to true after runStartup
@@ -309,9 +402,12 @@ func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus
 		peerOrder:       make([]domain.PeerIdentity, 0),
 		seenMessageIDs:  make(map[string]struct{}),
 		peerGen:         make(map[domain.PeerIdentity]uint64),
+		backwardsEpoch:  make(map[domain.PeerIdentity]peerEpochs),
+		fileOpMu:        make(map[domain.PeerIdentity]*sync.Mutex),
 		cache:           NewConversationCache(),
 		uiEvents:        make(chan UIEvent, 32),
 		startupDone:     make(chan struct{}),
+		presenceClock:   time.Now,
 		convDeleteRetry: newConversationDeleteRetryState(),
 		withdrawals:     newWithdrawalBacklog(),
 	}
@@ -323,6 +419,7 @@ func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus
 	// and writes the same set.
 	if client != nil {
 		r.wipeTombstones = client.wipeTombstones
+		r.removals = client.removals
 	}
 	r.deleteCheckpoint = newDeleteCheckpointer(
 		func() *chatlog.Store {
@@ -619,12 +716,14 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 		r.activeMessages = nil
 	}
 
-	// Snapshot the current unread count so we can restore it if the
-	// background doMarkSeen fails (optimistic clear with rollback).
-	oldUnread := 0
-	if ps, ok := r.peers[peerAddress]; ok {
-		oldUnread = ps.Unread
-	}
+	// Snapshot the unread set so it can be restored if the background
+	// doMarkSeen fails (optimistic clear with rollback).
+	oldUnread := r.unreadSnapshotLocked(peerAddress)
+	// And the backwards counters as they are BEFORE the optimistic clear
+	// below, so the load that follows is judged against the conversation the
+	// user asked for, not against the state this selection is about to
+	// create.
+	epochAtSelect := r.backwardsEpoch[peerAddress]
 	r.mu.Unlock()
 
 	// Optimistically clear the unread badge so the UI updates instantly.
@@ -649,13 +748,15 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 		defer r.endOp()
 		defer recoverLog(label)
 		if needLoad {
-			if !r.loadConversation(peerAddress) {
+			if !r.loadConversation(peerAddress, epochAtSelect) {
 				r.restorePeerUnread(peerAddress, oldUnread)
+				_ = r.repairBadgeFromStore(peerAddress)
 				return
 			}
 		}
 		if !r.doMarkSeen(peerAddress) {
 			r.restorePeerUnread(peerAddress, oldUnread)
+			_ = r.repairBadgeFromStore(peerAddress)
 		}
 		r.notify(UIEventMessagesUpdated)
 	}()
@@ -789,13 +890,7 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 		}
 
 		if sent != nil {
-			r.ensurePeerLocked(to)
-			r.peers[to].Preview = ConversationPreview{
-				PeerAddress: to,
-				Sender:      sent.Sender,
-				Body:        sent.Body,
-				Timestamp:   sent.Timestamp,
-			}
+			r.setPeerPreviewLocked(to, *sent)
 			r.promotePeerLocked(to)
 		}
 		r.mu.Unlock()
@@ -990,13 +1085,7 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 			r.pendingScrollToEnd = true
 		}
 
-		r.ensurePeerLocked(to)
-		r.peers[to].Preview = ConversationPreview{
-			PeerAddress: to,
-			Sender:      result.Sent.Sender,
-			Body:        result.Sent.Body,
-			Timestamp:   result.Sent.Timestamp,
-		}
+		r.setPeerPreviewLocked(to, *result.Sent)
 		r.promotePeerLocked(to)
 		r.mu.Unlock()
 
@@ -1124,6 +1213,19 @@ func (r *DMRouter) NotifyStatusChanged() {
 	r.notify(UIEventStatusUpdated)
 }
 
+// ErrHistorySweepFailed marks a removal that took the contact out of the
+// sidebar, the trust store and the conversation cache, but could not prove
+// that its history left the disk with it.
+//
+// It exists because the two failures a removal can report are not the same
+// failure. The first history delete fails BEFORE anything is touched, and
+// the contact is still there — the caller must leave its own state alone.
+// The final sweep fails at the very end, when the in-memory state is already
+// gone: the caller has to finish its own cleanup (drafts, aliases,
+// selection) and tell the user that the history may have survived. Callers
+// separate the two with errors.Is.
+var ErrHistorySweepFailed = errors.New("the history sweep after removing a contact failed")
+
 // RemovePeer deletes an identity from the sidebar, the node's trust store,
 // the conversation cache, and all chat history from the local database.
 // If the removed identity was active, the selection is cleared so the UI
@@ -1137,10 +1239,20 @@ func (r *DMRouter) NotifyStatusChanged() {
 // store, so the identity will not reappear.
 //
 // The first return value is true when the removed identity was the active
-// one (so the caller can decide what to select next).
+// one (so the caller can decide what to select next). It is meaningful on
+// the ErrHistorySweepFailed path too: by then the contact IS out of the
+// sidebar, and the caller still has to pick what to show instead.
 func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	identity = normalizePeer(identity)
 	id := identity.String()
+
+	// The gate goes up FIRST, before this function waits for anything —
+	// the history delete below is disk I/O, the file barrier after it is a
+	// lock, and a gate raised later is open for exactly the length of those
+	// waits. That window is what a second removal, or a message the node is
+	// about to store, walks through.
+	releaseGate := r.removals.begin(identity)
+	defer releaseGate()
 
 	// Delete chat history from the local database. This is the gate
 	// operation: if it fails, the peer is NOT removed and peerGen stays
@@ -1155,17 +1267,22 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	// will see a stale generation and discard their results. Without this
 	// ordering, a slow CleanupPeer could leave a window where in-flight
 	// sends slip through the peerGen guard.
+	// The version move, the transfer cleanup and the drop of the in-memory
+	// state are ONE section under the file barrier. Split apart, a message
+	// that took its stamp before the bump would wait for the barrier and
+	// then register a mapping AFTER the last cleanup ran — a transfer for a
+	// contact the user deleted, outliving the deletion. Inside the section
+	// the bump comes first, so whoever waited finds both a new generation
+	// and, by the end, no row at all.
+	fileLock := r.fileOpLock(identity)
+	fileLock.Lock()
+
 	r.mu.Lock()
 	r.peerGen[identity]++
+	// Removal takes the whole conversation, so both counters move: peerGen
+	// alone is checked only by the paths that know to look for it.
+	r.moveHistoryBackwardsLocked(identity)
 	r.mu.Unlock()
-
-	// Best-effort: remove from the node trust store. The RPC requires a
-	// live connection to the local node, which may be absent (e.g. during
-	// shutdown or reconnect). Log the error but proceed with in-memory
-	// cleanup — the sidebar no longer depends on the trust store.
-	if err := r.client.DeleteContact(identity); err != nil {
-		log.Warn().Str("identity", id).Err(err).Msg("trust store cleanup failed (best-effort)")
-	}
 
 	// Best-effort: clean up file transfer mappings and associated files
 	// (transmit refs, downloaded files, partial downloads).
@@ -1175,6 +1292,9 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 
 	r.mu.Lock()
 	delete(r.peers, identity)
+	delete(r.unreadIDs, identity)
+	delete(r.peerRefreshMu, identity)
+	delete(r.pendingDeleteReconcile, identity)
 	r.removePeerLocked(identity)
 	r.cache.Evict(identity)
 
@@ -1186,10 +1306,43 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	}
 
 	r.mu.Unlock()
+	// The barrier comes down only now: everything a waiting registration
+	// would have to see — the new generation, the cleaned transfers, the
+	// missing row — is in place.
+	fileLock.Unlock()
 
+	// Best-effort: remove from the node trust store. The RPC requires a
+	// live connection to the local node, which may be absent (e.g. during
+	// shutdown or reconnect). Log the error but proceed — the sidebar no
+	// longer depends on the trust store. Outside the file barrier (it is an
+	// RPC, and no transfer waits on it) but still inside the removal
+	// window, so nothing re-creates the conversation underneath it.
+	if err := r.client.DeleteContact(identity); err != nil {
+		log.Warn().Str("identity", id).Err(err).Msg("trust store cleanup failed (best-effort)")
+	}
+
+	// One last sweep of the history before the gate lifts. The store defers
+	// writes for a conversation being removed, so nothing new should be
+	// here — but a write already inside the chatlog when the gate went up
+	// is not covered by that, and a row left behind is what the next
+	// startup would rebuild the conversation from.
+	//
+	// A sweep that FAILS is reported, not logged and forgotten: the gate is
+	// about to lift, and telling the user the contact is gone while its
+	// history is still on disk is the one answer this function must not
+	// give.
+	_, sweepErr := r.client.DeletePeerHistory(r.opContext(), identity)
+
+	// The in-memory state is gone either way, so the UI is told either way;
+	// what the error changes is the ANSWER the caller gets, not the redraw.
 	r.notify(UIEventSidebarUpdated)
 	if wasActive {
 		r.notify(UIEventMessagesUpdated)
+	}
+
+	if sweepErr != nil {
+		log.Error().Str("identity", id).Err(sweepErr).Msg("dm_router: the sweep after removing the contact failed; its history may still be on disk")
+		return wasActive, fmt.Errorf("delete identity %s: %w: %w", id, ErrHistorySweepFailed, sweepErr)
 	}
 
 	return wasActive, nil
@@ -1284,9 +1437,10 @@ func (r *DMRouter) Start() {
 
 // runStartup loads initial data from the database and then replays any
 // message/receipt events that arrived via ebus during initialization.
-// Buffered events are replayed under replayingStartup=true to suppress
-// Unread++ (seedPreviews already loaded correct counts from SQL). Events
-// that arrive during replay are drained as live (replayingStartup=false).
+// replayingStartup marks that replay, and now suppresses only the beep: the
+// badge is a set, so a message counted by both the startup read and its own
+// replayed event is one unread message, while suppressing the replay would
+// lose the ones stored after the read was taken.
 func (r *DMRouter) runStartup() {
 	defer close(r.startupDone)
 	defer recoverLog("initializeFromDB")
@@ -1298,7 +1452,7 @@ func (r *DMRouter) runStartup() {
 	r.refreshPendingDeleteCounts()
 
 	// Phase 1: replay events buffered during initializeFromDB under
-	// replayingStartup=true (these are pre-snapshot, suppress Unread++).
+	// replayingStartup=true — history, so no beeps.
 	r.mu.Lock()
 	r.replayingStartup = true
 	buf := r.startupEventBuf
@@ -1316,7 +1470,8 @@ func (r *DMRouter) runStartup() {
 	}
 
 	// Phase 2: switch to live mode. Any events that arrived during Phase 1
-	// replay are drained as live (Unread++ and UIEventBeep enabled).
+	// replay are drained as live, which for them means the beep is no longer
+	// suppressed; the badge never was.
 	r.mu.Lock()
 	r.replayingStartup = false
 	r.startupComplete = true
@@ -1329,6 +1484,11 @@ func (r *DMRouter) runStartup() {
 	for _, ev := range remaining {
 		r.safeHandleEvent(ev)
 	}
+
+	// The badge needs no reconciliation here. It is a SET of message ids: the
+	// startup read and the replayed events both contribute to it, the same id
+	// from both changes nothing, and a message stored between the two is
+	// added by whichever of them saw it.
 
 	if droppedLive > 0 {
 		log.Warn().Int("dropped", droppedLive).Msg("startup ebus live buffer overflow: some events dropped, UI will reload from chatlog")
@@ -1471,11 +1631,18 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 
 	// Register this message so the repair-path (repairUnreadFromHeaders)
 	// won't double-count it as a new unread or trigger a duplicate beep.
+	//
+	// The lifecycle generation is captured in the same breath, because
+	// everything below it is slow: decrypting a message is an RPC, and a
+	// contact removed while it runs must not be recreated by the sidebar row
+	// this would otherwise write for it. A conversation new to this process
+	// has generation zero on both sides and is created normally.
+	r.mu.Lock()
 	if event.MessageID != "" {
-		r.mu.Lock()
 		r.seenMessageIDs[event.MessageID] = struct{}{}
-		r.mu.Unlock()
 	}
+	stampAtEvent := peerStamp{gen: r.peerGen[peerID], epochs: r.backwardsEpoch[peerID]}
+	r.mu.Unlock()
 
 	// During startup replay, suppress beep — these are old messages
 	// already counted by seedPreviews().
@@ -1485,28 +1652,57 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 
 	if !r.isActivePeer(peerID) {
 		// Definitely not the active conversation — update sidebar only.
-		if !r.updateSidebarFromEvent(event, peerID) {
+		if !r.updateSidebarFromEvent(event, peerID, stampAtEvent) {
 			// Inline decrypt failed (missing contact keys, etc.) —
 			// fall back to reading the latest preview from SQLite.
 			isIncoming := event.Sender != r.client.Address().String()
+			// The conversation may be new to this process, so the row is
+			// created HERE — synchronously with the message that introduces
+			// it, and before the goroutine is queued. Doing it inside the
+			// goroutine would race a removal that completes first: the
+			// goroutine would recreate the row and then find its own fresh
+			// generation perfectly consistent.
+			r.ensurePeerForReconcile(peerID, stampAtEvent.gen)
 			if !r.beginOp() {
 				return
 			}
 			go func() {
 				defer r.endOp()
 				defer recoverLog("onNewMessage.nonActive.decryptFail")
-				if !r.updatePreviewFromStore(peerID) {
+				switch r.reconcilePeerFromStore(r.opContext(), peerID, false, true) {
+				case reconcileApplied:
+					// The sidebar now matches the chatlog; fall through to
+					// the badge, which this path owns.
+				case reconcilePeerGone:
+					// The user removed the contact while this was queued.
+					// Marking it unread would put the conversation back.
+					return
+				default:
+					// Nothing was reconciled — a failed read, a contended
+					// peer, or no history at all. Reopen the dedup gate so
+					// the repair path can rediscover the message.
 					r.evictSeenMessages(event.MessageID)
 					return
 				}
 				r.mu.Lock()
-				r.ensurePeerLocked(peerID)
+				if _, alive := r.peers[peerID]; !alive {
+					r.mu.Unlock()
+					return
+				}
+				// The badge is event-driven on this path: the
+				// reconciliation above deliberately leaves Unread
+				// alone, so this is the only record the message gets.
+				// Startup replay is NOT suppressed — the id is a set
+				// member, so the snapshot reporting it too costs
+				// nothing, while skipping it loses every message
+				// stored after the snapshot was taken.
+				//
 				// Re-check: if the user opened this chat while the
 				// goroutine was running, SelectPeer already cleared
-				// unread. Incrementing now would re-add the badge on
-				// an already-visible conversation.
-				if isIncoming && !replaying && r.activePeer != peerID {
-					r.peers[peerID].Unread++
+				// unread. Marking now would re-add the badge on an
+				// already-visible conversation.
+				if isIncoming && r.activePeer != peerID {
+					r.markUnreadLocked(peerID, domain.MessageID(event.MessageID))
 				}
 				r.promotePeerLocked(peerID)
 				r.mu.Unlock()
@@ -1531,23 +1727,35 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		var decryptedMsg *DirectMessage
 		msg := r.client.DecryptIncomingMessage(r.opContext(), event)
 		if msg != nil {
-			r.tryRegisterFileReceive(msg)
 			decryptedMsg = msg
 			r.mu.Lock()
-			r.ensurePeerLocked(peerID)
-			r.peers[peerID].Preview = ConversationPreview{
-				PeerAddress: peerID,
-				Sender:      msg.Sender,
-				Body:        msg.Body,
-				Timestamp:   msg.Timestamp,
-			}
-			r.promotePeerLocked(peerID)
+			// The decrypt is an RPC; the contact may be gone by now, and
+			// setPeerPreviewLocked would create its row again.
+			outcome := r.applyIncomingMessageLocked(peerID, *msg, stampAtEvent)
 			r.mu.Unlock()
-			r.notify(UIEventSidebarUpdated)
+			switch outcome {
+			case applyApplied:
+				// The file mapping goes through the same guard, and only
+				// after it: registering first would put a transfer back for
+				// a contact whose transfers were just cleaned up.
+				r.registerFileReceiveForLivePeer(msg, peerID, stampAtEvent)
+				r.notify(UIEventSidebarUpdated)
+			case applyStale:
+				// Something in this conversation was deleted meanwhile; the
+				// database knows what survived, this goroutine does not.
+				if !r.recoverFromStaleApply(peerID, msg) {
+					r.evictSeenMessages(event.MessageID)
+				}
+			case applyPeerGone:
+			}
 		}
 		if event.Sender != r.client.Address().String() && !replaying {
 			r.notify(UIEventBeep)
 		}
+		// Before the goroutine, not inside it: a removal that completes
+		// first must not be undone by a row the queued work creates for
+		// itself.
+		r.ensurePeerForReconcile(peerID, stampAtEvent.gen)
 		if !r.beginOp() {
 			return
 		}
@@ -1564,7 +1772,12 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 				// MatchesPeer/HasMessage for subsequent paths.
 				if decryptedMsg != nil {
 					r.mu.Lock()
-					seeded := r.activePeer == peerID
+					// The generation as well as the selection: a contact
+					// removed and added back is the same peer by name, and
+					// seeding this message into the new conversation would
+					// show a message from the old one.
+					seeded := r.activePeer == peerID &&
+						r.stampIsCurrentLocked(peerID, stampAtEvent)
 					if seeded {
 						r.cache.Load(peerID, []DirectMessage{*decryptedMsg})
 						r.activeMessages = r.cache.Messages()
@@ -1601,6 +1814,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		if isIncoming && !replaying {
 			r.notify(UIEventBeep)
 		}
+		r.ensurePeerForReconcile(peerID, stampAtEvent.gen)
 		if !r.beginOp() {
 			return
 		}
@@ -1623,21 +1837,18 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	// acceptance) fired inside DecryptIncomingMessage via the
 	// onDecryptSuccess chokepoint — every decrypt path shares it, so no
 	// per-branch handling here.
-	r.tryRegisterFileReceive(msg)
-	r.cache.AppendMessage(*msg)
-	r.mu.Lock()
-	r.activeMessages = r.cache.Messages()
-	r.pendingScrollToEnd = true
+
 	isIncoming := msg.Sender != r.client.Address()
-	r.ensurePeerLocked(peerID)
-	r.peers[peerID].Preview = ConversationPreview{
-		PeerAddress: peerID,
-		Sender:      msg.Sender,
-		Body:        msg.Body,
-		Timestamp:   msg.Timestamp,
+	if !r.deliverDecryptedMessage(msg, peerID, stampAtEvent) {
+		// The conversation moved off screen while the message was being
+		// decrypted; it has been handled as a background arrival, badge
+		// included.
+		r.notify(UIEventSidebarUpdated)
+		if isIncoming && !replaying {
+			r.notify(UIEventBeep)
+		}
+		return
 	}
-	r.promotePeerLocked(peerID)
-	r.mu.Unlock()
 
 	r.notify(UIEventMessagesUpdated)
 	r.notify(UIEventSidebarUpdated)
@@ -1674,7 +1885,7 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 		}
 		go func() {
 			defer r.endOp()
-			r.loadConversation(receiptPeer)
+			r.loadConversation(receiptPeer, r.peerEpochsOf(receiptPeer))
 			r.notify(UIEventMessagesUpdated)
 		}()
 		return
@@ -1693,7 +1904,7 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 		}
 		go func() {
 			defer r.endOp()
-			r.loadConversation(receiptPeer)
+			r.loadConversation(receiptPeer, r.peerEpochsOf(receiptPeer))
 			r.notify(UIEventMessagesUpdated)
 		}()
 	}
@@ -1707,10 +1918,17 @@ func (r *DMRouter) initializeFromDB() {
 	defer r.pollHealth()
 
 	var previews []ConversationPreview
+	// Captured before the fetch for the same reason every other chatlog read
+	// captures it: the retry loop can spend seconds here, and the answer must
+	// not create a row for a contact removed in the meantime. The sidebar is
+	// normally empty at this point, which is why this was the last read
+	// without a guard — and "normally" is not an invariant.
+	var previewsBefore map[domain.PeerIdentity]peerEpochs
 	const maxRetries = 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var err error
+		previewsBefore = r.backwardsEpochSnapshot()
 		previews, err = r.client.FetchConversationPreviews(ctx)
 		cancel()
 		if err == nil && len(previews) > 0 {
@@ -1723,11 +1941,32 @@ func (r *DMRouter) initializeFromDB() {
 			log.Warn().Err(err).Msg("seedPreviews fetch failed after all retries")
 		}
 	}
+	if len(previews) != 0 {
+		r.seedPreviews(previews, previewsBefore)
+	}
+
+	// Both history reads happen off the startup path. Startup holds the ebus
+	// buffer open until it finishes, and that buffer DROPS its overflow at
+	// 256 events, so a slow database must not be allowed to lengthen it.
+	// Both merge idempotently, so they can land whenever they land.
+	//
+	// Started even when the preview fetch came back empty: the badge scan is
+	// the only thing that reads delivery_status for a conversation with no
+	// live header traffic, so skipping it would leave a quiet conversation's
+	// unread messages badgeless for the session. (The header path no longer
+	// depends on it — it reads the stored statuses itself — but it only ever
+	// sees the messages the node still holds in memory.)
+	if r.beginOp() {
+		go func() {
+			defer r.endOp()
+			defer recoverLog("seedHistoryEvidence")
+			r.seedHistoryEvidence(r.opContext())
+		}()
+	}
+
 	if len(previews) == 0 {
 		return
 	}
-
-	r.seedPreviews(previews)
 
 	me := r.client.Address()
 	var firstPeer domain.PeerIdentity
@@ -1780,14 +2019,32 @@ func (r *DMRouter) initializeFromDB() {
 
 func (r *DMRouter) resetIdentityState() {
 	r.mu.Lock()
+	// Every chatlog read still in flight belongs to the previous identity.
+	// Bumped BEFORE the sidebar is wiped, and for every peer that had one —
+	// including the ones that never moved backwards and so have no entry
+	// yet, whose epoch would otherwise still read zero and let a stale
+	// answer look current. The map itself is deliberately never cleared: an
+	// epoch that starts over is an epoch that proves nothing.
+	for peer, epochs := range r.backwardsEpoch {
+		epochs.unread++
+		epochs.history++
+		r.backwardsEpoch[peer] = epochs
+	}
+	for peer := range r.peers {
+		if _, tracked := r.backwardsEpoch[peer]; !tracked {
+			r.moveHistoryBackwardsLocked(peer)
+		}
+	}
 	r.peers = make(map[domain.PeerIdentity]*RouterPeerState)
+	r.unreadIDs = nil
+	r.peerRefreshMu = nil
+	r.pendingDeleteReconcile = nil
 	r.peerOrder = nil
 	r.activePeer = domain.PeerIdentity{}
 	r.peerClicked = false
 	r.activeMessages = nil
 	r.seenMessageIDs = make(map[string]struct{})
 	r.initialSynced = false
-	r.previewsSeeded = false
 	r.sendStatus = ""
 	r.pendingScrollToEnd = false
 	r.pendingComposerRestore = nil
@@ -1837,7 +2094,18 @@ func (r *DMRouter) pollHealth() {
 	r.notify(UIEventStatusUpdated)
 }
 
-func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity) bool {
+// epochBefore is the peer's backwards-move counters as they were BEFORE the
+// caller began the work this load belongs to. It is a parameter rather than
+// something read here because the caller's own slow steps count: by the time
+// this function starts, a deletion may already have happened, and reading the
+// counters now would compare the answer against a state that already includes
+// it.
+func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity, epochBefore peerEpochs) bool {
+	// The generation as it is now, the counters as the caller captured them
+	// before its own slow steps.
+	stamp := r.peerStampOf(peerAddress)
+	stamp.epochs = epochBefore
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	messages, err := r.client.FetchConversation(ctx, peerAddress)
 	cancel()
@@ -1847,33 +2115,87 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity) bool {
 		return false
 	}
 
-	r.mu.RLock()
-	current := r.activePeer
-	r.mu.RUnlock()
-	if current != peerAddress {
-		return false
-	}
-
-	// Register receiver-side mappings for any file_announce messages loaded
-	// from the database — ensures transfer state is restored after restart.
-	myAddr := r.client.Address()
-	for i := range messages {
-		if messages[i].Command == domain.DMCommandFileAnnounce && messages[i].Sender != myAddr {
-			r.tryRegisterFileReceive(&messages[i])
-		}
-	}
-
-	r.cache.Load(peerAddress, messages)
-
+	// One check, in one place, BEFORE anything is applied — the load and
+	// the side effects both hang off it. Checking early and applying later
+	// is what let a deletion land in between: the snapshot was discarded
+	// but the transfers it named had already been registered again.
 	r.mu.Lock()
-	if r.activePeer != peerAddress {
+	if r.activePeer != peerAddress || r.backwardsEpoch[peerAddress].history != epochBefore.history {
+		// Either the user moved on, or a row left this conversation while
+		// the three-second read ran — the eviction that removed it from the
+		// cache has already happened, and this answer predates it. The
+		// caller treats false as "try again".
 		r.mu.Unlock()
 		return false
 	}
+	r.cache.Load(peerAddress, messages)
 	r.activeMessages = r.cache.Messages()
 	r.pendingScrollToEnd = true
 	r.mu.Unlock()
+
+	// Register receiver-side mappings for the file announcements in what was
+	// just loaded — transfer state has to survive a restart. After the
+	// check, never before it: a contact removed while the fetch ran has had
+	// its transfers cleaned up, and re-registering them here would put back
+	// exactly what the removal took away.
+	myAddr := r.client.Address()
+	for i := range messages {
+		if messages[i].Command == domain.DMCommandFileAnnounce && messages[i].Sender != myAddr {
+			r.registerFileReceiveForLivePeer(&messages[i], peerAddress, stamp)
+		}
+	}
 	return true
+}
+
+// alreadyReadHeaderIDs answers, for the incoming headers of a first sync,
+// which messages the DATABASE calls read.
+//
+// The header carries no delivery status, and the node's in-memory topic
+// outlives a desktop session: attach a UI to a running node and the first
+// poll offers back every message of the previous session. Those are the ones
+// this suppresses. Everything else — unread in the database, or not in the
+// database at all — is the header's to badge, so this path needs no other
+// read to finish first. That independence is the point: an earlier version
+// deferred to the startup badge seed, and a seed that never ran (or never
+// succeeded) left every stored message badgeless for the session.
+//
+// A failed read suppresses nothing, so every header decides for itself: a
+// badge too many is cleared by opening the conversation, a badge lost is not.
+func (r *DMRouter) alreadyReadHeaderIDs(ctx context.Context, headers []DMHeader, me domain.PeerIdentity, seen map[string]struct{}) map[domain.MessageID]struct{} {
+	reader := r.chatHistory()
+	if reader == nil {
+		return nil
+	}
+
+	candidates := make([]domain.MessageID, 0, len(headers))
+	for _, header := range headers {
+		if _, already := seen[header.ID]; already {
+			continue
+		}
+		if header.Recipient != me || header.Sender == me {
+			continue
+		}
+		candidates = append(candidates, domain.MessageID(header.ID))
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	statuses, err := reader.StoredMessageStatuses(readCtx, candidates)
+	if err != nil {
+		log.Warn().Err(err).Int("headers", len(candidates)).Msg("first sync: read state unknown, headers badge on their own")
+		return nil
+	}
+
+	read := make(map[domain.MessageID]struct{}, len(statuses))
+	for id, status := range statuses {
+		if status == chatlog.StatusSeen {
+			read[id] = struct{}{}
+		}
+	}
+	return read
 }
 
 // doMarkSeen sends "seen" receipts for the active conversation.
@@ -1909,7 +2231,18 @@ func (r *DMRouter) doMarkSeen(peerAddress domain.PeerIdentity) bool {
 		log.Warn().Err(err).Str("peer", peerAddress.String()).Msg("MarkConversationSeen failed")
 		return false
 	}
-	r.clearPeerUnread(peerAddress)
+
+	// Only the ids that were actually sent are cleared. The RPC took time,
+	// and a message that arrived while it ran was never in the batch — its
+	// receipt was never sent, so it is still unread.
+	seen := make([]domain.MessageID, 0, len(msgs))
+	for i := range msgs {
+		seen = append(seen, domain.MessageID(msgs[i].ID))
+	}
+	r.mu.Lock()
+	r.dropUnreadLocked(peerAddress, seen...)
+	r.mu.Unlock()
+
 	r.notify(UIEventSidebarUpdated)
 	return true
 }
@@ -1947,7 +2280,248 @@ func (r *DMRouter) applyReceiptRepair(activePeer domain.PeerIdentity, receipts [
 	}
 }
 
-func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
+// historyReadAttempts bounds the startup retries. These reads are the only
+// ones of their kind on the startup path — nothing else re-reads
+// delivery_status, and nothing else gives an existing conversation its
+// last-online line — so a contact who never writes again would otherwise go
+// the whole session without either. Three attempts cover a database still
+// settling after launch.
+const historyReadAttempts = 3
+
+// historyReadRetryDelay is the linear step between those attempts.
+const historyReadRetryDelay = time.Second
+
+// historyReadTimeout bounds one attempt.
+const historyReadTimeout = 5 * time.Second
+
+// seedHistoryEvidence runs both history reads and publishes the result.
+//
+// Publishing is the part that is easy to forget: Snapshot() serves a cache
+// that only notify() rebuilds, so what these two write stays invisible until
+// some unrelated event notifies. On the retry path there is no unrelated
+// event to wait for — startup's own notify fired long ago, and a contact who
+// is about to write again is not the one this retried for.
+func (r *DMRouter) seedHistoryEvidence(ctx context.Context) {
+	changed := r.seedUnreadIDs(ctx)
+	if r.seedLastIncoming(ctx) {
+		changed = true
+	}
+	if changed {
+		r.notify(UIEventSidebarUpdated)
+	}
+}
+
+// backwardsEpochSnapshot captures every peer's counters in one pass, for a
+// read that answers about many conversations at once. Taken immediately
+// before the query it belongs to — one snapshot shared by two reads would
+// make the second one refuse everything the first one's wait allowed to
+// change.
+func (r *DMRouter) backwardsEpochSnapshot() map[domain.PeerIdentity]peerEpochs {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[domain.PeerIdentity]peerEpochs, len(r.peers)+len(r.backwardsEpoch))
+	for peer := range r.peers {
+		out[peer] = r.backwardsEpoch[peer]
+	}
+	// Also the peers with no row: a removed conversation keeps its counters
+	// precisely so a read that predates the removal cannot bring it back, and
+	// snapshotting zero for it would hand that read a matching baseline.
+	for peer, epochs := range r.backwardsEpoch {
+		out[peer] = epochs
+	}
+	return out
+}
+
+// readHistoryWithRetry runs one history read until it answers, giving up
+// after historyReadAttempts. name identifies the read in the logs and in the
+// warning that ends the last attempt.
+func readHistoryWithRetry[T any](ctx context.Context, name string, read func(context.Context) (T, error)) (T, bool) {
+	var zero T
+	for attempt := 1; attempt <= historyReadAttempts; attempt++ {
+		readCtx, cancel := context.WithTimeout(ctx, historyReadTimeout)
+		result, err := read(readCtx)
+		cancel()
+		if err == nil {
+			return result, true
+		}
+		if attempt == historyReadAttempts {
+			log.Warn().Err(err).Int("attempts", attempt).Str("read", name).Msg("dm_router: chat history unavailable at startup")
+			return zero, false
+		}
+		log.Warn().Err(err).Int("attempt", attempt).Str("read", name).Msg("dm_router: chat history read failed, retrying")
+
+		select {
+		case <-ctx.Done():
+			return zero, false
+		case <-time.After(time.Duration(attempt) * historyReadRetryDelay):
+		}
+	}
+	return zero, false
+}
+
+// seedLastIncoming recomputes, for every sidebar peer, the newest message
+// that peer wrote, and holds it in memory.
+//
+// It is deliberately recomputed rather than persisted. The value is derived
+// from the chatlog — messages arrive, messages get deleted — so a durable
+// copy would be a second thing to keep in step with the first, needing a
+// version to order its writers that a sidebar label does not justify.
+// Reading it back costs one scan of a covering index at startup, in a
+// background goroutine.
+//
+// The scan MERGES rather than assigns: it runs while events are already
+// being handled, and the value it carries can only be older than what an
+// event wrote, so taking the maximum is both correct and order-independent.
+// The bool reports whether any peer changed, so the caller can publish a
+// snapshot: nothing else re-reads this, and the UI shows only what notify
+// composed.
+func (r *DMRouter) seedLastIncoming(ctx context.Context) bool {
+	reader := r.chatHistory()
+	if reader == nil {
+		return false
+	}
+	// Captured inside the closure so it belongs to the attempt that answers,
+	// not to the first one: the retries span up to eighteen seconds, and a
+	// snapshot older than the read would refuse peers that moved during a
+	// wait this read already survived.
+	var before map[domain.PeerIdentity]peerEpochs
+	result, ok := readHistoryWithRetry(ctx, "last_incoming", func(ctx context.Context) (map[domain.PeerIdentity]time.Time, error) {
+		before = r.backwardsEpochSnapshot()
+		return reader.LastIncomingAtPerPeer(ctx, r.now())
+	})
+	if !ok {
+		// The sidebar keeps whatever presence data the node has. A contact
+		// who writes again repairs their own row; one who does not is the
+		// reason this retried at all.
+		return false
+	}
+	return r.applyScannedLastIncoming(result, before)
+}
+
+// chatHistory returns the chatlog surface these reads go through: the
+// injected one when a test supplied it, otherwise the store itself. nil means
+// there is no history to read — a client without persistence.
+func (r *DMRouter) chatHistory() chatHistoryReader {
+	if r.history != nil {
+		return r.history
+	}
+	if r.client == nil || r.client.chatlog == nil {
+		return nil
+	}
+	store := r.client.chatlog.Store()
+	if store == nil {
+		return nil
+	}
+	return store
+}
+
+// seedUnreadIDs loads the unseen incoming ids from the chatlog into the
+// per-peer sets. It is a union, not an assignment: events replayed from the
+// startup buffer may already have added some of these ids, and adding them
+// again is what makes the two sources safe to combine in any order.
+//
+// It retries like the scan beside it rather than settling for one attempt:
+// for a conversation with no live header traffic it is the only thing that
+// reads delivery_status at all.
+//
+// The bool reports whether any badge changed, so the caller can publish a
+// snapshot.
+func (r *DMRouter) seedUnreadIDs(ctx context.Context) bool {
+	reader := r.chatHistory()
+	if reader == nil {
+		return false
+	}
+	var before map[domain.PeerIdentity]peerEpochs
+	unseen, ok := readHistoryWithRetry(ctx, "unseen_incoming", func(ctx context.Context) (map[domain.PeerIdentity][]domain.MessageID, error) {
+		before = r.backwardsEpochSnapshot()
+		return reader.UnseenIncomingIDs(ctx)
+	})
+	if !ok {
+		log.Warn().Msg("seedUnreadIDs: unread badges start from the events alone")
+		return false
+	}
+
+	me := r.client.Address()
+	changed := false
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for peer, ids := range unseen {
+		if peer.IsZero() || peer == me {
+			continue
+		}
+		if r.backwardsEpoch[peer].unread != before[peer].unread {
+			// Read before something lowered this peer's badge — a mark-seen
+			// for the conversation the user opened, a deletion — and applied
+			// after. Adding these ids now would badge messages that have
+			// since been read or removed. This covers the open conversation
+			// too, whose mark-seen bumps the same counter, without needing a
+			// rule about the active peer: the badge for a chat that failed
+			// to open is rebuilt from the database by repairBadgeFromStore.
+			continue
+		}
+		if _, alive := r.peers[peer]; !alive {
+			// The scan reads the database, which still holds the messages of
+			// a conversation the user removed while it ran. Creating the row
+			// would put that conversation back on the sidebar, badge first —
+			// the seed is a reconciliation like any other, and a
+			// reconciliation never creates a peer.
+			continue
+		}
+		before := len(r.unreadIDs[peer])
+		for _, id := range ids {
+			r.markUnreadLocked(peer, id)
+		}
+		if len(r.unreadIDs[peer]) != before {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// applyScannedLastIncoming merges the scan's answer into every peer it found
+// something for. A merge, not an assignment: the scan runs while events are
+// already being handled, and the value it carries can only be older than what
+// an event wrote — never newer — so taking the maximum is both correct and
+// order-independent. Peers the scan found nothing for are left alone, because
+// "the query returned no row" and "this peer has no incoming message" are
+// only the same statement if nothing arrived meanwhile.
+// The bool reports whether any peer changed, so the caller can publish a
+// snapshot.
+func (r *DMRouter) applyScannedLastIncoming(lastIncoming map[domain.PeerIdentity]time.Time, before map[domain.PeerIdentity]peerEpochs) bool {
+	me := r.client.Address()
+
+	changed := false
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for peer, at := range lastIncoming {
+		if peer.IsZero() || peer == me {
+			continue
+		}
+		state, alive := r.peers[peer]
+		if !alive {
+			continue
+		}
+		if r.backwardsEpoch[peer].history != before[peer].history {
+			// A deletion landed while the scan ran, and the row it read may
+			// be the one that was deleted. The delete path has already
+			// recomputed this peer from the database; taking a maximum
+			// against a pre-deletion answer would undo exactly that.
+			//
+			// The HISTORY counter only: marking a conversation read removes
+			// no rows, and gating this on the badge's movers would make the
+			// conversation that opens at launch refuse its own scan.
+			continue
+		}
+		before := state.LastIncomingAt
+		r.noteIncomingAtLocked(peer, at)
+		if r.peers[peer].LastIncomingAt != before {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (r *DMRouter) seedPreviews(previews []ConversationPreview, before map[domain.PeerIdentity]peerEpochs) {
 	me := r.client.Address()
 
 	// Sort: unread first by unread count descending, then by most recent activity.
@@ -1975,7 +2549,19 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 		if p.PeerAddress == me || p.PeerAddress.IsZero() {
 			continue
 		}
-		r.ensurePeerLocked(p.PeerAddress)
+		if r.backwardsEpoch[p.PeerAddress].history != before[p.PeerAddress].history {
+			// The conversation moved — a message deleted, the thread wiped,
+			// the contact removed (all three bump the history counter) —
+			// while the fetch ran. Creating its row would put it back with
+			// the message the user removed inside it.
+			fresherPeers[p.PeerAddress] = struct{}{}
+			continue
+		}
+		if !r.tryEnsurePeerLocked(p.PeerAddress) {
+			// Being removed right now: the seed must not put it back.
+			fresherPeers[p.PeerAddress] = struct{}{}
+			continue
+		}
 		existing := r.peers[p.PeerAddress]
 		// Skip if the ebus event-path already delivered fresher data for this
 		// peer (ebus handlers run in parallel with initializeFromDB).
@@ -1983,11 +2569,13 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 			fresherPeers[p.PeerAddress] = struct{}{}
 			continue
 		}
+		if r.previewIsFuture(p) {
+			// A forward-dated row would pin the sidebar from the first
+			// frame, and this path assigns rather than merges.
+			fresherPeers[p.PeerAddress] = struct{}{}
+			continue
+		}
 		existing.Preview = p
-		// Apply the SQL unread count unconditionally. ListConversations
-		// is the source of truth for unread after startup — if it reports 0,
-		// any stale event-path badge must be cleared, not just increased.
-		existing.Unread = p.UnreadCount
 	}
 
 	// Rebuild peerOrder: peers whose SQL data was applied are repositioned
@@ -2038,7 +2626,6 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 		newOrder = append(newOrder, sqlSorted[sqlIdx])
 	}
 	r.peerOrder = newOrder
-	r.previewsSeeded = true
 
 	r.mu.Unlock()
 }
@@ -2054,12 +2641,12 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview) {
 // test that verifies inbound file_announce messages registered for
 // non-active conversations actually appear in
 // FileTransferManager.AllTransfersSnapshot.
-func (r *DMRouter) updateSidebarFromEvent(event protocol.LocalChangeEvent, peerID domain.PeerIdentity) bool {
+func (r *DMRouter) updateSidebarFromEvent(event protocol.LocalChangeEvent, peerID domain.PeerIdentity, stamp peerStamp) bool {
 	msg := r.client.DecryptIncomingMessage(r.opContext(), event)
 	if msg == nil {
 		return false
 	}
-	r.applyDecryptedMessageToSidebar(msg, peerID)
+	r.applyDecryptedMessageToSidebar(msg, peerID, stamp)
 	return true
 }
 
@@ -2070,70 +2657,679 @@ func (r *DMRouter) updateSidebarFromEvent(event protocol.LocalChangeEvent, peerI
 // drives non-active inbound announces with a synthetic message.
 //
 // Must be called outside r.mu — the function acquires it itself.
-func (r *DMRouter) applyDecryptedMessageToSidebar(msg *DirectMessage, peerID domain.PeerIdentity) {
+// gen is the peer's lifecycle generation as it was before the decrypt that
+// produced msg. Decrypting is an RPC; a contact removed while it ran must not
+// be brought back by the row this would write for it.
+func (r *DMRouter) applyDecryptedMessageToSidebar(msg *DirectMessage, peerID domain.PeerIdentity, stamp peerStamp) {
 	if msg == nil {
 		return
 	}
 
-	// Register receiver-side mapping for inbound file_announce messages
-	// here as well as on the active-chat path. Without this branch a
-	// file_announce arriving for a non-active conversation never
-	// creates a receiver mapping until the user opens that chat —
-	// AllTransfersSnapshot would omit the transfer and the file tab
-	// would silently miss background-conversation arrivals. Idempotent
-	// (RegisterFileReceive is idempotent and the function gates on
-	// Sender/Command/CommandData) so calling it on every successful
-	// inline decrypt is safe.
-	r.tryRegisterFileReceive(msg)
-
 	isIncoming := msg.Sender != r.client.Address()
 
 	r.mu.Lock()
-	r.ensurePeerLocked(peerID)
-	r.peers[peerID].Preview = ConversationPreview{
-		PeerAddress: peerID,
-		Sender:      msg.Sender,
-		Body:        msg.Body,
-		Timestamp:   msg.Timestamp,
+	// The shared helper records the presence evidence and the order: unlike
+	// the unread badge below, they are recorded on every incoming message —
+	// startup replay and the open conversation are exactly the cases where
+	// the peer demonstrably wrote to us.
+	outcome := r.applyIncomingMessageLocked(peerID, *msg, stamp)
+	if outcome != applyApplied {
+		r.mu.Unlock()
+		if outcome == applyStale {
+			// Something in this conversation was deleted while the message
+			// was being decrypted. Which row that was is not knowable from
+			// here, so the database is asked instead of guessing.
+			if !r.recoverFromStaleApply(peerID, msg) {
+				r.evictSeenMessages(msg.ID)
+			}
+		}
+		return
 	}
-	if isIncoming && !r.replayingStartup && r.activePeer != peerID {
-		// Skip Unread++ when:
-		// - startup replay (seedPreviews() already set correct counts)
-		// - active peer (chat is on screen, message is visible — doMarkSeen
-		//   will send seen receipts; incrementing would show a false badge)
-		r.peers[peerID].Unread++
+	// Every incoming message that reaches this path is badged, with no
+	// exception for the active peer. This function IS the not-on-screen
+	// path: a caller that had the message on screen delivered it into the
+	// open conversation and never got here. The case that made the old
+	// exception wrong is the conversation SELECTED BUT NOT YET LOADED —
+	// active by name, with nothing on screen to read — where skipping the
+	// badge left the message invisible and uncounted, its id already
+	// through the dedup gate.
+	//
+	// Startup replay is not suppressed either: with a set, the same id from
+	// the startup read and from its own replayed event is one unread
+	// message, while suppressing the replay loses the messages stored after
+	// the read was taken.
+	if isIncoming {
+		r.markUnreadLocked(peerID, domain.MessageID(msg.ID))
 	}
-	r.promotePeerLocked(peerID)
 	r.mu.Unlock()
+
+	// Register the receiver-side mapping for an inbound file_announce —
+	// after the lifecycle guard above, never before it. Without this a
+	// file announced into a background conversation would have no receiver
+	// mapping until the user opened that chat, and the file tab would miss
+	// it entirely.
+	r.registerFileReceiveForLivePeer(msg, peerID, stamp)
 }
 
-// updatePreviewFromStore fetches the last message for peer from the local
-// chatlog and updates peers[].Preview. It only touches router state — UI
-// notification is the caller's responsibility. Returns true if the preview
-// was successfully fetched (even if nil — meaning no messages in chatlog yet).
-// Returns false on transient errors (chatlog unavailable, timeout, etc.).
+// fileOpLock returns the per-peer mutex that serializes file-transfer
+// REGISTRATION against every path that CLEANS UP transfers.
 //
-// When the preview is nil (no chatlog entries), the peer state is left
-// untouched — the peer may have been created by repairUnreadFromHeaders
-// based on DMHeaders for a message not yet persisted to chatlog. Deleting
-// the peer here would erase the unread badge and sidebar entry permanently.
-func (r *DMRouter) updatePreviewFromStore(peer domain.PeerIdentity) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	preview, err := r.client.FetchSinglePreview(ctx, peer)
-	cancel()
-
-	if err != nil {
-		return false
+// The version check and the registration cannot be one atomic step on their
+// own: the check needs r.mu, the registration goes through the file bridge,
+// and holding a domain mutex across an external component is forbidden. So
+// the two are made atomic with respect to the cleanups instead — everything
+// that removes transfers takes this lock, bumps the version under it, and
+// only then cleans up, while a registration holds it from its check until
+// the mapping exists. A registration that started earlier therefore either
+// finishes before the cleanup begins, or finds the bumped version and stands
+// down; it can no longer land in between and re-create what was just removed.
+func (r *DMRouter) fileOpLock(peer domain.PeerIdentity) *sync.Mutex {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fileOpMu == nil {
+		r.fileOpMu = make(map[domain.PeerIdentity]*sync.Mutex)
 	}
+	lock, ok := r.fileOpMu[peer]
+	if !ok {
+		lock = &sync.Mutex{}
+		r.fileOpMu[peer] = lock
+	}
+	return lock
+}
 
-	if preview != nil {
+// withFileOps runs a transfer cleanup under the barrier.
+//
+// removedRows says whether rows actually left the conversation. Only then is
+// the history counter moved, and it is moved HERE, under the barrier and
+// before the cleanup, so a registration in flight sees the deletion rather
+// than the state that preceded it. A cleanup that removed nothing — an ack
+// for a row deleted long ago, a wipe that matched no message — must not move
+// it: every false move marks a load or a decrypt that is perfectly current
+// as stale, and sends it through recovery for nothing.
+func (r *DMRouter) withFileOps(peer domain.PeerIdentity, removedRows bool, cleanup func()) {
+	if peer.IsZero() {
+		cleanup()
+		return
+	}
+	lock := r.fileOpLock(peer)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if removedRows {
 		r.mu.Lock()
-		r.ensurePeerLocked(peer)
-		r.peers[peer].Preview = *preview
+		r.moveHistoryBackwardsLocked(peer)
 		r.mu.Unlock()
 	}
-	// nil preview → no chatlog entries yet. Leave peer state as-is.
-	return true
+
+	cleanup()
+}
+
+// registerFileReceiveForLivePeer registers an inbound file announcement,
+// unless the conversation moved while the message was being decrypted or
+// loaded.
+//
+// Two things can have moved. gen is the peer's lifecycle generation: a
+// contact removed since has had its transfers cleaned up, and registering
+// this one would put a transfer back for a conversation that no longer
+// exists. epoch is the peer's backwards-move counters: a message deleted or
+// a thread wiped since means this announcement may name a row that is gone,
+// and the generation says nothing about it — the contact is still there.
+//
+// Nothing is registered speculatively and rolled back afterwards. A rollback
+// by message id cannot tell its own registration from an identical one made
+// by a newer generation, and would take that one's downloaded file with it.
+func (r *DMRouter) registerFileReceiveForLivePeer(msg *DirectMessage, peer domain.PeerIdentity, stamp peerStamp) {
+	if msg == nil {
+		return
+	}
+	// Held from the check until the mapping exists, so a cleanup cannot slip
+	// in between and have this registration undo it.
+	lock := r.fileOpLock(peer)
+	lock.Lock()
+	defer lock.Unlock()
+
+	r.mu.RLock()
+	_, alive := r.peers[peer]
+	current := alive && r.stampIsCurrentLocked(peer, stamp)
+	r.mu.RUnlock()
+	if !current {
+		// Either the conversation moved, or it is gone. A stamp alone does
+		// not answer the second: a removal that is running right now bumps
+		// the counters under this same barrier, and whoever waited for it
+		// must find the row missing rather than register into a
+		// conversation that no longer exists.
+		return
+	}
+	r.tryRegisterFileReceive(msg)
+}
+
+// updatePreviewFromStore refreshes a peer from the chatlog on the
+// new-message path. It reports whether the reconciliation applied — false
+// means the caller should reopen its dedup gate so the message can be
+// rediscovered — and a removed peer counts as applied: there is nothing left
+// to rediscover.
+func (r *DMRouter) updatePreviewFromStore(peer domain.PeerIdentity) bool {
+	switch r.reconcilePeerFromStore(r.opContext(), peer, false, true) {
+	case reconcileApplied, reconcilePeerGone:
+		// Applied, or there is no conversation left to apply it to. Either
+		// way the caller has nothing to undo.
+		return true
+	default:
+		// Nothing was refreshed — a failed read, a contended peer, or a
+		// client with no history at all. The caller reopens its dedup gate
+		// so the message can be rediscovered.
+		return false
+	}
+}
+
+// reconcilePeerFromStore recomputes a peer's chatlog-derived state — preview,
+// unread count and last-incoming evidence — and applies all three together.
+//
+// Two mechanisms keep it honest, and they answer different problems:
+//
+//   - the per-peer refresh lock ORDERS concurrent reconciliations. Two
+//     deletions in one conversation run in their own goroutines, and without
+//     it both could read, then apply in either order, leaving the older answer
+//     on top;
+//   - the revision ORDERS this reconciliation against the event path. The
+//     queries are I/O and run outside r.mu, so a message arriving meanwhile
+//     has already written values this read could not have seen. Its answer is
+//     the newer one, so the read is repeated rather than applied.
+//
+// The three fields are applied in one critical section under one revision:
+// accepting some and rejecting others would publish a mixture of two moments
+// that never existed together.
+//
+// afterDelete says what an EMPTY conversation means. On the delete path it
+// means the user removed the last row, so the preview is cleared and unread
+// forced to zero; everywhere else it means the rows have not been written yet
+// (a peer created from DM headers), and clearing would erase a badge that is
+// about to be justified. Reports whether the store answered at all.
+func (r *DMRouter) reconcilePeerFromStore(ctx context.Context, peer domain.PeerIdentity, afterDelete, waitForLock bool) reconcileOutcome {
+	if r.client == nil {
+		return reconcileRetry
+	}
+	if peer.IsZero() {
+		// A malformed event — an unparseable sender — is not a removal. The
+		// caller has to tell the two apart: "gone" means stop, this one
+		// means nothing was reconciled and the message id must stay
+		// rediscoverable.
+		return reconcileRetry
+	}
+
+	// One reconciliation per peer at a time. Two deletions in one
+	// conversation run in their own goroutines, and without this the slower
+	// query would land last holding the older answer. It is the only
+	// ordering this needs: a message arriving meanwhile merges idempotently
+	// (a preview never moves backwards in time, an unread id is a set
+	// member), so only the deletion — the one authoritative step backwards —
+	// has to be serialized.
+	//
+	// The lock is taken only for a peer that still exists: creating one for a
+	// removed conversation would leave an entry nobody prunes, and taking it
+	// would serialize work that is about to be discarded anyway.
+	lock, alive := r.peerRefreshLock(peer)
+	if !alive {
+		return reconcilePeerGone
+	}
+	if waitForLock {
+		lock.Lock()
+	} else if !lock.TryLock() {
+		// Someone is already reconciling this peer. Waiting would hold the
+		// caller — the shared delete sweep — behind two query timeouts it
+		// has no budget for; the peer stays queued for the next tick.
+		return reconcileBusy
+	}
+	defer lock.Unlock()
+
+	// A reconciliation UPDATES a peer; it never creates one. The peer may
+	// have been removed before this goroutine was even scheduled — the queue
+	// is asynchronous, so no token taken here can see that — and creating the
+	// row would put the deleted conversation back on the sidebar with its
+	// last message in it. Callers that introduce a new conversation create
+	// the peer themselves, before asking for the reconciliation.
+	genBefore, observed := r.peerReconcileStart(peer)
+
+	reader := r.chatHistory()
+	if reader == nil {
+		// No chatlog on this client at all. Nothing to reconcile against,
+		// and nothing a retry would fix.
+		return reconcileNoHistory
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	preview, err := r.client.FetchSinglePreview(readCtx, peer)
+	cancel()
+	if err != nil {
+		// Transient chatlog error — leave the peer as it is rather than
+		// wiping it on a flaky read, and ask to be called again.
+		return reconcileRetry
+	}
+
+	lastIncoming, incomingResolved := r.fetchLastIncoming(ctx, peer)
+
+	// The badge is re-derived only on the delete path, and only there
+	// because it is the one place that has to be able to REMOVE ids: the
+	// event stream carries no delivery status, so everywhere else it can
+	// only add. This is also what heals a badge that drifted — an id the
+	// user has since read elsewhere, say — since nothing else re-reads it.
+	var unseen []domain.MessageID
+	unseenResolved := true
+	if afterDelete {
+		unseen, unseenResolved = r.fetchUnseenIncoming(ctx, reader, peer)
+		if unseenResolved {
+			unseen, unseenResolved = r.keepUnwrittenUnread(ctx, reader, unseen, observed.unreadIDs)
+		}
+	}
+
+	if !incomingResolved || !unseenResolved {
+		// Half a read is not a reconciliation: applying the preview while the
+		// last-incoming query failed would leave the two describing different
+		// conversations, and after a deletion nothing else re-reads this
+		// peer. This covers the EMPTY conversation too — "no rows left" is a
+		// claim about the same conversation, and it is the most destructive
+		// one to get wrong.
+		//
+		// The three reads are three statements, not one database snapshot: a
+		// row committed between them is visible to the later ones only. That
+		// skew is bounded and self-healing — the event carrying that row
+		// merges idempotently afterwards (preview by timestamp, last-incoming
+		// by maximum, unread by set) — while the skew that would NOT heal,
+		// this reconciliation lowering a value onto a peer that moved
+		// meanwhile, is what the check below catches.
+		return reconcileRetry
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.peerAliveLocked(peer, genBefore) {
+		// The contact is gone — removed while this ran, or before it
+		// started. Nothing to reconcile and nothing to retry.
+		return reconcilePeerGone
+	}
+
+	if preview == nil {
+		if !afterDelete {
+			return reconcileApplied
+		}
+		// No rows left for this peer: the user just removed the last one. An
+		// empty conversation cannot have unread messages, and nothing in the
+		// history supports a last-online date — but this is a step BACKWARDS
+		// like any other on the delete path, so it needs the same check that
+		// nothing arrived while the queries ran. Wiping a message that landed
+		// meanwhile would leave the sidebar blank for a message the database
+		// holds, with nothing to re-read it.
+		if !r.derivedStateMatchesLocked(peer, observed) {
+			return reconcileRetry
+		}
+		r.peers[peer].Preview = ConversationPreview{PeerAddress: peer}
+		r.peers[peer].LastIncomingAt = domain.OptionalTime{}
+		r.replaceUnreadLocked(peer, unseen)
+		r.moveHistoryBackwardsLocked(peer)
+		return reconcileApplied
+	}
+
+	if afterDelete {
+		// The deletion is the one authority allowed to move these backwards:
+		// the message they described may be the row the user just removed.
+		// It is therefore also the only path that can undo somebody else's
+		// work, so it applies only if the values it read are still the ones
+		// on screen. A message that landed while the queries ran is newer
+		// than anything the deletion removed, and lowering onto it would
+		// take the sidebar back to before it arrived.
+		if !r.derivedStateMatchesLocked(peer, observed) {
+			return reconcileRetry
+		}
+		if !r.previewIsFuture(*preview) {
+			// The deletion may move the preview backwards, but not onto a
+			// forward-dated row: that ceiling outlives the deletion.
+			r.peers[peer].Preview = *preview
+		}
+		r.peers[peer].LastIncomingAt = optionalTimeOrUnset(lastIncoming)
+		r.replaceUnreadLocked(peer, unseen)
+		// This assignment is itself a backwards move: a read that started
+		// before it must not merge its older answer on top.
+		r.moveHistoryBackwardsLocked(peer)
+		return reconcileApplied
+	}
+
+	if r.backwardsEpoch[peer].history != observed.epochs.history {
+		// Rows left this conversation while these queries ran. The merges
+		// below only move forward, so applying an answer read before that
+		// would put back exactly what was removed. Re-read.
+		return reconcileRetry
+	}
+	r.mergePreviewLocked(peer, *preview)
+	r.noteIncomingAtLocked(peer, lastIncoming)
+	return reconcileApplied
+}
+
+// chatHistoryReader is the chatlog surface the sidebar's derived state is
+// read through. Narrow on purpose: these are the only questions the router
+// asks of history, and an interface this size is one a test can stand in for
+// — including standing in for a database that fails one read, or fails once
+// and then recovers, which a working SQLite refuses to do on demand.
+type chatHistoryReader interface {
+	// LastIncomingAtFor is the newest non-future message the peer wrote.
+	LastIncomingAtFor(ctx context.Context, peer domain.PeerIdentity, now time.Time) (time.Time, error)
+	// LastIncomingAtPerPeer is the same question for every conversation.
+	LastIncomingAtPerPeer(ctx context.Context, now time.Time) (map[domain.PeerIdentity]time.Time, error)
+	// UnseenIncomingIDs is every conversation's unread ids as the database
+	// sees them, and the only startup reader of delivery_status.
+	UnseenIncomingIDs(ctx context.Context) (map[domain.PeerIdentity][]domain.MessageID, error)
+	// UnseenIncomingIDsFor is one peer's. It is the only reconciliation the
+	// badge gets after startup: the event stream carries no delivery status,
+	// so it can only ever add.
+	UnseenIncomingIDsFor(ctx context.Context, peer domain.PeerIdentity) ([]domain.MessageID, error)
+	// StoredMessageStatuses is the delivery status of every one of these ids
+	// the database holds; an absent id is one it does not hold at all. One
+	// read serves both questions asked of it — "has the user read this
+	// already", which a header cannot answer, and "is this id merely not
+	// written yet", which the delete path must not mistake for "read".
+	StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error)
+}
+
+// reconcileOutcome says what happened, because the three cases need different
+// answers from the caller: a retry has to be scheduled, a gone peer must not
+// be, and an applied result closes the matter. A bool collapsed the last two
+// and let a deletion drop its retry.
+type reconcileOutcome int
+
+const (
+	// reconcileApplied — the peer now matches what the chatlog said.
+	reconcileApplied reconcileOutcome = iota
+	// reconcileRetry — nothing was applied; the read has to be repeated.
+	reconcileRetry
+	// reconcilePeerGone — the conversation no longer exists. Nothing to do,
+	// now or later.
+	reconcilePeerGone
+	// reconcileNoHistory — this client keeps no chatlog, so there is nothing
+	// to reconcile against. Distinct from a failed read: retrying would
+	// never succeed, and a caller that queued it would burn its whole budget
+	// and then warn about a database that does not exist.
+	reconcileNoHistory
+	// reconcileBusy — another reconciliation holds this peer. Nothing was
+	// read, so nothing failed; the caller may come back without spending an
+	// attempt.
+	reconcileBusy
+)
+
+// ensurePeerForReconcile creates the sidebar row for a conversation that is
+// new to this process, so the reconciliation that follows has something to
+// update. Reconciliation itself never creates: it runs asynchronously, so a
+// row it created could be one the user removed while the work was queued.
+// Introducing the conversation is the caller's decision and happens
+// synchronously with the event that justifies it.
+func (r *DMRouter) ensurePeerForReconcile(peer domain.PeerIdentity, gen uint64) {
+	if peer.IsZero() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.peerGenUnchangedLocked(peer, gen) {
+		// Removed since the caller started. Creating the row now would put
+		// the deleted conversation back, and the reconciliation that follows
+		// would find its own fresh generation perfectly consistent.
+		return
+	}
+	r.tryEnsurePeerLocked(peer)
+}
+
+// derivedPeerState is the pair a deletion has to find unchanged before it may
+// lower it. Comparing the VALUES rather than a counter keeps the check honest
+// without a second bookkeeping field: these are exactly what the deletion is
+// about to overwrite.
+type derivedPeerState struct {
+	preview      ConversationPreview
+	lastIncoming domain.OptionalTime
+	// unreadIDs is the badge set itself. The delete path needs it twice: to
+	// tell "not written yet" from "read" (an id the database does not hold
+	// at all), and to compare sets rather than sizes — one id dropped while
+	// another arrives leaves the SIZE untouched, and a check on the size
+	// would then wave through a reconciliation that drops the new id.
+	unreadIDs map[domain.MessageID]struct{}
+	// epochs are the peer's backwards-move counters as they were before the
+	// queries. The delete path overwrites the badge AND the history-derived
+	// values, so it checks both.
+	epochs peerEpochs
+}
+
+// peerReconcileStart captures the lifecycle generation and the derived values
+// as they are before the queries run.
+func (r *DMRouter) peerReconcileStart(peer domain.PeerIdentity) (gen uint64, observed derivedPeerState) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// The epoch is read outside the row check: a peer whose row is gone can
+	// still have one, and reading zero for it would make a stale answer look
+	// current.
+	observed.epochs = r.backwardsEpoch[peer]
+	if state, ok := r.peers[peer]; ok {
+		observed.preview = state.Preview
+		observed.lastIncoming = state.LastIncomingAt
+		observed.unreadIDs = r.unreadSnapshotLocked(peer)
+	}
+	return r.peerGen[peer], observed
+}
+
+// derivedStateMatchesLocked reports whether the peer still holds the values
+// the caller read before its queries. Callers hold r.mu.
+func (r *DMRouter) derivedStateMatchesLocked(peer domain.PeerIdentity, observed derivedPeerState) bool {
+	state, ok := r.peers[peer]
+	if !ok {
+		return false
+	}
+	if r.backwardsEpoch[peer] != observed.epochs {
+		return false
+	}
+	return state.Preview == observed.preview &&
+		state.LastIncomingAt == observed.lastIncoming &&
+		maps.Equal(r.unreadIDs[peer], observed.unreadIDs)
+}
+
+// peerEpochs is the pair of backwards-move counters a peer carries. unread
+// counts the moves that only lower the BADGE (mark-seen, the optimistic clear
+// on opening a conversation); history counts the ones that remove ROWS
+// (message deletion, conversation wipe, contact removal, identity reset) and
+// therefore invalidate the preview and the last-incoming date as well.
+//
+// A history move implies an unread move — the deleted rows may be badged —
+// so moveHistoryBackwardsLocked bumps both.
+type peerEpochs struct {
+	unread  uint64
+	history uint64
+}
+
+// moveUnreadBackwardsLocked records that this peer's BADGE just moved
+// backwards: a mark-seen, an optimistic clear. Callers hold r.mu.
+func (r *DMRouter) moveUnreadBackwardsLocked(peer domain.PeerIdentity) {
+	if peer.IsZero() {
+		return
+	}
+	if r.backwardsEpoch == nil {
+		r.backwardsEpoch = make(map[domain.PeerIdentity]peerEpochs)
+	}
+	epochs := r.backwardsEpoch[peer]
+	epochs.unread++
+	r.backwardsEpoch[peer] = epochs
+}
+
+// moveHistoryBackwardsLocked records that rows left this peer's conversation,
+// which invalidates every chatlog-derived value it has — preview,
+// last-incoming date and badge alike. Callers hold r.mu.
+func (r *DMRouter) moveHistoryBackwardsLocked(peer domain.PeerIdentity) {
+	if peer.IsZero() {
+		return
+	}
+	if r.backwardsEpoch == nil {
+		r.backwardsEpoch = make(map[domain.PeerIdentity]peerEpochs)
+	}
+	epochs := r.backwardsEpoch[peer]
+	epochs.unread++
+	epochs.history++
+	r.backwardsEpoch[peer] = epochs
+}
+
+// peerEpochsOf reads a peer's counters, to be captured before a chatlog read
+// and re-checked before its result is applied.
+func (r *DMRouter) peerEpochsOf(peer domain.PeerIdentity) peerEpochs {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.backwardsEpoch[peer]
+}
+
+// peerGenUnchangedLocked reports whether the peer's lifecycle generation is
+// still the one the caller captured before its slow work. Unlike
+// peerAliveLocked it does NOT require the row to exist: a conversation new to
+// this process has no row yet and must still be allowed to appear. Callers
+// hold r.mu.
+func (r *DMRouter) peerGenUnchangedLocked(peer domain.PeerIdentity, gen uint64) bool {
+	return r.peerGen[peer] == gen
+}
+
+// peerAliveLocked reports whether the peer is still on the sidebar and still
+// the same generation of it. Both halves are needed: the row answers a
+// removal that happened before this reconciliation was scheduled, the
+// generation answers one that happened while it ran and was followed by the
+// contact being added back. Callers hold r.mu.
+func (r *DMRouter) peerAliveLocked(peer domain.PeerIdentity, gen uint64) bool {
+	if r.peerGen[peer] != gen {
+		return false
+	}
+	_, alive := r.peers[peer]
+	return alive
+}
+
+// mergePreviewLocked accepts a preview only if it is not older than the one
+// on screen. The rule is what lets a SQL read and the event stream run in any
+// order: the database is ahead of the events, so both can carry the same
+// message, and neither may undo the other's newer one. Callers hold r.mu.
+// previewIsFuture refuses a preview dated after now. The timestamp is the
+// SENDER's own created_at and the node accepts minutes of clock drift, so a
+// message dated forward would not merely show a wrong time — it would become
+// the ceiling that every later preview, including our own replies, fails to
+// beat, pinning whatever the peer chose in the sidebar for as long as they
+// keep it up. Every path that assigns Preview goes through this, including
+// the two that assign rather than merge (the startup seed, and the deletion
+// that is allowed to move the value backwards).
+func (r *DMRouter) previewIsFuture(preview ConversationPreview) bool {
+	return !preview.Timestamp.IsZero() && preview.Timestamp.After(r.now())
+}
+
+func (r *DMRouter) mergePreviewLocked(peer domain.PeerIdentity, preview ConversationPreview) {
+	state, ok := r.peers[peer]
+	if !ok {
+		return
+	}
+	if r.previewIsFuture(preview) {
+		return
+	}
+	if !state.Preview.Timestamp.IsZero() && preview.Timestamp.Before(state.Preview.Timestamp) {
+		return
+	}
+	state.Preview = preview
+}
+
+// fetchUnseenIncoming reads the peer's unread ids as the database sees them.
+// The second result separates "the store answered" from "the store did not",
+// because only the former may replace what is on screen.
+func (r *DMRouter) fetchUnseenIncoming(ctx context.Context, reader chatHistoryReader, peer domain.PeerIdentity) ([]domain.MessageID, bool) {
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ids, err := reader.UnseenIncomingIDsFor(readCtx, peer)
+	cancel()
+	if err != nil {
+		return nil, false
+	}
+	return ids, true
+}
+
+// keepUnwrittenUnread adds back the badged ids the database does not hold at
+// all.
+//
+// The header path badges a message as soon as the node reports it, which can
+// be before its chatlog row is written — the preview path has the same rule
+// and says so. Re-deriving the badge purely from the database would read
+// "not in the unseen list" as "read", drop that id, and never get it back:
+// the event stream cannot re-add it (the dedup gate has already seen it) and
+// only another deletion re-reads delivery_status.
+//
+// An id the database DOES hold and does not report as unseen is genuinely
+// read or gone, and stays dropped. The second result is false when the
+// lookup failed, because a reconciliation applies all of its reads or none.
+func (r *DMRouter) keepUnwrittenUnread(
+	ctx context.Context,
+	reader chatHistoryReader,
+	unseen []domain.MessageID,
+	badged map[domain.MessageID]struct{},
+) ([]domain.MessageID, bool) {
+	if len(badged) == 0 {
+		return unseen, true
+	}
+	inUnseen := make(map[domain.MessageID]struct{}, len(unseen))
+	for _, id := range unseen {
+		inUnseen[id] = struct{}{}
+	}
+	pending := make([]domain.MessageID, 0, len(badged))
+	for id := range badged {
+		if _, ok := inUnseen[id]; ok {
+			continue
+		}
+		pending = append(pending, id)
+	}
+	if len(pending) == 0 {
+		return unseen, true
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	statuses, err := reader.StoredMessageStatuses(readCtx, pending)
+	cancel()
+	if err != nil {
+		return nil, false
+	}
+	for _, id := range pending {
+		if _, stored := statuses[id]; stored {
+			continue
+		}
+		unseen = append(unseen, id)
+	}
+	return unseen, true
+}
+
+// replaceUnreadLocked makes the badge exactly what the database reported.
+// Used only where the caller has just verified that nothing moved under it —
+// otherwise a message that arrived during the read would be dropped, and the
+// event that carried it has already been consumed. Callers hold r.mu.
+func (r *DMRouter) replaceUnreadLocked(peer domain.PeerIdentity, ids []domain.MessageID) {
+	// Whatever this drops, a read still in flight may be holding. Only the
+	// badge: the caller assigns the preview and the date itself, and bumps
+	// the history counter when it does.
+	r.moveUnreadBackwardsLocked(peer)
+	delete(r.unreadIDs, peer)
+	for _, id := range ids {
+		r.markUnreadLocked(peer, id)
+	}
+	r.syncUnreadCountLocked(peer)
+}
+
+// fetchLastIncoming reads the peer's newest incoming message time from the
+// chatlog. The second result separates "the store answered, and the answer is
+// no incoming message" from "the store did not answer" — only the former is
+// grounds for a caller to overwrite what it already knows.
+//
+// now is passed down: the store refuses rows dated after it, and skipping one
+// does not skip the conversation — the honest message behind a forged future
+// date is still the answer.
+func (r *DMRouter) fetchLastIncoming(ctx context.Context, peer domain.PeerIdentity) (time.Time, bool) {
+	reader := r.chatHistory()
+	if reader == nil {
+		return time.Time{}, false
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	at, err := reader.LastIncomingAtFor(readCtx, peer, r.now())
+	cancel()
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at, true
 }
 
 // updatePreviewFromCache builds RouterPeerState.Preview from the last
@@ -2152,12 +3348,16 @@ func (r *DMRouter) updatePreviewFromCache(peer domain.PeerIdentity) {
 		return
 	}
 	last := r.activeMessages[len(r.activeMessages)-1]
-	r.ensurePeerLocked(peer)
-	r.peers[peer].Preview = ConversationPreview{
-		PeerAddress: peer,
-		Sender:      last.Sender,
-		Body:        last.Body,
-		Timestamp:   last.Timestamp,
+	r.setPeerPreviewLocked(peer, last)
+	// The cache holds the whole conversation, so the newest incoming message
+	// is available even when the last row is our own reply — the case that
+	// setPeerPreviewLocked alone cannot see.
+	for i := len(r.activeMessages) - 1; i >= 0; i-- {
+		if r.activeMessages[i].Sender != peer {
+			continue
+		}
+		r.noteIncomingAtLocked(peer, r.activeMessages[i].Timestamp)
+		break
 	}
 }
 
@@ -2172,7 +3372,7 @@ func (r *DMRouter) updatePreviewFromCache(peer domain.PeerIdentity) {
 // cache so eviction is NOT performed — the dedup gate must stay closed
 // to prevent redundant rediscovery on the next health poll.
 func (r *DMRouter) reloadAndRefreshPreview(peerID domain.PeerIdentity, messageID string) bool {
-	if !r.loadConversation(peerID) {
+	if !r.loadConversation(peerID, r.peerEpochsOf(peerID)) {
 		r.evictSeenMessages(messageID)
 		return false
 	}
@@ -2222,18 +3422,25 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	// under r.mu.Lock, causing writer starvation and UI freezes.
 	// ---------------------------------------------------------------
 	r.mu.Lock()
-	selected := r.activePeer
-
 	firstSync := !r.initialSynced
 	if firstSync {
 		r.initialSynced = true
 	}
-	// skipUnreadCount is true only when seedPreviews() already set unread
-	// counts from SQL. DMHeaders don't carry delivery_status, so blindly
-	// incrementing would double-count every incoming message. When
-	// seedPreviews never ran (empty/failed preview load), we must count
-	// normally — there is nothing to double-count.
-	skipUnreadCount := firstSync && r.previewsSeeded
+	// The first repair after startup used to skip the badge entirely,
+	// because the badge was a counter and the startup snapshot had already
+	// counted these messages. With a set that guard only causes losses: a
+	// message the snapshot missed — or every message, when the snapshot
+	// itself failed — would never be marked unread. Adding an id the set
+	// already holds costs nothing, so the repair reports what it finds.
+	//
+	// DMHeaders carry no delivery_status, which is why the header path can
+	// only ADD ids; removal stays with mark-seen and deletion. On the FIRST
+	// sync that is not enough on its own: the node's topic may hold messages
+	// this client read in an earlier session — a desktop reattaching to a
+	// long-running node sees them all — and badging them again would undo
+	// reads the database has already recorded. So on the first sync the
+	// header only decides for messages the database does not know; for the
+	// rest the database decides, through seedUnreadIDs.
 
 	// Copy seenMessageIDs keys for the lock-free classification pass.
 	// The copy is O(len(seenMessageIDs)) but is bounded by the total
@@ -2243,55 +3450,72 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	for id := range r.seenMessageIDs {
 		seenCopy[id] = struct{}{}
 	}
+	// The lifecycle generation of every peer we may touch, captured BEFORE
+	// the header scan and the status read. Both happen outside the lock, and
+	// a contact removed while they run must not be recreated by the row this
+	// is about to write for it. peerGen starts at zero, so a conversation
+	// that is new to this process compares equal and is created normally.
+	genBefore := make(map[domain.PeerIdentity]uint64, len(r.peerGen))
+	for peer, gen := range r.peerGen {
+		genBefore[peer] = gen
+	}
+	epochBefore := make(map[domain.PeerIdentity]peerEpochs, len(r.backwardsEpoch))
+	for peer, epochs := range r.backwardsEpoch {
+		epochBefore[peer] = epochs
+	}
 	r.mu.Unlock()
 
 	// ---------------------------------------------------------------
 	// Phase 2 (lock-free): classify each header into new/seen using
 	// the snapshot. cache.HasMessage has its own internal lock.
 	// ---------------------------------------------------------------
+	// The action carries FACTS about the header — who wrote it, whether the
+	// database already calls it read, whether the cache holds it — and not
+	// the decisions that depend on which conversation is on screen. That
+	// question is answered in phase 3, under the lock: `selected` was read
+	// before the header scan and the stored-status query, and the user can
+	// switch conversations while those run. Deciding here would classify a
+	// message as visible after the user left it, which skips its badge for
+	// good — its id goes through the dedup gate either way.
 	type headerAction struct {
-		peer            domain.PeerIdentity
-		id              string
-		isIncoming      bool
-		incrementUnread bool
-		triggerReload   bool
-		refreshSidebar  bool
-		triggerBeep     bool
+		peer          domain.PeerIdentity
+		id            string
+		isIncoming    bool
+		readInDB      bool
+		inCache       bool
+		firstSyncBeep bool
 	}
 	var actions []headerAction
+
+	alreadyRead := map[domain.MessageID]struct{}{}
+	if firstSync {
+		alreadyRead = r.alreadyReadHeaderIDs(r.opContext(), status.DMHeaders, me, seenCopy)
+	}
 
 	for _, header := range status.DMHeaders {
 		if _, ok := seenCopy[header.ID]; ok {
 			continue
 		}
-
 		var peer domain.PeerIdentity
 		isIncoming := false
-		triggerBeep := false
 		if header.Sender == me {
 			peer = normalizePeer(header.Recipient)
 		} else if header.Recipient == me {
 			peer = normalizePeer(header.Sender)
 			isIncoming = true
-			if !firstSync && peer != selected {
-				triggerBeep = true
-			}
 		} else {
 			continue
 		}
 
-		incrementUnread := isIncoming && peer != selected && !skipUnreadCount
-		triggerReload := peer == selected && !selected.IsZero() && !r.cache.HasMessage(header.ID)
-		refreshSidebar := !peer.IsZero() && peer != selected
+		_, readInDatabase := alreadyRead[domain.MessageID(header.ID)]
 
 		actions = append(actions, headerAction{
-			peer:            peer,
-			id:              header.ID,
-			isIncoming:      isIncoming,
-			incrementUnread: incrementUnread,
-			triggerReload:   triggerReload,
-			refreshSidebar:  refreshSidebar,
-			triggerBeep:     triggerBeep,
+			peer:          peer,
+			id:            header.ID,
+			isIncoming:    isIncoming,
+			readInDB:      readInDatabase,
+			inCache:       r.cache.HasMessage(header.ID),
+			firstSyncBeep: firstSync,
 		})
 	}
 
@@ -2301,30 +3525,65 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	hasNew := false
 	needReload := false
 	peerMessageIDs := make(map[domain.PeerIdentity][]string)
+	rebuild := make(map[domain.PeerIdentity]struct{})
 	var reloadMessageIDs []string
 
 	r.mu.Lock()
+	// The conversation that is on screen NOW, not the one that was when the
+	// scan started. It also decides which conversation the reload below
+	// belongs to.
+	selected := r.activePeer
 	for _, a := range actions {
 		// Re-check under lock: another goroutine may have inserted the
 		// same ID between Phase 1 snapshot and now.
 		if _, ok := r.seenMessageIDs[a.id]; ok {
 			continue
 		}
+		onScreen := a.peer == selected && !selected.IsZero()
+		incrementUnread := a.isIncoming && !onScreen && !a.readInDB
+		triggerReload := onScreen && !a.inCache
+		refreshSidebar := !a.peer.IsZero() && !onScreen
+		triggerBeep := a.isIncoming && !a.firstSyncBeep && !onScreen
+		if r.peerGen[a.peer] != genBefore[a.peer] {
+			// The contact was removed while the scan ran. Creating the row
+			// would put a deleted conversation back on the sidebar, and
+			// there is nothing to recover: the conversation is gone.
+			continue
+		}
+		if r.backwardsEpoch[a.peer] != epochBefore[a.peer] {
+			// The badge moved backwards — a mark-seen, a deletion — while
+			// the scan ran, so these ids may already be read or gone.
+			// This runs ONCE per process (pollHealth is deferred from
+			// initializeFromDB and has no other caller), so skipping would
+			// drop the badge for the session; the peer is handed to the
+			// database instead, which is the only thing that still knows.
+			//
+			// Except for the conversation on screen, which has no badge to
+			// rebuild: the user is reading it, the mark-seen that moved the
+			// counter is the receipt for these very messages, and a rebuild
+			// would put a count on the chat in front of them.
+			if !onScreen {
+				rebuild[a.peer] = struct{}{}
+			}
+			continue
+		}
+		if a.isIncoming && !r.tryEnsurePeerLocked(a.peer) {
+			// Being removed: no row, and therefore no badge, no order and
+			// no dedup entry either — the id is deliberately left OUT of
+			// seenMessageIDs, because writing it off as handled while
+			// nothing was applied is how a message disappears.
+			continue
+		}
 		r.seenMessageIDs[a.id] = struct{}{}
 
-		if a.isIncoming {
-			r.ensurePeerLocked(a.peer)
-		}
-
-		if a.triggerBeep {
+		if triggerBeep {
 			hasNew = true
 		}
-		if a.incrementUnread {
-			r.ensurePeerLocked(a.peer)
-			r.peers[a.peer].Unread++
+		if incrementUnread {
+			r.markUnreadLocked(a.peer, domain.MessageID(a.id))
 			r.promotePeerLocked(a.peer)
 		}
-		if a.triggerReload {
+		if triggerReload {
 			needReload = true
 			reloadMessageIDs = append(reloadMessageIDs, a.id)
 		}
@@ -2334,13 +3593,22 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 		// parallel would cause refreshPreviewForPeer to evict IDs that
 		// loadConversation already recovered, triggering duplicate
 		// rediscovery and spurious UIEventBeep on the next health poll.
-		if a.refreshSidebar {
+		if refreshSidebar {
 			peerMessageIDs[a.peer] = append(peerMessageIDs[a.peer], a.id)
 		}
 	}
 	r.mu.Unlock()
 
+	for peer := range rebuild {
+		// Outside the lock: this reads the database.
+		_ = r.repairBadgeFromStore(peer)
+	}
+
 	for peer, ids := range peerMessageIDs {
+		// Created before the goroutine is queued, for the same reason as on
+		// the new-message path: a removal that completes first must not be
+		// undone by a row the queued work creates for itself.
+		r.ensurePeerForReconcile(peer, genBefore[peer])
 		if !r.beginOp() {
 			break
 		}
@@ -2355,7 +3623,7 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	}
 
 	if needReload && !selected.IsZero() {
-		if r.loadConversation(selected) {
+		if r.loadConversation(selected, r.peerEpochsOf(selected)) {
 			if !r.updatePreviewFromStore(selected) {
 				// chatlog query failed, but messages are in cache.
 				// Build the preview from the last cached message so the
@@ -2385,31 +3653,535 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 
 func (r *DMRouter) clearPeerUnread(peer domain.PeerIdentity) {
 	r.mu.Lock()
-	if ps, ok := r.peers[peer]; ok {
-		ps.Unread = 0
-	}
+	r.clearUnreadLocked(peer)
 	r.mu.Unlock()
 }
 
-// restorePeerUnread restores unread badge after optimistic clear failed
-// (e.g., doMarkSeen network error). If count is 0, no update is needed.
-func (r *DMRouter) restorePeerUnread(peer domain.PeerIdentity, count int) {
-	if count <= 0 {
+// repairBadgeFromStore rebuilds a peer's badge from the database, for the
+// path where opening the conversation failed.
+//
+// The snapshot the rollback restores is only as good as what was in memory
+// when the conversation was opened, and at startup that can be nothing at
+// all: the badge seed may not have applied yet, or may have skipped this peer
+// precisely because the open was moving it. The database is the one place
+// that still knows, and outside the delete path nothing else re-reads
+// delivery_status.
+//
+// It REPLACES rather than unions, because a mark-seen that failed halfway
+// still marked some ids seen in the database and a union would keep badging
+// them. Two things are carried across the replacement: ids the database does
+// not hold at all (badged from a header whose row has not landed) and ids
+// that arrived while this was reading — additions move no counter, so the
+// epoch check cannot see them, and the event that carried them has already
+// been consumed by the dedup gate.
+func (r *DMRouter) repairBadgeFromStore(peer domain.PeerIdentity) bool {
+	reader := r.chatHistory()
+	if reader == nil {
+		// No history to rebuild from. Not a failure of this call, and not a
+		// recovery either — the caller decides what that means for it.
+		return true
+	}
+	before := r.peerEpochsOf(peer)
+	badgedBefore := r.unreadSnapshot(peer)
+
+	ctx, cancel := context.WithTimeout(r.opContext(), 2*time.Second)
+	unseen, err := reader.UnseenIncomingIDsFor(ctx, peer)
+	cancel()
+	if err != nil {
+		log.Warn().Err(err).Str("peer", peer.String()).Msg("dm_router: could not rebuild the badge after a failed open")
+		return false
+	}
+
+	unseen, ok := r.keepUnwrittenUnread(r.opContext(), reader, unseen, badgedBefore)
+	if !ok {
+		return false
+	}
+
+	changed := false
+	r.mu.Lock()
+	if _, alive := r.peers[peer]; alive && r.backwardsEpoch[peer] == before {
+		for id := range r.unreadIDs[peer] {
+			if _, had := badgedBefore[id]; had {
+				continue
+			}
+			// Added while the queries ran. Nothing else will re-add it.
+			unseen = append(unseen, id)
+		}
+		had := len(r.unreadIDs[peer])
+		r.replaceUnreadLocked(peer, unseen)
+		changed = len(r.unreadIDs[peer]) != had
+	}
+	r.mu.Unlock()
+
+	if changed {
+		r.notify(UIEventSidebarUpdated)
+	}
+	return true
+}
+
+// unreadSnapshot is unreadSnapshotLocked for a caller that holds nothing.
+func (r *DMRouter) unreadSnapshot(peer domain.PeerIdentity) map[domain.MessageID]struct{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.unreadSnapshotLocked(peer)
+}
+
+// restorePeerUnread puts back the set the optimistic clear removed, after the
+// background mark-seen failed. The SET is restored rather than a count: the
+// ids are what the next mark-seen has to work through, and a bare number
+// would have to be reinvented from SQL.
+func (r *DMRouter) restorePeerUnread(peer domain.PeerIdentity, ids map[domain.MessageID]struct{}) {
+	if len(ids) == 0 {
 		return
 	}
 	r.mu.Lock()
-	if ps, ok := r.peers[peer]; ok {
-		ps.Unread = count
-	}
+	r.restoreUnreadLocked(peer, ids)
 	r.mu.Unlock()
 	r.notify(UIEventSidebarUpdated)
 }
 
-func (r *DMRouter) ensurePeerLocked(peer domain.PeerIdentity) {
+// now reads the router's clock. nil means production, where the clock is the
+// wall clock; tests that reason about future or past timestamps install their
+// own instead of sleeping.
+func (r *DMRouter) now() time.Time {
+	if r.presenceClock == nil {
+		// A router built as a bare struct literal — only tests do that, and
+		// only the ones with no interest in time.
+		return time.Now()
+	}
+	return r.presenceClock()
+}
+
+// deliverDecryptedMessage puts a freshly decrypted message where it belongs
+// now that the decrypt has finished, and reports whether that was the open
+// conversation.
+//
+// The "is this the conversation on screen" answer the caller had is as old as
+// the decrypt, which is an RPC. If the user switched away while it ran, both
+// halves of that answer are wrong: appending to the cache would splice this
+// message into the OTHER peer's thread, and treating it as visible would skip
+// its unread badge for good, because its id is already through the dedup
+// gate. So the question is asked again here, against the cache as well as the
+// selection, and a message that lost its place is delivered as a background
+// arrival instead.
+//
+// false means "handled as background" — the caller still has to notify.
+func (r *DMRouter) deliverDecryptedMessage(msg *DirectMessage, peerID domain.PeerIdentity, stamp peerStamp) bool {
+	// All three questions in ONE critical section, and the LIFECYCLE one
+	// first: a contact removed and added back carries a new generation, and
+	// appending before that check leaves the old message sitting in the new
+	// conversation's cache even though the sidebar write is refused. The
+	// selection and the cache owner are checked here too — split apart, a
+	// switch in between splices the message into the other peer's thread.
+	// The cache has its own mutex and never calls back into the router, so
+	// taking it here inverts no order.
+	r.mu.Lock()
+	gone := !r.peerGenUnchangedLocked(peerID, stamp.gen)
+	stale := !gone && r.backwardsEpoch[peerID].history != stamp.epochs.history
+	stillOpen := !gone && !stale &&
+		r.activePeer == peerID && !peerID.IsZero() &&
+		r.cache.AppendForPeer(peerID, *msg)
+	if stillOpen {
+		r.applyIncomingMessageLocked(peerID, *msg, stamp)
+		r.activeMessages = r.cache.Messages()
+		r.pendingScrollToEnd = true
+	}
+	r.mu.Unlock()
+
+	if gone {
+		// The contact is gone: nothing to show and nothing to badge. It
+		// counts as delivered so the caller does not fall back to the
+		// sidebar path for a conversation that no longer exists.
+		return true
+	}
+	if stale {
+		// A row left this conversation while the message was being
+		// decrypted, and which row it was is not knowable from a per-peer
+		// counter. The database is asked rather than the message dropped:
+		// its id is already through the dedup gate, so a wrong guess here
+		// loses it for good. The conversation on screen is reloaded from
+		// the same authority.
+		recovered := r.recoverFromStaleApply(peerID, msg)
+		if r.loadConversation(peerID, r.peerEpochsOf(peerID)) {
+			r.notify(UIEventMessagesUpdated)
+		} else {
+			// The reload failed, so the message is not on screen either.
+			// Nothing here can put it there, and the cache still belongs to
+			// this peer, so re-selecting the conversation would not reload
+			// it: the id goes back out of the dedup gate for the header
+			// repair to find.
+			recovered = false
+		}
+		if !recovered {
+			r.evictSeenMessages(msg.ID)
+		}
+		return true
+	}
+	if !stillOpen {
+		r.applyDecryptedMessageToSidebar(msg, peerID, stamp)
+		return false
+	}
+	r.registerFileReceiveForLivePeer(msg, peerID, stamp)
+	return true
+}
+
+// peerStamp is what a slow step has to carry: the peer as it was when the
+// work started. Two values, because they answer different questions — the
+// contact may be gone (generation), or still there with the message that was
+// being decrypted already deleted (history counter). Passing them as one
+// value is what keeps a branch from checking half of it.
+type peerStamp struct {
+	gen    uint64
+	epochs peerEpochs
+}
+
+// peerStampOf captures the pair before a decrypt, a fetch, or anything else
+// that takes long enough for the conversation to move.
+func (r *DMRouter) peerStampOf(peer domain.PeerIdentity) peerStamp {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return peerStamp{gen: r.peerGen[peer], epochs: r.backwardsEpoch[peer]}
+}
+
+// stampIsCurrentLocked reports whether the peer still is what the stamp says.
+//
+// Only the HISTORY half of the epoch is compared. Marking a conversation read
+// bumps the unread counter and removes no rows, so it cannot make a message
+// stale — comparing the whole pair would make opening a chat discard the
+// messages arriving into it. Callers hold r.mu.
+func (r *DMRouter) stampIsCurrentLocked(peer domain.PeerIdentity, stamp peerStamp) bool {
+	return r.peerGenUnchangedLocked(peer, stamp.gen) &&
+		r.backwardsEpoch[peer].history == stamp.epochs.history
+}
+
+// applyIncomingMessageLocked writes a decrypted message into the sidebar —
+// preview, presence evidence, and conversation order — and reports whether it
+// did.
+//
+// stamp is the peer as it was BEFORE the decrypt, which is an RPC. Two things
+// can have moved since: the contact can be gone, and setPeerPreviewLocked
+// creates the row it writes to, so the write would bring it back; or the
+// message itself can have been deleted, which the generation cannot see —
+// the contact is still there, and this write would put its preview, its
+// last-online evidence and its badge back. Every branch that applies a
+// decrypted message goes through here precisely so that one of them cannot
+// forget the check: there are three, they look different, and the one that
+// was missed was the one for the conversation on screen.
+//
+// Callers hold r.mu.
+func (r *DMRouter) applyIncomingMessageLocked(peer domain.PeerIdentity, msg DirectMessage, stamp peerStamp) applyOutcome {
+	if !r.peerGenUnchangedLocked(peer, stamp.gen) {
+		return applyPeerGone
+	}
+	if r.backwardsEpoch[peer].history != stamp.epochs.history {
+		return applyStale
+	}
+	r.setPeerPreviewLocked(peer, msg)
+	if _, ok := r.peers[peer]; !ok {
+		// The row was refused: a removal is running, and the stamp cannot
+		// see it — the counters it compares were already bumped by that
+		// same removal.
+		return applyPeerGone
+	}
+	r.promotePeerLocked(peer)
+	return applyApplied
+}
+
+// applyOutcome separates the two reasons a decrypted message is not applied,
+// because they need opposite answers.
+type applyOutcome int
+
+const (
+	// applyApplied — the message is on the sidebar.
+	applyApplied applyOutcome = iota
+	// applyPeerGone — the contact was removed while the message was being
+	// decrypted. There is nothing to show and nothing to recover.
+	applyPeerGone
+	// applyStale — a row left this conversation while the message was being
+	// decrypted. The counter is per-PEER, so it cannot say whether the
+	// deleted row was this message or a different one — and dropping the
+	// message on that ambiguity loses a live message whose id is already
+	// through the dedup gate. The caller re-reads the conversation from the
+	// database instead, which knows the answer exactly.
+	applyStale
+)
+
+// recoverFromStaleApply rebuilds a peer from the database after a decrypted
+// message could not be applied because the conversation moved under it, and
+// reports whether the rebuild is complete.
+//
+// Everything the apply would have done is redone from the one authority that
+// knows what survived the deletion: the preview and the last-online evidence
+// through the reconciliation, the badge through its own re-derivation from
+// delivery_status, and — only if the database still holds this message — the
+// promotion and the receiver mapping for a file announcement. If the message
+// was the row that was deleted, none of that happens, which is the
+// distinction the peer-level counter could not make.
+//
+// false means the rebuild is INCOMPLETE: a read failed, so this message is
+// neither on screen nor counted, and its id must go back out of the dedup
+// gate for the header repair to find.
+func (r *DMRouter) recoverFromStaleApply(peer domain.PeerIdentity, msg *DirectMessage) bool {
+	if !r.updatePreviewFromStore(peer) {
+		return false
+	}
+	if !r.repairBadgeFromStore(peer) {
+		return false
+	}
+
+	// The stamp for the last step is taken BEFORE the question is asked, and
+	// checked when the answer is used. A fresh stamp would be an answer
+	// about the wrong moment: the contact can be removed, or this very
+	// message deleted, while the query runs, and the work below would then
+	// put a removed conversation back in the order and re-register a
+	// transfer that was just cleaned up.
+	commitStamp := r.peerStampOf(peer)
+	stored, ok := r.messageStillStored(peer, msg)
+	if !ok {
+		return false
+	}
+	if !stored {
+		r.notify(UIEventSidebarUpdated)
+		return true
+	}
+
+	r.mu.Lock()
+	_, alive := r.peers[peer]
+	current := alive && r.stampIsCurrentLocked(peer, commitStamp)
+	if current {
+		// Promotion requires a LIVE row, not merely an unchanged stamp: a
+		// peer with no row would be put back into peerOrder by it.
+		r.promotePeerLocked(peer)
+	}
+	r.mu.Unlock()
+	if !current {
+		return false
+	}
+	r.registerFileReceiveForLivePeer(msg, peer, commitStamp)
+
+	r.notify(UIEventSidebarUpdated)
+	return true
+}
+
+// messageStillStored asks the database whether this message survived the
+// deletion that made the apply stale. The second result is false when the
+// question could not be answered at all.
+func (r *DMRouter) messageStillStored(peer domain.PeerIdentity, msg *DirectMessage) (bool, bool) {
+	if msg == nil || msg.ID == "" {
+		return false, true
+	}
+	reader := r.chatHistory()
+	if reader == nil {
+		return false, true
+	}
+	ctx, cancel := context.WithTimeout(r.opContext(), 2*time.Second)
+	statuses, err := reader.StoredMessageStatuses(ctx, []domain.MessageID{domain.MessageID(msg.ID)})
+	cancel()
+	if err != nil {
+		log.Warn().Err(err).Str("peer", peer.String()).Msg("dm_router: could not tell whether the arriving message survived the deletion")
+		return false, false
+	}
+	_, held := statuses[domain.MessageID(msg.ID)]
+	return held, true
+}
+
+// setPeerPreviewLocked records msg as the newest row of the conversation and,
+// when the peer is the one who wrote it, as presence evidence. Every path that
+// learns of a new message goes through here: assigning Preview alone would
+// leave LastIncomingAt behind on whichever path forgot it, and the symptom —
+// a contact whose "last online" silently disappears — is invisible until
+// someone reads the sidebar days later. Callers hold r.mu.
+func (r *DMRouter) setPeerPreviewLocked(peer domain.PeerIdentity, msg DirectMessage) {
+	if !r.tryEnsurePeerLocked(peer) {
+		return
+	}
+	r.mergePreviewLocked(peer, ConversationPreview{
+		PeerAddress: peer,
+		Sender:      msg.Sender,
+		Body:        msg.Body,
+		Timestamp:   msg.Timestamp,
+	})
+	if msg.Sender == peer {
+		r.noteIncomingAtLocked(peer, msg.Timestamp)
+	}
+}
+
+// noteIncomingAtLocked advances the peer's last-incoming stamp. Monotone by
+// construction: history arriving out of order (startup replay, a relayed
+// message that took the long way) must not walk the evidence backwards.
+// Callers hold r.mu.
+//
+// A timestamp in the future is refused. It comes from the message, which
+// means it comes from the SENDER's clock — the one party that gains from
+// looking recently online — and the node applies the same rule to the
+// durable field. Displaying what we refuse to persist would let a forged
+// date win in the sidebar precisely because it was too dishonest to store.
+func (r *DMRouter) noteIncomingAtLocked(peer domain.PeerIdentity, at time.Time) {
+	if peer.IsZero() || at.IsZero() || at.After(r.now()) {
+		return
+	}
+	if !r.tryEnsurePeerLocked(peer) {
+		return
+	}
+	state := r.peers[peer]
+	current := state.LastIncomingAt
+	if current.Valid() && !at.After(current.Time()) {
+		return
+	}
+	state.LastIncomingAt = domain.TimeOf(at)
+}
+
+// markUnreadLocked records one unseen incoming message. Idempotent: the same
+// id twice is one unread message, whichever path reports it. Callers hold
+// r.mu.
+func (r *DMRouter) markUnreadLocked(peer domain.PeerIdentity, messageID domain.MessageID) {
+	// Emptiness is the only rejection: the set is keyed by whatever id the
+	// message carries, and refusing anything that is not a v4 UUID would
+	// silently drop the badge for a peer whose ids come from an older build
+	// or another implementation.
+	if peer.IsZero() || messageID == "" {
+		return
+	}
+	if r.unreadIDs == nil {
+		r.unreadIDs = make(map[domain.PeerIdentity]map[domain.MessageID]struct{})
+	}
+	ids, ok := r.unreadIDs[peer]
+	if !ok {
+		ids = make(map[domain.MessageID]struct{})
+		r.unreadIDs[peer] = ids
+	}
+	if _, already := ids[messageID]; already {
+		return
+	}
+	ids[messageID] = struct{}{}
+	r.syncUnreadCountLocked(peer)
+}
+
+// dropUnreadLocked forgets messages that are no longer unread — read, or
+// deleted. Callers hold r.mu.
+func (r *DMRouter) dropUnreadLocked(peer domain.PeerIdentity, messageIDs ...domain.MessageID) {
+	if len(messageIDs) > 0 {
+		// Bumped whether or not the set held these ids, because the move
+		// that matters happened in the DATABASE: mark-seen wrote `seen`, the
+		// deletion removed the row. At startup the in-memory set is empty by
+		// construction — the badge seed is the first thing to fill it and it
+		// has not landed yet — so a bump conditional on in-memory contents
+		// would silently do nothing exactly when the seed is in flight, and
+		// the pre-mark-seen answer would badge messages the user just read.
+		r.moveUnreadBackwardsLocked(peer)
+	}
+	for _, id := range messageIDs {
+		delete(r.unreadIDs[peer], id)
+	}
+	// The projection is republished even when the set was already empty: the
+	// set is the value, the count is a view of it, and a view that can be off
+	// is a badge nobody can explain.
+	r.syncUnreadCountLocked(peer)
+}
+
+// clearUnreadLocked marks the whole conversation read. Callers hold r.mu.
+func (r *DMRouter) clearUnreadLocked(peer domain.PeerIdentity) {
+	// Unconditional, for the same reason as dropUnreadLocked: an empty set
+	// in memory says nothing about what the database was just told.
+	r.moveUnreadBackwardsLocked(peer)
+	delete(r.unreadIDs, peer)
+	r.syncUnreadCountLocked(peer)
+}
+
+// restoreUnreadLocked puts a previously cleared set back, for the optimistic
+// clear whose background mark-seen failed. Callers hold r.mu.
+func (r *DMRouter) restoreUnreadLocked(peer domain.PeerIdentity, ids map[domain.MessageID]struct{}) {
+	if len(ids) == 0 {
+		return
+	}
+	if _, alive := r.peers[peer]; !alive {
+		// The conversation was removed while the mark-seen was in flight.
+		// Restoring would leave ids nobody owns, and re-adding the contact
+		// later would republish a badge for messages that no longer exist.
+		return
+	}
+	if r.unreadIDs == nil {
+		r.unreadIDs = make(map[domain.PeerIdentity]map[domain.MessageID]struct{})
+	}
+	// A UNION, not an assignment: messages may have arrived while the
+	// optimistic clear was in flight, and replacing the set would drop them.
+	current, ok := r.unreadIDs[peer]
+	if !ok {
+		current = make(map[domain.MessageID]struct{}, len(ids))
+		r.unreadIDs[peer] = current
+	}
+	for id := range ids {
+		current[id] = struct{}{}
+	}
+	r.syncUnreadCountLocked(peer)
+}
+
+// unreadSnapshotLocked copies the peer's unread set. Callers hold r.mu.
+func (r *DMRouter) unreadSnapshotLocked(peer domain.PeerIdentity) map[domain.MessageID]struct{} {
+	ids := r.unreadIDs[peer]
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make(map[domain.MessageID]struct{}, len(ids))
+	for id := range ids {
+		out[id] = struct{}{}
+	}
+	return out
+}
+
+// syncUnreadCountLocked republishes the set size on the peer state the UI
+// reads. The count is a projection; the set is the value. Callers hold r.mu.
+func (r *DMRouter) syncUnreadCountLocked(peer domain.PeerIdentity) {
+	count := len(r.unreadIDs[peer])
+	// The empty-set cleanup runs even for a peer that no longer has a row:
+	// leaving an orphan set behind is how a re-added contact inherits a badge
+	// for messages that are long gone.
+	if count == 0 {
+		delete(r.unreadIDs, peer)
+	}
+	if state, ok := r.peers[peer]; ok {
+		state.Unread = count
+	}
+}
+
+// peerRefreshLock returns the per-peer recomputation mutex, creating it on
+// first use. Held across SQL I/O, so it is never taken while r.mu is held.
+func (r *DMRouter) peerRefreshLock(peer domain.PeerIdentity) (*sync.Mutex, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, alive := r.peers[peer]; !alive {
+		return nil, false
+	}
+	if r.peerRefreshMu == nil {
+		r.peerRefreshMu = make(map[domain.PeerIdentity]*sync.Mutex)
+	}
+	lock, ok := r.peerRefreshMu[peer]
+	if !ok {
+		lock = &sync.Mutex{}
+		r.peerRefreshMu[peer] = lock
+	}
+	return lock, true
+}
+
+// tryEnsurePeerLocked creates the sidebar row if it is missing and reports
+// whether the row exists afterwards.
+//
+// It can REFUSE: while a removal is running, the row it just dropped must not
+// be born again behind it, or the cleanup that follows leaves the
+// conversation half-deleted — a sidebar row with no history and transfers
+// nobody will clean up. Every caller has to look at the answer; the ones that
+// wrote to r.peers[peer] straight after the old void helper would panic on
+// the refusal, and the ones that only added to unreadIDs or peerOrder would
+// leave that state orphaned. Callers hold r.mu.
+func (r *DMRouter) tryEnsurePeerLocked(peer domain.PeerIdentity) bool {
+	if r.removals.removing(peer) {
+		return false
+	}
 	if _, ok := r.peers[peer]; !ok {
 		r.peers[peer] = &RouterPeerState{}
 		r.peerOrder = append(r.peerOrder, peer)
 	}
+	return true
 }
 
 func (r *DMRouter) promotePeerLocked(peer domain.PeerIdentity) {

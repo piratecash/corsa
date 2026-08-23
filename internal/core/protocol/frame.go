@@ -172,10 +172,15 @@ type Frame struct {
 }
 
 type ContactFrame struct {
-	Address      string `json:"address"`
-	PubKey       string `json:"pubkey"`
-	BoxKey       string `json:"boxkey"`
-	BoxSig       string `json:"boxsig"`
+	Address string `json:"address"`
+	PubKey  string `json:"pubkey"`
+	BoxKey  string `json:"boxkey"`
+	BoxSig  string `json:"boxsig"`
+	// LastOnlineAt is what the node itself observed. Local RPC surface only —
+	// never sent in P2P contact exchange. What local chat history says about a
+	// contact is NOT carried here: it is recomputed by the application layer
+	// at startup rather than persisted, so there is no second copy to keep in
+	// step with this one.
 	LastOnlineAt string `json:"last_online_at,omitempty"`
 }
 

@@ -35,6 +35,11 @@ type trustedContact struct {
 	BoxSignature string    `json:"box_signature"`
 	FirstSeenAt  time.Time `json:"first_seen_at"`
 	LastSeenAt   time.Time `json:"last_seen_at"`
+	// LastOnlineAt is what THIS node observed with its own clock: a final
+	// route lost, or a DM the sender handed us over its own session. Chat
+	// history is deliberately NOT persisted beside it: what the messages say
+	// is recomputed from the chatlog at startup, which keeps one writer and
+	// one source of truth instead of a second copy to keep coherent.
 	LastOnlineAt time.Time `json:"last_online_at,omitzero"`
 	Source       string    `json:"source"`
 }
@@ -166,16 +171,24 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	return store, nil
 }
 
-// recordLastOnlineAt stores the locally observed online→offline transition for
-// trusted identities. It deliberately does not create contacts: route gossip
-// can mention identities the user has never trusted, while this JSON is the
-// durable trusted-contact store. One transition batch produces one atomic
-// snapshot write, and an older observation can never move the timestamp back.
-func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at time.Time) (updated int, err error) {
+// recordLastOnlineAt stores a locally observed presence moment for trusted
+// identities. It deliberately does not create contacts: route gossip can
+// mention identities the user has never trusted, while this JSON is the
+// durable trusted-contact store. One batch produces one atomic snapshot
+// write, and an older observation can never move the timestamp back.
+//
+// minAdvance is how much newer the observation has to be than the stored one
+// to be worth a write. Zero means any advance counts, which is what the
+// online→offline transition wants. The DM path passes a real interval and
+// relies on the check happening HERE, under the same lock as the update: a
+// caller that compares first and writes after leaves a window in which every
+// message of a burst reads the same stale stamp and each buys its own rewrite
+// of the whole trust file.
+func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at time.Time, minAdvance time.Duration) (updated int, err error) {
 	if len(identities) == 0 || at.IsZero() {
 		return 0, nil
 	}
-	at = at.UTC()
+	observedAt := at.UTC()
 
 	s.mu.Lock()
 	for _, identity := range identities {
@@ -184,10 +197,16 @@ func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at tim
 		}
 		address := identity.String()
 		contact, ok := s.contacts[address]
-		if !ok || (!contact.LastOnlineAt.IsZero() && !at.After(contact.LastOnlineAt)) {
+		if !ok {
 			continue
 		}
-		contact.LastOnlineAt = at
+		if !contact.LastOnlineAt.IsZero() && observedAt.Sub(contact.LastOnlineAt) < minAdvance {
+			continue
+		}
+		if !contact.LastOnlineAt.IsZero() && !observedAt.After(contact.LastOnlineAt) {
+			continue
+		}
+		contact.LastOnlineAt = observedAt
 		s.contacts[address] = contact
 		updated++
 	}
@@ -199,7 +218,7 @@ func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at tim
 	s.mu.Unlock()
 
 	if err := s.saveSnapshot(snapshot); err != nil {
-		return updated, fmt.Errorf("persist trust-store last-online observation: %w", err)
+		return updated, fmt.Errorf("persist trust-store last-online: %w", err)
 	}
 	return updated, nil
 }
@@ -382,6 +401,19 @@ func (s *trustStore) rememberRecord(network domain.NetworkID, record protocol.Si
 		return outcome, fmt.Errorf("persist trust store after record merge %s: %w", key.address, err)
 	}
 	return outcome, nil
+}
+
+// isTrustedContact answers the membership question without copying the whole
+// address book, which trustedContacts does and which the per-message paths
+// would otherwise pay for on every arrival.
+func (s *trustStore) isTrustedContact(identity domain.PeerIdentity) bool {
+	if identity.IsZero() {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.contacts[identity.String()]
+	return ok
 }
 
 func (s *trustStore) trustedContacts() map[string]trustedContact {

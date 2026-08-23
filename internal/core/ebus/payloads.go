@@ -229,10 +229,18 @@ type RouteTableChange struct {
 	Withdrawn int                      // number of routes withdrawn
 }
 
-// IdentityPresenceChange is the payload for TopicIdentityPresenceChanged.
-// It carries a batch of identities whose final selectable route disappeared.
-// Source identifies the observing node so consumers sharing one Bus do not
-// apply another node's local view. ChangedAt is that node's observation time.
+// IdentityPresenceChange is the payload of both identity-presence topics, and
+// what it asserts depends on which one carried it:
+//
+//   - TopicIdentityPresenceChanged — the final selectable route to these
+//     identities disappeared;
+//   - TopicIdentityPresenceObserved — positive evidence that they were up,
+//     today a DM their sender delivered over its own authenticated session.
+//
+// The shape is shared because consumers do the same thing with it: apply
+// ChangedAt to the identity, monotonically. Source identifies the observing
+// node so consumers sharing one Bus do not apply another node's local view.
+// ChangedAt is that node's observation time.
 type IdentityPresenceChange struct {
 	Source     domain.PeerIdentity
 	Identities []domain.PeerIdentity

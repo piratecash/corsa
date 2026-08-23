@@ -56,6 +56,15 @@ func PublishIdentityPresenceChanged(bus *Bus, change IdentityPresenceChange) {
 	bus.Publish(TopicIdentityPresenceChanged, change)
 }
 
+// PublishIdentityPresenceObserved emits TopicIdentityPresenceObserved with a
+// typed batch of identities this node observed as up.
+func PublishIdentityPresenceObserved(bus *Bus, change IdentityPresenceChange) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicIdentityPresenceObserved, change)
+}
+
 // PublishPeerConnected emits TopicPeerConnected with a typed
 // (address, identity) pair. Use this instead of bus.Publish at every new
 // call site so the compiler enforces the (PeerAddress, PeerIdentity)
