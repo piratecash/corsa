@@ -31,7 +31,6 @@ import (
 	"gioui.org/app"
 	"gioui.org/f32"
 	"gioui.org/font"
-	"gioui.org/font/gofont"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -491,10 +490,12 @@ func (w *Window) kit() ui.Kit {
 // unsynchronised map cache and is therefore not safe for concurrent use.
 func newAppTheme() *material.Theme {
 	theme := material.NewTheme()
-	theme.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
-	// Keep the bundled Go face for normal text and explicitly fall back to the
-	// platform emoji family for picker choices and emoji embedded in messages.
-	theme.Face = font.Typeface("Go, emoji")
+	theme.Shaper = text.NewShaper(text.WithCollection(appFontCollection()))
+	// Keep the bundled Go face for normal text and fall back to the bundled
+	// emoji family for picker choices and emoji embedded in messages. Both
+	// families ship with the binary — see emoji_font.go for why the emoji one
+	// cannot be left to the host.
+	theme.Face = font.Typeface("Go, " + string(emojiTypeface))
 	theme.Bg = color.NRGBA{R: 18, G: 21, B: 26, A: 255}
 	theme.Fg = color.NRGBA{R: 235, G: 239, B: 244, A: 255}
 	theme.ContrastBg = color.NRGBA{R: 36, G: 67, B: 126, A: 255}

@@ -90,6 +90,46 @@ contact, and Escape closes the overlay. This prevents the search editor or
 composer underneath from receiving text and shortcuts. Closing from the
 keyboard returns focus to the My identity card.
 
+### Fonts
+
+Both font families ship inside the binary: the Go faces for text, and Noto
+Color Emoji for emoji, registered under the family name `Corsa Emoji`. The
+theme asks for `Go, Corsa Emoji`, and an exact family match beats anything on
+the host, so the emoji a user sees are the ones this build carries.
+
+The family name matters as much as the file. `emoji` is a GENERIC family in the
+font matcher, alongside `serif` and `monospace`, and the fontconfig
+substitution table indexes the host's own emoji font under it — registering the
+bundled font as `emoji` therefore queued it behind Segoe UI Emoji on Windows,
+and the bundled bytes were never reached. A name nothing else can claim ends
+that competition, at the price of no longer falling back to the platform font
+for an emoji this build does not carry.
+
+The emoji font is bundled because the platform fonts are not interchangeable
+for this renderer. Gio draws outlines, SVG and BITMAP glyphs and skips anything
+else without a word, while Windows keeps the colour glyphs of Segoe UI Emoji in
+a COLR table: on Windows every emoji rendered as blank space, and the regional
+indicator pairs behind flags fell back to their plain letter outlines and
+showed as `UA`, `DE` and so on. Windows ships no flag glyphs at all, so nothing
+done on the host side could have produced them.
+
+The file must therefore stay a BITMAP build (CBDT/sbix). The Noto Color Emoji
+served by Google Fonts is COLRv1 and would restore the blank-emoji bug; the
+bitmap build lives in the `googlefonts/noto-emoji` repository as
+`fonts/NotoColorEmoji.ttf`. Two tests hold that contract: one reads the table
+directory of the embedded bytes and refuses a font without a bitmap table, the
+other shapes every emoji the picker offers and fails on any that comes back as
+`.notdef` — shaping rather than a `cmap` lookup, because flags are ligatures of
+two regional indicators and the rainbow flag is a ZWJ sequence.
+
+The cost is about ten megabytes in every binary, the Android package included,
+where the platform font would have done. That is the price of the same emoji
+everywhere and of not depending on what the host happens to have installed —
+a Linux desktop without an emoji font had the identical blank-glyph problem.
+The font is parsed once per process and its face shared between windows, which
+the Gio API explicitly allows; the licence travels with it as
+`internal/app/desktop/assets/fonts/OFL.txt`.
+
 ### Shared UI components
 
 Four pieces of chrome are single components rather than per-call-site
@@ -754,6 +794,47 @@ Window (Gio event loop)
 «Скопировать identity» и «Поделиться контактом», а Escape закрывает оверлей.
 Поэтому поиск и поле сообщения под ним не получают текст и сочетания клавиш.
 При закрытии с клавиатуры фокус возвращается на карточку «Мой identity».
+
+### Шрифты
+
+Оба семейства едут внутри бинаря: Go-начертания для текста и Noto Color Emoji
+для эмодзи, зарегистрированный под именем семейства `Corsa Emoji`. Тема просит
+`Go, Corsa Emoji`, а точное совпадение семейства выигрывает у любого
+установленного в системе шрифта, поэтому пользователь видит те эмодзи, которые
+несёт эта сборка.
+
+Имя семейства важно не меньше самого файла. `emoji` — это ОБЩЕЕ (generic)
+семейство в подсистеме подбора шрифтов, наравне с `serif` и `monospace`, и
+таблица подстановок fontconfig заводит под него системный эмодзи-шрифт:
+регистрация встроенного файла как `emoji` ставила его в очередь за Segoe UI
+Emoji на Windows, и до встроенных байтов дело не доходило. Имя, на которое
+никто больше не претендует, снимает эту конкуренцию — ценой того, что для
+эмодзи, которого в сборке нет, отката на системный шрифт больше не будет.
+
+Эмодзи-шрифт встроен потому, что системные шрифты для нашего рендерера не
+взаимозаменяемы. Gio рисует контуры, SVG и БИТМАПЫ, а всё остальное молча
+пропускает, тогда как Windows хранит цветные глифы Segoe UI Emoji в таблице
+COLR: на Windows каждое эмодзи выводилось пустым местом, а пары региональных
+индикаторов, из которых состоят флаги, откатывались на обычные контуры букв и
+показывались как `UA`, `DE` и так далее. Флагов в шрифтах Windows нет вовсе,
+поэтому со стороны системы их получить было нельзя.
+
+Значит, файл обязан оставаться БИТМАПНОЙ сборкой (CBDT/sbix). Noto Color Emoji
+с Google Fonts — это COLRv1, он вернул бы баг с пустыми эмодзи; битмапная
+сборка лежит в репозитории `googlefonts/noto-emoji` как
+`fonts/NotoColorEmoji.ttf`. Контракт держат два теста: один читает каталог
+таблиц встроенных байтов и отвергает шрифт без битмапной таблицы, второй
+шейпит каждое эмодзи пикера и падает на тех, что вернулись как `.notdef`, —
+именно шейпинг, а не поиск в `cmap`, потому что флаги это лигатуры двух
+региональных индикаторов, а радужный флаг — ZWJ-последовательность.
+
+Цена — около десяти мегабайт в каждом бинаре, включая Android-пакет, где
+хватило бы системного шрифта. Это плата за одинаковые эмодзи везде и за
+независимость от того, что установлено у пользователя: Linux-десктоп без
+эмодзи-шрифта имел ровно ту же проблему с пустыми глифами. Шрифт разбирается
+один раз на процесс, а его face переиспользуется между окнами — Gio это прямо
+разрешает; лицензия едет рядом с ним в
+`internal/app/desktop/assets/fonts/OFL.txt`.
 
 ### Общие компоненты интерфейса
 

@@ -10,7 +10,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"gioui.org/font"
 	"gioui.org/io/key"
 	"gioui.org/io/semantic"
 	"gioui.org/layout"
@@ -912,7 +911,7 @@ func (w *Window) layoutEmojiChoice(gtx layout.Context, value string) layout.Dime
 		}
 		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			label := material.Label(w.theme, emojiGlyphSizeSp, value)
-			label.Font.Typeface = font.Typeface("emoji")
+			label.Font.Typeface = emojiTypeface
 			label.Color = color.NRGBA{R: 247, G: 249, B: 252, A: 255}
 			return layoutEmojiGlyph(gtx, label)
 		})

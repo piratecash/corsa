@@ -189,8 +189,10 @@ func TestInsertEmojiReplacesSelection(t *testing.T) {
 
 func TestAppThemeIncludesEmojiFallback(t *testing.T) {
 	theme := newAppTheme()
-	if !strings.Contains(string(theme.Face), "emoji") {
-		t.Fatalf("theme face = %q, want explicit emoji fallback", theme.Face)
+	// The BUNDLED family by name, not the word "emoji": asking for the generic
+	// family handed the request to the host's own font — see emoji_font.go.
+	if !strings.Contains(string(theme.Face), string(emojiTypeface)) {
+		t.Fatalf("theme face = %q, want the bundled %q family as a fallback", theme.Face, emojiTypeface)
 	}
 }
 
