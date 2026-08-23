@@ -94,6 +94,20 @@ parameters, so a database at `/data/state?backup.db` silently opened
 `/data/state` while `Location()` and every log line named the file the operator
 had asked for.
 
+Building that URI is filesystem-dependent, so `fileURI` takes the separator as
+an argument — a Windows path can then be tested on a POSIX builder, which is
+the only place the tests run. On Windows the separators become `/` (a
+backslash left in place is percent-encoded as `%5C`, i.e. a character in a file
+name rather than a directory boundary) and a leading `/` is prepended:
+`C:\dir\state.db` becomes `file:///C:/dir/state.db`. Without that slash the URI
+authority — everything from `//` to the next `/` — swallowed the drive letter,
+and SQLite refused the DSN with `invalid uri authority`, which is every Windows
+start of the node failing at `Open`. A UNC path already begins with its own two
+separators and keeps them, so `\\host\share\state.db` becomes
+`file:////host/share/state.db`: an empty authority again, and SQLite maps the
+path back to the `\\host\share` form. A POSIX path is left alone, backslashes
+included — there they are legal characters in a file name.
+
 `ErrCorrupt` means the FILE is broken — the driver refused it as
 not-a-database, or a check reported violations. A check that could not RUN is
 not corruption: a cancelled caller is the everyday case, and `errorClass` tests
@@ -777,6 +791,19 @@ chatlog-<identity_short>-<port>.db
 драйвера обрезают обычный путь по первому `?`, разыскивая свои параметры,
 поэтому база `/data/state?backup.db` молча открывала `/data/state`, тогда как
 `Location()` и все строки лога называли файл, который запросил оператор.
+
+Построение этого URI зависит от файловой системы, поэтому `fileURI` принимает
+разделитель аргументом — так windows-путь проверяется на POSIX-машине, а только
+там тесты и запускаются. На Windows разделители заменяются на `/` (оставленный
+обратный слэш кодируется как `%5C`, то есть становится символом в имени файла, а
+не границей каталога) и добавляется ведущий `/`: `C:\dir\state.db` превращается в
+`file:///C:/dir/state.db`. Без этого слэша authority URI — всё от `//` до
+следующего `/` — поглощал букву диска, и SQLite отвергал DSN с `invalid uri
+authority`, то есть каждый запуск ноды на Windows падал на `Open`. UNC-путь уже
+начинается с собственных двух разделителей и сохраняет их, поэтому
+`\\host\share\state.db` становится `file:////host/share/state.db`: authority
+снова пустой, а SQLite восстанавливает форму `\\host\share`. POSIX-путь не
+трогается, включая обратные слэши, — там это законные символы имени файла.
 
 `ErrCorrupt` означает, что сломан ФАЙЛ: драйвер отверг его как не-базу либо
 проверка нашла нарушения. Проверка, которая не смогла ВЫПОЛНИТЬСЯ, повреждением

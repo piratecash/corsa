@@ -525,8 +525,40 @@ func DriverName() string { return sqliteDriverName }
 // while Location() and every log line named the file the operator asked for.
 // Percent-encoding puts the whole path back inside the name.
 func DSN(path string) string {
+	return fileURI(path, os.PathSeparator) + sqliteDSNOptions
+}
+
+// fileURI renders a local absolute path as a file: URI, for a filesystem whose
+// separator is the given one.
+//
+// The separator is a parameter rather than read from the host, because the two
+// cases that differ are the whole point of this function and only one of them
+// can be observed on any single machine: a Windows path has to be tested on
+// Linux and the other way round.
+//
+// Both adjustments below exist for Windows and are no-ops for a POSIX path,
+// which already starts at "/" and already separates with it:
+//
+//   - the separators become "/". A file: URI has no other path separator, and
+//     a backslash left in place is percent-encoded as %5C, i.e. a file name
+//     containing that character rather than a directory boundary. Backslashes
+//     are NOT rewritten under a "/" separator — there they are an ordinary,
+//     legal character in a POSIX file name.
+//   - a leading "/" is prepended when the path does not have one. The URI
+//     authority runs from "//" to the next "/", so C:/dir/state.db turned the
+//     drive into the host and SQLite refused the whole DSN with "invalid uri
+//     authority" — this crashed every Windows start of the node. A UNC path
+//     already starts with its own two separators and keeps them: file:////host
+//     leaves the authority empty and hands SQLite back the \\host\share form.
+func fileURI(path string, separator rune) string {
+	if separator != '/' {
+		path = strings.ReplaceAll(path, string(separator), "/")
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	uri := url.URL{Scheme: "file", Path: path}
-	return uri.String() + sqliteDSNOptions
+	return uri.String()
 }
 
 // Executor returns the non-owning handle for repositories.

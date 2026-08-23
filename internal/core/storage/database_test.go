@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1195,5 +1196,113 @@ func TestOpenEnablesSecureDelete(t *testing.T) {
 	}
 	if secureDelete == 0 {
 		t.Fatal("secure_delete is off: deleted message bodies stay readable in the free pages of the file")
+	}
+}
+
+// TestFileURIPlacesTheWholePathInTheName covers the DSN's name half on both
+// filesystem layouts. Only one of them can be observed on the machine running
+// this test, which is why fileURI takes the separator as an argument: the
+// Windows rows below are the ones that crashed every Windows start of the node
+// with "invalid uri authority" — the drive letter was parsed as the URI
+// authority — and no test on a POSIX builder could have caught that.
+func TestFileURIPlacesTheWholePathInTheName(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		path      string
+		separator rune
+		want      string
+	}{
+		{
+			name:      "windows drive path",
+			path:      `C:\Users\node\AppData\Roaming\CorsaCore\chatlog-bca44146-64646.db`,
+			separator: '\\',
+			want:      "file:///C:/Users/node/AppData/Roaming/CorsaCore/chatlog-bca44146-64646.db",
+		},
+		{
+			name:      "windows path with a question mark",
+			path:      `C:\data\state?backup.db`,
+			separator: '\\',
+			want:      "file:///C:/data/state%3Fbackup.db",
+		},
+		{
+			name:      "windows UNC path keeps its empty authority",
+			path:      `\\host\share\corsa\state.db`,
+			separator: '\\',
+			want:      "file:////host/share/corsa/state.db",
+		},
+		{
+			name:      "posix path",
+			path:      "/var/lib/corsa/state.db",
+			separator: '/',
+			want:      "file:///var/lib/corsa/state.db",
+		},
+		{
+			name:      "posix path with a question mark",
+			path:      "/var/lib/corsa/state?backup.db",
+			separator: '/',
+			want:      "file:///var/lib/corsa/state%3Fbackup.db",
+		},
+		{
+			// A backslash is an ordinary character in a POSIX file name, so
+			// rewriting it here would name a directory that does not exist.
+			name:      "posix path with a backslash in the file name",
+			path:      `/var/lib/corsa/state\backup.db`,
+			separator: '/',
+			want:      "file:///var/lib/corsa/state%5Cbackup.db",
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := fileURI(testCase.path, testCase.separator)
+			if got != testCase.want {
+				t.Fatalf("fileURI(%q) = %q, want %q", testCase.path, got, testCase.want)
+			}
+
+			// SQLite refuses any file: URI whose authority is neither empty
+			// nor "localhost", which is the exact refusal the Windows path
+			// produced. Asserting the parse as well as the string means a
+			// future edit cannot satisfy the expectation above while still
+			// producing a DSN the driver rejects.
+			parsed, err := url.Parse(got)
+			if err != nil {
+				t.Fatalf("parse %q: %v", got, err)
+			}
+			if parsed.Host != "" {
+				t.Fatalf("URI authority = %q, want empty: SQLite refuses anything else", parsed.Host)
+			}
+		})
+	}
+}
+
+// TestDSNCarriesTheDriverOptions keeps the two halves of the DSN together on
+// whichever filesystem this test runs: the name is a file: URI with an empty
+// authority, and the driver options follow it unchanged.
+func TestDSNCarriesTheDriverOptions(t *testing.T) {
+	t.Parallel()
+
+	dsn := DSN(filepath.Join(t.TempDir(), "state.db"))
+
+	name, options, found := strings.Cut(dsn, "?")
+	if !found {
+		t.Fatalf("DSN = %q, want the driver options after a %q", dsn, "?")
+	}
+	if options != strings.TrimPrefix(sqliteDSNOptions, "?") {
+		t.Fatalf("options = %q, want %q", options, strings.TrimPrefix(sqliteDSNOptions, "?"))
+	}
+
+	parsed, err := url.Parse(name)
+	if err != nil {
+		t.Fatalf("parse %q: %v", name, err)
+	}
+	if parsed.Scheme != "file" {
+		t.Fatalf("scheme = %q, want %q", parsed.Scheme, "file")
+	}
+	if parsed.Host != "" {
+		t.Fatalf("URI authority = %q, want empty: SQLite refuses anything else", parsed.Host)
 	}
 }
