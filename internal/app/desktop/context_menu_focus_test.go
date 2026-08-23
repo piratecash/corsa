@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"image"
 	"testing"
 
 	"gioui.org/io/event"
@@ -8,6 +9,8 @@ import (
 	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/unit"
+	"gioui.org/widget"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/service"
@@ -75,7 +78,7 @@ func (h *menuHarness) openFrame(items []event.Tag, keys ...key.Event) bool {
 	}
 	h.ops.Reset()
 	gtx := layout.Context{Ops: h.ops, Source: h.router.Source()}
-	esc := h.state.drive(gtx, items, h.arrows)
+	esc := h.state.drive(gtx, items, menuNavKeys{Arrows: h.arrows, Tab: true})
 	_, h.leftover = gtx.Event(
 		key.Filter{Name: key.NameEscape},
 		key.Filter{Name: key.NameTab, Optional: key.ModShift},
@@ -139,7 +142,7 @@ func (h *menuHarness) openFrameAfterAnOutsideTap() {
 	gtx := layout.Context{Ops: h.ops, Source: h.router.Source()}
 	gtx.Execute(key.FocusCmd{})
 	h.state.abandonRestore()
-	h.state.drive(gtx, h.items, h.arrows)
+	h.state.drive(gtx, h.items, menuNavKeys{Arrows: h.arrows, Tab: true})
 	h.layoutRest(gtx, h.items)
 	h.router.Frame(h.ops)
 }
@@ -164,7 +167,7 @@ func (h *menuHarness) closedFrame() {
 func (h *menuHarness) frameStealingFocus(items []event.Tag, steal event.Tag) {
 	h.ops.Reset()
 	gtx := layout.Context{Ops: h.ops, Source: h.router.Source()}
-	h.state.drive(gtx, items, h.arrows)
+	h.state.drive(gtx, items, menuNavKeys{Arrows: h.arrows, Tab: true})
 	gtx.Execute(key.FocusCmd{Tag: steal})
 	h.layoutRest(gtx, items)
 	h.router.Frame(h.ops)
@@ -650,5 +653,60 @@ func TestEscapeClosesAMenuWithNothingToStepBackInto(t *testing.T) {
 	w.escapeMsgMenu()
 	if w.msgContextMsg != nil {
 		t.Fatal("Escape must close the message menu, which has no sub-views to step back into")
+	}
+}
+
+// restoreOnClose waits one frame for the focus to be dropped, and it has to
+// ASK for that frame.
+//
+// A surface closed mid-layout still draws its own widgets for the rest of that
+// frame, so Gio drops their focus only at the end of the NEXT one — and a
+// focus drop is a state change nobody filters for. A close with no other
+// invalidate behind it, such as Escape or a press on a modal's backdrop, would
+// otherwise leave the hand-back parked until some unrelated input woke the
+// loop.
+//
+// The frame is kept deliberately quiet: with anything animating in it the
+// wakeup would be there whether the restore asked for one or not.
+func TestRestoreOnCloseAsksForItsGraceFrame(t *testing.T) {
+	var router input.Router
+	var state menuFocusState
+	var trigger, elsewhere widget.Clickable
+	state.open(&trigger)
+	// held is what drive would have set while the surface was open.
+	state.held = true
+
+	frame := func(focus, restore bool) bool {
+		gtx := layout.Context{
+			Ops:         new(op.Ops),
+			Source:      router.Source(),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Exact(image.Pt(200, 100)),
+		}
+		if focus {
+			gtx.Execute(key.FocusCmd{Tag: &elsewhere})
+		}
+		if restore {
+			state.restoreOnClose(gtx, nil)
+		}
+		elsewhere.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Dimensions{Size: image.Pt(10, 10)}
+		})
+		router.Frame(gtx.Ops)
+		_, wakeup := router.WakeupTime()
+		return wakeup
+	}
+
+	frame(true, false)
+	if frame(false, false) {
+		t.Fatal("the harness is not quiet: a wakeup here would hide the one the restore asks for")
+	}
+
+	asked := frame(false, true)
+	if !state.settle {
+		t.Fatal("the restore did not take its grace frame; this test is watching the wrong branch")
+	}
+	if !asked {
+		t.Fatal("the restore parked itself on a grace frame without asking for one")
 	}
 }

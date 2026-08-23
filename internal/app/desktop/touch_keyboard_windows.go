@@ -1458,9 +1458,8 @@ type tkPaneReg struct {
 
 // tkUnadviseRetryMax bounds the FAST retries of a failing Unadvise; past
 // it retries continue at tkUnadviseSlowRetry pace, without a final limit —
-// giving up entirely would pin the handler (and through its state pointer
-// the whole ConsoleWindow) forever, turning one stuck registration into an
-// unbounded per-open/close leak.
+// giving up entirely would pin the handler, and through its state pointer the
+// whole window, forever.
 const (
 	tkUnadviseRetryMax   = 5
 	tkUnadviseSlowRetry  = time.Minute
@@ -2004,7 +2003,7 @@ func tkKeyboardService() {
 			delay := time.Second
 			if reg.unadviseRetries > tkUnadviseRetryMax {
 				// Never give up entirely: a permanently pinned handler
-				// holds the whole ConsoleWindow through its state pointer.
+				// holds the whole window through its state pointer.
 				delay = tkUnadviseSlowRetry
 			}
 			kbdRetry := kbd

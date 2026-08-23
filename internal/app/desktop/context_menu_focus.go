@@ -79,11 +79,26 @@ func (m *menuFocusState) reopen() {
 	m.pending = true
 }
 
+// menuNavKeys is which keys a surface lets its focus ring take.
+//
+// Every one of them is a key some surface needs for itself, so none can be
+// assumed. Arrows must stay with a text editor's caret. Tab must stay with the
+// console's completion popup, which uses it to accept the highlighted command
+// — but only while that popup is showing, which is why this is decided per
+// frame rather than per surface.
+type menuNavKeys struct {
+	// Arrows lets Up/Down step between items.
+	Arrows bool
+	// Tab lets Tab and Shift+Tab step between items. Turning it off gives up
+	// containment for that frame: an unconsumed Tab reaches Gio's own focus
+	// traversal and can leave the surface.
+	Tab bool
+}
+
 // drive runs one frame of the contract for an OPEN menu. items are the menu's
-// focusable widgets in the order they are drawn; arrows selects whether Up/Down
-// navigate too — they must not when the menu embeds a text editor, which needs
-// the arrow keys for its own caret. It reports whether Escape was pressed; what
-// Escape MEANS differs per menu, so the caller decides.
+// focusable widgets in the order they are drawn; keys selects which navigation
+// keys the ring may take. It reports whether Escape was pressed; what Escape
+// MEANS differs per menu, so the caller decides.
 //
 // Call it from the overlay, on the real frame context, AFTER the "is there room
 // to draw" check and BEFORE the card is laid out:
@@ -97,9 +112,9 @@ func (m *menuFocusState) reopen() {
 // Focusing a tag before the frame has registered it is fine: the router only
 // drops focus at Frame time, and by then the card below has mentioned every
 // item.
-func (m *menuFocusState) drive(gtx layout.Context, items []event.Tag, arrows bool) bool {
+func (m *menuFocusState) drive(gtx layout.Context, items []event.Tag, keys menuNavKeys) bool {
 	m.want = nil
-	escape, step := readMenuNavKeys(gtx, arrows)
+	escape, step := readMenuNavKeys(gtx, keys)
 	if escape {
 		return true
 	}
@@ -235,9 +250,17 @@ func (m *menuFocusState) restoreOnClose(gtx layout.Context, fallback event.Tag) 
 	if !gtx.Focused(nil) {
 		if m.settle {
 			m.held, m.settle = false, false
-		} else {
-			m.settle = true
+			return
 		}
+		m.settle = true
+		// The grace frame has to be asked for, exactly like the verify frame
+		// below. A surface closed mid-layout still draws its own widgets for
+		// the rest of that frame, so the focus is dropped at the END of the
+		// NEXT one — and a focus drop is a state change nobody filters for. A
+		// close with no other invalidate behind it (Escape, a press on the
+		// backdrop) would otherwise leave the hand-back parked here until some
+		// unrelated input woke the loop.
+		gtx.Execute(op.InvalidateCmd{})
 		return
 	}
 	m.held, m.settle = false, false
@@ -288,12 +311,15 @@ func (m *menuFocusState) abandonRestore() {
 // background controls. Gio runs its own focus traversal only for a Tab that
 // NOTHING handled (see the SystemEvent path in app.Window.processEvent), so
 // consuming it here is what actually contains the menu.
-func readMenuNavKeys(gtx layout.Context, arrows bool) (escape bool, step int) {
-	filters := []event.Filter{
-		key.Filter{Name: key.NameEscape},
-		key.Filter{Name: key.NameTab, Optional: key.ModShift},
+//
+// Escape is always taken. A surface that wants Escape for something of its own
+// gets it through the caller's return value, not by leaving the key here.
+func readMenuNavKeys(gtx layout.Context, keys menuNavKeys) (escape bool, step int) {
+	filters := []event.Filter{key.Filter{Name: key.NameEscape}}
+	if keys.Tab {
+		filters = append(filters, key.Filter{Name: key.NameTab, Optional: key.ModShift})
 	}
-	if arrows {
+	if keys.Arrows {
 		filters = append(filters,
 			key.Filter{Name: key.NameUpArrow},
 			key.Filter{Name: key.NameDownArrow},
@@ -390,7 +416,8 @@ func (w *Window) escapePeerMenu() {
 // two context menus and identity details cover the composer, so for anything
 // that asks "may I take focus?" they are one condition.
 func (w *Window) contextMenuOpen() bool {
-	return w.identityPanelVisible || !w.contextMenuPeer.IsZero() || w.msgContextMsg != nil
+	return w.identityPanelVisible || !w.contextMenuPeer.IsZero() || w.msgContextMsg != nil ||
+		w.consoleModalVisible()
 }
 
 // consumeComposerFocus decides what a pending "focus the composer" request may

@@ -167,7 +167,7 @@ func capConsoleOutput(output string) (display string, truncated bool) {
 // composeConsoleEntry builds a bounded entry from a FULL command output:
 // caps the display text before any widget sees it, spills the complete
 // output to the overflow store and appends the truncation marker.
-func (c *ConsoleWindow) composeConsoleEntry(entry consoleEntry, fullOutput string) consoleEntry {
+func (c *consoleModal) composeConsoleEntry(entry consoleEntry, fullOutput string) consoleEntry {
 	display, truncated := capConsoleOutput(fullOutput)
 	entry.FullBytes = len(fullOutput)
 	if !truncated {
@@ -192,7 +192,7 @@ func (c *ConsoleWindow) composeConsoleEntry(entry consoleEntry, fullOutput strin
 // appendConsoleEntry prepends the entry and enforces the list caps,
 // deleting the overflow files of everything evicted. Must be called
 // WITHOUT c.mu held.
-func (c *ConsoleWindow) appendConsoleEntry(entry consoleEntry) {
+func (c *consoleModal) appendConsoleEntry(entry consoleEntry) {
 	var evictedOverflow []string
 
 	c.mu.Lock()
@@ -229,7 +229,7 @@ func (c *ConsoleWindow) appendConsoleEntry(entry consoleEntry) {
 
 // fullConsoleOutput returns the COMPLETE output of an entry for the
 // clipboard: the overflow file when one exists, the display text otherwise.
-func (c *ConsoleWindow) fullConsoleOutput(entry *consoleEntry) string {
+func (c *consoleModal) fullConsoleOutput(entry *consoleEntry) string {
 	if entry.OverflowPath == "" {
 		return entry.Output
 	}

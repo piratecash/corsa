@@ -12,7 +12,7 @@ import (
 // activeRowsForTab plus the two counters allocated fresh on every frame (the
 // top desktop-side allocator in the heap-churn profile).
 func TestPeerCachesPerGeneration(t *testing.T) {
-	c := &ConsoleWindow{}
+	c := &consoleModal{}
 
 	gen5 := service.RouterSnapshot{
 		Generation: 5,
@@ -55,7 +55,7 @@ func TestPeerCachesPerGeneration(t *testing.T) {
 // repeated calls within one generation return the SAME backing slice, proving
 // no re-derivation (and no per-frame allocation) happens on a cache hit.
 func TestActivePeerRows_ReusesSliceWithinGeneration(t *testing.T) {
-	c := &ConsoleWindow{}
+	c := &consoleModal{}
 	snap := service.RouterSnapshot{
 		Generation: 1,
 		NodeStatus: service.NodeStatus{
@@ -80,7 +80,7 @@ func TestActivePeerRows_ReusesSliceWithinGeneration(t *testing.T) {
 // caches are keyed independently so the info tab does not pay for the
 // active-rows merge.
 func TestPeerCounts_IndependentOfActiveRowsCache(t *testing.T) {
-	c := &ConsoleWindow{}
+	c := &consoleModal{}
 	snap := service.RouterSnapshot{
 		Generation: 7,
 		NodeStatus: service.NodeStatus{

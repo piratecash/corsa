@@ -36,7 +36,7 @@ Window (Gio event loop)
       ├── Message input (vertically centered single-line text, upright attachment icon, emoji picker, inline send action)
       │   └── Emoji picker (categories, keyword search aligned with its icon, recently used)
       ├── Status line (send/delete/sync feedback)
-      └── Footer (flexible shielded network status, chart-icon console button on the same desktop row down to 360dp)
+      └── Footer (flexible shielded network status, chart-icon console toolbar button on the same desktop row down to 360dp, on every platform)
 ```
 
 The emoji picker is non-modal. Opening it and selecting an emoji keep keyboard
@@ -89,6 +89,169 @@ on Close, Tab and Shift+Tab cycle through Close, Copy identity, and Share
 contact, and Escape closes the overlay. This prevents the search editor or
 composer underneath from receiving text and shortcuts. Closing from the
 keyboard returns focus to the My identity card.
+
+### Shared UI components
+
+Four pieces of chrome are single components rather than per-call-site
+assemblies, and they live in their own package, `internal/app/desktop/ui`. They
+came out of `docs/design/CHANGES.md` and `CHANGES1.md`, which are the
+designer's task files and are re-exported wholesale — this section is where the
+implementation is described, so a new export cannot erase it.
+
+The package boundary is the point. Every one of these started as a method on
+`*Window`, which meant a component could reach any state the window had. A
+component now takes a `ui.Kit` — a theme and an icon — plus its own arguments,
+and the compiler refuses anything else; a "component" that needs the peer list
+is a screen, and this is what says so.
+
+`ui.Chip` is the rounded clickable fill under the tab pill, the toolbar button
+and the popup row, and `ui.Filled` the rounded fill under all of those plus the
+popup card. Both exist because a fill painted from `Constraints.Max` covers the
+room a widget was OFFERED rather than the room it took: that put an opaque
+column down the console window under the open tab menu, and squared off every
+pill's corners, since the rounded corners landed outside the enclosing clip.
+Chips also go through `widget.Clickable` rather than `material.Clickable`,
+which drops Gio's ink: its hover wash is clipped square and showed as four pale
+dots at a rounded pill's corners, and its ripple flashed a white ring on every
+click. Neither is in the design.
+
+**Modal shell** (`modal_shell.go`) is every modal window: backdrop, card,
+header with title and close button, and the sizing rules. Identity details and
+the console use it. The backdrop covers the whole window and consumes EVERY
+press on it, which is two separate guarantees: a press beside the card closes
+the modal, and a press on a blank patch of card — its padding, the gap under
+short content, the whole screen in the compact layout — reaches neither the
+modal nor the application underneath. Desktop sizing is either a centred
+384×520dp card (identity) or the window less a 6dp margin (console); the
+compact layout gives every modal the full screen, without border or radius.
+
+**Modal close button** is a 44dp circle with a 1dp ring, in two states —
+resting and hovered. The ring is an outer disc with the fill laid over it
+inset by its width, not a stroked outline: a stroke is centred ON the path, so
+half of it falls outside the button's bounds, and `widget.Clickable` clips to
+exactly those bounds. Keyboard focus deliberately does NOT highlight it: the
+identity panel focuses its close button on open, so a focus-driven highlight
+left that one button permanently in the hovered look while every other modal's
+reacted to the pointer.
+
+**Toolbar button** (`toolbar_button.go`) is the language selector in the header
+and the Console button in the footer. Content-sized, icon on either side,
+active while the surface it owns is open.
+
+**Menu popup** (`menu_popup.go`) is every dropdown: the language selector and
+the console tabs that do not fit a narrow strip. The component is the card and
+its backdrop; where the card goes is the caller's, because the two anchors have
+nothing in common — one hangs under a header button in window coordinates, the
+other under a tab strip inside the console modal. Both anchor to the RIGHT edge
+of the button that opened them, clamped into the area they are drawn in.
+
+The backdrop is what makes a press aimed at empty space dismiss the menu
+instead of selecting whatever sits underneath it. Catching that press and
+tinting the background are separate: the console's tab menu dims the card it
+covers, the language menu does not — a wash over every contact and message for
+the sake of a six-row dropdown reads as a modal dialogue, which it is not.
+
+The card hugs its rows in both directions. Its height is capped by the room
+under the anchor and scrolls past that, never stretched to it; its width is
+either fixed (language, 220dp) or measured from the widest row (tabs), and
+every row is then laid out at that width so two rows in one card cannot come
+out different sizes. The scrollbar overlays the rows rather than reserving a
+gutter, which is Gio's default and made the card visibly lopsided.
+
+The fill of a small selectable control — console tab pill, toolbar button,
+popup row — is one shared pair (`chipFill`), because the design describes each
+of them by pointing at the others. The idle label colour is not shared: the tab
+strip is deliberately dimmer than the other two.
+
+Neither the modal card's shadow nor the popup's is implemented. Gio has no
+box-shadow primitive, and faking one with stacked translucent rectangles draws
+over the backdrop and reads worse than its absence.
+
+### Console
+
+The console is a modal drawn over the main window, not a window of its own. It
+has one instance for the life of the process, created when it is first opened,
+so command history and the selected tab survive closing it; the ebus
+subscriptions and the traffic ticker live only while it is open, and the temp
+files holding oversized command output are removed at shutdown.
+
+It reads the frame's router snapshot from the parent rather than taking its
+own, so the console and the contact list beside it can never show two
+generations of the same state.
+
+Opening the console moves the keyboard into it. Gio leaves focus where it was,
+which is the message composer the modal now covers: without the hand-over
+everything typed went to a contact the user could not see, and Enter SENT it
+instead of running the command. A pending "focus the composer" request is
+voided while the console is up, the same rule the context menus follow.
+
+Tab then stays inside, and it stays inside STRUCTURALLY: the window under the
+modal is laid out with input disabled, so nothing there declares a
+key.FocusFilter and Gio's traversal has only the modal's own widgets to walk.
+Window.handleActions stops at its first line for the same reason, and it is the
+less obvious half: Clickable.Clicked REGISTERS that filter, so merely reading
+Send or Attach for clicks would have kept them Tab-reachable however the
+widgets were later drawn — and Enter on a focused Send posts the hidden draft.
+Only Back is read while a modal is up, because it is a key filter rather than a
+widget and it is how Android dismisses the modal.
+The first attempt did it the way the context menus do — a focus ring listing
+the surface's items — and that cannot work here. A menu has four rows; the
+console's tabs carry a Copy button per history entry, a
+delete/download/restart set per file transfer, the donate rows and the
+recording controls. Enumerating them made everything not enumerated
+unreachable, and a ring that gave Tab back to the completion popup let
+Shift+Tab out of the modal entirely, because the editor's own filter matches
+Tab without the modifier. Removing what is outside scales; listing what is
+inside does not.
+
+The target focus lands on is the command line on the Console tab and the
+header's close button everywhere else, because the command line is only laid out on that one tab —
+and the selected tab survives a close, so the console can reopen on Peers or
+Donate. Focusing a widget the frame does not draw is the same as focusing
+nothing: Gio drops it at Frame time. The focus ring the modal still holds is used for one half of its contract, the
+hand-back on close, and never driven. Switching between the Console tab and any
+other re-aims focus for the same reason as above, and asks for the frame that
+will apply the move — a dropped focus is a state change nobody filters for, so otherwise
+it would wait on unrelated input. Closing hands the keyboard back to the
+Console button through the ring's own restore, which waits one frame for the
+focus to be dropped and asks for that frame — a close with no other invalidate
+behind it, Escape or a press on the backdrop, would otherwise park the
+hand-back until unrelated input woke the loop.
+
+Escape and the system Back key back out one layer at a time and share the same
+ladder: the More menu or the completion popup first, the modal itself once
+neither is open. Whether the popup is showing is decided by what the user can
+see — the suggestion list being non-empty, on the tab that actually draws it.
+Its rows scroll: the panel is as tall as they are, and past that the list
+scrolls rather than laying the tail out at zero height, which is what let arrow
+navigation select and run a command that was not on screen. Stepping the
+highlight scrolls only when the row is off screen, and to the near edge of the
+visible span — scrolling to it unconditionally makes it the list's FIRST
+element, and layout.List draws nothing before First, so Down to the second
+suggestion used to hide the first.
+Off the Console tab it reports nothing at all, so a stale popup cannot swallow
+a key while nothing on screen moves. The first attempt asked instead
+whether a frozen snapshot existed or the list had been hidden, which is inside
+out: an ordinary filtered list has neither and answered "nothing to close", so
+Escape took the whole modal; a list already dismissed by picking from it
+answered "yes", swallowed the key and reset the editor, wiping the typed
+command. They used to disagree — Back closed the whole console from
+inside an open menu — and nothing open inside the console survives its close,
+so a reopened console never restores a menu the user did not ask for.
+
+The tab strip shows all six tabs on a desktop window. Below the compact
+breakpoint it shows the first four and folds Info and Donate into a "More"
+dropdown, whose button carries the selected tab's name when the selection is
+inside it. Escape closes the dropdown first and the modal second; before the
+console became a modal, an Escape with no completion popup showing fell through
+and RAN the typed command.
+
+Two surfaces of one window now carry an input row the on-screen keyboard must
+not cover — the composer underneath and the console's command line on top. Only
+the reachable one may decide how much room the keyboard has to leave, so the
+frame's keyboard tail has an explicit owner (`keyboardTailOwner`): `layout.Stack`
+lays Stacked children out BEFORE its Expanded one, so neither "first wins" nor
+"last wins" falls out of the layout order by itself.
 
 ### Touch keyboard (Windows tablets)
 
@@ -479,9 +642,9 @@ flowchart TD
 
 The `CommandTable` is a single registry of all available commands. Desktop UI calls `Execute()` directly (no HTTP round-trip). External clients go through the HTTP server which wraps the same `CommandTable`.
 
-### Console Window — Traffic Recording Indicators
+### Console modal — Traffic Recording Indicators
 
-The Console Window (opened via the composer footer console button) displays per-peer diagnostic information. When a capture session is active, the following UI elements appear:
+The console modal (opened via the composer footer console button) displays per-peer diagnostic information. When a capture session is active, the following UI elements appear:
 
 - **Recording dot** — a small red ellipse on the peer card header next to the peer address. Visible when `NodeStatus.CaptureSessions` contains an `Active` entry whose `ConnID` matches the peer row.
 - **Recording info row** — displayed below the peer card health data. Shows scope (`conn_id` / `ip` / `all`), file path (selectable text), capture start time, and dropped event count if non-zero. An error string is shown if the capture writer encountered a disk error.
@@ -540,7 +703,7 @@ Window (Gio event loop)
       ├── Поле ввода (однострочный текст выровнен по вертикали, вертикальная скрепка, выбор эмодзи, встроенная кнопка отправки)
       │   └── Выбор эмодзи (категории, поиск по ключевым словам с выравниванием по лупе, недавние)
       ├── Строка статуса (обратная связь по отправке/удалению/синхронизации)
-      └── Нижняя строка (гибкий статус защищённой сети со щитом, кнопка консоли с иконкой графика в той же desktop-строке до 360dp)
+      └── Нижняя строка (гибкий статус защищённой сети со щитом, toolbar-кнопка консоли с иконкой графика в той же desktop-строке до 360dp, на всех платформах)
 ```
 
 Пикер эмодзи немодальный. При открытии и выборе эмодзи фокус
@@ -591,6 +754,168 @@ Window (Gio event loop)
 «Скопировать identity» и «Поделиться контактом», а Escape закрывает оверлей.
 Поэтому поиск и поле сообщения под ним не получают текст и сочетания клавиш.
 При закрытии с клавиатуры фокус возвращается на карточку «Мой identity».
+
+### Общие компоненты интерфейса
+
+Четыре части оболочки — отдельные компоненты, а не сборка на каждом месте
+использования, и лежат они в собственном пакете `internal/app/desktop/ui`. Они
+пришли из `docs/design/CHANGES.md` и `CHANGES1.md`; те файлы — задание
+дизайнера и перегенерируются целиком, поэтому реализация описана здесь, где
+следующий экспорт её не затрёт.
+
+Граница пакета и есть смысл. Каждый из компонентов начинался методом на
+`*Window`, то есть мог дотянуться до любого состояния окна. Теперь компонент
+получает `ui.Kit` — тему и иконку — и свои аргументы, а всё остальное запрещает
+компилятор: «компонент», которому нужен список пиров, — это экран, и вот это
+теперь так и говорит.
+
+`ui.Chip` — скруглённая кликабельная заливка под пилюлей вкладки,
+toolbar-кнопкой и строкой попапа, `ui.Filled` — скруглённая заливка под всем
+этим плюс карточка попапа. Оба появились потому, что заливка по
+`Constraints.Max` покрывает место, которое виджету ПРЕДЛОЖИЛИ, а не которое он
+занял: отсюда непрозрачная полоса вниз по окну консоли под открытым меню
+вкладок и прямые углы у всех пилюль — скругления оказывались за пределами
+внешнего клипа. Чипы идут через `widget.Clickable`, а не `material.Clickable`,
+и тем самым теряют Material-ink: его hover-заливка обрезается прямоугольником и
+вылезала четырьмя светлыми точками по углам скруглённой пилюли, а ripple давал
+белое кольцо на каждый клик. Ни того, ни другого в макете нет.
+
+**Modal shell** (`modal_shell.go`) — любое модальное окно: подложка, карточка,
+шапка с заголовком и кнопкой закрытия, правила размера. На нём identity-панель
+и консоль. Подложка накрывает всё окно и съедает КАЖДОЕ нажатие по себе, и это
+две разные гарантии: нажатие мимо карточки закрывает модалку, а нажатие по
+пустому месту самой карточки (padding, зазор под коротким содержимым, весь
+экран на телефоне) не доходит ни до модалки, ни до приложения под ней. На
+desktop размер — либо карточка 384×520dp по центру (identity), либо окно минус
+6dp по краям (консоль); в компактной раскладке модалка занимает весь экран, без
+рамки и радиуса.
+
+**Кнопка закрытия модалки** — круг 44dp с рамкой 1dp, два состояния: обычное и
+под курсором. Рамка рисуется внешним кругом с залитым поверх внутренним, а не
+обводкой: `clip.Stroke` кладёт линию ПО ЦЕНТРУ пути, половина уходит за границы
+кнопки, а `widget.Clickable` обрезает ровно по ним. Клавиатурный фокус
+подсветку НЕ включает: identity-панель отдаёт фокус своей кнопке закрытия сразу
+при открытии, и подсветка по фокусу оставляла именно её навсегда в
+hover-состоянии, пока остальные реагировали на мышь.
+
+**Toolbar button** (`toolbar_button.go`) — кнопка языка в шапке и кнопка
+консоли в футере. Ширина по содержимому, иконка с любой стороны, активна пока
+открыта поверхность, которой она владеет.
+
+**Menu popup** (`menu_popup.go`) — любое выпадающее меню: выбор языка и
+вкладки консоли, не поместившиеся на узкую полосу. Компонент — это карточка и
+подложка; куда карточку поставить, решает вызывающий, потому что у двух меню
+нет ничего общего в привязке: одно висит под кнопкой шапки в координатах окна,
+другое — под полосой вкладок внутри модалки консоли. Оба привязаны к ПРАВОМУ
+краю своей кнопки и подрезаются по границам области, в которой рисуются.
+
+Именно подложка делает так, что нажатие по пустому месту закрывает меню, а не
+выбирает то, что под ним. Поймать нажатие и затемнить фон — разные задачи: меню
+вкладок затемняет карточку, которую накрывает, меню языка — нет: заливка поверх
+всех контактов и сообщений ради выпадающего списка из шести строк читается как
+модальный диалог, которым оно не является.
+
+Карточка обжимает содержимое в обе стороны. Высота ограничена местом под якорем
+и дальше прокручивается, но никогда не растягивается до него; ширина либо
+фиксированная (язык, 220dp), либо измеряется по самой широкой строке (вкладки),
+и все строки затем раскладываются на эту ширину, чтобы две строки в одной
+карточке не вышли разного размера. Скроллбар рисуется поверх строк, а не
+резервирует жёлоб, — по умолчанию в Gio наоборот, и карточка выглядела
+кособокой.
+
+Фон маленького выбираемого элемента — пилюли вкладки, toolbar-кнопки, строки
+попапа — общий (`chipFill`): макет описывает каждый из них через остальные.
+Цвет текста в неактивном состоянии не общий: полоса вкладок намеренно тусклее.
+
+Тени карточки модалки и попапа не реализованы. В Gio нет примитива box-shadow,
+а имитация слоями рисуется поверх подложки и выглядит хуже, чем её отсутствие.
+
+### Консоль
+
+Консоль — модальное окно поверх главного, а не отдельное окно. Экземпляр один
+на процесс и создаётся при первом открытии, поэтому история команд и выбранная
+вкладка переживают закрытие; подписки ebus и тикер трафика живут только пока
+консоль открыта, а временные файлы слишком большого вывода снимаются при
+завершении приложения.
+
+Снапшот роутера консоль берёт у родителя, а не запрашивает свой, — иначе
+консоль и список контактов рядом с ней могли бы показывать разные поколения
+одного состояния.
+
+Открытие консоли переносит клавиатуру в неё. Gio оставляет фокус там, где он
+был, — то есть в composer-е, который модалка накрыла: без передачи всё
+набранное уходило контакту, которого пользователь не видит, а Enter это
+ОТПРАВЛЯЛ вместо выполнения команды. Отложенный запрос «сфокусировать composer»
+пока консоль открыта аннулируется — то же правило, что у контекстных меню.
+
+Дальше Tab не выходит наружу, и держится это СТРУКТУРНО: окно под модалкой
+раскладывается с отключённым вводом, поэтому там никто не объявляет
+key.FocusFilter и обходу Gio доступны только виджеты самой модалки. По той же
+причине Window.handleActions при открытой модалке останавливается на первой
+строке, и это менее очевидная половина: Clickable.Clicked РЕГИСТРИРУЕТ этот
+фильтр, так что одно только чтение кликов Send или Attach оставляло бы их
+достижимыми по Tab, как бы их потом ни рисовали, — а Enter на Send отправляет
+скрытый черновик. Пока модалка открыта, читается только Back: это фильтр
+клавиши, а не виджет, и именно им модалка закрывается на Android. Первая
+попытка сделала это так же, как в контекстных меню, — кольцом со списком
+элементов, — и здесь так нельзя. В меню четыре строки; во вкладках консоли —
+кнопка Copy на каждую запись истории, набор delete/download/restart на каждую
+передачу файла, строки донатов и управление записью. Перечисление сделало
+недостижимым всё, что в список не попало, а кольцо, отдающее Tab списку
+подсказок, выпускало Shift+Tab наружу: фильтр редактора совпадает с Tab без
+модификатора. Убирать то, что снаружи, масштабируется; перечислять то, что
+внутри, — нет.
+
+Цель фокуса — командная строка на вкладке Console и кнопка закрытия в шапке на
+всех остальных: командная строка раскладывается только на одной вкладке, а
+выбранная вкладка переживает закрытие, так что консоль может открыться на Peers
+или Donate. Сфокусировать виджет, которого в кадре нет, — то же самое, что не
+фокусировать ничего: Gio снимет фокус на Frame. Кольцо фокуса у модалки осталось ради одной половины контракта — возврата
+клавиатуры при закрытии — и не «драйвится». Переход с вкладки Console и на
+неё перенаводит фокус по той же причине, что выше, и запрашивает кадр, который этот
+перенос применит: снятый фокус — изменение состояния, на которое никто не
+подписан, иначе он ждал бы постороннего ввода. Закрытие возвращает клавиатуру
+кнопке Console через восстановление того же кольца: оно ждёт кадр, пока фокус
+снимут, и этот кадр запрашивает — иначе закрытие, за которым нет другого
+invalidate (Escape или нажатие по подложке), оставило бы возврат висеть до
+постороннего ввода.
+
+Escape и системный Back выходят по одному слою за раз и идут одной лестницей:
+сначала меню «Ещё» или список подсказок, и только потом сама модалка. Открыт ли
+список, решается по тому, что видит пользователь: по непустому списку подсказок
+и на той вкладке, которая его рисует. Вне вкладки Console список не
+существует — иначе он съедал бы клавишу, а на экране ничего не менялось бы.
+Строки списка прокручиваются: панель ровно по высоте строк, а дальше список
+скроллится, а не раскладывает хвост нулевой высоты, — именно это позволяло
+стрелками выбрать и выполнить команду, которой нет на экране. Перемещение
+выделения прокручивает список, только если строка вне экрана, и к ближней
+границе видимого участка: безусловная прокрутка делает строку ПЕРВЫМ элементом
+списка, а layout.List не рисует ничего до First, из-за чего Down ко второй
+подсказке прятал первую. Первая версия спрашивала, есть ли замороженный снапшот или скрыт ли
+список, и это наизнанку: у обычного отфильтрованного списка нет ни того, ни
+другого, он отвечал «закрывать нечего», и Escape забирал всю модалку; а список,
+уже закрытый выбором из него, отвечал «да», съедал нажатие и сбрасывал
+редактор, стирая набранную команду. Раньше
+они расходились — Back закрывал всю консоль из открытого меню; и ничто открытое
+ВНУТРИ консоли не переживает её закрытие — ни меню, ни список подсказок, — так
+что заново открытая консоль не восстанавливает поверхность, которой
+пользователь не просил. То, что он НАБРАЛ, поверхностью не является и
+сохраняется, как и история команд, — в том числе посреди навигации по
+подсказкам, когда в редакторе стоит выделенная команда, а настоящий ввод
+отложен: закрытие возвращает настоящий ввод.
+
+На desktop полоса показывает все шесть вкладок. Ниже компактного breakpoint —
+первые четыре, а Info и Donate уезжают в выпадающее меню «Ещё», кнопка которого
+берёт имя выбранной вкладки, если выбранная среди них. Escape закрывает сначала
+меню, потом модалку; до перевода консоли в модалку Escape при закрытом списке
+подсказок проваливался дальше и ВЫПОЛНЯЛ набранную команду.
+
+Теперь в одном окне две поверхности с полем ввода, которое не должна закрывать
+экранная клавиатура: composer снизу и командная строка консоли сверху. Решать,
+сколько места оставить клавиатуре, должна только достижимая из них, поэтому у
+keyboard-tail кадра есть явный владелец (`keyboardTailOwner`): `layout.Stack`
+раскладывает Stacked-детей ДО Expanded, так что ни «первый выигрывает», ни
+«последний выигрывает» из порядка раскладки сами не следуют.
 
 ### Сенсорная клавиатура (Windows-планшеты)
 
@@ -850,7 +1175,7 @@ flowchart TD
     end
 
     subgraph Desktop["Desktop приложение"]
-        CON[Окно консоли]
+        CON[Модалка консоли]
         WIN[Главное окно]
     end
 
@@ -900,7 +1225,7 @@ flowchart TD
 
 `CommandTable` — единый реестр всех доступных команд. Desktop UI вызывает `Execute()` напрямую (без HTTP round-trip). Внешние клиенты работают через HTTP сервер, который оборачивает тот же `CommandTable`.
 
-### Окно консоли — индикаторы записи трафика
+### Модалка консоли — индикаторы записи трафика
 
 Окно консоли (открывается кнопкой консоли в нижней строке карточки ввода) отображает диагностическую информацию по каждому peer'у. Когда capture-сессия активна, появляются следующие UI-элементы:
 

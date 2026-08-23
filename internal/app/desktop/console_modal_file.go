@@ -18,6 +18,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"github.com/piratecash/corsa/internal/app/desktop/ui"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/service/filetransfer"
 )
@@ -79,7 +80,7 @@ const fileTabThumbHeightMax = unit.Dp(72)
 // removes the local row and any backing on-disk file at once, and
 // an outgoing row's peer-side deletion is scheduled and retried
 // until the peer acknowledges it.
-func (c *ConsoleWindow) layoutFileTab(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutFileTab(gtx layout.Context) layout.Dimensions {
 	transfers := c.collectFileTransfers()
 	c.pruneFileTabButtons(transfers)
 
@@ -89,13 +90,13 @@ func (c *ConsoleWindow) layoutFileTab(gtx layout.Context) layout.Dimensions {
 
 	bg := color.NRGBA{R: 21, G: 26, B: 34, A: 255}
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, bg)
+		ui.Fill(gtx, bg)
 		// 8dp panel padding matching the main window cards (window.go card).
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.file_title"))
+			title := material.Label(c.theme(), unit.Sp(20), c.parent.t("console.file_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
-			summary := material.Body1(c.theme, c.fileSummaryText(transfers))
+			summary := material.Body1(c.theme(), c.fileSummaryText(transfers))
 			summary.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -105,11 +106,11 @@ func (c *ConsoleWindow) layoutFileTab(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(layout.Spacer{Height: unit.Dp(14)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					if len(transfers) == 0 {
-						label := material.Body1(c.theme, c.parent.t("console.file_empty"))
+						label := material.Body1(c.theme(), c.parent.t("console.file_empty"))
 						label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 						return label.Layout(gtx)
 					}
-					return material.List(c.theme, &c.fileList).Layout(gtx, len(transfers), func(gtx layout.Context, idx int) layout.Dimensions {
+					return material.List(c.theme(), &c.fileList).Layout(gtx, len(transfers), func(gtx layout.Context, idx int) layout.Dimensions {
 						return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 							return c.layoutFileTransferRow(gtx, transfers[idx])
 						})
@@ -125,7 +126,7 @@ func (c *ConsoleWindow) layoutFileTab(gtx layout.Context) layout.Dimensions {
 // stability (Go map iteration is non-deterministic; without the
 // tie-break two same-second entries would shuffle between paints
 // and look like flicker).
-func (c *ConsoleWindow) collectFileTransfers() []filetransfer.TransferSnapshot {
+func (c *consoleModal) collectFileTransfers() []filetransfer.TransferSnapshot {
 	if c.parent == nil || c.parent.router == nil {
 		return nil
 	}
@@ -158,7 +159,7 @@ func transferTimestampForSort(t filetransfer.TransferSnapshot) string {
 
 // fileSummaryText reports total / active counts in the tab header.
 // "Active" means anything not in a terminal state.
-func (c *ConsoleWindow) fileSummaryText(transfers []filetransfer.TransferSnapshot) string {
+func (c *consoleModal) fileSummaryText(transfers []filetransfer.TransferSnapshot) string {
 	active := 0
 	for _, t := range transfers {
 		if !isTerminalTransferState(t.State) {
@@ -189,8 +190,8 @@ func hasActiveFileTransfer(transfers []filetransfer.TransferSnapshot) bool {
 // under one lock — the older get()+isPending() pair had a window
 // where Pending→Ready between calls returned (nil, false) and
 // dropped the polling gate prematurely (reviewer P3 race).
-func (c *ConsoleWindow) hasPendingThumbnail(transfers []filetransfer.TransferSnapshot) bool {
-	if c.parent == nil || c.window == nil {
+func (c *consoleModal) hasPendingThumbnail(transfers []filetransfer.TransferSnapshot) bool {
+	if c.parent == nil || c.parent.window == nil {
 		return false
 	}
 	bridge := c.parent.router.FileBridge()
@@ -205,7 +206,7 @@ func (c *ConsoleWindow) hasPendingThumbnail(transfers []filetransfer.TransferSna
 		if path == "" {
 			continue
 		}
-		if c.parent.thumbCache.lookup(path, c.window).Pending {
+		if c.parent.thumbCache.lookup(path, c.parent.window).Pending {
 			return true
 		}
 	}
@@ -226,7 +227,7 @@ func isTerminalTransferState(state string) bool {
 // pruneFileTabButtons drops Clickable entries from every per-row map
 // whose FileID no longer appears in the latest snapshot, so the
 // maps cannot grow without bound.
-func (c *ConsoleWindow) pruneFileTabButtons(transfers []filetransfer.TransferSnapshot) {
+func (c *consoleModal) pruneFileTabButtons(transfers []filetransfer.TransferSnapshot) {
 	live := make(map[domain.FileID]struct{}, len(transfers))
 	for _, t := range transfers {
 		live[t.FileID] = struct{}{}
@@ -253,7 +254,7 @@ func (c *ConsoleWindow) pruneFileTabButtons(transfers []filetransfer.TransferSna
 // fileRowSelectableSet looks up (or lazily creates) the selectable
 // bundle for a given FileID. Caller MUST be on the UI goroutine —
 // the map is not concurrency-safe.
-func (c *ConsoleWindow) fileRowSelectableSet(fileID domain.FileID) *fileRowSelectables {
+func (c *consoleModal) fileRowSelectableSet(fileID domain.FileID) *fileRowSelectables {
 	sel, ok := c.fileRowSelectables[fileID]
 	if ok {
 		return sel
@@ -276,25 +277,25 @@ func fileRowButton(m map[domain.FileID]*widget.Clickable, fileID domain.FileID) 
 	return btn
 }
 
-func (c *ConsoleWindow) fileDeleteButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileDeleteButton(id domain.FileID) *widget.Clickable {
 	return fileRowButton(c.fileDeleteButtons, id)
 }
 
-func (c *ConsoleWindow) fileDownloadButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileDownloadButton(id domain.FileID) *widget.Clickable {
 	return fileRowButton(c.fileDownloadButtons, id)
 }
 
-func (c *ConsoleWindow) fileRestartButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileRestartButton(id domain.FileID) *widget.Clickable {
 	return fileRowButton(c.fileRestartButtons, id)
 }
 
-func (c *ConsoleWindow) fileThumbButton(id domain.FileID) *widget.Clickable {
+func (c *consoleModal) fileThumbButton(id domain.FileID) *widget.Clickable {
 	return fileRowButton(c.fileThumbButtons, id)
 }
 
 // scheduleFileTabInvalidate coalesces redraw requests so the polled
 // 750ms timer cannot stack up multiple goroutines.
-func (c *ConsoleWindow) scheduleFileTabInvalidate() {
+func (c *consoleModal) scheduleFileTabInvalidate() {
 	if !atomic.CompareAndSwapInt32(&c.fileTabInvalidating, 0, 1) {
 		return
 	}
@@ -325,7 +326,7 @@ func (c *ConsoleWindow) scheduleFileTabInvalidate() {
 // (layoutFileProgressBar, layoutReceiverProgress, layoutReachableIndicator,
 // the Open / Show in folder click handlers) so the two surfaces
 // stay visually identical for the same transfer state.
-func (c *ConsoleWindow) layoutFileTransferRow(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
+func (c *consoleModal) layoutFileTransferRow(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
 	cardBg := color.NRGBA{R: 28, G: 35, B: 47, A: 255}
 	border := color.NRGBA{R: 60, G: 76, B: 100, A: 255}
 	textPrimary := color.NRGBA{R: 235, G: 240, B: 250, A: 255}
@@ -485,9 +486,9 @@ func (c *ConsoleWindow) layoutFileTransferRow(gtx layout.Context, t filetransfer
 
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-			fill(gtx, border)
+			ui.Fill(gtx, border)
 			return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				fill(gtx, cardBg)
+				ui.Fill(gtx, cardBg)
 				return layout.Dimensions{Size: gtx.Constraints.Min}
 			})
 		}),
@@ -514,7 +515,7 @@ func (c *ConsoleWindow) layoutFileTransferRow(gtx layout.Context, t filetransfer
 // Uses thumbnailCache.lookup so the cache state read happens under
 // one lock — fixes the get()+isPending() race where a Pending→Ready
 // transition between the two calls dropped the polling gate.
-func (c *ConsoleWindow) layoutFileRowThumbnail(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Widget {
+func (c *consoleModal) layoutFileRowThumbnail(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Widget {
 	if !isImageContentType(t.ContentType) || c.parent == nil {
 		return nil
 	}
@@ -526,7 +527,7 @@ func (c *ConsoleWindow) layoutFileRowThumbnail(gtx layout.Context, t filetransfe
 	if path == "" {
 		return nil
 	}
-	res := c.parent.thumbCache.lookup(path, c.window)
+	res := c.parent.thumbCache.lookup(path, c.parent.window)
 	if res.Entry == nil {
 		return nil
 	}
@@ -574,11 +575,11 @@ func (c *ConsoleWindow) layoutFileRowThumbnail(gtx layout.Context, t filetransfe
 // click-drag to highlight and Cmd/Ctrl-C the text. The peer ID
 // and meta line are similarly selectable — see layoutFileRowPeerLine
 // and the meta-line builder in layoutFileTransferRow.
-func (c *ConsoleWindow) layoutFileRowHeader(gtx layout.Context, t filetransfer.TransferSnapshot, fg color.NRGBA) layout.Dimensions {
+func (c *consoleModal) layoutFileRowHeader(gtx layout.Context, t filetransfer.TransferSnapshot, fg color.NRGBA) layout.Dimensions {
 	sel := c.fileRowSelectableSet(t.FileID)
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			arrow := material.Body2(c.theme, c.directionIcon(t.Direction))
+			arrow := material.Body2(c.theme(), c.directionIcon(t.Direction))
 			arrow.Color = c.directionColor(t.Direction)
 			arrow.Font.Weight = 700
 			return arrow.Layout(gtx)
@@ -602,8 +603,10 @@ func (c *ConsoleWindow) layoutFileRowHeader(gtx layout.Context, t filetransfer.T
 // SetText copies what it's given, so we feed the truncated form
 // (matching what the user sees). For copying the full ID the user
 // can right-click the chat sidebar identity row instead.
-func (c *ConsoleWindow) layoutFileRowPeerLine(gtx layout.Context, t filetransfer.TransferSnapshot, fg color.NRGBA) layout.Dimensions {
-	status := c.parent.router.Snapshot().NodeStatus
+func (c *consoleModal) layoutFileRowPeerLine(gtx layout.Context, t filetransfer.TransferSnapshot, fg color.NRGBA) layout.Dimensions {
+	// The frame's snapshot, taken once at the top of Window.layout — see
+	// consoleModal.layoutActiveTab.
+	status := c.parent.snap.NodeStatus
 	sel := c.fileRowSelectableSet(t.FileID)
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -625,12 +628,12 @@ func (c *ConsoleWindow) layoutFileRowPeerLine(gtx layout.Context, t filetransfer
 // "completed" is split by direction so the user reads "Uploaded"
 // on a sent file and "Downloaded" on a received one — direction
 // disambiguates a single-state-per-side concept.
-func (c *ConsoleWindow) layoutFileStateBadge(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
+func (c *consoleModal) layoutFileStateBadge(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
 	bg, fg := fileStateBadgeColors(t.State)
 	inset := layout.Inset{Top: unit.Dp(3), Bottom: unit.Dp(3), Left: unit.Dp(8), Right: unit.Dp(8)}
 	macro := op.Record(gtx.Ops)
 	dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Caption(c.theme, c.parent.t(stateBadgeKey(t)))
+		lbl := material.Caption(c.theme(), c.parent.t(stateBadgeKey(t)))
 		lbl.Color = fg
 		lbl.Font.Weight = 600
 		return lbl.Layout(gtx)
@@ -663,7 +666,7 @@ func stateBadgeKey(t filetransfer.TransferSnapshot) string {
 // c.invalidateWindow() — without that, a Restart click on a terminal
 // "failed" row leaves the file tab showing the old state until some
 // unrelated event triggers a redraw.
-func (c *ConsoleWindow) layoutFileRowProgressOrButton(gtx layout.Context, t filetransfer.TransferSnapshot, peerOnline bool) layout.Dimensions {
+func (c *consoleModal) layoutFileRowProgressOrButton(gtx layout.Context, t filetransfer.TransferSnapshot, peerOnline bool) layout.Dimensions {
 	progressBg := color.NRGBA{R: 50, G: 60, B: 80, A: 255}
 	progressFg := color.NRGBA{R: 72, G: 150, B: 255, A: 255}
 	percent := transferProgressPercent(t)
@@ -719,7 +722,7 @@ func (c *ConsoleWindow) layoutFileRowProgressOrButton(gtx layout.Context, t file
 // resolves to the same FileBridge.CancelDownload call. The map is
 // lazily initialised here defensively in case the file tab paints
 // before the chat thread.
-func (c *ConsoleWindow) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, percent int, fileID domain.FileID) layout.Dimensions {
+func (c *consoleModal) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg color.NRGBA, percent int, fileID domain.FileID) layout.Dimensions {
 	messageID := string(fileID)
 	if c.parent.fileCancelDownloadBtns == nil {
 		c.parent.fileCancelDownloadBtns = make(map[string]*widget.Clickable)
@@ -747,7 +750,7 @@ func (c *ConsoleWindow) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			matBtn := material.Button(c.theme, cancelBtn, "✕")
+			matBtn := material.Button(c.theme(), cancelBtn, "✕")
 			matBtn.Background = color.NRGBA{R: 65, G: 70, B: 85, A: 255}
 			matBtn.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
 			matBtn.Inset = layout.UniformInset(unit.Dp(2))
@@ -767,12 +770,12 @@ func (c *ConsoleWindow) layoutFileTabReceiverProgress(gtx layout.Context, bg, fg
 // one frame, the goroutine completes asynchronously, and no further
 // frame fires until something unrelated happens — leaving the row
 // stuck on "Available + Download".
-func (c *ConsoleWindow) layoutFileTabDownloadButton(gtx layout.Context, fileID domain.FileID) layout.Dimensions {
+func (c *consoleModal) layoutFileTabDownloadButton(gtx layout.Context, fileID domain.FileID) layout.Dimensions {
 	btn := c.fileDownloadButton(fileID)
 	for btn.Clicked(gtx) {
 		c.dispatchFileTabDownloadAsync(fileID)
 	}
-	matBtn := material.Button(c.theme, btn, c.parent.t("file.download"))
+	matBtn := material.Button(c.theme(), btn, c.parent.t("file.download"))
 	matBtn.Background = color.NRGBA{R: 36, G: 67, B: 126, A: 255}
 	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	matBtn.Inset = layout.Inset{
@@ -794,12 +797,12 @@ func (c *ConsoleWindow) layoutFileTabDownloadButton(gtx layout.Context, fileID d
 // invalidate-after-click so the row updates from "Failed + Restart"
 // → "Available" / "Downloading" without waiting for an unrelated
 // repaint event.
-func (c *ConsoleWindow) layoutFileTabRestartButton(gtx layout.Context, fileID domain.FileID) layout.Dimensions {
+func (c *consoleModal) layoutFileTabRestartButton(gtx layout.Context, fileID domain.FileID) layout.Dimensions {
 	btn := c.fileRestartButton(fileID)
 	for btn.Clicked(gtx) {
 		c.dispatchFileTabRestartAsync(fileID)
 	}
-	matBtn := material.Button(c.theme, btn, c.parent.t("file.restart"))
+	matBtn := material.Button(c.theme(), btn, c.parent.t("file.restart"))
 	matBtn.Background = color.NRGBA{R: 70, G: 90, B: 130, A: 255}
 	matBtn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	matBtn.Inset = layout.Inset{
@@ -819,7 +822,7 @@ func (c *ConsoleWindow) layoutFileTabRestartButton(gtx layout.Context, fileID do
 // dispatchFileTabDownloadAsync runs StartDownload off the UI
 // goroutine and invalidates the console window when it settles so
 // the row picks up the new state on the next frame.
-func (c *ConsoleWindow) dispatchFileTabDownloadAsync(fileID domain.FileID) {
+func (c *consoleModal) dispatchFileTabDownloadAsync(fileID domain.FileID) {
 	if c.parent == nil || c.parent.router == nil {
 		return
 	}
@@ -846,7 +849,7 @@ func (c *ConsoleWindow) dispatchFileTabDownloadAsync(fileID domain.FileID) {
 // dispatchFileTabRestartAsync runs RestartDownload + StartDownload
 // off the UI goroutine and invalidates after the pair settles.
 // Mirrors the chat-thread layoutFileRestartButton goroutine.
-func (c *ConsoleWindow) dispatchFileTabRestartAsync(fileID domain.FileID) {
+func (c *consoleModal) dispatchFileTabRestartAsync(fileID domain.FileID) {
 	if c.parent == nil || c.parent.router == nil {
 		return
 	}
@@ -874,13 +877,13 @@ func (c *ConsoleWindow) dispatchFileTabRestartAsync(fileID domain.FileID) {
 // ("downloaded" / "sender offline" / "confirming…" / "failed" /
 // "unavailable"). Returns zero dims when the state has no
 // informational caption.
-func (c *ConsoleWindow) layoutFileRowStateLabel(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
+func (c *consoleModal) layoutFileRowStateLabel(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
 	labelKey, fg := fileRowStateLabel(t)
 	if labelKey == "" {
 		return layout.Dimensions{}
 	}
 	return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		lbl := material.Caption(c.theme, c.parent.t(labelKey))
+		lbl := material.Caption(c.theme(), c.parent.t(labelKey))
 		lbl.Color = fg
 		return lbl.Layout(gtx)
 	})
@@ -932,7 +935,7 @@ func fileRowStateLabel(t filetransfer.TransferSnapshot) (string, color.NRGBA) {
 // buttons read as "wasted line + buttons floating off in the
 // distance". Left alignment packs the action affordance under the
 // status caption it semantically belongs to.
-func (c *ConsoleWindow) layoutFileRowDiskActions(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
+func (c *consoleModal) layoutFileRowDiskActions(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
 	if !showDiskActionsForRow(t) {
 		return layout.Dimensions{}
 	}
@@ -986,7 +989,7 @@ func (c *ConsoleWindow) layoutFileRowDiskActions(gtx layout.Context, t filetrans
 	return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				matBtn := material.Button(c.theme, revealBtn, c.parent.t("file.show_in_folder"))
+				matBtn := material.Button(c.theme(), revealBtn, c.parent.t("file.show_in_folder"))
 				matBtn.Background = btnBg
 				matBtn.Color = btnFg
 				matBtn.Inset = layout.Inset{
@@ -999,7 +1002,7 @@ func (c *ConsoleWindow) layoutFileRowDiskActions(gtx layout.Context, t filetrans
 			}),
 			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				matBtn := material.Button(c.theme, openBtn, c.parent.t("file.open_file"))
+				matBtn := material.Button(c.theme(), openBtn, c.parent.t("file.open_file"))
 				matBtn.Background = btnBg
 				matBtn.Color = btnFg
 				matBtn.Inset = layout.Inset{
@@ -1050,7 +1053,7 @@ func showDiskActionsForRow(t filetransfer.TransferSnapshot) bool {
 // local row and the on-disk file at once, and any peer-side half is
 // scheduled by the router rather than refused, so peer reachability
 // never gates this control.
-func (c *ConsoleWindow) layoutFileRowDeleteAction(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
+func (c *consoleModal) layoutFileRowDeleteAction(gtx layout.Context, t filetransfer.TransferSnapshot) layout.Dimensions {
 	if t.State == "tombstone" {
 		return layout.Dimensions{}
 	}
@@ -1058,7 +1061,7 @@ func (c *ConsoleWindow) layoutFileRowDeleteAction(gtx layout.Context, t filetran
 	for btn.Clicked(gtx) {
 		c.dispatchFileDeleteAsync(t)
 	}
-	label := material.Button(c.theme, btn, c.parent.t("console.file.delete"))
+	label := material.Button(c.theme(), btn, c.parent.t("console.file.delete"))
 	label.Background = color.NRGBA{R: 120, G: 50, B: 60, A: 255}
 	label.Color = color.NRGBA{R: 250, G: 240, B: 240, A: 255}
 	label.Inset = layout.Inset{
@@ -1073,7 +1076,7 @@ func (c *ConsoleWindow) layoutFileRowDeleteAction(gtx layout.Context, t filetran
 // dispatchFileDeleteAsync runs SendMessageDelete on a background
 // goroutine. Mirrors the pattern in window.go's context-menu delete
 // handler, caption rule included (messageDeleteStatusFor).
-func (c *ConsoleWindow) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot) {
+func (c *consoleModal) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot) {
 	if c.parent == nil || c.parent.router == nil {
 		return
 	}
@@ -1103,7 +1106,7 @@ func (c *ConsoleWindow) dispatchFileDeleteAsync(t filetransfer.TransferSnapshot)
 }
 
 // fileRowMetaLine: "1.2 MB / 4.8 MB · 14:33" (active) or "4.8 MB · 14:33" (terminal).
-func (c *ConsoleWindow) fileRowMetaLine(t filetransfer.TransferSnapshot) string {
+func (c *consoleModal) fileRowMetaLine(t filetransfer.TransferSnapshot) string {
 	timestamp := t.CreatedAt
 	if t.CompletedAt != "" {
 		timestamp = t.CompletedAt
@@ -1228,7 +1231,7 @@ func fileDisplayName(t filetransfer.TransferSnapshot) string {
 }
 
 // directionIcon: ↑ outbound, ↓ inbound.
-func (c *ConsoleWindow) directionIcon(direction string) string {
+func (c *consoleModal) directionIcon(direction string) string {
 	switch direction {
 	case "send":
 		return "↑"
@@ -1241,7 +1244,7 @@ func (c *ConsoleWindow) directionIcon(direction string) string {
 
 // directionColor pairs the arrow with a state colour: cool blue for
 // outbound, green-ish for inbound.
-func (c *ConsoleWindow) directionColor(direction string) color.NRGBA {
+func (c *consoleModal) directionColor(direction string) color.NRGBA {
 	switch direction {
 	case "send":
 		return color.NRGBA{R: 92, G: 156, B: 220, A: 255}

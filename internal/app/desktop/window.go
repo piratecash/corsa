@@ -19,6 +19,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/app/desktop/ui"
 	"github.com/piratecash/corsa/internal/core/contactlink"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -89,6 +90,7 @@ type Window struct {
 	personIcon               *widget.Icon
 	personOutlineIcon        *widget.Icon
 	chevronIcon              *widget.Icon
+	chevronDownIcon          *widget.Icon
 	copyIcon                 *widget.Icon
 	shareIcon                *widget.Icon
 	closeIcon                *widget.Icon
@@ -105,12 +107,22 @@ type Window struct {
 	languageToggle       widget.Clickable
 	languageOptions      map[string]*widget.Clickable
 	languageMenuList     widget.List
-	shutdown             func()
-	shutdownOnce         sync.Once
-	uiOpMu               sync.RWMutex
-	uiOpClosed           bool
-	uiStopOnce           sync.Once
-	uiStopCh             chan struct{}
+	// languageMenuDismissTag is the popup backdrop's pointer target.
+	languageMenuDismissTag struct{}
+	// headerHeight and languageButtonSize are what the last drawn frame
+	// measured for the header row and for the language button inside it. They
+	// are the only way to know where that button IS: Gio exposes no absolute
+	// position, so the popup reconstructs the anchor from the window padding
+	// plus these two. Both keep their last value on a frame that does not draw
+	// the header — see languageMenuAnchor.
+	headerHeight       int
+	languageButtonSize image.Point
+	shutdown           func()
+	shutdownOnce       sync.Once
+	uiOpMu             sync.RWMutex
+	uiOpClosed         bool
+	uiStopOnce         sync.Once
+	uiStopCh           chan struct{}
 	// sendWG tracks UI-side goroutines that write through the router /
 	// chatlog: sendFileCore (transmit import + handoff), async message
 	// deletes and conversation-delete completion. The shutdown path
@@ -126,7 +138,15 @@ type Window struct {
 	lastChatPeer         domain.PeerIdentity
 	language             string
 	showLanguageMenu     bool
-	consoleOpen          bool
+	// consoleFocusReturn asks the next frame to hand the keyboard back to the
+	// Console button, once the modal that took it has closed. See
+	// restoreConsoleFocus.
+	// consoleModal is the console. Created on first open and kept for the rest
+	// of the process so command history and the selected tab survive a close;
+	// nil until then, which is the whole session for most users. Whether it is
+	// showing lives on it, not here: the traffic ticker reads that off the UI
+	// goroutine (see consoleModal.visible).
+	consoleModal *consoleModal
 
 	// Global cursor tracking for context menu positioning.
 	cursorTracker   int // tag for window-level pointer events
@@ -379,8 +399,6 @@ type Window struct {
 	// decoding the full peer-health slice for every contact.
 	peerLastOnlineByIdentity map[domain.PeerIdentity]time.Time
 
-	consoleMu sync.Mutex
-
 	window *app.Window
 
 	transferInvalidateMu      sync.Mutex
@@ -448,12 +466,25 @@ type pendingFailedMsg struct {
 }
 
 const (
-	languageButtonWidth = 76
-	languageMenuWidth   = 220
-	languageOverlayTop  = 58
-	windowInset         = 24
-	languageMenuHeight  = 316
+	// windowPadXDp and windowPadYDp are the window's own margin, applied once
+	// in Window.layout. The language popup measures its anchor against them,
+	// so they are constants rather than literals in one place.
+	windowPadXDp       = 6
+	windowPadYDp       = 4
+	languageMenuHeight = 316
 )
+
+// kit is what the shared components (internal/app/desktop/ui) need from this
+// window: its theme and its close icon.
+//
+// Derived on each call rather than stored, because a stored copy is a field
+// somebody has to remember to set — and the places that build a Window by
+// literal, every test in this package among them, would each have to know to
+// set it. Two pointer copies per call is not a cost worth a class of nil
+// panics.
+func (w *Window) kit() ui.Kit {
+	return ui.Kit{Theme: w.theme, CloseIcon: w.closeIcon}
+}
 
 // newAppTheme creates a fresh material.Theme with the application colour scheme.
 // Each window must own its own Theme because the embedded text.Shaper uses an
@@ -485,6 +516,7 @@ type windowIcons struct {
 	person          *widget.Icon
 	personOutline   *widget.Icon
 	chevron         *widget.Icon
+	chevronDown     *widget.Icon
 	copy            *widget.Icon
 	share           *widget.Icon
 	close           *widget.Icon
@@ -508,6 +540,7 @@ func loadWindowIcons() (windowIcons, error) {
 		{name: "person", data: icons.SocialPerson, dst: &loaded.person},
 		{name: "person-outline", data: icons.SocialPersonOutline, dst: &loaded.personOutline},
 		{name: "chevron-right", data: icons.NavigationChevronRight, dst: &loaded.chevron},
+		{name: "chevron-down", data: icons.NavigationExpandMore, dst: &loaded.chevronDown},
 		{name: "copy", data: icons.ContentContentCopy, dst: &loaded.copy},
 		{name: "share", data: icons.SocialShare, dst: &loaded.share},
 		{name: "close", data: icons.NavigationClose, dst: &loaded.close},
@@ -603,6 +636,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		personIcon:               loadedIcons.person,
 		personOutlineIcon:        loadedIcons.personOutline,
 		chevronIcon:              loadedIcons.chevron,
+		chevronDownIcon:          loadedIcons.chevronDown,
 		copyIcon:                 loadedIcons.copy,
 		shareIcon:                loadedIcons.share,
 		closeIcon:                loadedIcons.close,
@@ -640,6 +674,17 @@ func (w *Window) SetShutdown(fn func()) {
 func (w *Window) runShutdown() {
 	w.shutdownOnce.Do(func() {
 		w.flushRecentEmojiPreferences(time.Time{}, true)
+		// The console's overflow files used to be removed when its window was
+		// destroyed. It has no window any more and its entries live as long as
+		// the process, so this is the one place left that can take them.
+		if w.consoleModal != nil {
+			w.consoleModal.shutdown()
+		}
+		// Unregister the touch-keyboard pane handler. The console window used
+		// to be the only caller of this — it was destroyed and recreated on
+		// every open — and with it gone the main window's own registration is
+		// the one left to release.
+		platformReleaseKeyboardEvents(&w.touchKbd)
 		if w.shutdown != nil {
 			w.shutdown()
 		}
@@ -665,6 +710,16 @@ func (w *Window) beginUIOp() bool {
 
 // endUIOp releases a slot taken by beginUIOp.
 func (w *Window) endUIOp() { w.sendWG.Done() }
+
+// invalidate asks the window for a redraw, from any goroutine. It is the one
+// safe way to say that: the app.Window is created inside Run, so w.window is
+// nil for the whole of construction and for anything a test drives directly,
+// and app.Window.Invalidate is documented as safe to call concurrently.
+func (w *Window) invalidate() {
+	if w.window != nil {
+		w.window.Invalidate()
+	}
+}
 
 // uiStop returns the channel closed when drainUIOps begins: cancellable
 // UI operations select on it to abort promptly on shutdown.
@@ -934,6 +989,12 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	if !w.identityPanelVisible {
 		w.identityPanelFocus.restoreOnClose(gtx, &w.myIdentityButton)
 	}
+	if !w.consoleModalVisible() && w.consoleModal != nil {
+		// The console hands the keyboard back to the button that opened it.
+		// The composer is the fallback for the same reason the menus use it:
+		// it is the one focus target every frame of this window draws.
+		w.consoleModal.focusRing.restoreOnClose(gtx, &w.messageEditor)
+	}
 	w.snap = w.router.Snapshot()
 	w.rebuildPeerLastOnlineIndex()
 	w.rebuildMsgCache()
@@ -1043,10 +1104,14 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		}
 	}
 
-	w.handleReplyContextClicks(gtx)
+	// Not while the console covers it: the reply row's Cancel is a background
+	// widget, and reading its clicks would put it in the focus traversal.
+	if !w.consoleModalVisible() {
+		w.handleReplyContextClicks(gtx)
+	}
 	w.handlePendingActions()
 	w.handleActions(gtx)
-	fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
+	ui.Fill(gtx, color.NRGBA{R: 12, G: 15, B: 20, A: 255})
 
 	// Symmetric keyboard hide: when every editor of this window has lost
 	// focus (tap on a button, chat, etc.), ask the keyboard we opened to
@@ -1112,13 +1177,14 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	// keyboardYieldingChrome carries the argument for why the padding had
 	// to move and why the yield is the part that does the work.
 	inset := layout.Inset{
-		Top:    unit.Dp(4),
-		Bottom: unit.Dp(4),
-		Left:   unit.Dp(6),
-		Right:  unit.Dp(6),
+		Top:    unit.Dp(windowPadYDp),
+		Bottom: unit.Dp(windowPadYDp),
+		Left:   unit.Dp(windowPadXDp),
+		Right:  unit.Dp(windowPadXDp),
 	}
 	dims := layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			gtx = w.disableUnderConsoleModal(gtx)
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{
 					Axis: layout.Vertical,
@@ -1128,7 +1194,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{
 								Axis: layout.Vertical,
 							}.Layout(gtx,
-								layout.Rigid(w.layoutHeader),
+								layout.Rigid(w.layoutMeasuredHeader),
 								layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 							)
 						})
@@ -1171,6 +1237,12 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 			}
 			return w.layoutIdentityPanelOverlay(gtx)
 		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if !w.consoleModalVisible() {
+				return layout.Dimensions{}
+			}
+			return w.layoutConsoleOverlay(gtx)
+		}),
 	)
 
 	// Every one of the four places that raises focusComposerPending does it
@@ -1187,6 +1259,33 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		gtx.Execute(op.InvalidateCmd{})
 	}
 	return dims
+}
+
+// disableUnderConsoleModal takes input away from the window while the console
+// modal covers it.
+//
+// This is what keeps the keyboard inside the modal, and it works because Gio
+// decides what Tab can reach from what each widget DECLARES: a widget lays out
+// its key.FocusFilter through gtx.Event, and a disabled Source returns from
+// gtx.Event without registering anything. Nothing under here is focusable for
+// the frames it is disabled, so the focus traversal has only the modal's own
+// widgets to walk.
+//
+// The alternative was a focus ring listing the modal's items, the way the
+// context menus do it. It cannot work here: a menu has four rows, while the
+// console's tabs carry a Copy button per history entry, a delete/download/
+// restart set per file transfer, the donate rows and the recording controls.
+// Enumerating them made everything NOT enumerated unreachable — a worse bug
+// than the one it fixed. Removing what is outside scales; listing what is
+// inside does not.
+//
+// It also settles the pointer half for free: a press on the contact list under
+// the modal is refused here as well as by the shell's backdrop.
+func (w *Window) disableUnderConsoleModal(gtx layout.Context) layout.Context {
+	if !w.consoleModalVisible() {
+		return gtx
+	}
+	return gtx.Disabled()
 }
 
 // composerDraft is the unsent state stashed per conversation: the message
@@ -1660,15 +1759,36 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 
 func (w *Window) handleActions(gtx layout.Context) {
 	w.handleBackNavigation(gtx)
+
+	// The Console button comes first so that the frame which OPENS the modal
+	// stops at the guard below too. Checking only at the top let that one
+	// frame run on and register every other control for the next one.
+	if !w.consoleModalVisible() {
+		for w.consoleButton.Clicked(gtx) {
+			w.openConsoleModal(gtx)
+		}
+	}
+
+	// While the console modal covers the window, none of the window's own
+	// controls are there to be used — and reading them is not free. Clicked
+	// registers the widget's key.FocusFilter, which is what puts it in Gio's
+	// focus traversal, so draining Send, Attach or the language button here
+	// would keep them Tab-reachable from inside the modal no matter that
+	// layoutMain is drawn with input disabled. Enter on a focused Send would
+	// then post the hidden draft.
+	//
+	// Back is the exception above: it is a key filter, not a widget, and it is
+	// how the modal is dismissed on Android.
+	if w.consoleModalVisible() {
+		return
+	}
+
 	w.handleEmojiEscapeNavigation(gtx)
 
 	for w.languageToggle.Clicked(gtx) {
 		w.showLanguageMenu = !w.showLanguageMenu
 	}
-
-	for w.consoleButton.Clicked(gtx) {
-		w.openConsoleWindow()
-	}
+	w.handleLanguageMenu(gtx)
 
 	for w.updateButton.Clicked(gtx) {
 		openBrowser("https://github.com/piratecash/corsa/releases")
@@ -2384,13 +2504,26 @@ func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, r
 	}()
 }
 
+// layoutMeasuredHeader draws the header and records its height for the
+// language popup's anchor. It is a wrapper rather than a line inside
+// layoutHeader because the header is also laid out by measuring passes that
+// must not publish anything (keyboardYieldingChrome records it before deciding
+// whether to draw it) — this is the call site that ends up on screen.
+func (w *Window) layoutMeasuredHeader(gtx layout.Context) layout.Dimensions {
+	dims := w.layoutHeader(gtx)
+	w.headerHeight = dims.Size.Y
+	return dims
+}
+
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 	titleText := w.t("app.title")
 	if w.isCompactLayout(gtx) {
-		// Phone width: the full product name wraps into two lines under
-		// the header buttons; the brand alone is enough there. Literal on
-		// purpose — the brand is not localized.
-		titleText = "Corsa"
+		// Phone width — which is every Android screen: the full product name
+		// wraps into two lines under the header buttons, so the brand alone
+		// goes there. It is its own message rather than a literal even though
+		// no locale translates the brand, so the one place a translator would
+		// look for the header title has both forms of it.
+		titleText = w.t("app.title.compact")
 	}
 	title := material.Label(w.theme, unit.Sp(24), titleText)
 	title.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
@@ -2425,6 +2558,7 @@ type navigationDismissTarget uint8
 
 const (
 	dismissNothing navigationDismissTarget = iota
+	dismissConsoleModal
 	dismissIdentityPanel
 	dismissMessageMenu
 	dismissIdentityMenu
@@ -2438,6 +2572,8 @@ const (
 // to the non-modal picker and finally compact-chat navigation.
 func (w *Window) topNavigationDismissTarget(gtx layout.Context) navigationDismissTarget {
 	switch {
+	case w.consoleModalVisible():
+		return dismissConsoleModal
 	case w.identityPanelVisible:
 		return dismissIdentityPanel
 	case w.msgContextMsg != nil:
@@ -2465,8 +2601,10 @@ func (w *Window) topNavigationDismissTarget(gtx layout.Context) navigationDismis
 //     the identity menu (backing out of its confirmation / alias sub-views one
 //     step at a time, exactly like Escape — reusing escapePeerMenu keeps the
 //     focus-restore invariants of the menu machinery intact), and the language
-//     dropdown last. The language overlay does not block interaction
-//     underneath, so a context menu CAN legitimately be open on top of it;
+//     dropdown last. The language dropdown now carries the shared popup
+//     backdrop (menu_popup.go), so nothing new can be opened while it is up —
+//     but one opened BEFORE it still outranks it here, which is why it stays
+//     at the bottom of the list rather than being assumed unreachable;
 //  2. the non-modal emoji picker;
 //  3. in the compact layout, an open chat — Back returns to the contact
 //     list (DeselectPeer).
@@ -2490,6 +2628,8 @@ func (w *Window) handleBackNavigation(gtx layout.Context) {
 			continue
 		}
 		switch w.topNavigationDismissTarget(gtx) {
+		case dismissConsoleModal:
+			w.escapeConsoleModal(gtx)
 		case dismissIdentityPanel:
 			w.closeIdentityPanel()
 		case dismissMessageMenu:
@@ -2497,10 +2637,7 @@ func (w *Window) handleBackNavigation(gtx layout.Context) {
 		case dismissIdentityMenu:
 			w.escapePeerMenu()
 		case dismissLanguageMenu:
-			w.showLanguageMenu = false
-			if w.window != nil {
-				w.window.Invalidate()
-			}
+			w.closeLanguageMenu()
 		case dismissEmojiPicker:
 			w.closeEmojiPicker(gtx)
 			w.dropEmojiToggleClicks(gtx)
@@ -2794,9 +2931,9 @@ func (w *Window) layoutMyIdentityButton(gtx layout.Context, known int) layout.Di
 						iconGTX.Constraints.Min = image.Pt(side, side)
 						iconGTX.Constraints.Max = image.Pt(side, side)
 						defer clip.Ellipse(image.Rect(0, 0, side, side)).Push(gtx.Ops).Pop()
-						fill(iconGTX, color.NRGBA{R: 25, G: 119, B: 67, A: 255})
+						ui.Fill(iconGTX, color.NRGBA{R: 25, G: 119, B: 67, A: 255})
 						return layout.Center.Layout(iconGTX, func(gtx layout.Context) layout.Dimensions {
-							return layoutVectorIcon(gtx, w.fingerprintIcon, unit.Dp(25), color.NRGBA{R: 240, G: 250, B: 244, A: 255})
+							return ui.Icon(gtx, w.fingerprintIcon, unit.Dp(25), color.NRGBA{R: 240, G: 250, B: 244, A: 255})
 						})
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
@@ -2825,7 +2962,7 @@ func (w *Window) layoutMyIdentityButton(gtx layout.Context, known int) layout.Di
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layoutVectorIcon(gtx, w.chevronIcon, unit.Dp(22), color.NRGBA{R: 218, G: 228, B: 240, A: 255})
+						return ui.Icon(gtx, w.chevronIcon, unit.Dp(22), color.NRGBA{R: 218, G: 228, B: 240, A: 255})
 					}),
 				)
 			})
@@ -2923,11 +3060,11 @@ func (w *Window) identitySearchCard(gtx layout.Context, status service.NodeStatu
 				Width:        unit.Dp(1),
 			}
 			return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				fillRounded(gtx, color.NRGBA{R: 20, G: 29, B: 39, A: 255}, unit.Dp(9))
+				ui.FillRounded(gtx, color.NRGBA{R: 20, G: 29, B: 39, A: 255}, unit.Dp(9))
 				return layout.Inset{Top: unit.Dp(11), Bottom: unit.Dp(11), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return layoutVectorIcon(gtx, w.searchIcon, unit.Dp(20), color.NRGBA{R: 139, G: 158, B: 183, A: 255})
+							return ui.Icon(gtx, w.searchIcon, unit.Dp(20), color.NRGBA{R: 139, G: 158, B: 183, A: 255})
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -3080,7 +3217,7 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 			// events propagate to our tag without conflict.
 			event.Op(gtx.Ops, rc)
 
-			fill(gtx, bg)
+			ui.Fill(gtx, bg)
 			// Tight padding matching the window-edge inset (Top/Bottom 4,
 			// Left/Right 6) so the card content sits close to its border.
 			dims := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -3197,7 +3334,7 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 
 func (w *Window) layoutLoadingCard(gtx layout.Context, title string) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 
 		inset := layout.UniformInset(unit.Dp(8))
 		return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -3283,10 +3420,10 @@ func (w *Window) layoutComposerFooter(gtx layout.Context, status service.NodeSta
 	statusRow := func(gtx layout.Context) layout.Dimensions {
 		return w.layoutNetworkStatus(gtx, status)
 	}
-	if runtime.GOOS == "android" {
-		return statusRow(gtx)
-	}
 
+	// Android used to get the network bar alone — the console was a second
+	// app.Window there, which Android has no way to show. As a modal it is
+	// reachable on every platform, so the button is laid out unconditionally.
 	consoleButton := func(gtx layout.Context) layout.Dimensions {
 		return layout.E.Layout(gtx, w.layoutConsoleButton)
 	}
@@ -3364,7 +3501,7 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 				layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					semantic.DescriptionOp(w.t("compose.network_security")).Add(gtx.Ops)
-					return layoutVectorIcon(gtx, w.shieldIcon, unit.Dp(24), fg)
+					return ui.Icon(gtx, w.shieldIcon, unit.Dp(24), fg)
 				}),
 			)
 		})
@@ -3568,10 +3705,10 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		gtx.Constraints.Min.Y = cardHeight
 		gtx.Constraints.Max.Y = cardHeight
-		fill(gtx, borderColor)
+		ui.Fill(gtx, borderColor)
 
 		return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			fill(gtx, backgroundColor)
+			ui.Fill(gtx, backgroundColor)
 
 			return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(1), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{
@@ -3667,7 +3804,7 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 									layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 										gtx.Constraints.Min.Y = editorHeight
 										gtx.Constraints.Max.Y = editorHeight
-										fill(gtx, editorBg)
+										ui.Fill(gtx, editorBg)
 										return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, editorHeight)}
 									}),
 									layout.Stacked(func(gtx layout.Context) layout.Dimensions {
@@ -3785,7 +3922,7 @@ func (w *Window) layoutComposerSendButton(gtx layout.Context, enabled bool, desc
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layoutVectorIcon(gtx, w.sendIcon, unit.Dp(18), foreground)
+					return ui.Icon(gtx, w.sendIcon, unit.Dp(18), foreground)
 				}),
 			)
 		})
@@ -4976,7 +5113,7 @@ func (w *Window) invalidateStaleMenuRects() {
 // so a caller that raises the touch keyboard on a click must gate on this,
 // otherwise a hardware Return within touchInputRecency of an unrelated touch
 // (lastInputTouch is not cleared by key events) would wrongly pop the keyboard
-// while the user types on real keys. Same package, so ConsoleWindow uses it too.
+// while the user types on real keys. Same package, so consoleModal uses it too.
 func pointerClickedThisFrame(btn *widget.Clickable, gtx layout.Context) bool {
 	h := btn.History()
 	return len(h) > 0 && h[len(h)-1].End.Equal(gtx.Now)
@@ -5314,7 +5451,7 @@ func (w *Window) layoutContactPresenceAvatar(gtx layout.Context, status service.
 			if icon == nil {
 				return layout.Dimensions{}
 			}
-			return layoutVectorIcon(gtx, icon, avatarIconSize, iconColor)
+			return ui.Icon(gtx, icon, avatarIconSize, iconColor)
 		}),
 	)
 }
@@ -5916,24 +6053,11 @@ func (w *Window) contextMenuDeleteEnabled() bool {
 }
 
 func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
-	foreground := color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-	button := material.ButtonLayout(w.theme, &w.consoleButton)
-	button.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-	return button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return layoutVectorIcon(gtx, w.consoleIcon, unit.Dp(18), foreground)
-				}),
-				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Label(w.theme, unit.Sp(14), w.t("header.console"))
-					label.Color = foreground
-					label.MaxLines = 1
-					return label.Layout(gtx)
-				}),
-			)
-		})
+	return w.kit().ToolbarButton(gtx, &w.consoleButton, ui.ToolbarButtonOpts{
+		Label:    w.t("header.console"),
+		Icon:     w.consoleIcon,
+		IconSide: ui.IconLeading,
+		Active:   w.consoleModalVisible(),
 	})
 }
 
@@ -5961,24 +6085,10 @@ func (w *Window) nodeUpdateAvailable() bool {
 // exec-based implementations for desktop OSes live in open_default.go,
 // the Android intent/stub implementations in open_android.go.
 
-func (w *Window) openConsoleWindow() {
-	w.consoleMu.Lock()
-	if w.consoleOpen {
-		w.consoleMu.Unlock()
-		return
-	}
-	w.consoleOpen = true
-	w.consoleMu.Unlock()
-
-	console := NewConsoleWindow(w, func() {
-		w.consoleMu.Lock()
-		w.consoleOpen = false
-		w.consoleMu.Unlock()
-	})
-	console.Open()
-}
-
 func (w *Window) languageButton(code string) *widget.Clickable {
+	if w.languageOptions == nil {
+		w.languageOptions = make(map[string]*widget.Clickable, len(supportedLanguages))
+	}
 	if btn, ok := w.languageOptions[code]; ok {
 		return btn
 	}
@@ -6003,120 +6113,48 @@ func (w *Window) layoutLanguageSelectorInline(gtx layout.Context) layout.Dimensi
 	)
 }
 
+// languageToolbarButton describes the header's language button. Active while
+// its menu is open, the same way a selected console tab is — that is what says
+// which button the popup belongs to.
+func (w *Window) languageToolbarButton() ui.ToolbarButtonOpts {
+	return ui.ToolbarButtonOpts{
+		Label:    currentLanguageLabel(w.language),
+		Icon:     w.chevronDownIcon,
+		IconSide: ui.IconTrailing,
+		Active:   w.showLanguageMenu,
+	}
+}
+
 func (w *Window) layoutLanguageDropdown(gtx layout.Context) layout.Dimensions {
-	label := currentLanguageLabel(w.language)
-	btn := material.Button(w.theme, &w.languageToggle, label+"  v")
-	btn.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-	btn.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 	return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		width := gtx.Dp(unit.Dp(languageButtonWidth))
-		if gtx.Constraints.Max.X < width {
-			width = gtx.Constraints.Max.X
-		}
-		gtx.Constraints.Min.X = width
-		gtx.Constraints.Max.X = width
-		return btn.Layout(gtx)
+		dims := w.kit().ToolbarButton(gtx, &w.languageToggle, w.languageToolbarButton())
+		w.languageButtonSize = dims.Size
+		return dims
 	})
 }
 
-func identityPanelSize(window image.Point, pxPerDp float32) image.Point {
-	dp := func(value int) int {
-		return int(float32(value)*pxPerDp + 0.5)
-	}
-	inset := dp(16)
-	width := min(dp(384), window.X-2*inset)
-	height := min(dp(520), window.Y-2*inset)
-	if width < 0 {
-		width = 0
-	}
-	if height < 0 {
-		height = 0
-	}
-	return image.Pt(width, height)
-}
-
-func identityPanelSizeForMode(window image.Point, pxPerDp float32, compact bool) image.Point {
-	if compact {
-		return window
-	}
-	return identityPanelSize(window, pxPerDp)
-}
-
-func identityPanelBounds(window, panel image.Point) image.Rectangle {
-	origin := image.Pt((window.X-panel.X)/2, (window.Y-panel.Y)/2)
-	return image.Rectangle{Min: origin, Max: origin.Add(panel)}
-}
-
-func (w *Window) registerIdentityPanelInputBlocker(gtx layout.Context) {
-	area := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
-	event.Op(gtx.Ops, &w.identityPanelDismissTag)
-	area.Pop()
-}
-
-func pointInsideRectangle(point f32.Point, bounds image.Rectangle) bool {
-	return point.X >= float32(bounds.Min.X) && point.X < float32(bounds.Max.X) &&
-		point.Y >= float32(bounds.Min.Y) && point.Y < float32(bounds.Max.Y)
-}
-
 func (w *Window) layoutIdentityPanelOverlay(gtx layout.Context) layout.Dimensions {
-	if w.identityPanelFocus.drive(gtx, w.identityPanelItems(), false) {
+	if w.identityPanelFocus.drive(gtx, w.identityPanelItems(), menuNavKeys{Tab: true}) {
 		w.closeIdentityPanel()
 		return layout.Dimensions{}
 	}
-	compact := w.isCompactLayout(gtx)
-	panelSize := identityPanelSizeForMode(gtx.Constraints.Max, gtx.Metric.PxPerDp, compact)
-	panelBounds := identityPanelBounds(gtx.Constraints.Max, panelSize)
-	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
-		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-			fill(gtx, color.NRGBA{R: 2, G: 8, B: 14, A: 205})
-			w.registerIdentityPanelInputBlocker(gtx)
-			for {
-				ev, ok := gtx.Event(pointer.Filter{Target: &w.identityPanelDismissTag, Kinds: pointer.Press})
-				if !ok {
-					break
-				}
-				if pointerEvent, ok := ev.(pointer.Event); ok {
-					// The full-window target always consumes the press so blank
-					// card padding and the compact screen cannot leak input to
-					// the application below. Only the desktop area outside the
-					// centered card also dismisses the panel.
-					if !compact && !pointInsideRectangle(pointerEvent.Position, panelBounds) {
-						w.closeIdentityPanel()
-					}
-				}
-			}
-			return layout.Dimensions{Size: gtx.Constraints.Max}
-		}),
-		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-			if panelSize.X == 0 || panelSize.Y == 0 {
-				return layout.Dimensions{}
-			}
-			gtx.Constraints.Min = panelSize
-			gtx.Constraints.Max = panelSize
-			return w.layoutIdentityPanelCard(gtx, compact)
-		}),
-	)
+	return w.kit().Modal(gtx, ui.Modal{
+		Title:      w.t("clients.my_identity"),
+		CloseHint:  w.t("clients.close_identity"),
+		Close:      &w.identityPanelClose,
+		DismissTag: &w.identityPanelDismissTag,
+		Dismiss:    w.closeIdentityPanel,
+		// Identity details keeps the rounder corner the design gives it; the
+		// other modals use ui.ModalCardRadiusDp.
+		CornerRadius: unit.Dp(ui.ModalIdentityRadiusDp),
+		Sizing:       ui.ModalSizingCentered,
+		Compact:      w.isCompactLayout(gtx),
+		Content:      w.layoutIdentityPanelList,
+	})
 }
 
 func (w *Window) identityPanelItems() []event.Tag {
 	return []event.Tag{&w.identityPanelClose, &w.copyIdentityButton, &w.shareContactButton}
-}
-
-func (w *Window) layoutIdentityPanelCard(gtx layout.Context, fullscreen bool) layout.Dimensions {
-	if fullscreen {
-		fill(gtx, color.NRGBA{R: 18, G: 27, B: 37, A: 255})
-		return layout.UniformInset(unit.Dp(20)).Layout(gtx, w.layoutIdentityPanelList)
-	}
-
-	border := widget.Border{
-		Color:        color.NRGBA{R: 52, G: 68, B: 87, A: 255},
-		CornerRadius: unit.Dp(16),
-		Width:        unit.Dp(1),
-	}
-	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fillRounded(gtx, color.NRGBA{R: 18, G: 27, B: 37, A: 255}, unit.Dp(16))
-		return layout.UniformInset(unit.Dp(20)).Layout(gtx, w.layoutIdentityPanelList)
-	})
 }
 
 func (w *Window) layoutIdentityPanelList(gtx layout.Context) layout.Dimensions {
@@ -6126,25 +6164,10 @@ func (w *Window) layoutIdentityPanelList(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *Window) layoutIdentityPanelContent(gtx layout.Context) layout.Dimensions {
+	// The title and the close button belong to the modal shell around this
+	// content (modal_shell.go), not to the content itself — every modal in the
+	// application wears the same header.
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					label := material.H6(w.theme, w.t("clients.my_identity"))
-					label.Color = color.NRGBA{R: 246, G: 248, B: 251, A: 255}
-					return label.Layout(gtx)
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					button := material.IconButton(w.theme, &w.identityPanelClose, w.closeIcon, w.t("clients.close_identity"))
-					button.Background = color.NRGBA{R: 27, G: 39, B: 53, A: 255}
-					button.Color = color.NRGBA{R: 157, G: 173, B: 194, A: 255}
-					button.Size = unit.Dp(20)
-					button.Inset = layout.UniformInset(unit.Dp(12))
-					return button.Layout(gtx)
-				}),
-			)
-		}),
-		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return w.layoutIdentityQR(gtx, unit.Dp(220))
@@ -6162,7 +6185,7 @@ func (w *Window) layoutIdentityPanelContent(gtx layout.Context) layout.Dimension
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			gtx.Constraints.Min.Y = gtx.Dp(unit.Dp(1))
 			gtx.Constraints.Max.Y = gtx.Constraints.Min.Y
-			fill(gtx, color.NRGBA{R: 50, G: 65, B: 84, A: 255})
+			ui.Fill(gtx, color.NRGBA{R: 50, G: 65, B: 84, A: 255})
 			return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Min.Y)}
 		}),
 		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
@@ -6192,7 +6215,7 @@ func (w *Window) layoutIdentityActionButton(gtx layout.Context, button *widget.C
 			return layout.Inset{Left: unit.Dp(14), Right: unit.Dp(14), Top: unit.Dp(13), Bottom: unit.Dp(13)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layoutVectorIcon(gtx, icon, unit.Dp(23), color.NRGBA{R: 202, G: 215, B: 231, A: 255})
+						return ui.Icon(gtx, icon, unit.Dp(23), color.NRGBA{R: 202, G: 215, B: 231, A: 255})
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -6208,23 +6231,31 @@ func (w *Window) layoutIdentityActionButton(gtx layout.Context, button *widget.C
 }
 
 func (w *Window) layoutLanguageOverlay(gtx layout.Context) layout.Dimensions {
-	x := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(windowInset)) - gtx.Dp(unit.Dp(languageMenuWidth))
-	if x < 0 {
-		x = 0
-	}
-	y := gtx.Dp(unit.Dp(windowInset + languageOverlayTop))
+	// The backdrop goes down first, under the card and over everything else.
+	// Until this existed the overlay let input through, so the click a user
+	// aims at empty space to dismiss the menu also hit whatever was there. It
+	// does not tint: a wash over the whole application for a six-row dropdown
+	// reads as a modal dialogue, and the design does not ask for one here.
+	w.kit().MenuPopupBackdrop(gtx, &w.languageMenuDismissTag, ui.MenuPopupScrimNone, w.closeLanguageMenu)
+
+	anchor := w.languageMenuAnchor(gtx)
+	width := gtx.Dp(unit.Dp(ui.MenuPopupLanguageWidthDp))
+	// Right-aligned with the button, and just under it. The offset used to be
+	// the constant 58dp below a 24dp window inset, which stopped matching the
+	// header the day its padding changed — the menu opened a finger's width
+	// below the button it belongs to.
+	x := ui.MenuPopupAnchorX(anchor.Max.X-width, width, gtx.Constraints.Max.X)
+	y := anchor.Max.Y + gtx.Dp(unit.Dp(ui.MenuPopupAnchorGapDp))
 
 	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
 	defer stack.Pop()
 
-	// The nominal height is a cap, not a promise: in phone landscape the
-	// window below the anchor point can be shorter than the full list
-	// (316dp needs ≈398dp of window height), which used to clip the
-	// bottom languages with no way to reach them. Clamp to the height
-	// genuinely available under the anchor (minus the bottom inset) —
-	// the card's List scrolls to whatever does not fit.
+	// The height is a CAP, never a size: the card hugs its rows and scrolls
+	// only what does not fit. In phone landscape the window below the anchor
+	// can be shorter than the full list (six rows need ≈250dp), which used to
+	// clip the bottom languages with no way to reach them.
 	h := gtx.Dp(unit.Dp(languageMenuHeight))
-	if avail := gtx.Constraints.Max.Y - y - gtx.Dp(unit.Dp(windowInset)); avail < h {
+	if avail := gtx.Constraints.Max.Y - y - gtx.Dp(unit.Dp(windowPadYDp)); avail < h {
 		h = avail
 	}
 	if h < gtx.Dp(unit.Dp(menuMinUsableDp)) {
@@ -6232,13 +6263,40 @@ func (w *Window) layoutLanguageOverlay(gtx layout.Context) layout.Dimensions {
 	}
 
 	menuGTX := gtx
-	menuGTX.Constraints.Min.X = gtx.Dp(unit.Dp(languageMenuWidth))
-	menuGTX.Constraints.Max.X = gtx.Dp(unit.Dp(languageMenuWidth))
-	menuGTX.Constraints.Min.Y = h
+	menuGTX.Constraints.Min.X = width
+	menuGTX.Constraints.Max.X = width
+	menuGTX.Constraints.Min.Y = 0
 	menuGTX.Constraints.Max.Y = h
-	_ = w.languageMenuCard(menuGTX)
+	_ = w.kit().MenuPopupCard(menuGTX, ui.MenuPopup{
+		Items:  w.languageMenuItems(),
+		Scroll: &w.languageMenuList,
+	})
 
 	return layout.Dimensions{}
+}
+
+// languageMenuAnchor is the language button's rectangle in window
+// coordinates, which is where its popup hangs from.
+//
+// Gio gives no way to read a widget's absolute position, so the rectangle is
+// reconstructed from the two things that DO place it: the window padding the
+// header sits inside, and the header's own measured height. Both are recorded
+// as the header is laid out (Window.layout), on the same frame this reads
+// them, so the anchor cannot lag the button.
+//
+// The button is flush with the right edge of the header (layout.E), which is
+// what makes "window width less the padding" its right edge.
+//
+// The fallbacks matter: the header YIELDS its whole row when the touch
+// keyboard leaves too little space (keyboardYieldingChrome), so on the frames
+// where it is not drawn its height is zero and the popup would climb to the
+// top of the window. Holding the last measured height keeps the menu where the
+// user last saw the button.
+func (w *Window) languageMenuAnchor(gtx layout.Context) image.Rectangle {
+	right := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(windowPadXDp))
+	bottom := gtx.Dp(unit.Dp(windowPadYDp)) + w.headerHeight
+	size := w.languageButtonSize
+	return image.Rect(right-size.X, bottom-size.Y, right, bottom)
 }
 
 // menuMinUsableDp is the smallest height in which drawing a context menu is
@@ -6371,7 +6429,7 @@ func (w *Window) layoutContextMenuOverlay(gtx layout.Context) layout.Dimensions 
 		// they cannot see and cannot dismiss. Drive with no items: the keys are
 		// still read, and first-item focus stays armed for the frame the room
 		// comes back.
-		if w.peerMenuFocus.drive(gtx, nil, !w.showAliasEditor) {
+		if w.peerMenuFocus.drive(gtx, nil, menuNavKeys{Arrows: !w.showAliasEditor, Tab: true}) {
 			w.escapePeerMenu()
 		}
 		return layout.Dimensions{}
@@ -6382,7 +6440,7 @@ func (w *Window) layoutContextMenuOverlay(gtx layout.Context) layout.Dimensions 
 	// deferred draw lays out no item to focus, and before the measure below,
 	// whose disabled source would drop the FocusCmd. Arrow keys are left to the
 	// alias editor's caret while it is on screen.
-	if w.peerMenuFocus.drive(gtx, w.peerMenuItems(), !w.showAliasEditor) {
+	if w.peerMenuFocus.drive(gtx, w.peerMenuItems(), menuNavKeys{Arrows: !w.showAliasEditor, Tab: true}) {
 		w.escapePeerMenu()
 		if w.contextMenuPeer.IsZero() {
 			// Escape closed the menu outright; drawing a card for a peer that
@@ -6683,7 +6741,7 @@ func (w *Window) contextMenuItem(gtx layout.Context, btn *widget.Clickable, labe
 
 	return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
 		if btn.Hovered() {
-			fill(gtx, hoverBg)
+			ui.Fill(gtx, hoverBg)
 		}
 		return layout.Inset{
 			Top: unit.Dp(8), Bottom: unit.Dp(8),
@@ -6728,43 +6786,46 @@ func (w *Window) contextMenuItemDisabled(gtx layout.Context, label string) layou
 	})
 }
 
-func (w *Window) languageMenuCard(gtx layout.Context) layout.Dimensions {
-	fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
-
-	return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		// A List rather than a fixed column: layoutLanguageOverlay clamps
-		// the menu height to what actually fits under the anchor (phone
-		// landscape), and the tail languages must stay reachable by
-		// scrolling instead of being clipped.
-		w.languageMenuList.Axis = layout.Vertical
-		return material.List(w.theme, &w.languageMenuList).Layout(gtx, len(supportedLanguages), func(gtx layout.Context, i int) layout.Dimensions {
-			opt := supportedLanguages[i]
-			btn := w.languageButton(opt.Code)
-			for btn.Clicked(gtx) {
-				w.language = normalizeLanguage(opt.Code)
-				w.showLanguageMenu = false
-				if w.prefs != nil {
-					w.prefs.Language = w.language
-					_ = w.prefs.Save()
-				}
-				if w.window != nil {
-					w.window.Invalidate()
-				}
-			}
-
-			style := material.Button(w.theme, btn, opt.Label+" - "+localizedLanguageName(opt.Code))
-			if opt.Code == w.language {
-				style.Background = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
-			} else {
-				style.Background = color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-			}
-			style.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-			if i == len(supportedLanguages)-1 {
-				return style.Layout(gtx)
-			}
-			return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, style.Layout)
+// languageMenuItems builds the language menu's rows. The em dash between code
+// and name is the design's (screen 7e), not a hyphen.
+func (w *Window) languageMenuItems() []ui.MenuPopupItem {
+	current := normalizeLanguage(w.language)
+	items := make([]ui.MenuPopupItem, 0, len(supportedLanguages))
+	for _, option := range supportedLanguages {
+		items = append(items, ui.MenuPopupItem{
+			Label:    option.Label + " — " + localizedLanguageName(option.Code),
+			Button:   w.languageButton(option.Code),
+			Selected: option.Code == current,
 		})
-	})
+	}
+	return items
+}
+
+// handleLanguageMenu drains the language rows' clicks. It runs from
+// handleActions rather than from inside the row builder, so that choosing a
+// language is not a side effect of drawing one — the popup component lays rows
+// out and nothing else.
+func (w *Window) handleLanguageMenu(gtx layout.Context) {
+	for _, option := range supportedLanguages {
+		for w.languageButton(option.Code).Clicked(gtx) {
+			w.selectLanguage(option.Code)
+		}
+	}
+}
+
+func (w *Window) selectLanguage(code string) {
+	w.language = normalizeLanguage(code)
+	w.showLanguageMenu = false
+	if w.prefs != nil {
+		w.prefs.Language = w.language
+		_ = w.prefs.Save()
+	}
+	w.invalidate()
+}
+
+func (w *Window) closeLanguageMenu() {
+	w.showLanguageMenu = false
+	w.invalidate()
 }
 
 func (w *Window) card(gtx layout.Context, titleText string, rows []string, extras ...func(layout.Context) layout.Dimensions) layout.Dimensions {
@@ -7158,7 +7219,7 @@ func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensio
 	if !room {
 		// See the recipient menu: deferred until the keyboard frees the room,
 		// with Escape kept alive throughout.
-		if w.msgMenuFocus.drive(gtx, nil, true) {
+		if w.msgMenuFocus.drive(gtx, nil, menuNavKeys{Arrows: true, Tab: true}) {
 			w.escapeMsgMenu()
 		}
 		return layout.Dimensions{}
@@ -7166,7 +7227,7 @@ func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensio
 
 	// Focus contract, as for the identity menu above. This menu has no
 	// sub-views, so Escape always closes it.
-	if w.msgMenuFocus.drive(gtx, w.msgMenuItems(), true) {
+	if w.msgMenuFocus.drive(gtx, w.msgMenuItems(), menuNavKeys{Arrows: true, Tab: true}) {
 		w.escapeMsgMenu()
 		return layout.Dimensions{}
 	}
@@ -7799,23 +7860,4 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 			}),
 		)
 	})
-}
-
-func fill(gtx layout.Context, c color.NRGBA) {
-	stack := clip.Rect{Max: image.Pt(gtx.Constraints.Max.X, gtx.Constraints.Max.Y)}.Push(gtx.Ops)
-	defer stack.Pop()
-	paint.ColorOp{Color: c}.Add(gtx.Ops)
-	paint.PaintOp{}.Add(gtx.Ops)
-}
-
-func fillRounded(gtx layout.Context, c color.NRGBA, radius unit.Dp) {
-	bounds := image.Rectangle{Max: gtx.Constraints.Max}
-	paint.FillShape(gtx.Ops, c, clip.UniformRRect(bounds, gtx.Dp(radius)).Op(gtx.Ops))
-}
-
-func layoutVectorIcon(gtx layout.Context, icon *widget.Icon, size unit.Dp, iconColor color.NRGBA) layout.Dimensions {
-	side := gtx.Dp(size)
-	gtx.Constraints.Min = image.Pt(side, side)
-	gtx.Constraints.Max = image.Pt(side, side)
-	return icon.Layout(gtx, iconColor)
 }

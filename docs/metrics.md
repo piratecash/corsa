@@ -91,7 +91,7 @@ When the collector attaches to a source whose counters are already non-zero, cal
 
 ### Desktop UI — Traffic Tab
 
-The console window includes a Traffic tab that visualizes network activity in real time. On tab open, the full history is loaded from `fetch_traffic_history` (up to 3600 samples). While the tab is active, a 1-second ticker appends new samples via `fetch_network_stats`.
+The console modal includes a Traffic tab (reachable only inside the console) that visualizes network activity in real time. On tab open, the full history is loaded from `fetch_traffic_history` (up to 3600 samples). While the tab is active, a 1-second ticker appends new samples via `fetch_network_stats`.
 
 The graph contains three visual elements:
 
@@ -196,7 +196,7 @@ Runtimes `desktop`, `node` и `sdk` вызывают `Seed` между созд�
 
 ### Desktop UI — вкладка Traffic
 
-Окно консоли содержит вкладку Traffic для визуализации сетевой активности в реальном времени. При открытии вкладки загружается полная история из `fetch_traffic_history` (до 3600 семплов). Пока вкладка активна, тикер раз в секунду добавляет новые семплы через `fetch_network_stats`.
+Модалка консоли содержит вкладку Traffic (открыть можно только внутри консоли) для визуализации сетевой активности в реальном времени. При открытии вкладки загружается полная история из `fetch_traffic_history` (до 3600 семплов). Пока вкладка активна, тикер раз в секунду добавляет новые семплы через `fetch_network_stats`.
 
 График содержит три визуальных элемента:
 

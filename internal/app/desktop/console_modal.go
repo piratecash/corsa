@@ -15,12 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/piratecash/corsa/internal/app/desktop/ui"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	"github.com/piratecash/corsa/internal/core/service"
 
-	"gioui.org/app"
 	"gioui.org/font"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
@@ -36,19 +36,41 @@ import (
 )
 
 const (
-	defaultConsoleWindowWidth  = unit.Dp(768)
-	defaultConsoleWindowHeight = unit.Dp(550)
-	maxVisibleSuggestions      = 5
+	// maxSuggestions caps the completion popup. The panel hugs its rows and
+	// scrolls past this only on a window too short to show them all.
+	maxSuggestions = 6
 	// maxConsoleCommandHistory bounds the in-memory ring of submitted commands
 	// reachable via Up/Down arrows in the console input. Older entries are
-	// dropped from the front when the cap is exceeded — this is per-window
-	// state, not persisted across console reopens.
+	// dropped from the front when the cap is exceeded. The ring lives as long
+	// as the process now that the modal is reused, so this cap is what keeps a
+	// long session from growing it without limit.
 	maxConsoleCommandHistory = 200
+	// consoleVisibleTabs is how many tabs stay on the strip once it folds the
+	// tail into a "More" menu. The width that triggers the fold is the
+	// application's own compact breakpoint (compactLayoutMaxDp, read through
+	// Window.isCompactLayout) rather than a number of its own: the card is
+	// full-screen at exactly that width, which is exactly when six tabs stop
+	// fitting.
+	consoleVisibleTabs = 4
+	// Tab pill geometry, from §4 of docs/design/CHANGES.md. The text size is
+	// part of it: material.Body1 takes the theme's size (16sp), which made the
+	// pills half again as tall as the design and pushed six of them off any
+	// window narrower than a desktop.
+	consoleTabRadiusDp   = 5
+	consoleTabPaddingXDp = 10
+	consoleTabPaddingYDp = 7
+	consoleTabGapDp      = 4
+	consoleTabTextSp     = 13
+	// The "More" slot carries a trailing chevron: 1dp less side padding, a
+	// 4dp gap and a 16dp glyph, per §4 of docs/design/CHANGES.md.
+	consoleTabIconPaddingXDp = 9
+	consoleTabIconGapDp      = 4
+	consoleTabIconDp         = 16
 )
 
 type consoleTab int32
 
-func (c *ConsoleWindow) currentTab() consoleTab {
+func (c *consoleModal) currentTab() consoleTab {
 	return consoleTab(atomic.LoadInt32(&c.activeTab))
 }
 
@@ -102,25 +124,61 @@ type consoleDonateEntry struct {
 	CopyButton widget.Clickable
 }
 
-type ConsoleWindow struct {
-	parent          *Window
-	theme           *material.Theme
-	ops             op.Ops
-	onClose         func()
-	window          *app.Window
-	touchKbdTag     int8               // pointer tag: console editor touch-keyboard area
-	kbdTapTracker   int8               // pointer tag: window-level touch presses (outside-tap detection)
-	lastInputTouch  bool               // the most recent pointer press came from a touch screen
-	lastPressAt     time.Time          // frame time of that press (recency gate)
-	touchKbd        touchKeyboardState // this window's keyboard occlusion state
-	closed          chan struct{}      // closed when DestroyEvent is received; used as a hard gate for cross-goroutine Invalidate
+// consoleModal is the console: a modal window drawn over the main window on
+// the modal shell (modal_shell.go), not a window of its own.
+//
+// It used to own an app.Window, an event loop goroutine, a theme and a
+// touchKeyboardState, all because it was a second native window. As a modal it
+// borrows every one of those from parent — same goroutine, same text shaper,
+// same on-screen keyboard — and what is left here is console state: the
+// command history, the tabs, the traffic samples and the per-row widgets.
+//
+// One instance is created on the first open and reused for the rest of the
+// process (Window.consoleModal), so command history and the selected tab
+// survive closing the modal. Everything with a cost that should not outlive
+// the modal — the ebus subscriptions and the traffic ticker — is started on
+// open and stopped on close.
+type consoleModal struct {
+	parent *Window
+	// visible is whether the console modal is on screen.
+	//
+	// Atomic because the traffic ticker goroutine reads it once a second to
+	// decide whether it still has an audience, while the UI goroutine writes
+	// it from the click handlers. Every other consoleModal field that crosses
+	// goroutines is either atomic (activeTab) or under c.mu; this one is read
+	// on the layout path of every frame, where taking c.mu for a bool would be
+	// the only lock on that path.
+	visible atomic.Bool
+	// focusPending asks the next laid-out frame to move the keyboard onto this
+	// tab's focus target. Set when the modal opens and when the tab changes;
+	// see claimFocus.
+	focusPending bool
+	// focusRing is used for ONE half of its contract: handing the keyboard back
+	// to the Console button when the modal closes. Its Tab containment is not
+	// used — nothing calls drive. Containment comes from Window.layout
+	// disabling the window underneath, which is what keeps every control
+	// INSIDE the console reachable; a ring would have had to enumerate them,
+	// and the console's tabs carry per-row buttons that no list can track.
+	focusRing menuFocusState
+	// closeButton and dismissTag are this content's half of the modal shell
+	// around it.
+	closeButton widget.Clickable
+	dismissTag  struct{}
+	// touchKbdTag is the pointer tag of the console editor's
+	// touch-keyboard area. The state it feeds is the PARENT's — there is one
+	// on-screen keyboard and one window for it to overlap.
+	touchKbdTag     int8
 	peerList        widget.List
 	peerSectionList widget.List
 	peerSelectables map[string]*peerCardSelectables // keyed by peer address; lazily created
 	historyList     widget.List
-	suggestList     widget.List
-	donateList      widget.List
-	fileList        widget.List
+	// suggestList scrolls the completion popup. The list is capped at
+	// maxSuggestions rows and the panel hugs them, so it scrolls only when the
+	// window is too short to show them all — which is exactly when arrow
+	// navigation would otherwise walk onto a row of zero height.
+	suggestList widget.List
+	donateList  widget.List
+	fileList    widget.List
 
 	// peerRows memoizes per-frame-derived peers/info-tab data so the O(peers)
 	// derivations run on state change instead of on every frame. The peers
@@ -172,14 +230,27 @@ type ConsoleWindow struct {
 	// Same lazy-allocate / prune pattern as the Clickable maps.
 	fileRowSelectables map[domain.FileID]*fileRowSelectables
 
-	consoleEditor     widget.Editor
-	runButton         widget.Clickable
-	consoleTabButton  widget.Clickable
-	peersTabButton    widget.Clickable
-	trafficTabButton  widget.Clickable
-	fileTabButton     widget.Clickable
-	infoTabButton     widget.Clickable
-	donateTabButton   widget.Clickable
+	consoleEditor widget.Editor
+	runButton     widget.Clickable
+	// tabButtons holds one Clickable per tab, created on demand. A map rather
+	// than six named fields because every use — the strip, the More menu, the
+	// click handlers — walks the tabs as a list, and six parallel branches is
+	// how the strip ended up unable to fit a phone in the first place.
+	tabButtons map[consoleTab]*widget.Clickable
+	// tabMenuButton opens the "More" menu that holds the tabs the compact
+	// strip has no room for; tabMenuOpen is whether that menu is showing.
+	//
+	// tabMenuAnchor is that button's rectangle on the strip, recorded by
+	// layoutTabs so the dropdown can hang from its right edge. It is written
+	// and read in the same frame, strip before menu, so it is never stale.
+	//
+	// tabMenuDismissTag catches the press that closes an open menu without
+	// picking anything from it.
+	tabMenuButton     widget.Clickable
+	tabMenuOpen       bool
+	tabMenuAnchor     image.Rectangle
+	tabMenuDismissTag struct{}
+	tabMenuList       widget.List
 	activeTab         int32     // consoleTab value; accessed atomically (UI writes, ticker reads)
 	trafficSamplesIn  []float32 // per-second received bytes/s (newest last)
 	trafficSamplesOut []float32 // per-second sent bytes/s (newest last)
@@ -225,12 +296,9 @@ type ConsoleWindow struct {
 	fileTabInvalidating int32                 // atomic flag; coalesces file-tab redraw requests during active transfers
 }
 
-func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
-	window := &ConsoleWindow{
-		parent:  parent,
-		theme:   newAppTheme(),
-		onClose: onClose,
-		closed:  make(chan struct{}),
+func newConsoleModal(parent *Window) *consoleModal {
+	console := &consoleModal{
+		parent: parent,
 		peerList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
@@ -260,9 +328,9 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 		donateEntries:       newConsoleDonateEntries(),
 		overflow:            newConsoleOverflowStore(),
 	}
-	window.consoleEditor.SingleLine = true
-	window.donateLink.SetText(consoleDonateURL)
-	window.consoleEntries = []consoleEntry{
+	console.consoleEditor.SingleLine = true
+	console.donateLink.SetText(consoleDonateURL)
+	console.consoleEntries = []consoleEntry{
 		newConsoleEntry(consoleEntry{
 			Command:   "help",
 			Output:    parent.t("console.welcome"),
@@ -272,121 +340,250 @@ func NewConsoleWindow(parent *Window, onClose func()) *ConsoleWindow {
 
 	// Load available commands directly from CommandTable — no HTTP, always available.
 	if parent.cmdTable != nil {
-		window.loadCommands()
+		console.loadCommands()
 	}
 
-	return window
+	return console
 }
 
-func (c *ConsoleWindow) Open() {
-	go func() {
-		window := new(app.Window)
-
-		c.mu.Lock()
-		c.window = window
-		c.mu.Unlock()
-		// The occlusion monitor may fire after the console closes;
-		// invalidateWindow is gated on c.closed and safe cross-goroutine.
-		c.touchKbd.setInvalidate(c.invalidateWindow)
-
-		window.Option(
-			app.Title(c.parent.t("console.title")),
-			app.Size(defaultConsoleWindowWidth, defaultConsoleWindowHeight),
-		)
-
-		// Subscribe to ebus events that affect console display (peers, info,
-		// aggregate status). Each event invalidates the window so the console
-		// re-reads the latest Snapshot on the next frame. Replaces the old
-		// 2-second polling ticker — now the console updates only when state
-		// actually changes.
-		c.subscribeConsoleEvents()
-
-		for {
-			switch e := window.Event().(type) {
-			case app.DestroyEvent:
-				// Signal all cross-goroutine callers (ticker, command goroutine)
-				// to stop touching the window BEFORE the native handle is freed.
-				close(c.closed)
-
-				// The overflow files live exactly as long as the window that
-				// can show their entries.
-				c.overflow.removeAll()
-
-				// Remove ebus handlers so dead console doesn't accumulate
-				// subscriber entries on every open/close cycle.
-				c.unsubscribeConsoleEvents()
-
-				// Unregister the touch-keyboard pane handler: the console
-				// is recreated on every open, and a stale registration
-				// would leak and could route pane callbacks into this dead
-				// window's state if the HWND is reused.
-				platformReleaseKeyboardEvents(&c.touchKbd)
-
-				c.mu.Lock()
-				c.window = nil
-				c.mu.Unlock()
-
-				if c.onClose != nil {
-					c.onClose()
-				}
-				return
-			case app.ViewEvent:
-				// Native handle known: bind it and register the pane
-				// Showing/Hiding handler proactively, so a keyboard opened
-				// before the first console-editor tap is tracked too.
-				platformBindKeyboardWindow(&c.touchKbd, platformViewHWND(e))
-			case app.FrameEvent:
-				gtx := app.NewContext(&c.ops, e)
-				c.layout(gtx)
-				e.Frame(gtx.Ops)
-			}
-		}
-	}()
-}
-
-// touchDrivenInput mirrors Window.touchDrivenInput for the console.
-func (c *ConsoleWindow) touchDrivenInput(gtx layout.Context) bool {
-	return c.lastInputTouch && gtx.Now.Sub(c.lastPressAt) < touchInputRecency
-}
-
-func (c *ConsoleWindow) layout(gtx layout.Context) layout.Dimensions {
-	// Outside-tap evaluation BEFORE action handlers so a suggestion pick's
-	// explicit FocusCmd (issued below) wins over the dismissal (see
-	// Window.layout).
-	c.touchKbd.dismissOnOutsideTap(gtx)
-
-	// Window-level touch-press recording for outside-tap detection (the
-	// console has no cursor tracker) + symmetric keyboard hide.
-	defer clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops).Pop()
-	event.Op(gtx.Ops, &c.kbdTapTracker)
-	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: &c.kbdTapTracker, Kinds: pointer.Press})
-		if !ok {
-			break
-		}
-		if pe, ok := ev.(pointer.Event); ok && pe.Kind == pointer.Press {
-			c.lastInputTouch = pe.Source == pointer.Touch
-			c.lastPressAt = gtx.Now
-			if pe.Source == pointer.Touch {
-				c.touchKbd.noteWindowTouchPress(pe.PointerID)
-			}
-		}
+// console returns the one console instance, creating it on first use.
+//
+// Lazily, because most sessions never open the console and building it loads
+// the whole command table; once, because closing the modal must not throw away
+// the command history the user is working through.
+func (w *Window) console() *consoleModal {
+	if w.consoleModal == nil {
+		w.consoleModal = newConsoleModal(w)
 	}
+	return w.consoleModal
+}
 
+// consoleModalVisible reports whether the console modal is on screen. It
+// tolerates a console that was never opened, which is the normal case.
+func (w *Window) consoleModalVisible() bool {
+	return w.consoleModal != nil && w.consoleModal.visible.Load()
+}
+
+// openConsoleModal shows the console over the main window and starts the
+// subscriptions that keep it current.
+//
+// It closes every other overlay first, for the same reason openIdentityPanel
+// does: these are modal surfaces and two of them stacked leave the user with a
+// dismissal order nothing on screen explains.
+func (w *Window) openConsoleModal(gtx layout.Context) {
+	console := w.console()
+	if console.visible.Load() {
+		return
+	}
+	w.closeOverlaysForModal(gtx)
+	console.visible.Store(true)
+	console.focusPending = true
+	console.focusRing.open(&w.consoleButton)
+	// held is what restoreOnClose checks before handing focus back, and drive
+	// is what would normally set it. Nothing drives this ring, so the modal
+	// claims the focus here: it does take it (claimFocus), which is exactly
+	// what held means.
+	console.focusRing.held = true
+	console.subscribeConsoleEvents()
+	// The Traffic tab may be the one restored from the previous open, and its
+	// ticker was stopped when the modal closed.
+	console.startTrafficTickerIfShowing()
+	w.invalidate()
+}
+
+// claimFocus moves the keyboard into the console on the frame after it opens.
+//
+// It has to happen, and it has to happen here. Gio leaves focus where it was,
+// which is the message composer the modal is now covering: everything the user
+// types goes to a contact they cannot see, and Enter SENDS it instead of
+// running the command. The command line is the right target — it is what the
+// console is for, and it is laid out on every frame of every tab.
+//
+// A flag consumed during layout rather than a FocusCmd at the click, because
+// gtx.Execute is dropped by the measuring passes a frame may run before the
+// real one (see keyboardYieldingChrome), and the console editor is not in the
+// frame yet when the button that opened the modal is clicked.
+func (c *consoleModal) claimFocus(gtx layout.Context) {
+	if !c.focusPending {
+		return
+	}
+	c.focusPending = false
+	target := c.focusTarget()
+	if target == &c.consoleEditor {
+		c.parent.touchKbd.noteExplicitEditorFocus()
+	}
+	gtx.Execute(key.FocusCmd{Tag: target})
+}
+
+// focusTarget is where the keyboard goes when the console opens, or when the
+// tab changes under it.
+//
+// The command line only exists on the Console tab. The selected tab survives a
+// close, so the console can reopen on Peers or Donate — and focusing a widget
+// that is not in the frame is the same as focusing nothing: Gio drops it at
+// Frame time and the user is left with no focus anywhere. The close button is
+// in the header of every tab, so it is the fallback.
+func (c *consoleModal) focusTarget() event.Tag {
+	if c.currentTab() == consoleTabConsole {
+		return &c.consoleEditor
+	}
+	return &c.closeButton
+}
+
+// escapeConsoleModal backs out one layer of the console: the completion popup
+// or the More menu first, the modal itself once neither is open.
+//
+// Escape and system Back share it. They used to disagree — Escape stepped out
+// of the inner surface while Back closed the whole console from inside an open
+// menu — and a user on Android had no way to dismiss the menu alone.
+func (w *Window) escapeConsoleModal(gtx layout.Context) {
+	if !w.consoleModalVisible() {
+		return
+	}
+	if w.consoleModal.dismissInnerSurface(gtx) {
+		w.invalidate()
+		return
+	}
+	w.closeConsoleModal()
+}
+
+// dismissInnerSurface closes the topmost thing open INSIDE the console and
+// reports whether there was one.
+//
+// The More menu comes first because it covers the completion popup's own
+// anchor. dismissSuggestions hands focus back to the command line as it closes,
+// which is why this wants a layout context and why Back is routed through
+// handleBackNavigation's rather than given a context-free path of its own.
+func (c *consoleModal) dismissInnerSurface(gtx layout.Context) bool {
+	if c.tabMenuOpen {
+		c.tabMenuOpen = false
+		return true
+	}
+	return c.dismissSuggestions(gtx)
+}
+
+// closeConsoleModal hides the console and releases what only a visible console
+// needs. The console itself, and everything the user typed into it, stays.
+//
+// The traffic ticker is not stopped here: it stops itself on its next tick,
+// which is when it re-reads trafficViewVisible. Reaching in to stop it from
+// this goroutine would race the goroutine that owns it.
+func (w *Window) closeConsoleModal() {
+	if !w.consoleModalVisible() {
+		return
+	}
+	w.consoleModal.visible.Store(false)
+	w.consoleModal.closeInnerSurfaces()
+	w.consoleModal.unsubscribeConsoleEvents()
+	w.invalidate()
+}
+
+// closeInnerSurfaces puts away everything open INSIDE the console. Nothing
+// open inside it survives its close: the More menu came back over a tab the
+// user had not chosen, and the completion popup came back over a command they
+// had stopped typing.
+//
+// What the user TYPED is not an open surface and stays, like the command
+// history does.
+func (c *consoleModal) closeInnerSurfaces() {
+	c.tabMenuOpen = false
+	c.restoreTypedQuery()
+	c.hideSuggestionsUntilRetyped()
+}
+
+// shutdown releases what outlives every close: the temp files holding command
+// output too large to display. They live exactly as long as the entries that
+// point at them, and those now live as long as the process.
+func (c *consoleModal) shutdown() {
+	c.unsubscribeConsoleEvents()
+	c.overflow.removeAll()
+}
+
+// closeOverlaysForModal dismisses whatever else is open before a modal takes
+// over the window. Mirrors the block in openIdentityPanel.
+func (w *Window) closeOverlaysForModal(gtx layout.Context) {
+	w.showLanguageMenu = false
+	w.contextMenuPeer = domain.PeerIdentity{}
+	w.showDeleteConfirm = false
+	w.showClearChatConfirm = false
+	w.showAliasEditor = false
+	w.msgContextMsg = nil
+	// The emoji picker is non-modal and would otherwise stay open, and live,
+	// under a modal that covers it. Through its own close, not by clearing the
+	// flag: that path also drops the search query and the grid offset, and
+	// settles what it owes the on-screen keyboard. Clearing the flag alone
+	// reopened the picker filtered by a query the user had forgotten typing.
+	w.closeEmojiPicker(gtx)
+	w.peerMenuFocus.abandonRestore()
+	w.msgMenuFocus.abandonRestore()
+	w.closeIdentityPanel()
+}
+
+// layoutConsoleOverlay draws the console modal.
+func (w *Window) layoutConsoleOverlay(gtx layout.Context) layout.Dimensions {
+	console := w.consoleModal
+	console.handleCloseButton(gtx)
+	return w.kit().Modal(gtx, ui.Modal{
+		Title:        w.t("console.title"),
+		CloseHint:    w.t("console.close"),
+		Close:        &console.closeButton,
+		DismissTag:   &console.dismissTag,
+		Dismiss:      w.closeConsoleModal,
+		CornerRadius: unit.Dp(ui.ModalCardRadiusDp),
+		Sizing:       ui.ModalSizingInset,
+		Compact:      w.isCompactLayout(gtx),
+		Content:      keyboardTailOwner(&w.touchKbd, console.layoutContent),
+	})
+}
+
+// handleCloseButton drains the header close button.
+//
+// It runs BEFORE the shell lays that button out, and the order is the whole
+// point: Clickable.Layout drains the click queue itself, so a drain that comes
+// after it — from layoutContent, say, which the shell reaches only after the
+// header — finds nothing and the button does nothing. That is what broke it
+// for mouse, touch and Enter alike.
+//
+// It lives here rather than in Window.handleActions because that function
+// stops at its first lines while the modal is open: reading a background
+// widget's clicks is what makes it Tab-reachable, and the window's controls
+// must not be.
+func (c *consoleModal) handleCloseButton(gtx layout.Context) {
+	for c.closeButton.Clicked(gtx) {
+		c.parent.closeConsoleModal()
+	}
+}
+
+// theme is the parent window's theme. The console used to build its own,
+// because it ran on its own goroutine and Gio's text shaper is not safe to
+// share across them. A modal is laid out by the window's own event loop, so
+// that reason is gone and a second shaper would only mean a second font cache
+// and two sets of measurements for the same strings.
+func (c *consoleModal) theme() *material.Theme {
+	return c.parent.theme
+}
+
+// touchDrivenInput reports whether the most recent press came from a finger,
+// recently enough to act on. The presses themselves are recorded by the parent
+// window's cursor tracker — the console no longer has a window to track them in.
+func (c *consoleModal) touchDrivenInput(gtx layout.Context) bool {
+	return c.parent.touchDrivenInput(gtx)
+}
+
+// layoutContent fills the modal shell's card below the header: the tab strip
+// and the active tab.
+//
+// The title and the close button are the shell's (modal_shell.go), and so is
+// the card padding — which is why the 4/6dp window margin this used to apply
+// is gone.
+func (c *consoleModal) layoutContent(gtx layout.Context) layout.Dimensions {
+	c.claimFocus(gtx)
+	c.handleEscape(gtx)
 	c.handleActions(gtx)
-	fill(gtx, colorBackground())
-	// Tight outer margin matching the main window (window.go layout:
-	// Top/Bottom 4dp, Left/Right 6dp) so the content frame sits a few
-	// pixels from the window edge rather than the previous wide 24dp
-	// border.
-	c.touchKbd.trackEditorFocus(gtx, gtx.Focused(&c.consoleEditor))
-
-	// Same as the main window: publish what this frame measures at its end,
-	// while keyboardYieldingChrome below reads what the previous frame left.
-	defer c.touchKbd.endTailFrame(gtx)
+	c.parent.touchKbd.trackEditorFocus(gtx, gtx.Focused(&c.consoleEditor))
 
 	// Same shape as the main window: the keyboard inset goes on the tab
-	// content rather than on this padding, and the tab strip with its
+	// content rather than on the card padding, and the tab strip with its
 	// spacer yields when the free strip cannot hold them and an input row
 	// both. The console leans on the yield even harder than the composer
 	// does — layoutConsoleTab puts the input at the TOP of the tab, so
@@ -394,59 +591,52 @@ func (c *ConsoleWindow) layout(gtx layout.Context) layout.Dimensions {
 	// above it is the only thing that raises it at all. The inset still
 	// earns its place there by keeping the history below the input out from
 	// under the keyboard.
-	inset := layout.Inset{
-		Top:    unit.Dp(4),
-		Bottom: unit.Dp(4),
-		Left:   unit.Dp(6),
-		Right:  unit.Dp(6),
-	}
-	return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return keyboardYieldingChrome(gtx, &c.touchKbd, func(gtx layout.Context) layout.Dimensions {
-					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-						layout.Rigid(c.layoutTabs),
-						layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-					)
-				})
-			}),
-			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-				return layout.Inset{
-					Bottom: keyboardInsetDp(gtx, &c.touchKbd),
-				}.Layout(gtx, c.layoutActiveTab)
-			}),
-		)
-	})
+	strip := consoleTabStripFor(c.parent.isCompactLayout(gtx), c.currentTab())
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return keyboardYieldingChrome(gtx, &c.parent.touchKbd, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(c.layoutTabs),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
+				)
+			})
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			content := layout.Inset{
+				Bottom: keyboardInsetDp(gtx, &c.parent.touchKbd),
+			}
+			// The open More menu hangs over the tab below it rather than
+			// pushing it down: a menu that reflowed the tab would move the
+			// console input out from under the finger that opened it.
+			menuOpen := c.tabMenuOpen && len(strip.Menu) > 0
+			return layout.Stack{Alignment: layout.NW}.Layout(gtx,
+				layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+					return content.Layout(gtx, c.layoutActiveTab)
+				}),
+				layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+					if !menuOpen {
+						return layout.Dimensions{}
+					}
+					return c.layoutTabMenuDismissLayer(gtx)
+				}),
+				layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+					if !menuOpen {
+						return layout.Dimensions{}
+					}
+					return c.layoutTabMenu(gtx, strip)
+				}),
+			)
+		}),
+	)
 }
 
-func colorBackground() color.NRGBA {
-	return color.NRGBA{R: 12, G: 15, B: 20, A: 255}
-}
-
-func (c *ConsoleWindow) handleActions(gtx layout.Context) {
+func (c *consoleModal) handleActions(gtx layout.Context) {
 	c.syncSuggestionVisibility()
 	c.syncHistoryNavigation()
 	suggestions := c.consoleSuggestions()
 
-	for c.consoleTabButton.Clicked(gtx) {
-		atomic.StoreInt32(&c.activeTab, int32(consoleTabConsole))
-	}
-	for c.peersTabButton.Clicked(gtx) {
-		atomic.StoreInt32(&c.activeTab, int32(consoleTabPeers))
-	}
-	for c.trafficTabButton.Clicked(gtx) {
-		atomic.StoreInt32(&c.activeTab, int32(consoleTabTraffic))
-		c.startTrafficTicker()
-	}
-	for c.fileTabButton.Clicked(gtx) {
-		atomic.StoreInt32(&c.activeTab, int32(consoleTabFile))
-	}
-	for c.infoTabButton.Clicked(gtx) {
-		atomic.StoreInt32(&c.activeTab, int32(consoleTabInfo))
-	}
-	for c.donateTabButton.Clicked(gtx) {
-		atomic.StoreInt32(&c.activeTab, int32(consoleTabDonate))
-	}
+	c.handleTabActions(gtx, c.parent.isCompactLayout(gtx))
+
 	for c.donateLinkButton.Clicked(gtx) {
 		go func() {
 			_ = openExternalURL(consoleDonateURL)
@@ -467,7 +657,7 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 			// keyboard-driven picks (Tab/Enter/Escape/RightArrow) reach
 			// applySuggestion & co. through key handlers.
 			if pointerClickedThisFrame(btn, gtx) && c.touchDrivenInput(gtx) {
-				showTouchKeyboard(&c.touchKbd)
+				showTouchKeyboard(&c.parent.touchKbd)
 			}
 		}
 	}
@@ -477,7 +667,6 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameDownArrow},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameUpArrow},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameRightArrow},
-			key.Filter{Focus: &c.consoleEditor, Name: key.NameEscape},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameTab},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameEnter},
 			key.Filter{Focus: &c.consoleEditor, Name: key.NameReturn},
@@ -508,10 +697,6 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 			if c.commitSuggestionForArguments(gtx, suggestions) {
 				continue
 			}
-		case key.NameEscape:
-			if c.cancelSuggestions(gtx) {
-				continue
-			}
 		case key.NameTab:
 			if c.applySelectedSuggestion(gtx, suggestions, true) {
 				continue
@@ -529,56 +714,353 @@ func (c *ConsoleWindow) handleActions(gtx layout.Context) {
 	}
 }
 
-func (c *ConsoleWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.consoleTabButton, c.currentTab() == consoleTabConsole, c.parent.t("console.tab.console"))
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.peersTabButton, c.currentTab() == consoleTabPeers, c.parent.t("console.tab.peers"))
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.trafficTabButton, c.currentTab() == consoleTabTraffic, c.parent.t("console.tab.traffic"))
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.fileTabButton, c.currentTab() == consoleTabFile, c.parent.t("console.tab.file"))
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.infoTabButton, c.currentTab() == consoleTabInfo, c.parent.t("console.tab.info"))
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return c.layoutTabButton(gtx, &c.donateTabButton, c.currentTab() == consoleTabDonate, c.parent.t("console.tab.donate"))
-		}),
-	)
+// handleEscape applies Escape to the console: back out of the completion popup
+// or the More menu first, close the modal once neither is open.
+//
+// The filter carries no Focus target, for the same reason readMenuNavKeys does
+// not: Escape has to reach the console wherever focus happens to sit, which is
+// the command line most of the time but a Copy button or a file action after a
+// Tab.
+func (c *consoleModal) handleEscape(gtx layout.Context) {
+	for {
+		ev, ok := gtx.Event(key.Filter{Name: key.NameEscape})
+		if !ok {
+			return
+		}
+		ke, ok := ev.(key.Event)
+		if !ok || ke.State != key.Press {
+			continue
+		}
+		c.parent.escapeConsoleModal(gtx)
+	}
 }
 
-func (c *ConsoleWindow) layoutTabButton(gtx layout.Context, clickable *widget.Clickable, active bool, labelText string) layout.Dimensions {
-	return material.Clickable(gtx, clickable, func(gtx layout.Context) layout.Dimensions {
-		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
-		fg := color.NRGBA{R: 220, G: 228, B: 240, A: 255}
-		if active {
-			bg = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
-			fg = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+// consoleTabOrder is the tabs left to right. It is the single list every part
+// of the tab machinery walks — the strip, the More menu and the click
+// handlers — so a tab can never be drawn somewhere it cannot be clicked.
+func consoleTabOrder() []consoleTab {
+	return []consoleTab{
+		consoleTabConsole,
+		consoleTabPeers,
+		consoleTabTraffic,
+		consoleTabFile,
+		consoleTabInfo,
+		consoleTabDonate,
+	}
+}
+
+var consoleTabLabelKeys = map[consoleTab]string{
+	consoleTabConsole: "console.tab.console",
+	consoleTabPeers:   "console.tab.peers",
+	consoleTabTraffic: "console.tab.traffic",
+	consoleTabFile:    "console.tab.file",
+	consoleTabInfo:    "console.tab.info",
+	consoleTabDonate:  "console.tab.donate",
+}
+
+func (c *consoleModal) tabLabel(tab consoleTab) string {
+	return c.parent.t(consoleTabLabelKeys[tab])
+}
+
+// tabButton returns one tab's Clickable, creating it on first use. The tabs
+// are a fixed set, so the map never grows past six entries and needs no
+// pruning.
+func (c *consoleModal) tabButton(tab consoleTab) *widget.Clickable {
+	if c.tabButtons == nil {
+		c.tabButtons = make(map[consoleTab]*widget.Clickable, len(consoleTabOrder()))
+	}
+	if button, ok := c.tabButtons[tab]; ok {
+		return button
+	}
+	button := new(widget.Clickable)
+	c.tabButtons[tab] = button
+	return button
+}
+
+// consoleTabStrip is what the tab strip shows at one width.
+type consoleTabStrip struct {
+	// Visible are the tabs with a button of their own, left to right.
+	Visible []consoleTab
+	// Menu are the tabs folded behind the "More" button, empty when they all
+	// fit on the strip.
+	Menu []consoleTab
+	// MenuActive is the folded tab that is currently selected and
+	// MenuHasActive whether there is one. When there is, its name labels the
+	// More button, so the strip still says where the user is instead of
+	// showing four unselected tabs and a menu.
+	//
+	// The two fields are separate because consoleTab zero is a real tab
+	// (Console) and cannot double as "none".
+	MenuActive    consoleTab
+	MenuHasActive bool
+}
+
+// consoleTabStripFor decides how many tabs the strip can show. Six of them
+// need about 700dp and a phone has 360—420, so below the breakpoint the tail
+// folds into a menu rather than running off the edge of the screen, which is
+// what it used to do.
+func consoleTabStripFor(compact bool, active consoleTab) consoleTabStrip {
+	all := consoleTabOrder()
+	if !compact {
+		return consoleTabStrip{Visible: all}
+	}
+
+	strip := consoleTabStrip{
+		Visible: all[:consoleVisibleTabs],
+		Menu:    all[consoleVisibleTabs:],
+	}
+	for _, tab := range strip.Menu {
+		if tab == active {
+			strip.MenuActive = tab
+			strip.MenuHasActive = true
+			break
 		}
-		fill(gtx, bg)
-		return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(16), Right: unit.Dp(16)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Body1(c.theme, labelText)
-			label.Color = fg
-			label.Font.Weight = 600
-			return label.Layout(gtx)
+	}
+	return strip
+}
+
+// selectTab switches tabs and puts the More menu away — a tab picked from the
+// menu is the menu's job done.
+func (c *consoleModal) selectTab(tab consoleTab) {
+	previous := c.currentTab()
+	atomic.StoreInt32(&c.activeTab, int32(tab))
+	c.tabMenuOpen = false
+	// Leaving or entering the Console tab takes the command line out of the
+	// frame or puts it back, and focus has to move with it — see focusTarget.
+	if (previous == consoleTabConsole) != (tab == consoleTabConsole) {
+		c.focusPending = true
+	}
+	if tab == consoleTabTraffic {
+		c.startTrafficTicker()
+	}
+}
+
+// handleTabActions runs the tab strip's click handlers. Every tab is handled,
+// including the ones the compact strip has folded away: their buttons are laid
+// out by the More menu, and a Clickable whose clicks nobody drains keeps them
+// queued for whenever it is next asked.
+func (c *consoleModal) handleTabActions(gtx layout.Context, compact bool) {
+	for _, tab := range consoleTabOrder() {
+		for c.tabButton(tab).Clicked(gtx) {
+			c.selectTab(tab)
+		}
+	}
+	for c.tabMenuButton.Clicked(gtx) {
+		c.tabMenuOpen = !c.tabMenuOpen
+	}
+	// A window widened past the breakpoint puts every tab back on the strip,
+	// and the menu button goes with them.
+	if !compact {
+		c.tabMenuOpen = false
+	}
+	if c.focusPending {
+		// claimFocus already ran this frame, with the old tab. The frame that
+		// will act on the move has to be asked for: a focus DROP is a state
+		// change, not an event anybody filters for, so a tab switched by
+		// keyboard would otherwise leave focus on nothing until the user
+		// produced some unrelated input.
+		gtx.Execute(op.InvalidateCmd{})
+	}
+}
+
+// layoutTabs draws the strip and records where the "More" slot ended up, so
+// the dropdown can hang directly under it.
+//
+// The row is placed by hand rather than by layout.Flex because Flex reports
+// only the total size, and the menu needs the x of one particular child. Doing
+// it here also keeps the pills at their natural width instead of the equal
+// shares a Flexed layout would give them.
+func (c *consoleModal) layoutTabs(gtx layout.Context) layout.Dimensions {
+	strip := consoleTabStripFor(c.parent.isCompactLayout(gtx), c.currentTab())
+	gap := gtx.Dp(unit.Dp(consoleTabGapDp))
+
+	// Each pill is measured at its natural size. The minimum has to be dropped
+	// explicitly: this is laid out as a Rigid child of a vertical Flex, which
+	// passes the container's CROSS-axis minimum straight through, and
+	// material.Clickable sizes itself to the minimum it is given — so every
+	// pill would come out as wide as the whole card.
+	childGtx := gtx
+	childGtx.Constraints.Min = image.Point{}
+
+	x, height := 0, 0
+	place := func(w layout.Widget) {
+		macro := op.Record(gtx.Ops)
+		dims := w(childGtx)
+		call := macro.Stop()
+		offset := op.Offset(image.Pt(x, 0)).Push(gtx.Ops)
+		call.Add(gtx.Ops)
+		offset.Pop()
+		x += dims.Size.X + gap
+		height = max(height, dims.Size.Y)
+	}
+
+	for _, tab := range strip.Visible {
+		place(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutTabButton(gtx, c.tabButton(tab), c.currentTab() == tab, c.tabLabel(tab))
+		})
+	}
+	if len(strip.Menu) > 0 {
+		left := x
+		place(func(gtx layout.Context) layout.Dimensions {
+			return c.layoutTabMenuButton(gtx, strip)
+		})
+		// x has already moved past the slot and its trailing gap.
+		c.tabMenuAnchor = image.Rect(left, 0, x-gap, height)
+	}
+	if x > 0 {
+		x -= gap // the trailing gap belongs to no child
+	}
+	return layout.Dimensions{Size: image.Pt(x, height)}
+}
+
+// layoutTabMenuDismissLayer is the popup's backdrop, scoped to the console
+// card: a press anywhere but on the menu puts it away instead of reaching the
+// tab underneath. The menu itself is Stacked ABOVE this layer, so a press on
+// one of its items still reaches the item.
+//
+// Without it the only ways out of an accidentally opened menu are picking a
+// tab from it or Escape, and the press that would naturally dismiss it — the
+// one aimed at whatever the menu is covering — silently does something else.
+func (c *consoleModal) layoutTabMenuDismissLayer(gtx layout.Context) layout.Dimensions {
+	return c.parent.kit().MenuPopupBackdrop(gtx, &c.tabMenuDismissTag, ui.MenuPopupScrimDim, func() {
+		c.tabMenuOpen = false
+	})
+}
+
+// layoutTabMenuButton draws the "More ∨" slot. It reads as the selected tab
+// when the selection is inside the menu, which is what keeps the strip honest
+// about where the user is.
+func (c *consoleModal) layoutTabMenuButton(gtx layout.Context, strip consoleTabStrip) layout.Dimensions {
+	label := c.parent.t("console.tab.more")
+	if strip.MenuHasActive {
+		label = c.tabLabel(strip.MenuActive)
+	}
+	return c.layoutTabPill(gtx, &c.tabMenuButton, consoleTabPill{
+		Label: label,
+		// A real chevron glyph from the icon set, not the "∨" character the
+		// first cut used. That character is a mathematical operator: it sits
+		// on the text baseline at text size, so it rendered larger and higher
+		// than the design's 16dp icon and made the slot taller than the tabs
+		// beside it.
+		Icon:   c.parent.chevronDownIcon,
+		Active: strip.MenuHasActive,
+	})
+}
+
+// layoutTabMenu draws the open More menu: a panel of the folded tabs hanging
+// under the slot that opened it, over the tab content rather than pushing it
+// down — a menu that reflowed the tab would move the console input out from
+// under the finger that just opened it.
+//
+// It is laid out into the FULL content area and positions itself with an
+// offset, because the panel has to line up with a button in a different part
+// of the tree (the anchor recorded by layoutTabs) and to be free to hang past
+// the bottom of anything it is nested in.
+func (c *consoleModal) layoutTabMenu(gtx layout.Context, strip consoleTabStrip) layout.Dimensions {
+	macro := op.Record(gtx.Ops)
+	dims := c.layoutTabMenuPanel(gtx, strip)
+	panel := macro.Stop()
+
+	// Right-aligned with the slot that opened it, as the design has it: the
+	// "More" slot is the LAST thing on the strip, so aligning its left edge
+	// pushes the card off the card's own right edge as soon as the menu is
+	// wider than the slot.
+	x := ui.MenuPopupAnchorX(c.tabMenuAnchor.Max.X-dims.Size.X, dims.Size.X, gtx.Constraints.Max.X)
+	offset := op.Offset(image.Pt(x, 0)).Push(gtx.Ops)
+	panel.Add(gtx.Ops)
+	offset.Pop()
+	return dims
+}
+
+// tabMenuItems turns the folded tabs into popup rows.
+func (c *consoleModal) tabMenuItems(strip consoleTabStrip) []ui.MenuPopupItem {
+	items := make([]ui.MenuPopupItem, 0, len(strip.Menu))
+	for _, tab := range strip.Menu {
+		items = append(items, ui.MenuPopupItem{
+			Label:    c.tabLabel(tab),
+			Button:   c.tabButton(tab),
+			Selected: c.currentTab() == tab,
+		})
+	}
+	return items
+}
+
+// layoutTabMenuPanel is the shared popup card (menu_popup.go), sized to its
+// content: the folded tabs are one word each, and the language menu's fixed
+// 220dp would cover most of a phone-width tab strip.
+func (c *consoleModal) layoutTabMenuPanel(gtx layout.Context, strip consoleTabStrip) layout.Dimensions {
+	gtx.Constraints.Min = image.Point{}
+	return c.parent.kit().MenuPopupCard(gtx, ui.MenuPopup{
+		Items:  c.tabMenuItems(strip),
+		Scroll: &c.tabMenuList,
+		Width:  ui.MenuPopupWidthFit,
+	})
+}
+
+// consoleTabPill describes one pill on the tab strip.
+type consoleTabPill struct {
+	// Label is the tab's name.
+	Label string
+	// Icon trails the label; nil on a plain tab. Only the "More" slot has one.
+	Icon *widget.Icon
+	// Active paints the pill as the selected tab.
+	Active bool
+}
+
+func (c *consoleModal) layoutTabButton(gtx layout.Context, clickable *widget.Clickable, active bool, labelText string) layout.Dimensions {
+	return c.layoutTabPill(gtx, clickable, consoleTabPill{Label: labelText, Active: active})
+}
+
+func (c *consoleModal) layoutTabPill(gtx layout.Context, clickable *widget.Clickable, pill consoleTabPill) layout.Dimensions {
+	fg := color.NRGBA{R: 0xdc, G: 0xe4, B: 0xf0, A: 255}
+	if pill.Active {
+		fg = ui.ChipActiveLabel()
+	}
+
+	// The design gives the icon slot 1dp less horizontal padding than a plain
+	// tab, so the two come out the same visual weight despite the glyph's own
+	// side bearings.
+	padX := unit.Dp(consoleTabPaddingXDp)
+	if pill.Icon != nil {
+		padX = unit.Dp(consoleTabIconPaddingXDp)
+	}
+
+	return c.parent.kit().Chip(gtx, clickable, ui.ChipFill(pill.Active), unit.Dp(consoleTabRadiusDp), func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{
+			Top: unit.Dp(consoleTabPaddingYDp), Bottom: unit.Dp(consoleTabPaddingYDp),
+			Left: padX, Right: padX,
+		}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			text := layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := material.Label(c.theme(), unit.Sp(consoleTabTextSp), pill.Label)
+				label.Color = fg
+				label.Font.Weight = 600
+				label.MaxLines = 1
+				return label.Layout(gtx)
+			})
+			if pill.Icon == nil {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, text)
+			}
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				text,
+				layout.Rigid(layout.Spacer{Width: unit.Dp(consoleTabIconGapDp)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return ui.Icon(gtx, pill.Icon, unit.Dp(consoleTabIconDp), fg)
+				}),
+			)
 		})
 	})
 }
 
-func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
-	// Capture the full snapshot (not just NodeStatus): the peers/info tabs
-	// key their per-frame derived-data cache on snap.Generation.
-	snap := c.parent.router.Snapshot()
+func (c *consoleModal) layoutActiveTab(gtx layout.Context) layout.Dimensions {
+	// The full snapshot, not just NodeStatus: the peers/info tabs key their
+	// per-frame derived-data cache on snap.Generation.
+	//
+	// It comes from the parent rather than from the router directly. The
+	// console used to be its own window with its own frame loop and had to ask
+	// for its own; drawn inside the main window's frame it must see the SAME
+	// snapshot as everything else in that frame, or the console can show a peer
+	// count one generation ahead of the contact list beside it.
+	snap := c.parent.snap
 	switch c.currentTab() {
 	case consoleTabPeers:
 		return c.layoutPeersTab(gtx, snap)
@@ -595,7 +1077,7 @@ func (c *ConsoleWindow) layoutActiveTab(gtx layout.Context) layout.Dimensions {
 	}
 }
 
-func (c *ConsoleWindow) infoRows(snap service.RouterSnapshot) []string {
+func (c *consoleModal) infoRows(snap service.RouterSnapshot) []string {
 	status := snap.NodeStatus
 	// Both counters consume the full NodeStatus: orphan CaptureSessions count
 	// as connected/known peers during the capture-start race, matching the
@@ -650,23 +1132,23 @@ func (c *ConsoleWindow) infoRows(snap service.RouterSnapshot) []string {
 	return rows
 }
 
-func (c *ConsoleWindow) layoutInfoTab(gtx layout.Context, snap service.RouterSnapshot) layout.Dimensions {
+func (c *consoleModal) layoutInfoTab(gtx layout.Context, snap service.RouterSnapshot) layout.Dimensions {
 	return c.card(gtx, c.parent.t("console.info_title"), c.infoRows(snap))
 }
 
-func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutDonateTab(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 		// 8dp panel padding matching the main window cards (window.go card).
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.donate_title"))
+			title := material.Label(c.theme(), unit.Sp(20), c.parent.t("console.donate_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(title.Layout),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					list := material.List(c.theme, &c.donateList)
+					list := material.List(c.theme(), &c.donateList)
 					return list.Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
 						return c.layoutDonateSection(gtx)
 					})
@@ -676,7 +1158,7 @@ func (c *ConsoleWindow) layoutDonateTab(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, snap service.RouterSnapshot) layout.Dimensions {
+func (c *consoleModal) layoutPeersTab(gtx layout.Context, snap service.RouterSnapshot) layout.Dimensions {
 	status := snap.NodeStatus
 	// activeRowsForTab merges orphan CaptureSessions into the active-peer
 	// set so the empty-state gate, summary, and section renderer all agree
@@ -704,13 +1186,13 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, snap service.RouterSn
 	}
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 		// 8dp panel padding matching the main window cards (window.go card).
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			title := material.Label(c.theme, unit.Sp(20), c.parent.t("console.peers_title"))
+			title := material.Label(c.theme(), unit.Sp(20), c.parent.t("console.peers_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
-			summary := material.Body1(c.theme, activePeerSummary(c.parent, activePeers))
+			summary := material.Body1(c.theme(), activePeerSummary(c.parent, activePeers))
 			summary.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -724,7 +1206,7 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, snap service.RouterSn
 				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					if len(activePeers) == 0 {
-						label := material.Body1(c.theme, c.parent.t("console.peers_empty"))
+						label := material.Body1(c.theme(), c.parent.t("console.peers_empty"))
 						label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 						return label.Layout(gtx)
 					}
@@ -735,21 +1217,23 @@ func (c *ConsoleWindow) layoutPeersTab(gtx layout.Context, snap service.RouterSn
 	})
 }
 
-func (c *ConsoleWindow) layoutConsoleTab(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutConsoleTab(gtx layout.Context) layout.Dimensions {
 	rows := []string{
 		c.parent.t("console.help"),
 	}
-	title := c.parent.t("console.title")
+	// No title on this card: the modal shell's header already says "Console"
+	// directly above it, and the tab strip in between names the tab.
+	const title = ""
 
 	// The console input is the FIRST row of this card, so what the keyboard
 	// must not cover is everything from the card's top down through it: the
-	// title and the help line push the input down exactly as a header would.
-	// They are not reachable as a widget from here — card builds them around
-	// whatever content it is handed — so they are measured by laying the same
-	// card out around nothing. That also counts the card's own bottom padding
-	// and the gap it puts before its content, over-stating the tail by those
-	// few dp, in the direction that retires the tab strip slightly early.
-	keyboardMeasureTail(gtx, &c.touchKbd, func(gtx layout.Context) layout.Dimensions {
+	// help line pushes the input down exactly as a header would. It is not
+	// reachable as a widget from here — card builds it around whatever content
+	// it is handed — so it is measured by laying the same card out around
+	// nothing. That also counts the card's own bottom padding and the gap it
+	// puts before its content, over-stating the tail by those few dp, in the
+	// direction that retires the tab strip slightly early.
+	keyboardMeasureTail(gtx, &c.parent.touchKbd, func(gtx layout.Context) layout.Dimensions {
 		return c.card(gtx, title, rows, func(layout.Context) layout.Dimensions {
 			return layout.Dimensions{}
 		})
@@ -761,7 +1245,7 @@ func (c *ConsoleWindow) layoutConsoleTab(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					// The history below scrolls and may shrink to nothing;
 					// this row may not.
-					layout.Rigid(keyboardTailRow(&c.touchKbd, c.layoutConsoleInput)),
+					layout.Rigid(keyboardTailRow(&c.parent.touchKbd, c.layoutConsoleInput)),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 					layout.Flexed(1, c.layoutConsoleHistory),
 				)
@@ -780,10 +1264,10 @@ func (c *ConsoleWindow) layoutConsoleTab(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-func (c *ConsoleWindow) layoutConsoleInput(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutConsoleInput(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			label := material.Body2(c.theme, c.parent.t("console.input_label"))
+			label := material.Body2(c.theme(), c.parent.t("console.input_label"))
 			label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
 			return label.Layout(gtx)
 		}),
@@ -798,14 +1282,14 @@ func (c *ConsoleWindow) layoutConsoleInput(gtx layout.Context) layout.Dimensions
 						layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 							gtx.Constraints.Min.Y = height
 							gtx.Constraints.Max.Y = height
-							fill(gtx, borderColor)
+							ui.Fill(gtx, borderColor)
 							return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								fill(gtx, backgroundColor)
+								ui.Fill(gtx, backgroundColor)
 								return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									editor := material.Editor(c.theme, &c.consoleEditor, c.parent.t("console.placeholder"))
+									editor := material.Editor(c.theme(), &c.consoleEditor, c.parent.t("console.placeholder"))
 									editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
 									editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
-									return editorTouchKeyboardArea(gtx, &c.touchKbdTag, &c.touchKbd, editor.Layout)
+									return editorTouchKeyboardArea(gtx, &c.touchKbdTag, &c.parent.touchKbd, editor.Layout)
 								})
 							})
 						}),
@@ -817,7 +1301,7 @@ func (c *ConsoleWindow) layoutConsoleInput(gtx layout.Context) layout.Dimensions
 					if c.isConsoleBusy() {
 						label = c.parent.t("console.running")
 					}
-					btn := material.Button(c.theme, &c.runButton, label)
+					btn := material.Button(c.theme(), &c.runButton, label)
 					if c.isConsoleBusy() {
 						btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
 					}
@@ -828,40 +1312,40 @@ func (c *ConsoleWindow) layoutConsoleInput(gtx layout.Context) layout.Dimensions
 	)
 }
 
-func (c *ConsoleWindow) layoutConsoleSuggestions(gtx layout.Context, suggestions []consoleSuggestion) layout.Dimensions {
+func (c *consoleModal) layoutConsoleSuggestions(gtx layout.Context, suggestions []consoleSuggestion) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		headerHeight := gtx.Dp(unit.Dp(28))
-		headerGap := gtx.Dp(unit.Dp(8))
-		itemHeight := gtx.Dp(unit.Dp(62))
-		visibleItems := len(suggestions)
-		if visibleItems > maxVisibleSuggestions {
-			visibleItems = maxVisibleSuggestions
-		}
-		listHeight := visibleItems * itemHeight
-		totalHeight := headerHeight + headerGap + listHeight + gtx.Dp(unit.Dp(20))
-
+		// The panel is as tall as its rows and no taller — it used to reserve
+		// a fixed 62dp per row, and a row is nowhere near that, so the card
+		// ended in a slab of empty background.
+		//
+		// The rows go in a scrolling List all the same. Hugging alone is not
+		// enough: on a short window, or with the on-screen keyboard up, the
+		// rows past the fold would be laid out at zero height while arrow
+		// navigation went on counting them — the user could select, and run, a
+		// command they could not see.
 		macro := op.Record(gtx.Ops)
 		dims := layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Min.Y = totalHeight
-			gtx.Constraints.Max.Y = totalHeight
+			gtx.Constraints.Min.Y = 0
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Caption(c.theme, c.parent.t("console.suggestions_hint"))
+					label := material.Caption(c.theme(), c.parent.t("console.suggestions_hint"))
 					label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
 					return label.Layout(gtx)
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					gtx.Constraints.Min.Y = listHeight
-					gtx.Constraints.Max.Y = listHeight
-					return c.suggestList.Layout(gtx, len(suggestions), func(gtx layout.Context, index int) layout.Dimensions {
-						item := suggestions[index]
+					list := material.List(c.theme(), &c.suggestList)
+					// Overlay for the same reason the popup menu uses it: the
+					// reserved gutter of Gio's default takes its width out of
+					// the rows and leaves the card visibly lopsided.
+					list.AnchorStrategy = material.Overlay
+					return list.Layout(gtx, len(suggestions), func(gtx layout.Context, index int) layout.Dimensions {
 						top := unit.Dp(0)
 						if index > 0 {
 							top = unit.Dp(6)
 						}
 						return layout.Inset{Top: top}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							return c.layoutConsoleSuggestionItem(gtx, item.Label, index == c.selectedSuggest)
+							return c.layoutConsoleSuggestionItem(gtx, suggestions[index].Label, index == c.selectedSuggest)
 						})
 					})
 				}),
@@ -876,23 +1360,23 @@ func (c *ConsoleWindow) layoutConsoleSuggestions(gtx layout.Context, suggestions
 	})
 }
 
-func (c *ConsoleWindow) layoutConsoleSuggestionItem(gtx layout.Context, command string, selected bool) layout.Dimensions {
+func (c *consoleModal) layoutConsoleSuggestionItem(gtx layout.Context, command string, selected bool) layout.Dimensions {
 	btn := c.suggestionButton(command)
 	return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
 		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
 		if selected {
 			bg = color.NRGBA{R: 57, G: 98, B: 170, A: 255}
 		}
-		fill(gtx, bg)
+		ui.Fill(gtx, bg)
 		return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(12), Right: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Body2(c.theme, command)
+			label := material.Body2(c.theme(), command)
 			label.Color = color.NRGBA{R: 231, G: 237, B: 246, A: 255}
 			return label.Layout(gtx)
 		})
 	})
 }
 
-func (c *ConsoleWindow) layoutConsoleHistory(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutConsoleHistory(gtx layout.Context) layout.Dimensions {
 	entries := c.consoleHistory()
 	return c.historyList.Layout(gtx, len(entries), func(gtx layout.Context, index int) layout.Dimensions {
 		entry := entries[index]
@@ -906,9 +1390,9 @@ func (c *ConsoleWindow) layoutConsoleHistory(gtx layout.Context) layout.Dimensio
 	})
 }
 
-func (c *ConsoleWindow) layoutConsoleHistoryCard(gtx layout.Context, entry *consoleEntry) layout.Dimensions {
+func (c *consoleModal) layoutConsoleHistoryCard(gtx layout.Context, entry *consoleEntry) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
 		return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			for entry.CopyButton.Clicked(gtx) {
 				// Copy hands over the COMPLETE output: the display text was
@@ -922,14 +1406,14 @@ func (c *ConsoleWindow) layoutConsoleHistoryCard(gtx layout.Context, entry *cons
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							command := material.Body1(c.theme, "> "+entry.Command)
+							command := material.Body1(c.theme(), "> "+entry.Command)
 							command.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 							command.Font.Weight = 600
 							return command.Layout(gtx)
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							btn := material.Button(c.theme, &entry.CopyButton, c.parent.t("console.copy"))
+							btn := material.Button(c.theme(), &entry.CopyButton, c.parent.t("console.copy"))
 							btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
 							return btn.Layout(gtx)
 						}),
@@ -937,7 +1421,7 @@ func (c *ConsoleWindow) layoutConsoleHistoryCard(gtx layout.Context, entry *cons
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Body2(c.theme, entry.CreatedAt.Format("2006-01-02 15:04:05"))
+					label := material.Body2(c.theme(), entry.CreatedAt.Format("2006-01-02 15:04:05"))
 					label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
 					return label.Layout(gtx)
 				}),
@@ -950,7 +1434,7 @@ func (c *ConsoleWindow) layoutConsoleHistoryCard(gtx layout.Context, entry *cons
 	})
 }
 
-func (c *ConsoleWindow) submitConsoleCommand() {
+func (c *consoleModal) submitConsoleCommand() {
 	if c.isConsoleBusy() {
 		return
 	}
@@ -1076,7 +1560,7 @@ func (c *ConsoleWindow) submitConsoleCommand() {
 // command should not push the previous distinct command out of arrow-reach.
 // The ring is capped at maxConsoleCommandHistory; older entries are dropped
 // from the front.
-func (c *ConsoleWindow) appendCommandHistory(cmd string) {
+func (c *consoleModal) appendCommandHistory(cmd string) {
 	if cmd == "" {
 		return
 	}
@@ -1092,7 +1576,7 @@ func (c *ConsoleWindow) appendCommandHistory(cmd string) {
 // resetHistoryNavigation parks the cursor one past the most recent entry, so
 // the next Up arrow starts a fresh walk from the latest command. Called after
 // a successful submit and whenever syncHistoryNavigation detects manual edits.
-func (c *ConsoleWindow) resetHistoryNavigation() {
+func (c *consoleModal) resetHistoryNavigation() {
 	c.historyCursor = len(c.commandHistory)
 	c.historyDraft = ""
 	c.historyText = ""
@@ -1108,7 +1592,7 @@ func (c *ConsoleWindow) resetHistoryNavigation() {
 // otherwise the next frame would treat the inserted command as fresh user
 // input and re-open the suggestion list, which would hijack the next arrow
 // press into completion-navigation instead of continuing through history.
-func (c *ConsoleWindow) navigateHistory(delta int) {
+func (c *consoleModal) navigateHistory(delta int) {
 	end := len(c.commandHistory)
 	if end == 0 {
 		return
@@ -1140,11 +1624,7 @@ func (c *ConsoleWindow) navigateHistory(delta int) {
 	c.consoleEditor.SetCaret(pos, pos)
 	c.historyText = text
 
-	c.hideSuggestions = true
-	c.lastSuggestQuery = strings.TrimSpace(text)
-	c.selectedSuggest = -1
-	c.suggestBaseQuery = ""
-	c.suggestSnapshot = nil
+	c.hideSuggestionsUntilRetyped()
 }
 
 // syncHistoryNavigation drops the history-navigation state when the editor
@@ -1152,7 +1632,7 @@ func (c *ConsoleWindow) navigateHistory(delta int) {
 // two can diverge is the user typing into the editor mid-browse, which means
 // they have committed to that text as their new draft and the next Up should
 // snapshot it fresh.
-func (c *ConsoleWindow) syncHistoryNavigation() {
+func (c *consoleModal) syncHistoryNavigation() {
 	if c.historyCursor >= len(c.commandHistory) {
 		return
 	}
@@ -1166,7 +1646,7 @@ func (c *ConsoleWindow) syncHistoryNavigation() {
 // Peers tab uptime counter. Only one timer goroutine is in flight at a
 // time — the atomic flag prevents unbounded goroutine spawning when
 // layoutPeersTab runs at 60 fps while peers are connected.
-func (c *ConsoleWindow) scheduleUptimeInvalidate() {
+func (c *consoleModal) scheduleUptimeInvalidate() {
 	if !atomic.CompareAndSwapInt32(&c.uptimeInvalidating, 0, 1) {
 		return
 	}
@@ -1177,43 +1657,34 @@ func (c *ConsoleWindow) scheduleUptimeInvalidate() {
 	}()
 }
 
-// invalidateWindow safely invalidates the console window from any goroutine.
-// It checks the closed channel first (non-blocking) — once closed, the native
-// window handle is about to be freed, so no Invalidate is attempted.  Then it
-// reads c.window under the mutex and calls Invalidate while still holding the
-// lock so that DestroyEvent cannot nil-out the pointer and free the handle
-// between the read and the call.
-func (c *ConsoleWindow) invalidateWindow() {
-	select {
-	case <-c.closed:
-		return
-	default:
-	}
-	c.mu.RLock()
-	w := c.window
-	if w != nil {
-		w.Invalidate()
-	}
-	c.mu.RUnlock()
+// invalidateWindow asks for a redraw from any goroutine. The console draws
+// into the main window now, so this is the parent's invalidate — which is
+// itself safe to call after shutdown has begun.
+//
+// The name is kept because ~15 call sites and their comments describe the
+// coalescing contract around it, and none of them care which window redraws.
+func (c *consoleModal) invalidateWindow() {
+	c.parent.invalidate()
 }
 
-// subscribeConsoleEvents registers ebus handlers that invalidate the console
-// window when node state changes. Subscription IDs are stored in
-// c.ebusSubscriptions so they can be removed on close via unsubscribeConsoleEvents.
-func (c *ConsoleWindow) subscribeConsoleEvents() {
+// subscribeConsoleEvents registers ebus handlers that redraw the console when
+// node state changes. Subscription IDs are stored in c.ebusSubscriptions so
+// unsubscribeConsoleEvents can remove them when the modal closes: the handlers
+// exist to keep a VISIBLE console current, and a closed one that kept them
+// would pay for every peer event for the rest of the process.
+func (c *consoleModal) subscribeConsoleEvents() {
 	bus := c.parent.eventBus
 	if bus == nil {
 		return
 	}
-
-	invalidate := func() {
-		select {
-		case <-c.closed:
-			return
-		default:
-		}
-		c.invalidateWindow()
+	// Re-subscribing on top of a live set would double every handler. The
+	// modal can be reopened any number of times, so the guard is not
+	// theoretical.
+	if len(c.ebusSubscriptions) > 0 {
+		return
 	}
+
+	invalidate := c.invalidateWindow
 
 	// Peer list and health data changed — affects Peers tab.
 	ids := []ebus.SubscriptionID{
@@ -1257,7 +1728,7 @@ func (c *ConsoleWindow) subscribeConsoleEvents() {
 
 // unsubscribeConsoleEvents removes all ebus handlers registered by
 // subscribeConsoleEvents. Called on window close to prevent handler leak.
-func (c *ConsoleWindow) unsubscribeConsoleEvents() {
+func (c *consoleModal) unsubscribeConsoleEvents() {
 	bus := c.parent.eventBus
 	if bus == nil {
 		return
@@ -1266,19 +1737,19 @@ func (c *ConsoleWindow) unsubscribeConsoleEvents() {
 	c.ebusSubscriptions = nil
 }
 
-func (c *ConsoleWindow) isConsoleBusy() bool {
+func (c *consoleModal) isConsoleBusy() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.consoleBusy
 }
 
-func (c *ConsoleWindow) setConsoleBusy(value bool) {
+func (c *consoleModal) setConsoleBusy(value bool) {
 	c.mu.Lock()
 	c.consoleBusy = value
 	c.mu.Unlock()
 }
 
-func (c *ConsoleWindow) consoleHistory() []*consoleEntry {
+func (c *consoleModal) consoleHistory() []*consoleEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	out := make([]*consoleEntry, 0, len(c.consoleEntries))
@@ -1288,7 +1759,7 @@ func (c *ConsoleWindow) consoleHistory() []*consoleEntry {
 	return out
 }
 
-func (c *ConsoleWindow) suggestionButton(command string) *widget.Clickable {
+func (c *consoleModal) suggestionButton(command string) *widget.Clickable {
 	if btn, ok := c.suggestButtons[command]; ok {
 		return btn
 	}
@@ -1297,7 +1768,14 @@ func (c *ConsoleWindow) suggestionButton(command string) *widget.Clickable {
 	return btn
 }
 
-func (c *ConsoleWindow) consoleSuggestions() []consoleSuggestion {
+func (c *consoleModal) consoleSuggestions() []consoleSuggestion {
+	// The popup is drawn by layoutConsoleTab and nowhere else, so off that tab
+	// it is not showing whatever the state says. Reporting otherwise let a
+	// stale popup swallow the Escape or Back that the user aimed at the modal,
+	// with nothing on screen to explain where the key went.
+	if c.currentTab() != consoleTabConsole {
+		return nil
+	}
 	if len(c.suggestSnapshot) > 0 {
 		return append([]consoleSuggestion(nil), c.suggestSnapshot...)
 	}
@@ -1316,13 +1794,13 @@ func (c *ConsoleWindow) consoleSuggestions() []consoleSuggestion {
 			matches = append(matches, item)
 		}
 	}
-	if len(matches) > 6 {
-		return matches[:6]
+	if len(matches) > maxSuggestions {
+		return matches[:maxSuggestions]
 	}
 	return matches
 }
 
-func (c *ConsoleWindow) syncSuggestionVisibility() {
+func (c *consoleModal) syncSuggestionVisibility() {
 	query := strings.TrimSpace(c.consoleEditor.Text())
 	if query != c.lastSuggestQuery {
 		if len(c.suggestSnapshot) > 0 && query == c.currentSuggestionText() {
@@ -1345,7 +1823,7 @@ func (c *ConsoleWindow) syncSuggestionVisibility() {
 	}
 }
 
-func (c *ConsoleWindow) moveSuggestionSelection(delta int, suggestions []consoleSuggestion) {
+func (c *consoleModal) moveSuggestionSelection(delta int, suggestions []consoleSuggestion) {
 	if len(c.suggestSnapshot) == 0 {
 		c.suggestBaseQuery = strings.TrimSpace(c.consoleEditor.Text())
 		c.suggestSnapshot = c.computeConsoleSuggestions(c.suggestBaseQuery)
@@ -1370,6 +1848,7 @@ func (c *ConsoleWindow) moveSuggestionSelection(delta int, suggestions []console
 			c.selectedSuggest = 0
 		}
 	}
+	c.scrollSuggestionIntoView(len(suggestions))
 	c.consoleEditor.SetText(suggestions[c.selectedSuggest].Insert)
 	pos := len([]rune(suggestions[c.selectedSuggest].Insert))
 	c.consoleEditor.SetCaret(pos, pos)
@@ -1377,7 +1856,7 @@ func (c *ConsoleWindow) moveSuggestionSelection(delta int, suggestions []console
 	c.lastSuggestQuery = strings.TrimSpace(c.consoleEditor.Text())
 }
 
-func (c *ConsoleWindow) applySelectedSuggestion(gtx layout.Context, suggestions []consoleSuggestion, chooseFirst bool) bool {
+func (c *consoleModal) applySelectedSuggestion(gtx layout.Context, suggestions []consoleSuggestion, chooseFirst bool) bool {
 	if len(suggestions) == 0 {
 		return false
 	}
@@ -1391,7 +1870,7 @@ func (c *ConsoleWindow) applySelectedSuggestion(gtx layout.Context, suggestions 
 	return true
 }
 
-func (c *ConsoleWindow) commitSuggestionForArguments(gtx layout.Context, suggestions []consoleSuggestion) bool {
+func (c *consoleModal) commitSuggestionForArguments(gtx layout.Context, suggestions []consoleSuggestion) bool {
 	if len(suggestions) == 0 {
 		return false
 	}
@@ -1409,59 +1888,126 @@ func (c *ConsoleWindow) commitSuggestionForArguments(gtx layout.Context, suggest
 	c.consoleEditor.SetText(item)
 	pos := len([]rune(item))
 	c.consoleEditor.SetCaret(pos, pos)
-	c.hideSuggestions = true
-	c.lastSuggestQuery = strings.TrimSpace(c.consoleEditor.Text())
-	c.selectedSuggest = -1
-	c.suggestBaseQuery = ""
-	c.suggestSnapshot = nil
-	c.touchKbd.noteExplicitEditorFocus()
+	c.hideSuggestionsUntilRetyped()
+	c.parent.touchKbd.noteExplicitEditorFocus()
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
 	c.invalidateWindow()
 	return true
 }
 
-func (c *ConsoleWindow) cancelSuggestions(gtx layout.Context) bool {
-	if len(c.suggestSnapshot) == 0 && !c.hideSuggestions {
+// dismissSuggestions closes the completion popup if it is showing, and reports
+// whether it was.
+//
+// The test is what the user can SEE — consoleSuggestions() being non-empty —
+// and this is the second attempt at it. The first asked whether a frozen
+// snapshot existed or the list had been hidden, which is inside out: an
+// ordinary filtered list has neither, so it answered "nothing to close" and
+// Escape took the whole modal instead; and a list already dismissed by picking
+// from it answered "yes", swallowed the key AND reset the editor to an empty
+// base query, wiping the command the user had typed.
+func (c *consoleModal) dismissSuggestions(gtx layout.Context) bool {
+	if len(c.consoleSuggestions()) == 0 {
 		return false
 	}
 
+	c.restoreTypedQuery()
+	c.hideSuggestionsUntilRetyped()
+	c.parent.touchKbd.noteExplicitEditorFocus()
+	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
+	c.invalidateWindow()
+	return true
+}
+
+// scrollSuggestionIntoView scrolls the completion popup only when the
+// highlighted row is not already on screen.
+//
+// Scrolling unconditionally is what the first cut did, with List.ScrollTo,
+// and it makes the selection the FIRST element — layout.List draws nothing
+// before First, so stepping Down to the second suggestion hid the first, and
+// stepping Up from nothing left a single row on screen. A list that jumps
+// under the user is worse than one that does not move.
+//
+// Position.Count is how many rows the last frame actually drew, so the visible
+// span is [First, First+Count). Zero Count means nothing has been laid out yet
+// and there is nothing to be off-screen from.
+func (c *consoleModal) scrollSuggestionIntoView(total int) {
+	selected := c.selectedSuggest
+	if selected < 0 || total == 0 {
+		return
+	}
+	first, count := c.suggestList.Position.First, c.suggestList.Position.Count
+	if count <= 0 {
+		return
+	}
+	switch {
+	case selected < first:
+		c.suggestList.ScrollTo(selected)
+	case selected >= first+count:
+		// Bring it to the BOTTOM of the visible span, so the rows above it
+		// stay where the user last saw them.
+		c.suggestList.ScrollTo(selected - count + 1)
+	}
+}
+
+// restoreTypedQuery puts back the text the user actually typed.
+//
+// Arrow navigation rewrites the command line with the highlighted suggestion
+// and parks the real input in suggestBaseQuery. Anything that ends that
+// navigation owes the user their own text back — closing the modal mid-walk
+// used to drop it and reopen showing a command they never wrote.
+//
+// A plain filtered list never touched the editor and there is nothing to
+// restore, which is what the snapshot check means.
+func (c *consoleModal) restoreTypedQuery() {
+	if len(c.suggestSnapshot) == 0 {
+		return
+	}
 	base := strings.TrimSpace(c.suggestBaseQuery)
 	c.consoleEditor.SetText(base)
 	pos := len([]rune(base))
 	c.consoleEditor.SetCaret(pos, pos)
-	c.hideSuggestions = true
 	c.lastSuggestQuery = base
+}
+
+// hideSuggestionsUntilRetyped puts the completion popup away and keeps it away
+// until the command line changes.
+//
+// lastSuggestQuery is pinned to the text as it stands because
+// syncSuggestionVisibility un-hides on any query it has not seen; leaving it
+// stale would reopen the popup on the very next frame.
+// Every path that puts the popup away goes through it — Escape, closing the
+// modal, and accepting a suggestion by Tab, click, Enter or Right Arrow. Those
+// last four used to clear the same five fields by hand, which is how the
+// scroll reset added here reached only some of them.
+func (c *consoleModal) hideSuggestionsUntilRetyped() {
+	// The next query is a different list, and it opens at its own first row —
+	// a kept scroll position would open it partway down.
+	c.suggestList.Position = layout.Position{}
+	c.hideSuggestions = true
 	c.selectedSuggest = -1
 	c.suggestBaseQuery = ""
 	c.suggestSnapshot = nil
-	c.touchKbd.noteExplicitEditorFocus()
-	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
-	c.invalidateWindow()
-	return true
+	c.lastSuggestQuery = strings.TrimSpace(c.consoleEditor.Text())
 }
 
-func (c *ConsoleWindow) applySuggestion(gtx layout.Context, item string) {
+func (c *consoleModal) applySuggestion(gtx layout.Context, item string) {
 	c.consoleEditor.SetText(item)
 	pos := len([]rune(item))
 	c.consoleEditor.SetCaret(pos, pos)
-	c.hideSuggestions = true
-	c.lastSuggestQuery = strings.TrimSpace(c.consoleEditor.Text())
-	c.selectedSuggest = -1
-	c.suggestBaseQuery = ""
-	c.suggestSnapshot = nil
-	c.touchKbd.noteExplicitEditorFocus()
+	c.hideSuggestionsUntilRetyped()
+	c.parent.touchKbd.noteExplicitEditorFocus()
 	gtx.Execute(key.FocusCmd{Tag: &c.consoleEditor})
 	c.invalidateWindow()
 }
 
-func (c *ConsoleWindow) currentSuggestionText() string {
+func (c *consoleModal) currentSuggestionText() string {
 	if c.selectedSuggest < 0 || c.selectedSuggest >= len(c.suggestSnapshot) {
 		return ""
 	}
 	return c.suggestSnapshot[c.selectedSuggest].Label
 }
 
-func (c *ConsoleWindow) computeConsoleSuggestions(query string) []consoleSuggestion {
+func (c *consoleModal) computeConsoleSuggestions(query string) []consoleSuggestion {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if c.hideSuggestions || query == "" {
 		return nil
@@ -1473,8 +2019,8 @@ func (c *ConsoleWindow) computeConsoleSuggestions(query string) []consoleSuggest
 			matches = append(matches, item)
 		}
 	}
-	if len(matches) > 6 {
-		return matches[:6]
+	if len(matches) > maxSuggestions {
+		return matches[:maxSuggestions]
 	}
 	return matches
 }
@@ -1503,7 +2049,7 @@ func newConsoleDonateEntries() []consoleDonateEntry {
 	return entries
 }
 
-func (c *ConsoleWindow) layoutSelectableOutput(gtx layout.Context, entry *consoleEntry) layout.Dimensions {
+func (c *consoleModal) layoutSelectableOutput(gtx layout.Context, entry *consoleEntry) layout.Dimensions {
 	textColor := color.NRGBA{R: 208, G: 216, B: 228, A: 255}
 	if entry.Failed {
 		textColor = color.NRGBA{R: 255, G: 168, B: 168, A: 255}
@@ -1518,10 +2064,10 @@ func (c *ConsoleWindow) layoutSelectableOutput(gtx layout.Context, entry *consol
 	selectionMaterial := selectionMacro.Stop()
 
 	entry.OutputText.SetText(entry.Output)
-	return entry.OutputText.Layout(gtx, c.theme.Shaper, font.Font{Typeface: c.theme.Face}, c.theme.TextSize, textMaterial, selectionMaterial)
+	return entry.OutputText.Layout(gtx, c.theme().Shaper, font.Font{Typeface: c.theme().Face}, c.theme().TextSize, textMaterial, selectionMaterial)
 }
 
-func (c *ConsoleWindow) layoutSelectableText(gtx layout.Context, sel *widget.Selectable, text string, textColor color.NRGBA) layout.Dimensions {
+func (c *consoleModal) layoutSelectableText(gtx layout.Context, sel *widget.Selectable, text string, textColor color.NRGBA) layout.Dimensions {
 	textMacro := op.Record(gtx.Ops)
 	paint.ColorOp{Color: textColor}.Add(gtx.Ops)
 	textMaterial := textMacro.Stop()
@@ -1531,20 +2077,20 @@ func (c *ConsoleWindow) layoutSelectableText(gtx layout.Context, sel *widget.Sel
 	selectionMaterial := selectionMacro.Stop()
 
 	sel.SetText(text)
-	return sel.Layout(gtx, c.theme.Shaper, font.Font{Typeface: c.theme.Face}, c.theme.TextSize, textMaterial, selectionMaterial)
+	return sel.Layout(gtx, c.theme().Shaper, font.Font{Typeface: c.theme().Face}, c.theme().TextSize, textMaterial, selectionMaterial)
 }
 
-func (c *ConsoleWindow) layoutDonateSection(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutDonateSection(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		children := []layout.FlexChild{
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				label := material.Body2(c.theme, c.parent.t("console.donate_description"))
+				label := material.Body2(c.theme(), c.parent.t("console.donate_description"))
 				label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 				return label.Layout(gtx)
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				label := material.Body2(c.theme, c.parent.t("console.donate_source"))
+				label := material.Body2(c.theme(), c.parent.t("console.donate_source"))
 				label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
 				return label.Layout(gtx)
 			}),
@@ -1552,7 +2098,7 @@ func (c *ConsoleWindow) layoutDonateSection(gtx layout.Context) layout.Dimension
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return c.donateLinkButton.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					pointer.CursorPointer.Add(gtx.Ops)
-					label := material.Body2(c.theme, consoleDonateURL)
+					label := material.Body2(c.theme(), consoleDonateURL)
 					label.Color = color.NRGBA{R: 124, G: 177, B: 255, A: 255}
 					label.Font.Weight = 600
 					return label.Layout(gtx)
@@ -1580,7 +2126,7 @@ func (c *ConsoleWindow) layoutDonateSection(gtx layout.Context) layout.Dimension
 	})
 }
 
-func (c *ConsoleWindow) layoutDonateAddressCard(gtx layout.Context, entry *consoleDonateEntry) layout.Dimensions {
+func (c *consoleModal) layoutDonateAddressCard(gtx layout.Context, entry *consoleDonateEntry) layout.Dimensions {
 	border := color.NRGBA{R: 56, G: 68, B: 86, A: 255}
 	bg := color.NRGBA{R: 28, G: 35, B: 46, A: 255}
 
@@ -1609,7 +2155,7 @@ func (c *ConsoleWindow) layoutDonateAddressCard(gtx layout.Context, entry *conso
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						btn := material.Button(c.theme, &entry.CopyButton, c.parent.t("console.copy"))
+						btn := material.Button(c.theme(), &entry.CopyButton, c.parent.t("console.copy"))
 						btn.Background = color.NRGBA{R: 48, G: 56, B: 70, A: 255}
 						return btn.Layout(gtx)
 					}),
@@ -1633,7 +2179,7 @@ func (c *ConsoleWindow) layoutDonateAddressCard(gtx layout.Context, entry *conso
 	})
 }
 
-func (c *ConsoleWindow) layoutDonateBadge(gtx layout.Context, text string) layout.Dimensions {
+func (c *consoleModal) layoutDonateBadge(gtx layout.Context, text string) layout.Dimensions {
 	bg := color.NRGBA{R: 42, G: 51, B: 64, A: 255}
 	fg := color.NRGBA{R: 198, G: 210, B: 226, A: 255}
 
@@ -1642,7 +2188,7 @@ func (c *ConsoleWindow) layoutDonateBadge(gtx layout.Context, text string) layou
 		inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
 		macro := op.Record(gtx.Ops)
 		dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Caption(c.theme, strings.ToUpper(text))
+			label := material.Caption(c.theme(), strings.ToUpper(text))
 			label.Color = fg
 			label.Font.Weight = 600
 			return label.Layout(gtx)
@@ -1672,9 +2218,9 @@ func openExternalURL(url string) error {
 
 // card renders a styled card using the console window's own theme to avoid
 // a data race with the parent window's text shaper (not thread-safe on Linux).
-func (c *ConsoleWindow) card(gtx layout.Context, titleText string, rows []string, extras ...func(layout.Context) layout.Dimensions) layout.Dimensions {
+func (c *consoleModal) card(gtx layout.Context, titleText string, rows []string, extras ...func(layout.Context) layout.Dimensions) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 
 		// 8dp panel padding matching the main window cards (window.go card).
 		inset := layout.UniformInset(unit.Dp(8))
@@ -1683,7 +2229,7 @@ func (c *ConsoleWindow) card(gtx layout.Context, titleText string, rows []string
 			if strings.TrimSpace(titleText) != "" {
 				children = append(children,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						label := material.Label(c.theme, unit.Sp(20), titleText)
+						label := material.Label(c.theme(), unit.Sp(20), titleText)
 						label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 						return label.Layout(gtx)
 					}),
@@ -1694,7 +2240,7 @@ func (c *ConsoleWindow) card(gtx layout.Context, titleText string, rows []string
 			for _, row := range rows {
 				text := row
 				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.Body1(c.theme, text)
+					label := material.Body1(c.theme(), text)
 					label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 					return label.Layout(gtx)
 				}))
@@ -1713,13 +2259,13 @@ func (c *ConsoleWindow) card(gtx layout.Context, titleText string, rows []string
 	})
 }
 
-func (c *ConsoleWindow) layoutInfoRows(gtx layout.Context, rows []string) layout.Dimensions {
+func (c *consoleModal) layoutInfoRows(gtx layout.Context, rows []string) layout.Dimensions {
 	children := make([]layout.FlexChild, 0, len(rows)*2)
 	for _, row := range rows {
 		text := row
 		children = append(children,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				label := material.Body1(c.theme, text)
+				label := material.Body1(c.theme(), text)
 				label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 				return label.Layout(gtx)
 			}),
@@ -1730,7 +2276,7 @@ func (c *ConsoleWindow) layoutInfoRows(gtx layout.Context, rows []string) layout
 }
 
 // peerSelectablesFor returns or creates the set of Selectable widgets for a peer address.
-func (c *ConsoleWindow) peerSelectablesFor(address string) *peerCardSelectables {
+func (c *consoleModal) peerSelectablesFor(address string) *peerCardSelectables {
 	sel, ok := c.peerSelectables[address]
 	if !ok {
 		sel = &peerCardSelectables{}
@@ -1924,7 +2470,7 @@ func promotePlaceholderFromCapture(p *service.PeerHealth, s service.CaptureSessi
 // recording visuals (red dot, info line, stop-all banner) off this map rather
 // than fields on PeerHealth so that capture bookkeeping is independent of
 // peer-health row lifecycle.
-func (c *ConsoleWindow) layoutActivePeersContent(
+func (c *consoleModal) layoutActivePeersContent(
 	gtx layout.Context,
 	peers []service.PeerHealth,
 	captures map[domain.ConnID]service.CaptureSession,
@@ -1978,7 +2524,7 @@ func (c *ConsoleWindow) layoutActivePeersContent(
 		})
 	}
 
-	list := material.List(c.theme, &c.peerSectionList)
+	list := material.List(c.theme(), &c.peerSectionList)
 	return list.Layout(gtx, len(sections), func(gtx layout.Context, index int) layout.Dimensions {
 		item := sections[index]
 		return layout.Inset{Top: item.top}.Layout(gtx, item.render)
@@ -2032,7 +2578,7 @@ func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
 }
 
 // executeCommand parses console input and dispatches it through CommandTable.
-func (c *ConsoleWindow) executeCommand(ctx context.Context, input string) (string, error) {
+func (c *consoleModal) executeCommand(ctx context.Context, input string) (string, error) {
 	if c.parent.cmdTable == nil {
 		return "", fmt.Errorf("command table not initialized")
 	}
@@ -2069,7 +2615,7 @@ func (c *ConsoleWindow) executeCommand(ctx context.Context, input string) (strin
 }
 
 // loadCommands populates command suggestions from CommandTable — synchronous, no HTTP.
-func (c *ConsoleWindow) loadCommands() {
+func (c *consoleModal) loadCommands() {
 	commands := c.parent.cmdTable.Commands()
 	suggestions := commandInfoToSuggestions(commands)
 	c.mu.Lock()
@@ -2078,7 +2624,7 @@ func (c *ConsoleWindow) loadCommands() {
 }
 
 // getCommands returns the current command suggestions.
-func (c *ConsoleWindow) getCommands() []consoleSuggestion {
+func (c *consoleModal) getCommands() []consoleSuggestion {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.cachedCommands
@@ -2328,7 +2874,7 @@ type peerRowCache struct {
 // peerCounts returns the connected/unique peer counts for snap, recomputing
 // only when the generation advanced. Used by both the peers tab (connected)
 // and the info tab (connected + unique). Does NOT build the active-rows merge.
-func (c *ConsoleWindow) peerCounts(snap service.RouterSnapshot) (connected, unique int) {
+func (c *consoleModal) peerCounts(snap service.RouterSnapshot) (connected, unique int) {
 	if c.peerRows.countsValid && c.peerRows.countsGen == snap.Generation {
 		return c.peerRows.connectedPeers, c.peerRows.uniquePeers
 	}
@@ -2346,7 +2892,7 @@ func (c *ConsoleWindow) peerCounts(snap service.RouterSnapshot) (connected, uniq
 // (PeerHealth + CaptureSessions), so the cached slice is safe to reuse;
 // callers MUST treat it as read-only — it is shared across frames until the
 // next generation.
-func (c *ConsoleWindow) activePeerRows(snap service.RouterSnapshot) []service.PeerHealth {
+func (c *consoleModal) activePeerRows(snap service.RouterSnapshot) []service.PeerHealth {
 	if c.peerRows.rowsValid && c.peerRows.rowsGen == snap.Generation {
 		return c.peerRows.activeRows
 	}
@@ -2356,7 +2902,7 @@ func (c *ConsoleWindow) activePeerRows(snap service.RouterSnapshot) []service.Pe
 	return c.peerRows.activeRows
 }
 
-func (c *ConsoleWindow) layoutPeerSection(
+func (c *consoleModal) layoutPeerSection(
 	gtx layout.Context,
 	title string,
 	peers []service.PeerHealth,
@@ -2368,7 +2914,7 @@ func (c *ConsoleWindow) layoutPeerSection(
 
 	children := []layout.FlexChild{
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			label := material.Body1(c.theme, title)
+			label := material.Body1(c.theme(), title)
 			label.Color = color.NRGBA{R: 232, G: 237, B: 247, A: 255}
 			label.Font.Weight = 600
 			return label.Layout(gtx)
@@ -2399,10 +2945,10 @@ func (c *ConsoleWindow) layoutPeerSection(
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
-func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.PeerHealth, capture *service.CaptureSession) layout.Dimensions {
+func (c *consoleModal) layoutPeerHealthCard(gtx layout.Context, item service.PeerHealth, capture *service.CaptureSession) layout.Dimensions {
 	sel := c.peerSelectablesFor(item.Address)
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 30, G: 39, B: 52, A: 255})
 		return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -2413,7 +2959,7 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 								return layout.Dimensions{}
 							}
 							return layout.Inset{Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-								label := material.Body1(c.theme, arrow)
+								label := material.Body1(c.theme(), arrow)
 								label.Color = peerDirectionColor(item.Direction)
 								return label.Layout(gtx)
 							})
@@ -2478,13 +3024,13 @@ func (c *ConsoleWindow) layoutPeerHealthCard(gtx layout.Context, item service.Pe
 	})
 }
 
-func (c *ConsoleWindow) layoutStateBadge(gtx layout.Context, state string) layout.Dimensions {
+func (c *consoleModal) layoutStateBadge(gtx layout.Context, state string) layout.Dimensions {
 	bg, fg := peerStateColors(state)
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		inset := layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(10), Right: unit.Dp(10)}
 		macro := op.Record(gtx.Ops)
 		dims := inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Caption(c.theme, strings.ToUpper(c.parent.t("node.peer_state."+state)))
+			label := material.Caption(c.theme(), strings.ToUpper(c.parent.t("node.peer_state."+state)))
 			label.Color = fg
 			return label.Layout(gtx)
 		})
@@ -2497,7 +3043,7 @@ func (c *ConsoleWindow) layoutStateBadge(gtx layout.Context, state string) layou
 	})
 }
 
-func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
+func (c *consoleModal) peerHealthMeta(item service.PeerHealth) string {
 	lastRecv := "-"
 	if item.LastUsefulReceiveAt.Valid() {
 		lastRecv = item.LastUsefulReceiveAt.Time().Format("15:04:05")
@@ -2540,9 +3086,9 @@ func (c *ConsoleWindow) peerHealthMeta(item service.PeerHealth) string {
 
 // layoutStopRecordingBanner renders a red-tinted banner with a "Stop all recordings"
 // button, visible only when at least one peer has an active capture.
-func (c *ConsoleWindow) layoutStopRecordingBanner(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutStopRecordingBanner(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 60, G: 25, B: 25, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 60, G: 25, B: 25, A: 255})
 		return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -2550,12 +3096,12 @@ func (c *ConsoleWindow) layoutStopRecordingBanner(gtx layout.Context) layout.Dim
 				}),
 				layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					label := material.Body2(c.theme, "Traffic recording active")
+					label := material.Body2(c.theme(), "Traffic recording active")
 					label.Color = color.NRGBA{R: 255, G: 180, B: 180, A: 255}
 					return label.Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					btn := material.Button(c.theme, &c.stopRecordingButton, "Stop all")
+					btn := material.Button(c.theme(), &c.stopRecordingButton, "Stop all")
 					btn.Background = color.NRGBA{R: 180, G: 40, B: 40, A: 255}
 					btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 					return btn.Layout(gtx)
@@ -2566,7 +3112,7 @@ func (c *ConsoleWindow) layoutStopRecordingBanner(gtx layout.Context) layout.Dim
 }
 
 // layoutRecordingDot draws a small red filled circle as the recording indicator.
-func (c *ConsoleWindow) layoutRecordingDot(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutRecordingDot(gtx layout.Context) layout.Dimensions {
 	size := gtx.Dp(unit.Dp(10))
 	defer clip.Ellipse{Max: image.Pt(size, size)}.Push(gtx.Ops).Pop()
 	paint.ColorOp{Color: color.NRGBA{R: 230, G: 50, B: 50, A: 255}}.Add(gtx.Ops)
@@ -2681,7 +3227,7 @@ type trafficSamplePoint struct {
 // ok=false means RPC failure, unmarshal failure, or missing frame — an empty
 // sample slice with ok=true is a valid response (collector just restarted or
 // nothing newer than the cursor).
-func (c *ConsoleWindow) fetchTrafficSamples(ctx context.Context, since string) (samples []trafficSamplePoint, ok bool) {
+func (c *consoleModal) fetchTrafficSamples(ctx context.Context, since string) (samples []trafficSamplePoint, ok bool) {
 	if c.parent.cmdTable == nil {
 		return nil, false
 	}
@@ -2713,7 +3259,7 @@ func (c *ConsoleWindow) fetchTrafficSamples(ctx context.Context, since string) (
 // empty history), false on any failure (RPC error, unmarshal error, nil
 // collector, context cancellation). On failure the cached graph state is
 // cleared to prevent rendering stale data from a previous session.
-func (c *ConsoleWindow) loadTrafficHistory(ctx context.Context) bool {
+func (c *consoleModal) loadTrafficHistory(ctx context.Context) bool {
 	samples, ok := c.fetchTrafficSamples(ctx, "")
 	if !ok {
 		c.resetTrafficState()
@@ -2746,7 +3292,7 @@ func (c *ConsoleWindow) loadTrafficHistory(ctx context.Context) bool {
 
 // resetTrafficState clears all cached traffic graph data so the UI does not
 // render stale samples from a previous session or failed reload.
-func (c *ConsoleWindow) resetTrafficState() {
+func (c *consoleModal) resetTrafficState() {
 	c.mu.Lock()
 	c.trafficSamplesIn = nil
 	c.trafficSamplesOut = nil
@@ -2769,7 +3315,24 @@ func (c *ConsoleWindow) resetTrafficState() {
 // stored during the load phase to prevent concurrent clicks from
 // spawning a second goroutine. The history load has a 30-second timeout;
 // on timeout or failure the sentinel is cleared so the user can retry.
-func (c *ConsoleWindow) startTrafficTicker() {
+// trafficViewVisible reports whether the traffic graph is on screen: the
+// console modal is open AND the Traffic tab is the selected one. It is the
+// ticker's audience test, so it is read from the ticker goroutine — hence the
+// atomics behind both halves.
+func (c *consoleModal) trafficViewVisible() bool {
+	return c.visible.Load() && c.currentTab() == consoleTabTraffic
+}
+
+// startTrafficTickerIfShowing restarts sampling for a console reopened onto
+// the Traffic tab. Closing the modal lets the ticker retire, and nothing else
+// would notice that the tab it was serving is back.
+func (c *consoleModal) startTrafficTickerIfShowing() {
+	if c.trafficViewVisible() {
+		c.startTrafficTicker()
+	}
+}
+
+func (c *consoleModal) startTrafficTicker() {
 	c.mu.Lock()
 	if c.trafficTicker != nil {
 		c.mu.Unlock()
@@ -2796,9 +3359,10 @@ func (c *ConsoleWindow) startTrafficTicker() {
 		loadCancel()
 		c.invalidateWindow()
 
-		// If the user navigated away while history was loading, clean up
-		// the sentinel and exit without starting the real ticker.
-		if c.currentTab() != consoleTabTraffic {
+		// If the user navigated away — or closed the modal — while history
+		// was loading, clean up the sentinel and exit without starting the
+		// real ticker.
+		if !c.trafficViewVisible() {
 			c.mu.Lock()
 			c.trafficTicker = nil
 			c.mu.Unlock()
@@ -2826,13 +3390,14 @@ func (c *ConsoleWindow) startTrafficTicker() {
 		c.trafficTicker = ticker
 		c.mu.Unlock()
 
+		stop := c.parent.uiStop()
 		for {
 			select {
-			case <-c.closed:
+			case <-stop:
 				ticker.Stop()
 				return
 			case <-ticker.C:
-				if c.currentTab() != consoleTabTraffic {
+				if !c.trafficViewVisible() {
 					ticker.Stop()
 					c.mu.Lock()
 					c.trafficTicker = nil
@@ -2864,7 +3429,7 @@ func (c *ConsoleWindow) startTrafficTicker() {
 // If a tick is late (UI stall, system sleep), the collector kept sampling, so
 // the next pull simply appends several correct 1-second bars instead of one
 // inflated one.
-func (c *ConsoleWindow) appendNewTrafficSamples() {
+func (c *consoleModal) appendNewTrafficSamples() {
 	c.mu.RLock()
 	since := c.trafficLastTS
 	c.mu.RUnlock()
@@ -2902,15 +3467,15 @@ func (c *ConsoleWindow) appendNewTrafficSamples() {
 	c.mu.Unlock()
 }
 
-func (c *ConsoleWindow) layoutTrafficTab(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutTrafficTab(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
 		// 8dp panel padding matching the main window cards (window.go card).
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				// Title
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					label := material.H6(c.theme, c.parent.t("console.traffic_title"))
+					label := material.H6(c.theme(), c.parent.t("console.traffic_title"))
 					label.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 					return label.Layout(gtx)
 				}),
@@ -2929,14 +3494,14 @@ func (c *ConsoleWindow) layoutTrafficTab(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-func (c *ConsoleWindow) layoutTrafficLegend(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutTrafficLegend(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return c.layoutColorDot(gtx, trafficInSolid)
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Caption(c.theme, c.parent.t("console.traffic_in"))
+			lbl := material.Caption(c.theme(), c.parent.t("console.traffic_in"))
 			lbl.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 			return lbl.Layout(gtx)
 		}),
@@ -2946,7 +3511,7 @@ func (c *ConsoleWindow) layoutTrafficLegend(gtx layout.Context) layout.Dimension
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Caption(c.theme, c.parent.t("console.traffic_out"))
+			lbl := material.Caption(c.theme(), c.parent.t("console.traffic_out"))
 			lbl.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 			return lbl.Layout(gtx)
 		}),
@@ -2956,14 +3521,14 @@ func (c *ConsoleWindow) layoutTrafficLegend(gtx layout.Context) layout.Dimension
 		}),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			lbl := material.Caption(c.theme, c.parent.t("console.traffic_total"))
+			lbl := material.Caption(c.theme(), c.parent.t("console.traffic_total"))
 			lbl.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 			return lbl.Layout(gtx)
 		}),
 	)
 }
 
-func (c *ConsoleWindow) layoutColorDot(gtx layout.Context, clr color.NRGBA) layout.Dimensions {
+func (c *consoleModal) layoutColorDot(gtx layout.Context, clr color.NRGBA) layout.Dimensions {
 	sz := gtx.Dp(unit.Dp(10))
 	defer clip.UniformRRect(image.Rectangle{Max: image.Pt(sz, sz)}, sz/2).Push(gtx.Ops).Pop()
 	paint.ColorOp{Color: clr}.Add(gtx.Ops)
@@ -2984,7 +3549,7 @@ func trafficVisibleSlice(data []float32, maxVisible int) []float32 {
 	return out
 }
 
-func (c *ConsoleWindow) layoutTrafficGraph(gtx layout.Context) layout.Dimensions {
+func (c *consoleModal) layoutTrafficGraph(gtx layout.Context) layout.Dimensions {
 	// snapshot traffic data under read-lock to avoid races with ticker goroutine
 	c.mu.RLock()
 	visIn := trafficVisibleSlice(c.trafficSamplesIn, trafficGraphVisiblePoints)
@@ -3042,7 +3607,7 @@ func (c *ConsoleWindow) layoutTrafficGraph(gtx layout.Context) layout.Dimensions
 		y := height * i / 5
 		drawHLine(gtx, yAxisWidth, totalWidth, y, gridColor)
 		gridVal := maxVal * float32(5-i) / 5.0
-		lbl := material.Caption(c.theme, formatBytes(int64(gridVal))+"/s")
+		lbl := material.Caption(c.theme(), formatBytes(int64(gridVal))+"/s")
 		lbl.Color = labelColor
 		stack := op.Offset(image.Pt(0, y-gtx.Dp(unit.Dp(7)))).Push(gtx.Ops)
 		lbl.Layout(gtx)
@@ -3119,7 +3684,7 @@ func (c *ConsoleWindow) layoutTrafficGraph(gtx layout.Context) layout.Dimensions
 
 // drawTrafficBadges renders Total In / Total Out stacked vertically
 // inside a single rounded rectangle in the top-right corner of the graph.
-func (c *ConsoleWindow) drawTrafficBadges(gtx layout.Context, totalWidth, height int, totalSent, totalRecv int64) {
+func (c *consoleModal) drawTrafficBadges(gtx layout.Context, totalWidth, height int, totalSent, totalRecv int64) {
 	inText := c.parent.t("console.traffic_total_in", formatBytes(totalRecv))
 	outText := c.parent.t("console.traffic_total_out", formatBytes(totalSent))
 
@@ -3137,13 +3702,13 @@ func (c *ConsoleWindow) drawTrafficBadges(gtx layout.Context, totalWidth, height
 	measureGtx.Constraints.Max = image.Pt(totalWidth, height)
 
 	inMacro := op.Record(gtx.Ops)
-	inLbl := material.Caption(c.theme, inText)
+	inLbl := material.Caption(c.theme(), inText)
 	inLbl.Color = trafficInSolid
 	inDims := inLbl.Layout(measureGtx)
 	inCall := inMacro.Stop()
 
 	outMacro := op.Record(gtx.Ops)
-	outLbl := material.Caption(c.theme, outText)
+	outLbl := material.Caption(c.theme(), outText)
 	outLbl.Color = trafficOutSolid
 	outDims := outLbl.Layout(measureGtx)
 	outCall := outMacro.Stop()

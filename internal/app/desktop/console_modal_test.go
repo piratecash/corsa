@@ -11,11 +11,11 @@ import (
 	"github.com/piratecash/corsa/internal/core/service"
 )
 
-// newTestConsoleWindow creates a ConsoleWindow backed by a CommandTable
+// newTestConsoleModal creates a consoleModal backed by a CommandTable
 // with no GUI dependencies. Only the parent.cmdTable field is used
 // by executeCommand, so all other Window fields are left at zero values.
-func newTestConsoleWindow(table *rpc.CommandTable) *ConsoleWindow {
-	return &ConsoleWindow{
+func newTestConsoleModal(table *rpc.CommandTable) *consoleModal {
+	return &consoleModal{
 		parent: &Window{
 			cmdTable: table,
 		},
@@ -83,7 +83,7 @@ func testTable() *rpc.CommandTable {
 }
 
 func TestExecuteCommandDispatchesViaCommandTable(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	result, err := cw.executeCommand(context.Background(), "ping")
 	if err != nil {
@@ -96,7 +96,7 @@ func TestExecuteCommandDispatchesViaCommandTable(t *testing.T) {
 }
 
 func TestExecuteCommandWithArgs(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	result, err := cw.executeCommand(context.Background(), "sendDm peer-abc hello world")
 	if err != nil {
@@ -112,7 +112,7 @@ func TestExecuteCommandWithArgs(t *testing.T) {
 }
 
 func TestExecuteCommandJSONFrame(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	result, err := cw.executeCommand(context.Background(), `{"type":"ping"}`)
 	if err != nil {
@@ -125,7 +125,7 @@ func TestExecuteCommandJSONFrame(t *testing.T) {
 }
 
 func TestExecuteCommandUnavailableReturnsError(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	_, err := cw.executeCommand(context.Background(), "fetchChatlog")
 	if err == nil {
@@ -138,7 +138,7 @@ func TestExecuteCommandUnavailableReturnsError(t *testing.T) {
 }
 
 func TestExecuteCommandPrettyPrintsJSON(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	result, err := cw.executeCommand(context.Background(), "ping")
 	if err != nil {
@@ -155,7 +155,7 @@ func TestExecuteCommandPrettyPrintsJSON(t *testing.T) {
 }
 
 func TestLoadCommandsPopulatesSuggestions(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	cw.loadCommands()
 	suggestions := cw.getCommands()
@@ -185,7 +185,7 @@ func TestLoadCommandsPopulatesSuggestions(t *testing.T) {
 }
 
 func TestExecuteCommandHelpReturnsHumanReadable(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	result, err := cw.executeCommand(context.Background(), "help")
 	if err != nil {
@@ -225,7 +225,7 @@ func TestExecuteCommandHelpReturnsHumanReadable(t *testing.T) {
 func TestExecuteCommandUnknownFallsBackWithNilClient(t *testing.T) {
 	// When client is nil and command is unknown, executeCommand should
 	// return the CommandTable error (not panic).
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	_, err := cw.executeCommand(context.Background(), "nonexistent_command")
 	if err == nil {
@@ -567,7 +567,7 @@ func trafficHistoryTable(samples []map[string]any, honorSince bool, gotSince *st
 }
 
 func TestLoadTrafficHistoryEmptyLeavesEmptyCursor(t *testing.T) {
-	cw := newTestConsoleWindow(trafficHistoryTable(nil, true, nil))
+	cw := newTestConsoleModal(trafficHistoryTable(nil, true, nil))
 
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false for valid empty frame")
@@ -590,7 +590,7 @@ func TestLoadTrafficHistoryEmptyLeavesEmptyCursor(t *testing.T) {
 }
 
 func TestLoadTrafficHistoryNonEmptyPopulatesStateAndCursor(t *testing.T) {
-	cw := newTestConsoleWindow(trafficHistoryTable([]map[string]any{
+	cw := newTestConsoleModal(trafficHistoryTable([]map[string]any{
 		trafficSample("2026-06-11T10:00:00Z", 10, 20, 4000, 2500),
 		trafficSample("2026-06-11T10:00:01Z", 30, 40, 5000, 3000),
 	}, true, nil))
@@ -629,7 +629,7 @@ func TestAppendNewTrafficSamplesAppendsTail(t *testing.T) {
 		trafficSample("2026-06-11T10:00:01Z", 15, 25, 1015, 525),
 	}
 	var gotSince string
-	cw := newTestConsoleWindow(trafficHistoryTable(history, true, &gotSince))
+	cw := newTestConsoleModal(trafficHistoryTable(history, true, &gotSince))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
 	}
@@ -675,7 +675,7 @@ func TestAppendNewTrafficSamplesSkipsDuplicatesWhenServerIgnoresSince(t *testing
 		trafficSample("2026-06-11T10:00:00Z", 10, 20, 1000, 500),
 		trafficSample("2026-06-11T10:00:01Z", 15, 25, 1015, 525),
 	}
-	cw := newTestConsoleWindow(trafficHistoryTable(history, false, nil))
+	cw := newTestConsoleModal(trafficHistoryTable(history, false, nil))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
 	}
@@ -707,7 +707,7 @@ func TestAppendNewTrafficSamplesSkipsDuplicatesWhenServerIgnoresSince(t *testing
 // path: an empty initial load leaves an empty cursor, and the next tick picks
 // up everything the collector recorded since — no baseline seeding required.
 func TestAppendNewTrafficSamplesAfterEmptyHistory(t *testing.T) {
-	cw := newTestConsoleWindow(trafficHistoryTable(nil, true, nil))
+	cw := newTestConsoleModal(trafficHistoryTable(nil, true, nil))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
 		t.Fatalf("loadTrafficHistory returned false")
 	}
@@ -738,7 +738,7 @@ func TestAppendNewTrafficSamplesAfterEmptyHistory(t *testing.T) {
 // TestAppendNewTrafficSamplesTrimsToMax verifies the FIFO cap: appended
 // samples may not grow the local slices beyond trafficMaxSamples.
 func TestAppendNewTrafficSamplesTrimsToMax(t *testing.T) {
-	cw := newTestConsoleWindow(trafficHistoryTable([]map[string]any{
+	cw := newTestConsoleModal(trafficHistoryTable([]map[string]any{
 		trafficSample("2026-06-11T10:00:00Z", 1, 2, 1, 2),
 	}, true, nil))
 	if ok := cw.loadTrafficHistory(context.Background()); !ok {
@@ -796,7 +796,7 @@ func TestActivePeerSummary_Fallback(t *testing.T) {
 // pressing Up after a re-run would replay the duplicate before reaching the
 // previous distinct command.
 func TestAppendCommandHistoryDeduplicatesConsecutive(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	cw.appendCommandHistory("ping")
 	cw.appendCommandHistory("ping")
@@ -820,7 +820,7 @@ func TestAppendCommandHistoryDeduplicatesConsecutive(t *testing.T) {
 // short-circuits empty input, but the helper enforces the same contract on
 // its own so future callers cannot accidentally pollute history.
 func TestAppendCommandHistoryIgnoresEmpty(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	cw.appendCommandHistory("")
 	if len(cw.commandHistory) != 0 {
@@ -832,7 +832,7 @@ func TestAppendCommandHistoryIgnoresEmpty(t *testing.T) {
 // entries once it grows past maxConsoleCommandHistory, so long-running
 // console sessions cannot accumulate unbounded memory.
 func TestAppendCommandHistoryCapsAtMax(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 
 	// Use a synthetic alphabet that produces non-consecutive duplicates.
 	for i := 0; i < maxConsoleCommandHistory+5; i++ {
@@ -847,7 +847,7 @@ func TestAppendCommandHistoryCapsAtMax(t *testing.T) {
 // TestNavigateHistoryUpReplaysLatest covers the most common interaction —
 // pressing Up on an empty input restores the most recently submitted command.
 func TestNavigateHistoryUpReplaysLatest(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 	cw.appendCommandHistory("ping")
 	cw.appendCommandHistory("help")
 	cw.resetHistoryNavigation()
@@ -866,7 +866,7 @@ func TestNavigateHistoryUpReplaysLatest(t *testing.T) {
 // repeated Up reaches the oldest entry and clamps there; Down walks back
 // toward the most recent entry and finally restores the original draft.
 func TestNavigateHistoryWalksOlderToNewer(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 	cw.appendCommandHistory("a")
 	cw.appendCommandHistory("b")
 	cw.appendCommandHistory("c")
@@ -916,7 +916,7 @@ func TestNavigateHistoryWalksOlderToNewer(t *testing.T) {
 // TestNavigateHistoryEmptyIsNoop guards against panics or stray writes when
 // the user presses Up before submitting any commands.
 func TestNavigateHistoryEmptyIsNoop(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 	cw.consoleEditor.SetText("typing")
 
 	cw.navigateHistory(-1)
@@ -933,7 +933,7 @@ func TestNavigateHistoryEmptyIsNoop(t *testing.T) {
 // editing of the editor text drops navigation state, so the next Up press
 // snapshots the new draft instead of the stale one.
 func TestSyncHistoryNavigationResetsOnUserEdit(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 	cw.appendCommandHistory("alpha")
 	cw.appendCommandHistory("beta")
 	cw.resetHistoryNavigation()
@@ -973,7 +973,7 @@ func TestSyncHistoryNavigationResetsOnUserEdit(t *testing.T) {
 // every navigation step must mark suggestions as hidden and snap the
 // completion cursor back to a clean state.
 func TestNavigateHistorySuppressesSuggestions(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 	cw.appendCommandHistory("ping")
 	cw.resetHistoryNavigation()
 
@@ -999,7 +999,7 @@ func TestNavigateHistorySuppressesSuggestions(t *testing.T) {
 // parked one past the end. Uses the registered "ping" command so executeCommand
 // completes synchronously without touching network or RPC client.
 func TestSubmitConsoleCommandRecordsHistory(t *testing.T) {
-	cw := newTestConsoleWindow(testTable())
+	cw := newTestConsoleModal(testTable())
 	cw.consoleEditor.SetText("ping")
 
 	cw.submitConsoleCommand()

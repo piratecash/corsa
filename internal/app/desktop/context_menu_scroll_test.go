@@ -92,7 +92,7 @@ func (h *scrollHarness) frame(keys ...key.Event) bool {
 		Source:      h.router.Source(),
 		Constraints: layout.Constraints{Max: image.Pt(200, h.view)},
 	}
-	h.state.drive(gtx, h.items, true)
+	h.state.drive(gtx, h.items, menuNavKeys{Arrows: true, Tab: true})
 
 	measure := gtx
 	measure.Constraints.Min = image.Point{}
@@ -151,7 +151,7 @@ func (h *scrollHarness) deferFrame() {
 		Source:      h.router.Source(),
 		Constraints: layout.Constraints{Max: image.Pt(200, h.view)},
 	}
-	h.state.drive(gtx, nil, true)
+	h.state.drive(gtx, nil, menuNavKeys{Arrows: true, Tab: true})
 	h.router.Frame(h.ops)
 }
 

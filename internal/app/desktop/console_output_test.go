@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-func newOverflowTestConsole(t *testing.T) *ConsoleWindow {
+func newOverflowTestConsole(t *testing.T) *consoleModal {
 	t.Helper()
-	c := &ConsoleWindow{
+	c := &consoleModal{
 		parent:   &Window{},
 		overflow: newConsoleOverflowStore(),
 	}

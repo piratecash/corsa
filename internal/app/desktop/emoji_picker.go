@@ -20,6 +20,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+	"github.com/piratecash/corsa/internal/app/desktop/ui"
 )
 
 type emojiCategoryID string
@@ -713,7 +714,7 @@ func (w *Window) layoutEmojiPicker(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 			return layout.UniformInset(emojiPickerBorderDp).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				fillRounded(gtx, background, unit.Dp(9))
+				ui.FillRounded(gtx, background, unit.Dp(9))
 				return layout.Inset{Top: emojiPickerPaddingDp, Bottom: emojiPickerPaddingDp, Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 						layout.Rigid(w.layoutEmojiCategories),
@@ -823,11 +824,11 @@ func (w *Window) layoutEmojiSearch(gtx layout.Context) layout.Dimensions {
 	height := gtx.Dp(emojiSearchHeightDp)
 	gtx.Constraints.Min.Y = height
 	gtx.Constraints.Max.Y = height
-	fillRounded(gtx, color.NRGBA{R: 13, G: 19, B: 27, A: 255}, unit.Dp(7))
+	ui.FillRounded(gtx, color.NRGBA{R: 13, G: 19, B: 27, A: 255}, unit.Dp(7))
 	return layout.Inset{Left: unit.Dp(9), Right: unit.Dp(9)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layoutVectorIcon(gtx, w.searchIcon, unit.Dp(16), color.NRGBA{R: 115, G: 134, B: 160, A: 255})
+				return ui.Icon(gtx, w.searchIcon, unit.Dp(16), color.NRGBA{R: 115, G: 134, B: 160, A: 255})
 			}),
 			layout.Rigid(layout.Spacer{Width: unit.Dp(7)}.Layout),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -907,7 +908,7 @@ func (w *Window) layoutEmojiChoice(gtx layout.Context, value string) layout.Dime
 		gtx.Constraints.Min.Y = side
 		gtx.Constraints.Max.Y = side
 		if button.Hovered() || gtx.Focused(button) {
-			fillRounded(gtx, color.NRGBA{R: 36, G: 54, B: 76, A: 255}, unit.Dp(7))
+			ui.FillRounded(gtx, color.NRGBA{R: 36, G: 54, B: 76, A: 255}, unit.Dp(7))
 		}
 		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			label := material.Label(w.theme, emojiGlyphSizeSp, value)

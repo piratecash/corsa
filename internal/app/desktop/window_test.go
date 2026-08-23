@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/app/desktop/ui"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/service"
@@ -99,6 +100,7 @@ func newIdentityLayoutTestWindow(t *testing.T) *Window {
 		personOutlineIcon:        icons.personOutline,
 		peerLastOnlineByIdentity: make(map[domain.PeerIdentity]time.Time),
 		chevronIcon:              icons.chevron,
+		chevronDownIcon:          icons.chevronDown,
 		copyIcon:                 icons.copy,
 		shareIcon:                icons.share,
 		closeIcon:                icons.close,
@@ -554,34 +556,17 @@ func TestIdentitySearchEditorLayoutAppliesOpticalOffset(t *testing.T) {
 	}
 }
 
-func TestIdentityPanelSizeStaysInsideWindow(t *testing.T) {
-	tests := []struct {
-		name   string
-		window image.Point
-		want   image.Point
-	}{
-		{name: "desktop", window: image.Pt(1000, 700), want: image.Pt(384, 520)},
-		{name: "phone", window: image.Pt(360, 640), want: image.Pt(328, 520)},
-		{name: "landscape phone", window: image.Pt(640, 320), want: image.Pt(384, 288)},
+// The identity panel's own sizing rules now live in modal_shell.go and are
+// covered by TestModalCardSizeCentered / TestModalCardFillsTheCompactWindow.
+// What is asserted here is that the panel still asks for the centred sizing.
+func TestIdentityPanelUsesTheCenteredModalSizing(t *testing.T) {
+	window := image.Pt(1000, 700)
+	want := ui.ModalCardSize(window, 1, ui.ModalSizingCentered, false)
+	if want == window {
+		t.Fatalf("centred sizing degenerated to the full window %v", window)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := identityPanelSize(tt.window, 1); got != tt.want {
-				t.Fatalf("identityPanelSize(%v) = %v, want %v", tt.window, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIdentityPanelFillsCompactWindow(t *testing.T) {
-	window := image.Pt(390, 720)
-	if got := identityPanelSizeForMode(window, 1, true); got != window {
-		t.Fatalf("compact identity panel size = %v, want full client area %v", got, window)
-	}
-
-	if got := identityPanelSizeForMode(window, 1, false); got == window {
-		t.Fatalf("desktop identity panel unexpectedly fills the window: %v", got)
+	if got := ui.ModalCardSize(window, 1, ui.ModalSizingCentered, false); got != want {
+		t.Fatalf("identity panel card size = %v, want %v", got, want)
 	}
 }
 

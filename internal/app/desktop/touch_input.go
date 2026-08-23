@@ -162,14 +162,23 @@ type touchKeyboardState struct {
 	// measured. See endTailFrame.
 	tailFrame int
 	tailDone  int
+	// tailSealed marks the frame's tail as already owned by one surface, so
+	// later measurements from surfaces underneath it are dropped rather than
+	// added. Cleared by endTailFrame. See keyboardTailOwner.
+	tailSealed bool
 }
 
 // registerKeyboardState maintains the process-wide set of LIVE window
 // keyboard states used for ownership transfer. Released states are removed
-// and never re-added — a late Publish or retry command for a destroyed
-// console must not resurrect its entry (each entry pins the whole window
-// through the invalidate closure, so a stale entry is a leak of the entire
-// ConsoleWindow per open/close cycle).
+// and never re-added — a late Publish or retry command for a window that is
+// gone must not resurrect its entry, since each entry pins the whole window
+// through the invalidate closure.
+//
+// The application draws into ONE window today: the console, which used to be
+// the second one, is a modal on this one (console_modal.go). The transfer
+// machinery is kept because releasing a state on shutdown still goes through
+// it, and because nothing about it assumes more than one window — but a reader
+// looking for the second window will not find it.
 func registerKeyboardState(known map[*touchKeyboardState]bool, kbd *touchKeyboardState) {
 	if kbd.released.Load() {
 		delete(known, kbd)
@@ -454,12 +463,40 @@ func (s *touchKeyboardState) endTailFrame(gtx layout.Context) {
 		gtx.Execute(op.InvalidateCmd{})
 	}
 	s.tailFrame = 0
+	s.tailSealed = false
 }
 
-// noteTailPx adds px to the tail being measured for the frame in flight.
+// noteTailPx adds px to the tail being measured for the frame in flight, or
+// discards it once a surface has claimed the frame's tail for itself
+// (keyboardTailOwner).
 func (s *touchKeyboardState) noteTailPx(px int) {
-	if px > 0 {
+	if px > 0 && !s.tailSealed {
 		s.tailFrame += px
+	}
+}
+
+// keyboardTailOwner gives one surface sole ownership of the frame's keyboard
+// tail: whatever was measured before it is discarded, and whatever is measured
+// after it is ignored.
+//
+// It exists because the console became a modal. Two surfaces in one window now
+// carry an input row — the composer underneath and the console's command line
+// on top — and only the one the user can actually reach should decide how much
+// room the keyboard has to leave. Without this their tails would be ADDED,
+// because layout.Stack lays its Stacked children out BEFORE its Expanded one:
+// the modal is measured first and the composer it covers second, so neither
+// "first wins" nor "last wins" falls out of the layout order by itself.
+//
+// The overstated tail would not break anything — a tail that is too big only
+// retires the chrome above it early, the safe direction — but "early" here
+// means the console's tab strip vanishing on a phone while there is room for
+// it, with no way for the user to tell why.
+func keyboardTailOwner(kbd *touchKeyboardState, w layout.Widget) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		kbd.tailFrame = 0
+		dims := w(gtx)
+		kbd.tailSealed = true
+		return dims
 	}
 }
 

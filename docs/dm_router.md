@@ -64,7 +64,7 @@ Each layer communicates with the next through a well-defined interface:
 
 - **Network → ebus**: node publishes short delta events (peer health, messages, receipts, routing changes) via `ebus.Bus.Publish()`
 - **ebus → Service**: DMRouter subscribes to all relevant topics; handlers are async (64-slot inbox per subscriber, dedicated drain goroutine)
-- **ebus → UI**: console window subscribes directly to peer health and aggregate status topics for real-time updates
+- **ebus → UI**: the console modal subscribes directly to peer health and aggregate status topics for real-time updates while it is open
 - **Service → UI**: `UIEvent` channel (non-blocking notifications) + `Snapshot()` (read-only state copy)
 - **UI → Service**: method calls (`SelectPeer`, `SendMessage`, `ConsumePendingActions`)
 - **RPC** remains for commands/queries (fetch messages, send messages, get routing table). RPC handlers may publish ebus events as side effects
