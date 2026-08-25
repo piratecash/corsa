@@ -169,6 +169,9 @@ func newDatagramPlaneParts(svc *Service, metrics *datagram.Metrics) (datagramPla
 	if err := registerIdentityDiscoveryTypes(types, svc, network); err != nil {
 		return datagramPlaneParts{}, err
 	}
+	if err := registerDMControlTypes(types, svc); err != nil {
+		return datagramPlaneParts{}, err
+	}
 
 	scheduler, err := datagram.NewScheduler(datagram.SchedulerConfig{
 		Routes:               datagramRouteResolver{service: svc},
@@ -326,6 +329,18 @@ func (s *Service) startDatagramSchedules(ctx context.Context, layer *datagramLay
 	s.goRunLoop(func() { layer.sweepQueueLoop(ctx) })
 	s.goRunLoop(func() { layer.sweepReverseLoop(ctx) })
 	s.goRunLoop(func() { s.datagramMaintenanceLoop(ctx, layer) })
+	// The conversation-control outbox. A pass is a ticker over an in-memory
+	// map plus, at most, a few enqueues into the outbound queue above — the
+	// same bounded shape as the other loops here, and it selects on ctx.Done.
+	//
+	// The door is opened HERE, synchronously, and not inside the goroutine.
+	// A session can form the moment the handshake paths are live, and the first
+	// thing one does is re-offer that conversation's reactions; if the flag were
+	// still down because the goroutine had not been scheduled, the re-offer
+	// would be refused and would wait for the NEXT session. The loop still
+	// closes the door on its way out (stop).
+	s.dmControl.setDraining(true)
+	s.goRunLoop(func() { s.dmControlSendLoop(ctx) })
 
 	log.Info().
 		Bool("transit", s.localDatagramAdvertise().Transit).

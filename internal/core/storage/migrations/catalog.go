@@ -47,6 +47,9 @@ var chatlogDecryptRecoverySQL string
 //go:embed 0005_message_deletion.sql
 var messageDeletionSQL string
 
+//go:embed 0006_message_reactions.sql
+var messageReactionsSQL string
+
 // Catalog returns the ordered migration list for storage.Open.
 func Catalog() []storage.Migration {
 	return []storage.Migration{
@@ -74,6 +77,11 @@ func Catalog() []storage.Migration {
 			Version: 5,
 			Name:    "message_deletion",
 			SQL:     messageDeletionSQL,
+		},
+		{
+			Version: 6,
+			Name:    "message_reactions",
+			SQL:     messageReactionsSQL,
 		},
 	}
 }

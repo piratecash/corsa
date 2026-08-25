@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -154,8 +155,12 @@ func TestNodeWithAnEmptyRegistryAdvertisesTheEnvelopeAndDeclaresTheEmptySet(t *t
 	if names == nil {
 		t.Fatal("an endpoint emitted an absent field: the peer would learn about none of its types")
 	}
-	if len(*names) != len(fixtureDatagramTypes())+1 {
-		t.Fatalf("declared %v, want every registered type", *names)
+	// Against the REGISTRY, not against localDatagramDTypes: the field is built
+	// from that function, so comparing the two could not fail whatever the
+	// emit side did.
+	registered = svc.datagramLayer().types.DTypes()
+	if len(*names) != len(registered) {
+		t.Fatalf("declared %v, want every registered type %v", *names, registered)
 	}
 	if !containsString(*names, "file_transfer") {
 		t.Fatalf("declared %v, missing the type the node really handles", *names)
@@ -172,10 +177,17 @@ func newDatagramServiceWithTypes(t *testing.T, nodeType domain.NodeType) *Servic
 }
 
 // fixtureDatagramTypeModes is the kit the fixtures register. It is a FIXTURE
-// and nothing more: the production registry is empty, and no set of names is
-// implied by anything on the wire — a peer is an endpoint for exactly what it
-// listed (§6.1). The four names are kept because they cover all three modes
-// plus the request/response pairing the registry validates.
+// and nothing more: no set of names is implied by anything on the wire — a peer
+// is an endpoint for exactly what it listed (§6.1). The four names are kept
+// because they cover all three modes plus the request/response pairing the
+// registry validates.
+//
+// It is NOT the whole registry. A production node registers its own types
+// (identity discovery, dm_control) before any fixture runs, and three of these
+// four names are those very types — registerFixtureDatagramTypes skips a name
+// that is already there. So assertions here compare against the REGISTRY,
+// never against the length of this map: counting fixtures would make every new
+// production type look like a test failure.
 var fixtureDatagramTypeModes = map[domain.DType]domain.DatagramMode{
 	"get_identity":         domain.DatagramModeRequest,
 	"post_identity":        domain.DatagramModeResponse,
@@ -405,8 +417,10 @@ func TestLocalDTypeStrings_AnEndpointAlwaysEmitsItsSet(t *testing.T) {
 
 	svc := newDatagramServiceWithTypes(t, config.NodeTypeFull)
 	declared := svc.localDatagramDTypes()
-	if len(declared) != len(fixtureDatagramTypes()) {
-		t.Fatalf("localDatagramDTypes = %v, want the registered kit", declared)
+	for _, dtype := range fixtureDatagramTypes() {
+		if !slices.Contains(declared, dtype) {
+			t.Fatalf("localDatagramDTypes = %v, missing the registered %q", declared, dtype)
+		}
 	}
 
 	field := svc.localDTypeStrings(datagramAdvertise{Endpoint: true})

@@ -591,7 +591,15 @@ type Service struct {
 	observedAddrs   map[domain.PeerIdentity]string            // peer identity (fingerprint) → observed IP they reported for us
 	reachableGroups map[domain.NetGroup]struct{}              // network groups this node can reach (computed at startup)
 	messageStore    MessageStore                              // optional: persistence handler registered by desktop layer
-	router          Router                                    // routing strategy for outbound message delivery
+	// conversationControl is where accepted dm_control commands land. Same
+	// shape and same lifecycle as messageStore: registered by the desktop
+	// layer before Run, absent on a relay-only node.
+	conversationControl ConversationControlStore
+	// dmControl batches and delays outgoing conversation-control commands.
+	// Immutable after NewService and carrying its own mutex, so it sits
+	// outside the seven domain mutexes of docs/locking.md.
+	dmControl *dmControlSender
+	router    Router // routing strategy for outbound message delivery
 
 	// gossipJobs feeds the bounded gossip-dispatch worker pool that
 	// replaces the historical goroutine-per-target gossip fan-out (see
@@ -1924,6 +1932,12 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// (overview §7.5, docs/protocol/route_health.md).
 	svc.queryRateLimit = newQueryRateLimit(nil, 0, 0)
 
+	// The conversation-control outbox. Built BEFORE the datagram layer
+	// because registering the dm_control type reaches the sender through
+	// svc, and a handler that answers "unsupported" needs somewhere to
+	// queue that answer from its first delivery onwards.
+	svc.dmControl = newDMControlSender(svc)
+
 	// Datagram transport layer (docs/refactoring/datagram-transport.md).
 	// Built after the routing table, because the scheduler's resolver reads
 	// it, and before anything can dispatch a frame.
@@ -3224,6 +3238,13 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		// inbound identity is the push's addressee; the send path skips peers
 		// without the plane and closes the connection on an enqueue fault.
 		if pushPeer := s.provenInboundPeerIdentity(connID); !pushPeer.IsZero() {
+			// A fresh session re-declares what the peer can receive, so what we
+			// believed about its build is now stale — see forgetDMControlRefusal
+			// — and it is the moment this conversation's own reactions are
+			// offered again, which is where their delivery guarantee lives.
+			s.forgetDMControlRefusal(pushPeer)
+			// lifecycle: joined by backgroundWg (WaitBackground).
+			s.goBackground(func() { s.reofferReactions(s.runCtx, pushPeer) })
 			// lifecycle: joined by backgroundWg (WaitBackground). One bounded
 			// SendLocal enqueue; the close callback is a NetCore close, not a
 			// goroutine.

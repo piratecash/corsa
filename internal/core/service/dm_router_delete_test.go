@@ -1662,3 +1662,45 @@ func TestFreezeIsReleasedEvenWhenTheCallerCancelled(t *testing.T) {
 		t.Fatalf("the thaw inherited the caller's dead context: %v", thawErr)
 	}
 }
+
+// Deleting one message takes its reactions out of the database, and the chips
+// are drawn from a per-conversation cache that ONLY this event reloads. Without
+// it the facts of a deleted message stay in the window's memory until the user
+// leaves the chat — and if the same id is delivered again after its wipe
+// tombstone expires, the new bubble is drawn with chips no row backs any more.
+func TestDeletingAMessageTellsTheUIToReloadTheChips(t *testing.T) {
+	t.Parallel()
+
+	r, c, myAddr, _ := newTestDMRouterForDelete(t)
+	r.eventBus = ebus.New()
+	t.Cleanup(r.eventBus.Shutdown)
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	const target = "9b111111-2222-4333-8444-555555555555"
+	insertChatlogEntry(t, c.chatlog, peer, chatlog.Entry{
+		ID:             target,
+		Sender:         myAddr.String(),
+		Recipient:      peer.String(),
+		Body:           "ciphertext",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		Flag:           string(protocol.MessageFlagSenderDelete),
+		DeliveryStatus: protocol.ReceiptStatusDelivered,
+	})
+
+	reloaded := make(chan domain.PeerIdentity, 4)
+	r.eventBus.Subscribe(ebus.TopicReactionsChanged, func(p domain.PeerIdentity) {
+		reloaded <- p
+	})
+
+	if _, err := r.SendMessageDelete(context.Background(), peer, domain.MessageID(target)); err != nil {
+		t.Fatalf("SendMessageDelete: %v", err)
+	}
+	select {
+	case got := <-reloaded:
+		if got != peer {
+			t.Fatalf("the reload named %s, want %s", got, peer)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deleting a message never told the UI to reload the conversation's chips")
+	}
+}

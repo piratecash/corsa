@@ -28,8 +28,12 @@ Window (Gio event loop)
   │       ├── Reply quote (if reply): sender · date + quoted text
   │       │   └── Click scrolls to original message
   │       ├── Message body (selectable text)
+  │       ├── Reaction chips (real state: what this node holds for the message)
   │       ├── Delivery status (sent/delivered/seen)
-  │       └── Context menu (right-click, 500 ms long-press, or the bubble's ⋯ button: Reply, Copy, Delete)
+  │       └── Context menu (right-click, 500 ms long-press, or the bubble's ⋯ button)
+  │           ├── Quick reaction pill above the card (7 emoji + more)
+  │           │   └── Emoji panel in reaction mode (Escape steps back to the pill)
+  │           └── Reply, Copy, Delete
   └── Composer card
       ├── Recipient display
       ├── Reply preview banner (when replying)
@@ -132,7 +136,7 @@ the Gio API explicitly allows; the licence travels with it as
 
 ### Shared UI components
 
-Four pieces of chrome are single components rather than per-call-site
+Seven pieces of the interface are single components rather than per-call-site
 assemblies, and they live in their own package, `internal/app/desktop/ui`. They
 came out of `docs/design/CHANGES.md` and `CHANGES1.md`, which are the
 designer's task files and are re-exported wholesale — this section is where the
@@ -206,6 +210,188 @@ strip is deliberately dimmer than the other two.
 Neither the modal card's shadow nor the popup's is implemented. Gio has no
 box-shadow primitive, and faking one with stacked translucent rectangles draws
 over the backdrop and reads worse than its absence.
+
+**Message bubble** (`message_bubble.go`) is the frame around one chat message
+and, above all, the ORDER of the five things it can hold: reply quote, header,
+body, reaction chips, delivery status, with 4/4/8/6dp between them. It used to
+be a sequence of appends inside one 180-line function, where a fifth part could
+be added in four places and three of them would have looked almost right. A
+slot the caller leaves nil takes its spacer with it, so a message with no
+reactions pays nothing for the slot. What goes IN the slots stays with the
+screen: the quote resolves a message by ID, the body may be a file card, the
+status line reads delivery receipts. Only the border colour and the author
+colour follow the sender; which side of the chat the bubble sits on is the
+list's business, not the bubble's.
+
+**Emoji panel** (`emoji_picker.go`) is one component drawn in two places: under
+the composer, where a choice is inserted into the draft, and over a message,
+where it becomes a reaction. The mode changes exactly two things — a header
+with a title and a close button appears, and the caller closes the panel after
+a choice instead of leaving it open. The CATALOGUE is not in the package: what
+emoji exist, what they are called in six languages, which of them match a query
+and which twelve were used most recently are application data, so the screen
+filters and hands the result over. `EmojiPickerChromeHeight` counts the mode's
+header, so the reaction panel reserves room the composer's does not need.
+
+The composer's panel is as wide as the composer; the reaction one is placed by
+hand and so has to be told how wide to be. It takes the width that holds the
+design's seven columns (`EmojiPickerWidthForColumns`), not the width of the
+reaction pill it replaces — matching the pill looked tidy and cost a column, 365
+minus 18dp of frame and padding being six cells of 52dp rather than seven. That
+width includes the 8dp the scrollbar occupies, and the column COUNT is taken
+against the same post-gutter width: `material.List` reserves its gutter out of
+the row it lays out, so counting first and reserving second draws every cell a
+pixel narrow with the count one rounding step from dropping a column.
+
+The category chip is a rounded SQUARE, drawn by hand rather than through
+`material.IconButton`: that style paints its background as an ellipse, so the
+selected category read as a blue dot where the design asks for a 7dp slot, the
+same shape as every other small selectable control here.
+
+One emoji is drawn by `Kit.EmojiGlyph`, which reports its whole LINE box.
+Reporting the ascent alone is the right thing for text and the wrong thing for
+an emoji, which does not sit on the baseline but straddles it: measured from the
+bundled font at 22sp, the line box is 27px with the baseline 6px off the bottom
+and the ink running from 20.4px above that baseline to 5.4px below it. Centring
+the 21px ascent therefore centred a box the ink overflows downwards and pushed
+every glyph ~2.5px low in its cell, measurably off the hover highlight drawn
+around it.
+
+The two panels are one component but two STATES. Both can be on screen at once
+— a message menu opens over a composer whose picker is already up — and sharing
+a state aliased their search fields and their grid buttons; worse, the
+composer's click handler runs before the overlay is laid out, so a tap meant as
+a reaction was inserted into the draft. Only the recents are shared: which emoji
+a person reaches for does not depend on whether they are writing or reacting.
+
+The pill takes as many quick choices as the window holds, longest first: the
+design's seven need 365dp, and nothing clips a surface that is drawn at its own
+size and placed by an anchor, so a fixed seven-slot row on a 320dp phone put its
+"more" button entirely past the right edge. Below one quick choice the pill is
+not drawn at all. Which slots were drawn is recorded before the focus ring is
+built, for the same reason the "did the pill fit vertically" answer is.
+
+Both floating surfaces — the pill and the panel — swallow every press that
+lands on them (`SwallowPresses`). Without it only their interactive widgets
+register for input, so a press on padding, on the panel's header or in the gap
+between two blocks fell through to the backdrop, whose job is to dismiss: the
+user pressed the middle of an open panel and it vanished. The modal shell
+answers the same question by testing the press against the card's bounds, which
+a surface placed by an offset cannot do.
+
+Swallowing PRESSES is all any of them filter for, and it is enough for the
+wheel too: a Gio area that registers an `event.Op` is opaque to pointer routing,
+so nothing below it is considered for any pointer event whatever filters that
+area declared. The chat cannot be scrolled through an open overlay, and adding
+`pointer.Scroll` to these filters would only deliver events they have nothing to
+do with.
+
+A window with no usable width takes the same path as one with no usable height:
+nothing drawn, an empty focus ring, and both Escape and a press still working.
+The backdrop stays — it is what a press dismisses against — but it stops
+TINTING, because a 40% wash over a chat with no menu on it reads as an
+application that has hung rather than one waiting for room.
+
+The floor is the menu card's own chrome, because `layout.Inset` floors its
+subtraction at zero and hands back a card WIDER than it was allowed — the trap
+`menuMinUsableDp` names on the other axis. It is summed in PIXELS from the terms
+the card draws rather than converted from their total in dp: at 1.5 px/dp the
+card's own 2×`Dp(1)` + 2×`Dp(6)` is 22px while `Dp(14)` is 21, so a gate written
+the short way admitted a window that left the card's content exactly nothing.
+`emojiPickerChromeHeight` states the same rule for the other axis.
+
+All three surfaces the message overlay places — the pill, the panel and the menu
+card — are sized by `msgOverlayWidth` and placed by `placeMsgOverlay`, which is
+`placeMenu` plus the same 8dp edge. One rule for each, because the two halves
+have to agree: reserving the edge when counting quick reactions and ignoring it
+when placing them made the reservation a fiction, and sizing the pill and the
+panel to the window while the card kept a flat 180dp ran the card off the edge
+under the two surfaces it is placed with.
+
+The pill drains the presses of the slots it drew LAST frame as well as the ones
+it is about to draw, and it drains them whether or not it has room this frame — including on the frame
+where the whole overlay is deferred for want of height: the quick list is recomputed for the new width before the
+previous frame's events are read, so a window narrowed in between drops the slot
+the user pressed — and a press nobody asks about is discarded at Frame time
+rather than merely postponed.
+
+**Reaction surfaces** (`reactions.go`) are the pill of quick choices that opens
+with a message's context menu, and the chip row under a message that already has
+some. The list is longest first and trimmed to what the window holds: seven slots
+and the "more" button come to 365dp, which is what fits a 412dp phone with 8dp of
+inset either side, so a phone shows the head of the list and the rest stays one
+tap away behind "more". Neither surface knows
+what a reaction IS: they are handed emoji and counts and report what was
+pressed. The pill's shadow is not drawn, for the same reason the modal card's
+and the popup's are not.
+
+The pill and the menu card are placed as ONE block by the message overlay, and
+the pill is dropped entirely when the two cannot both have room — the menu
+comes first, since Reply, Copy and Delete are the only way to act on a message
+while the pill is a shortcut to something the menu reaches anyway. Whether the
+pill was given room is decided BEFORE the focus ring is built, because the ring
+lists its slots: a ring holding an item the frame never draws loses its focus
+at Frame time and pulls it back every frame after. With the emoji panel open
+the ring is the panel's own controls: the search field, the close button, the
+nine category chips, and ONE stop for the whole grid — the cell a keyboard
+cursor sits on, moved by the arrows and activated by Enter, since a focused
+`widget.Clickable` activates itself. The grid is one stop because listing every
+cell would take a minute to Tab past; the categories are all nine because nine
+is walkable, and leaving them out stranded a keyboard user in whichever category
+the panel opened on. The search field is hoisted ahead of the close button drawn
+above it, the same exception `peerMenuItems` makes for the alias editor.
+
+Left and Right stay on their row: stepping the index by one lands on the first
+cell of the next row, which is nowhere near where the user was pointing.
+Stepping off the top of the grid returns to the search field; the other three
+edges do nothing. Whatever the keyboard walks to — a grid cell or a category
+chip on a row too narrow to spread — is scrolled into view, because Gio drops
+the focus of any tag the frame does not draw and the ring would then pull focus
+back to its first item every frame. The ring SAYS where it sent focus
+(`menuFocusState.want` → `RevealTag`), the same contract `menuScroll` works
+under, rather than the panel asking `gtx.Focused`: Gio applies a `FocusCmd`
+immediately only while its event queue is not deferring, so reading the answer
+back works on a quiet frame and stops working on a busy one. Escape steps back to the pill rather than
+closing
+the menu. The panel is keyed by the open MENU — by the pointer `openMsgMenu`
+stores, not by the message's ID — so none of the nine paths that close that menu
+has to remember to close the panel too. Keying it by ID looked equivalent and
+was not: pressing the backdrop clears the menu and would leave the ID behind, so
+reopening the menu on that same message came straight back up as a 250dp panel,
+on the query the user had walked away from.
+
+The chips draw real state. A tap means "the opposite of what I have now", and
+which of the two that is gets decided by the service against what is stored,
+not here against the chips on screen: the chips are a frame old, and two quick
+taps read from them would both decide "set".
+
+The decision is stored first and only then handed to the peer, over the
+`dm_control` datagram type. The send is deliberately asynchronous — the node
+batches a burst of taps into one frame about a second and a half later — so the
+UI never blocks a tap on the network and never reports the send's outcome. The
+one thing it does report is a peer whose build cannot receive reactions at all
+(`ReactionsUnsupportedBy`): that reaction is never going to be seen by anyone
+else, and saying nothing would make it look exactly like one that has been. See
+`docs/refactoring/reactions-protocol.md`.
+
+A peer's reactions arrive on the event-bus goroutine, which owns none of the
+window's state. It therefore raises one atomic flag and asks for a frame; the
+reload happens at the top of the next layout, on the goroutine that owns the
+cache. Writing the cache from the subscriber is a concurrent map access — a hard
+crash, not a stale value — and `Invalidate()` is not a barrier.
+
+Sending a message closes every emoji surface: the composer's picker, the
+reaction pill, the panel over it, and the message menu the pill belongs to.
+Sending ends the composing gesture, and a surface that outlives its gesture is
+one the user has to dismiss by hand before they can see what they just sent. The
+press queued in the same frame is dropped with them, as on every other dismissal
+path — otherwise a tap on a quick slot in the frame of a send would be answered
+by the next menu to open, on whatever message that is.
+
+A tap that does not reach storage is reported. The write can lose a race against
+another decision on the same key, or cross one of the storage ceilings; both
+leave the chips exactly as they were, so closing the surface silently would
+leave the user believing they made a reaction that does not exist.
 
 ### Console
 
@@ -735,8 +921,12 @@ Window (Gio event loop)
   │       ├── Цитата ответа (если ответ): отправитель · дата + текст
   │       │   └── Клик прокручивает к оригинальному сообщению
   │       ├── Тело сообщения (выделяемый текст)
+  │       ├── Чипы реакций (настоящее состояние по этому сообщению)
   │       ├── Статус доставки (отправлено/доставлено/прочитано)
-  │       └── Контекстное меню (правый клик, долгое удержание 500 мс или кнопка ⋯ на пузыре: Ответить, Копировать, Удалить)
+  │       └── Контекстное меню (правый клик, долгое удержание 500 мс или кнопка ⋯ на пузыре)
+  │           ├── Пилюля быстрых реакций над карточкой (7 эмодзи + «ещё»)
+  │           │   └── Панель эмодзи в режиме реакции (Escape возвращает к пилюле)
+  │           └── Ответить, Копировать, Удалить
   └── Карточка ввода
       ├── Отображение получателя
       ├── Баннер предпросмотра ответа (при ответе)
@@ -838,7 +1028,7 @@ COLR: на Windows каждое эмодзи выводилось пустым �
 
 ### Общие компоненты интерфейса
 
-Четыре части оболочки — отдельные компоненты, а не сборка на каждом месте
+Семь частей интерфейса — отдельные компоненты, а не сборка на каждом месте
 использования, и лежат они в собственном пакете `internal/app/desktop/ui`. Они
 пришли из `docs/design/CHANGES.md` и `CHANGES1.md`; те файлы — задание
 дизайнера и перегенерируются целиком, поэтому реализация описана здесь, где
@@ -910,6 +1100,187 @@ hover-состоянии, пока остальные реагировали н�
 
 Тени карточки модалки и попапа не реализованы. В Gio нет примитива box-shadow,
 а имитация слоями рисуется поверх подложки и выглядит хуже, чем её отсутствие.
+
+**Пузырь сообщения** (`message_bubble.go`) — рамка вокруг одного сообщения и,
+главное, ПОРЯДОК пяти его частей: цитата, шапка, тело, чипы реакций, статус
+доставки, с промежутками 4/4/8/6dp. Раньше это была череда append внутри
+функции на 180 строк, где пятую часть можно было вставить в четыре разных
+места, и три из них выглядели бы почти правильно. Слот, оставленный nil,
+забирает с собой и свой отступ, поэтому сообщение без реакций за слот не
+платит. Что именно лежит В слотах — дело экрана: цитата разрешает сообщение по
+ID, телом может быть карточка файла, строка статуса читает квитанции. От
+отправителя зависят только цвет рамки и цвет автора; на какой стороне чата
+стоит пузырь — дело списка, а не пузыря.
+
+**Панель эмодзи** (`emoji_picker.go`) — один компонент в двух местах: под
+композером, где выбор вставляется в черновик, и над сообщением, где он
+становится реакцией. Режим меняет ровно две вещи: появляется шапка с заголовком
+и кнопкой закрытия, и вызывающий закрывает панель после выбора, а не оставляет
+открытой. КАТАЛОГА в пакете нет: какие эмодзи существуют, как они называются на
+шести языках, какие из них подходят под запрос и какие двенадцать использовались
+последними — данные приложения, поэтому фильтрует экран и отдаёт готовый список.
+`EmojiPickerChromeHeight` учитывает шапку режима, так что панель реакции
+резервирует место, которое композеру не нужно.
+
+Панель композера шириной с композер; панель реакции ставится вручную, и её
+ширину нужно задать. Берётся та, в которую влезают семь колонок макета
+(`EmojiPickerWidthForColumns`), а не ширина пилюли, которую панель заменяет:
+подгонка под пилюлю выглядела аккуратно и стоила колонки — 365dp минус 18dp
+рамки и отступов дают шесть ячеек по 52dp, а не семь. В эту ширину входят и 8dp
+под скроллбар, а число колонок считается от той же ширины ЗА вычетом жёлоба:
+`material.List` забирает жёлоб из строки, которую раскладывает, поэтому «сначала
+посчитать, потом зарезервировать» рисует каждую ячейку на пиксель уже, и колонка
+теряется на первом же округлении.
+
+Слот категории — скруглённый КВАДРАТ, нарисованный руками, а не через
+`material.IconButton`: тот рисует фон эллипсом, и выбранная категория читалась
+синей точкой там, где в макете слот радиусом 7dp — та же форма, что у всех
+остальных маленьких выбираемых элементов.
+
+Один эмодзи рисует `Kit.EmojiGlyph`, и он отдаёт ВСЮ строку целиком. Отдавать
+только ascent правильно для текста и неправильно для эмодзи: тот не стоит на
+базовой линии, а сидит на ней верхом. Замеры по встроенному шрифту на 22sp:
+строка 27px, базовая линия в 6px от низа, чернила идут от 20.4px над ней до
+5.4px под ней. Центрирование 21px ascent центрировало коробку, из которой
+чернила вылезают вниз, и опускало каждый глиф примерно на 2.5px ниже середины
+ячейки — заметно мимо подсветки под курсором.
+
+Панелей две: один компонент, но два СОСТОЯНИЯ. Обе могут быть на экране
+одновременно — меню сообщения открывается поверх композера с уже поднятым
+пикером, — и общее состояние склеивало их поля поиска и кнопки сетки; хуже того,
+обработчик кликов композера отрабатывает раньше, чем раскладывается оверлей, и
+тап, задуманный как реакция, вставлялся в черновик. Общие только недавние: какие
+эмодзи человек берёт чаще, не зависит от того, пишет он или реагирует.
+
+Пилюля берёт столько быстрых вариантов, сколько влезает в окно, начиная с
+первых: семь из макета требуют 365dp, а поверхность, нарисованную в собственный
+размер и поставленную по якорю, никто не обрезает — фиксированный ряд из семи на
+телефоне 320dp уносил кнопку «ещё» целиком за правый край. Меньше одного
+быстрого варианта — пилюля не рисуется вовсе. Какие слоты нарисованы,
+записывается до сборки кольца фокуса — по той же причине, что и ответ «влезла ли
+пилюля по высоте».
+
+Окно без пригодной ширины идёт по тому же пути, что и без пригодной высоты:
+ничего не рисуется, кольцо фокуса пустое, работают и Escape, и нажатие.
+Подложка остаётся — против неё нажатие и закрывает, — но перестаёт ЗАТЕМНЯТЬ:
+40-процентная заливка поверх чата, на котором нет меню, читается как зависшее
+приложение, а не как ожидание места.
+
+Пол — собственная обвязка карточки меню: `layout.Inset` обрезает вычитание нулём
+и возвращает карточку ШИРЕ, чем ей разрешили, — та же ловушка, которую
+`menuMinUsableDp` называет для высоты. Складывается она в ПИКСЕЛЯХ из тех же
+слагаемых, что рисует карточка, а не переводом их суммы из dp: при 1.5 px/dp
+собственные 2×`Dp(1)` + 2×`Dp(6)` дают 22px, а `Dp(14)` — 21, и проверка,
+написанная коротко, пропускала окно, где содержимому карточки не оставалось
+ничего. Для другой оси то же правило формулирует `emojiPickerChromeHeight`.
+
+Все три поверхности, которые ставит оверлей сообщения — пилюля, панель и карточка
+меню, — получают ширину через `msgOverlayWidth` и позицию через
+`placeMsgOverlay` (это `placeMenu` плюс тот же отступ 8dp от краёв). По одному
+правилу на каждое, потому что половины обязаны сходиться: зарезервировать отступ
+при подсчёте быстрых реакций и не применить его при размещении — значит сделать
+резерв фикцией, а подогнать под окно пилюлю с панелью, оставив карточке плоские
+180dp, — значит увести карточку за край под теми самыми поверхностями, вместе с
+которыми она ставится.
+
+Обе плавающие поверхности — пилюля и панель — съедают каждое нажатие по себе
+(`SwallowPresses`). Без этого на ввод регистрируются только их интерактивные
+виджеты, и нажатие по отступу, по шапке панели или в промежутке между блоками
+проваливалось на подложку, задача которой — закрыть: пользователь жал в середину
+открытой панели, и она исчезала. Оболочка модалки решает то же самое проверкой
+попадания в границы карточки, а поверхность, поставленная офсетом, так не может.
+
+Фильтруются только НАЖАТИЯ, и колеса это тоже касается: область Gio, которая
+зарегистрировала `event.Op`, непрозрачна для маршрутизации указателя — всё, что
+под ней, не рассматривается ни для какого события указателя, какие бы фильтры эта
+область ни объявила. Прокрутить чат сквозь открытый оверлей нельзя, а добавление
+`pointer.Scroll` в эти фильтры только выдавало бы им события, с которыми им
+нечего делать.
+
+Пилюля вычитывает нажатия и тех слотов, которые нарисовала на ПРОШЛОМ кадре, и
+делает это независимо от того, нашлось ли ей место сейчас, — в том числе на
+кадре, где из-за нехватки высоты отложен весь оверлей:
+список быстрых вариантов пересчитывается под новую ширину раньше, чем читаются
+события прошлого кадра, поэтому сузившееся окно убирает как раз тот слот, по
+которому нажали, — а нажатие, о котором никто не спросил, Gio выбрасывает в
+конце кадра, а не откладывает.
+
+**Поверхности реакций** (`reactions.go`) — пилюля быстрых вариантов,
+открывающаяся вместе с контекстным меню сообщения, и ряд чипов под сообщением, у
+которого реакции уже есть. Список идёт от начала и обрезается по ширине окна:
+семь слотов и кнопка «ещё» дают 365dp, что и влезает в телефон 412dp с инсетами
+по 8dp, поэтому на телефоне видно начало списка, а остальное — в одном нажатии
+за кнопкой «ещё». Ни одна из поверхностей не знает, ЧТО такое
+реакция: им дают эмодзи и счётчики, они сообщают, что нажали. Тень пилюли не
+рисуется — по той же причине, что и тени карточки модалки и попапа.
+
+Пилюлю и карточку меню оверлей ставит ОДНИМ блоком, а при нехватке места пилюля
+не рисуется вовсе: меню важнее, потому что «Ответить», «Скопировать» и
+«Удалить» — единственный способ что-то сделать с сообщением, а пилюля лишь
+короткий путь к тому, что меню и так достаёт. Получила ли пилюля место, решается
+ДО сборки кольца фокуса, потому что кольцо перечисляет её слоты: кольцо с
+элементом, которого нет в кадре, теряет фокус на Frame и вытягивает его обратно
+каждый следующий кадр. При открытой панели эмодзи кольцо — только поле поиска и
+кнопка закрытия, девять кнопок категорий и ОДИН стоп на всю сетку — ячейка, на
+которой стоит клавиатурный курсор: его двигают стрелки, а Enter срабатывает сам,
+потому что `widget.Clickable` в фокусе активируется по Return. Сетка одним
+стопом, потому что перечислить все ячейки — это минута на Tab; категории все
+девять, потому что девять пройти можно, а без них клавиатура застревала в той
+категории, на которой панель открылась. Поле поиска поднято вперёд кнопки
+закрытия, нарисованной выше него, — то же исключение, что `peerMenuItems` делает
+для редактора имени.
+
+Left и Right не уходят со своей строки: шаг по индексу на единицу кладёт курсор
+в первую ячейку следующей строки — не туда, куда показывал пользователь. Шаг
+вверх за край сетки возвращает в поле поиска, остальные три края не делают
+ничего. Всё, до чего дошла клавиатура, — ячейка сетки или чип категории на
+слишком узкой строке — подкручивается в видимую область: Gio роняет фокус тега,
+которого нет в кадре, и кольцо тогда каждый кадр утаскивало бы фокус на первый
+элемент. Кольцо СООБЩАЕТ, куда отправило фокус (`menuFocusState.want` →
+`RevealTag`) — тот же контракт, по которому работает `menuScroll`, — а не панель
+спрашивает `gtx.Focused`: Gio применяет `FocusCmd` немедленно только пока его
+очередь событий не в defer-режиме, так что чтение ответа работает на спокойном
+кадре и перестаёт на загруженном. Escape возвращает к пилюле, а не закрывает меню. Панель привязана к ОТКРЫТОМУ МЕНЮ — к указателю, который
+кладёт `openMsgMenu`, а не к ID сообщения, — поэтому ни одному из девяти путей
+закрытия меню не нужно помнить про закрытие панели. Привязка по ID выглядела тем
+же самым и им не была: нажатие по подложке гасит меню и оставило бы ID, так что
+повторное открытие меню на том же сообщении поднималось сразу панелью — и с тем
+запросом, от которого пользователь ушёл.
+
+Чипы рисуют настоящее состояние. Тап означает «противоположное тому, что у меня
+сейчас», и что именно из двух — решает сервис по сохранённому состоянию, а не
+экран по чипам: чипы отстают на кадр, и два быстрых тапа, прочитанных с них,
+оба решили бы «поставить».
+
+Решение сначала сохраняется и только потом уходит пиру — типом датаграмм
+`dm_control`. Отправка намеренно асинхронна: узел собирает пачку тапов в один
+кадр примерно через полторы секунды, поэтому UI не блокирует тап на сети и не
+сообщает исход отправки. Сообщает он ровно одно — что сборка собеседника вообще
+не умеет принимать реакции (`ReactionsUnsupportedBy`): такую реакцию никто,
+кроме автора, не увидит никогда, а молчание сделало бы её неотличимой от
+доставленной. Подробности — `docs/refactoring/reactions-protocol.md`.
+
+Реакции пира приходят в горутине шины событий, которой не принадлежит ничего из
+состояния окна. Поэтому она поднимает один атомарный флаг и просит кадр, а
+перезагрузка происходит в начале следующего layout — в горутине-владельце кэша.
+Запись кэша из подписчика — это конкурентный доступ к map, то есть падение
+процесса, а не устаревшее значение; `Invalidate()` барьером не является.
+
+Отправка сообщения закрывает все эмодзи-поверхности: пикер композера, пилюлю
+реакций, панель над ней и меню сообщения, которому пилюля принадлежит. Отправка
+завершает жест набора, а поверхность, пережившая свой жест, — это то, что
+пользователю приходится убирать руками, прежде чем он увидит отправленное.
+Нажатие, стоявшее в очереди на том же кадре, снимается вместе с ними — как на
+любом другом пути закрытия: иначе тап по быстрому слоту в кадре отправки
+ответило бы следующее открытое меню, на каком угодно сообщении.
+
+Тап, не доехавший до хранилища, сообщается. Запись может проиграть гонку другому
+решению по тому же ключу или упереться в потолок хранения; и то и другое
+оставляет чипы ровно как были, поэтому молча закрыть поверхность значит оставить
+пользователя с уверенностью в реакции, которой нет.
+
+Открытые вопросы вёрстки — в `docs/design/CHANGES-reactions.md`
+§5.
 
 ### Консоль
 

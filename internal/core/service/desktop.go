@@ -10,6 +10,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/contactlink"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -63,6 +64,12 @@ type DesktopClient struct {
 	rpc     *LocalRPCClient
 	chatlog *ChatlogGateway
 	store   *MessageStoreAdapter
+
+	// reactionControl is the door a peer's reactions come in through, and the
+	// pager the periodic re-offer reads. Built by RegisterConversationControl
+	// because it needs the event bus, which the composition root makes beside
+	// this client rather than before it.
+	reactionControl *ReactionControlAdapter
 
 	// wipeTombstones refuses a re-delivery of a message this node has
 	// deleted. Owned here, not by the DMRouter, because it guards the
@@ -437,6 +444,117 @@ func (c *DesktopClient) setChatLogForTest(store *chatlog.Store) {
 // classifying peers.
 func (c *DesktopClient) BackfillEstablished(ctx context.Context, now time.Time) error {
 	return c.chatlog.BackfillEstablished(ctx, now)
+}
+
+// RegisterConversationControl opens the door for reactions a peer states over
+// the datagram plane.
+//
+// Separate from NewDesktopClient because it needs the event bus, which the
+// composition root builds alongside the client rather than before it. It must
+// run before the node starts: the node accepts a dm_control frame the moment it
+// is running, and until this is registered it can only refuse them.
+func (c *DesktopClient) RegisterConversationControl(events *ebus.Bus) {
+	if c == nil || c.localNode == nil {
+		return
+	}
+	c.reactionControl = NewReactionControlAdapter(
+		c.chatlog, c.wipeTombstones, c.removals, events, nil)
+	c.localNode.RegisterConversationControlStore(c.reactionControl)
+	// The other half of the same story: a message landing releases the
+	// reactions that were waiting for it, and the UI has to be told.
+	c.store.attachEventBus(events)
+}
+
+// SendReactionFacts hands this user's own reaction decisions to the node, which
+// batches them and puts them on the wire a second or so later.
+//
+// It returns once they are queued, not once they are sent: the outcome of the
+// send is not something this layer can act on. A fact is idempotent and ordered
+// by its author's clock, so a lost frame is not a delivery to retry but a
+// divergence for reconciliation to find.
+func (c *DesktopClient) SendReactionFacts(peer domain.PeerIdentity, facts []domain.ReactionFact) error {
+	if c == nil || c.localNode == nil {
+		return nil
+	}
+	return c.localNode.QueueReactionFacts(peer, facts)
+}
+
+// HoldReactionSends stops this node's queued reactions for a peer from going out
+// until the returned release runs, and waits for the frames already being
+// sealed.
+//
+// Called around the deletion of a SINGLE message. The reaction queue names
+// reactions, not messages, and its frames are built from what the record said a
+// moment earlier — so without this bracket a frame built just before the delete
+// still goes out, telling the peer about a reaction on a message this node has
+// erased. What is paused is not lost: it is offered again on the next pass,
+// built from the record as it stands after the delete.
+func (c *DesktopClient) HoldReactionSends(peer domain.PeerIdentity) func() {
+	if c == nil || c.localNode == nil {
+		return func() {}
+	}
+	return c.localNode.HoldReactionSends(peer)
+}
+
+// ForgetContactState drops everything about one CONTACT that lives outside the
+// database, and ForgetConversationState drops everything about one of their
+// THREADS. The difference is what is being removed, and it decides one thing:
+// whether what this node believes about that peer's build goes too.
+//
+// The shared inventory — read it as one when something new is added, because
+// the database is erased by the deletion paths themselves and anything a
+// conversation leaves in memory has to be listed here or it outlives what it
+// belongs to:
+//
+//   - the node's send queue for that peer, and the batch it may have out of the
+//     queue being sent right now;
+//   - the re-offer cursor and its backoff for that conversation, which nothing
+//     else prunes: the database stops returning the conversation, but the entry
+//     would sit in memory until the process ended;
+//   - CONTACT REMOVAL ONLY: what this node believes about that peer's build —
+//     whether it can receive reactions at all. That belief is about the peer,
+//     not the thread, so a wipe keeps it: clearing it would make the next
+//     reaction to a contact the user still has look delivered until the refusal
+//     is learned again.
+//
+// Call either UNDER the removal gate, from inside the section that erases the
+// database. Outside it, a re-offer that has already read a page can queue that
+// page after this has run, and the queue is rebuilt from rows that are gone.
+func (c *DesktopClient) ForgetContactState(peer domain.PeerIdentity) {
+	c.forgetReactionState(peer, true)
+}
+
+// ForgetConversationState is the wipe half of ForgetContactState: the queue and
+// the cursor go, the beliefs stay.
+func (c *DesktopClient) ForgetConversationState(peer domain.PeerIdentity) {
+	c.forgetReactionState(peer, false)
+}
+
+func (c *DesktopClient) forgetReactionState(peer domain.PeerIdentity, contactGone bool) {
+	if c == nil {
+		return
+	}
+	if c.reactionControl != nil {
+		c.reactionControl.ForgetConversation(domain.ReactionScopeForPeer(peer))
+	}
+	if c.localNode == nil {
+		return
+	}
+	if contactGone {
+		c.localNode.ForgetPeerReactions(peer)
+		return
+	}
+	c.localNode.DropQueuedReactions(peer)
+}
+
+// ReactionsUnsupportedBy reports whether this peer runs a build that cannot
+// receive reactions at all — as opposed to being merely offline. Telling those
+// two apart is what the datagram transport buys, and the UI has to say so.
+func (c *DesktopClient) ReactionsUnsupportedBy(peer domain.PeerIdentity) bool {
+	if c == nil || c.localNode == nil {
+		return false
+	}
+	return c.localNode.ReactionsUnsupportedBy(peer)
 }
 
 // ---------------------------------------------------------------------------

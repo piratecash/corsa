@@ -8187,3 +8187,65 @@ func (i *interleavingReader) StoredMessageStatuses(ctx context.Context, ids []do
 	i.once.Do(func() { i.hook(domain.PeerIdentity{}) })
 	return i.inner.StoredMessageStatuses(ctx, ids)
 }
+
+// Removing a contact stops the send queue for the length of the history delete,
+// and opens it again afterwards. Same reason as the wipe: the removal gate does
+// not reach the queue, so a pass that resolved this conversation's facts a
+// moment earlier would hand its frame over after the rows are gone.
+func TestRemovingAContactStopsTheSendQueueWhileTheHistoryGoes(t *testing.T) {
+	t.Parallel()
+
+	r, c, _, _ := newTestDMRouterForConversationDelete(t)
+	r.removals = c.removals
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	if c.localNode.ReactionSendsHeldFor(peer) {
+		t.Fatal("the fixture starts with the queue already shut")
+	}
+
+	// A write of that conversation is in flight, so the removal waits inside
+	// removals.begin — and the queue has to be shut for the whole of that wait,
+	// not from after it.
+	releaseWrite, admitted := c.removals.admitWrite(peer)
+	if !admitted {
+		t.Fatal("the fixture could not take a write lease")
+	}
+	removed := make(chan error, 1)
+	go func() {
+		_, err := r.RemovePeer(peer)
+		removed <- err
+	}()
+
+	shut := false
+	for range 100 {
+		if c.localNode.ReactionSendsHeldFor(peer) {
+			shut = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !shut {
+		t.Fatal("the removal waited for the write with the send queue still open")
+	}
+	select {
+	case err := <-removed:
+		t.Fatalf("the removal finished while a write was still in flight: %v", err)
+	default:
+	}
+
+	releaseWrite()
+	select {
+	case err := <-removed:
+		if err != nil {
+			t.Fatalf("RemovePeer: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the removal never finished after the write was done")
+	}
+	if c.localNode.ReactionSendsHeldFor(peer) {
+		t.Fatal("the send queue stayed shut after the contact was removed")
+	}
+	if c.localNode.QueuedReactionsFor(peer) != 0 {
+		t.Fatal("the removed contact still has reactions waiting")
+	}
+}

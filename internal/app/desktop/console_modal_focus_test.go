@@ -372,18 +372,18 @@ func TestTheFrameThatOpensTheConsoleReadsNoBackgroundControls(t *testing.T) {
 func TestOpeningTheConsoleClosesTheEmojiPickerProperly(t *testing.T) {
 	w := newConsoleModalTestWindow(t)
 	w.emojiPicker.visible = true
-	w.emojiPicker.searchEditor.SetText("pizza")
-	w.emojiPicker.list.Position.First = 3
+	w.emojiPicker.panel.Search.SetText("pizza")
+	w.emojiPicker.panel.Grid.Position.First = 3
 
 	openConsoleForTest(w)
 
 	if w.emojiPicker.visible {
 		t.Fatal("the emoji picker stayed open under the console modal")
 	}
-	if got := w.emojiPicker.searchEditor.Text(); got != "" {
+	if got := w.emojiPicker.panel.Search.Text(); got != "" {
 		t.Fatalf("the picker kept the search query %q, so it reopens filtered by it", got)
 	}
-	if got := w.emojiPicker.list.Position.First; got != 0 {
+	if got := w.emojiPicker.panel.Grid.Position.First; got != 0 {
 		t.Fatalf("the picker kept its grid offset at row %d, which indexes a result list that no longer exists", got)
 	}
 }

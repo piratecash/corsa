@@ -677,6 +677,19 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 	// own signed record. Fire-and-forget — the send path itself decides
 	// between "peer without the plane, skip" and "enqueue fault, close".
 	if peerID := s.sessionPeerIdentity(session); !peerID.IsZero() {
+		// A new session is the only moment at which what this peer can receive
+		// may have changed: the declared dtype set is fixed for a session's
+		// whole lifetime, so a peer that updated its build becomes willing to
+		// take conversation-control commands exactly here.
+		s.forgetDMControlRefusal(peerID)
+		// And offer this conversation's own reactions again. A session coming up
+		// is the only moment this node has to work with: nothing on this
+		// transport reports that a fact ARRIVED, so re-offering from the durable
+		// record is the delivery guarantee (see reofferReactions).
+		//
+		// lifecycle: joined by backgroundWg (WaitBackground). One bounded read
+		// plus one enqueue into the debounce buffer.
+		s.goBackground(func() { s.reofferReactions(s.runCtx, peerID) })
 		// lifecycle: joined by backgroundWg (WaitBackground). The push is one
 		// bounded SendLocal enqueue — milliseconds, no retry loop — and its
 		// session-close callback owns no goroutine of its own.

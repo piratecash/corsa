@@ -370,10 +370,43 @@ func (w *Window) peerMenuItems() []event.Tag {
 	return []event.Tag{&w.ctxMenuAlias, &w.ctxMenuCopy, &w.ctxMenuDelete, &w.ctxMenuClearChat}
 }
 
-// msgMenuItems mirrors peerMenuItems for the message context menu. Delete drops
-// out of the list on exactly the condition that renders it as a disabled label.
+// msgMenuItems mirrors peerMenuItems for the message context menu, and for the
+// reaction surfaces opened by the same gesture. The precedence mirrors
+// layoutMsgContextMenuOverlay exactly, so the list can never describe a surface
+// other than the one on screen.
+//
+// With the emoji panel up the ring is the panel's own controls: the search
+// field, the close button, the nine category chips, and ONE stop for the whole
+// grid — the cell the keyboard cursor is on, which the arrows then move
+// (navigateReactionGrid).
+//
+// The grid is one stop rather than several hundred because a ring that listed
+// every cell would take upwards of a minute to Tab past; the categories are all
+// nine because nine is walkable, and leaving them out stranded a keyboard user
+// in whichever category the panel happened to open on.
+//
+// The search field is hoisted to the front, ahead of the close button drawn
+// above it. That is the same exception peerMenuItems makes for the alias
+// editor: a panel is opened to pick something, and the field that filters is
+// where picking starts.
+//
+// Delete drops out of the list on exactly the condition that renders it as a
+// disabled label.
 func (w *Window) msgMenuItems() []event.Tag {
-	items := []event.Tag{&w.msgCtxReply, &w.msgCtxCopy}
+	if w.reactionPickerOpen() {
+		panel := &w.reactionRow.panel
+		items := []event.Tag{&panel.Search, &panel.Close}
+		items = append(items, panel.CategoryTags(w.emojiPickerCategories())...)
+		if cursor := panel.CursorTag(); cursor != nil {
+			items = append(items, cursor)
+		}
+		return items
+	}
+	items := []event.Tag{}
+	if w.reactionRow.shown {
+		items = w.reactionRow.row.Tags(w.reactionRow.quick)
+	}
+	items = append(items, &w.msgCtxReply, &w.msgCtxCopy)
 	if w.contextMenuDeleteEnabled() {
 		items = append(items, &w.msgCtxDelete)
 	}
@@ -440,8 +473,17 @@ func consumeComposerFocus(pending, raiseKeyboard, menuOpen bool) (focus, raise b
 	return true, raiseKeyboard
 }
 
-// escapeMsgMenu applies Escape to the message menu, which has no sub-views.
+// escapeMsgMenu applies Escape to the message overlay: one step back out of the
+// emoji panel to the reaction pill when the panel is up, otherwise close.
+//
+// Stepping back rather than closing outright is what the panel's own close
+// button does, and is what a user who pressed "more" by accident expects — the
+// same rule escapePeerMenu applies to the identity menu's sub-views.
 func (w *Window) escapeMsgMenu() {
+	if w.reactionPickerOpen() {
+		w.closeReactionPicker()
+		return
+	}
 	w.msgContextMsg = nil
 	if w.window != nil {
 		w.window.Invalidate()

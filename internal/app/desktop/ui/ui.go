@@ -18,6 +18,9 @@ import (
 	"image/color"
 
 	"gioui.org/f32"
+	"gioui.org/font"
+	"gioui.org/io/event"
+	"gioui.org/io/pointer"
 	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
@@ -34,6 +37,21 @@ type Kit struct {
 	Theme *material.Theme
 	// CloseIcon is the glyph in a modal's close button.
 	CloseIcon *widget.Icon
+	// EmojiFace is the family emoji are drawn in. It is given rather than
+	// assumed: the family is a bundled font the application registers with its
+	// own shaper, and which font that is — and why it cannot be the host's — is
+	// the application's business, not a component's.
+	EmojiFace font.Typeface
+}
+
+// VerticallyCentered centres one widget in the height it was given without
+// stretching it.
+func VerticallyCentered(gtx layout.Context, content layout.Widget) layout.Dimensions {
+	return layout.Flex{
+		Axis:      layout.Vertical,
+		Alignment: layout.Start,
+		Spacing:   layout.SpaceSides,
+	}.Layout(gtx, layout.Rigid(content))
 }
 
 // Fill paints the whole area the caller was given.
@@ -94,10 +112,52 @@ func (k Kit) Chip(gtx layout.Context, button *widget.Clickable, fill color.NRGBA
 	})
 }
 
+// SwallowPresses makes an area consume every pointer press that lands on it, so
+// the press reaches nothing behind it.
+//
+// A floating surface needs this or it is not really a surface. Only its
+// interactive widgets register for input, so a press on its padding, its header,
+// or the gap between two of its blocks falls straight through to whatever is
+// underneath — which for a popup is the backdrop, and the backdrop's whole job
+// is to dismiss. The user presses the middle of an open panel and the panel
+// vanishes.
+//
+// The modal shell answers the same question by asking whether the press landed
+// inside the card (see ModalCardBounds); a surface placed by an offset rather
+// than centred does not know its own window coordinates and cannot ask that, so
+// it answers by being in the way instead.
+//
+// Call it with the surface's own size and BEFORE replaying the surface's
+// recorded content: Gio hands a press to the LAST area registered over that
+// point, so the widgets drawn afterwards still win it.
+func SwallowPresses(gtx layout.Context, tag event.Tag, size image.Point) {
+	area := clip.Rect{Max: size}.Push(gtx.Ops)
+	event.Op(gtx.Ops, tag)
+	area.Pop()
+
+	// Drained and discarded. Nothing acts on these — being consumed IS the
+	// behaviour — but an undrained filter stops matching after Gio's queue for
+	// it fills, and the surface would start leaking presses again.
+	for {
+		if _, ok := gtx.Event(pointer.Filter{Target: tag, Kinds: pointer.Press | pointer.Release}); !ok {
+			return
+		}
+	}
+}
+
 // Icon draws one vector icon at a fixed size.
+//
+// A nil icon leaves the space blank instead of panicking, which Gio's own
+// Icon.Layout does. The space is what matters to everything around it: the
+// control keeps its size, its hit area and its accessibility label, so a window
+// assembled without one glyph — every test in the application builds one by
+// literal — is a window with a blank button rather than a crash.
 func Icon(gtx layout.Context, icon *widget.Icon, size unit.Dp, tint color.NRGBA) layout.Dimensions {
 	side := gtx.Dp(size)
 	gtx.Constraints = layout.Exact(image.Pt(side, side))
+	if icon == nil {
+		return layout.Dimensions{Size: image.Pt(side, side)}
+	}
 	return icon.Layout(gtx, tint)
 }
 

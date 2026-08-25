@@ -680,9 +680,37 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 	// a long thread is tens of thousands of statements. A deadline on the
 	// caller's context still caps it — see the contract above — which is
 	// why the desktop caller sets none.
+	//
+	// The REMOVAL gate goes up for the wipe itself. convDeleteRetry's barrier
+	// stops this node's own sends; it says nothing to the paths that write the
+	// conversation from the side — the reaction re-offer reads a page of facts
+	// and queues it as a copy, and a wipe landing between those two steps
+	// deletes rows that are already on their way out again. begin() waits for
+	// the leases already handed out, so a re-offer mid-flight finishes before
+	// the transaction, and refuses new ones until the queue has been dropped
+	// too. Incoming messages are DEFERRED for that window, not lost: the sender
+	// re-delivers, and a message that arrives after the wipe is outside it on
+	// both sides either way.
+	releaseRemoval := r.removals.begin(peer)
+	// The gate stops writes and re-offers; it does not stop the send queue,
+	// which by then may already hold RESOLVED facts of this thread. Without the
+	// pause a pass can read them before the transaction, clear the frame gate
+	// during it, and hand the frame over after the commit — and the forgetting
+	// below would then only wait for a frame that has already gone. So the
+	// outbox is stopped for the length of the wipe, and released once there is
+	// nothing left in it to send.
+	resumeReactions := r.client.HoldReactionSends(peer)
 	wipeCtx, cancelWipe := context.WithTimeout(ctx, conversationWipeBudget)
 	deleted, owed, localOK := r.wipeConversationLocally(wipeCtx, peer)
 	cancelWipe()
+	if localOK {
+		// Inside the gate: see ForgetConversationState. Only after a wipe that
+		// actually happened — a rolled-back transaction leaves the thread
+		// untouched, and its queue with it.
+		r.client.ForgetConversationState(peer)
+	}
+	resumeReactions()
+	releaseRemoval()
 
 	// The barrier comes down here. It exists to keep a send from racing
 	// the local wipe, and the wipe is done; holding it until the peer
@@ -793,6 +821,48 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 		return 0, 0, false
 	}
 	if len(scope.IDs) == 0 {
+		// No messages this wipe may take, but the conversation can still hold
+		// reactions WAITING for messages that never arrived — and the
+		// transaction below never runs to take them. Orphans only: a thread of
+		// immutable messages also reports no candidates, and those messages keep
+		// their reactions because they keep existing.
+		// Both halves in ONE call, because they are one commit: the waiting
+		// facts, and the refusals of everything removed from this conversation
+		// one message at a time before today. The deleting transaction — what
+		// forgets them on the ordinary path — never runs here, and nothing else
+		// can name those ids, because their messages are long gone.
+		//
+		// Whether the refusals go is the store's decision: a thread of immutable
+		// messages reports no candidates either, and there they must stay, or
+		// each one is an hour of held rows waiting to happen as soon as the
+		// tombstones expire.
+		dropped, forgotten, err := store.WipeEmptyConversationReactions(ctx, peer)
+		if err != nil {
+			// NOT a successful wipe. Reporting success here would have the
+			// caller empty the send queue and tell the user the thread is gone,
+			// while the only thing that was in it is still on this disk and can
+			// surface again the moment its message arrives. Nothing was written
+			// either — one transaction — so "nothing wiped" is the truth and not
+			// a report over rows that already went.
+			log.Warn().Err(err).Str("peer", peer.String()).
+				Msg("dm_router: wipeConversationLocally: the reactions of an empty thread could not be wiped; nothing wiped")
+			return 0, 0, false
+		}
+		if dropped > 0 {
+			log.Debug().Str("peer", peer.String()).Int("reactions", dropped).
+				Msg("dm_router: wipeConversationLocally: dropped the reactions of a thread with no messages")
+			// Same reason as on the ordinary path: the chips come from a cache
+			// only this event reloads.
+			r.publishReactionsChanged(peer)
+		}
+		if dropped > 0 || forgotten {
+			// Same class of deletion as any other, so the pages leave the
+			// write-ahead log now rather than at the next automatic checkpoint —
+			// what the user asked to erase should not sit in the WAL because it
+			// happened to be the only thing in the thread. The refusals count:
+			// each names a message this user destroyed.
+			r.checkpointAfterDelete(ctx, store)
+		}
 		return 0, 0, true
 	}
 
@@ -905,6 +975,12 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 	})
 
 	r.evictWipedConversationFromUI(peer, wiped.Removed)
+	// The chips are drawn from a per-conversation cache the window holds, and
+	// the ONLY thing that reloads it is this event. Evicting the messages is not
+	// enough: a message that survived the wipe — an immutable one — is still on
+	// screen with whatever chips were cached for it, and the facts of the erased
+	// messages stay in the window's memory until the user leaves the chat.
+	r.publishReactionsChanged(peer)
 	if len(wiped.Removed) > 0 {
 		r.checkpointAfterDelete(ctx, store)
 	}
@@ -1349,7 +1425,17 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	if store == nil {
 		return false
 	}
+	// Bracketed like every other per-message delete: the row exists for as long
+	// as this takes, and a reaction frame built from it a moment ago must not
+	// leave after it is gone.
+	//
+	// The conversation is peerForMessage, not the event's sender: this event
+	// fires for messages in BOTH directions, and on one this node sent, the
+	// sender is this node — pausing that would leave the real recipient
+	// unguarded, which is the only one a frame could go to.
+	resumeReactions := r.client.HoldReactionSends(r.peerForMessage(event))
 	removed, err := store.DeleteByID(r.opContext(), id)
+	resumeReactions()
 	if err != nil {
 		log.Warn().Err(err).
 			Str("message_id", event.MessageID).
@@ -1421,6 +1507,11 @@ func (r *DMRouter) publishConversationDeleteOutcome(outcome ebus.ConversationDel
 // wipeTombstoneReaperLoop runs in a dedicated goroutine launched from
 // Start(). It restores the refusals the previous process left behind, then
 // prunes expired ones so a long-running install stays bounded.
+//
+// It also sweeps reactions that waited for a message that never arrived. The
+// two share a loop rather than each having one because they are the same job on
+// the same schedule — bounding a set a REMOTE peer can grow — and a second
+// ticker of the same period would only be a second thing to keep in step.
 func (r *DMRouter) wipeTombstoneReaperLoop(ctx context.Context) {
 	defer recoverLog("wipeTombstoneReaperLoop")
 	if r.wipeTombstones == nil {
@@ -1438,6 +1529,147 @@ func (r *DMRouter) wipeTombstoneReaperLoop(ctx context.Context) {
 			// and the reaper is the only thing that comes back around.
 			r.wipeTombstones.reloadIfUnloaded(ctx, now.UTC())
 			r.wipeTombstones.reap(ctx, now.UTC())
+			// RELEASE BEFORE SWEEP, and the order is load-bearing. Both look at
+			// pending rows; the sweep destroys the ones past their TTL. If a
+			// release failed and stayed failed for longer than the TTL, sweeping
+			// first would destroy a fact whose message is sitting right there —
+			// and the release would then have nothing left to find.
+			r.releaseArrivedReactions(ctx, now.UTC())
+			r.sweepHeldReactions(ctx, now.UTC())
+			r.reofferReactions(ctx)
 		}
+	}
+}
+
+// sweepHeldReactions drops facts that waited past their TTL for a message that
+// never came.
+//
+// A held row is the one reaction row nothing else can reach: every other
+// deletion joins through a row in `messages`, and a held fact names an id that
+// has none. See chatlog.HeldReactionTTL.
+// releaseArrivedReactions un-hides held facts whose message turned out to be
+// here after all.
+//
+// The per-message release is best-effort — its error is logged and the message
+// is still stored — so a fact can be left pending on a node that HAS the
+// message, and nothing else comes back for it: the sender will not repeat what
+// it believes delivered, and even a repeat may never bring another copy of the
+// MESSAGE, which is what the per-message path keys on. This is the local half of
+// the recovery, owing nothing to the peer.
+func (r *DMRouter) releaseArrivedReactions(ctx context.Context, now time.Time) {
+	store := r.reactions()
+	if store == nil {
+		return
+	}
+	scopes, err := store.ReleaseArrivedReactions(ctx, now)
+	if err != nil {
+		log.Warn().Err(err).Msg("arrived reactions could not be released")
+		return
+	}
+	for _, scope := range scopes {
+		// Told, not merely logged: the chips are drawn from a per-conversation
+		// cache that only this event reloads, so a release nobody announces is a
+		// reaction the user does not see until they switch chats.
+		log.Debug().Str("scope", string(scope)).
+			Msg("reactions whose message had already arrived were released")
+		r.publishReactionsChanged(domain.PeerIdentityFromWire(string(scope)))
+	}
+}
+
+// publishReactionsChanged tells the UI to reload one conversation's chips.
+func (r *DMRouter) publishReactionsChanged(peer domain.PeerIdentity) {
+	if r.eventBus == nil || peer.IsZero() {
+		return
+	}
+	r.eventBus.Publish(ebus.TopicReactionsChanged, peer)
+}
+
+// reofferReactions offers every conversation's own facts again, one page each.
+//
+// This is the half that reaches a peer this node has no SESSION with. A reaction
+// can travel three hops, and the two ends of that path may never be neighbours;
+// re-offering only when a session comes up would then never retry for them, and
+// nothing else would, because no outcome on this transport reports arrival.
+//
+// A page per conversation per pass, and only for the conversations whose backoff
+// says it is time (reofferDue). The gap starts short and widens to
+// ReofferMaxInterval, where it stays: the retries do not stop, because a peer
+// reached only through transit may never open a session and "until their build
+// can take it" has no deadline. What the backoff removes is the fixed cadence,
+// not the retrying.
+func (r *DMRouter) reofferReactions(ctx context.Context) {
+	store := r.reactions()
+	control := r.reactionControl()
+	if store == nil || control == nil {
+		return
+	}
+	self := r.MyAddress()
+	if self.IsZero() {
+		return
+	}
+	scopes, err := store.ConversationsWithReactionsBy(ctx, self)
+	if err != nil {
+		log.Warn().Err(err).Msg("conversations with our reactions could not be listed")
+		return
+	}
+	for _, scope := range scopes {
+		peer := domain.PeerIdentityFromWire(string(scope))
+		if peer.IsZero() {
+			// A group id rather than a peer identity: groups have no fan-out
+			// yet (§8), so there is nobody to offer it to.
+			continue
+		}
+		r.reofferConversation(ctx, control, peer)
+	}
+}
+
+// reofferConversation offers one conversation's due page.
+//
+// The read and the send are one step under the store's removal lease — see
+// offerReoffer — so a removal that starts between them cannot leave a queue full
+// of facts about messages it has just erased.
+func (r *DMRouter) reofferConversation(
+	ctx context.Context,
+	control *ReactionControlAdapter,
+	peer domain.PeerIdentity,
+) {
+	err := control.reofferDue(ctx, peer, func(facts []domain.ReactionFact) error {
+		return r.client.SendReactionFacts(peer, facts)
+	})
+	if err != nil {
+		log.Debug().Err(err).Str("peer", peer.String()).Msg("re-offer page not queued")
+	}
+}
+
+func (r *DMRouter) sweepHeldReactions(ctx context.Context, now time.Time) {
+	store := r.reactions()
+	if store == nil {
+		return
+	}
+	swept, err := store.SweepHeldReactions(ctx, now)
+	if err != nil {
+		log.Warn().Err(err).Msg("held reactions could not be swept")
+		return
+	}
+	if swept > 0 {
+		log.Debug().Int("reactions", swept).
+			Msg("reactions waiting for a message that never arrived were dropped")
+	}
+
+	// The refusals of deleted ids have no expiry — one that expires is the
+	// offer loop starting again — so their bound is a count, and this is the
+	// timer that applies it. Here rather than on the write path because the
+	// write is the moment a deletion is being recorded: making it pay for a
+	// trim would put a scan of the table into the user's delete.
+	trimmed, err := store.TrimReactionRefusals(ctx, chatlog.MaxReactionRefusals)
+	if err != nil {
+		log.Warn().Err(err).Msg("the refusals of deleted ids could not be trimmed")
+		return
+	}
+	if trimmed > 0 {
+		// Worth a line above debug: each id dropped here is one whose reaction
+		// offers can start being accepted again.
+		log.Info().Int("ids", trimmed).
+			Msg("the least recently offered refusals of deleted ids were dropped")
 	}
 }

@@ -99,7 +99,20 @@ func (s *Store) AppendReportNew(ctx context.Context, topic string, selfAddress d
 		status = StatusSent
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	// ONE transaction for the row and the refusal it lifts. Two statements in
+	// sequence would have a state between them where the message is committed
+	// and its refusal is not, and the caller cannot recover from it: the
+	// returned error is read as "not stored", so no arrival event is published,
+	// while the next copy of the message is a duplicate that publishes nothing
+	// either. The message would sit in the database, invisible until the
+	// conversation is loaded again.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("chatlog: begin insert %s: %w", entry.ID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO messages (id, topic, sender, recipient, body, flag, delivery_status, ttl_seconds, metadata, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID, topic, entry.Sender, entry.Recipient, entry.Body,
@@ -109,6 +122,26 @@ func (s *Store) AppendReportNew(ctx context.Context, topic string, selfAddress d
 		return false, fmt.Errorf("chatlog: insert %s: %w", entry.ID, err)
 	}
 	rows, _ := res.RowsAffected()
+	if rows > 0 {
+		// The message is here, so any standing refusal of its reactions is
+		// wrong from this moment: the refusal means "not here and did not
+		// come", and a re-delivery or a reseed days later is exactly the case
+		// it must not outlive. Its author is still offering the fact, and the
+		// next offer has to apply.
+		//
+		// Only on a real insert, so the duplicate arrivals that INSERT OR
+		// IGNORE swallows do not pay for it, and only in THIS conversation:
+		// two of them can hold the same id, and lifting id-wide would clear a
+		// refusal the sweep could never record again — the id exists now.
+		if scope, ok := dmScopeOf(topic, selfAddress, entry); ok {
+			if err := dropReactionRefusalTx(ctx, tx, scope, domain.MessageID(entry.ID)); err != nil {
+				return false, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("chatlog: commit insert %s: %w", entry.ID, err)
+	}
 	return rows > 0, nil
 }
 
@@ -635,17 +668,59 @@ func (s *Store) ReadLastEntryPerPeer(ctx context.Context) (map[string]Entry, err
 }
 
 // Returns the number of deleted rows.
+//
+// It goes through deleteMessageTx per id rather than deleting the rows in one
+// statement, and that is the point rather than an inefficiency: a message is
+// never only its row. Its journals, its resend intents and its REACTIONS are the
+// same message seen from other tables, there is no cascading foreign key to take
+// them, and a bulk DELETE would leave a reaction whose message no longer exists
+// — which the UI still draws and the re-offer still sends, forever, since both
+// read reactions without joining the messages. The ids are read and deleted in
+// ONE transaction so an expiry cannot half-happen.
 func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM messages
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("chatlog: begin delete expired: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM messages
 		WHERE flag = 'auto-delete-ttl'
 		  AND ttl_seconds > 0
 		  AND datetime(created_at) < datetime('now', '-' || ttl_seconds || ' seconds')`)
 	if err != nil {
-		return 0, fmt.Errorf("chatlog: delete expired: %w", err)
+		return 0, fmt.Errorf("chatlog: find expired: %w", err)
+	}
+	var expired []domain.MessageID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("chatlog: scan expired id: %w", err)
+		}
+		expired = append(expired, domain.MessageID(id))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("chatlog: find expired: %w", err)
+	}
+	_ = rows.Close()
+
+	var n int64
+	for _, id := range expired {
+		gone, err := deleteMessageTx(ctx, tx, s.identityAddr, id)
+		if err != nil {
+			return 0, fmt.Errorf("chatlog: delete expired: %w", err)
+		}
+		if gone {
+			n++
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("chatlog: commit delete expired: %w", err)
 	}
 
-	n, _ := res.RowsAffected()
 	if n > 0 {
 		// Same class of deletion as a user-issued one — a message whose
 		// lifetime ran out is supposed to stop existing — so the pages
@@ -711,6 +786,25 @@ func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) 
 		{`DELETE FROM delivery_failed WHERE id IN (` + conversationFilter + `)`, conversationArgs},
 		{`DELETE FROM decrypt_resend_intents WHERE original_id IN (` + conversationFilter +
 			`) OR replacement_id IN (` + conversationFilter + `)`, twoFilters},
+		// Reactions go with the conversation for the reason the per-message
+		// delete gives: they are metadata about messages that are being erased.
+		//
+		// Matched by SCOPE and not through the message rows. The join would
+		// miss precisely the facts that are still WAITING for a message this
+		// node never received — they have no row to join through — and those
+		// are the ones that would outlive the wipe as "peer X reacted to
+		// something in this conversation" on a conversation the user erased.
+		{`DELETE FROM message_reactions WHERE scope = ?`, []any{id}},
+		// And the refusals of this conversation, for the reason
+		// DeleteConversationWithIntents gives at length: with the conversation
+		// gone, offers from this peer are refused at the door, so a row per
+		// erased id would spend a bounded table on ids nothing will ask about.
+		//
+		// Unconditional here, unlike there: this path removes EVERY message of
+		// the peer, immutable ones included, so nothing can be left to keep the
+		// conversation admitting offers. And by scope, which reaches the ids
+		// deleted from it one at a time long before today.
+		{`DELETE FROM reaction_refusals WHERE scope = ?`, []any{id}},
 	}
 	for _, deletion := range journalDeletes {
 		if _, err := tx.ExecContext(ctx, deletion.statement, deletion.args...); err != nil {
@@ -816,7 +910,7 @@ func (s *Store) DeleteByID(ctx context.Context, messageID domain.MessageID) (boo
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	removed, err := deleteMessageTx(ctx, tx, messageID)
+	removed, err := deleteMessageTx(ctx, tx, s.identityAddr, messageID)
 	if err != nil {
 		return false, err
 	}
@@ -853,7 +947,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID, tomb
 
 	removed := make([]domain.MessageID, 0, len(ids))
 	for _, id := range ids {
-		gone, err := deleteMessageTx(ctx, tx, id)
+		gone, err := deleteMessageTx(ctx, tx, s.identityAddr, id)
 		if err != nil {
 			return nil, err
 		}
@@ -886,7 +980,7 @@ func (s *Store) DeleteMessageWithTombstone(ctx context.Context, messageID domain
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	removed, err := deleteMessageTx(ctx, tx, messageID)
+	removed, err := deleteMessageTx(ctx, tx, s.identityAddr, messageID)
 	if err != nil {
 		return false, err
 	}
@@ -918,7 +1012,7 @@ func (s *Store) DeleteMessageWithTombstone(ctx context.Context, messageID domain
 // `decrypt_recovery_cycles`) is deliberately untouched: it describes the
 // conversation, not this message, and survives it by design. The recovery
 // marks of the row itself live in its `metadata` column and go with it.
-func deleteMessageTx(ctx context.Context, db execContext, messageID domain.MessageID) (bool, error) {
+func deleteMessageTx(ctx context.Context, db readWriteContext, self domain.PeerIdentity, messageID domain.MessageID) (bool, error) {
 	res, err := db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, messageID)
 	if err != nil {
 		return false, fmt.Errorf("chatlog: delete %s: %w", messageID, err)
@@ -931,6 +1025,51 @@ func deleteMessageTx(ctx context.Context, db execContext, messageID domain.Messa
 	} {
 		if _, err := db.ExecContext(ctx, statement, messageID); err != nil {
 			return false, fmt.Errorf("chatlog: delete %s journals: %w", messageID, err)
+		}
+	}
+
+	// Reactions describe THIS message and are metadata about it in exactly the
+	// sense the paragraph above means: who responded to what, and when. Left
+	// behind they would also resurrect the message on the next reconciliation,
+	// since a fact naming an id is a claim that the id existed.
+	//
+	// By id alone, without the scope ReleaseHeldReactions insists on, and the
+	// asymmetry is deliberate. Releasing makes rows VISIBLE, so it must not
+	// reach a stranger's fact that happens to name the same id; deleting
+	// destroys them, and over-deleting is the safe direction of a collision
+	// that requires a message id to be reused on purpose.
+	//
+	// The conversations are read BEFORE the delete, and they are read from the
+	// reaction rows themselves rather than from the message: this runs after
+	// the message row is already gone, and a held fact never had one to begin
+	// with. They are what the refusal below is keyed by.
+	scopes, err := reactionScopesOfTx(ctx, db, messageID)
+	if err != nil {
+		return false, err
+	}
+	if _, err := db.ExecContext(ctx,
+		`DELETE FROM message_reactions WHERE message_id = ?`, messageID); err != nil {
+		return false, fmt.Errorf("chatlog: delete %s journals: %w", messageID, err)
+	}
+	if len(scopes) > 0 {
+		// Somebody reacted to this message, and their node offers the facts it
+		// holds for as long as it holds them — longer than the tombstone that
+		// refuses the id, which is sized for message re-delivery and expires
+		// within the week. Recording the id here is what stops the next offer
+		// after that from putting these rows back; see reaction_refusals.go.
+		//
+		// In the same transaction as the delete, for the reason the whole
+		// function takes an executor: a deletion that committed without its
+		// refusal is one that can be undone by the sender, one offer at a time.
+		//
+		// The stamp orders the trim and decides nothing, which is why the wall
+		// clock is the right source for it.
+		keys := make([]scopedID, 0, len(scopes))
+		for _, scope := range scopes {
+			keys = append(keys, scopedID{Scope: scope, MessageID: messageID})
+		}
+		if err := refuseReactionsForTx(ctx, db, self, keys, time.Now().UTC()); err != nil {
+			return false, err
 		}
 	}
 	if _, err := db.ExecContext(ctx,

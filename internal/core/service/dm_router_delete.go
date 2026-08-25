@@ -458,6 +458,21 @@ func (r *DMRouter) removeLocalMessage(ctx context.Context, store *chatlog.Store,
 	// as the row.
 	expiry := r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC())
 
+	// The reaction queue is bracketed around the delete ITSELF, and around
+	// nothing else: it names reactions rather than messages, so it cannot see
+	// this coming, and a frame built from the record a moment ago would
+	// otherwise go out about a message that is no longer here.
+	//
+	// Released the moment the row is gone, before the file cleanup, the UI
+	// eviction and the checkpoint. Those can take a while — a synchronous
+	// TRUNCATE checkpoint waits for readers up to busy_timeout — and every
+	// moment the gate is up costs the whole conversation: a pass that meets it
+	// puts its ENTIRE batch back for dmControlRetryDelay, including reactions on
+	// other messages and the answers this node owes the peer. The defer is a
+	// safety net for the error returns above; the release is idempotent.
+	resumeReactions := r.client.HoldReactionSends(peer)
+	defer resumeReactions()
+
 	// removed says whether a row actually went. A re-issued delete finds
 	// nothing to remove, and moving the version for it would mark every
 	// load and decrypt in flight as stale for nothing.
@@ -473,6 +488,10 @@ func (r *DMRouter) removeLocalMessage(ctx context.Context, store *chatlog.Store,
 			return fmt.Errorf("delete chatlog entry %s: %w", target, err)
 		}
 	}
+
+	// The row is gone: everything below is cleanup, and none of it can put a
+	// reaction on the wire, so the gate comes down here rather than at return.
+	resumeReactions()
 
 	// Under the file barrier, which moves the version first: a registration
 	// in flight either finishes before this begins or finds the deletion
@@ -595,6 +614,13 @@ func (r *DMRouter) evictDeletedMessageFromUI(peer domain.PeerIdentity, target do
 	r.mu.Unlock()
 
 	r.refreshPreviewAfterDelete(peer)
+
+	// The reactions of that message went with it, and the chips are drawn from a
+	// per-conversation cache that ONLY this event reloads. Without it the facts
+	// of a deleted message stay in the window's memory until the user leaves the
+	// chat — and if the same id is delivered again after its wipe tombstone
+	// expires, the new bubble is drawn with chips no row backs any more.
+	r.publishReactionsChanged(peer)
 
 	if cacheRemoved {
 		r.notify(UIEventMessagesUpdated)
@@ -945,8 +971,12 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 		return domain.MessageDeleteStatusDenied
 	}
 
+	// Bracketed like the local delete: a reaction frame built a moment ago must
+	// not reach the peer about a message this node is erasing right now.
+	resumeReactions := r.client.HoldReactionSends(envelopeSender)
 	inboundRemoved, err := store.DeleteMessageWithTombstone(r.opContext(), target,
 		r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC()))
+	resumeReactions()
 	if err != nil {
 		log.Warn().Err(err).
 			Str("target", string(target)).
@@ -1140,7 +1170,13 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 		// the version move: an ack usually names a row deleted when the
 		// intent was written, and moving the counter for it would mark
 		// every current read stale for nothing.
+		// Bracketed like every other per-message delete. This one is for a row
+		// that came BACK after its tombstone expired, which means the user may
+		// well have seen it and reacted to it — so the window this closes is not
+		// theoretical here, it is the case the path exists for.
+		resumeReactions := r.client.HoldReactionSends(envelopeSender)
 		removed, err := store.DeleteByID(ctx, ack.TargetID)
+		resumeReactions()
 		if err != nil {
 			log.Warn().Err(err).
 				Str("target", string(ack.TargetID)).

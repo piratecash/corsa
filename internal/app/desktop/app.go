@@ -152,6 +152,11 @@ func Run() error {
 		log.Warn().Err(err).Msg("chatlog established backfill failed")
 	}
 
+	// Reactions a peer states arrive on the datagram plane and land in the
+	// chatlog through this door. Registered before the node starts, for the
+	// same reason the ebus subscribers below are.
+	client.RegisterConversationControl(eventBus)
+
 	fileBridge := service.NewFileTransferBridge(client)
 
 	// NodeStatusMonitor aggregates network-layer state from ebus events.

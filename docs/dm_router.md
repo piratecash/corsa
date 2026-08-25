@@ -368,6 +368,26 @@ either way and the UI is told either way, but reporting a contact as removed
 while its history may still be on disk is the one answer this function must
 not give.
 
+Both the removal and the **conversation wipe** also STOP the reaction send queue
+for the length of the delete (`HoldReactionSends`), before raising or while
+holding the gate. The gate reaches writes and re-offers; it does not reach the
+queue, which by then may already hold facts of this conversation resolved from
+the record — and a pass that read them a moment earlier would hand its frame over
+after the rows are gone, with the queue's own clearing afterwards only waiting
+for a frame that has already left.
+
+The **conversation wipe** raises the same gate, around its transaction and
+around the drop of the reaction queue. Its own barrier (`convDeleteRetry`)
+stops this node's own sends and says nothing to the paths that write the
+conversation from the side: the reaction re-offer reads a page of the user's
+facts and hands a COPY of them to the node's outbox, so a wipe landing between
+those two steps deletes rows that are already on their way out again, and then
+empties a queue the callback refills a moment later. `begin` waits for the
+lease such a re-offer already holds and refuses new ones until the queue has
+been dropped too. Incoming messages are deferred for that window exactly as
+during a contact removal — and a message arriving after the wipe is outside it
+on both sides in any case.
+
 The two failures a removal can report are not the same failure, so callers
 can tell them apart with `errors.Is(err, ErrHistorySweepFailed)`. The FIRST
 history delete fails before anything is touched: the contact is still there,
@@ -1152,6 +1172,25 @@ stamp. Сам мьютекс при удалении контакта не вы�
 памяти снято в любом случае и UI уведомляется в любом случае, но сообщить об
 удалении контакта, чья история, возможно, осталась на диске, — единственный
 ответ, который эта функция давать не должна.
+
+И удаление контакта, и стирание беседы вдобавок ОСТАНАВЛИВАЮТ очередь отправки
+реакций на время удаления (`HoldReactionSends`) — до подъёма шлюза или под ним.
+Шлюз достаёт до записей и переанонса, но не до очереди, а та к этому моменту
+может уже держать факты беседы, разрешённые по записи; проход, прочитавший их
+мгновением раньше, отдал бы кадр уже после исчезновения строк, и последующая
+очистка очереди дождалась бы лишь кадра, который давно ушёл.
+
+**Стирание беседы** поднимает тот же шлюз — вокруг своей транзакции и вокруг
+сброса очереди реакций. Собственный барьер стирания (`convDeleteRetry`)
+останавливает только отправки этого узла и ничего не говорит путям, которые
+пишут беседу сбоку: переанонс реакций читает страницу фактов пользователя и
+отдаёт КОПИЮ в очередь ноды, поэтому стирание, попавшее между этими двумя
+шагами, удаляет строки, которые уже снова в пути, а затем опустошает очередь,
+которую колбэк через мгновение наполняет заново. `begin` дожидается аренды,
+которую такой переанонс уже держит, и не пускает новые, пока не будет сброшена
+и очередь. Входящие сообщения на это окно откладываются ровно так же, как при
+удалении контакта, — а сообщение, пришедшее после стирания, и так лежит вне
+него с обеих сторон.
 
 Две ошибки, которые может вернуть удаление, — разные ошибки, и вызывающий
 различает их через `errors.Is(err, ErrHistorySweepFailed)`. ПЕРВОЕ удаление

@@ -217,7 +217,7 @@ prefix — is what actually guards against opening somebody else's file.
 
 The chatlog tables are created by the shared migration catalog
 (`internal/core/storage/migrations`), not by this package: chatlog contains no
-DDL at all. The statements below are reproduced from migrations `0002`–`0005`
+DDL at all. The statements below are reproduced from migrations `0002`–`0006`
 for reference — the catalog is the source of truth, and a schema change is a
 new migration there.
 
@@ -248,8 +248,9 @@ Indexes:
 Alongside `messages` the same catalog creates the delivery journals
 (`seen_ack`, `delivery_failed`), the decrypt-recovery tables
 (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`,
-`decrypt_resend_intents`) and the delete-intent table
-(`message_delete_intents`, migration `0005`):
+`decrypt_resend_intents`), the delete-intent table (`message_delete_intents`,
+migration `0005`) and the reaction table (`message_reactions`, migration
+`0006`, described below):
 
 ```sql
 CREATE TABLE IF NOT EXISTS message_delete_intents (
@@ -481,17 +482,19 @@ The `flag` column has a CHECK constraint enforcing these values.
 
 Two deletion methods are available:
 
-- **`DeleteByID(messageID domain.MessageID)`** — removes a single message by primary key, together with every per-message trace under the same id: its `seen_ack` and `delivery_failed` journal rows (migration 0003) and any resend intents keyed on it (migration 0004). Those rows are durable records that a message with this id existed and how its delivery went, so leaving them behind would keep exactly the metadata the deletion was for. Per-PEER state (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) describes the conversation rather than the message and is untouched. All of it commits in one transaction, so a row can never outlive its journal entries or the reverse. Returns true if a message row was found.
-- **`DeleteByPeer(identity)`** — the whole-conversation wipe: its messages, their journal rows, and the peer's pending delete intents, in one transaction. The intents go because their ids are the last rows naming an erased thread; the cost is that peer-side deletions scheduled earlier are abandoned.
+- **`DeleteByID(messageID domain.MessageID)`** — removes a single message by primary key, together with every per-message trace under the same id: its `seen_ack` and `delivery_failed` journal rows (migration 0003), any resend intents keyed on it (migration 0004) and its reactions (migration 0006). Those rows are durable records that a message with this id existed and how its delivery went, so leaving them behind would keep exactly the metadata the deletion was for. When there WERE reactions, the same transaction records the id in `reaction_refusals`: their author re-offers the facts it holds indefinitely, so without it the next offer after the deletion tombstone expires would put them back. Per-PEER state (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) describes the conversation rather than the message and is untouched. All of it commits in one transaction, so a row can never outlive its journal entries or the reverse. Returns true if a message row was found.
+- **`DeleteByPeer(identity)`** — the whole-conversation wipe: its messages, their journal rows, the peer's pending delete intents and every reaction in that conversation, in one transaction. The reactions go by `scope` rather than through a join on `messages`, which is the interesting half: a reaction that arrived before the message it is about has no message row to join through, and matching by scope is the only thing that reaches it. The intents go because their ids are the last rows naming an erased thread; the cost is that peer-side deletions scheduled earlier are abandoned.
 - **`CheckpointWAL()`** — folds the write-ahead log back into the file and truncates it. `secure_delete` (see [storage.md](storage.md)) overwrites the freed page, but in WAL mode that overwrite is itself a log frame and the original bytes live in the `-wal` until a checkpoint retires them. Best-effort: a busy checkpoint is not a failed deletion. Called after every deletion commits — our own, the ones a peer asks us to perform, and the TTL sweep.
-- **`DeleteExpired()`** — batch-removes all auto-delete-ttl messages whose lifetime has elapsed. Uses one SQL query:
+- **`DeleteExpired()`** — removes every auto-delete-ttl message whose lifetime has elapsed. It READS the ids first and then deletes each through the same path `DeleteByID` takes, all in one transaction:
   ```sql
-  DELETE FROM messages
+  SELECT id FROM messages
   WHERE flag = 'auto-delete-ttl'
     AND ttl_seconds > 0
     AND datetime(created_at) < datetime('now', '-' || ttl_seconds || ' seconds')
   ```
-  The partial index `idx_messages_ttl` makes this efficient even with large tables.
+  The partial index `idx_messages_ttl` makes the read efficient even with large tables.
+
+  Per id rather than one bulk `DELETE`, and that is the point rather than an inefficiency: a message is never only its row. Its journals, its resend intents and its reactions are the same message seen from other tables, there is no cascading foreign key to take them, and a bulk delete would leave a reaction whose message no longer exists — which the UI still draws and the re-offer still sends, indefinitely, because both read reactions without joining `messages`. Reading and deleting in ONE transaction is what keeps an expiry from half-happening.
 
   > **Status: not yet wired.** The `DeleteExpired()` method exists in
   > `chatlog.Store` but is not called by any runtime path. Currently the node
@@ -580,14 +583,167 @@ The whole-conversation wipe goes through the same table:
 
 ### Metadata column
 
+Migration `0006` adds the reaction table. One row is one FACT — "this actor set
+(or cleared) this emoji on this message, and that decision is their Nth" — and
+the count under a message is a fold over the rows, never a number in a column:
+
+```sql
+CREATE TABLE IF NOT EXISTS message_reactions (
+    scope         TEXT    NOT NULL,   -- conversation: the peer today, a group id later
+    message_id    TEXT    NOT NULL,
+    actor         TEXT    NOT NULL,   -- 40-hex identity of the fact's author
+    emoji         TEXT    NOT NULL,
+    op            INTEGER NOT NULL,   -- 0 cleared (a TOMBSTONE), 1 set
+    clock         INTEGER NOT NULL,   -- the ACTOR's own monotonic counter
+    pending       INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT    NOT NULL,   -- never moves; the held-row TTL measures from it
+    updated_at    TEXT    NOT NULL,
+    PRIMARY KEY (message_id, actor, emoji)
+);
+```
+
+Four things about it are not obvious from the columns:
+
+- the key has exactly ONE writer, the actor, which the signed envelope enforces
+  on arrival. So merging is `if incoming.clock > local.clock`, and none of the
+  usual conflict machinery is needed;
+- `op = 0` is a tombstone, not an absence. Deleting the row on "cleared" would
+  leave a delayed duplicate of the "set" with nothing to compare against, and
+  the reaction would come back;
+- `pending = 1` is a fact that arrived BEFORE the message it talks about. It is
+  released when the message lands, and swept if it never does;
+- a conversation wipe erases the ORPHANED reactions of the scope — the ones with
+  no message left in the conversation — rather than reaching them through the
+  message rows, and the TTL sweep deletes each expired message through the same path a
+  user-issued deletion takes. Both for the same reason: a reaction is not
+  reachable from the message row in every case that matters — a held fact has no
+  message row at all — and there is no cascading foreign key to take it. A
+  message the wipe KEEPS (an immutable one) keeps its reactions with it: erasing
+  those would not stick, because the peer re-offers the fact, the message is
+  still there, and the chip comes back;
+- an APPLIED fact is refused unless its message is in `messages`, and the check
+  is a clause of the upsert rather than a question the caller asks first. Asking
+  first is a check-then-act: a per-message delete landing between the question
+  and the write erases the reactions and then has the write put one back, for a
+  message that no longer exists — a row no deletion path reaches afterwards. A
+  HELD fact is exempt, because waiting for a message that is not here yet is the
+  whole point of it;
+- `first_seen_at` and `updated_at` are two clocks for two questions. The sweep
+  measures the first, because the second is refreshed on every write and the
+  SENDER chooses when to write.
+
+Its indexes answer four readers: `(scope, message_id)` the conversation view,
+`(pending, actor, first_seen_at)` the sweep and the per-actor ceiling,
+`(actor, clock)` the local user's next counter value, and
+`(actor, scope, pending, updated_at DESC, message_id DESC, emoji DESC)` the
+re-offer, which runs on a timer once per conversation and would otherwise scan
+every fact this user ever stated and sort the result in a temporary B-tree. The
+tiebreak columns are what removes the sort entirely: the query needs a TOTAL
+order to page safely, and rowid — the obvious tiebreak — cannot go in an index.
+
+The same migration adds a second, much smaller table: the ids whose reactions
+this node refuses — the message is not here and did not come.
+
+```sql
+CREATE TABLE IF NOT EXISTS reaction_refusals (
+    scope      TEXT NOT NULL,  -- the conversation, and the only handle a wipe has
+    message_id TEXT NOT NULL,
+    refused_at TEXT NOT NULL,  -- last touch, not birth: the trim orders by it
+    PRIMARY KEY (scope, message_id)
+);
+```
+
+It exists because two refusals expire on different clocks. The deletion
+tombstone (`message_delete_intents.refuse_until`) is sized by the sender's
+reseed horizon — past a week no copy of the MESSAGE is re-sent, so the refusal
+has nothing left to refuse. A reaction has no horizon: its author re-offers the
+facts it holds for as long as it holds them, because nothing on that transport
+reports arrival. So the tombstone went first, the next offer was accepted as a
+`pending` fact, the sweep took it an hour later, and the offer after that put it
+back — a row naming a message the user destroyed, re-created for as long as both
+nodes run.
+
+There are three writers, ordered by how much they know:
+
+- the delete of a message that HAD reactions, in the same transaction, so the
+  loop never starts for the case that can be seen coming;
+- an offer refused while the tombstone is still alive — a reaction made after
+  the deletion, which nothing at delete time could have noticed;
+- the sweep of a fact that waited out `HeldReactionTTL`. This is the one that
+  needs no foresight and closes the rest: a first offer arriving days after the
+  tombstone expired is held once — indistinguishable, at that moment, from a
+  fact whose message is merely late — and the sweep turns "waited a whole window
+  for nothing" into the answer for every offer after it. That write is guarded
+  by the message being absent, so a release that loses the race with the sweep
+  cannot refuse an id whose message is on screen.
+
+Not every deletion writes a row: messages also expire on their own timer, and a
+row per deleted id would be a second copy of the message table that never
+shrinks.
+
+Both the guard on that write and the read below ask about the message's
+MEMBERSHIP of the conversation, not about the id existing somewhere: ids are
+chosen by their sender, so a peer can put a message in ITS conversation under an
+id this node deleted in another.
+
+One eraser: storing a message with that id IN THAT CONVERSATION. A re-delivery
+or a reseed days later makes the refusal wrong, and its author is still offering
+the fact, so the next offer has to apply. That is what keeps "did not come" from
+silently meaning "never will". Scoped exactly like the write it undoes — lifting
+id-wide would clear a refusal the sweep could never record again, because the id
+now exists. The insert and the lift are ONE commit: a caller reads an error as
+"not stored" and publishes no arrival event, so a row committed under a reported
+failure would be a message nothing announces — and the next copy of it is a
+duplicate, silent by design.
+
+There is no expiry column, because an id that expires is the loop starting
+again. The bound is a count instead — `chatlog.MaxReactionRefusals`, trimmed
+least-recently-touched first on the same timer that sweeps held facts — and the
+READ moves `refused_at`, so what survives the trim is what somebody is still
+pushing at. The touch has an hour's floor: it runs on the arrival path of every
+refused fact, while the trim measures in days. The read itself happens only when
+the message is NOT in `messages`, so an id that legitimately came back is judged
+by its own presence rather than by a row nobody cleaned up.
+
+A conversation WIPE goes the other way and DROPS the conversation's refusals —
+but only when the conversation is really gone. With no messages left, an offer
+from that peer is refused at the door by the "do we have a conversation with this
+peer" check, so keeping the rows would spend a bounded table on ids nothing will
+ask about. The wipe KEEPS immutable messages, though, and one survivor is enough
+to keep the conversation admitting offers, so the drop is conditional on the
+transaction finding nothing left. `DeleteByPeer` — contact removal — has no such
+condition: it takes every message of the peer.
+
+That drop is by SCOPE and not by the ids the wipe touched, which is what the
+column is for: everything deleted from this conversation EARLIER is refused too,
+and those ids are in no list a wipe holds — no query over `messages` can name
+them any more. It also runs on the wipe of a thread with NOTHING to delete, which
+never opens the deleting transaction at all; that is the only path left for a
+conversation whose messages went one at a time. There it shares ONE commit with
+the drop of the facts still waiting in that thread (`WipeEmptyConversationReactions`),
+because the caller reports "nothing was wiped" on an error and would otherwise
+be saying so over rows that are already gone — while skipping the event that
+redraws the chips. If the conversation ever starts
+again, the sweep records what it has to. What this table is for is the
+single-message delete, where the conversation lives on.
+
+The full model is in `docs/refactoring/reactions-protocol.md`.
+
+
 The `metadata` column stores arbitrary JSON for fields that don't have their own
 column. This provides forward compatibility — new message properties can be stored
 without schema migrations. Examples of future metadata:
 
 - `{"edited": true, "edit_at": "2026-..."}` — edit history
-- `{"reactions": {"👍": 2}}` — message reactions
-
 When `metadata` is empty string, it means no extra data is present.
+
+Reactions are NOT one of these, and the reason is worth stating because this
+column was the obvious home for them. A counter in JSON cannot say WHO reacted,
+which in a group is the only thing worth knowing, and it cannot be merged: two
+nodes that each saw one reaction have `{"👍": 1}` twice and no way to tell
+whether that is one person or two. It would also mean an UPDATE of the message
+row competing with the guarded `UpdateStatus`. So they live in their own table,
+one row per fact — see below.
 
 **`never_emitted`** is the one mark the delivery path writes there. The node
 tracks in memory whether an outgoing envelope has ever been handed to the wire,
@@ -1213,7 +1369,7 @@ chatlog-<identity_short>-<port>.db
 
 Таблицы chatlog создаются общим каталогом миграций
 (`internal/core/storage/migrations`), а не этим пакетом: в chatlog нет DDL
-вообще. Ниже приведена справочная копия из миграций `0002`–`0005` — источник
+вообще. Ниже приведена справочная копия из миграций `0002`–`0006` — источник
 истины именно каталог, и изменение схемы делается новой миграцией там.
 
 Основная таблица — `messages`, с CHECK-ограничениями для enum-полей:
@@ -1474,17 +1630,19 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 
 Два метода удаления:
 
-- **`DeleteByID(messageID domain.MessageID)`** — удаляет одно сообщение по первичному ключу вместе со всеми per-message следами под тем же id: строками журналов `seen_ack` и `delivery_failed` (миграция 0003) и resend-intent-ами, ключёванными на него (миграция 0004). Эти строки — долговечная запись о том, что сообщение с таким id существовало и как прошла доставка, поэтому оставлять их — значит сохранять ровно ту метаинформацию, ради которой удаляли. Per-PEER состояние (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) описывает переписку, а не сообщение, и не трогается. Всё это коммитится одной транзакцией, поэтому строка не может пережить свои журнальные записи и наоборот. Возвращает true, если строка сообщения найдена.
-- **`DeleteByPeer(identity)`** — очистка всей переписки: её сообщения, их журнальные строки и ожидающие delete intent-ы этого пира, одной транзакцией. Intent-ы уходят, потому что их id — последние строки, называющие стёртую переписку; цена в том, что запланированные ранее удаления у пира отменяются.
+- **`DeleteByID(messageID domain.MessageID)`** — удаляет одно сообщение по первичному ключу вместе со всеми per-message следами под тем же id: строками журналов `seen_ack` и `delivery_failed` (миграция 0003), resend-intent-ами, ключёванными на него (миграция 0004), и его реакциями (миграция 0006). Эти строки — долговечная запись о том, что сообщение с таким id существовало и как прошла доставка, поэтому оставлять их — значит сохранять ровно ту метаинформацию, ради которой удаляли. Если реакции БЫЛИ, та же транзакция записывает id в `reaction_refusals`: их автор предлагает удерживаемые факты бессрочно, и без этой записи первое же предложение после истечения надгробия вернуло бы строки обратно. Per-PEER состояние (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) описывает переписку, а не сообщение, и не трогается. Всё это коммитится одной транзакцией, поэтому строка не может пережить свои журнальные записи и наоборот. Возвращает true, если строка сообщения найдена.
+- **`DeleteByPeer(identity)`** — очистка всей переписки: её сообщения, их журнальные строки, ожидающие delete intent-ы этого пира и все реакции этой беседы, одной транзакцией. Реакции удаляются по `scope`, а не через join с `messages`, и это самая интересная половина: у реакции, пришедшей раньше своего сообщения, строки для join-а нет вовсе, и достать её можно только по scope. Intent-ы уходят, потому что их id — последние строки, называющие стёртую переписку; цена в том, что запланированные ранее удаления у пира отменяются.
 - **`CheckpointWAL()`** — сворачивает write-ahead log обратно в файл и усекает его. `secure_delete` (см. [storage.md](storage.md)) перезаписывает освобождённую страницу, но в режиме WAL сама эта перезапись — тоже фрейм лога, и исходные байты живут в `-wal` до чекпойнта. Best-effort: busy — это не провал удаления. Вызывается после коммита каждого удаления — своего, выполненного по просьбе пира и TTL-свипа.
-- **`DeleteExpired()`** — пакетное удаление всех auto-delete-ttl сообщений, время жизни которых истекло. Один SQL-запрос:
+- **`DeleteExpired()`** — удаляет все auto-delete-ttl сообщения, время жизни которых истекло. Сначала ЧИТАЕТ их id, затем удаляет каждое тем же путём, что и `DeleteByID`, всё одной транзакцией:
   ```sql
-  DELETE FROM messages
+  SELECT id FROM messages
   WHERE flag = 'auto-delete-ttl'
     AND ttl_seconds > 0
     AND datetime(created_at) < datetime('now', '-' || ttl_seconds || ' seconds')
   ```
-  Частичный индекс `idx_messages_ttl` делает это эффективным даже на больших таблицах.
+  Частичный индекс `idx_messages_ttl` делает это чтение эффективным даже на больших таблицах.
+
+  По одному id, а не одним массовым `DELETE`, и это именно замысел, а не неэффективность: сообщение — это никогда не только его строка. Его журналы, resend-intent-ы и реакции — то же сообщение, увиденное из других таблиц, каскадного внешнего ключа здесь нет, а массовое удаление оставило бы реакцию, сообщения которой больше не существует, — её и рисует UI, и бесконечно отправляет переанонс, потому что оба читают реакции без join с `messages`. Чтение и удаление в ОДНОЙ транзакции не дают истечению произойти наполовину.
 
   > **Статус: пока не подключено.** Метод `DeleteExpired()` реализован в
   > `chatlog.Store`, но ни один runtime-путь его не вызывает. Сейчас нода
@@ -1568,6 +1726,150 @@ sidebar остаётся пустым, а 5-секундный тикер чер
   спросит пира.
 
 ### Столбец metadata
+
+Миграция `0006` добавляет таблицу реакций. Одна строка — один ФАКТ: «этот актор
+поставил (или снял) этот эмодзи на этом сообщении, и это его N-е решение»; счёт
+под сообщением — свёртка по строкам, а не число в колонке:
+
+```sql
+CREATE TABLE IF NOT EXISTS message_reactions (
+    scope         TEXT    NOT NULL,   -- беседа: пара identity сейчас, group id потом
+    message_id    TEXT    NOT NULL,
+    actor         TEXT    NOT NULL,   -- 40-hex identity автора факта
+    emoji         TEXT    NOT NULL,
+    op            INTEGER NOT NULL,   -- 0 cleared (НАДГРОБИЕ), 1 set
+    clock         INTEGER NOT NULL,   -- собственный монотонный счётчик АКТОРА
+    pending       INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT    NOT NULL,   -- не двигается; от него меряется TTL придержанных
+    updated_at    TEXT    NOT NULL,
+    PRIMARY KEY (message_id, actor, emoji)
+);
+```
+
+Четыре вещи, не очевидные из колонок:
+
+- у ключа ровно ОДИН писатель — сам актор, и это обеспечивает подписанный
+  конверт на приёме. Поэтому слияние — это «если `incoming.clock > local.clock`»,
+  и никакой обычной машинерии разрешения конфликтов не нужно;
+- `op = 0` — надгробие, а не отсутствие. Удаление строки на «снял» оставило бы
+  задержавшийся дубль «поставил» без того, с чем сравнивать, и реакция
+  вернулась бы;
+- `pending = 1` — факт, пришедший РАНЬШЕ своего сообщения. Освобождается, когда
+  сообщение приходит, и выметается, если оно так и не пришло;
+- стирание беседы удаляет ОСИРОТЕВШИЕ реакции этого scope — те, для которых в
+  беседе не осталось сообщения, — а не достаёт их через строки сообщений, а
+  TTL-сметка удаляет каждое истёкшее сообщение тем же путём, что и удаление,
+  инициированное пользователем. Причина одна: реакция достижима из строки
+  сообщения не во всех значимых случаях — у придержанного факта строки сообщения
+  нет вовсе, — а каскадного внешнего ключа здесь нет. Сообщение, которое стирание
+  СОХРАНЯЕТ (immutable), сохраняет и свои реакции: стереть их не удержится —
+  пир предложит факт заново, сообщение на месте, и чип вернётся;
+- ПРИМЕНЁННЫЙ факт не пишется, если его сообщения нет в `messages`, и проверка
+  живёт условием самого upsert, а не вопросом вызывающего перед записью. Вопрос
+  перед записью — это check-then-act: удаление одного сообщения, попавшее между
+  вопросом и записью, сначала стирает реакции, а потом запись создаёт строку
+  заново — для сообщения, которого больше нет, и до неё потом не дотягивается ни
+  один путь удаления. ПРИДЕРЖАННЫЙ факт из-под этого правила выведен: ждать
+  сообщение, которого ещё нет, — его прямое назначение;
+- `first_seen_at` и `updated_at` — два времени на два вопроса. Sweep меряет
+  первое, потому что второе обновляется каждой записью, а когда писать — решает
+  ОТПРАВИТЕЛЬ.
+
+Её индексы отвечают четырём читателям: `(scope, message_id)` — вид беседы,
+`(pending, actor, first_seen_at)` — sweep и потолок на актора, `(actor, clock)` —
+следующее значение счётчика локального пользователя и
+`(actor, scope, pending, updated_at DESC, message_id DESC, emoji DESC)` —
+переанонс, который ходит по таймеру на каждую беседу и иначе сканировал бы все
+факты пользователя и сортировал результат во временном B-дереве. Колонки
+тайбрейка убирают сортировку целиком: пагинации нужен ТОТАЛЬНЫЙ порядок, а
+очевидный тайбрейк `rowid` в индекс не кладётся.
+
+Та же миграция добавляет вторую, куда более скромную таблицу — идентификаторы
+сообщений, реакции на которые узел отказывается принимать навсегда.
+
+```sql
+CREATE TABLE IF NOT EXISTS reaction_refusals (
+    scope      TEXT NOT NULL,  -- беседа, и единственная ручка, которая есть у стирания
+    message_id TEXT NOT NULL,
+    refused_at TEXT NOT NULL,  -- последнее касание, а не рождение: по нему идёт trim
+    PRIMARY KEY (scope, message_id)
+);
+```
+
+Она есть потому, что два отказа истекают по разным часам. Надгробие удаления
+(`message_delete_intents.refuse_until`) отмерено горизонтом переотправки
+ОТПРАВИТЕЛЯ: после недели копию СООБЩЕНИЯ уже никто не шлёт, и отказу нечего
+отказывать. У реакции такого горизонта нет — автор предлагает удерживаемые факты
+столько, сколько их держит, потому что на этом транспорте ничто не сообщает о
+доставке. Поэтому надгробие уходило первым, следующее предложение принималось
+как `pending`-факт, через час его забирала сметка, а предложение после этого
+создавало его снова — строка, называющая уничтоженное пользователем сообщение,
+пересоздавалась ровно столько, сколько работают оба узла.
+
+Писателей три, по убыванию осведомлённости:
+
+- удаление сообщения, у которого БЫЛИ реакции, — в той же транзакции, чтобы для
+  предвидимого случая цикл вообще не начинался;
+- предложение, отказанное при ещё живом надгробии, — реакция, поставленная уже
+  после удаления, которую в момент удаления заметить было нечем;
+- сметка факта, простоявшего `HeldReactionTTL`. Именно она не требует
+  предвидения и закрывает остальное: первое предложение, пришедшее через дни
+  после истечения надгробия, придерживается один раз — в этот момент оно
+  неотличимо от факта, чьё сообщение просто задерживается, — а сметка
+  превращает «прождал всё окно впустую» в ответ для всех последующих
+  предложений. Эта запись защищена условием отсутствия сообщения: освобождение,
+  проигравшее гонку сметке, не должно отказать id, чьё сообщение на экране.
+
+Не на каждое удаление: сообщения ещё и истекают по своему сроку, и строка на
+каждый удалённый id была бы второй копией таблицы сообщений, которая никогда не
+уменьшается.
+
+И охрана этой записи, и чтение ниже спрашивают о ПРИНАДЛЕЖНОСТИ сообщения
+беседе, а не о том, что id где-то существует: id выбирает отправитель, поэтому
+пир может положить сообщение в СВОЮ беседу под id, который мы удалили в другой.
+
+Стиратель один — сохранение сообщения с этим id В ЭТОЙ БЕСЕДЕ. Переотправка или
+reseed через дни делают отказ неверным, а автор факта всё ещё его предлагает,
+поэтому следующее предложение обязано примениться; это и не даёт «не пришло»
+тихо означать «не придёт никогда». Снятие заскоуплено ровно так же, как запись,
+которую оно отменяет: снятие по одному id стёрло бы отказ, который сметка уже не
+сможет записать заново, — id ведь теперь существует. Вставка и снятие — ОДИН коммит: вызывающий читает
+ошибку как «не сохранено» и не публикует событие прихода, поэтому строка,
+закоммиченная под сообщённой ошибкой, была бы сообщением, о котором никто не
+объявит, — а следующая его копия уже дубликат и молчит по построению.
+
+Колонки срока нет: id, который истекает, — это возвращение того самого цикла.
+Ограничение вместо срока — счётное (`chatlog.MaxReactionRefusals`), а trim
+выбрасывает наименее недавно тронутые на том же таймере, что метёт придержанные
+факты. `refused_at` двигает само ЧТЕНИЕ, поэтому trim переживают те id, в
+которые кто-то всё ещё стучится. У касания есть часовой порог: оно живёт на
+пути прихода каждого отказанного факта, а trim меряет днями. Само чтение
+происходит только когда сообщения НЕТ в `messages`, поэтому id, вернувшийся
+законно, судится по своему присутствию, а не по строке, которую никто не убрал.
+
+Стирание беседы идёт в обратную сторону и УДАЛЯЕТ её отказы — но только если
+беседы действительно не осталось. Без сообщений предложение от этого пира
+отбивается на входе проверкой «есть ли у нас беседа с этим пиром», так что
+хранить строки — тратить ограниченную таблицу на id, о которых никто не спросит.
+Но стирание СОХРАНЯЕТ immutable-сообщения, и одного выжившего достаточно, чтобы
+беседа продолжала принимать предложения, поэтому удаление обусловлено тем, что
+транзакция не нашла ничего живого. У `DeleteByPeer` (удаление контакта) такого
+условия нет: он забирает все сообщения пира.
+
+Удаление идёт по SCOPE, а не по списку id, которые тронуло стирание, — ради
+этого колонка и существует: всё, что удалили из беседы РАНЬШЕ, тоже отказано, и
+этих id нет ни в одном списке — запрос по `messages` их уже не назовёт. Оно же
+работает при стирании беседы, в которой удалять НЕЧЕГО: там удаляющая транзакция
+не открывается вовсе, и это единственный путь для беседы, сообщения которой
+удалили по одному. Там оно делит ОДИН коммит с удалением фактов, всё ещё ждущих
+в этой беседе (`WipeEmptyConversationReactions`): вызывающий на ошибке
+сообщает «ничего не стёрто» — и иначе говорил бы это поверх уже удалённых строк,
+пропустив событие, которое перерисовывает чипы. Если
+беседа начнётся заново, нужное запишет сметка. Таблица существует ради удаления
+ОДНОГО сообщения, когда беседа продолжает жить.
+
+Полная модель — в `docs/refactoring/reactions-protocol.md`.
+
 
 Столбец `metadata` хранит произвольный JSON для полей, у которых нет собственной
 колонки. Это обеспечивает совместимость вперёд — новые свойства сообщений можно

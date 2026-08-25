@@ -280,10 +280,14 @@ func TestDismissedMenusStopBeforeTheirCard(t *testing.T) {
 			open:  func(w *Window) bool { return !w.contextMenuPeer.IsZero() },
 		},
 		{
-			name:  "message menu",
-			msg:   true,
-			items: func(w *Window) []event.Tag { return []event.Tag{&w.msgCtxReply, &w.msgCtxCopy} },
-			open:  func(w *Window) bool { return w.msgContextMsg != nil },
+			name: "message menu",
+			msg:  true,
+			// The reaction pill is drawn above the card and comes first in the
+			// ring, so the first item focus lands on is one of its slots.
+			items: func(w *Window) []event.Tag {
+				return append(w.reactionRow.row.Tags(defaultQuickReactions), &w.msgCtxReply, &w.msgCtxCopy)
+			},
+			open: func(w *Window) bool { return w.msgContextMsg != nil },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

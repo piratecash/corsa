@@ -141,6 +141,13 @@ type queryContext interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// readWriteContext is both halves, for a transaction that has to read rows
+// it is about to destroy in order to record what they said.
+type readWriteContext interface {
+	execContext
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // DeleteWithIntent removes the message and records the peer-side delete
 // intent in ONE transaction.
 //
@@ -161,7 +168,7 @@ func (s *Store) DeleteWithIntent(ctx context.Context, intent DeleteIntent, tombs
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	removed, err := deleteMessageTx(ctx, tx, intent.MessageID)
+	removed, err := deleteMessageTx(ctx, tx, s.identityAddr, intent.MessageID)
 	if err != nil {
 		return false, err
 	}
@@ -461,7 +468,7 @@ func (s *Store) DeleteConversationWithIntents(ctx context.Context, peer domain.P
 			return ConversationWipeResult{}, err
 		}
 
-		gone, err := deleteMessageTx(ctx, tx, id)
+		gone, err := deleteMessageTx(ctx, tx, s.identityAddr, id)
 		if err != nil {
 			return ConversationWipeResult{}, err
 		}
@@ -492,12 +499,46 @@ func (s *Store) DeleteConversationWithIntents(ctx context.Context, peer domain.P
 		result.Owed++
 	}
 
+	// The conversation's ORPHANED reactions go last, once the messages are
+	// gone, because "orphaned" is decided against the rows that are left.
+	//
+	// It has to be a scope-wide statement rather than a consequence of deleting
+	// the messages: a fact still WAITING for a message this node never received
+	// has no message row to be deleted through, and if that message ever arrives
+	// the repair pass would make it visible in a conversation the user erased.
+	//
+	// And it deliberately spares the reactions of a message that SURVIVED — an
+	// immutable one, which this wipe keeps by design. Erasing those would not
+	// stick: the peer re-offers the fact, the message is there, and the chip
+	// comes back. See DeleteOrphanReactions.
+	if _, err := deleteOrphanReactionsTx(ctx, tx, s.identityAddr, domain.ReactionScopeForPeer(peer)); err != nil {
+		return ConversationWipeResult{}, err
+	}
+
 	// The refusals go in the same commit as the deletions, so no row can
 	// be gone while a replay of its envelope is still welcome. The caller
 	// also marks the ids in memory BEFORE calling — that covers the
 	// window between reading the scope and this commit, which no
 	// transaction can reach into.
 	if err := noteWipeTombstones(ctx, tx, scope.IDs, tombstoneUntil); err != nil {
+		return ConversationWipeResult{}, err
+	}
+
+	// The REACTION refusals go the other way — they are dropped — but ONLY if
+	// the conversation is actually gone.
+	//
+	// That condition is the whole of it. With no message left, an offer from
+	// this peer is refused at the door, because the admission check asks whether
+	// a conversation exists at all; keeping a row per erased id would then spend
+	// a bounded table on ids nothing will ever ask about. But this wipe KEEPS
+	// immutable messages, and one survivor is enough to keep the conversation
+	// admitting offers — and then every refusal dropped here is an hour of
+	// held rows waiting to happen, once per id, as soon as the tombstones go.
+	//
+	// By SCOPE, not by the ids this wipe touched: everything deleted from this
+	// conversation EARLIER is refused too, and those ids are in no list the wipe
+	// has — the scope column exists so they can be found at all.
+	if _, err := forgetRefusalsIfConversationGoneTx(ctx, tx, s.identityAddr, peer); err != nil {
 		return ConversationWipeResult{}, err
 	}
 

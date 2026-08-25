@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -49,14 +50,18 @@ import (
 )
 
 type Window struct {
-	router   *service.DMRouter
-	client   *service.DesktopClient
-	eventBus *ebus.Bus
-	cmdTable *rpc.CommandTable
-	runtime  *NodeRuntime
-	prefs    *Preferences
-	theme    *material.Theme
-	ops      op.Ops
+	router *service.DMRouter
+	// reactionRouter narrows what a reaction decision may reach, and is nil in
+	// production — reactions() falls back to router. A test sets it to observe
+	// the one call that distinguishes a wired chip row from an unwired one.
+	reactionRouter reactionRouter
+	client         *service.DesktopClient
+	eventBus       *ebus.Bus
+	cmdTable       *rpc.CommandTable
+	runtime        *NodeRuntime
+	prefs          *Preferences
+	theme          *material.Theme
+	ops            op.Ops
 
 	recipientEditor      widget.Editor
 	identitySearchEditor widget.Editor
@@ -191,6 +196,38 @@ type Window struct {
 	msgCtxDelete  widget.Clickable
 	msgRightClick map[string]*rightClickState  // keyed by message ID
 	msgMenuBtns   map[string]*widget.Clickable // per-message "⋯" menu buttons
+
+	// Reactions: the chip row's widgets per message, the state those chips are
+	// drawn from, and the quick-choice pill that opens with the message menu.
+	// See reactions.go.
+	msgReactionChips map[domain.MessageID]*ui.ReactionChipsState
+	msgReactionState map[domain.MessageID][]domain.Reaction
+	// reactionsStale is raised by the event-bus goroutine and lowered by the
+	// layout goroutine. It is the ONLY thing that crosses between them for this
+	// feature: msgReactionState above is a map every bubble reads each frame,
+	// so a write from a subscriber is a concurrent map access rather than a
+	// stale read. See noteReactionsChanged.
+	reactionsStale atomic.Bool
+	reactionRow    reactionRowState
+	// reactionsLocalOnlyFor names the conversations the "your reaction stayed
+	// here" notice has already been shown for. Layout goroutine only.
+	//
+	// Once per conversation, not once per reload: the news arrives
+	// asynchronously (the node learns the refusal a second after the tap), and
+	// every later reload of that conversation would repeat the notice over
+	// whatever else the status line was saying.
+	//
+	// A SET rather than "the last conversation announced", because the check
+	// also runs on every chat switch: with one slot, walking A → B → A would
+	// announce A twice, and A → B with both refusing would lose B's notice the
+	// moment the user came back to A.
+	reactionsLocalOnlyFor map[domain.PeerIdentity]bool
+	// reactionsLocalOnlyText is the notice AS IT WAS WRITTEN. Taking it back
+	// compares against the line's current contents, and re-translating the
+	// notice to do that compares against a string that was never on the line if
+	// the user has changed language since — the notice then stays up for good,
+	// because the flag above is cleared either way.
+	reactionsLocalOnlyText string
 
 	// Keyboard/Narrator focus contract of the two context menus above: which
 	// "⋯" button opened one, whether it holds focus, and where focus goes back
@@ -473,8 +510,35 @@ const (
 	languageMenuHeight = 316
 )
 
+// editorTags lists every widget in this window that a caret can sit in.
+//
+// It is one list rather than a condition written out at its single call site
+// because leaving a field out of it is silent and expensive: the touch-keyboard
+// tracker reads "no editor focused" as "the user is done typing" and asks the
+// keyboard down 400ms later. The reaction panel's search field was missed
+// exactly that way, and on a Windows tablet the keyboard closed mid-word.
+func (w *Window) editorTags() []event.Tag {
+	return []event.Tag{
+		&w.messageEditor,
+		&w.identitySearchEditor,
+		&w.aliasEditor,
+		&w.emojiPicker.panel.Search,
+		&w.reactionRow.panel.Search,
+	}
+}
+
+// anyEditorFocused reports whether the caret is in any of them this frame.
+func (w *Window) anyEditorFocused(gtx layout.Context) bool {
+	for _, tag := range w.editorTags() {
+		if gtx.Focused(tag) {
+			return true
+		}
+	}
+	return false
+}
+
 // kit is what the shared components (internal/app/desktop/ui) need from this
-// window: its theme and its close icon.
+// window: its theme, its close icon and the family emoji are drawn in.
 //
 // Derived on each call rather than stored, because a stored copy is a field
 // somebody has to remember to set — and the places that build a Window by
@@ -482,7 +546,7 @@ const (
 // set it. Two pointer copies per call is not a cost worth a class of nil
 // panics.
 func (w *Window) kit() ui.Kit {
-	return ui.Kit{Theme: w.theme, CloseIcon: w.closeIcon}
+	return ui.Kit{Theme: w.theme, CloseIcon: w.closeIcon, EmojiFace: emojiTypeface}
 }
 
 // newAppTheme creates a fresh material.Theme with the application colour scheme.
@@ -616,6 +680,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		messageSelectables:       make(map[string]*widget.Selectable),
 		msgRightClick:            make(map[string]*rightClickState),
 		msgMenuBtns:              make(map[string]*widget.Clickable),
+		msgReactionChips:         make(map[domain.MessageID]*ui.ReactionChipsState),
 		recipientMenuBtns:        make(map[domain.PeerIdentity]*widget.Clickable),
 		menuBtnRects:             make(map[*widget.Clickable]image.Rectangle),
 		touchPressPos:            make(map[pointer.ID]image.Point),
@@ -904,6 +969,13 @@ func (w *Window) startPolling(window *app.Window) {
 		w.eventBus.Subscribe(ebus.TopicIdentityResolutionChanged, func(state ebus.IdentityResolutionState) {
 			w.handleIdentityResolutionState(state)
 		})
+		// A peer's reactions have been merged. The event names the
+		// conversation and not the change, because the chip rows are drawn
+		// from a whole-conversation cache — reloading it is both the
+		// cheapest and the only correct response.
+		w.eventBus.Subscribe(ebus.TopicReactionsChanged, func(domain.PeerIdentity) {
+			w.noteReactionsChanged()
+		})
 	}
 
 	go func() {
@@ -997,6 +1069,11 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		w.consoleModal.focusRing.restoreOnClose(gtx, &w.messageEditor)
 	}
 	w.snap = w.router.Snapshot()
+	// Before rebuildMsgCache, which is what the chip rows are drawn against:
+	// a peer's reactions arrive on the event bus goroutine, which can only
+	// raise a flag (see noteReactionsChanged), and this is the first point on
+	// the goroutine that owns the cache at which they can be read.
+	w.reloadStaleReactions()
 	w.rebuildPeerLastOnlineIndex()
 	w.rebuildMsgCache()
 	// AFTER the snapshot, and after rebuildMsgCache: the signature carries
@@ -1117,11 +1194,7 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	// Symmetric keyboard hide: when every editor of this window has lost
 	// focus (tap on a button, chat, etc.), ask the keyboard we opened to
 	// hide — Gio's ShowTextInput is a no-op on Windows in both directions.
-	w.touchKbd.trackEditorFocus(gtx,
-		gtx.Focused(&w.messageEditor) ||
-			gtx.Focused(&w.identitySearchEditor) ||
-			gtx.Focused(&w.aliasEditor) ||
-			gtx.Focused(&w.emojiPicker.searchEditor))
+	w.touchKbd.trackEditorFocus(gtx, w.anyEditorFocused(gtx))
 
 	// Publish what THIS frame measures, at its end — deferred so it happens
 	// however the function returns. The header yields on what the composer and
@@ -1426,6 +1499,15 @@ func (w *Window) resetReplyOnPeerChange() {
 	w.msgRightClick = make(map[string]*rightClickState)
 	w.replyQuoteTags = make(map[string]*widget.Clickable)
 	w.msgMenuBtns = make(map[string]*widget.Clickable)
+	w.msgReactionChips = make(map[domain.MessageID]*ui.ReactionChipsState)
+	// The reactions on screen belong to the conversation being left. Reloading
+	// rather than clearing keeps the new conversation's chips from appearing a
+	// frame late, which reads as them being added by the switch.
+	w.reloadReactions()
+	// And the conversation being ENTERED may already be known not to take
+	// reactions — the refusal can have been learned while another chat was
+	// open, and the event that carried it was consumed by that other chat.
+	w.announceReactionsAreLocalOnly()
 	// The per-message ⋯ buttons just recreated above are new pointers;
 	// drop their cached rectangles so the map cannot accumulate entries
 	// keyed by buttons that no longer exist.
@@ -1805,7 +1887,7 @@ func (w *Window) handleActions(gtx layout.Context) {
 	w.handleEmojiActions(gtx)
 
 	for w.sendButton.Clicked(gtx) {
-		w.triggerSend()
+		w.triggerSend(gtx)
 	}
 
 	for w.failedRetryButton.Clicked(gtx) {
@@ -1968,6 +2050,9 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 		// re-add starts clean (no resurrected draft text/file) and the next
 		// peer swap cannot re-save a draft for the peer just deleted.
 		w.forgetPeerComposerState(peer, wasActive)
+		// Including what the user was told about their app: a re-added contact
+		// is a new conversation and hears it again if it is still true.
+		w.forgetPeerReactionNotice(peer)
 
 		// Remove saved alias together with the identity.
 		if w.prefs != nil {
@@ -2060,11 +2145,22 @@ func (w *Window) handleMessageSubmitShortcut(gtx layout.Context) {
 		if !ok || ke.State != key.Press {
 			continue
 		}
-		w.triggerSend()
+		w.triggerSend(gtx)
 	}
 }
 
-func (w *Window) triggerSend() {
+// triggerSend sends what the composer holds.
+//
+// It takes the frame context because sending ENDS the composing gesture, and
+// the emoji surfaces that gesture put on screen have to come down with it —
+// closing them is focus and keyboard work, which only exists on a frame.
+func (w *Window) triggerSend(gtx layout.Context) {
+	// Before the send and not after it: every branch below returns somewhere,
+	// and a picker left standing over a sent message is the same wrong state
+	// whether the send succeeded, was blocked by a wipe, or turned out to be a
+	// contact link.
+	w.closeEmojiSurfaces(gtx)
+
 	to := domain.PeerIdentityFromWire(strings.TrimSpace(w.snap.ActivePeer.String()))
 	if to.IsZero() {
 		to = domain.PeerIdentityFromWire(strings.TrimSpace(w.recipientEditor.Text()))
@@ -5707,12 +5803,6 @@ func (w *Window) layoutChatBubble(gtx layout.Context, recipient domain.PeerIdent
 }
 
 func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessage, isMine bool, author string) layout.Dimensions {
-	maxWidth := gtx.Dp(unit.Dp(520))
-	if gtx.Constraints.Max.X < maxWidth {
-		maxWidth = gtx.Constraints.Max.X
-	}
-	gtx.Constraints.Max.X = maxWidth
-
 	// Read right-click / touch long-press events from the previous frame.
 	rc := w.msgRightClickState(message.ID)
 	openMsgMenu := func(pos image.Point) {
@@ -5747,130 +5837,15 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 		openMsgMenu(rc.pressCursor)
 	}
 
-	borderColor := color.NRGBA{R: 55, G: 68, B: 86, A: 255}
-	authorColor := color.NRGBA{R: 162, G: 176, B: 196, A: 255}
-	statusColor := color.NRGBA{R: 110, G: 130, B: 160, A: 180}
-	if isMine {
-		borderColor = color.NRGBA{R: 74, G: 109, B: 176, A: 255}
-		authorColor = color.NRGBA{R: 173, G: 205, B: 255, A: 255}
-	}
-
-	border := widget.Border{Color: borderColor, CornerRadius: unit.Dp(8), Width: unit.Dp(1)}
-
 	// Record the bubble content first to measure its size.
 	macro := op.Record(gtx.Ops)
-	dims := border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			children := []layout.FlexChild{}
-
-			// Show quoted message if this is a reply.
-			if message.ReplyTo != "" {
-				children = append(children,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return w.layoutReplyQuote(gtx, message.ReplyTo, isMine)
-					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-				)
-			}
-
-			children = append(children,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					// Author is Flexed with a single ellipsized line, so a
-					// long alias can never push the timestamp or the "⋯"
-					// button past the clip; the rigid trailing children are
-					// measured first and always keep their space, landing
-					// the button in the bubble's top-right corner.
-					return layout.Flex{
-						Axis:      layout.Horizontal,
-						Alignment: layout.Middle,
-					}.Layout(gtx,
-						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							label := material.Caption(w.theme, author)
-							label.Color = authorColor
-							label.MaxLines = 1
-							return label.Layout(gtx)
-						}),
-						layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							label := material.Caption(w.theme, message.Timestamp.Local().Format("02.01.2006 15:04"))
-							label.Color = color.NRGBA{R: 160, G: 185, B: 220, A: 255}
-							return label.Layout(gtx)
-						}),
-						layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							// "⋯" — always-available touch path to the
-							// message menu (long-press is limited by Gio's
-							// pointer-grab threshold).
-							btn := w.msgMenuButton(message.ID)
-							for btn.Clicked(gtx) {
-								openMsgMenu(w.menuAnchorForClick(btn, gtx))
-							}
-							return w.menuDotsButton(gtx, btn, statusColor, w.t("context.menu_button_message"))
-						}),
-					)
-				}),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					// Render file card for file_announce messages instead of plain text.
-					if message.Command == domain.DMCommandFileAnnounce && message.CommandData != "" {
-						return w.layoutFileCard(gtx, message, isMine)
-					}
-
-					sel := w.messageSelectable(message.ID)
-					sel.SetText(message.Body)
-					textColor := color.NRGBA{R: 245, G: 247, B: 250, A: 255}
-					selColor := color.NRGBA{R: 72, G: 96, B: 140, A: 180}
-
-					textMacro := op.Record(gtx.Ops)
-					paint.ColorOp{Color: textColor}.Add(gtx.Ops)
-					textMaterial := textMacro.Stop()
-
-					selMacro := op.Record(gtx.Ops)
-					paint.ColorOp{Color: selColor}.Add(gtx.Ops)
-					selMaterial := selMacro.Stop()
-
-					return sel.Layout(gtx, w.theme.Shaper, font.Font{Typeface: w.theme.Face}, w.theme.TextSize, textMaterial, selMaterial)
-				}),
-			)
-
-			if isMine && (message.DeliveredAt.Valid() || message.ReceiptStatus == "queued" || message.ReceiptStatus == "retrying" || message.ReceiptStatus == "failed" || message.ReceiptStatus == "expired" || message.ReceiptStatus == "sent" || message.ReceiptStatus == "delivered" || message.ReceiptStatus == "seen") {
-				children = append(children,
-					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						statusText := ""
-						switch {
-						case message.ReceiptStatus == "seen" && message.DeliveredAt.Valid():
-							statusText = "✓✓ " + message.DeliveredAt.Time().Local().Format("02.01.2006 15:04")
-						case message.ReceiptStatus == "seen":
-							statusText = "✓✓"
-						case message.ReceiptStatus == "delivered" && message.DeliveredAt.Valid():
-							statusText = "✓ " + message.DeliveredAt.Time().Local().Format("02.01.2006 15:04")
-						case message.ReceiptStatus == "delivered":
-							statusText = "✓"
-						case message.DeliveredAt.Valid():
-							statusText = "✓ " + message.DeliveredAt.Time().Local().Format("02.01.2006 15:04")
-						case message.ReceiptStatus == "queued":
-							statusText = w.t("chat.status.queued")
-						case message.ReceiptStatus == "retrying":
-							statusText = w.t("chat.status.retrying")
-						case message.ReceiptStatus == "failed":
-							statusText = w.t("chat.status.failed")
-						case message.ReceiptStatus == "expired":
-							statusText = w.t("chat.status.expired")
-						case message.ReceiptStatus == "sent":
-							statusText = w.t("chat.status.sent")
-						}
-						return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							label := material.Caption(w.theme, statusText)
-							label.Color = statusColor
-							return label.Layout(gtx)
-						})
-					}),
-				)
-			}
-
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
-		})
+	dims := w.kit().MessageBubble(gtx, ui.MessageBubble{
+		Mine:      isMine,
+		Quote:     w.bubbleQuote(message, isMine),
+		Header:    w.bubbleHeader(message, author, isMine, openMsgMenu),
+		Body:      w.bubbleBody(message, isMine),
+		Reactions: w.bubbleReactions(message),
+		Status:    w.bubbleStatus(message, isMine),
 	})
 	bubbleCall := macro.Stop()
 
@@ -5883,6 +5858,161 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 	bubbleCall.Add(gtx.Ops)
 
 	return dims
+}
+
+// bubbleQuote is the reply block, or nil when the message answers nothing.
+func (w *Window) bubbleQuote(message service.DirectMessage, isMine bool) layout.Widget {
+	if message.ReplyTo == "" {
+		return nil
+	}
+	return func(gtx layout.Context) layout.Dimensions {
+		return w.layoutReplyQuote(gtx, message.ReplyTo, isMine)
+	}
+}
+
+// bubbleHeader is the author, the timestamp and the "⋯" button.
+//
+// The author is Flexed with a single ellipsized line, so a long alias can never
+// push the timestamp or the button past the clip; the rigid trailing children
+// are measured first and always keep their space, landing the button in the
+// bubble's top-right corner.
+func (w *Window) bubbleHeader(message service.DirectMessage, author string, isMine bool, openMenu func(image.Point)) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				label := material.Caption(w.theme, author)
+				label.Color = ui.MessageAuthorColor(isMine)
+				label.MaxLines = 1
+				return label.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				label := material.Caption(w.theme, message.Timestamp.Local().Format(chatTimestampLayout))
+				label.Color = color.NRGBA{R: 160, G: 185, B: 220, A: 255}
+				return label.Layout(gtx)
+			}),
+			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				// "⋯" — always-available touch path to the message menu
+				// (long-press is limited by Gio's pointer-grab threshold).
+				btn := w.msgMenuButton(message.ID)
+				for btn.Clicked(gtx) {
+					openMenu(w.menuAnchorForClick(btn, gtx))
+				}
+				return w.menuDotsButton(gtx, btn, ui.MessageStatusColor(), w.t("context.menu_button_message"))
+			}),
+		)
+	}
+}
+
+// bubbleBody is the message text, or the file card for a file announcement.
+func (w *Window) bubbleBody(message service.DirectMessage, isMine bool) layout.Widget {
+	return func(gtx layout.Context) layout.Dimensions {
+		if message.Command == domain.DMCommandFileAnnounce && message.CommandData != "" {
+			return w.layoutFileCard(gtx, message, isMine)
+		}
+
+		sel := w.messageSelectable(message.ID)
+		sel.SetText(message.Body)
+		textColor := color.NRGBA{R: 245, G: 247, B: 250, A: 255}
+		selColor := color.NRGBA{R: 72, G: 96, B: 140, A: 180}
+
+		textMacro := op.Record(gtx.Ops)
+		paint.ColorOp{Color: textColor}.Add(gtx.Ops)
+		textMaterial := textMacro.Stop()
+
+		selMacro := op.Record(gtx.Ops)
+		paint.ColorOp{Color: selColor}.Add(gtx.Ops)
+		selMaterial := selMacro.Stop()
+
+		return sel.Layout(gtx, w.theme.Shaper, font.Font{Typeface: w.theme.Face}, w.theme.TextSize, textMaterial, selMaterial)
+	}
+}
+
+// bubbleReactions is the chip row under the body, and nil while the message
+// carries no reactions.
+//
+// What it draws comes from the conversation cache rather than from the message,
+// because a reaction is not a property of a message: it is a fact by an actor,
+// merged from what this node decided and what peers stated, and it changes
+// without the message changing. See reactions.go and
+// docs/refactoring/reactions-protocol.md.
+func (w *Window) bubbleReactions(message service.DirectMessage) layout.Widget {
+	reactions := w.messageReactions(message)
+	if len(reactions) == 0 {
+		return nil
+	}
+	return func(gtx layout.Context) layout.Dimensions {
+		chips := w.messageReactionChips(domain.MessageID(message.ID))
+		// Drained on the frame they were drawn on, against the set that was
+		// drawn: a chip is a button with a button's semantics, so leaving the
+		// presses unread would announce an action to a screen reader and then
+		// not perform it — and the press would still be queued when the row is
+		// next laid out, on whatever the message is by then.
+		w.handleReactionChipTap(gtx, chips, message, reactions)
+		return w.kit().ReactionChips(gtx, chips, reactions)
+	}
+}
+
+// bubbleStatus is the delivery line under the caller's own messages, and nil
+// when there is nothing to say — an incoming message, or an outgoing one whose
+// status has not come back yet.
+func (w *Window) bubbleStatus(message service.DirectMessage, isMine bool) layout.Widget {
+	if !isMine {
+		return nil
+	}
+	text, ok := messageStatusText(message, w.t)
+	if !ok {
+		return nil
+	}
+	return func(gtx layout.Context) layout.Dimensions {
+		label := material.Caption(w.theme, text)
+		label.Color = ui.MessageStatusColor()
+		return label.Layout(gtx)
+	}
+}
+
+// chatTimestampLayout is how every date in the chat is written: the bubble
+// header, the delivery line and the reply quote all use it, and a date that
+// changed shape between them would read as two different clocks.
+const chatTimestampLayout = "02.01.2006 15:04"
+
+// messageStatusText renders the delivery line for one outgoing message and
+// reports whether there is a line at all.
+//
+// The receipt status and the delivery timestamp are read together rather than
+// in sequence: "delivered" with a time and "delivered" without are different
+// lines, and a message whose only evidence of arrival is the timestamp still
+// gets the single tick. tr is the window's t method, injected so the mapping
+// stays a pure function for tests.
+func messageStatusText(message service.DirectMessage, tr func(string, ...any) string) (string, bool) {
+	deliveredAt := func() string {
+		return message.DeliveredAt.Time().Local().Format(chatTimestampLayout)
+	}
+	switch {
+	case message.ReceiptStatus == "seen" && message.DeliveredAt.Valid():
+		return "✓✓ " + deliveredAt(), true
+	case message.ReceiptStatus == "seen":
+		return "✓✓", true
+	case message.ReceiptStatus == "delivered" && message.DeliveredAt.Valid():
+		return "✓ " + deliveredAt(), true
+	case message.ReceiptStatus == "delivered":
+		return "✓", true
+	case message.DeliveredAt.Valid():
+		return "✓ " + deliveredAt(), true
+	}
+	pending := map[string]string{
+		"queued":   "chat.status.queued",
+		"retrying": "chat.status.retrying",
+		"failed":   "chat.status.failed",
+		"expired":  "chat.status.expired",
+		"sent":     "chat.status.sent",
+	}
+	key, ok := pending[message.ReceiptStatus]
+	if !ok {
+		return "", false
+	}
+	return tr(key), true
 }
 
 // messageSelectable returns a reusable Selectable widget for the given
@@ -7186,63 +7316,257 @@ func (w *Window) handleReplyContextClicks(gtx layout.Context) {
 	}
 }
 
-// layoutMsgContextMenuOverlay renders the right-click context menu for a chat message.
-func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensions {
-	// Dismiss on click outside.
-	dismissArea := clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops)
-	event.Op(gtx.Ops, w.msgContextMsg)
-	dismissed := false
-	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: w.msgContextMsg, Kinds: pointer.Press})
-		if !ok {
-			break
-		}
-		if _, ok := ev.(pointer.Event); ok {
-			w.msgContextMsg = nil
-			if w.window != nil {
-				w.window.Invalidate()
-			}
-			dismissed = true
-			break
-		}
+// msgOverlayEdgeDp is how far the message overlay's surfaces stay from the
+// window edges. It is the design's phone inset, and it is used TWICE — to work
+// out how many quick reactions fit across the window, and to place what that
+// produced. Reserving it in one place and ignoring it in the other made the
+// reservation a fiction: placeMenu clamps into [0, windowW-blockW], so a menu
+// opened near an edge put the pill flush against it.
+const msgOverlayEdgeDp = 8
+
+// msgMenuWidthDp is what the message menu card asks for. It is a want, not a
+// promise: msgOverlayWidth cuts it down on a window that cannot hold it.
+const msgMenuWidthDp = 180
+
+// The menu card's own chrome. These are the figures menuMinUsableDp reasons
+// about on the other axis, named here so the card and the widths derived from
+// it cannot drift apart.
+const (
+	msgMenuCardBorderDp = 1
+	msgMenuCardPadDp    = 6
+)
+
+// msgMenuCardChromePx is what the card puts either side of its rows, summed in
+// PIXELS from the terms the card itself draws — not by converting their total.
+//
+// The two differ, and the difference is the whole bug this replaced: at 1.5
+// px/dp the card's own 2×Dp(1) + 2×Dp(6) is 22px while Dp(14) is 21, so a gate
+// asking for "more than 14dp" admitted a window that left the card's content
+// exactly nothing. emojiPickerChromeHeight names the same rule on the other
+// axis; this is that rule applied here.
+func msgMenuCardChromePx(gtx layout.Context) int {
+	return 2*gtx.Dp(unit.Dp(msgMenuCardBorderDp)) + 2*gtx.Dp(unit.Dp(msgMenuCardPadDp))
+}
+
+// msgOverlayFitsWidth reports whether the window is wide enough to draw
+// anything in this overlay at all.
+//
+// The floor is the menu card's own chrome, and it is not a taste judgement:
+// layout.Inset subtracts its inset, floors the result at zero and adds it back,
+// so a card given less than its chrome comes out WIDER than it was allowed —
+// the same trap menuMinUsableDp names for the height. Below that the surfaces
+// were still "open" at a size of zero: nothing was drawn, yet the chat stayed
+// dimmed behind a menu that was not there and the focus ring went on listing
+// widgets no frame mentioned.
+func msgOverlayFitsWidth(gtx layout.Context, windowW int) bool {
+	return msgOverlayRoom(gtx, windowW) > msgMenuCardChromePx(gtx)
+}
+
+// msgOverlayScrim is how the backdrop looks while the overlay is in a given
+// state. It tints only when there is a surface to tint BEHIND: the backdrop's
+// other job — swallowing the press that dismisses — is wanted either way, but a
+// deferred draw put a 40% wash over the whole chat with no menu on it, which
+// reads as an application that has hung rather than one waiting for room.
+func msgOverlayScrim(drawn bool) ui.MenuPopupScrim {
+	if drawn {
+		return ui.MenuPopupScrimDim
 	}
-	dismissArea.Pop()
-	// See the identity menu. Breaking out matters twice over here: the target
-	// of this filter is the message pointer the handler has just nil'd, so a
-	// second turn of the loop would build a filter for a nil tag.
+	return ui.MenuPopupScrimNone
+}
+
+// msgOverlayRoom is how wide a surface in this overlay may be: the window less
+// both edges, never negative.
+func msgOverlayRoom(gtx layout.Context, windowW int) int {
+	return max(0, windowW-2*gtx.Dp(unit.Dp(msgOverlayEdgeDp)))
+}
+
+// msgOverlayWidth is that room, or the width the surface wanted if it is
+// smaller.
+//
+// Every surface in this overlay goes through it, and the menu card was the one
+// that did not: the pill and the panel were made to fit the window while the
+// card kept a flat 180dp, so on a narrow window the two surfaces it is placed
+// with stayed inside and the card ran off the edge under them.
+func msgOverlayWidth(gtx layout.Context, want, windowW int) int {
+	return min(want, msgOverlayRoom(gtx, windowW))
+}
+
+// placeMsgOverlay is placeMenu plus that edge. The horizontal clamp is the only
+// part that changes: the vertical one is already governed by availH, which is
+// the room above the on-screen keyboard rather than the window.
+//
+// A surface too wide for the window less both edges gets the left edge and
+// overhangs the right, which is the same answer placeMenu gives and is only
+// reachable when the caller has ignored the width budget.
+func placeMsgOverlay(gtx layout.Context, anchor image.Point, size image.Point, windowW, availH int) (int, int) {
+	x, y := placeMenu(anchor.X, anchor.Y, size.X, size.Y, windowW, availH)
+	edge := gtx.Dp(unit.Dp(msgOverlayEdgeDp))
+	return min(max(x, edge), max(edge, windowW-size.X-edge)), y
+}
+
+// msgReactionRowGapDp is the air between the reaction pill and the menu card
+// under it. Small enough that the two read as one surface opened by one
+// gesture, wide enough that a 40dp slot is not mistaken for a menu row.
+const msgReactionRowGapDp = 6
+
+// layoutMsgContextMenuOverlay renders what a right-click on a chat message
+// opens: the reaction pill (screens 3e/3f) with the menu card under it, or —
+// once "more" has been pressed — the full emoji panel in its place (screen 3h).
+//
+// The two surfaces are ONE overlay because they are one open state. A pill with
+// its own dismissal, its own focus ring and its own backdrop would be a second
+// thing to close, and the first stray press that closed one but not the other
+// would leave a menu floating over a chat with nothing under it.
+func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensions {
+	// Decided before the backdrop is drawn, because it decides how the backdrop
+	// LOOKS: a wash over a chat with no menu on it is worse than no wash.
+	windowW := gtx.Constraints.Max.X
+	availH, room := w.menuOverlayRoom(gtx)
+	drawn := room && msgOverlayFitsWidth(gtx, windowW)
+
+	// The backdrop swallows every press, whether or not that press dismisses
+	// anything — a click aimed at empty space must not also select the contact
+	// underneath — and it does so even while nothing is drawn, so a press is
+	// still the way out of a deferred overlay.
+	dismissed := false
+	w.kit().MenuPopupBackdrop(gtx, w.msgContextMsg, msgOverlayScrim(drawn), func() {
+		if dismissed {
+			return
+		}
+		dismissed = true
+		w.msgContextMsg = nil
+		if w.window != nil {
+			w.window.Invalidate()
+		}
+	})
 	if dismissed {
 		return layout.Dimensions{}
 	}
 
-	menuWidth := gtx.Dp(unit.Dp(180))
-	windowW := gtx.Constraints.Max.X
-	availH, room := w.menuOverlayRoom(gtx)
-	if !room {
+	if !drawn {
 		// See the recipient menu: deferred until the keyboard frees the room,
-		// with Escape kept alive throughout.
-		if w.msgMenuFocus.drive(gtx, nil, menuNavKeys{Arrows: true, Tab: true}) {
+		// with Escape kept alive throughout. A window too NARROW takes the same
+		// path — nothing is drawn either way, and a resize can free the room the
+		// way the keyboard coming down does.
+		//
+		// The presses of the LAST frame are still read here. The overlay can be
+		// on screen when a slot is pressed and gone by the frame that reads the
+		// release — the keyboard comes up, the window shrinks — and a press
+		// nobody asks about is discarded at Frame time rather than postponed,
+		// which loses the tap the user actually made.
+		w.handleReactionRowActions(gtx)
+		// The empty item list is what keeps the ring honest: it lists nothing
+		// while nothing is drawn, so no focus is claimed for a widget that is
+		// not in the frame.
+		if w.msgMenuFocus.drive(gtx, nil, w.msgMenuNavKeys()) {
 			w.escapeMsgMenu()
+			w.dropReactionClicks(gtx)
 		}
 		return layout.Dimensions{}
 	}
 
-	// Focus contract, as for the identity menu above. This menu has no
-	// sub-views, so Escape always closes it.
-	if w.msgMenuFocus.drive(gtx, w.msgMenuItems(), menuNavKeys{Arrows: true, Tab: true}) {
+	// Whether the pill is drawn at all is decided BEFORE the focus ring is
+	// built, because the ring lists it. A ring holding an item the frame never
+	// draws is worse than a shorter ring: Gio drops the focus of any tag the
+	// frame did not mention, so the next frame would pull it back to the same
+	// invisible slot, every frame, for as long as the menu is open.
+	if w.reactionPickerOpen() && w.reactionPickerSize(gtx, availH) == (image.Point{}) {
+		// No room for the panel. It steps back to the pill rather than staying
+		// open and invisible: an open surface that is never drawn owns the
+		// focus ring and swallows Escape while showing the user nothing.
+		w.closeReactionPicker()
+	}
+	w.reactionRow.quick = w.quickReactionsFor(gtx, windowW)
+	w.reactionRow.shown = w.reactionRowFits(gtx, availH)
+
+	// Focus contract, as for the identity menu above. Escape always closes the
+	// whole overlay except while the emoji panel is up, where it steps back to
+	// the pill — the same "one step out of a sub-view" rule the identity menu
+	// applies to its confirmations.
+	if w.msgMenuFocus.drive(gtx, w.msgMenuItems(), w.msgMenuNavKeys()) {
 		w.escapeMsgMenu()
+		w.dropReactionClicks(gtx)
 		return layout.Dimensions{}
 	}
 
-	// Measure the menu, bounded to the usable height above the keyboard; the
-	// card's scrolling List clamps-with-scroll on overflow instead of squeezing
-	// the bottom rows (see the recipient menu above).
+	// Whatever the ring just focused has to be brought on screen by the layout
+	// below; see ui.EmojiPickerState.RevealTag.
+	w.reactionRow.panel.RevealTag(w.msgMenuFocus.want)
+	w.handleReactionRowActions(gtx)
+	if w.msgContextMsg == nil {
+		// A reaction was chosen and closed the overlay mid-frame.
+		return layout.Dimensions{}
+	}
+
+	if w.reactionPickerOpen() {
+		w.placeReactionPicker(gtx, windowW, availH)
+		return layout.Dimensions{}
+	}
+	w.placeReactionRowAndMenu(gtx, windowW, availH)
+	return layout.Dimensions{}
+}
+
+// reactionRowFits reports whether the pill is worth drawing at all this frame:
+// whether the window is wide enough to hold even one quick choice beside the
+// "more" button, and whether the pill and the menu can BOTH have room in the
+// height available.
+//
+// The menu comes first when they cannot fit vertically. Reply, Copy and Delete
+// are the only way to act on a message; the pill is a shortcut to a reaction
+// that the menu can reach anyway. Splitting the little room there is would leave
+// the menu at one clipped row AND the pill at nothing — worse than either alone.
+//
+// The width is checked for a different reason: nothing clips the pill to the
+// window. It is drawn at its own size and placed by an anchor, so a pill wider
+// than the screen simply hangs off the right edge — which is what a fixed
+// seven-slot row did on a 320dp phone, taking the "more" button with it while
+// the focus ring went on offering it. quickReactionsFor drops slots until the
+// row fits; this is the floor below which there is nothing left to drop.
+func (w *Window) reactionRowFits(gtx layout.Context, availH int) bool {
+	if len(w.reactionRow.quick) == 0 {
+		return false
+	}
+	block := w.reactionRowSize(gtx).Y + gtx.Dp(unit.Dp(msgReactionRowGapDp))
+	return availH-block >= gtx.Dp(unit.Dp(menuMinUsableDp))
+}
+
+// msgMenuNavKeys is which navigation keys the message overlay's focus ring may
+// take. The arrows go back to the caret whenever the emoji panel is up: its
+// first item is a text field, and a ring that stole Up and Down from it would
+// make the search box unusable. The identity menu does the same for its alias
+// editor.
+func (w *Window) msgMenuNavKeys() menuNavKeys {
+	return menuNavKeys{Arrows: !w.reactionPickerOpen(), Tab: true}
+}
+
+// placeReactionRowAndMenu draws the pill and the menu card as one block: the
+// block is anchored where the gesture happened, and the two parts keep their
+// order inside it.
+//
+// They are placed together rather than separately because placeMenu flips a
+// surface above its anchor when it does not fit below. Anchoring each on its
+// own let the flip apply to one and not the other, which put the pill under the
+// menu near the bottom of the window — the one place the order matters most,
+// since that is where a thumb reaches first.
+func (w *Window) placeReactionRowAndMenu(gtx layout.Context, windowW, availH int) {
+	menuWidth := msgOverlayWidth(gtx, gtx.Dp(unit.Dp(msgMenuWidthDp)), windowW)
+	rowSize := w.reactionRowSize(gtx)
+	gap := gtx.Dp(unit.Dp(msgReactionRowGapDp))
+
+	if !w.reactionRow.shown {
+		rowSize, gap = image.Point{}, 0
+	}
+
+	// Measure the menu, bounded to the usable height above the keyboard less
+	// what the pill takes; the card's scrolling List clamps-with-scroll on
+	// overflow instead of squeezing the bottom rows (see the recipient menu).
 	measureGTX := gtx
 	measureGTX.Constraints.Min.X = menuWidth
 	measureGTX.Constraints.Max.X = menuWidth
 	measureGTX.Constraints.Min.Y = 0
-	measureGTX.Constraints.Max.Y = availH
+	measureGTX.Constraints.Max.Y = max(0, availH-rowSize.Y-gap)
 	macro := op.Record(measureGTX.Ops)
-	dims := w.msgContextMenuCard(measureGTX)
+	menuDims := w.msgContextMenuCard(measureGTX)
 	menuCall := macro.Stop()
 
 	// Scroll the freshly focused row into view; see the recipient menu above.
@@ -7250,24 +7574,42 @@ func (w *Window) layoutMsgContextMenuOverlay(gtx layout.Context) layout.Dimensio
 		gtx.Execute(op.InvalidateCmd{})
 	}
 
-	x, y := placeMenu(w.msgContextPos.X, w.msgContextPos.Y, menuWidth, dims.Size.Y, windowW, availH)
+	blockW := max(rowSize.X, menuWidth)
+	blockH := rowSize.Y + gap + menuDims.Size.Y
+	x, y := placeMsgOverlay(gtx, w.msgContextPos, image.Pt(blockW, blockH), windowW, availH)
 
-	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
+	if rowSize.Y > 0 {
+		drawAt(gtx, image.Pt(x, y), rowSize, w.layoutReactionRow)
+	}
+
+	menuStack := op.Offset(image.Pt(x, y+rowSize.Y+gap)).Push(gtx.Ops)
 	menuCall.Add(gtx.Ops)
-	stack.Pop()
+	menuStack.Pop()
+}
 
-	return layout.Dimensions{}
+// placeReactionPicker draws the full emoji panel where the pill was. It stands
+// in place of the pill and the menu rather than over them: the panel is the
+// same choice the pill offers, made from a longer list, and leaving a menu
+// half-visible behind a 250dp surface only invites a press that lands on
+// neither.
+func (w *Window) placeReactionPicker(gtx layout.Context, windowW, availH int) {
+	size := w.reactionPickerSize(gtx, availH)
+	if size.X == 0 || size.Y == 0 {
+		return
+	}
+	x, y := placeMsgOverlay(gtx, w.msgContextPos, size, windowW, availH)
+	drawAt(gtx, image.Pt(x, y), size, w.layoutReactionPicker)
 }
 
 func (w *Window) msgContextMenuCard(gtx layout.Context) layout.Dimensions {
 	borderColor := color.NRGBA{R: 72, G: 85, B: 106, A: 255}
 	bgColor := color.NRGBA{R: 28, G: 34, B: 44, A: 255}
 	rr := gtx.Dp(unit.Dp(8))
-	borderWidth := gtx.Dp(unit.Dp(1))
+	borderWidth := gtx.Dp(unit.Dp(msgMenuCardBorderDp))
 
 	macro := op.Record(gtx.Ops)
-	dims := layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.UniformInset(unit.Dp(6)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	dims := layout.UniformInset(unit.Dp(msgMenuCardBorderDp)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.UniformInset(unit.Dp(msgMenuCardPadDp)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			// One list item so an overflowing menu scrolls within availH.
 			// Measured out here for the reason given in contextMenuCard.
 			w.msgCtxMenuScroll.begin(gtx.Constraints.Max.Y)
@@ -7380,7 +7722,7 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 		} else {
 			quotedAuthor = w.peerDisplayName(cm.Sender)
 		}
-		quotedTime = cm.Timestamp.Local().Format("02.01.2006 15:04")
+		quotedTime = cm.Timestamp.Local().Format(chatTimestampLayout)
 	}
 
 	// Mini image preview for quoted image files. Nil while the file is

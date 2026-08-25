@@ -117,6 +117,17 @@ const (
 	//   func(outcome ebus.ConversationDeleteOutcome)
 	TopicConversationDeleteCompleted = "conversation.delete.completed"
 
+	// TopicReactionsChanged is emitted when a peer's reaction facts have been
+	// merged into local state. It names the CONVERSATION and nothing else:
+	// the reader already holds the whole conversation's reactions in memory
+	// (one query per open chat, not one per bubble), so the useful message is
+	// "reload that one conversation" rather than a delta it would have to
+	// apply in the same order the database did.
+	//
+	// Handler signature:
+	//   func(peer domain.PeerIdentity)
+	TopicReactionsChanged = "reactions.changed"
+
 	// TopicIdentityAdded is emitted when a new identity is discovered and
 	// added to the node's known set. Carries the peer identity so the
 	// receiver can append it locally without an RPC round-trip.

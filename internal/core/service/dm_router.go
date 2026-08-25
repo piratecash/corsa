@@ -1251,6 +1251,19 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	// lock, and a gate raised later is open for exactly the length of those
 	// waits. That window is what a second removal, or a message the node is
 	// about to store, walks through.
+	// The send queue is stopped FIRST, for the same reason the gate is raised
+	// before anything is waited for. The gate stops writes and re-offers; it
+	// does not reach the queue, which by then may already hold RESOLVED facts of
+	// this conversation — and a pass that read them before the history delete
+	// would hand its frame over after it, with the forgetting below only waiting
+	// for a frame that has already gone. Stopping it after begin() would leave
+	// it open for exactly the length of that wait.
+	//
+	// Released once the queue is empty; the defer is a net for the error return
+	// in between, and the release is idempotent.
+	resumeReactions := r.client.HoldReactionSends(identity)
+	defer resumeReactions()
+
 	releaseGate := r.removals.begin(identity)
 	defer releaseGate()
 
@@ -1261,6 +1274,14 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 		log.Error().Str("identity", id).Err(err).Msg("failed to delete identity chat history")
 		return false, fmt.Errorf("delete identity %s: %w", id, err)
 	}
+
+	// Everything this conversation left outside the database goes with the
+	// history, under the same gate — see ForgetContactState for what that
+	// is and why it cannot wait until the gate comes down.
+	r.client.ForgetContactState(identity)
+	// The queue is empty now, so nothing of this conversation can reach the
+	// wire any more and the pause has nothing left to protect.
+	resumeReactions()
 
 	// Bump generation BEFORE any best-effort cleanup. In-flight goroutines
 	// (SendMessage, SendFileAnnounce) that captured gen before this point

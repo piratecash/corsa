@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/chatlog"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -48,12 +50,38 @@ type MessageStoreAdapter struct {
 	// deletion cannot see a row that is not there yet — and rebuilds the
 	// conversation on the next start.
 	removals *removalGate
+
+	// events is where the UI is told that a message landing made reactions
+	// visible.
+	//
+	// An atomic pointer and not a plain field: the composition root sets it
+	// (DesktopClient.RegisterConversationControl) while the node's ingress
+	// goroutines read it, and the ordering that puts the write first is a
+	// comment in the root rather than something this type can check. Nil until
+	// it is set, and a nil one costs only a redraw that waits for the next
+	// conversation change.
+	events atomic.Pointer[ebus.Bus]
 }
 
 // NewMessageStoreAdapter binds a ChatlogGateway to a MessageStore surface.
 // The returned adapter is ready to be handed to node.Service.RegisterMessageStore.
 func NewMessageStoreAdapter(chatlog *ChatlogGateway, id *identity.Identity, refusals *wipeTombstoneSet, removals *removalGate) *MessageStoreAdapter {
 	return &MessageStoreAdapter{chatlog: chatlog, id: id, refusals: refusals, removals: removals}
+}
+
+// attachEventBus gives the adapter somewhere to announce that a stored message
+// made reactions visible.
+//
+// Unexported and called from exactly one place — DesktopClient's single
+// conversation-control wiring step — so this is not a Set* initialiser callers
+// can forget or reorder: the bus is built by the composition root alongside the
+// client, while the adapter is built inside it, and one wiring call is the
+// smallest thing that can bridge that.
+func (a *MessageStoreAdapter) attachEventBus(events *ebus.Bus) {
+	if a == nil {
+		return
+	}
+	a.events.Store(events)
 }
 
 // opContext is the context every repository call from this adapter runs with.
@@ -201,10 +229,77 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
 		return node.StoreFailed
 	}
+	// Released on a duplicate too, and that is not belt-and-braces. The message
+	// EXISTS in both cases, which is the only thing a held reaction is waiting
+	// for; a re-delivery is in fact the common way to reach this line, because
+	// the reaction and the message travel by different paths and a peer that
+	// resends the message has usually resent the reaction with it. Releasing
+	// only on the first insert left those facts pending until the sweep.
+	a.releaseReactionsWaitingFor(domain.MessageID(envelope.ID), conversationPeer(a.id.Address, envelope))
 	if !inserted {
 		return node.StoreDuplicate
 	}
 	return node.StoreInserted
+}
+
+// releaseReactionsWaitingFor makes visible any reaction that arrived before the
+// message it is about.
+//
+// It runs HERE because this is the moment the wait was for, and only on a row
+// that was really inserted: a duplicate changes nothing, and a message that was
+// refused or deferred is one whose reactions must keep waiting.
+//
+// A failure is logged and not propagated. The message itself is stored, which
+// is the answer this function's caller returns; refusing the message because
+// its reactions could not be un-hidden would trade a row the user can read for
+// a chip they cannot see.
+func (a *MessageStoreAdapter) releaseReactionsWaitingFor(id domain.MessageID, peer domain.PeerIdentity) {
+	store := a.chatlog.Store()
+	if store == nil || peer.IsZero() {
+		// No conversation to release WITHIN. Message ids are chosen by their
+		// sender, so releasing by id alone would make a stranger's held facts
+		// visible the moment an unrelated message with the same id landed.
+		return
+	}
+	// time.Now directly, and it stays that way: this stamp lands in
+	// `updated_at`, which nothing compares — the sweep measures `first_seen_at`,
+	// which this statement does not touch. It is a record of when the release
+	// happened, not an input to any decision, so it is the infrastructural use
+	// CLAUDE.md's rule on time permits. An injected clock here was tried and
+	// removed: nothing ever set it.
+	released, err := store.ReleaseHeldReactions(
+		a.opContext(), domain.ReactionScopeForPeer(peer), id, time.Now().UTC())
+	if err != nil {
+		log.Warn().Err(err).Str("id", string(id)).Msg("held reactions could not be released")
+		return
+	}
+	if released == 0 {
+		return
+	}
+	log.Debug().Str("id", string(id)).Int("reactions", released).
+		Msg("reactions that arrived before their message are now visible")
+	// Told, not merely written: the chips are drawn from a per-conversation
+	// cache the UI loads once, so a release nobody announces is a reaction the
+	// user does not see until they leave the chat and come back — which is the
+	// exact scenario holding the fact existed for.
+	if events := a.events.Load(); events != nil {
+		events.Publish(ebus.TopicReactionsChanged, peer)
+	}
+}
+
+// conversationPeer is the other party to an envelope, relative to this node.
+// Zero when the envelope names neither side as us, which is what a broadcast
+// topic looks like — and a conversation nobody can name is one no reader is
+// waiting on.
+func conversationPeer(self string, envelope protocol.Envelope) domain.PeerIdentity {
+	switch self {
+	case envelope.Sender:
+		return domain.PeerIdentityFromWire(envelope.Recipient)
+	case envelope.Recipient:
+		return domain.PeerIdentityFromWire(envelope.Sender)
+	default:
+		return domain.PeerIdentity{}
+	}
 }
 
 // UpdateDeliveryStatus applies a delivery receipt to the persisted record.

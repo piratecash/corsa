@@ -1,9 +1,6 @@
 package desktop
 
 import (
-	"image"
-	"image/color"
-	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -11,14 +8,10 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"gioui.org/io/key"
-	"gioui.org/io/semantic"
 	"gioui.org/layout"
 	"gioui.org/op"
-	"gioui.org/op/clip"
-	"gioui.org/op/paint"
-	"gioui.org/unit"
 	"gioui.org/widget"
-	"gioui.org/widget/material"
+
 	"github.com/piratecash/corsa/internal/app/desktop/ui"
 )
 
@@ -41,64 +34,11 @@ const (
 	emojiRecentSaveDelay = 500 * time.Millisecond
 )
 
-// The width one emoji cell aims for; the grid fits as many columns as that
-// allows, never fewer than four.
-const emojiGridCellWidthDp = unit.Dp(52)
-
-// The picker's vertical budget, in one place. Every constant here is used at
-// the single site that draws the thing it measures, so the sums below cannot
-// drift away from the surface they describe.
-const (
-	emojiPickerBorderDp      = unit.Dp(1) // frame around the whole surface
-	emojiPickerPaddingDp     = unit.Dp(6) // inset between frame and content
-	emojiPickerSpacingDp     = unit.Dp(6) // categories → search → grid
-	emojiCategoryIconDp      = unit.Dp(17)
-	emojiCategoryIconInsetDp = unit.Dp(5)
-	emojiSearchHeightDp      = unit.Dp(34)
-	emojiGridCellHeightDp    = unit.Dp(38)
-
-	// How tall the picker opens when the composer can afford it.
-	emojiPickerDesiredHeightDp = unit.Dp(250)
-)
-
-// emojiGlyphSizeSp is the type size one emoji is drawn at in the grid. Its ink
-// is a square of exactly this height — an emoji face's ascent is one em — so
-// it also fixes how much of emojiGridCellHeightDp the glyph fills.
-const emojiGlyphSizeSp = unit.Sp(22)
-
-// emojiCategoryChipPx is how wide and tall a full-size category chip draws,
-// summed from its PARTS the way the icon button draws them: at 1.5 px/dp the
-// 17dp icon rounds to 26px and each 5dp inset to 8px, one pixel more than
-// rounding the 27dp total would claim.
-func emojiCategoryChipPx(gtx layout.Context) int {
-	return gtx.Dp(emojiCategoryIconDp) + 2*gtx.Dp(emojiCategoryIconInsetDp)
-}
-
-// emojiPickerChromeHeight is everything the picker draws around its grid: the
-// frame, the content insets, the category row, the search field and the two
-// spacers between them. Every term carries its own draw site's rounding and
-// they are summed in PIXELS, rather than taking gtx.Dp of a total in dp — the
-// two differ by up to a pixel per component at fractional densities, and this
-// number is compared against real pixels.
-//
-// The category row is counted at FULL chip height and always comes out that
-// tall: a row too narrow for nine chips scrolls them rather than shrinking
-// them (layoutEmojiCategories), so this is the row's real height at every
-// width, not an upper bound on it.
-func emojiPickerChromeHeight(gtx layout.Context) int {
-	return 2*gtx.Dp(emojiPickerBorderDp) + 2*gtx.Dp(emojiPickerPaddingDp) +
-		emojiCategoryChipPx(gtx) +
-		2*gtx.Dp(emojiPickerSpacingDp) + gtx.Dp(emojiSearchHeightDp)
-}
-
-// emojiPickerMinHeight is the smallest height at which the surface can show a
-// single emoji. Below it the picker is not drawn at all: a clipped strip with
-// no reachable cell is worse than no picker, and an empty one is worse still —
-// it is invisible, yet it is the top Escape/Back target and consumes the key
-// that was meant for the surface underneath.
-func emojiPickerMinHeight(gtx layout.Context) int {
-	return emojiPickerChromeHeight(gtx) + gtx.Dp(emojiGridCellHeightDp)
-}
+// The panel itself — its geometry, its widgets and the way they are drawn —
+// lives in internal/app/desktop/ui. What stays here is what that package must
+// not know: the CATALOGUE (which emoji exist and what they are called in six
+// languages), the per-user "recently used" list persisted in preferences, and
+// the way an open picker negotiates room with the on-screen keyboard.
 
 type emojiEntry struct {
 	value        string
@@ -413,38 +353,21 @@ func insertEmoji(editor *widget.Editor, selected string) {
 	editor.Insert(selected)
 }
 
+// emojiPickerState is the application's half of the picker: whether it is
+// showing, the toggle that opens it, the recents it persists and the keyboard
+// state it restores on close. The panel's own state — category, query, scroll
+// positions and every widget the user touches — lives in the component.
+//
+// The two are kept apart rather than merged because they answer to different
+// owners. The component's half is reset by the component; this half is written
+// from the touch-keyboard subsystem, from preferences and from the window's
+// navigation stack, and none of those has any business reaching into a widget.
 type emojiPickerState struct {
-	visible         bool
-	category        emojiCategoryID
-	toggleButton    widget.Clickable
-	searchEditor    widget.Editor
-	categoryButtons map[emojiCategoryID]*widget.Clickable
-	emojiButtons    map[string]*widget.Clickable
-	list            widget.List
-	// Scroll position of the category row, used only on a picker too narrow
-	// to spread nine chips across it. Plain layout.List, not material's: a
-	// scrollbar's gutter would eat into a 27dp row.
-	categoryList layout.List
-	// A request to bring the selected category on screen, set wherever the
-	// selection changes and consumed by layoutEmojiCategories on the next
-	// enabled frame. It has to cross into layout because only the row knows
-	// how wide it came out, and therefore which first index shows the chip
-	// without leaving a gap after the last one. A picker wide enough to
-	// spread every chip consumes nothing: there is nothing to reveal, and the
-	// request keeps until the window is narrow enough for it to mean
-	// something.
-	revealCategory bool
-	recents        []string
-	// The emoji this frame's grid was built from, written by
-	// resolveVisibleChoices during layout and read by handleEmojiActions at
-	// the top of the NEXT frame. Crossing a frame is the point, not an
-	// oversight: the clicks that frame delivers were aimed at the buttons the
-	// previous layout drew, so the set those buttons came from is the set that
-	// may answer for them. Reading a freshly filtered list instead would let a
-	// query typed in between decide which taps count — a tap on an emoji the
-	// search has since filtered out would be dropped, and one on the cell that
-	// took its place would insert a character nobody touched.
-	visibleChoices               []string
+	panel        ui.EmojiPickerState
+	visible      bool
+	toggleButton widget.Clickable
+	recents      []string
+
 	restoreSoftKeyboard          bool
 	restorePlatformTouchKeyboard bool
 	suppressSoftKeyboardOnOpen   bool
@@ -453,30 +376,33 @@ type emojiPickerState struct {
 }
 
 func newEmojiPickerState() emojiPickerState {
-	state := emojiPickerState{
-		category:        emojiCategorySmileys,
-		categoryButtons: make(map[emojiCategoryID]*widget.Clickable, len(emojiCategories)+1),
-		emojiButtons:    make(map[string]*widget.Clickable),
-		list:            widget.List{List: layout.List{Axis: layout.Vertical}},
-		categoryList:    layout.List{Axis: layout.Horizontal, Alignment: layout.Middle},
-	}
-	state.searchEditor.SingleLine = true
-	state.categoryButtons[emojiCategoryRecent] = new(widget.Clickable)
-	for _, category := range emojiCategories {
-		state.categoryButtons[category.id] = new(widget.Clickable)
-		for _, entry := range category.entries {
-			if state.emojiButtons[entry.value] == nil {
-				state.emojiButtons[entry.value] = new(widget.Clickable)
-			}
-		}
-	}
-	return state
+	return emojiPickerState{panel: ui.NewEmojiPickerState(string(emojiCategorySmileys))}
 }
 
 func newEmojiPickerStateWithRecents(recents []string) emojiPickerState {
 	state := newEmojiPickerState()
 	state.recents = normalizeRecentEmojis(recents)
 	return state
+}
+
+// query is the text currently in the composer panel's search field.
+func (state *emojiPickerState) query() string {
+	return state.panel.Search.Text()
+}
+
+// choices refreshes the composer panel's grid for this frame. See
+// ui.EmojiPickerState.Choices for why a disabled source reuses the last set.
+func (state *emojiPickerState) choices(sourceEnabled bool) []string {
+	return emojiChoicesFor(&state.panel, sourceEnabled, state.recents)
+}
+
+// emojiChoicesFor is the catalogue lookup behind any panel's grid. The recents
+// are the window's one list, shared by both panels: which emoji a person
+// reaches for does not depend on whether they are writing or reacting.
+func emojiChoicesFor(panel *ui.EmojiPickerState, sourceEnabled bool, recents []string) []string {
+	return panel.Choices(sourceEnabled, func(category, query string) []string {
+		return filterEmojiChoices(emojiCategoryID(category), query, recents)
+	})
 }
 
 func (w *Window) handleEmojiActions(gtx layout.Context) {
@@ -498,16 +424,19 @@ func (w *Window) handleEmojiActions(gtx layout.Context) {
 		return
 	}
 
-	for categoryID, button := range w.emojiPicker.categoryButtons {
-		for button.Clicked(gtx) {
-			w.emojiPicker.selectCategory(categoryID)
+	for {
+		categoryID, ok := w.emojiPicker.panel.CategoryClicked(gtx)
+		if !ok {
+			break
 		}
+		w.emojiPicker.panel.SelectCategory(categoryID)
 	}
-	for _, value := range w.emojiPicker.visibleChoices {
-		button := w.emojiPicker.emojiButtons[value]
-		for button.Clicked(gtx) {
-			w.selectEmoji(gtx, value)
+	for {
+		value, ok := w.emojiPicker.panel.Clicked(gtx)
+		if !ok {
+			break
 		}
+		w.selectEmoji(gtx, value)
 	}
 }
 
@@ -525,7 +454,7 @@ func (w *Window) openEmojiPicker(gtx layout.Context) {
 	// The selection survives a close; where the row was scrolled to does not
 	// have to, and on a narrow picker the two disagree — reopening on the
 	// flags category used to show a row that highlighted nothing at all.
-	w.emojiPicker.revealCategory = true
+	w.emojiPicker.panel.RevealCategory()
 	gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
 	// Keep logical focus and the caret in the composer, but dismiss the
 	// on-screen keyboard while the emoji surface supplies input instead.
@@ -542,15 +471,7 @@ func (w *Window) closeEmojiPicker(gtx layout.Context) {
 	}
 	w.emojiPicker.visible = false
 	w.emojiPicker.suppressSoftKeyboardOnOpen = false
-	// A query left behind reopens the picker on one cell with no category
-	// highlighted — a state that reads as broken, and whose only explanation
-	// is small text in a field the user is not looking at. The grid's scroll
-	// offset goes with it: it indexes a result list that no longer exists.
-	// The chip row's offset is NOT reset here — openEmojiPicker owns where
-	// that row sits, and zeroing it would be the second owner that put the
-	// selected chip out of sight.
-	w.emojiPicker.searchEditor.SetText("")
-	w.emojiPicker.list.Position = layout.Position{}
+	w.emojiPicker.panel.ResetSearch()
 	gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
 	restoreSoftKeyboard := w.emojiPicker.restoreSoftKeyboard
 	restorePlatformTouchKeyboard := w.emojiPicker.restorePlatformTouchKeyboard
@@ -573,50 +494,37 @@ func (state *emojiPickerState) takeSoftKeyboardSuppression(sourceEnabled bool) b
 	return true
 }
 
-// selectCategory switches the grid to a category, puts its list back at the
-// top and asks the chip row to show the chip that is now highlighted. The
-// three belong together: a highlighted chip nobody can see reads as nothing
-// being selected at all.
-func (state *emojiPickerState) selectCategory(categoryID emojiCategoryID) {
-	state.category = categoryID
-	state.list.Position = layout.Position{}
-	state.revealCategory = true
-}
-
-// emojiCategoryRowFirst is the chip the scrolling row should start on to show
-// the selected one. It is the selected chip itself, pulled back far enough
-// that the row still ends on the last chip: layout.List renders from First
-// onwards and does not backfill, so ScrollTo(8) of nine chips would leave one
-// chip beside an empty row.
-func emojiCategoryRowFirst(selected, count, visible int) int {
-	return max(0, min(selected, count-visible))
-}
-
-// resolveVisibleChoices refreshes the grid's contents and hands them to the
-// caller, keeping the copy handleEmojiActions answers next frame's clicks from
-// (see visibleChoices).
-func (state *emojiPickerState) resolveVisibleChoices(sourceEnabled bool) []string {
-	if !sourceEnabled {
-		// keyboardTailRow measures the composer with a disabled source before
-		// drawing it for real. The picker height is fixed by its parent, so the
-		// previous result is sufficient for that inert pass and avoids doing the
-		// same catalog search twice in one frame.
-		return state.visibleChoices
-	}
-	state.visibleChoices = filterEmojiChoices(state.category, state.searchEditor.Text(), state.recents)
-	return state.visibleChoices
-}
-
 func (w *Window) selectEmoji(gtx layout.Context, value string) {
 	insertEmoji(&w.messageEditor, value)
-	w.emojiPicker.recents = rememberRecentEmoji(w.emojiPicker.recents, value)
-	if w.prefs != nil {
-		w.prefs.RecentEmojis = append([]string(nil), w.emojiPicker.recents...)
-		w.emojiPicker.recentSavePending = true
-		w.emojiPicker.recentSaveAt = gtx.Now.Add(emojiRecentSaveDelay)
+	w.rememberEmoji(gtx, value)
+	gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
+}
+
+// rememberEmoji moves one emoji to the head of the recents list and schedules
+// the write. Split out of selectEmoji because "insert it in the draft" is what
+// the COMPOSER does with a choice, and the panel now serves a second caller.
+func (w *Window) rememberEmoji(gtx layout.Context, value string) {
+	w.rememberEmojiAt(value, gtx.Now)
+	if w.emojiPicker.recentSavePending {
 		gtx.Execute(op.InvalidateCmd{At: w.emojiPicker.recentSaveAt})
 	}
-	gtx.Execute(key.FocusCmd{Tag: &w.messageEditor})
+}
+
+// rememberEmojiAt is the same without a frame in hand.
+//
+// The reaction surfaces choose emoji outside a layout callback — a tap is
+// handled, the decision goes to the service, and there is no gtx to schedule the
+// trailing-edge save with. It does not need one: handleEmojiActions re-arms the
+// wake-up on the next frame while a save is pending, and a tap always produces
+// one.
+func (w *Window) rememberEmojiAt(value string, now time.Time) {
+	w.emojiPicker.recents = rememberRecentEmoji(w.emojiPicker.recents, value)
+	if w.prefs == nil {
+		return
+	}
+	w.prefs.RecentEmojis = append([]string(nil), w.emojiPicker.recents...)
+	w.emojiPicker.recentSavePending = true
+	w.emojiPicker.recentSaveAt = now.Add(emojiRecentSaveDelay)
 }
 
 func (w *Window) flushRecentEmojiPreferences(now time.Time, force bool) {
@@ -674,7 +582,7 @@ func (w *Window) dropEmojiToggleClicks(gtx layout.Context) {
 // composer through. That pass hands the row the occlusion back, so it measures
 // a window with the keyboard already gone and its answer says nothing about
 // what is on screen now; gtx.Enabled() is how it is recognised, as in
-// resolveVisibleChoices.
+// ui.EmojiPickerState.Choices.
 //
 // A deferred picker keeps consuming Escape and Back, deliberately: it is still
 // open, its toggle still reads "close", and both keys are handled in
@@ -688,8 +596,8 @@ func (w *Window) emojiPickerRoom(gtx layout.Context, chromeHeight, editorHeight,
 		chromeHeight,
 		editorHeight,
 		footerReserve,
-		emojiPickerMinHeight(gtx),
-		gtx.Dp(emojiPickerDesiredHeightDp),
+		ui.EmojiPickerMinHeight(gtx, ui.EmojiPickerModeCompose),
+		gtx.Dp(ui.EmojiPickerDesiredHeightDp),
 	)
 	if !gtx.Enabled() {
 		return height
@@ -700,35 +608,6 @@ func (w *Window) emojiPickerRoom(gtx layout.Context, chromeHeight, editorHeight,
 	}
 	requestTouchKeyboardRoom(&w.touchKbd, &w.emojiKbdHideAskedGen)
 	return 0
-}
-
-func (w *Window) layoutEmojiPicker(gtx layout.Context) layout.Dimensions {
-	background := color.NRGBA{R: 18, G: 25, B: 34, A: 255}
-	border := color.NRGBA{R: 46, G: 58, B: 75, A: 255}
-
-	return layout.Stack{}.Layout(gtx,
-		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-			paint.FillShape(gtx.Ops, border, clip.UniformRRect(image.Rectangle{Max: gtx.Constraints.Min}, gtx.Dp(unit.Dp(10))).Op(gtx.Ops))
-			return layout.Dimensions{Size: gtx.Constraints.Min}
-		}),
-		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-			return layout.UniformInset(emojiPickerBorderDp).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				ui.FillRounded(gtx, background, unit.Dp(9))
-				return layout.Inset{Top: emojiPickerPaddingDp, Bottom: emojiPickerPaddingDp, Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-						layout.Rigid(w.layoutEmojiCategories),
-						layout.Rigid(layout.Spacer{Height: emojiPickerSpacingDp}.Layout),
-						layout.Rigid(w.layoutEmojiSearch),
-						layout.Rigid(layout.Spacer{Height: emojiPickerSpacingDp}.Layout),
-						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							choices := w.emojiPicker.resolveVisibleChoices(gtx.Enabled())
-							return w.layoutEmojiGrid(gtx, choices)
-						}),
-					)
-				})
-			})
-		}),
-	)
 }
 
 // emojiCategoryOrder is the order the category chips are drawn in: recent
@@ -745,62 +624,67 @@ var emojiCategoryOrder = []emojiCategoryID{
 	emojiCategoryFlags,
 }
 
-// layoutEmojiCategories spreads the chips across the row when they all fit at
-// full size, and scrolls them at full size when they do not.
-//
-// Shrinking them to fit was the other option and it is the worse one: nine
-// chips need 243dp, and a picker narrow enough to matter drives the icon down
-// to 15dp at 140dp of row, 10dp at 90dp, 4dp at 40dp — no overlap, but nothing
-// left to hit either. Nobody can be asked for horizontal room the way the
-// keyboard can be asked for vertical room, so the row does what the grid below
-// it already does: keeps its cells the size a finger needs and lets the ones
-// that do not fit be scrolled to.
-//
-// Full size at every width is also what keeps emojiPickerChromeHeight exact —
-// a row that shrank was a row shorter than the height budget reserved for it.
-func (w *Window) layoutEmojiCategories(gtx layout.Context) layout.Dimensions {
-	chip := emojiCategoryChipPx(gtx)
-	if len(emojiCategoryOrder)*chip > gtx.Constraints.Max.X {
-		if w.emojiPicker.revealCategory && gtx.Enabled() {
-			// Not in the pass keyboardTailRow measures with: it would spend
-			// the request on a row that is never shown (see emojiPickerRoom).
-			w.emojiPicker.revealCategory = false
-			w.emojiPicker.categoryList.ScrollTo(emojiCategoryRowFirst(
-				slices.Index(emojiCategoryOrder, w.emojiPicker.category),
-				len(emojiCategoryOrder),
-				gtx.Constraints.Max.X/chip,
-			))
-		}
-		return w.emojiPicker.categoryList.Layout(gtx, len(emojiCategoryOrder),
-			func(gtx layout.Context, index int) layout.Dimensions {
-				return w.layoutEmojiCategoryChip(gtx, emojiCategoryOrder[index])
-			})
-	}
-
-	children := make([]layout.FlexChild, 0, len(emojiCategoryOrder))
+// emojiPickerCategories describes the chip row to the component: the catalogue's
+// order, this window's icons and the labels in this window's language.
+func (w *Window) emojiPickerCategories() []ui.EmojiPickerCategory {
+	categories := make([]ui.EmojiPickerCategory, 0, len(emojiCategoryOrder))
 	for _, categoryID := range emojiCategoryOrder {
-		children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return w.layoutEmojiCategoryChip(gtx, categoryID)
-			})
-		}))
+		categories = append(categories, ui.EmojiPickerCategory{
+			ID:   string(categoryID),
+			Icon: w.emojiCategoryIcons[categoryID],
+			Hint: w.t(emojiCategoryNameKey(categoryID)),
+		})
 	}
-	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
+	return categories
 }
 
-func (w *Window) layoutEmojiCategoryChip(gtx layout.Context, categoryID emojiCategoryID) layout.Dimensions {
-	background := color.NRGBA{R: 18, G: 25, B: 34, A: 255}
-	iconColor := color.NRGBA{R: 150, G: 166, B: 188, A: 255}
-	if emojiCategoryIsActive(w.emojiPicker.category, categoryID, w.emojiPicker.searchEditor.Text()) {
-		background = color.NRGBA{R: 32, G: 76, B: 135, A: 255}
-		iconColor = color.NRGBA{R: 222, G: 238, B: 255, A: 255}
+// emojiPickerSelection is the chip a panel should highlight: none while a
+// global query is running, since the grid then shows matches from every
+// category and no chip describes what is on screen.
+//
+// The component keys its chips by plain strings — it draws whatever list it is
+// handed and has no catalogue to type them against — so the conversion back to
+// the catalogue's own type happens here and in emojiChoicesFor, at the two
+// boundaries, rather than leaking untyped identifiers further in.
+func emojiPickerSelection(panel *ui.EmojiPickerState) string {
+	category := emojiCategoryID(panel.Category())
+	if !emojiCategoryIsActive(category, category, panel.Search.Text()) {
+		return ""
 	}
-	style := material.IconButton(w.theme, w.emojiPicker.categoryButtons[categoryID], w.emojiCategoryIcons[categoryID], w.t(emojiCategoryNameKey(categoryID)))
-	style.Background = background
-	style.Color = iconColor
-	style.Size = emojiCategoryIconDp
-	style.Inset = layout.UniformInset(emojiCategoryIconInsetDp)
-	return style.Layout(gtx)
+	return string(category)
+}
+
+// emojiPickerDescriptor builds the panel description shared by both modes.
+// mode selects the header and the wording; everything else is common.
+func (w *Window) emojiPickerDescriptor(panel *ui.EmojiPickerState, mode ui.EmojiPickerMode, choices []string) ui.EmojiPicker {
+	return ui.EmojiPicker{
+		Mode:       mode,
+		Categories: w.emojiPickerCategories(),
+		Selected:   emojiPickerSelection(panel),
+		Choices:    choices,
+		Labels: ui.EmojiPickerLabels{
+			SearchPlaceholder: w.t("emoji.search_placeholder"),
+			Empty:             w.t("emoji.empty"),
+			Title:             w.t("reaction.pick"),
+			CloseHint:         w.t("reaction.pick_close"),
+			Describe: func(value string) string {
+				if mode == ui.EmojiPickerModeReaction {
+					return w.t("reaction.apply", value)
+				}
+				return w.t("emoji.insert", value)
+			},
+		},
+		SearchWrap: func(gtx layout.Context, editor layout.Widget) layout.Dimensions {
+			return editorTouchKeyboardArea(gtx, &w.touchKbdTags[3], &w.touchKbd, editor)
+		},
+		SearchIcon: w.searchIcon,
+	}
+}
+
+func (w *Window) layoutEmojiPicker(gtx layout.Context) layout.Dimensions {
+	choices := w.emojiPicker.choices(gtx.Enabled())
+	return w.kit().EmojiPicker(gtx, &w.emojiPicker.panel,
+		w.emojiPickerDescriptor(&w.emojiPicker.panel, ui.EmojiPickerModeCompose, choices))
 }
 
 func emojiCategoryIsActive(selected, category emojiCategoryID, query string) bool {
@@ -817,103 +701,4 @@ func emojiCategoryNameKey(categoryID emojiCategoryID) string {
 		}
 	}
 	return "emoji.category.smileys"
-}
-
-func (w *Window) layoutEmojiSearch(gtx layout.Context) layout.Dimensions {
-	height := gtx.Dp(emojiSearchHeightDp)
-	gtx.Constraints.Min.Y = height
-	gtx.Constraints.Max.Y = height
-	ui.FillRounded(gtx, color.NRGBA{R: 13, G: 19, B: 27, A: 255}, unit.Dp(7))
-	return layout.Inset{Left: unit.Dp(9), Right: unit.Dp(9)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return ui.Icon(gtx, w.searchIcon, unit.Dp(16), color.NRGBA{R: 115, G: 134, B: 160, A: 255})
-			}),
-			layout.Rigid(layout.Spacer{Width: unit.Dp(7)}.Layout),
-			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-				editor := material.Editor(w.theme, &w.emojiPicker.searchEditor, w.t("emoji.search_placeholder"))
-				editor.Color = color.NRGBA{R: 231, G: 237, B: 245, A: 255}
-				editor.HintColor = color.NRGBA{R: 105, G: 121, B: 143, A: 255}
-				editor.TextSize = unit.Sp(13)
-				return editorTouchKeyboardArea(gtx, &w.touchKbdTags[3], &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
-					return layoutVerticallyCentered(gtx, editor.Layout)
-				})
-			}),
-		)
-	})
-}
-
-func (w *Window) layoutEmojiGrid(gtx layout.Context, values []string) layout.Dimensions {
-	gtx.Constraints.Min.X = gtx.Constraints.Max.X
-	if len(values) == 0 {
-		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Caption(w.theme, w.t("emoji.empty"))
-			label.Color = color.NRGBA{R: 126, G: 143, B: 166, A: 255}
-			return label.Layout(gtx)
-		})
-	}
-
-	columns := emojiGridColumns(gtx.Constraints.Max.X, max(1, gtx.Dp(emojiGridCellWidthDp)))
-	rows := (len(values) + columns - 1) / columns
-	list := material.List(w.theme, &w.emojiPicker.list)
-	return list.Layout(gtx, rows, func(gtx layout.Context, row int) layout.Dimensions {
-		gtx.Constraints.Min.X = gtx.Constraints.Max.X
-		children := make([]layout.FlexChild, 0, columns)
-		for column := 0; column < columns; column++ {
-			index := row*columns + column
-			if index >= len(values) {
-				children = append(children, layout.Flexed(1, func(layout.Context) layout.Dimensions { return layout.Dimensions{} }))
-				continue
-			}
-			value := values[index]
-			children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-				return w.layoutEmojiChoice(gtx, value)
-			}))
-		}
-		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
-	})
-}
-
-func emojiGridColumns(width, targetCellWidth int) int {
-	if targetCellWidth <= 0 {
-		return 4
-	}
-	return max(4, width/targetCellWidth)
-}
-
-// layoutEmojiGlyph draws one emoji and reports the box its INK occupies rather
-// than the box its line occupies, so a centring parent centres the glyph.
-//
-// An emoji's ink fills the whole ascent and stops on the baseline: at 22sp the
-// line box is 29px tall with 22px of glyph and 7px of empty descent under it.
-// Centring that box splits the emptiness in two and lifts the glyph 3px above
-// the middle of its cell — measurably off the hover highlight drawn around it.
-//
-// The glyph still DRAWS its descent below the reported box. That stays inside
-// the cell while the cell can spare half a descent under the centred ink,
-// which a 38dp cell around a 22sp emoji can.
-func layoutEmojiGlyph(gtx layout.Context, label material.LabelStyle) layout.Dimensions {
-	dims := label.Layout(gtx)
-	return layout.Dimensions{Size: image.Pt(dims.Size.X, dims.Size.Y-dims.Baseline)}
-}
-
-func (w *Window) layoutEmojiChoice(gtx layout.Context, value string) layout.Dimensions {
-	button := w.emojiPicker.emojiButtons[value]
-	return button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		semantic.Button.Add(gtx.Ops)
-		semantic.DescriptionOp(w.t("emoji.insert", value)).Add(gtx.Ops)
-		side := gtx.Dp(emojiGridCellHeightDp)
-		gtx.Constraints.Min.X = max(gtx.Constraints.Min.X, min(side, gtx.Constraints.Max.X))
-		gtx.Constraints.Min.Y = side
-		gtx.Constraints.Max.Y = side
-		if button.Hovered() || gtx.Focused(button) {
-			ui.FillRounded(gtx, color.NRGBA{R: 36, G: 54, B: 76, A: 255}, unit.Dp(7))
-		}
-		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			label := material.Label(w.theme, emojiGlyphSizeSp, value)
-			label.Font.Typeface = emojiTypeface
-			label.Color = color.NRGBA{R: 247, G: 249, B: 252, A: 255}
-			return layoutEmojiGlyph(gtx, label)
-		})
-	})
 }

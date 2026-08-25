@@ -258,6 +258,10 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 		}
 		log.Warn().Err(err).Msg("sdk: chatlog established backfill failed")
 	}
+	// Reactions a peer states arrive on the datagram plane and land in the
+	// chatlog through this door. Registered before the node starts.
+	client.RegisterConversationControl(eventBus)
+
 	fileBridge := service.NewFileTransferBridge(client)
 
 	var statusMonitor *service.NodeStatusMonitor

@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"image"
+	"image/color"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,10 +12,12 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/piratecash/corsa/internal/app/desktop/ui"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/service"
 
 	"gioui.org/f32"
+	"gioui.org/font"
 	"gioui.org/gpu/headless"
 	"gioui.org/io/event"
 	"gioui.org/io/input"
@@ -22,8 +25,11 @@ import (
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
+	"gioui.org/widget/material"
+	"golang.org/x/image/math/fixed"
 )
 
 func TestFilterEmojiChoices(t *testing.T) {
@@ -135,14 +141,15 @@ func TestFilterEmojiChoicesKeepsHotPathAllocationsBounded(t *testing.T) {
 
 func TestDisabledComposerMeasurementReusesEmojiChoices(t *testing.T) {
 	state := newEmojiPickerState()
-	state.visibleChoices = []string{"😀"}
-	state.searchEditor.SetText("pizza")
+	state.panel.Search.SetText("pizza")
 
-	if got := state.resolveVisibleChoices(false); !reflect.DeepEqual(got, []string{"😀"}) {
-		t.Fatalf("disabled measurement recalculated choices: %#v", got)
-	}
-	if got := state.resolveVisibleChoices(true); !reflect.DeepEqual(got, []string{"🍕"}) {
+	// One enabled frame to fill the cache the disabled pass must reuse.
+	if got := state.choices(true); !reflect.DeepEqual(got, []string{"🍕"}) {
 		t.Fatalf("enabled layout choices = %#v, want pizza", got)
+	}
+	state.panel.Search.SetText("fire")
+	if got := state.choices(false); !reflect.DeepEqual(got, []string{"🍕"}) {
+		t.Fatalf("disabled measurement recalculated choices: %#v", got)
 	}
 }
 
@@ -294,87 +301,6 @@ func TestOpenEmojiPickerFitsComposerHeight(t *testing.T) {
 	}
 	if dims.Size.Y < 200 {
 		t.Fatalf("open picker height = %d, want a usable picker", dims.Size.Y)
-	}
-}
-
-func TestEmojiGridColumnsUseAvailableWidth(t *testing.T) {
-	tests := []struct {
-		width int
-		want  int
-	}{
-		{width: 240, want: 4},
-		{width: 360, want: 6},
-		{width: 760, want: 14},
-		{width: 1200, want: 23},
-	}
-
-	for _, tt := range tests {
-		if got := emojiGridColumns(tt.width, 52); got != tt.want {
-			t.Errorf("emojiGridColumns(%d, 52) = %d, want %d", tt.width, got, tt.want)
-		}
-	}
-}
-
-func TestEmojiGridOccupiesFullAvailableWidth(t *testing.T) {
-	for _, width := range []int{360, 1200} {
-		var router input.Router
-		gtx := layout.Context{
-			Ops:         new(op.Ops),
-			Source:      router.Source(),
-			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
-			Constraints: layout.Constraints{Max: image.Pt(width, 240)},
-		}
-		w := &Window{
-			theme:       newAppTheme(),
-			language:    "en",
-			emojiPicker: newEmojiPickerState(),
-		}
-
-		dims := w.layoutEmojiGrid(gtx, emojiValues(emojiCategorySmileys))
-		if dims.Size.X != width {
-			t.Errorf("emoji grid width = %d, want available width %d", dims.Size.X, width)
-		}
-	}
-}
-
-func TestEmojiChoiceOccupiesAllocatedCellWidth(t *testing.T) {
-	var router input.Router
-	gtx := layout.Context{
-		Ops:         new(op.Ops),
-		Source:      router.Source(),
-		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
-		Constraints: layout.Exact(image.Pt(104, 52)),
-	}
-	w := &Window{
-		theme:       newAppTheme(),
-		language:    "en",
-		emojiPicker: newEmojiPickerState(),
-	}
-
-	dims := w.layoutEmojiChoice(gtx, "😀")
-	if dims.Size.X != gtx.Constraints.Max.X {
-		t.Fatalf("emoji cell width = %d, want allocated width %d", dims.Size.X, gtx.Constraints.Max.X)
-	}
-}
-
-func TestLayoutVerticallyCenteredKeepsNaturalChildHeight(t *testing.T) {
-	gtx := layout.Context{
-		Ops:         new(op.Ops),
-		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
-		Constraints: layout.Exact(image.Pt(200, 34)),
-	}
-	childMinHeight := -1
-
-	dims := layoutVerticallyCentered(gtx, func(gtx layout.Context) layout.Dimensions {
-		childMinHeight = gtx.Constraints.Min.Y
-		return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, 14)}
-	})
-
-	if childMinHeight != 0 {
-		t.Fatalf("centered child minimum height = %d, want natural height constraint 0", childMinHeight)
-	}
-	if dims.Size != gtx.Constraints.Max {
-		t.Fatalf("centered area size = %v, want full search area %v", dims.Size, gtx.Constraints.Max)
 	}
 }
 
@@ -559,26 +485,26 @@ func TestClosingEmojiPickerClearsTheSearchQuery(t *testing.T) {
 	gtx := layout.Context{Ops: new(op.Ops)}
 
 	w.openEmojiPicker(gtx)
-	w.emojiPicker.searchEditor.SetText("пиц")
-	w.emojiPicker.list.Position.First = 3
-	if got := w.emojiPicker.resolveVisibleChoices(true); len(got) != 1 {
+	w.emojiPicker.panel.Search.SetText("пиц")
+	w.emojiPicker.panel.Grid.Position.First = 3
+	if got := w.emojiPicker.choices(true); len(got) != 1 {
 		t.Fatalf("precondition: query matched %d emoji, want the single pizza", len(got))
 	}
 
 	w.closeEmojiPicker(gtx)
 	w.openEmojiPicker(gtx)
 
-	if query := w.emojiPicker.searchEditor.Text(); query != "" {
+	if query := w.emojiPicker.query(); query != "" {
 		t.Fatalf("reopened picker still filters on %q", query)
 	}
-	if first := w.emojiPicker.list.Position.First; first != 0 {
+	if first := w.emojiPicker.panel.Grid.Position.First; first != 0 {
 		t.Fatalf("reopened picker scrolled to item %d of a result list that no longer exists", first)
 	}
-	if got, want := w.emojiPicker.resolveVisibleChoices(true), emojiValues(emojiCategorySmileys); len(got) != len(want) {
+	if got, want := w.emojiPicker.choices(true), emojiValues(emojiCategorySmileys); len(got) != len(want) {
 		t.Fatalf("reopened picker shows %d emoji, want the whole %d of its category", len(got), len(want))
 	}
-	if !emojiCategoryIsActive(w.emojiPicker.category, emojiCategorySmileys, w.emojiPicker.searchEditor.Text()) {
-		t.Fatal("reopened picker highlights no category")
+	if got := emojiPickerSelection(&w.emojiPicker.panel); got != string(emojiCategorySmileys) {
+		t.Fatalf("reopened picker highlights %q, want the smileys chip", got)
 	}
 }
 
@@ -617,7 +543,7 @@ func runEmojiNavigationFrameAt(w *Window, router *input.Router, ops *op.Ops, now
 	for _, action := range actions {
 		action(gtx)
 	}
-	for _, tag := range []event.Tag{&w.messageEditor, &w.emojiPicker.toggleButton, &w.emojiPicker.searchEditor} {
+	for _, tag := range []event.Tag{&w.messageEditor, &w.emojiPicker.toggleButton, &w.emojiPicker.panel.Search} {
 		event.Op(gtx.Ops, tag)
 		gtx.Event(key.FocusFilter{Target: tag})
 	}
@@ -837,11 +763,83 @@ func TestComposerPickerHeightRefusesUnusableStrip(t *testing.T) {
 	}
 }
 
+// The same contract as the render test below, asked of the font's METRICS
+// rather than of a frame, so it is checked on every machine instead of only the
+// ones with a GPU. It is also where the numbers in ui.EmojiGlyph's comment come
+// from: the bundled emoji does not sit on the baseline the way a letter does,
+// it straddles it, and the code that treated the ink as "the ascent" pushed
+// every glyph below the middle of its cell.
+func TestEmojiGlyphInkCentresOnItsLineBox(t *testing.T) {
+	const cell = 38
+	theme := newAppTheme()
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+		Constraints: layout.Constraints{Max: image.Pt(200, 200)},
+	}
+
+	reported := ui.Kit{Theme: theme, EmojiFace: emojiTypeface}.
+		EmojiGlyph(gtx, emojiCellGlyphSp, "\U0001F600", color.NRGBA{A: 255})
+
+	inkTop, inkBottom, ok := emojiInkBand(theme, reported)
+	if !ok {
+		t.Fatal("the bundled font shaped no glyph for a grinning face")
+	}
+
+	// layout.Center offsets the child by half the room left over, in whole
+	// pixels — the halving is integer division there, so it is here too.
+	offset := float32((cell - reported.Size.Y) / 2)
+	centre := offset + (inkTop+inkBottom)/2
+	if diff := centre - cell/2; diff < -1 || diff > 1 {
+		t.Fatalf("ink spans %.2f..%.2f in a %dpx cell: its centre is %.2f, want %d",
+			offset+inkTop, offset+inkBottom, cell, centre, cell/2)
+	}
+}
+
+// emojiCellGlyphSp is the size the grid draws an emoji at. It mirrors the
+// component's own unexported constant; a test in this package cannot reach it,
+// and the two are pinned together by the render test below failing if they
+// drift.
+const emojiCellGlyphSp = unit.Sp(22)
+
+// emojiInkBand is where one shaped emoji's ink sits inside its line box, in
+// pixels from the top of that box. reported is what ui.EmojiGlyph handed its
+// parent, which carries the baseline the glyph bounds are measured against.
+func emojiInkBand(theme *material.Theme, reported layout.Dimensions) (top, bottom float32, ok bool) {
+	theme.Shaper.LayoutString(text.Parameters{
+		Font:     font.Font{Typeface: emojiTypeface},
+		PxPerEm:  fixed.I(int(emojiCellGlyphSp)),
+		MaxWidth: 200,
+	}, "\U0001F600")
+
+	// Distance from the top of the line box down to the baseline. Dimensions
+	// measure the baseline from the BOTTOM.
+	baseline := float32(reported.Size.Y - reported.Baseline)
+	for {
+		glyph, more := theme.Shaper.NextGlyph()
+		if !more {
+			return top, bottom, ok
+		}
+		if ok {
+			continue
+		}
+		// Bounds are relative to the dot and grow downwards, so Min.Y is above
+		// the baseline and negative.
+		top = baseline + float32(glyph.Bounds.Min.Y)/64
+		bottom = baseline + float32(glyph.Bounds.Max.Y)/64
+		ok = true
+	}
+}
+
 // The hover highlight covers the whole cell, so the glyph has to sit in the
-// middle of it. An emoji's ink ends on the baseline and the font's descent
-// below it is empty, so centring the line box used to lift every glyph 4px in
-// a 38px cell — off the highlight drawn around it.
-func TestEmojiChoiceCentresTheGlyphInItsCell(t *testing.T) {
+// middle of it, and the cell is what a finger aims at. This is the same claim
+// as the metrics test above, made against real pixels.
+//
+// The test lives here rather than beside the component because it needs the
+// BUNDLED emoji font: ui takes the family as an argument and a bare
+// material.Theme would draw a tofu box, whose ink says nothing about where an
+// emoji's does.
+func TestEmojiGlyphCentresOnItsInk(t *testing.T) {
 	const width, height = 57, 38
 	window, err := headless.NewWindow(width, height)
 	if err != nil {
@@ -851,11 +849,14 @@ func TestEmojiChoiceCentresTheGlyphInItsCell(t *testing.T) {
 
 	w := &Window{theme: newAppTheme(), language: "en", emojiPicker: newEmojiPickerState()}
 	ops := new(op.Ops)
-	w.layoutEmojiChoice(layout.Context{
+	gtx := layout.Context{
 		Ops:         ops,
 		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
 		Constraints: layout.Exact(image.Pt(width, height)),
-	}, "\U0001F600")
+	}
+	layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return w.kit().EmojiGlyph(gtx, emojiCellGlyphSp, "\U0001F600", color.NRGBA{R: 247, G: 249, B: 252, A: 255})
+	})
 	if err := window.Frame(ops); err != nil {
 		t.Fatalf("render frame: %v", err)
 	}
@@ -868,12 +869,22 @@ func TestEmojiChoiceCentresTheGlyphInItsCell(t *testing.T) {
 	if ink.Empty() {
 		t.Fatal("nothing was drawn in the cell")
 	}
-	// Doubled so an odd cell height needs no rounding rule of its own.
-	if got, want := ink.Min.Y+ink.Max.Y, height; got < want-1 || got > want+1 {
+	// Compared doubled, so an odd cell needs no rounding rule of its own: the
+	// bound below is therefore ONE pixel of centring error, not two.
+	//
+	// One pixel is what the arrangement can actually promise, and both halves of
+	// it are unavoidable here. layout.Center halves the room left over with
+	// integer division, so a 27px line box in a 38px cell is offset by 5 where
+	// 5.5 was wanted; and the ink's own edges are then read off whole pixel rows
+	// of a screenshot. Chasing the last pixel would mean rounding the offset UP,
+	// which happens to land this font exactly and is a coincidence of its
+	// metrics, not a rule. The defect this test exists for was 2.5px.
+	const slack = 2
+	if got, want := ink.Min.Y+ink.Max.Y, height; got < want-slack || got > want+slack {
 		t.Fatalf("glyph ink spans y %d..%d in a %dpx cell: its centre is %.1f, want %.1f",
 			ink.Min.Y, ink.Max.Y, height, float32(got)/2, float32(want)/2)
 	}
-	if got, want := ink.Min.X+ink.Max.X, width; got < want-1 || got > want+1 {
+	if got, want := ink.Min.X+ink.Max.X, width; got < want-slack || got > want+slack {
 		t.Fatalf("glyph ink spans x %d..%d in a %dpx cell: its centre is %.1f, want %.1f",
 			ink.Min.X, ink.Max.X, width, float32(got)/2, float32(want)/2)
 	}
@@ -901,147 +912,6 @@ func drawnBounds(img *image.RGBA) image.Rectangle {
 	return ink
 }
 
-// Nine chips need 243dp. Narrower than that the row scrolls them rather than
-// shrinking them: a 15dp chip at 140dp of row, or a 4dp one at 40dp, overlaps
-// nothing and can be hit by nobody. Full size at every width is also what
-// keeps emojiPickerChromeHeight exact.
-func TestEmojiCategoryRowKeepsChipsFullSizeAtEveryWidth(t *testing.T) {
-	icons, err := loadWindowIcons()
-	if err != nil {
-		t.Fatalf("loadWindowIcons: %v", err)
-	}
-	w := &Window{
-		theme:              newAppTheme(),
-		language:           "en",
-		emojiCategoryIcons: icons.emojiCategories,
-		emojiPicker:        newEmojiPickerState(),
-	}
-
-	for _, pxPerDp := range []float32{1, 1.5, 2} {
-		for _, width := range []int{40, 90, 140, 243, 261, 400} {
-			gtx := layout.Context{
-				Ops:         new(op.Ops),
-				Metric:      unit.Metric{PxPerDp: pxPerDp, PxPerSp: pxPerDp},
-				Constraints: layout.Constraints{Max: image.Pt(width, 200)},
-			}
-			dims := w.layoutEmojiCategories(gtx)
-			if chip := emojiCategoryChipPx(gtx); dims.Size.Y != chip {
-				t.Fatalf("at %dpx wide (PxPerDp %v) the row is %dpx tall, want a full chip of %dpx",
-					width, pxPerDp, dims.Size.Y, chip)
-			}
-			if dims.Size.X > width {
-				t.Fatalf("at %dpx wide (PxPerDp %v) the row reports %dpx and spills out of the picker",
-					width, pxPerDp, dims.Size.X)
-			}
-		}
-	}
-}
-
-// Reopening the picker keeps the selected category but not where the row was
-// scrolled to, so on a narrow picker the grid showed one category while the
-// row highlighted none of the chips it had room for.
-func TestNarrowEmojiCategoryRowOpensOnTheSelectedChip(t *testing.T) {
-	icons, err := loadWindowIcons()
-	if err != nil {
-		t.Fatalf("loadWindowIcons: %v", err)
-	}
-
-	for _, selected := range emojiCategoryOrder {
-		t.Run(string(selected), func(t *testing.T) {
-			w := &Window{
-				theme:              newAppTheme(),
-				language:           "en",
-				emojiCategoryIcons: icons.emojiCategories,
-				emojiPicker:        newEmojiPickerState(),
-			}
-			w.emojiPicker.selectCategory(selected)
-			router := new(input.Router)
-			row := func(width int) layout.Context {
-				return layout.Context{
-					Ops:         new(op.Ops),
-					Source:      router.Source(),
-					Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
-					Constraints: layout.Constraints{Max: image.Pt(width, 200)},
-				}
-			}
-			// Wide enough to spread every chip: the row scrolls nowhere, so
-			// the reveal has to survive to a frame that can act on it.
-			w.layoutEmojiCategories(row(400))
-			w.closeEmojiPicker(layout.Context{Ops: new(op.Ops)})
-			w.openEmojiPicker(layout.Context{Ops: new(op.Ops)})
-
-			gtx := row(140)
-			w.layoutEmojiCategories(gtx)
-
-			index := slices.Index(emojiCategoryOrder, selected)
-			position := w.emojiPicker.categoryList.Position
-			if index < position.First || index >= position.First+position.Count {
-				t.Fatalf("%s is chip %d, but the row shows %d..%d", selected, index,
-					position.First, position.First+position.Count-1)
-			}
-			if chip := emojiCategoryChipPx(gtx); position.OffsetLast >= chip {
-				t.Fatalf("%s left %dpx empty after the last chip, more than the %dpx chip that could fill it",
-					selected, position.OffsetLast, chip)
-			}
-		})
-	}
-}
-
-func TestEmojiCategoryRowFirstKeepsTheRowFull(t *testing.T) {
-	const count, visible = 9, 7
-	tests := []struct{ selected, want int }{
-		{selected: 0, want: 0},
-		{selected: 1, want: 1},
-		{selected: 2, want: 2},
-		{selected: 5, want: 2},
-		{selected: 8, want: 2},
-		{selected: -1, want: 0}, // an unknown category resolves to no index
-	}
-	for _, tt := range tests {
-		if got := emojiCategoryRowFirst(tt.selected, count, visible); got != tt.want {
-			t.Fatalf("first chip for selection %d = %d, want %d", tt.selected, got, tt.want)
-		}
-	}
-	if got := emojiCategoryRowFirst(8, count, 0); got != 8 {
-		t.Fatalf("first chip in a row narrower than one chip = %d, want the selected 8", got)
-	}
-}
-
-func TestNarrowEmojiCategoryRowScrolls(t *testing.T) {
-	icons, err := loadWindowIcons()
-	if err != nil {
-		t.Fatalf("loadWindowIcons: %v", err)
-	}
-	w := &Window{
-		theme:              newAppTheme(),
-		language:           "en",
-		emojiCategoryIcons: icons.emojiCategories,
-		emojiPicker:        newEmojiPickerState(),
-	}
-	row := func(width int) layout.Dimensions {
-		return w.layoutEmojiCategories(layout.Context{
-			Ops:         new(op.Ops),
-			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
-			Constraints: layout.Constraints{Max: image.Pt(width, 200)},
-		})
-	}
-
-	row(400)
-	if count := w.emojiPicker.categoryList.Position.Count; count != 0 {
-		t.Fatalf("a row with room for every chip used the scrolling list (%d items)", count)
-	}
-
-	row(140)
-	count := w.emojiPicker.categoryList.Position.Count
-	if count == 0 {
-		t.Fatal("a row too narrow for nine chips did not scroll them")
-	}
-	if count >= len(emojiCategoryOrder) {
-		t.Fatalf("the scrolling row laid out %d of %d chips: they cannot all fit 140px at full size",
-			count, len(emojiCategoryOrder))
-	}
-}
-
 // emojiPickerMinHeightDp is a budget for a surface drawn elsewhere, so it is
 // worth proving rather than trusting: at exactly that height an emoji must
 // still be reachable by a tap. If the chrome grows a row without the budget
@@ -1063,7 +933,7 @@ func TestEmojiPickerMinHeightKeepsAnEmojiTappable(t *testing.T) {
 	ops := new(op.Ops)
 	metric := unit.Metric{PxPerDp: 1, PxPerSp: 1}
 	measure := layout.Context{Metric: metric, Constraints: layout.Constraints{Max: image.Pt(360, 1000)}}
-	height := emojiPickerMinHeight(measure)
+	height := ui.EmojiPickerMinHeight(measure, ui.EmojiPickerModeCompose)
 
 	frame := func() {
 		ops.Reset()
@@ -1080,8 +950,9 @@ func TestEmojiPickerMinHeightKeepsAnEmojiTappable(t *testing.T) {
 
 	// The only row of cells, and the first of them: the grid starts below the
 	// chrome, and the row is one cell tall by construction.
-	cell := int(emojiGridCellHeightDp)
-	tap := f32.Pt(float32(measure.Dp(emojiPickerBorderDp)+8+cell/2), float32(emojiPickerChromeHeight(measure)+cell/2))
+	const cellDp, borderDp, insetDp = 38, 1, 8
+	tap := f32.Pt(float32(borderDp+insetDp+cellDp/2),
+		float32(ui.EmojiPickerChromeHeight(measure, ui.EmojiPickerModeCompose)+cellDp/2))
 
 	frame()
 	for _, kind := range []pointer.Kind{pointer.Press, pointer.Release} {
@@ -1133,10 +1004,10 @@ func TestShortComposerDefersEmojiPickerInsteadOfDrawingAStrip(t *testing.T) {
 	closed := card(600).Size.Y
 	w.emojiPicker.visible = true
 
-	minimum := emojiPickerMinHeight(layout.Context{
+	minimum := ui.EmojiPickerMinHeight(layout.Context{
 		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
 		Constraints: layout.Constraints{Max: image.Pt(360, 1000)},
-	})
+	}, ui.EmojiPickerModeCompose)
 	if got := card(closed + footerReserve + minimum); got.Size.Y != closed+minimum {
 		t.Fatalf("card height with exactly enough room = %d, want %d", got.Size.Y, closed+minimum)
 	}
