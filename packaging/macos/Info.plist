@@ -14,6 +14,28 @@
 	<string>Corsa</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<!--
+	  corsa: links. LaunchServices routes a scheme to the bundle that
+	  claims it here, and Gio turns the resulting Apple Event
+	  (application:openURLs:) into an app.URLEvent — see
+	  internal/core/deeplink. The claim is registered when the bundle is
+	  first seen by LaunchServices (first launch, or lsregister); the
+	  scheme string must stay equal to deeplink.Scheme, which
+	  TestMacOSBundleDeclaresTheScheme checks.
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>chat.corsa.link</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>corsa</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>

@@ -2,9 +2,18 @@
 Type=Application
 Name=Corsa
 Comment=Decentralized messenger
-Exec=corsa-desktop
+# %u hands the clicked corsa: URI to the program. X11 and Wayland have no
+# way to deliver into a running process, so a link STARTS the program
+# again; the newcomer forwards the URI to the instance already running
+# over the local socket in the data directory and exits (see
+# internal/core/deeplink).
+Exec=corsa-desktop %u
 Icon=corsa
 Terminal=false
 Categories=Network;Chat;InstantMessaging;
+# The scheme claim itself. xdg-open resolves x-scheme-handler/corsa
+# through the MIME database, which `update-desktop-database` rebuilds
+# from this line (install-desktop-linux runs it).
+MimeType=x-scheme-handler/corsa;
 StartupNotify=true
 StartupWMClass=chat.corsa

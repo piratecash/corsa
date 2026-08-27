@@ -17,7 +17,17 @@ APP_NAME ?= Corsa
 DESKTOP_ICON_ICNS ?= assets/icons/app-icon.icns
 DESKTOP_ICON_ICO ?= assets/icons/app-icon.ico
 GO_DESKTOP_LDFLAGS ?= $(GO_LDFLAGS) -X gioui.org/app.ID=$(APP_ID)
-GO_WINDOWS_DESKTOP_LDFLAGS ?= $(GO_DESKTOP_LDFLAGS) -H windowsgui
+# URI schemes the desktop app handles (internal/core/deeplink). Windows
+# is the one platform where the claim is made from inside the binary:
+# with this set, Gio registers HKCU\Software\Classes\<scheme> at
+# startup, and a link clicked while the app runs starts a second process
+# that hands the URI to the live window (WM_COPYDATA) and exits. NB that
+# relay also makes the app single-instance on Windows: a second launch
+# with no URI exits immediately. macOS declares the same scheme in
+# packaging/macos/Info.plist, Linux in packaging/linux/corsa.desktop,
+# Android in packaging/android/app/src/main/AndroidManifest.xml.
+APP_URL_SCHEMES ?= corsa
+GO_WINDOWS_DESKTOP_LDFLAGS ?= $(GO_DESKTOP_LDFLAGS) -H windowsgui -X gioui.org/app.schemesURI=$(APP_URL_SCHEMES)
 RSRC ?= $(GO) tool rsrc
 # Android SDK autodetect (Android Studio default location on macOS);
 # override via environment or .env if the SDK lives elsewhere.
@@ -331,6 +341,10 @@ install-desktop-linux: build-desktop-linux-amd64
 	install -m 0644 packaging/linux/corsa.desktop $(DESTDIR)$(PREFIX)/share/applications/corsa.desktop
 	install -d $(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps
 	install -m 0644 assets/icons/png/app-icon-256.png $(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/corsa.png
+	# Rebuild the MIME cache so xdg-open can resolve x-scheme-handler/corsa
+	# to this entry. Best effort: absent on minimal systems, and pointless
+	# for a staged (DESTDIR) install a package manager will index itself.
+	-update-desktop-database $(DESTDIR)$(PREFIX)/share/applications
 
 .PHONY: build-node-all
 build-node-all: build-node-macos-arm64 build-node-macos-amd64 build-node-linux-amd64 build-node-windows-amd64 build-node-windows-arm64

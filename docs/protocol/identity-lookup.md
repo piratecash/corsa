@@ -536,7 +536,11 @@ dependency-free (`internal/core/qrcode`, byte mode, level M, versions
 UI: "Share contact" at the own profile renders the QR and copies the link;
 a link pasted into the identity search or the composer imports the contact
 at once — the composer never sends the keys as chat text. A bare 40-hex
-keeps working through the lookup.
+keeps working through the lookup. The same link OPENED from outside the
+app — clicked in a browser, tapped in another messenger — takes that same
+verify-then-import path: the `corsa:` scheme is claimed on every platform
+this repository ships, and the link is one member of a family that routes
+by kind. See [../deeplinks.md](../deeplinks.md).
 
 ---
 
@@ -1072,4 +1076,8 @@ reject с понятным объяснением. Границы парсера
 UI: «Поделиться контактом» у своего профиля рендерит QR и копирует ссылку;
 ссылка, вставленная в поиск identity или композер, импортирует контакт
 сразу — композер никогда не отправит ключи как текст сообщения. Голый
-40-hex продолжает работать через lookup.
+40-hex продолжает работать через lookup. Та же ссылка, ОТКРЫТАЯ снаружи
+приложения — нажатая в браузере или другом мессенджере, — идёт тем же
+путём verify-then-import: схема `corsa:` заявлена на всех платформах,
+которые собирает этот репозиторий, а сама ссылка — один член семейства,
+маршрутизируемого по типу. См. [../deeplinks.md](../deeplinks.md).

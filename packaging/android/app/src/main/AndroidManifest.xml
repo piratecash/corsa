@@ -42,6 +42,23 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+              corsa: links. BROWSABLE is what lets a link tapped in a
+              browser, a mail client or another messenger reach us at
+              all; DEFAULT is what makes the filter match an implicit
+              VIEW intent. With launchMode="singleTask" above, a link
+              tapped while the app runs arrives as onNewIntent (Gio turns
+              it into an app.URLEvent); the intent that STARTS the app is
+              read from the activity itself, because Gio may deliver that
+              one before Go has an event iterator — see
+              internal/app/desktop/deeplink_launch_android.go.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="corsa" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>

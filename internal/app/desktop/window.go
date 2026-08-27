@@ -23,6 +23,7 @@ import (
 	"github.com/piratecash/corsa/internal/app/desktop/ui"
 	"github.com/piratecash/corsa/internal/core/contactlink"
 	"github.com/piratecash/corsa/internal/core/crashlog"
+	"github.com/piratecash/corsa/internal/core/deeplink"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -115,9 +116,34 @@ type Window struct {
 	// lastContactLinkTried edge-triggers the search-paste import
 	// (contact_share.go).
 	lastContactLinkTried string
-	languageToggle       widget.Clickable
-	languageOptions      map[string]*widget.Clickable
-	languageMenuList     widget.List
+	// deepLinks carries corsa: URIs from whichever thread the operating
+	// system delivered them on to the layout goroutine, and
+	// deepLinkRoutes decides which member of the family each one is.
+	// See deeplink.go.
+	deepLinks      deeplink.Inbox
+	deepLinkRoutes *deeplink.Router
+	// launchDeepLinkRead marks the one-time platform query for the URI
+	// this process was started with. Layout goroutine only: a view can
+	// be recreated, and re-reading the launch intent on every ViewEvent
+	// would import the same contact again.
+	launchDeepLinkRead bool
+	// deepLinkWake asks the polling goroutine for a frame after a link
+	// lands in the inbox.
+	//
+	// The pusher must NOT call Window.Invalidate itself. A link is
+	// delivered on the platform's own thread, and on macOS Gio runs its
+	// wakeup INLINE when it is already on the main thread: Invalidate
+	// then pumps the event loop while holding the window's invalidation
+	// lock, and the layout goroutine — mid-frame, about to invalidate or
+	// to hand over its frame — waits for the very thread that is waiting
+	// for it. That deadlock froze the app on the first link it ever
+	// received. Signalling a goroutine that is not the platform thread
+	// is what keeps Invalidate a client-goroutine call, which is the
+	// only way Gio supports it.
+	deepLinkWake     chan struct{}
+	languageToggle   widget.Clickable
+	languageOptions  map[string]*widget.Clickable
+	languageMenuList widget.List
 	// languageMenuDismissTag is the popup backdrop's pointer target.
 	languageMenuDismissTag struct{}
 	// headerHeight and languageButtonSize are what the last drawn frame
@@ -755,6 +781,9 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 	}
 	w.aliasEditor.SingleLine = true
 	w.aliasEditor.Submit = true
+	// Depth one: the frame that follows a wake drains EVERY queued link,
+	// so a second signal while one is pending would ask for nothing new.
+	w.deepLinkWake = make(chan struct{}, 1)
 	return w, nil
 }
 
@@ -947,7 +976,17 @@ func (w *Window) Run() error {
 		os.Exit(0)
 	}()
 
-	app.Main()
+	// app.Events replaces app.Main: same blocking main-thread loop, plus
+	// the iterator through which Gio delivers what the operating system
+	// opened — the macOS Apple Event, the Windows relay from a second
+	// launch, the Android intent. Without it those events are dropped
+	// before they reach any window.
+	app.Events(func(e event.Event) bool {
+		if opened, ok := e.(app.URLEvent); ok {
+			w.enqueueDeepLink(opened.URL.String())
+		}
+		return true
+	})
 	return nil
 }
 
@@ -1030,6 +1069,13 @@ func (w *Window) startPolling(window *app.Window) {
 				if w.window != nil {
 					w.window.Invalidate()
 				}
+			case <-w.deepLinkWake:
+				// A corsa: link reached the inbox from a thread that is
+				// not allowed to invalidate (see deepLinkWake). This
+				// goroutine is, so the frame is requested here.
+				if w.window != nil {
+					w.window.Invalidate()
+				}
 			case <-heartbeat.C:
 				// Periodic recovery: ensure the UI redraws at least
 				// every uiHeartbeatInterval even if all event-driven
@@ -1058,6 +1104,9 @@ func (w *Window) loop(window *app.Window) error {
 			// the touch-keyboard Showing/Hiding handler proactively, so a
 			// keyboard the user opens before their first editor tap is tracked.
 			platformBindKeyboardWindow(&w.touchKbd, platformViewHWND(e))
+			// First moment a native view exists — the only handle from
+			// which the platform's launch URI can be read (Android).
+			w.readLaunchDeepLinkOnce(e)
 		case app.FrameEvent:
 			gtx := app.NewContext(&w.ops, e)
 			w.layout(gtx)
@@ -1109,6 +1158,14 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		// composer takes it, which is where focus was before the viewer.
 		w.imageViewer.focusRing.restoreOnClose(gtx, &w.messageEditor)
 	}
+	// Deep links are drained HERE, and not in handleActions with the rest
+	// of the input: handleActions returns early while the image viewer or
+	// the console modal is open, and a link handed over by the operating
+	// system is not a control of the window that a modal can cover. Before
+	// the snapshot, so a contact imported by a link is in the list the very
+	// frame it arrives.
+	w.handleDeepLinks()
+
 	w.snap = w.router.Snapshot()
 	// Before rebuildMsgCache, which is what the chip rows are drawn against:
 	// a peer's reactions arrive on the event bus goroutine, which can only

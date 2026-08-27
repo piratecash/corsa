@@ -69,6 +69,22 @@ func Run() error {
 		cfg.Node.Type = config.NodeTypeClient
 	}
 
+	// A corsa: link on the command line, on a desktop that answers a
+	// clicked link by starting the program AGAIN (X11 and Wayland always,
+	// macOS whenever the running instance is not the registered bundle).
+	// Two things happen here, both before the sweeps below delete anything
+	// and before the data directory is opened: an instance that is
+	// already running takes the link and this process is done, or this
+	// process claims the delivery socket so the NEXT launch hands its
+	// link over instead of starting a second node on this identity.
+	// Everywhere else this is a no-op: the platform delivers into the
+	// live process.
+	deepLinkSocket, deepLinkDelivered := beginDeepLinkDelivery(ctx,
+		cfg.Node.EffectiveDataDir(), config.PortSuffix(cfg.Node.ListenAddress))
+	if deepLinkDelivered {
+		return nil
+	}
+
 	// Wipe attachment staging copies from previous runs before any UI
 	// (and thus any new pick) exists — the one moment no draft or
 	// failed-send entry can reference them. See file_attach_stream.go.
@@ -303,6 +319,11 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("initialize desktop window: %w", err)
 	}
+	// The window now exists, so the link this process was started with —
+	// and anything the socket has accepted since it was claimed above —
+	// has somewhere to go.
+	startDeepLinkDelivery(deepLinkSocket, window)
+
 	// From here the UI owns the teardown, on both platforms but for two
 	// different reasons. On desktop its exit paths (window closed) terminate
 	// the process straight from the event loop, so the defers above never get
@@ -315,6 +336,20 @@ func Run() error {
 	// in-flight queries, so sqlite finishes its WAL work instead of dying
 	// inside os.Exit.
 	window.SetShutdown(func() {
+		// The deep link socket goes FIRST, before any of the stages
+		// below. It answers "ok" and hands the link to the frame
+		// goroutine — which by this point is already gone, so an
+		// accepted link would be acknowledged to a process that then
+		// exits, and then dropped. Closing the socket here removes it,
+		// so the next launch becomes the owner and opens the link
+		// itself. Waiting for cancelNode (stage 4) would leave that
+		// window open for the whole drain.
+		if deepLinkSocket != nil {
+			if err := deepLinkSocket.Close(); err != nil {
+				log.Warn().Err(err).Msg("deep link socket close failed")
+			}
+		}
+
 		// Shutdown ordering — producers stop before their consumers'
 		// state is torn down, and everything settles before sqlite
 		// closes:

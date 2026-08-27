@@ -729,30 +729,36 @@ func resolveStartupPath(path string) string {
 }
 
 func defaultIdentityPath(listenAddress string) string {
-	port := portSuffix(listenAddress)
+	port := PortSuffix(listenAddress)
 
 	return filepath.Join(defaultChatLogDir(), "identity-"+port+".json")
 }
 
 func defaultTrustStorePath(listenAddress string) string {
-	port := portSuffix(listenAddress)
+	port := PortSuffix(listenAddress)
 
 	return filepath.Join(defaultChatLogDir(), "trust-"+port+".json")
 }
 
 func defaultIdentityIntentsPath(listenAddress string) string {
-	port := portSuffix(listenAddress)
+	port := PortSuffix(listenAddress)
 
 	return filepath.Join(defaultChatLogDir(), "identity-intents-"+port+".json")
 }
 
 func defaultPeersStatePath(listenAddress string) string {
-	port := portSuffix(listenAddress)
+	port := PortSuffix(listenAddress)
 
 	return filepath.Join(defaultChatLogDir(), "peers-"+port+".json")
 }
 
-func portSuffix(listenAddress string) string {
+// PortSuffix is the scoping rule for every node-local file: state that
+// belongs to ONE node carries the port it listens on
+// (peers-64646.json, identity-64646.json, chatlog-<id>-64646.db), so two
+// nodes started from one data directory on different ports never share a
+// file. Exported because the rule is not only about paths this package
+// builds — the deep link delivery socket is scoped by it too.
+func PortSuffix(listenAddress string) string {
 	port := "default"
 	if idx := strings.LastIndex(listenAddress, ":"); idx >= 0 && idx < len(listenAddress)-1 {
 		port = listenAddress[idx+1:]

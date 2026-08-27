@@ -20,12 +20,17 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/piratecash/corsa/internal/core/deeplink"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 )
 
-// Scheme is the URI scheme, compared case-insensitively as URI schemes are.
-const Scheme = "corsa"
+// Scheme is the URI scheme, compared case-insensitively as URI schemes
+// are. The contact link is one member of the corsa: family (see
+// internal/core/deeplink), and the family owns the scheme: two spellings
+// would be a URI the operating system routes to us and this parser
+// rejects.
+const Scheme = deeplink.Scheme
 
 // MaxLinkBytes bounds the whole URI BEFORE any decoding: the parser must
 // never do work proportional to attacker-sized input.
