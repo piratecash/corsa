@@ -103,6 +103,13 @@ type Window struct {
 	sendIcon                 *widget.Icon
 	shieldIcon               *widget.Icon
 	consoleIcon              *widget.Icon
+	chevronLeftIcon          *widget.Icon
+	zoomInIcon               *widget.Icon
+	zoomOutIcon              *widget.Icon
+	downloadIcon             *widget.Icon
+	deleteIcon               *widget.Icon
+	brokenImageIcon          *widget.Icon
+	hourglassIcon            *widget.Icon
 	emojiCategoryIcons       map[emojiCategoryID]*widget.Icon
 	emojiPicker              emojiPickerState
 	// lastContactLinkTried edge-triggers the search-paste import
@@ -151,6 +158,13 @@ type Window struct {
 	// showing lives on it, not here: the traffic ticker reads that off the UI
 	// goroutine (see consoleModal.visible).
 	consoleModal *consoleModal
+
+	// imageViewer is the full-window image viewer (image_viewer.go). Created
+	// on first use and kept afterwards, like the console: what it holds while
+	// it is closed is one empty struct, and what it holds while it is open —
+	// decoded bitmaps measured in tens of megabytes — is released by the
+	// close itself.
+	imageViewer *imageViewer
 
 	// Global cursor tracking for context menu positioning.
 	cursorTracker   int // tag for window-level pointer events
@@ -590,6 +604,13 @@ type windowIcons struct {
 	send            *widget.Icon
 	shield          *widget.Icon
 	console         *widget.Icon
+	chevronLeft     *widget.Icon
+	zoomIn          *widget.Icon
+	zoomOut         *widget.Icon
+	download        *widget.Icon
+	remove          *widget.Icon
+	brokenImage     *widget.Icon
+	hourglass       *widget.Icon
 	emojiCategories map[emojiCategoryID]*widget.Icon
 }
 
@@ -614,6 +635,13 @@ func loadWindowIcons() (windowIcons, error) {
 		{name: "send", data: icons.ContentSend, dst: &loaded.send},
 		{name: "shield", data: icons.ActionVerifiedUser, dst: &loaded.shield},
 		{name: "console", data: icons.EditorShowChart, dst: &loaded.console},
+		{name: "chevron-left", data: icons.NavigationChevronLeft, dst: &loaded.chevronLeft},
+		{name: "zoom-in", data: icons.ActionZoomIn, dst: &loaded.zoomIn},
+		{name: "zoom-out", data: icons.ActionZoomOut, dst: &loaded.zoomOut},
+		{name: "download", data: icons.FileFileDownload, dst: &loaded.download},
+		{name: "delete", data: icons.ActionDelete, dst: &loaded.remove},
+		{name: "broken-image", data: icons.ImageBrokenImage, dst: &loaded.brokenImage},
+		{name: "hourglass", data: icons.ActionHourglassEmpty, dst: &loaded.hourglass},
 	}
 	for _, definition := range definitions {
 		icon, err := loadUIIcon(definition.name, definition.data)
@@ -711,6 +739,13 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		sendIcon:                 loadedIcons.send,
 		shieldIcon:               loadedIcons.shield,
 		consoleIcon:              loadedIcons.console,
+		chevronLeftIcon:          loadedIcons.chevronLeft,
+		zoomInIcon:               loadedIcons.zoomIn,
+		zoomOutIcon:              loadedIcons.zoomOut,
+		downloadIcon:             loadedIcons.download,
+		deleteIcon:               loadedIcons.remove,
+		brokenImageIcon:          loadedIcons.brokenImage,
+		hourglassIcon:            loadedIcons.hourglass,
 		emojiCategoryIcons:       loadedIcons.emojiCategories,
 		emojiPicker:              emojiPicker,
 		// Generously buffered and fully drained each frame so background
@@ -1068,6 +1103,12 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		// it is the one focus target every frame of this window draws.
 		w.consoleModal.focusRing.restoreOnClose(gtx, &w.messageEditor)
 	}
+	if !w.imageViewerVisible() && w.imageViewer != nil {
+		// The viewer has no trigger to hand the keyboard back to — the
+		// thumbnail that opened it belongs to a row that may be gone — so the
+		// composer takes it, which is where focus was before the viewer.
+		w.imageViewer.focusRing.restoreOnClose(gtx, &w.messageEditor)
+	}
 	w.snap = w.router.Snapshot()
 	// Before rebuildMsgCache, which is what the chip rows are drawn against:
 	// a peer's reactions arrive on the event bus goroutine, which can only
@@ -1256,7 +1297,48 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 		Left:   unit.Dp(windowPadXDp),
 		Right:  unit.Dp(windowPadXDp),
 	}
+	// The viewer is not one more Stacked overlay beside the others: it covers
+	// the console too (a thumbnail in the console's Files tab opens it), so
+	// everything the window draws — the console included — goes underneath it
+	// and is laid out with input disabled while it is up.
 	dims := layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			return w.layoutWindowSurfaces(w.disableUnderImageViewer(gtx), inset)
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			if !w.imageViewerVisible() {
+				return layout.Dimensions{}
+			}
+			return w.viewer().layout(gtx)
+		}),
+	)
+
+	// Every one of the four places that raises focusComposerPending does it
+	// from inside a widget — a contact tapped in the list — which happens
+	// while this frame is being laid out, long after the block at the top has
+	// run. Handling it therefore waits for the next frame, and nothing else
+	// guarantees there will be one: Gio draws in response to input, and the
+	// tap that set the flag has already been drawn. Ask for that frame, or the
+	// composer would take focus (and on a touch tap raise the keyboard) only
+	// whenever the user happened to move next. While the flag lived inside the
+	// composer this could not arise — it was set and consumed in the same
+	// frame, in list-then-composer order.
+	if w.focusComposerPending {
+		gtx.Execute(op.InvalidateCmd{})
+	}
+	return dims
+}
+
+// layoutWindowSurfaces draws the window itself and every overlay that lives
+// inside it: the main panel, the two context menus, the language dropdown,
+// identity details and the console.
+//
+// It was extracted from layout() when the image viewer arrived, because the
+// viewer is the one surface that goes OVER all of these rather than beside
+// them, and a stack of eight children where one of them disables the other
+// seven reads as an accident.
+func (w *Window) layoutWindowSurfaces(gtx layout.Context, inset layout.Inset) layout.Dimensions {
+	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			gtx = w.disableUnderConsoleModal(gtx)
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -1318,21 +1400,20 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 			return w.layoutConsoleOverlay(gtx)
 		}),
 	)
+}
 
-	// Every one of the four places that raises focusComposerPending does it
-	// from inside a widget — a contact tapped in the list — which happens
-	// while this frame is being laid out, long after the block at the top has
-	// run. Handling it therefore waits for the next frame, and nothing else
-	// guarantees there will be one: Gio draws in response to input, and the
-	// tap that set the flag has already been drawn. Ask for that frame, or the
-	// composer would take focus (and on a touch tap raise the keyboard) only
-	// whenever the user happened to move next. While the flag lived inside the
-	// composer this could not arise — it was set and consumed in the same
-	// frame, in list-then-composer order.
-	if w.focusComposerPending {
-		gtx.Execute(op.InvalidateCmd{})
+// disableUnderImageViewer takes input away from the window — the console
+// included — while the image viewer covers it.
+//
+// Same mechanism as disableUnderConsoleModal, and the same two guarantees:
+// nothing underneath declares a key.FocusFilter, so Tab has only the viewer's
+// own controls to walk, and a press that lands beside the picture cannot
+// reach a contact row through it.
+func (w *Window) disableUnderImageViewer(gtx layout.Context) layout.Context {
+	if !w.imageViewerVisible() {
+		return gtx
 	}
-	return dims
+	return gtx.Disabled()
 }
 
 // disableUnderConsoleModal takes input away from the window while the console
@@ -1843,6 +1924,15 @@ func (w *Window) applyPendingAttach(msg pendingAttachMsg) {
 func (w *Window) handleActions(gtx layout.Context) {
 	w.handleBackNavigation(gtx)
 
+	// The image viewer covers everything, the console included, so nothing
+	// below it may be read for clicks — reading a widget is what puts it in
+	// Gio's focus traversal, and Enter on a Send button nobody can see still
+	// posts the draft. Same rule and same exception (Back, above) as the
+	// console guard further down.
+	if w.imageViewerVisible() {
+		return
+	}
+
 	// The Console button comes first so that the frame which OPENS the modal
 	// stops at the guard below too. Checking only at the top let that one
 	// frame run on and register every other control for the next one.
@@ -2254,7 +2344,16 @@ func (w *Window) triggerFileAttach() {
 		}
 		rc, err := w.fileExplorer.ChooseFile()
 		if err != nil {
-			// User cancelled or platform error — silently ignore cancel.
+			// A dismissed picker is not an error and says nothing. Anything
+			// else is, and it used to say nothing either — which is how a
+			// picker that could not start on Android (its Java classes were
+			// missing from the APK) presented as a button that does nothing
+			// at all. See ANDROID_JAVA_PKGS in the Makefile.
+			if !errors.Is(err, explorer.ErrUserDecline) {
+				log.Error().Err(err).Msg("desktop: file picker failed")
+				w.router.SetSendStatus(w.t("file.prepare_failed", err.Error()))
+				w.invalidate()
+			}
 			return
 		}
 		// Picker done — everything below (materializeAttachment copies
@@ -2655,6 +2754,7 @@ type navigationDismissTarget uint8
 
 const (
 	dismissNothing navigationDismissTarget = iota
+	dismissImageViewer
 	dismissConsoleModal
 	dismissIdentityPanel
 	dismissMessageMenu
@@ -2669,6 +2769,8 @@ const (
 // to the non-modal picker and finally compact-chat navigation.
 func (w *Window) topNavigationDismissTarget(gtx layout.Context) navigationDismissTarget {
 	switch {
+	case w.imageViewerVisible():
+		return dismissImageViewer
 	case w.consoleModalVisible():
 		return dismissConsoleModal
 	case w.identityPanelVisible:
@@ -2725,6 +2827,8 @@ func (w *Window) handleBackNavigation(gtx layout.Context) {
 			continue
 		}
 		switch w.topNavigationDismissTarget(gtx) {
+		case dismissImageViewer:
+			w.escapeImageViewer()
 		case dismissConsoleModal:
 			w.escapeConsoleModal(gtx)
 		case dismissIdentityPanel:
@@ -4231,19 +4335,27 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 			)
 		}
 
-		// Image thumbnail preview (only for image content types when file
-		// is available on disk). Click on thumbnail opens the file with the
-		// system default viewer.
+		// Image attachments open in the in-app viewer. What the card offers
+		// as the way in depends on what it has: the preview when the
+		// thumbnail is decoded, and the name row otherwise — a picture whose
+		// thumbnail failed, or one still downloading, is exactly what the
+		// viewer's fallback and loading states are for, and a card with no
+		// click target at all is what made them unreachable.
+		var nameRowButton *widget.Clickable
 		if isImageContentType(payload.ContentType) {
 			filePath := w.router.FileBridge().FilePath(fileID, isMine)
-			// get() returns non-nil only when the image is decoded and
-			// ready (thumbReady). While decoding is in progress or if
-			// it failed, nil is returned and we skip the thumbnail.
-			entry := w.thumbCache.get(filePath, w.window)
-			if entry != nil {
-				imgOp := entry.op
-				imgBounds := entry.bounds
-				openPath := filePath
+			// receiverDownloadActive is the "it is on its way" half: the file
+			// is not on disk yet, and the viewer says so rather than
+			// pretending the attachment is not an image.
+			if filePath != "" || receiverDownloadActive {
+				openItem := viewerItem{
+					messageID: domain.MessageID(message.ID),
+					peer:      conversationPeer(message, w.snap.MyAddress),
+					path:      filePath,
+					name:      payload.FileName,
+					size:      payload.FileSize,
+					mine:      isMine,
+				}
 
 				// Ensure clickable widget exists for this message.
 				if w.thumbClickBtns == nil {
@@ -4256,74 +4368,92 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 				}
 
 				for thumbBtn.Clicked(gtx) {
-					if openPath != "" {
-						go openFile(openPath)
-					}
+					w.openImageViewer(openItem, gtx.Now)
 				}
 
-				renderThumb := func(gtx layout.Context) layout.Dimensions {
-					dispW, dispH := thumbnailDisplaySize(
-						imgBounds.X, imgBounds.Y,
-						gtx.Dp(unit.Dp(thumbnailMaxWidth)),
-						gtx.Dp(unit.Dp(thumbnailMaxHeight)),
-					)
+				// get() returns non-nil only when the image is decoded and
+				// ready (thumbReady). While decoding is in progress or if it
+				// failed, nil is returned and the name row carries the click
+				// instead — one Clickable, two possible hosts, only ever one
+				// of them in the frame.
+				entry := w.thumbCache.get(filePath, w.window)
+				if entry == nil {
+					nameRowButton = thumbBtn
+				} else {
+					imgOp := entry.op
+					imgBounds := entry.bounds
+					renderThumb := func(gtx layout.Context) layout.Dimensions {
+						dispW, dispH := thumbnailDisplaySize(
+							imgBounds.X, imgBounds.Y,
+							gtx.Dp(unit.Dp(thumbnailMaxWidth)),
+							gtx.Dp(unit.Dp(thumbnailMaxHeight)),
+						)
 
-					// Apply rounded clip before rendering the image.
-					size := image.Pt(dispW, dispH)
-					defer clip.UniformRRect(image.Rectangle{Max: size}, gtx.Dp(unit.Dp(6))).Push(gtx.Ops).Pop()
+						// Apply rounded clip before rendering the image.
+						size := image.Pt(dispW, dispH)
+						defer clip.UniformRRect(image.Rectangle{Max: size}, gtx.Dp(unit.Dp(6))).Push(gtx.Ops).Pop()
 
-					imgWidget := widget.Image{
-						Src:      imgOp,
-						Fit:      widget.ScaleDown,
-						Position: layout.NW,
-					}
-					gtx.Constraints = layout.Exact(size)
-					return imgWidget.Layout(gtx)
-				}
-
-				children = append(children,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						// openFile is a stub on Android (no FileProvider —
-						// see open_android.go), so the thumbnail is plain
-						// content there: no Clickable, no hand cursor, no
-						// dead tap target.
-						if runtime.GOOS == "android" {
-							return renderThumb(gtx)
+						imgWidget := widget.Image{
+							Src:      imgOp,
+							Fit:      widget.ScaleDown,
+							Position: layout.NW,
 						}
-						return thumbBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							// Hand cursor on hover so the click
-							// affordance is discoverable — same UX
-							// the file-tab thumbnail and the donate
-							// link already provide. CursorPointer
-							// must be added INSIDE the clickable's
-							// layout callback so the cursor area
-							// matches the clickable's hit area.
-							pointer.CursorPointer.Add(gtx.Ops)
-							return renderThumb(gtx)
-						})
-					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
-				)
+						gtx.Constraints = layout.Exact(size)
+						return imgWidget.Layout(gtx)
+					}
+
+					children = append(children,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							// Clickable on every platform now. The Android
+							// exception here was openFile's: it is a stub
+							// there (no FileProvider — see open_android.go),
+							// so the tap target would have been dead. The
+							// viewer this opens is drawn by the application
+							// itself.
+							return thumbBtn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								// Hand cursor on hover so the click
+								// affordance is discoverable — same UX
+								// the file-tab thumbnail and the donate
+								// link already provide. CursorPointer
+								// must be added INSIDE the clickable's
+								// layout callback so the cursor area
+								// matches the clickable's hit area.
+								pointer.CursorPointer.Add(gtx.Ops)
+								return renderThumb(gtx)
+							})
+						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+					)
+				}
 			}
 		}
 
 		// File icon + name.
 		children = append(children,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Body2(w.theme, w.t("file.icon"))
-						lbl.Color = color.NRGBA{R: 100, G: 180, B: 255, A: 255}
-						return lbl.Layout(gtx)
-					}),
-					layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						lbl := material.Body2(w.theme, payload.FileName)
-						lbl.Font.Weight = font.Bold
-						lbl.Color = nameFg
-						return lbl.Layout(gtx)
-					}),
-				)
+				row := func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Body2(w.theme, w.t("file.icon"))
+							lbl.Color = color.NRGBA{R: 100, G: 180, B: 255, A: 255}
+							return lbl.Layout(gtx)
+						}),
+						layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							lbl := material.Body2(w.theme, payload.FileName)
+							lbl.Font.Weight = font.Bold
+							lbl.Color = nameFg
+							return lbl.Layout(gtx)
+						}),
+					)
+				}
+				if nameRowButton == nil {
+					return row(gtx)
+				}
+				return nameRowButton.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					pointer.CursorPointer.Add(gtx.Ops)
+					return row(gtx)
+				})
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
 		)
@@ -4792,13 +4922,7 @@ func (w *Window) layoutFileActionButtons(gtx layout.Context, msg service.DirectM
 // only draws it for outgoing rows today) gets the right rule for
 // free.
 func (w *Window) layoutFileCardDeleteButton(gtx layout.Context, msg service.DirectMessage) layout.Dimensions {
-	// Determine the conversation peer relative to self — same
-	// rule as the chat context-menu Delete handler.
-	me := w.router.MyAddress()
-	peer := msg.Recipient
-	if msg.Sender != me {
-		peer = msg.Sender
-	}
+	peer := conversationPeer(msg, w.router.MyAddress())
 
 	btn, ok := w.fileRowDeleteBtns[msg.ID]
 	if !ok {
@@ -4821,6 +4945,19 @@ func (w *Window) layoutFileCardDeleteButton(gtx layout.Context, msg service.Dire
 	matBtn.CornerRadius = unit.Dp(5)
 	matBtn.TextSize = unit.Sp(11)
 	return matBtn.Layout(gtx)
+}
+
+// conversationPeer is the OTHER party of a message, relative to this node:
+// the recipient of one we sent, the sender of one we received.
+//
+// Every action that reaches across a message — deleting it, deleting the
+// image it carries — is addressed to that peer, and each of the three places
+// that needed it had worked it out again from the same two fields.
+func conversationPeer(message service.DirectMessage, me domain.PeerIdentity) domain.PeerIdentity {
+	if message.Sender != me {
+		return message.Sender
+	}
+	return message.Recipient
 }
 
 // dispatchMessageDeleteAsync runs SendMessageDelete on a background
@@ -7051,11 +7188,7 @@ func (w *Window) handleMsgContextMenuActions(gtx layout.Context) {
 		// deletion (the recipient may reject if the message Flag does
 		// not authorize them — that's the wire-side concern, not ours).
 		msg := *w.msgContextMsg
-		me := w.router.MyAddress()
-		peer := msg.Recipient
-		if msg.Sender != me {
-			peer = msg.Sender
-		}
+		peer := conversationPeer(msg, w.router.MyAddress())
 
 		targetID := domain.MessageID(msg.ID)
 

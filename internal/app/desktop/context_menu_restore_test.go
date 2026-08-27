@@ -405,8 +405,8 @@ func TestLayoutWiresTheRestoreFallbackAndItsCancellation(t *testing.T) {
 		}
 		return true
 	})
-	if restores != 4 {
-		t.Errorf("layout() calls restoreOnClose %d times, want 4 (the peer menu, message menu, identity panel and console modal)", restores)
+	if restores != 5 {
+		t.Errorf("layout() calls restoreOnClose %d times, want 5 (the peer menu, message menu, identity panel, console modal and image viewer)", restores)
 	}
 
 	// The cancellation has to hang off the call's own result. Anything else —

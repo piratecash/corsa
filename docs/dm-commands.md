@@ -448,6 +448,46 @@ Future DM types can register additional cleanup callbacks against this
 chain; the chain is order-independent because each callback is scoped to
 its own domain.
 
+### Deleting the file without the message
+
+The image viewer's delete button is NOT `message_delete`. It removes this
+node's copy of the file and leaves the message where it is —
+`filetransfer.Manager.DeleteLocalCopy(fileID)`, reached from the desktop
+through `FileTransferBridge.DeleteLocalCopy`. Nothing is sent to the peer:
+the user is emptying their own disk, not asking anybody to forget anything.
+
+The mapping is what survives, and it is what makes the difference visible.
+On the receiving side it goes back to `available`, so the attachment shows
+without a preview and offers the download again — a re-download the protocol
+can actually fulfil, because `senderCompleted` is re-servable and the sender
+keeps its transmit blob. Resetting it is also what allows the erasure at all:
+`pathOwnershipLocked` refuses to unlink a file some mapping still points at,
+and until `CompletedPath` is cleared that mapping is this one.
+
+**The sending side is refused** (`ErrOutgoingCopy`), and the viewer's delete
+button is inert on an outgoing image. What this node holds for a file it SENT
+is the transmit blob every re-download is served from; nothing can bring it
+back, because there is no protocol for asking the recipient for your own file.
+It is also shared BY CONTENT: two messages carrying the same picture reference
+one file, so "deleting it for one of them" is either the other message losing
+its attachment or — since the store keeps a file something still references —
+no deletion at all, with the picture returning to the strip on the next
+rebuild. Taking back an outgoing image is `message_delete`, which removes the
+attachment with the message and drops the ref on the way.
+
+The two receiver states it accepts are exactly the two in which a verified
+file is on disk — `completed` and `waiting_ack`. From `waiting_ack` it also
+abandons the `file_downloaded` this node still owed the sender: both that
+send and the ack answering it are guarded on the state, so they become
+no-ops, the sender reclaims its stalled serving slot on its own tick, and it
+keeps the blob — which is what the re-download needs. `ErrNoLocalCopy` is the
+answer when there was nothing on disk to remove; for the user that is the
+same outcome as a delete.
+
+Erasing goes through the same cleanup intent as every other deletion here:
+the record of what must be gone is persisted before the first unlink is
+attempted, and retried until the file is actually gone.
+
 ### Delete routes (UI scope)
 
 A delete always removes the local copy immediately — reachable peer or
@@ -1936,6 +1976,48 @@ generic-цепочку cleanup. Сейчас один хук:
 Будущие DM-типы могут регистрировать дополнительные cleanup-callback-и в
 эту цепочку; порядок неважен, потому что каждый callback скоупится в свой
 домен.
+
+### Удаление файла без сообщения
+
+Кнопка удаления в просмотрщике изображений — это НЕ `message_delete`. Она
+удаляет копию файла на этом узле и оставляет сообщение на месте:
+`filetransfer.Manager.DeleteLocalCopy(fileID)`, доступный десктопу через
+`FileTransferBridge.DeleteLocalCopy`. Собеседнику не отправляется ничего:
+пользователь освобождает свой диск, а не просит кого-то что-то забыть.
+
+Выживает mapping, и именно он делает разницу видимой. На приёмной стороне он
+возвращается в `available`, так что вложение показывается без превью и снова
+предлагает скачивание — которое протокол действительно может выполнить:
+`senderCompleted` пере-раздаваем, и отправитель хранит свой transmit-блоб.
+Этот сброс ещё и единственное, что вообще делает стирание возможным:
+`pathOwnershipLocked` отказывается отвязывать файл, на который указывает
+какой-то mapping, а пока `CompletedPath` не очищен, этот mapping — наш
+собственный.
+
+**Отправляющая сторона получает отказ** (`ErrOutgoingCopy`), а кнопка удаления
+в просмотрщике на исходящем изображении неактивна. То, что узел хранит для
+ОТПРАВЛЕННОГО файла, — это transmit-блоб, из которого обслуживается любое
+повторное скачивание; вернуть его нельзя, потому что протокола «попросить у
+получателя свой же файл» не существует. И он общий ПО СОДЕРЖИМОМУ: два
+сообщения с одной и той же картинкой ссылаются на один файл, поэтому «удалить
+его для одного из них» — это либо потеря вложения у другого сообщения, либо,
+раз store не трогает файл, на который кто-то ссылается, отсутствие удаления
+вообще, с возвратом картинки в полосу на следующей пересборке. Забрать
+исходящее изображение обратно — это `message_delete`, который уносит вложение
+вместе с сообщением и по дороге снимает ссылку.
+
+Принимаются ровно два receiver-состояния, в которых проверенный файл лежит на
+диске, — `completed` и `waiting_ack`. Из `waiting_ack` операция вдобавок
+отказывается от `file_downloaded`, который узел ещё был должен отправителю:
+и эта отправка, и отвечающий ей ack защищены проверкой состояния, поэтому
+становятся no-op, отправитель освобождает зависший слот раздачи собственным
+тиком и сохраняет блоб — а это то, что нужно повторному скачиванию.
+`ErrNoLocalCopy` — ответ, когда на диске нечего было удалять; для
+пользователя это тот же результат, что и удаление.
+
+Стирание идёт через то же намерение очистки, что и любое другое удаление
+здесь: запись о том, что должно исчезнуть, сохраняется до первой попытки
+unlink и повторяется, пока файл действительно не исчезнет.
 
 ### Маршруты удаления (UI)
 

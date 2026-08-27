@@ -203,6 +203,20 @@ func (b *FileTransferBridge) FilePath(fileID domain.FileID, isSender bool) strin
 	return b.client.FileTransferFilePath(fileID, isSender)
 }
 
+// DeleteLocalCopy erases this node's copy of a transferred file and leaves
+// the mapping and the message alone — the attachment then shows without a
+// preview, and a received file can be downloaded from the peer again.
+//
+// This is deliberately NOT OnMessageDeleted: that one is the cleanup of a
+// message that no longer exists, this one is a file the user no longer wants
+// on their disk.
+func (b *FileTransferBridge) DeleteLocalCopy(fileID domain.FileID) error {
+	if b.client == nil {
+		return errNoLocalNode
+	}
+	return b.client.DeleteLocalFileCopy(fileID)
+}
+
 // CleanupPeer removes all file transfer mappings for the given peer.
 // Called when a peer is removed from the sidebar.
 func (b *FileTransferBridge) CleanupPeer(peer domain.PeerIdentity) {

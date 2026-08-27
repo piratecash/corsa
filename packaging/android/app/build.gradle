@@ -28,6 +28,27 @@ def gioArchive = file(propertyValue(
     "corsaGioArchive",
     rootProject.file("../../dist/corsa-android.aar").absolutePath,
 ))
+// JNI jars gogio leaves out of the AAR. Its archive mode compiles only
+// gioui.org/app's Java; the *.jar files of other imported packages are
+// collected but used only by its -buildmode=exe path. gioui.org/x/explorer
+// is one of those packages, and without its classes the system file picker
+// behind Attach and Save as… fails inside jni.LoadClass — which the app can
+// only report as "nothing happened". The Makefile stages them
+// (`make android-extra-jars`) from the module cache.
+def extraJarsDir = file(propertyValue(
+    "corsaExtraJarsDir",
+    rootProject.file("../../dist/android-libs").absolutePath,
+))
+// Keep this list aligned with the class names loaded through JNI by
+// gioui.org/x/explorer. Merely finding an arbitrary jar in the staging
+// directory is not enough: explorer_android without FileInfo, or without
+// file_android, still builds successfully and fails only after a user picks a
+// document.
+def requiredExplorerClasses = [
+    "org/gioui/x/explorer/explorer_android.class",
+    'org/gioui/x/explorer/explorer_android$FileInfo.class',
+    "org/gioui/x/explorer/file_android.class",
+]
 def generatedIconResources = layout.buildDirectory.dir("generated/corsa-icon-resources").get().asFile
 
 def verifyCorsaInputs = tasks.register("verifyCorsaInputs") {
@@ -41,6 +62,26 @@ def verifyCorsaInputs = tasks.register("verifyCorsaInputs") {
             if (!input.isFile()) {
                 throw new GradleException("${label} not found: ${input}")
             }
+        }
+        // A missing jar is not a missing feature at build time and a dead
+        // button at run time: fail here, where the message can say what to do.
+        def jars = extraJarsDir.isDirectory()
+            ? extraJarsDir.listFiles({ f -> f.name.endsWith(".jar") } as FileFilter)
+            : null
+        if (jars == null || jars.length == 0) {
+            throw new GradleException(
+                "no JNI jars in ${extraJarsDir}: run `make android-extra-jars` " +
+                "(the file picker's Java classes are not in the gogio AAR)")
+        }
+        def missingClasses = requiredExplorerClasses.findAll { className ->
+            !jars.any { jar ->
+                !zipTree(jar).matching { include className }.files.isEmpty()
+            }
+        }
+        if (!missingClasses.isEmpty()) {
+            throw new GradleException(
+                "Android file-picker JNI classes are missing from ${extraJarsDir}: " +
+                missingClasses.join(", ") + ". Run `make android-extra-jars`.")
         }
     }
 }
@@ -108,4 +149,5 @@ tasks.named("preBuild").configure {
 
 dependencies {
     implementation files(gioArchive)
+    implementation fileTree(dir: extraJarsDir, include: ["*.jar"])
 }

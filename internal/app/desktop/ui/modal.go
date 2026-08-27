@@ -132,22 +132,77 @@ func ModalCloseButtonStateFor(hovered bool) ModalCloseButtonState {
 	return ModalCloseButtonIdle
 }
 
-// ModalCloseButton draws the shared close button: a 44dp circle with a 1dp
-// ring, filled per its current state. hint is the accessibility description
-// screen readers announce, since the button carries no text.
+// RoundIconButton is one circular icon control: the close button of a modal,
+// and every button of the image viewer (design screen 7c calls them one
+// component, and they are).
+//
+// The zero value is not usable: a button with no icon and no palette is not a
+// state this application has, and defaulting either would hide the omission
+// at the call site instead of at the compiler. Sizes are the exception —
+// zero means the standard 44/22.
+type RoundIconButton struct {
+	// Icon is the glyph in the middle.
+	Icon *widget.Icon
+	// Hint is what a screen reader announces, since the button carries no
+	// text.
+	Hint string
+	// SideDp is the circle's diameter and IconDp the glyph's size; zero for
+	// each means the standard 44dp / 22dp.
+	SideDp int
+	IconDp int
+	// Idle and Hovered are the two looks. Which one is showing follows from
+	// the pointer, never from what the surface is doing — see
+	// ModalCloseButtonStateFor.
+	Idle    ModalCloseButtonPalette
+	Hovered ModalCloseButtonPalette
+	// Enabled false draws the same circle at DimmedAlpha and wraps NO
+	// Clickable: no hover, no hit area, no click. It is how a control says
+	// "not now" without disappearing — a control that vanishes moves
+	// everything laid out beside it.
+	Enabled bool
+}
+
+// DimmedAlpha is what an unavailable control keeps of itself.
+const DimmedAlpha = 0.4
+
+func dim(c color.NRGBA) color.NRGBA {
+	c.A = uint8(float32(c.A) * DimmedAlpha)
+	return c
+}
+
+// RoundIconButton draws one: a circle with a 1dp ring, filled per its current
+// state.
 //
 // The ring is an outer disc with the fill laid over it inset by its width,
 // rather than a stroked outline. A stroke is centred ON the path, so half of
 // it falls outside the button's bounds — and widget.Clickable clips to exactly
 // those bounds, which cut the ring on all four sides.
-func (k Kit) ModalCloseButton(gtx layout.Context, button *widget.Clickable, hint string) layout.Dimensions {
-	side := gtx.Dp(unit.Dp(modalCloseButtonSideDp))
+func (k Kit) RoundIconButton(gtx layout.Context, button *widget.Clickable, opts RoundIconButton) layout.Dimensions {
+	sideDp := opts.SideDp
+	if sideDp == 0 {
+		sideDp = modalCloseButtonSideDp
+	}
+	iconDp := opts.IconDp
+	if iconDp == 0 {
+		iconDp = modalCloseButtonIconDp
+	}
+	side := gtx.Dp(unit.Dp(sideDp))
 	gtx.Constraints = layout.Exact(image.Pt(side, side))
-	palette := ModalCloseButtonColors(ModalCloseButtonStateFor(button.Hovered()))
 
-	return button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		semantic.Button.Add(gtx.Ops)
-		semantic.DescriptionOp(hint).Add(gtx.Ops)
+	palette := opts.Idle
+	switch {
+	case !opts.Enabled:
+		palette = ModalCloseButtonPalette{
+			Fill:   dim(palette.Fill),
+			Border: dim(palette.Border),
+			Icon:   dim(palette.Icon),
+		}
+	case button.Hovered():
+		palette = opts.Hovered
+	}
+
+	draw := func(gtx layout.Context) layout.Dimensions {
+		semantic.DescriptionOp(opts.Hint).Add(gtx.Ops)
 
 		border := gtx.Dp(unit.Dp(modalCloseButtonBorderDp))
 		outer := image.Rectangle{Max: image.Pt(side, side)}
@@ -156,8 +211,31 @@ func (k Kit) ModalCloseButton(gtx layout.Context, button *widget.Clickable, hint
 		paint.FillShape(gtx.Ops, palette.Fill, clip.Ellipse(inner).Op(gtx.Ops))
 
 		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return Icon(gtx, k.CloseIcon, unit.Dp(modalCloseButtonIconDp), palette.Icon)
+			return Icon(gtx, opts.Icon, unit.Dp(iconDp), palette.Icon)
 		})
+	}
+
+	if !opts.Enabled {
+		// No Clickable at all: a disabled control that still reported hovers
+		// would light up under the pointer and do nothing when pressed.
+		return draw(gtx)
+	}
+	return button.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		semantic.Button.Add(gtx.Ops)
+		pointer.CursorPointer.Add(gtx.Ops)
+		return draw(gtx)
+	})
+}
+
+// ModalCloseButton draws the shared close button in the standard palette.
+// hint is the accessibility description screen readers announce.
+func (k Kit) ModalCloseButton(gtx layout.Context, button *widget.Clickable, hint string) layout.Dimensions {
+	return k.RoundIconButton(gtx, button, RoundIconButton{
+		Icon:    k.CloseIcon,
+		Hint:    hint,
+		Idle:    ModalCloseButtonColors(ModalCloseButtonIdle),
+		Hovered: ModalCloseButtonColors(ModalCloseButtonHighlighted),
+		Enabled: true,
 	})
 }
 

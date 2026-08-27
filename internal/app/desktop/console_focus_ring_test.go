@@ -91,40 +91,53 @@ func TestConsoleModalTakesInputAwayFromTheWindowUnderIt(t *testing.T) {
 	}
 }
 
-// The disabling has to be wired into layout(), and no test that lays widgets
+// The disabling has to be wired into the frame, and no test that lays widgets
 // out by hand can see that: each of them applies the helper itself. So this
 // one reads the source.
-func TestLayoutDisablesTheWindowUnderTheConsoleModal(t *testing.T) {
+//
+// Two helpers, two surfaces, one rule: whatever a modal surface covers is
+// laid out with input disabled, or the focus walk leaves that surface for the
+// composer underneath it. The frame is layout() plus the function it hands
+// the window's own surfaces to, so both are searched — moving the call from
+// one to the other is a refactor, dropping it is the bug.
+func TestLayoutDisablesTheWindowUnderModalSurfaces(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "window.go", nil, parser.SkipObjectResolution)
 	if err != nil {
 		t.Fatalf("parsing window.go: %v", err)
 	}
-	var layoutFn *ast.FuncDecl
+	frame := map[string]bool{"layout": true, "layoutWindowSurfaces": true}
+	var bodies []*ast.BlockStmt
 	ast.Inspect(f, func(n ast.Node) bool {
 		fd, ok := n.(*ast.FuncDecl)
-		if ok && fd.Name.Name == "layout" && fd.Recv != nil {
-			layoutFn = fd
+		if ok && fd.Recv != nil && frame[fd.Name.Name] {
+			bodies = append(bodies, fd.Body)
 		}
 		return true
 	})
-	if layoutFn == nil {
-		t.Fatal("no (*Window).layout in window.go — this guard can no longer see the code it protects")
+	if len(bodies) != len(frame) {
+		t.Fatalf("found %d of the %d frame functions in window.go — this guard can no longer see the code it protects",
+			len(bodies), len(frame))
 	}
 
-	found := false
-	ast.Inspect(layoutFn.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
+	called := map[string]bool{}
+	for _, body := range bodies {
+		ast.Inspect(body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				called[sel.Sel.Name] = true
+			}
 			return true
+		})
+	}
+	for _, helper := range []string{"disableUnderConsoleModal", "disableUnderImageViewer"} {
+		if !called[helper] {
+			t.Errorf("the frame never calls %s: what that surface covers keeps its focus targets, "+
+				"and the focus walk can leave the surface for the composer", helper)
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		found = found || (ok && sel.Sel.Name == "disableUnderConsoleModal")
-		return true
-	})
-	if !found {
-		t.Fatal("layout() never calls disableUnderConsoleModal: the window under the modal keeps its focus targets, " +
-			"and the focus walk can leave the modal for the composer")
 	}
 }
 

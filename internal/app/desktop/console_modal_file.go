@@ -509,8 +509,15 @@ func (c *consoleModal) layoutFileTransferRow(gtx layout.Context, t filetransfer.
 }
 
 // layoutFileRowThumbnail returns a layout function rendering the
-// fixed-width image preview, or nil when the transfer is not an
-// image / has no on-disk path / decode is not yet ready.
+// fixed-width image preview, or nil when the row is not an image this
+// application could show at all.
+//
+// A row whose picture is not decoded — a file still downloading, or one
+// whose decode failed — still gets a tile: a placeholder that opens the
+// viewer, which is where "Loading…" and "Cannot display this file" are
+// drawn. Without it those two states are unreachable from this tab, exactly
+// as they were from the chat before the file card started carrying the
+// click on its name row.
 //
 // Uses thumbnailCache.lookup so the cache state read happens under
 // one lock — fixes the get()+isPending() race where a Pending→Ready
@@ -523,20 +530,47 @@ func (c *consoleModal) layoutFileRowThumbnail(gtx layout.Context, t filetransfer
 	if bridge == nil {
 		return nil
 	}
-	path := bridge.FilePath(t.FileID, t.Direction == "send")
-	if path == "" {
+	mine := t.Direction == "send"
+	path := bridge.FilePath(t.FileID, mine)
+	arriving := path == "" && transferIsArriving(t.State, mine)
+	if path == "" && !arriving {
 		return nil
 	}
-	res := c.parent.thumbCache.lookup(path, c.parent.window)
-	if res.Entry == nil {
-		return nil
-	}
-	imgOp := res.Entry.op
-	imgBounds := res.Entry.bounds
+
 	btn := c.fileThumbButton(t.FileID)
 	for btn.Clicked(gtx) {
-		go openFile(path)
+		// The in-app viewer, over the console — the same picture the chat
+		// opens. A row here can belong to a conversation other than the open
+		// one, which the viewer answers by showing exactly this file rather
+		// than a strip of somebody else's chat.
+		c.parent.openImageViewer(viewerItem{
+			messageID: domain.MessageID(t.FileID),
+			peer:      t.Peer,
+			path:      path,
+			name:      fileDisplayName(t),
+			size:      t.FileSize,
+			mine:      mine,
+		}, gtx.Now)
 	}
+
+	var res thumbnailLookup
+	if path != "" {
+		res = c.parent.thumbCache.lookup(path, c.parent.window)
+	}
+	if res.Entry == nil {
+		// Waiting on the file itself or on its decode; a failed decode is the
+		// broken-image tile.
+		waiting := arriving || res.Pending
+		return func(gtx layout.Context) layout.Dimensions {
+			return btn.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				pointer.CursorPointer.Add(gtx.Ops)
+				return c.layoutFileRowThumbPlaceholder(gtx, waiting)
+			})
+		}
+	}
+
+	imgOp := res.Entry.op
+	imgBounds := res.Entry.bounds
 	return func(gtx layout.Context) layout.Dimensions {
 		w := gtx.Dp(fileTabThumbWidth)
 		hMax := gtx.Dp(fileTabThumbHeightMax)
@@ -561,6 +595,31 @@ func (c *consoleModal) layoutFileRowThumbnail(gtx layout.Context, t filetransfer
 			return imgWidget.Layout(gtx)
 		})
 	}
+}
+
+// fileTabThumbPlaceholderHeight is the height of the tile that stands in for
+// a picture there is nothing to draw yet. Shorter than a real preview, so a
+// row waiting on its file does not reserve the space of one that arrived.
+const fileTabThumbPlaceholderHeight = unit.Dp(42)
+
+// layoutFileRowThumbPlaceholder draws the tile that opens the viewer for a
+// picture with no thumbnail: an hourglass while one is still expected, the
+// broken-image glyph once the decode has failed for good.
+func (c *consoleModal) layoutFileRowThumbPlaceholder(gtx layout.Context, waiting bool) layout.Dimensions {
+	size := image.Pt(gtx.Dp(fileTabThumbWidth), gtx.Dp(fileTabThumbPlaceholderHeight))
+	gtx.Constraints = layout.Exact(size)
+	radius := gtx.Dp(unit.Dp(4))
+	paint.FillShape(gtx.Ops, viewerThumbBorder(), clip.UniformRRect(image.Rectangle{Max: size}, radius).Op(gtx.Ops))
+	inner := image.Rect(1, 1, size.X-1, size.Y-1)
+	paint.FillShape(gtx.Ops, viewerThumbFill(), clip.UniformRRect(inner, max(0, radius-1)).Op(gtx.Ops))
+
+	icon, tint := c.parent.brokenImageIcon, viewerBrokenColor()
+	if waiting {
+		icon, tint = c.parent.hourglassIcon, viewerMetaColor()
+	}
+	return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return ui.Icon(gtx, icon, unit.Dp(20), tint)
+	})
 }
 
 // layoutFileRowHeader: [arrow] [filename ........]

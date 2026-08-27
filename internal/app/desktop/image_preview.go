@@ -74,10 +74,25 @@ const (
 
 // thumbnailEntry holds a decoded image ready for Gio rendering.
 type thumbnailEntry struct {
-	state    thumbnailState
-	op       paint.ImageOp
-	bounds   image.Point // cached bitmap dimensions
-	byteSize int64       // decoded bytes held (0 until ready)
+	state  thumbnailState
+	op     paint.ImageOp
+	bounds image.Point // cached bitmap dimensions
+	// natural is the source image's own dimensions, before the downscale
+	// that produced bounds. The viewer's header names them, and no consumer
+	// can recover them from the bitmap once it has been shrunk — re-reading
+	// the header off disk to print a caption would be file I/O on the layout
+	// path.
+	natural  image.Point
+	byteSize int64 // decoded bytes held (0 until ready)
+}
+
+// decodeEstimate is what reading an image header tells the decode pipeline:
+// what the decode will cost at its peak, and how big the picture actually
+// is. They come from the same DecodeConfig, so returning them separately
+// would mean reading the header twice.
+type decodeEstimate struct {
+	PeakBytes int64
+	Natural   image.Point
 }
 
 // thumbnailCache is a concurrency-safe cache of decoded image thumbnails.
@@ -176,6 +191,33 @@ func (tc *thumbnailCache) evictLocked() {
 			tc.totalBytes -= e.byteSize
 		}
 		delete(tc.entries, victim)
+	}
+}
+
+// forget drops one path from the cache, so what is drawn for it next is
+// decoded again.
+//
+// It exists for deletion: the file behind an entry can be destroyed while
+// the entry is still cached, and every surface that draws a preview reads
+// this cache — a file card would keep showing the picture of a message that
+// no longer has one until an unrelated eviction happened to reach it.
+func (tc *thumbnailCache) forget(path string) {
+	if path == "" {
+		return
+	}
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	entry, ok := tc.entries[path]
+	if !ok {
+		return
+	}
+	tc.totalBytes -= entry.byteSize
+	delete(tc.entries, path)
+	for i, candidate := range tc.lru {
+		if candidate == path {
+			tc.lru = append(tc.lru[:i], tc.lru[i+1:]...)
+			break
+		}
 	}
 }
 
@@ -297,7 +339,7 @@ func (tc *thumbnailCache) decodeInBackground(path string, entry *thumbnailEntry,
 
 	// Read the decode cost (DecodeConfig only — no pixel allocation) and
 	// reject bombs before admission.
-	est, err := estimateDecodeBytes(path)
+	est, err := estimateDecodeBytes(path, thumbnailStoreMaxPx)
 	if err != nil {
 		tc.mu.Lock()
 		if alive() {
@@ -307,6 +349,7 @@ func (tc *thumbnailCache) decodeInBackground(path string, entry *thumbnailEntry,
 		window.Invalidate()
 		return
 	}
+	natural := est.Natural
 
 	// Skip everything if the entry was evicted before we even got here.
 	tc.mu.Lock()
@@ -317,8 +360,8 @@ func (tc *thumbnailCache) decodeInBackground(path string, entry *thumbnailEntry,
 	tc.mu.Unlock()
 
 	// Byte-weighted admission bounds the transient full-res peak.
-	thumbDecodeAdmit(est)
-	defer thumbDecodeRelease(est)
+	thumbDecodeAdmit(est.PeakBytes)
+	defer thumbDecodeRelease(est.PeakBytes)
 
 	// Re-check after the (possibly long) admission wait.
 	tc.mu.Lock()
@@ -328,7 +371,7 @@ func (tc *thumbnailCache) decodeInBackground(path string, entry *thumbnailEntry,
 	}
 	tc.mu.Unlock()
 
-	img, err := decodeImageFile(path)
+	img, err := decodeImageFile(path, thumbnailStoreMaxPx)
 
 	tc.mu.Lock()
 	if !alive() {
@@ -343,7 +386,8 @@ func (tc *thumbnailCache) decodeInBackground(path string, entry *thumbnailEntry,
 		entry.op = paint.NewImageOp(img)
 		sz := img.Bounds().Size()
 		entry.bounds = sz
-		// The stored bitmap is always *image.NRGBA (downscaleForThumbnail
+		entry.natural = natural
+		// The stored bitmap is always *image.NRGBA (downscaleToMaxPx
 		// converts even when it does not shrink), so 4 bytes/pixel is
 		// exact, not an assumption.
 		entry.byteSize = int64(sz.X) * int64(sz.Y) * 4
@@ -423,16 +467,22 @@ func modelBytesPerPixel(m color.Model) int64 {
 	}
 }
 
-// thumbnailBytesFor returns the size of the NRGBA thumbnail that
-// downscaleForThumbnail will produce for a WxH source. It is allocated
-// WHILE the full-resolution decode is still alive, so admission has to
-// reserve both — otherwise many cheap sources (e.g. 1 byte/px grayscale)
-// are admitted en masse and then each allocates up to 4MB of output on
+// scaledBitmapBytes returns the size of the NRGBA bitmap that
+// downscaleToMaxPx will produce for a WxH source bounded to maxPx. It is
+// allocated WHILE the full-resolution decode is still alive, so admission
+// has to reserve both — otherwise many cheap sources (e.g. 1 byte/px
+// grayscale) are admitted en masse and then each allocates its output on
 // top of the reservation.
-func thumbnailBytesFor(w, h int) int64 {
+//
+// maxPx is a parameter rather than the thumbnail constant because the two
+// consumers keep bitmaps of very different sizes: a file-card thumbnail is
+// capped at thumbnailStoreMaxPx, the image viewer at viewerStoreMaxPx, and
+// charging the viewer's decode the thumbnail's output would under-count its
+// peak by an order of magnitude.
+func scaledBitmapBytes(w, h, maxPx int) int64 {
 	long := max(w, h)
-	if long > thumbnailStoreMaxPx {
-		scale := float64(thumbnailStoreMaxPx) / float64(long)
+	if long > maxPx {
+		scale := float64(maxPx) / float64(long)
 		w = max(1, int(float64(w)*scale))
 		h = max(1, int(float64(h)*scale))
 	}
@@ -440,43 +490,48 @@ func thumbnailBytesFor(w, h int) int64 {
 }
 
 // estimateDecodeBytes reads only the header (DecodeConfig) and returns
-// the estimated PEAK byte cost of producing a thumbnail (full-resolution
-// decode + the NRGBA output that coexists with it), rejecting files over
-// the size or memory limits without allocating any pixels.
-func estimateDecodeBytes(path string) (int64, error) {
+// the estimated PEAK byte cost of producing a bitmap whose long side is
+// bounded by storeMaxPx (full-resolution decode + the NRGBA output that
+// coexists with it), rejecting files over the size or memory limits
+// without allocating any pixels.
+func estimateDecodeBytes(path string, storeMaxPx int) (decodeEstimate, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return 0, err
+		return decodeEstimate{}, err
 	}
 	if info.Size() > maxImageDecodeBytes {
-		return 0, fmt.Errorf("file too large for thumbnail: %d bytes", info.Size())
+		return decodeEstimate{}, fmt.Errorf("file too large to decode: %d bytes", info.Size())
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return decodeEstimate{}, err
 	}
 	defer func() { _ = f.Close() }()
 
 	cfg, _, err := image.DecodeConfig(f)
 	if err != nil {
-		return 0, err
+		return decodeEstimate{}, err
 	}
 	if cfg.Width <= 0 || cfg.Height <= 0 {
-		return 0, fmt.Errorf("invalid image dimensions %dx%d", cfg.Width, cfg.Height)
+		return decodeEstimate{}, fmt.Errorf("invalid image dimensions %dx%d", cfg.Width, cfg.Height)
 	}
 	decoded := int64(cfg.Width) * int64(cfg.Height) * modelBytesPerPixel(cfg.ColorModel)
 	if decoded > maxImageDecodeMemBytes {
-		return 0, fmt.Errorf("image too large for thumbnail: %dx%d (~%dMB decoded)", cfg.Width, cfg.Height, decoded>>20)
+		return decodeEstimate{}, fmt.Errorf("image too large to decode: %dx%d (~%dMB decoded)", cfg.Width, cfg.Height, decoded>>20)
 	}
-	// Peak = full-resolution decode + the NRGBA thumbnail built from it
-	// while the former is still referenced.
-	return decoded + thumbnailBytesFor(cfg.Width, cfg.Height), nil
+	// Peak = full-resolution decode + the NRGBA bitmap built from it while
+	// the former is still referenced.
+	return decodeEstimate{
+		PeakBytes: decoded + scaledBitmapBytes(cfg.Width, cfg.Height, storeMaxPx),
+		Natural:   image.Pt(cfg.Width, cfg.Height),
+	}, nil
 }
 
-// decodeImageFile decodes the image at path into a cache-sized *image.NRGBA
-// thumbnail. Callers gate the cost first with estimateDecodeBytes; this
-// re-checks the file size but assumes admission already bounded the peak.
-func decodeImageFile(path string) (image.Image, error) {
+// decodeImageFile decodes the image at path into an *image.NRGBA whose long
+// side is at most storeMaxPx. Callers gate the cost first with
+// estimateDecodeBytes; this re-checks the file size but assumes admission
+// already bounded the peak.
+func decodeImageFile(path string, storeMaxPx int) (image.Image, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -495,19 +550,19 @@ func decodeImageFile(path string) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	return downscaleForThumbnail(img), nil
+	return downscaleToMaxPx(img, storeMaxPx), nil
 }
 
-// downscaleForThumbnail returns an *image.NRGBA thumbnail whose long side
-// is at most thumbnailStoreMaxPx. It ALWAYS produces NRGBA (4bpp) — even
-// when the source is already small — so the cached byte size is exactly
-// w×h×4 and a 16-bit (8bpp) source never sneaks into the cache at double
-// the accounted cost. The full-resolution decode is released to the GC.
-func downscaleForThumbnail(img image.Image) *image.NRGBA {
+// downscaleToMaxPx returns an *image.NRGBA whose long side is at most
+// maxPx. It ALWAYS produces NRGBA (4bpp) — even when the source is already
+// small — so the cached byte size is exactly w×h×4 and a 16-bit (8bpp)
+// source never sneaks into a cache at double the accounted cost. The
+// full-resolution decode is released to the GC.
+func downscaleToMaxPx(img image.Image, maxPx int) *image.NRGBA {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	long := max(w, h)
-	if long <= thumbnailStoreMaxPx {
+	if long <= maxPx {
 		if nrgba, ok := img.(*image.NRGBA); ok {
 			return nrgba
 		}
@@ -515,7 +570,7 @@ func downscaleForThumbnail(img image.Image) *image.NRGBA {
 		draw.Draw(dst, dst.Bounds(), img, b.Min, draw.Src)
 		return dst
 	}
-	scale := float64(thumbnailStoreMaxPx) / float64(long)
+	scale := float64(maxPx) / float64(long)
 	nw := max(1, int(float64(w)*scale))
 	nh := max(1, int(float64(h)*scale))
 	dst := image.NewNRGBA(image.Rect(0, 0, nw, nh))

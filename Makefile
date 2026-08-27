@@ -90,6 +90,17 @@ GOGIO ?= $(GO) tool gogio
 ANDROID_GRADLE_DIR ?= packaging/android
 ANDROID_GRADLE ?= ./gradlew
 ANDROID_GIO_ARCHIVE = $(abspath $(DIST_DIR)/corsa-android.aar)
+# Java classes the Go code calls through JNI but gogio does NOT put in the
+# AAR. gogio collects the *.jar files of every imported package, and then
+# uses them only in its -buildmode=exe path — the archive path writes a
+# classes.jar built from gioui.org/app alone. Everything else that ships
+# Java (gioui.org/x/explorer: the system file picker behind Attach and
+# Save as…) therefore reaches the APK only if the Gradle wrapper is given
+# those jars, which is what ANDROID_EXTRA_JARS_DIR carries.
+ANDROID_EXTRA_JARS_DIR = $(abspath $(DIST_DIR)/android-libs)
+# The packages whose jars have to be staged. One line per package so a
+# second JNI dependency is one word, not a new mechanism.
+ANDROID_JAVA_PKGS = gioui.org/x/explorer
 ANDROID_GRADLE_ARGS = --no-daemon \
 	"-PcorsaAppId=$(ANDROID_APPID)" \
 	"-PcorsaAppName=$(APP_NAME)" \
@@ -101,7 +112,8 @@ ANDROID_GRADLE_ARGS = --no-daemon \
 	"-PcorsaAdaptiveIconBackground=$(ANDROID_ADAPTIVE_ICON_BACKGROUND)" \
 	"-PcorsaLegacyIcon=$(abspath $(ANDROID_ICON))" \
 	"-PcorsaAdaptiveIconForeground=$(abspath $(ANDROID_ADAPTIVE_ICON_FOREGROUND))" \
-	"-PcorsaGioArchive=$(ANDROID_GIO_ARCHIVE)"
+	"-PcorsaGioArchive=$(ANDROID_GIO_ARCHIVE)" \
+	"-PcorsaExtraJarsDir=$(ANDROID_EXTRA_JARS_DIR)"
 
 .PHONY: build-dirs
 build-dirs:
@@ -243,8 +255,24 @@ check-android-keystore:
 # Prerequisites: a JDK and an Android SDK with an NDK (>= r19c) installed;
 # set ANDROID_HOME to the SDK root — gogio picks the newest NDK from
 # $$ANDROID_HOME/ndk/.
+# android-extra-jars stages the JNI jars listed in ANDROID_JAVA_PKGS. The
+# source of truth is the module cache, resolved through `go list`, so the
+# jars always match go.mod and nothing third-party is vendored into the
+# repository. Missing jars fail the build here rather than shipping an
+# app whose Attach button silently does nothing.
+.PHONY: android-extra-jars
+android-extra-jars: build-dirs
+	@rm -rf "$(ANDROID_EXTRA_JARS_DIR)" && mkdir -p "$(ANDROID_EXTRA_JARS_DIR)"
+	@for pkg in $(ANDROID_JAVA_PKGS); do \
+		dir=$$(GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) list -f '{{.Dir}}' $$pkg) || exit 1; \
+		jars=$$(ls "$$dir"/*.jar 2>/dev/null); \
+		[ -n "$$jars" ] || { echo "no *.jar in $$dir ($$pkg): the Android build would ship without its Java classes"; exit 1; }; \
+		for jar in $$jars; do cp "$$jar" "$(ANDROID_EXTRA_JARS_DIR)/"; done; \
+	done
+	@echo "staged Android JNI jars in $(ANDROID_EXTRA_JARS_DIR)"
+
 .PHONY: build-android
-build-android: build-dirs check-android-minsdk
+build-android: build-dirs check-android-minsdk android-extra-jars
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(GOGIO) -target android -buildmode archive -minsdk $(ANDROID_MINSDK) -targetsdk $(ANDROID_TARGETSDK) -appid $(ANDROID_APPID) $(GOGIO_EXTRA_FLAGS) -o $(ANDROID_GIO_ARCHIVE) ./cmd/corsa-android
 	cd $(ANDROID_GRADLE_DIR) && env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(ANDROID_GRADLE) :app:assembleDebug $(ANDROID_GRADLE_ARGS)
 	cp $(ANDROID_GRADLE_DIR)/app/build/outputs/apk/debug/app-debug.apk $(DIST_DIR)/corsa-android.apk
@@ -254,7 +282,7 @@ build-android: build-dirs check-android-minsdk
 # Release builds default to warn to avoid leaking identities/message IDs
 # into logcat and burning battery on steady-state chatter.
 .PHONY: build-android-debug
-build-android-debug: build-dirs check-android-minsdk
+build-android-debug: build-dirs check-android-minsdk android-extra-jars
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(GOGIO) -target android -buildmode archive -minsdk $(ANDROID_MINSDK) -targetsdk $(ANDROID_TARGETSDK) -appid $(ANDROID_APPID) -tags corsadebug $(GOGIO_EXTRA_FLAGS) -o $(ANDROID_GIO_ARCHIVE) ./cmd/corsa-android
 	cd $(ANDROID_GRADLE_DIR) && env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(ANDROID_GRADLE) :app:assembleDebug $(ANDROID_GRADLE_ARGS)
 	cp $(ANDROID_GRADLE_DIR)/app/build/outputs/apk/debug/app-debug.apk $(DIST_DIR)/corsa-android-debug.apk
@@ -268,7 +296,7 @@ build-android-debug: build-dirs check-android-minsdk
 # Keep ONE release keystore for the app's lifetime — Android updates are
 # only accepted from the same signing key.
 .PHONY: build-android-release
-build-android-release: build-dirs check-android-minsdk check-android-keystore
+build-android-release: build-dirs check-android-minsdk check-android-keystore android-extra-jars
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(GOGIO) -target android -buildmode archive -minsdk $(ANDROID_MINSDK) -targetsdk $(ANDROID_TARGETSDK) -appid $(ANDROID_APPID) $(GOGIO_EXTRA_FLAGS) -o $(ANDROID_GIO_ARCHIVE) ./cmd/corsa-android
 	cd $(ANDROID_GRADLE_DIR) && env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(ANDROID_GRADLE) :app:assembleRelease $(ANDROID_GRADLE_ARGS)
 	cp $(ANDROID_GRADLE_DIR)/app/build/outputs/apk/release/app-release-unsigned.apk $(DIST_DIR)/corsa-android-release.apk
@@ -285,7 +313,7 @@ build-android-release: build-dirs check-android-minsdk check-android-keystore
 # with the release key, password via environment
 # (-storepass:env). jarsigner needs the key alias — ANDROID_KEY_ALIAS.
 .PHONY: build-android-aab
-build-android-aab: build-dirs check-android-minsdk check-android-keystore
+build-android-aab: build-dirs check-android-minsdk check-android-keystore android-extra-jars
 	@[ -n "$$ANDROID_KEY_ALIAS" ] || { echo "ANDROID_KEY_ALIAS is not set (jarsigner needs the key alias for AAB signing)"; exit 1; }
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(GOGIO) -target android -buildmode archive -minsdk $(ANDROID_MINSDK) -targetsdk $(ANDROID_TARGETSDK) -appid $(ANDROID_APPID) $(GOGIO_EXTRA_FLAGS) -o $(ANDROID_GIO_ARCHIVE) ./cmd/corsa-android
 	cd $(ANDROID_GRADLE_DIR) && env -u ANDROID_KEYSTORE_PASS -u ANDROID_KEYSTORE_PASS_FILE $(ANDROID_GRADLE) :app:bundleRelease $(ANDROID_GRADLE_ARGS)

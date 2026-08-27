@@ -975,6 +975,17 @@ func (c *DesktopClient) FileTransferFilePath(fileID domain.FileID, isSender bool
 	return c.localNode.FileTransferFilePath(fileID, isSender)
 }
 
+// DeleteLocalFileCopy erases this node's copy of a transferred file,
+// keeping the mapping and the message. Returns an error when the
+// file-transfer subsystem is not available (standalone-RPC desktop), which
+// is the same answer as "nothing was deleted".
+func (c *DesktopClient) DeleteLocalFileCopy(fileID domain.FileID) error {
+	if c.localNode == nil {
+		return errNoLocalNode
+	}
+	return c.localNode.DeleteLocalFileCopy(fileID)
+}
+
 // CleanupPeerTransfers removes all file transfer mappings and files
 // associated with the given peer identity.
 func (c *DesktopClient) CleanupPeerTransfers(peer domain.PeerIdentity) {

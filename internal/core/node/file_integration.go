@@ -624,6 +624,19 @@ func (s *Service) FileTransferFilePath(fileID domain.FileID, isSender bool) stri
 	return manager.ReceiverFilePath(fileID)
 }
 
+// DeleteLocalFileCopy erases this node's copy of a transferred file and
+// keeps the transfer mapping, so the message that carries it stays in the
+// chat and — on the receiving side — the file can be requested from the peer
+// again. Returns filetransfer.ErrNoLocalCopy when there was nothing on disk
+// to delete.
+func (s *Service) DeleteLocalFileCopy(fileID domain.FileID) error {
+	manager, err := s.getFileTransferManager()
+	if err != nil {
+		return err
+	}
+	return manager.DeleteLocalCopy(fileID)
+}
+
 // RegisterIncomingFileTransfer registers a receiver-side file mapping after
 // a file_announce DM has been received and decrypted. Does not start
 // downloading — call StartFileDownload when the user accepts. Returns an

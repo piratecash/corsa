@@ -592,6 +592,35 @@ func (m *Manager) HandleFileDownloadedAck(
 // CancelDownload aborts an active download and resets the receiver mapping
 // to available state. The partial file is deleted from disk. The user can
 // re-initiate the download later by clicking the download button again.
+// resetReceiverToAvailableLocked puts a mapping back to "the file has been
+// announced and nothing of it is here", which is the one state a fresh
+// download may start from.
+//
+// Three paths arrive at it — a cancelled download, a restarted failed one,
+// and a deleted local copy — and each of them has to clear exactly the same
+// eight fields; a copy that forgot one left the next download resuming from
+// an offset whose bytes were gone. Caller holds m.mu.
+func (m *Manager) resetReceiverToAvailableLocked(mapping *receiverFileMapping) {
+	mapping.State = receiverAvailable
+	mapping.BytesReceived = 0
+	mapping.NextOffset = 0
+	mapping.ChunkRetries = 0
+	mapping.DownloadedRetries = 0
+	mapping.DownloadedBackoff = 0
+	mapping.DownloadedSentAt = time.Time{}
+	// Forget the stashed serving epoch: the next download is a new run and
+	// must learn the sender's current epoch from its next chunk_response.
+	// Leaving the previous epoch here would cause the receiver to echo it on
+	// completion, which the sender would reject as stale (its ServingEpoch is
+	// now strictly larger).
+	mapping.ServingEpoch = 0
+	// A new generation retires every in-flight write and timer that still
+	// names the old one.
+	m.nextGeneration++
+	mapping.Generation = m.nextGeneration
+	mapping.CompletedPath = ""
+}
+
 func (m *Manager) CancelDownload(fileID domain.FileID) error {
 	// The stripe FIRST, before the state is published. Resetting to available
 	// is what lets a new download start, and the .part of that new download
@@ -621,22 +650,7 @@ func (m *Manager) CancelDownload(fileID domain.FileID) error {
 		return fmt.Errorf("cannot cancel download in state %s", mapping.State)
 	}
 
-	mapping.State = receiverAvailable
-	mapping.BytesReceived = 0
-	mapping.NextOffset = 0
-	mapping.ChunkRetries = 0
-	mapping.DownloadedRetries = 0
-	mapping.DownloadedBackoff = 0
-	mapping.DownloadedSentAt = time.Time{}
-	// Forget the stashed serving epoch: the next download is a new run
-	// and must learn the sender's current epoch from its next
-	// chunk_response. Leaving the previous epoch here would cause the
-	// receiver to echo it on completion, which the sender would reject
-	// as stale (its ServingEpoch is now strictly larger).
-	mapping.ServingEpoch = 0
-	m.nextGeneration++
-	mapping.Generation = m.nextGeneration
-	mapping.CompletedPath = ""
+	m.resetReceiverToAvailableLocked(mapping)
 	m.saveMappingsLocked()
 	m.mu.Unlock()
 
@@ -672,22 +686,7 @@ func (m *Manager) RestartDownload(fileID domain.FileID) error {
 		return fmt.Errorf("cannot restart download in state %s (only failed)", mapping.State)
 	}
 
-	mapping.State = receiverAvailable
-	mapping.BytesReceived = 0
-	mapping.NextOffset = 0
-	mapping.ChunkRetries = 0
-	mapping.DownloadedRetries = 0
-	mapping.DownloadedBackoff = 0
-	mapping.DownloadedSentAt = time.Time{}
-	// Forget the stashed serving epoch: the next download is a new run
-	// and must learn the sender's current epoch from its next
-	// chunk_response. Leaving the previous epoch here would cause the
-	// receiver to echo it on completion, which the sender would reject
-	// as stale (its ServingEpoch is now strictly larger).
-	mapping.ServingEpoch = 0
-	m.nextGeneration++
-	mapping.Generation = m.nextGeneration
-	mapping.CompletedPath = ""
+	m.resetReceiverToAvailableLocked(mapping)
 	m.saveMappingsLocked()
 	m.mu.Unlock()
 

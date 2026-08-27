@@ -4,6 +4,15 @@ import (
 	"image"
 	"image/color"
 	"testing"
+
+	"gioui.org/f32"
+	"gioui.org/io/input"
+	"gioui.org/io/pointer"
+	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/unit"
+	"gioui.org/widget"
+	"gioui.org/widget/material"
 )
 
 func TestModalCloseButtonPaletteMatchesDesign(t *testing.T) {
@@ -51,6 +60,89 @@ func TestModalCloseButtonHighlightsOnHoverOnly(t *testing.T) {
 	}
 	if got := ModalCloseButtonStateFor(true); got != ModalCloseButtonHighlighted {
 		t.Fatalf("hovered close button = %v, want highlighted", got)
+	}
+}
+
+// TestRoundIconButtonDisabledTakesNoInput: the disabled look is not a look,
+// it is the absence of a control. A dimmed circle that still reported hovers
+// would light up under the pointer and do nothing when pressed.
+func TestRoundIconButtonDisabledTakesNoInput(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		router := new(input.Router)
+		kit := Kit{Theme: material.NewTheme()}
+		button := new(widget.Clickable)
+
+		frame := func() {
+			ops := new(op.Ops)
+			gtx := layout.Context{
+				Ops:         ops,
+				Source:      router.Source(),
+				Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+				Constraints: layout.Exact(image.Pt(44, 44)),
+			}
+			kit.RoundIconButton(gtx, button, RoundIconButton{
+				Hint:    "close",
+				Idle:    ModalCloseButtonColors(ModalCloseButtonIdle),
+				Hovered: ModalCloseButtonColors(ModalCloseButtonHighlighted),
+				Enabled: enabled,
+			})
+			router.Frame(ops)
+		}
+
+		frame()
+		at := f32.Pt(22, 22)
+		router.Queue(
+			pointer.Event{Source: pointer.Mouse, Kind: pointer.Press, Buttons: pointer.ButtonPrimary, Position: at},
+			pointer.Event{Source: pointer.Mouse, Kind: pointer.Release, Position: at},
+		)
+		ops := new(op.Ops)
+		gtx := layout.Context{
+			Ops:         ops,
+			Source:      router.Source(),
+			Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
+			Constraints: layout.Exact(image.Pt(44, 44)),
+		}
+		clicked := button.Clicked(gtx)
+		kit.RoundIconButton(gtx, button, RoundIconButton{
+			Hint:    "close",
+			Idle:    ModalCloseButtonColors(ModalCloseButtonIdle),
+			Hovered: ModalCloseButtonColors(ModalCloseButtonHighlighted),
+			Enabled: enabled,
+		})
+		router.Frame(ops)
+
+		if clicked != enabled {
+			t.Fatalf("enabled=%v: clicked=%v", enabled, clicked)
+		}
+	}
+}
+
+// TestRoundIconButtonSizesDefaultToTheCloseButton keeps the "same component"
+// claim honest: a caller that names no size gets the modal close button's.
+func TestRoundIconButtonSizesDefaultToTheCloseButton(t *testing.T) {
+	kit := Kit{Theme: material.NewTheme()}
+	gtx := layout.Context{
+		Ops:         new(op.Ops),
+		Metric:      unit.Metric{PxPerDp: 2, PxPerSp: 2},
+		Constraints: layout.Constraints{Max: image.Pt(500, 500)},
+	}
+	dims := kit.RoundIconButton(gtx, new(widget.Clickable), RoundIconButton{
+		Idle:    ModalCloseButtonColors(ModalCloseButtonIdle),
+		Hovered: ModalCloseButtonColors(ModalCloseButtonHighlighted),
+		Enabled: true,
+	})
+	if want := image.Pt(88, 88); dims.Size != want {
+		t.Fatalf("default size = %v at 2px/dp, want %v (44dp)", dims.Size, want)
+	}
+	dims = kit.RoundIconButton(gtx, new(widget.Clickable), RoundIconButton{
+		SideDp:  36,
+		IconDp:  20,
+		Idle:    ModalCloseButtonColors(ModalCloseButtonIdle),
+		Hovered: ModalCloseButtonColors(ModalCloseButtonHighlighted),
+		Enabled: true,
+	})
+	if want := image.Pt(72, 72); dims.Size != want {
+		t.Fatalf("36dp size = %v at 2px/dp, want %v", dims.Size, want)
 	}
 }
 

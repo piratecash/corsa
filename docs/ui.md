@@ -28,6 +28,8 @@ Window (Gio event loop)
   │       ├── Reply quote (if reply): sender · date + quoted text
   │       │   └── Click scrolls to original message
   │       ├── Message body (selectable text)
+  │       ├── File card, with an image preview for image attachments
+  │       │   └── Click opens the image viewer over the whole window
   │       ├── Reaction chips (real state: what this node holds for the message)
   │       ├── Delivery status (sent/delivered/seen)
   │       └── Context menu (right-click, 500 ms long-press, or the bubble's ⋯ button)
@@ -169,14 +171,23 @@ modal nor the application underneath. Desktop sizing is either a centred
 384×520dp card (identity) or the window less a 6dp margin (console); the
 compact layout gives every modal the full screen, without border or radius.
 
-**Modal close button** is a 44dp circle with a 1dp ring, in two states —
-resting and hovered. The ring is an outer disc with the fill laid over it
-inset by its width, not a stroked outline: a stroke is centred ON the path, so
-half of it falls outside the button's bounds, and `widget.Clickable` clips to
-exactly those bounds. Keyboard focus deliberately does NOT highlight it: the
-identity panel focuses its close button on open, so a focus-driven highlight
-left that one button permanently in the hovered look while every other modal's
-reacted to the pointer.
+**Round icon button** is one component (`RoundIconButton`) behind every
+circular control the design draws as the same thing: a modal's close button
+and all seven of the image viewer's. A 44dp circle with a 1dp ring, in two
+states — resting and hovered — plus a disabled look at 40% that keeps its
+place in the row and wraps no `Clickable` at all, so it neither highlights nor
+takes a press. The ring is an outer disc with the fill laid over it inset by
+its width, not a stroked outline: a stroke is centred ON the path, so half of
+it falls outside the button's bounds, and `widget.Clickable` clips to exactly
+those bounds. Keyboard focus deliberately does NOT highlight it: the identity
+panel focuses its close button on open, so a focus-driven highlight left that
+one button permanently in the hovered look while every other modal's reacted
+to the pointer.
+
+The viewer drew its own circles first, and that is precisely how its buttons
+ended up with no hover at all — a component copied by eye is a component whose
+states are copied by eye. Only the palette varies now: the destructive delete
+button carries its own pair, everything else takes the shared one.
 
 **Toolbar button** (`toolbar_button.go`) is the language selector in the header
 and the Console button in the footer. Content-sized, icon on either side,
@@ -478,6 +489,174 @@ the reachable one may decide how much room the keyboard has to leave, so the
 frame's keyboard tail has an explicit owner (`keyboardTailOwner`): `layout.Stack`
 lays Stacked children out BEFORE its Expanded one, so neither "first wins" nor
 "last wins" falls out of the layout order by itself.
+
+### Image viewer
+
+Clicking an image preview opens it inside the application: one picture over
+the whole window on an opaque backdrop, with every other image of the open
+conversation reachable from it, save and delete under it (`image_viewer*.go`,
+design screens 8a–8d). The backdrop is the one in this application that does
+not let anything through: at the design's 88% a bright message bubble and its
+white text stayed legible behind the picture, and a surface whose whole job is
+to show one image ended up showing the chat through it.
+Before it, a click handed the file to whatever the desktop opens images with,
+and on Android it did nothing at all — `openFile` is a stub there, since gogio
+ships no FileProvider, so the preview was not even a button. The external
+application is now the fallback for a file the viewer cannot draw, and nothing
+else.
+
+Two surfaces open it: the preview inside a chat bubble, and the thumbnail in
+the console's Files tab. They know different things — one has a message, the
+other a transfer snapshot — so each builds the item it opens and the viewer
+takes it as given.
+
+**What it steps through.** The image attachments of the open conversation, in
+message order: the ones whose file is on disk, plus the ones still arriving —
+a download in flight holds its place in the strip with no path yet and is
+drawn as the loading state, because the alternative is a picture that cannot
+be looked at until it is finished and then appears from nowhere.
+
+The list is rebuilt when the router's DM generation moves (a message
+arriving, a deletion taking one away) and not per frame: walking a
+conversation and stat-ing every attachment is per-open work. Finishing a
+download moves none of that — it changes the disk, not the conversation — so
+a list that holds an item with no file yet also re-resolves itself twice a
+second until it has one, and asks for the frames that poll costs. A list
+where everything is on disk is never rebuilt on a timer.
+
+A rebuild keeps the picture on screen selected by its message id, and keeps
+its ZOOM when the selection did not change — that generation moves for a
+delivery receipt too, and resetting the zoom on each of those drops the user
+out of a magnified picture. When the image is gone, the viewer lands on the
+next one, on the previous one if it was the last, and closes on an empty
+list. A file opened from the console can belong to a conversation that is not
+the open one; the viewer then shows exactly that file, and re-resolves that
+one path rather than rebuilding a list it does not own.
+
+**How it is opened.** A chat bubble's image attachment opens it, and what
+carries the click depends on what the card has: the preview when the
+thumbnail is decoded, the file-name row when it is not. The console's Files
+tab does the same with a tile: the picture when there is one, an
+hourglass-or-broken-image placeholder when there is not. That second case is
+not an edge — it is a file still downloading and a picture whose decode
+failed, which are exactly the two states the viewer draws as "loading" and
+"cannot display this file". Gating the click on a ready thumbnail made both
+of them unreachable from either surface.
+
+**Where it sits.** Not one more Stacked overlay beside the context menus and
+the console: it covers the console too, so the whole window — the console
+included — is laid out underneath it with input disabled
+(`disableUnderImageViewer`), and `Window.handleActions` stops before the
+window's own controls while it is up. That is the same pair of measures the
+console modal takes over the window, and for the same two reasons: reading a
+widget for clicks is what puts it in Gio's focus traversal, and a press beside
+the picture must not reach a contact row through it. Escape and the system
+Back key back out one layer at a time — the delete confirmation first, the
+viewer second. Opening moves the keyboard onto the close button (the one
+control every state draws); closing hands it back to the composer, and asks
+the console to re-claim it when the console is what the viewer was covering,
+because the composer under an open console is disabled and Gio would drop that
+focus at Frame time.
+
+**Two bitmap caches.** `thumbnailCache` holds pictures downscaled to 1024px
+because its consumers draw them in a 260dp box. The viewer decodes at full
+resolution into a cache of its own, and the only thing that bounds the size
+is the hardware: Gio gives a painted image a texture of its own and PANICS if
+the driver refuses to create it, so a bitmap wider than the device's
+`GL_MAX_TEXTURE_SIZE` would not look bad, it would take the window down.
+`viewerStoreMaxPx` is therefore 4096 — the floor OpenGL ES 3.0 guarantees,
+which is the baseline for the Android minimum this application targets, and
+below every desktop driver — and only a picture larger than that is
+downscaled at all.
+
+What it holds is the current image plus one neighbour on each side, bounded
+by `viewerCacheMaxBytes`: full-resolution bitmaps are large (a 12MP photo is
+48MB as NRGBA), so "three of them" is not a memory bound by itself and on
+Android it is an out-of-memory kill. The picture on screen is never evicted —
+the budget exists to bound the preload — and everything is released on close.
+Widening the shared thumbnail cache instead would have made a scrolled
+conversation decode every card at viewer size. What the two caches share is
+what actually bounds the decode: `estimateDecodeBytes` reads the header and
+rejects the bombs, and the byte-weighted `thumbDecodeAdmit` budget serializes
+large decodes across both.
+
+While the full bitmap is being decoded the thumbnail stands in, stretched —
+it is the same picture at the same aspect ratio, so nothing moves when the
+full one lands; with neither, the viewer says so, and a decode that fails
+gives the "cannot display" fallback with the external-application link.
+
+**Zoom and gestures.** 100% is the picture contained in the viewport and never
+upscaled past its own pixels; the stops above it are 200% and 400%. A desktop
+window steps them with the header buttons and Ctrl+wheel, and both controls
+dim at the end they cannot pass rather than disappearing — a control that
+vanishes moves everything laid out beside it, which is the same reason the
+arrows dim at the ends of the strip. Touch has no zoom controls at all: a
+pinch is continuous between the same two limits and a double tap toggles
+100 ↔ 200 around the point touched. Every zoom keeps the point under the
+pointer where it is, and stepping to another image goes back to fitted.
+
+The picture, and not the box around it, is what the pointer works on: the
+gesture area is the rectangle the image actually covers, so the space beside
+a portrait or a small picture is backdrop and a press there closes the viewer.
+The exception is the phone layout with nothing drawn yet — a file still
+arriving, a picture that cannot be decoded — where the swipe across that space
+is the only way to step to the next image.
+
+While the picture is magnified one finger drags it, and only asks for the
+neighbouring image once its edge is against the viewport — so a pan and a
+swipe are the same gesture in a fixed order, not two gestures competing. There
+is no mouse swipe: the mouse pans, and the arrows and keys step. The recogniser
+(`viewerGestures`) is a state machine fed one pointer event at a time and
+carries no viewer state of its own; what a drag means depends on the zoom and
+the pan, which are handed to it per event. It is tested directly, because
+pinch and double-tap have no equivalent in `gioui.org/gesture` and neither is
+ever right by accident.
+
+**Under the picture.** The thumbnail strip appears from two images and is
+drawn from the thumbnail cache the chat has already filled, so opening the
+viewer decodes one picture rather than a conversation.
+
+Save copies the file into the platform's downloads folder under its own name,
+without asking. Which folder that is, the platform decides. Windows is asked
+(`FOLDERID_Downloads`), because there the folder is a Known Folder the user
+can move, OneDrive redirects and policy relocates — and the old
+`%USERPROFILE%\Downloads` usually still exists, so guessing saves into a
+folder nobody looks at. Everywhere else it is the XDG chain: an exported
+`XDG_DOWNLOAD_DIR`, then `~/.config/user-dirs.dirs` — where the XDG user dirs
+actually live, and the only place that knows a folder the user moved or a
+desktop-created localized one ("Загрузки") — then `~/Downloads`, which is also
+the whole answer on macOS. Names never
+collide: the file is created with `O_EXCL` under "photo.png", "photo (2).png",
+"photo (3).png" until one takes, so two saves racing for the same name end up
+as two files rather than one failure. Android has no such folder reachable by
+an application — its files are app-private — so there, and anywhere the
+folder cannot be found, the save falls back to the system document picker.
+
+Delete removes THIS node's copy of the file and nothing else
+(`FileBridge.DeleteLocalCopy`). The message stays in the conversation and
+shows its attachment without a preview; on the receiving side it offers to
+download it from the peer again. Deleting the message is a different action
+with a different button — the message menu's Delete, which also asks the peer
+to drop their copy — and the two must not be one control.
+
+The button is inert on an image this node SENT, and the core refuses that
+call as well (`ErrOutgoingCopy`). The sender's copy is the transmit blob the
+recipient is still served from, it is shared by content between messages, and
+nothing can restore it — see docs/dm-commands.md.
+
+Even for a received file the deletion is behind a confirmation on the same
+card the chat's destructive actions use, and it has no keyboard shortcut. The
+question takes exactly one answer: a double click delivers two clicks to one
+frame, and the second — aimed at a picture the first one already deleted —
+is thrown away rather than acted on or left in the queue for the next time
+the question is asked. While the question is up, nothing else in the viewer
+moves: the surface under it is laid out disabled, and its own backdrop
+dismisses the question alone — the card itself swallows the presses that land
+on it (`ui.SwallowPresses`), so pressing its padding or the gap between the
+question and the answers is not pressing the backdrop. An answered delete drops the file from both
+bitmap caches before the erasure even starts, because the chat bubble behind
+the viewer reads the same thumbnail entry; a delete that then fails puts the
+image back on the next rebuild.
 
 ### Touch keyboard (Windows tablets)
 
@@ -921,6 +1100,8 @@ Window (Gio event loop)
   │       ├── Цитата ответа (если ответ): отправитель · дата + текст
   │       │   └── Клик прокручивает к оригинальному сообщению
   │       ├── Тело сообщения (выделяемый текст)
+  │       ├── Карточка файла, с превью для вложений-изображений
+  │       │   └── Клик открывает просмотр изображения на всё окно
   │       ├── Чипы реакций (настоящее состояние по этому сообщению)
   │       ├── Статус доставки (отправлено/доставлено/прочитано)
   │       └── Контекстное меню (правый клик, долгое удержание 500 мс или кнопка ⋯ на пузыре)
@@ -1061,13 +1242,22 @@ desktop размер — либо карточка 384×520dp по центру 
 6dp по краям (консоль); в компактной раскладке модалка занимает весь экран, без
 рамки и радиуса.
 
-**Кнопка закрытия модалки** — круг 44dp с рамкой 1dp, два состояния: обычное и
-под курсором. Рамка рисуется внешним кругом с залитым поверх внутренним, а не
-обводкой: `clip.Stroke` кладёт линию ПО ЦЕНТРУ пути, половина уходит за границы
-кнопки, а `widget.Clickable` обрезает ровно по ним. Клавиатурный фокус
-подсветку НЕ включает: identity-панель отдаёт фокус своей кнопке закрытия сразу
-при открытии, и подсветка по фокусу оставляла именно её навсегда в
-hover-состоянии, пока остальные реагировали на мышь.
+**Круглая кнопка с иконкой** — один компонент (`RoundIconButton`) под всеми
+круглыми контролами, которые макет рисует как одно и то же: кнопка закрытия
+модалки и все семь кнопок просмотрщика изображений. Круг 44dp с рамкой 1dp,
+два состояния — обычное и под курсором — плюс недоступный вид на 40%, который
+сохраняет своё место в ряду и не оборачивает `Clickable` вовсе, так что не
+подсвечивается и не принимает нажатие. Рамка рисуется внешним кругом с залитым
+поверх внутренним, а не обводкой: `clip.Stroke` кладёт линию ПО ЦЕНТРУ пути,
+половина уходит за границы кнопки, а `widget.Clickable` обрезает ровно по ним.
+Клавиатурный фокус подсветку НЕ включает: identity-панель отдаёт фокус своей
+кнопке закрытия сразу при открытии, и подсветка по фокусу оставляла именно её
+навсегда в hover-состоянии, пока остальные реагировали на мышь.
+
+Просмотрщик сначала рисовал свои круги сам — и именно так остался вообще без
+hover: компонент, скопированный на глаз, — это компонент, чьи состояния
+скопированы на глаз. Теперь различается только палитра: у деструктивной кнопки
+удаления своя пара, у остальных общая.
 
 **Toolbar button** (`toolbar_button.go`) — кнопка языка в шапке и кнопка
 консоли в футере. Ширина по содержимому, иконка с любой стороны, активна пока
@@ -1368,6 +1558,173 @@ Escape и системный Back выходят по одному слою за
 keyboard-tail кадра есть явный владелец (`keyboardTailOwner`): `layout.Stack`
 раскладывает Stacked-детей ДО Expanded, так что ни «первый выигрывает», ни
 «последний выигрывает» из порядка раскладки сами не следуют.
+
+### Просмотр изображения
+
+Клик по превью открывает изображение внутри приложения: одна картинка на всё
+окно поверх непрозрачного фона, из неё достижимы все остальные изображения
+открытого чата, под ней — сохранение и удаление (`image_viewer*.go`, экраны
+макета 8a—8d). Этот фон — единственный в приложении, который не пропускает
+ничего: при заданных макетом 88% яркий пузырь сообщения и его белый текст
+оставались читаемыми за картинкой, и поверхность, вся задача которой —
+показать одно изображение, показывала сквозь него переписку. Раньше клик
+отдавал файл тому, чем система открывает изображения, а на Android не делал
+ничего: `openFile` там заглушка (gogio не поставляет FileProvider), и превью
+не было даже кнопкой. Внешнее приложение осталось только запасным вариантом
+для файла, который просмотрщик нарисовать не может.
+
+Открывают его две поверхности: превью в бабле чата и миниатюра во вкладке
+Files консоли. Они знают разное — у одной есть сообщение, у другой снапшот
+передачи, — поэтому каждая собирает открываемый элемент сама, а просмотрщик
+принимает его как есть.
+
+**Что он листает.** Вложения-изображения открытого чата в порядке сообщений:
+те, чей файл лежит на диске, плюс те, что ещё качаются, — идущая загрузка
+держит своё место в полосе без пути и рисуется состоянием загрузки, потому что
+иначе картинку нельзя посмотреть до конца передачи, а потом она появляется
+ниоткуда.
+
+Список пересобирается, когда сдвинулась DM-генерация роутера (пришло
+сообщение, удаление забрало одно из них), а не каждый кадр: обойти переписку и
+сделать stat каждому вложению — работа на открытие, а не на кадр. Завершение
+загрузки не двигает ничего из этого — оно меняет диск, а не переписку, —
+поэтому список, в котором есть элемент без файла, дополнительно перерешает
+себя дважды в секунду, пока файл не появится, и сам просит нужные для этого
+кадры. Список, где всё уже на диске, по таймеру не пересобирается никогда.
+
+Пересборка оставляет выбранной ту же картинку по id сообщения и сохраняет
+МАСШТАБ, если выбор не изменился: генерация двигается и от квитанции о
+доставке, и сброс масштаба на каждой такой выбрасывал бы пользователя из
+увеличенного изображения. Если картинки больше нет, просмотрщик переходит к
+следующей, к предыдущей — если удалена была последняя, и закрывается на пустом
+списке. Файл, открытый из консоли, может принадлежать не открытому чату; тогда
+просмотрщик показывает ровно этот файл и перерешает только этот один путь, а
+не пересобирает список, которым не владеет.
+
+**Как он открывается.** Его открывает вложение-изображение в бабле чата, а что
+именно принимает клик, зависит от того, что у карточки есть: превью, когда
+миниатюра декодирована, и строка с именем файла, когда нет. Вкладка Files в
+консоли делает то же самое плиткой: картинка, если она есть, и заглушка с
+песочными часами или «битым изображением», если нет. Второй случай — не
+экзотика: это качающийся файл и картинка с упавшим декодом, ровно те два
+состояния, которые просмотрщик рисует как «загрузка» и «нельзя показать этот
+файл». Пока клик был привязан к готовой миниатюре, оба были недостижимы с
+обеих поверхностей.
+
+**Где он находится.** Это не ещё один Stacked-оверлей рядом с контекстными
+меню и консолью: он накрывает и консоль, поэтому всё окно вместе с консолью
+раскладывается под ним с отключённым вводом (`disableUnderImageViewer`), а
+`Window.handleActions` при поднятом просмотрщике не доходит до собственных
+контролов окна. Это те же две меры, которые модалка консоли принимает по
+отношению к окну, и по тем же причинам: чтение виджета на клики — это то, что
+помещает его в обход фокуса Gio, а нажатие рядом с картинкой не должно
+доставать до строки контакта под ней. Escape и системный Back снимают по
+одному слою: сначала подтверждение удаления, затем сам просмотрщик. Открытие
+переводит клавиатуру на кнопку закрытия (единственный контрол, который рисуют
+все состояния), закрытие возвращает её в composer и просит консоль забрать
+фокус себе, если просмотрщик накрывал именно её: composer под открытой
+консолью отключён, и Gio сбросил бы этот фокус на Frame.
+
+**Два кэша битмапов.** `thumbnailCache` хранит картинки, уменьшенные до
+1024px, потому что его потребители рисуют их в коробке 260dp. Просмотрщик
+декодирует в полном разрешении в собственный кэш, и единственное, что
+ограничивает размер, — железо: Gio выдаёт рисуемому изображению отдельную
+текстуру и ПАДАЕТ, если драйвер отказался её создать, так что битмап шире
+`GL_MAX_TEXTURE_SIZE` устройства не выглядел бы плохо — он уронил бы окно.
+Поэтому `viewerStoreMaxPx` равен 4096: это нижняя граница, гарантированная
+OpenGL ES 3.0 (базовая для минимальной версии Android, на которую нацелено
+приложение) и не превышающая возможности ни одного настольного драйвера;
+уменьшается только картинка крупнее неё.
+
+Держит он текущее изображение плюс по одному соседу с каждой стороны, в
+пределах `viewerCacheMaxBytes`: полноразмерные битмапы велики (снимок 12 Мп —
+это 48 МБ в NRGBA), так что «три штуки» сами по себе памятью не ограничены, а
+на Android это OOM-kill. Картинку на экране бюджет не вытесняет никогда — он
+существует, чтобы ограничить предзагрузку, — а на закрытии отдаётся всё.
+Расширить вместо этого общий кэш миниатюр означало бы декодировать каждую
+карточку прокрученной переписки в размере просмотрщика. Общим у двух кэшей
+остаётся то, что реально ограничивает декод: `estimateDecodeBytes` читает
+заголовок и отсекает бомбы, а байтовый бюджет `thumbDecodeAdmit` сериализует
+крупные декоды сразу для обоих.
+
+Пока полный битмап декодируется, его подменяет растянутая миниатюра — это то
+же изображение с тем же соотношением сторон, поэтому при появлении полного
+кадра ничего не сдвигается; если нет и её, просмотрщик так и говорит, а
+упавший декод даёт состояние «нельзя показать» со ссылкой на внешнее
+приложение.
+
+**Масштаб и жесты.** 100% — это изображение, вписанное в область и никогда не
+растянутое выше собственных пикселей; ступени над ним — 200% и 400%. Настольное
+окно шагает по ним кнопками шапки и колесом с Ctrl, и обе кнопки гаснут на том
+краю, за который не могут выйти, а не исчезают: исчезнувший контрол сдвигает всё,
+что разложено рядом, — по той же причине гаснут стрелки на краях списка. У
+сенсорного ввода кнопок масштаба нет вовсе: пинч плавно ходит между теми же
+границами, а двойной тап переключает 100 ↔ 200 в точке касания. Любое изменение
+масштаба удерживает точку под указателем на месте, а переход к соседнему
+изображению возвращает вписанный размер.
+
+Указатель работает по самой картинке, а не по коробке вокруг неё: область
+жестов — прямоугольник, который изображение реально занимает, поэтому место
+сбоку от портретной или небольшой картинки — это backdrop, и нажатие там
+закрывает просмотрщик. Исключение — телефонная раскладка, когда рисовать
+нечего (файл ещё идёт, картинку не удалось декодировать): там свайп по этому
+месту — единственный способ перейти к следующему изображению.
+
+Пока изображение увеличено, один палец возит его и просит соседнее только после
+того, как край доведён до границы области, — так что панорамирование и свайп это
+один жест в фиксированном порядке, а не два конкурирующих. Свайпа мышью нет:
+мышь возит, а листают стрелки и клавиши. Распознаватель (`viewerGestures`) —
+конечный автомат, которому скармливают по одному событию указателя, и своего
+состояния просмотрщика он не держит: что означает перетаскивание, зависит от
+масштаба и сдвига, и они передаются ему на каждом событии. Он проверяется
+тестами напрямую, потому что пинча и двойного тапа нет в `gioui.org/gesture`, и
+ни один из них не бывает правильным случайно.
+
+**Под изображением.** Полоса миниатюр появляется от двух изображений и
+рисуется из того же кэша миниатюр, который уже наполнил чат, так что открытие
+просмотрщика декодирует одну картинку, а не переписку.
+
+Сохранение копирует файл в папку загрузок платформы под его собственным именем
+и ничего не спрашивает. Какая это папка, решает платформа. Windows спрашивают
+(`FOLDERID_Downloads`): там папка — Known Folder, её переносит пользователь,
+перенаправляет OneDrive и релоцирует политика, а старый
+`%USERPROFILE%\Downloads` обычно остаётся на месте, так что догадка сохраняет
+в папку, в которую никто не смотрит. Во всём остальном — цепочка XDG:
+экспортированная переменная `XDG_DOWNLOAD_DIR`, затем `~/.config/user-dirs.dirs`
+— где XDG user dirs на самом деле и живут, и единственное место, знающее про
+перенесённую пользователем или созданную рабочим столом локализованную папку
+(«Загрузки»), — затем `~/Downloads`, который на macOS и есть весь ответ. Имена не конфликтуют: файл создаётся с
+`O_EXCL` под именами «photo.png», «photo (2).png», «photo (3).png», пока одно
+не возьмётся, так что два одновременных сохранения дают два файла, а не одну
+ошибку. На Android такой доступной приложению папки нет — его файлы
+приватны, — поэтому там, как и везде, где папку не удалось найти, сохранение
+уходит в системный document picker.
+
+Удаление удаляет копию файла на ЭТОМ узле и больше ничего
+(`FileBridge.DeleteLocalCopy`). Сообщение остаётся в переписке и показывает
+вложение без превью; на приёмной стороне оно снова предлагает скачать файл у
+собеседника. Удаление сообщения — другое действие с другой кнопкой (Delete в
+меню сообщения, которое ещё и просит собеседника удалить свою копию), и эти
+два не должны быть одним контролом.
+
+На ОТПРАВЛЕННОМ этим узлом изображении кнопка неактивна, и ядро такой вызов
+тоже отклоняет (`ErrOutgoingCopy`): копия отправителя — это transmit-блоб, из
+которого обслуживается получатель, он общий по содержимому между сообщениями,
+и вернуть его нечем — см. docs/dm-commands.md.
+
+Даже для полученного файла удаление закрыто подтверждением на той же карточке,
+что и деструктивные действия чата, и горячей клавиши у него нет. Вопрос
+принимает ровно один ответ: двойной клик приносит в один кадр два клика, и
+второй — нацеленный на картинку, которую удалил первый, — выбрасывается, а не
+исполняется и не остаётся в очереди до следующего открытия вопроса. Пока
+вопрос открыт, в просмотрщике ничего не двигается: поверхность под ним
+разложена с отключённым вводом, а его собственный backdrop закрывает только
+вопрос — сама карточка поглощает попадающие в неё нажатия
+(`ui.SwallowPresses`), так что нажать её отступ или промежуток между вопросом
+и ответами не значит нажать backdrop. Подтверждённое удаление выбрасывает файл из обоих кэшей битмапов ещё
+до начала стирания, потому что бабл чата за просмотрщиком читает ту же запись
+миниатюры; а если удаление не удалось, картинка возвращается на следующей
+пересборке списка.
 
 ### Сенсорная клавиатура (Windows-планшеты)
 

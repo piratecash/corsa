@@ -1189,6 +1189,126 @@ func (m *Manager) RemoveSenderMapping(fileID domain.FileID) bool {
 	return true
 }
 
+// ErrNoLocalCopy is returned by DeleteLocalCopy when the transfer holds
+// nothing on this node's disk to delete: no mapping at all, or one in a
+// state where the file has not been written (or has already gone).
+//
+// A sentinel rather than a formatted error because the UI has to tell it
+// from a real failure — it means "there was nothing to do", which for a
+// delete is success as far as the user is concerned.
+var ErrNoLocalCopy = errors.New("file_transfer: no local copy to delete")
+
+// ErrOutgoingCopy is returned by DeleteLocalCopy for a file this node SENT.
+//
+// The sender's copy is not a copy the sender may throw away: it is the
+// transmit blob, the only thing a re-download can be served from, and
+// nothing can bring it back — this node has no way to ask the recipient for
+// its own file. Worse, that blob is shared by content: two messages
+// carrying the same picture reference one file, so "deleting" it for one of
+// them either erases the other message's attachment or — because the store
+// keeps a file something still references — erases nothing at all, and the
+// picture the user just deleted comes back the next time the list is built.
+//
+// Deleting an outgoing image is therefore the message's own delete, which
+// takes the attachment with it and drops the ref along the way.
+var ErrOutgoingCopy = errors.New("file_transfer: an outgoing file's copy is the transmit blob and cannot be deleted on its own")
+
+// DeleteLocalCopy erases THIS node's copy of a transferred file and keeps
+// everything else: the mapping stays, and so does the message that carries
+// it, which then shows the attachment without a preview.
+//
+// It is the difference between "I do not want this file on my disk" and "I
+// want this message gone", and the two must not be the same button. Deleting
+// the message asks the peer to delete their copy too; this asks nothing of
+// anybody.
+//
+// Receiver side: the mapping goes back to available, so the file can be
+// downloaded from the peer again — senderCompleted is re-servable and keeps
+// the transmit blob (see validateChunkRequest). Resetting it is also what
+// makes the erasure possible at all: pathOwnershipLocked refuses to unlink a
+// file a mapping still points at, and until CompletedPath is cleared the
+// mapping pointing at it is this one.
+//
+// Sender side: refused (ErrOutgoingCopy). What this node holds for a file it
+// SENT is the transmit blob every re-download is served from, it is shared
+// between messages carrying the same content, and nothing can restore it.
+//
+// Erasing files goes through the same durable intent as every other deletion
+// in this subsystem: the record of what must be gone is persisted BEFORE the
+// first unlink is attempted, and retried until the file is actually gone.
+func (m *Manager) DeleteLocalCopy(fileID domain.FileID) error {
+	// The .part stripe, for the same reason CancelDownload takes it: the
+	// mapping is about to advertise that a new download may start, and that
+	// download writes the very path this call is clearing out.
+	release := m.lockPartial(fileID)
+	defer release()
+
+	m.mu.Lock()
+
+	intent := pendingCleanup{FileID: fileID, NotedAt: time.Now()}
+
+	if mapping, ok := m.receiverMaps[fileID]; ok {
+		// Exactly the two states in which a verified file is on disk — the
+		// same pair ReceiverFilePath answers for.
+		if mapping.State == receiverCompleted || mapping.State == receiverWaitingAck {
+			// Name AND hash go in beside the path: the path can be empty for
+			// a mapping persisted before the field existed, and those two are
+			// what finds the file then.
+			intent.Downloads = []pendingDownload{{
+				Path: m.backfillCompletedPath(mapping),
+				Name: mapping.FileName,
+				Hash: mapping.FileHash,
+			}}
+			// From waitingAck this also abandons the file_downloaded the
+			// receiver still owes the sender: both that send and the ack that
+			// answers it are guarded on the state, so they become no-ops. The
+			// sender reclaims its stalled serving slot on its own tick and
+			// keeps the blob, which is what the re-download needs.
+			m.resetReceiverToAvailableLocked(mapping)
+		}
+	}
+
+	if _, ok := m.senderMaps[fileID]; ok && intent.empty() {
+		// Nothing was found on the receiving side, so what this file id
+		// names here is our own transmit blob. See ErrOutgoingCopy.
+		m.mu.Unlock()
+		return ErrOutgoingCopy
+	}
+
+	if intent.empty() {
+		m.mu.Unlock()
+		return ErrNoLocalCopy
+	}
+
+	m.noteCleanupLocked(intent)
+	if err := m.saveMappingsLockedErr(); err != nil {
+		// Nothing may be erased before the record of the erasure is durable:
+		// a crash here must not leave a file nobody remembers deleting.
+		m.cleanupsDirty = true
+		m.mu.Unlock()
+		log.Error().Err(err).Str("file_id", logID(string(fileID))).
+			Msg("file_transfer: could not record the erasure of a deleted local copy; deferring it to the maintenance tick")
+		return fmt.Errorf("record local-copy deletion: %w", err)
+	}
+	m.mu.Unlock()
+
+	erased := false
+	if remaining, done, ran := m.attemptCleanup(intent); ran {
+		erased = done
+		m.mu.Lock()
+		m.settleCleanupLocked(remaining, done)
+		m.flushCleanupsLocked()
+		m.mu.Unlock()
+	}
+
+	deletionLog().Info().
+		Str("file_id", logID(string(fileID))).
+		Bool("download_removed", len(intent.Downloads) > 0).
+		Bool("erased", erased).
+		Msg("file_transfer: local copy deleted, mapping kept")
+	return nil
+}
+
 // CleanupTransferByMessageID releases all file-transfer state attached
 // to a single DM (sender mapping, receiver mapping, transmit-blob ref,
 // partial/completed downloaded files). Called by the DM-router delete
