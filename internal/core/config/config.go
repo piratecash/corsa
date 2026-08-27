@@ -441,8 +441,8 @@ const (
 	// across releases so older peers continue to interpret the comparison
 	// correctly.
 	ClientVersionMajor = 2
-	ClientVersionMinor = 0
-	ClientVersionBuild = 66
+	ClientVersionMinor = 1
+	ClientVersionBuild = 67
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
@@ -473,7 +473,7 @@ const (
 	// the legacy sync path. No emission gate is needed — unlike
 	// seen_ack, unknown JSON fields are silently ignored, not rejected.
 	ProtocolVersion        = 28
-	MinimumProtocolVersion = 25
+	MinimumProtocolVersion = 26
 	// ProtocolVersionSeenAck is the version that introduced
 	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
 	// peer advertising >= this version (a pre-v23 binary only rejects the
