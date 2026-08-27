@@ -1,7 +1,12 @@
 package chatlog
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,9 +149,8 @@ func TestCheckpointWALSucceedsOnAQuietDatabase(t *testing.T) {
 }
 
 // TestDeleteMessagesBatchesOneTransaction pins the receiver's side of the
-// cost: a thread goes in batches, not one commit per row, and every id in
-// the batch is refused afterwards — including ones that were already gone,
-// which can still be replayed.
+// cost: a thread goes in batches, not one commit per row, and an id that was
+// already gone is not an error.
 func TestDeleteMessagesBatchesOneTransaction(t *testing.T) {
 	t.Parallel()
 
@@ -168,7 +172,7 @@ func TestDeleteMessagesBatchesOneTransaction(t *testing.T) {
 		t.Fatalf("AppendReportNew: %v", err)
 	}
 
-	removed, err := store.DeleteMessages(ctx, []domain.MessageID{present, absent}, now.Add(time.Hour))
+	removed, err := store.DeleteMessages(ctx, []domain.MessageID{present, absent})
 	if err != nil {
 		t.Fatalf("DeleteMessages: %v", err)
 	}
@@ -176,21 +180,24 @@ func TestDeleteMessagesBatchesOneTransaction(t *testing.T) {
 		t.Fatalf("removed = %v, want only the row that was there", removed)
 	}
 
-	live, err := store.LiveWipeTombstones(ctx, now)
-	if err != nil {
-		t.Fatalf("LiveWipeTombstones: %v", err)
-	}
+	// And the batch leaves NOTHING naming either id. A wipe carries no
+	// requests — it names no messages by design — so after it the two ids
+	// exist nowhere in this file.
 	for _, id := range []domain.MessageID{present, absent} {
-		if _, ok := live[id]; !ok {
-			t.Errorf("%s was deleted without a refusal; a replay would put it back", id)
+		if found := tablesNaming(t, store, string(id)); len(found) > 0 {
+			t.Errorf("after the wipe, %s is still named in %v", id, found)
 		}
 	}
 }
 
-// TestDeleteWithIntentCommitsTheTombstoneToo pins the third half of the
-// single-message deletion: the row, the request the peer owes us, and the
-// refusal of the id land in one commit or not at all.
-func TestDeleteWithIntentCommitsTheTombstoneToo(t *testing.T) {
+// TestDeleteWithIntentCommitsTheRequestToo pins both halves of the
+// single-message deletion: the row and the request the peer owes us land in
+// one commit or not at all.
+//
+// And the request is what refuses a replay across a restart — the id is on the
+// owed list, which is what the router loads at startup. That is the whole of
+// the durable protection, and it is durable only while the job is.
+func TestDeleteWithIntentCommitsTheRequestToo(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -211,15 +218,127 @@ func TestDeleteWithIntentCommitsTheTombstoneToo(t *testing.T) {
 
 	if _, err := store.DeleteWithIntent(ctx, DeleteIntent{
 		MessageID: intentMsgID, Peer: peer, CreatedAt: now, NextAttemptAt: now,
-	}, now.Add(time.Hour)); err != nil {
+	}); err != nil {
 		t.Fatalf("DeleteWithIntent: %v", err)
 	}
 
-	live, err := store.LiveWipeTombstones(ctx, now)
+	owed, err := store.OwedDeleteIntentMessageIDs(ctx)
 	if err != nil {
-		t.Fatalf("LiveWipeTombstones: %v", err)
+		t.Fatalf("OwedDeleteIntentMessageIDs: %v", err)
 	}
-	if _, ok := live[intentMsgID]; !ok {
-		t.Error("the deletion committed without its refusal; a replay would resurrect the message")
+	if len(owed) != 1 || owed[0] != intentMsgID {
+		t.Fatalf("owed = %v, want the deleted id: nothing would refuse its replay after a restart", owed)
 	}
+}
+
+// TestASettledDeletionIsForgottenEntirely is the contract the user asked for in
+// one sentence: once the peer confirms, this database says nothing about the
+// message ever having existed.
+//
+// It checks the FILE and not a repository method — every table, then the raw
+// bytes of the database and its write-ahead log. A refusal kept "just for the
+// replay window" would show up here, which is exactly how the previous design
+// failed the promise while passing every test it had.
+func TestASettledDeletionIsForgottenEntirely(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	self := domain.PeerIdentityFromWire(intentSelf)
+	peer := domain.PeerIdentityFromWire(intentPeer)
+	path := filepath.Join(t.TempDir(), "state.db")
+	store := newTestStoreAt(t, path, self)
+	now := time.Now().UTC()
+
+	seedMessageWithJournals(t, store, self, peer, intentMsgID)
+	if _, err := store.DeleteWithIntent(ctx, DeleteIntent{
+		MessageID: intentMsgID, Peer: peer, CreatedAt: now, NextAttemptAt: now,
+	}); err != nil {
+		t.Fatalf("DeleteWithIntent: %v", err)
+	}
+	// The peer answers: the task is over.
+	if _, err := store.DropDeleteIntent(ctx, intentMsgID); err != nil {
+		t.Fatalf("DropDeleteIntent: %v", err)
+	}
+	if err := store.CheckpointWAL(ctx); err != nil {
+		t.Fatalf("CheckpointWAL: %v", err)
+	}
+
+	if found := tablesNaming(t, store, string(intentMsgID)); len(found) > 0 {
+		t.Errorf("a settled deletion is still recorded in %v", found)
+	}
+	for _, file := range []string{path, path + "-wal"} {
+		raw, err := os.ReadFile(file)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if bytes.Contains(raw, []byte(intentMsgID)) {
+			t.Errorf("%s still contains the id of a message whose deletion is finished", file)
+		}
+	}
+}
+
+// tablesNaming reports every table holding the value in any column. The schema
+// is read from sqlite_master rather than listed here, so a table added later is
+// searched without anybody remembering to add it.
+func tablesNaming(t *testing.T, store *Store, value string) []string {
+	t.Helper()
+
+	ctx := context.Background()
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			t.Fatalf("scan table name: %v", err)
+		}
+		tables = append(tables, name)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+
+	var found []string
+	for _, table := range tables {
+		columns, err := store.db.QueryContext(ctx,
+			`SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			t.Fatalf("columns of %s: %v", table, err)
+		}
+		var conditions []string
+		for columns.Next() {
+			var column string
+			if err := columns.Scan(&column); err != nil {
+				_ = columns.Close()
+				t.Fatalf("scan column of %s: %v", table, err)
+			}
+			conditions = append(conditions, `CAST("`+column+`" AS TEXT) = ?`)
+		}
+		if err := errors.Join(columns.Err(), columns.Close()); err != nil {
+			t.Fatalf("columns of %s: %v", table, err)
+		}
+		if len(conditions) == 0 {
+			continue
+		}
+		args := make([]any, len(conditions))
+		for i := range args {
+			args[i] = value
+		}
+		var hits int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM "`+table+`" WHERE `+strings.Join(conditions, " OR "), args...).Scan(&hits); err != nil {
+			t.Fatalf("search %s: %v", table, err)
+		}
+		if hits > 0 {
+			found = append(found, table)
+		}
+	}
+	return found
 }

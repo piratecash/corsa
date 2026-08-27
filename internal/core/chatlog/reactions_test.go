@@ -1183,8 +1183,8 @@ func TestWipingAConversationTakesTheReactionsStillWaitingInIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scope: %v", err)
 	}
-	if _, err := store.DeleteConversationWithIntents(ctx, peer, ids,
-		ConversationWipeClassification{}, now, now.Add(time.Hour)); err != nil {
+	if _, err := store.DeleteConversationWithIntent(ctx, peer, ids,
+		conversationIntentFor(peer, now)); err != nil {
 		t.Fatalf("wipe: %v", err)
 	}
 
@@ -1275,8 +1275,8 @@ func TestAWipeKeepsTheReactionsOfTheMessagesItKeeps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scope: %v", err)
 	}
-	if _, err := store.DeleteConversationWithIntents(ctx, peer, ids,
-		ConversationWipeClassification{}, now, now.Add(time.Hour)); err != nil {
+	if _, err := store.DeleteConversationWithIntent(ctx, peer, ids,
+		conversationIntentFor(peer, now)); err != nil {
 		t.Fatalf("wipe: %v", err)
 	}
 
@@ -1383,9 +1383,9 @@ func TestEveryDeletionPathLeavesNoOrphanedReactions(t *testing.T) {
 			heldKept:  true,
 		},
 		{
-			name: "one message with a tombstone",
-			run: func(t *testing.T, store *Store, ctx context.Context, now time.Time) {
-				if _, err := store.DeleteMessageWithTombstone(ctx, ordinary, now.Add(time.Hour)); err != nil {
+			name: "one message deleted on its own",
+			run: func(t *testing.T, store *Store, ctx context.Context, _ time.Time) {
+				if _, err := store.DeleteByID(ctx, ordinary); err != nil {
 					t.Fatalf("delete: %v", err)
 				}
 			},
@@ -1409,8 +1409,8 @@ func TestEveryDeletionPathLeavesNoOrphanedReactions(t *testing.T) {
 				if err != nil {
 					t.Fatalf("scope: %v", err)
 				}
-				if _, err := store.DeleteConversationWithIntents(ctx, peer, ids,
-					ConversationWipeClassification{}, now, now.Add(time.Hour)); err != nil {
+				if _, err := store.DeleteConversationWithIntent(ctx, peer, ids,
+					conversationIntentFor(peer, now)); err != nil {
 					t.Fatalf("wipe: %v", err)
 				}
 			},

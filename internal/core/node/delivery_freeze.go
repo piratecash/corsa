@@ -5,9 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/logid"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -57,8 +56,12 @@ func (s *Service) FreezeOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 		return FrozenDeliveries{}, fmt.Errorf("freeze outgoing deliveries: %w: recipient is required", protocol.ErrInvalidCancelDelivery)
 	}
 	frozen := s.freezeDeliveries(scope)
-	log.Info().
-		Str("recipient", recipient.String()).
+	// A freeze is only ever taken for a deletion, so this line says the same
+	// thing the deletion paths must not say: that this user is erasing a
+	// conversation with this peer, right now. Behind the same gate as the rest
+	// of them, and the recipient is a digest even there.
+	logid.DeletionLog().Info().
+		Str("recipient", logid.Of(recipient.String())).
 		Int("frozen", frozen.Frozen).
 		Int("never_emitted", len(frozen.NeverEmitted)).
 		Msg("delivery_freeze_taken")
@@ -108,7 +111,7 @@ func (s *Service) ThawOutgoingDeliveries(ids []protocol.MessageID) {
 		delete(s.frozenDeliveries, id)
 	}
 	s.deliveryMu.Unlock()
-	log.Info().Int("thawed", len(ids)).Msg("delivery_freeze_released")
+	logid.DeletionLog().Info().Int("thawed", len(ids)).Msg("delivery_freeze_released")
 }
 
 // clearFreezeLocked forgets a freeze because the delivery it held back is

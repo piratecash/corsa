@@ -93,26 +93,28 @@ func (s *Store) Append(ctx context.Context, topic string, selfAddress domain.Pee
 // actually inserted (true) or already existed (false). This allows callers
 // to distinguish genuinely new messages from duplicates that were silently
 // ignored by INSERT OR IGNORE, so they can suppress duplicate UI events.
+//
+// selfAddress is READ BY NOTHING here any more. It used to decide which
+// conversation the row belongs to, so the insert could lift that conversation's
+// durable refusal of the id's reactions; that refusal is gone (see
+// delete_intents.go). The parameter stays only because Append and this method
+// have ~150 call sites between them and removing it is a mechanical change of
+// its own — not because the value matters. Nothing should start passing
+// something meaningful to it.
 func (s *Store) AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error) {
+	_ = selfAddress
+
 	status := entry.DeliveryStatus
 	if status == "" {
 		status = StatusSent
 	}
 
-	// ONE transaction for the row and the refusal it lifts. Two statements in
-	// sequence would have a state between them where the message is committed
-	// and its refusal is not, and the caller cannot recover from it: the
-	// returned error is read as "not stored", so no arrival event is published,
-	// while the next copy of the message is a duplicate that publishes nothing
-	// either. The message would sit in the database, invisible until the
-	// conversation is loaded again.
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("chatlog: begin insert %s: %w", entry.ID, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	res, err := tx.ExecContext(ctx, `
+	// One statement, no transaction: the row is all this writes. It used to
+	// carry a second write — lifting the durable refusal of the id's reactions
+	// — and the two had to commit together. Nothing durable remembers a
+	// deletion any more (see delete_intents.go), so there is nothing here to
+	// undo.
+	res, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO messages (id, topic, sender, recipient, body, flag, delivery_status, ttl_seconds, metadata, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.ID, topic, entry.Sender, entry.Recipient, entry.Body,
@@ -122,26 +124,6 @@ func (s *Store) AppendReportNew(ctx context.Context, topic string, selfAddress d
 		return false, fmt.Errorf("chatlog: insert %s: %w", entry.ID, err)
 	}
 	rows, _ := res.RowsAffected()
-	if rows > 0 {
-		// The message is here, so any standing refusal of its reactions is
-		// wrong from this moment: the refusal means "not here and did not
-		// come", and a re-delivery or a reseed days later is exactly the case
-		// it must not outlive. Its author is still offering the fact, and the
-		// next offer has to apply.
-		//
-		// Only on a real insert, so the duplicate arrivals that INSERT OR
-		// IGNORE swallows do not pay for it, and only in THIS conversation:
-		// two of them can hold the same id, and lifting id-wide would clear a
-		// refusal the sweep could never record again — the id exists now.
-		if scope, ok := dmScopeOf(topic, selfAddress, entry); ok {
-			if err := dropReactionRefusalTx(ctx, tx, scope, domain.MessageID(entry.ID)); err != nil {
-				return false, err
-			}
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("chatlog: commit insert %s: %w", entry.ID, err)
-	}
 	return rows > 0, nil
 }
 
@@ -709,7 +691,7 @@ func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
 
 	var n int64
 	for _, id := range expired {
-		gone, err := deleteMessageTx(ctx, tx, s.identityAddr, id)
+		gone, err := deleteMessageTx(ctx, tx, id)
 		if err != nil {
 			return 0, fmt.Errorf("chatlog: delete expired: %w", err)
 		}
@@ -737,20 +719,14 @@ func (s *Store) DeleteExpired(ctx context.Context) (int64, error) {
 // identity, along with every per-message trace those rows left in the other
 // tables. Returns the number of deleted message rows.
 //
-// Everything else naming this peer goes with them: the delete requests
-// still owed by them and the tombstones of the rows being removed. They are
-// the last things left naming a conversation the user has erased,
-// and a client that keeps phoning a peer about a thread its owner destroyed
-// — or keeps a row with their address in it — is carrying exactly the
-// metadata the deletion was for. The cost is stated plainly: peer-side
-// deletions that had been scheduled and not yet acknowledged are abandoned,
-// so the peer keeps whatever it still holds. Asking both sides to forget
-// the thread first is what "Delete chat and ask the peer" is for; this is the
-// user erasing their own side of it.
-//
-// What cannot be cleaned here is a tombstone for a row the peer's own wipe
-// already removed: those name a message id and nothing else, no longer
-// resolve to any conversation, and expire on their own hour.
+// The delete requests still owed by this peer go with them. They are the last
+// thing left naming a conversation the user has erased, and a client that keeps
+// phoning a peer about a thread its owner destroyed — or keeps a row with their
+// address in it — is carrying exactly the metadata the deletion was for. The
+// cost is stated plainly: peer-side deletions that had been scheduled and not
+// yet acknowledged are abandoned, so the peer keeps whatever it still holds.
+// Asking both sides to forget the thread first is what "Delete chat and ask the
+// peer" is for; this is the user erasing their own side of it.
 //
 // One transaction: a wipe that removed the rows but left their journals (or
 // the reverse) is a half-erased conversation, and nothing downstream could
@@ -763,7 +739,7 @@ func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) 
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("chatlog: begin delete identity %s: %w", id, err)
+		return 0, fmt.Errorf("chatlog: begin delete identity: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -795,32 +771,20 @@ func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) 
 		// are the ones that would outlive the wipe as "peer X reacted to
 		// something in this conversation" on a conversation the user erased.
 		{`DELETE FROM message_reactions WHERE scope = ?`, []any{id}},
-		// And the refusals of this conversation, for the reason
-		// DeleteConversationWithIntents gives at length: with the conversation
-		// gone, offers from this peer are refused at the door, so a row per
-		// erased id would spend a bounded table on ids nothing will ask about.
-		//
-		// Unconditional here, unlike there: this path removes EVERY message of
-		// the peer, immutable ones included, so nothing can be left to keep the
-		// conversation admitting offers. And by scope, which reaches the ids
-		// deleted from it one at a time long before today.
-		{`DELETE FROM reaction_refusals WHERE scope = ?`, []any{id}},
 	}
 	for _, deletion := range journalDeletes {
 		if _, err := tx.ExecContext(ctx, deletion.statement, deletion.args...); err != nil {
-			return 0, fmt.Errorf("chatlog: delete identity %s journals: %w", id, err)
+			return 0, fmt.Errorf("chatlog: delete identity journals: %w", err)
 		}
 	}
 
-	// Both halves of the deletion table go: the requests still owed by
-	// this peer, and the refusals of the ids of the conversation being
-	// erased. A refusal names no peer, so it is found through the rows it
-	// belongs to — which are still here, this statement running before
-	// they are removed.
+	// The requests owed by this peer, and any row still keyed to a message of
+	// the conversation — found through the message rows, which are still here,
+	// this statement running before they are removed.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM message_delete_intents WHERE peer = ? OR message_id IN (`+conversationFilter+`)`,
 		append([]any{id}, conversationArgs...)...); err != nil {
-		return 0, fmt.Errorf("chatlog: delete identity %s deletion rows: %w", id, err)
+		return 0, fmt.Errorf("chatlog: delete identity deletion rows: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx, `
@@ -829,12 +793,12 @@ func (s *Store) DeleteByPeer(ctx context.Context, identity domain.PeerIdentity) 
 		  AND ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))`,
 		s.identityAddr, id, id, s.identityAddr)
 	if err != nil {
-		return 0, fmt.Errorf("chatlog: delete identity %s: %w", id, err)
+		return 0, fmt.Errorf("chatlog: delete identity: %w", err)
 	}
 	n, _ := res.RowsAffected()
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("chatlog: commit delete identity %s: %w", id, err)
+		return 0, fmt.Errorf("chatlog: commit delete identity: %w", err)
 	}
 
 	// Same on-disk treatment as every other deletion: secure_delete
@@ -906,16 +870,16 @@ func (s *Store) EntryByID(ctx context.Context, messageID domain.MessageID) (Entr
 func (s *Store) DeleteByID(ctx context.Context, messageID domain.MessageID) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("chatlog: begin delete %s: %w", messageID, err)
+		return false, fmt.Errorf("chatlog: begin delete: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	removed, err := deleteMessageTx(ctx, tx, s.identityAddr, messageID)
+	removed, err := deleteMessageTx(ctx, tx, messageID)
 	if err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("chatlog: commit delete %s: %w", messageID, err)
+		return false, fmt.Errorf("chatlog: commit delete: %w", err)
 	}
 	return removed, nil
 }
@@ -934,7 +898,7 @@ func (s *Store) DeleteByID(ctx context.Context, messageID domain.MessageID) (boo
 // All-or-nothing per batch: a failure rolls back the whole chunk and
 // reports the error, so the caller can retry those ids (delete is
 // idempotent) or fall back to one at a time to isolate the row that fails.
-func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID, tombstoneUntil time.Time) ([]domain.MessageID, error) {
+func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID) ([]domain.MessageID, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -947,7 +911,7 @@ func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID, tomb
 
 	removed := make([]domain.MessageID, 0, len(ids))
 	for _, id := range ids {
-		gone, err := deleteMessageTx(ctx, tx, s.identityAddr, id)
+		gone, err := deleteMessageTx(ctx, tx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -955,40 +919,9 @@ func (s *Store) DeleteMessages(ctx context.Context, ids []domain.MessageID, tomb
 			removed = append(removed, id)
 		}
 	}
-	// Every id in the batch is refused from here on, not just the ones
-	// that were still present: an id already gone can still be replayed,
-	// and the caller asked for it to stay gone.
-	if err := noteWipeTombstones(ctx, tx, ids, tombstoneUntil); err != nil {
-		return nil, err
-	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("chatlog: commit batch delete of %d messages: %w", len(ids), err)
-	}
-	return removed, nil
-}
-
-// DeleteMessageWithTombstone removes one message and plants the refusal of
-// its id in the same commit. The pair is the point: a row deleted without
-// its tombstone can be put straight back by a replay of the same envelope,
-// and a tombstone written after the commit leaves that window open for as
-// long as the second write takes — or forever, if the process dies in it.
-func (s *Store) DeleteMessageWithTombstone(ctx context.Context, messageID domain.MessageID, tombstoneUntil time.Time) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("chatlog: begin delete %s: %w", messageID, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	removed, err := deleteMessageTx(ctx, tx, s.identityAddr, messageID)
-	if err != nil {
-		return false, err
-	}
-	if err := noteWipeTombstones(ctx, tx, []domain.MessageID{messageID}, tombstoneUntil); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("chatlog: commit delete %s: %w", messageID, err)
 	}
 	return removed, nil
 }
@@ -1012,10 +945,10 @@ func (s *Store) DeleteMessageWithTombstone(ctx context.Context, messageID domain
 // `decrypt_recovery_cycles`) is deliberately untouched: it describes the
 // conversation, not this message, and survives it by design. The recovery
 // marks of the row itself live in its `metadata` column and go with it.
-func deleteMessageTx(ctx context.Context, db readWriteContext, self domain.PeerIdentity, messageID domain.MessageID) (bool, error) {
+func deleteMessageTx(ctx context.Context, db readWriteContext, messageID domain.MessageID) (bool, error) {
 	res, err := db.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, messageID)
 	if err != nil {
-		return false, fmt.Errorf("chatlog: delete %s: %w", messageID, err)
+		return false, fmt.Errorf("chatlog: delete: %w", err)
 	}
 	n, _ := res.RowsAffected()
 
@@ -1024,7 +957,7 @@ func deleteMessageTx(ctx context.Context, db readWriteContext, self domain.PeerI
 		`DELETE FROM delivery_failed WHERE id = ?`,
 	} {
 		if _, err := db.ExecContext(ctx, statement, messageID); err != nil {
-			return false, fmt.Errorf("chatlog: delete %s journals: %w", messageID, err)
+			return false, fmt.Errorf("chatlog: delete journals: %w", err)
 		}
 	}
 
@@ -1039,43 +972,20 @@ func deleteMessageTx(ctx context.Context, db readWriteContext, self domain.PeerI
 	// destroys them, and over-deleting is the safe direction of a collision
 	// that requires a message id to be reused on purpose.
 	//
-	// The conversations are read BEFORE the delete, and they are read from the
-	// reaction rows themselves rather than from the message: this runs after
-	// the message row is already gone, and a held fact never had one to begin
-	// with. They are what the refusal below is keyed by.
-	scopes, err := reactionScopesOfTx(ctx, db, messageID)
-	if err != nil {
-		return false, err
-	}
+	// Nothing is written down about the id whose reactions these were. A row
+	// saying "reactions naming this id are not to be stored" is a record that
+	// the id was deleted here, kept after the deletion settled — which is the
+	// one trace this function exists to remove. The offer that arrives
+	// afterwards is answered in memory while the process lives, and held
+	// invisibly when it does not; see wipe_tombstone_set.go.
 	if _, err := db.ExecContext(ctx,
 		`DELETE FROM message_reactions WHERE message_id = ?`, messageID); err != nil {
-		return false, fmt.Errorf("chatlog: delete %s journals: %w", messageID, err)
-	}
-	if len(scopes) > 0 {
-		// Somebody reacted to this message, and their node offers the facts it
-		// holds for as long as it holds them — longer than the tombstone that
-		// refuses the id, which is sized for message re-delivery and expires
-		// within the week. Recording the id here is what stops the next offer
-		// after that from putting these rows back; see reaction_refusals.go.
-		//
-		// In the same transaction as the delete, for the reason the whole
-		// function takes an executor: a deletion that committed without its
-		// refusal is one that can be undone by the sender, one offer at a time.
-		//
-		// The stamp orders the trim and decides nothing, which is why the wall
-		// clock is the right source for it.
-		keys := make([]scopedID, 0, len(scopes))
-		for _, scope := range scopes {
-			keys = append(keys, scopedID{Scope: scope, MessageID: messageID})
-		}
-		if err := refuseReactionsForTx(ctx, db, self, keys, time.Now().UTC()); err != nil {
-			return false, err
-		}
+		return false, fmt.Errorf("chatlog: delete journals: %w", err)
 	}
 	if _, err := db.ExecContext(ctx,
 		`DELETE FROM decrypt_resend_intents WHERE original_id = ? OR replacement_id = ?`,
 		messageID, messageID); err != nil {
-		return false, fmt.Errorf("chatlog: delete %s resend intents: %w", messageID, err)
+		return false, fmt.Errorf("chatlog: delete resend intents: %w", err)
 	}
 
 	return n > 0, nil

@@ -57,10 +57,6 @@ func (f *fakeReactionStore) SweepHeldReactions(context.Context, time.Time) (int,
 	return 0, nil
 }
 
-func (f *fakeReactionStore) TrimReactionRefusals(context.Context, int) (int, error) {
-	return 0, nil
-}
-
 func (f *fakeReactionStore) ReleaseArrivedReactions(context.Context, time.Time) ([]domain.ReactionScope, error) {
 	return nil, nil
 }

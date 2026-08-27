@@ -595,8 +595,8 @@ implementation: one catalog, one set of repository statements, two thin
 platform configurations.
 
 Both DSNs set the same per-connection semantics — `busy_timeout=5000`,
-`foreign_keys=ON` and `secure_delete=ON` — and the driver contract suite
-asserts them together with the journal mode.
+`foreign_keys=ON`, `secure_delete=ON` and `synchronous=FULL` — and the driver
+contract suite asserts them together with the journal mode.
 
 `secure_delete` is here because this file holds chat history. Without it a
 `DELETE` only unlinks the page, and the message body stays legible in the
@@ -613,6 +613,33 @@ whole point is that the content stops existing. The delete paths therefore
 follow their commit with an explicit `wal_checkpoint(TRUNCATE)`
 (`chatlog.CheckpointWAL`), best-effort: a busy checkpoint is not a failed
 deletion, and the automatic one still comes.
+
+`synchronous=FULL` is stated rather than inherited, and that is the third
+half of the same promise. In WAL mode a `COMMIT` under `synchronous=NORMAL`
+returns once the log is in the operating system's cache: fast, and for most
+applications correct, but here it means a user can be told their messages are
+deleted and have them come back after a power cut. FULL is SQLite's own
+default — but a COMPILE-TIME one, so a driver built with
+`SQLITE_DEFAULT_WAL_SYNCHRONOUS=1` would hand out NORMAL and nothing in this
+repository would notice. The DSN says it, and `TestOpenCommitsSynchronously`
+keeps it said. The cost is one fsync per commit, paid by a client that writes
+at human speed.
+
+The write-ahead log is truncated before Open calls the database ready
+(`checkpointWAL`, with the retry described above). What it holds is two
+things that must not outlive their reason: the pre-migration image of every
+page a step rewrote, so a data-touching migration would leave the old
+content in a sidecar file until the log filled; and, from a PREVIOUS run
+that died between a deletion and its checkpoint, the bytes of erased
+messages — the automatic checkpoint fires at ~1000 pages, which a quiet
+client can take days to reach.
+
+After a migration it is MANDATORY: those pages exist because this very Open
+rewrote them, and declaring the database ready with them still in the log
+would be this process leaving the trace, so a failure is returned from Open
+and the node does not start. On an ordinary open it is best-effort — the log
+may hold nothing sensitive at all, and refusing to start over a busy
+checkpoint would be an outage we inflicted on ourselves.
 
 `journal_mode` is deliberately **not** in either DSN. It is a property of the
 file rather than of a connection, so setting it there made every pooled
@@ -1279,8 +1306,8 @@ build tag `linux`; платформы нет в матрице поддержк�
 repository-запросов и две тонкие платформенные конфигурации.
 
 Оба DSN задают одинаковую посоединительную семантику — `busy_timeout=5000`,
-`foreign_keys=ON` и `secure_delete=ON`, — и это проверяется contract-тестами
-вместе с journal mode.
+`foreign_keys=ON`, `secure_delete=ON` и `synchronous=FULL`, — и это
+проверяется contract-тестами вместе с journal mode.
 
 `secure_delete` здесь потому, что в этом файле лежит история переписки. Без
 него `DELETE` только отвязывает страницу, и тело сообщения остаётся читаемым
@@ -1297,6 +1324,33 @@ repository-запросов и две тонкие платформенные к
 пути удаления после коммита выполняют явный `wal_checkpoint(TRUNCATE)`
 (`chatlog.CheckpointWAL`), best-effort: busy — это не провал удаления, а
 автоматический чекпойнт всё равно придёт.
+
+`synchronous=FULL` задан явно, а не унаследован, — и это третья половина того
+же обещания. В режиме WAL `COMMIT` при `synchronous=NORMAL` возвращается,
+как только лог попал в кэш операционной системы: быстро и для большинства
+приложений корректно, но здесь это значит, что пользователю сказали «удалено»,
+а после отключения питания сообщения вернулись. FULL — собственный дефолт
+SQLite, но дефолт ВРЕМЕНИ СБОРКИ: драйвер, собранный с
+`SQLITE_DEFAULT_WAL_SYNCHRONOUS=1`, отдаст NORMAL, и в репозитории этого никто
+не заметит. Поэтому DSN говорит это вслух, а `TestOpenCommitsSynchronously`
+следит, чтобы продолжал говорить. Цена — один fsync на коммит у клиента,
+который пишет со скоростью человека.
+
+Журнал упреждающей записи усекается прежде, чем Open объявит базу готовой
+(`checkpointWAL`, с описанным выше retry). В нём лежат две вещи, которые не
+должны пережить свою причину: до-миграционный образ каждой переписанной
+страницы — иначе миграция, трогающая данные, оставила бы старое содержимое в
+сайдкар-файле до заполнения лога; и — от ПРЕДЫДУЩЕГО запуска, умершего между
+удалением и его чекпойнтом, — байты стёртых сообщений: автоматический чекпойнт
+срабатывает примерно на 1000 страницах, до которых тихий клиент добирается
+сутками.
+
+После миграции это ОБЯЗАТЕЛЬНО: эти страницы существуют потому, что их
+переписал именно этот Open, и объявить базу готовой, оставив их в логе,
+значило бы, что след оставил сам процесс, — поэтому ошибка возвращается из
+Open и узел не стартует. На обычном открытии — best-effort: в логе может не
+быть ничего чувствительного, а отказ стартовать из-за занятого чекпойнта был
+бы простоем, который мы устроили себе сами.
 
 `journal_mode` намеренно **не** в DSN. Это свойство файла, а не соединения,
 поэтому установка там заставляла каждое соединение пула пытаться переключить

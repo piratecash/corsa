@@ -3,8 +3,10 @@ package filetransfer
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -124,6 +126,45 @@ type Manager struct {
 	// Persisted with the mappings, in the same write, and retried by the
 	// maintenance tick. See cleanup_intents.go.
 	pendingCleanups map[domain.FileID]*pendingCleanup
+	// downloadNamespaceMu serialises the two operations that decide which file
+	// sits at a download path: the erasure of a deleted message's download, and
+	// the rename that lands a finished one.
+	//
+	// It exists because the pair "check that nobody owns this file" + "unlink
+	// it" cannot be one step under m.mu — file I/O does not run under that
+	// mutex here — and a rename landing between the two would have its file
+	// erased a moment after it arrived. Both sides take THIS lock instead, so
+	// one of them completes before the other begins.
+	//
+	// Lock order is partial stripe → downloadNamespaceMu → m.mu, never the
+	// reverse.
+	downloadNamespaceMu sync.Mutex
+	// partialStripes serialise everything that creates, writes, renames or
+	// removes ONE file id's .part.
+	//
+	// That path is derived from the id, so it is shared by a transfer, the
+	// transfer that replaces it after a cancel, the verifier that renames it
+	// away, and the erasure of a deleted message. Those live in four different
+	// places and, until this lock, coordinated through four different pieces of
+	// state — which is why every fix here produced another window: a chunk that
+	// passed its ownership check could still create the file after an erasure
+	// had looked for it and found nothing.
+	//
+	// Striped rather than one lock per id: a map of locks needs its own
+	// lifecycle, and one global lock would serialise the chunk writes of
+	// unrelated downloads. Collisions cost a little serialisation and nothing
+	// else.
+	partialStripes [64]sync.Mutex
+	// runningCleanups are the erasures with an attempt in flight.
+	//
+	// An erasure runs its unlinks outside m.mu and then writes the outcome
+	// back. Two attempts at the same intent — the one a deletion starts
+	// immediately and the one the maintenance tick starts while it is still
+	// going — would write their outcomes back in whatever order they finished,
+	// so a slow FAILED attempt could restore an intent a fast successful one
+	// had just retired, putting the record of a finished deletion back on disk.
+	// One attempt per intent removes the question.
+	runningCleanups map[domain.FileID]struct{}
 	// cleanupsDirty means the intents in memory are ahead of the file. No
 	// file may be unlinked while it is set: the whole guarantee is that
 	// the record of what must be erased reaches the disk BEFORE the
@@ -235,6 +276,14 @@ func (m *Manager) Stop() {
 	if m.started {
 		<-m.retryDone
 	}
+	// The last thing this manager does is forget the erasures it finished.
+	// Without it, a user who deletes a message with an attachment and closes
+	// the application leaves the intent — the message id, the files' paths, the
+	// moment of deletion — in the mappings file until some later session's
+	// maintenance tick happens to rewrite it.
+	m.mu.Lock()
+	m.flushCleanupsLocked()
+	m.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -313,14 +362,14 @@ func (t *SenderAnnounceToken) Commit(fileID domain.FileID, recipient domain.Peer
 
 	if err := t.manager.saveMappingsLockedErr(); err != nil {
 		log.Error().Err(err).
-			Str("file_id", string(fileID)).
+			Str("file_id", logID(string(fileID))).
 			Str("file_hash", t.fileHash).
 			Msg("file_transfer: sender mapping committed in memory but persist failed — transfer may not survive restart")
 		return fmt.Errorf("persist sender mapping for %s: %w", fileID, err)
 	}
 
 	log.Info().
-		Str("file_id", string(fileID)).
+		Str("file_id", logID(string(fileID))).
 		Str("recipient", recipient.String()).
 		Str("file_name", t.fileName).
 		Uint64("file_size", t.fileSize).
@@ -507,7 +556,7 @@ func (m *Manager) validateChunkRequest(
 			return chunkServePrep{}, fmt.Errorf("tombstone: blob not available: %w", err)
 		}
 		log.Info().
-			Str("file_id", string(req.FileID)).
+			Str("file_id", logID(string(req.FileID))).
 			Str("file_hash", mapping.FileHash).
 			Msg("file_transfer: tombstone sender has blob on disk, resurrecting to completed")
 		mapping.State = senderCompleted
@@ -585,7 +634,7 @@ func (m *Manager) HandleChunkRequest(
 
 	if err != nil {
 		log.Debug().Err(err).
-			Str("file_id", string(req.FileID)).
+			Str("file_id", logID(string(req.FileID))).
 			Str("sender", senderIdentity.String()).
 			Msg("file_transfer: chunk_request rejected")
 		return
@@ -614,13 +663,13 @@ func (m *Manager) HandleChunkRequest(
 	// Phase 2: I/O without lock.
 	data, err := m.store.ReadChunk(prep.fileHash, prep.offset, prep.chunkSize)
 	if err != nil {
-		log.Error().Err(err).Str("file_id", string(req.FileID)).Msg("file_transfer: read chunk failed")
+		log.Error().Err(err).Str("file_id", logID(string(req.FileID))).Msg("file_transfer: read chunk failed")
 		rollbackState()
 		return
 	}
 
 	log.Info().
-		Str("file_id", string(req.FileID)).
+		Str("file_id", logID(string(req.FileID))).
 		Str("receiver", senderIdentity.String()).
 		Uint64("offset", prep.offset).
 		Int("chunk_bytes", len(data)).
@@ -643,7 +692,7 @@ func (m *Manager) HandleChunkRequest(
 		Data:    respData,
 	}); err != nil {
 		log.Warn().Err(err).
-			Str("file_id", string(req.FileID)).
+			Str("file_id", logID(string(req.FileID))).
 			Str("receiver", senderIdentity.String()).
 			Msg("file_transfer: send chunk_response failed")
 		rollbackState()
@@ -707,7 +756,7 @@ func (m *Manager) HandleFileDownloaded(
 		currentState := mapping.State
 		m.mu.Unlock()
 		log.Warn().
-			Str("file_id", string(downloaded.FileID)).
+			Str("file_id", logID(string(downloaded.FileID))).
 			Str("recipient", senderIdentity.String()).
 			Str("state", string(currentState)).
 			Msg("file_transfer: file_downloaded rejected — sender not in serving or completed state")
@@ -725,7 +774,7 @@ func (m *Manager) HandleFileDownloaded(
 		currentState := mapping.State
 		m.mu.Unlock()
 		log.Warn().
-			Str("file_id", string(downloaded.FileID)).
+			Str("file_id", logID(string(downloaded.FileID))).
 			Str("recipient", senderIdentity.String()).
 			Uint64("received_epoch", downloaded.Epoch).
 			Uint64("current_epoch", currentEpoch).
@@ -770,12 +819,12 @@ func (m *Manager) HandleFileDownloaded(
 	}
 
 	if err := m.sendCommand(senderIdentity, payload); err != nil {
-		log.Debug().Err(err).Str("file_id", string(downloaded.FileID)).Msg("file_transfer: send file_downloaded_ack failed")
+		log.Debug().Err(err).Str("file_id", logID(string(downloaded.FileID))).Msg("file_transfer: send file_downloaded_ack failed")
 	}
 
 	if !wasAlreadyCompleted {
 		log.Info().
-			Str("file_id", string(downloaded.FileID)).
+			Str("file_id", logID(string(downloaded.FileID))).
 			Str("recipient", senderIdentity.String()).
 			Msg("file_transfer: transfer completed (sender)")
 	}
@@ -785,24 +834,27 @@ func (m *Manager) HandleFileDownloaded(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// safeRemoveInDownloadDir removes a file only if it resides within the
-// download directory. Logs a warning and skips removal if the path escapes
-// the directory boundary (e.g. tampered persistence data). Silently ignores
-// already-deleted files. The context string is included in log messages to
-// identify the caller.
-func (m *Manager) safeRemoveInDownloadDir(path, context string) {
-	if path == "" {
-		return
+// lockPartial takes the stripe that guards this file id's .part and returns
+// its release. Everything that creates, writes, renames or removes that file
+// holds it — see partialStripes.
+//
+// Callers MUST NOT hold m.mu or downloadNamespaceMu: the order is stripe →
+// downloadNamespaceMu → m.mu.
+func (m *Manager) lockPartial(fileID domain.FileID) func() {
+	stripe := &m.partialStripes[partialStripeIndex(fileID)]
+	stripe.Lock()
+	return stripe.Unlock
+}
+
+// partialStripeIndex spreads file ids over the stripes. FNV-1a over the id,
+// which is a UUID string: cheap and even enough for a lock table.
+func partialStripeIndex(fileID domain.FileID) int {
+	hash := uint32(2166136261)
+	for i := range len(fileID) {
+		hash ^= uint32(fileID[i])
+		hash *= 16777619
 	}
-	if err := ensureWithinDir(m.downloadDir, path); err != nil {
-		log.Warn().Err(err).Str("path", path).
-			Msgf("file_transfer: %s skipped — path escapes download dir", context)
-		return
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		log.Warn().Err(err).Str("path", path).
-			Msgf("file_transfer: %s failed", context)
-	}
+	return int(hash % 64)
 }
 
 // removeOwnedFileInDownloadDir removes a file only if it is still the same
@@ -818,41 +870,65 @@ func (m *Manager) safeRemoveInDownloadDir(path, context string) {
 // already gone, it is a no-op. expected must be the os.FileInfo captured
 // from the fd the caller verified and renamed; os.Rename preserves inode on
 // POSIX so this identity matches whatever the caller's rename produced.
-func (m *Manager) removeOwnedFileInDownloadDir(path string, expected os.FileInfo, context string) {
+//
+// Held under downloadNamespaceMu for the whole check-and-unlink: the identity
+// test and the os.Remove are two syscalls, and a newer attempt renaming its own
+// file onto the path between them would be deleted by an identity check that
+// had already passed. Callers MUST NOT hold m.mu (lock order is
+// downloadNamespaceMu → m.mu) and MUST NOT hold downloadNamespaceMu either.
+func (m *Manager) removeOwnedFileInDownloadDir(path string, expected os.FileInfo, context string) bool {
+	m.downloadNamespaceMu.Lock()
+	defer m.downloadNamespaceMu.Unlock()
+	return m.removeOwnedFileHeld(path, expected, context)
+}
+
+// removeOwnedFileHeld is removeOwnedFileInDownloadDir for a caller that already
+// holds downloadNamespaceMu.
+func (m *Manager) removeOwnedFileHeld(path string, expected os.FileInfo, context string) bool {
 	if path == "" || expected == nil {
-		return
+		return true
 	}
 	if err := ensureWithinDir(m.downloadDir, path); err != nil {
 		log.Warn().Err(err).Str("path", path).
 			Msgf("file_transfer: %s skipped — path escapes download dir", context)
-		return
+		return true
 	}
 	current, err := os.Lstat(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Warn().Err(err).Str("path", path).
-				Msgf("file_transfer: %s stat failed", context)
+		if os.IsNotExist(err) {
+			return true
 		}
-		return
+		log.Warn().Err(err).Str("path", path).
+			Msgf("file_transfer: %s stat failed", context)
+		return false
 	}
 	// Symlink at this location means somebody put something there that is
 	// not a regular file we own. Never follow, never delete.
 	if current.Mode()&os.ModeSymlink != 0 {
 		log.Warn().Str("path", path).
 			Msgf("file_transfer: %s skipped — path is a symlink", context)
-		return
+		return true
 	}
 	if !os.SameFile(expected, current) {
 		// Another attempt's atomic rename replaced our inode. Skip — the
 		// file at this path is not ours to delete.
 		log.Info().Str("path", path).
 			Msgf("file_transfer: %s skipped — file identity changed (another attempt owns this path)", context)
-		return
+		return true
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		log.Warn().Err(err).Str("path", path).
 			Msgf("file_transfer: %s failed", context)
+		return false
 	}
+	// The unlink reaches the disk when the directory entry does, and the caller
+	// drops the last thing that knew about this file when it hears "removed".
+	if err := syncDirectory(filepath.Dir(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Warn().Err(err).Str("path", path).
+			Msgf("file_transfer: %s did not reach the disk", context)
+		return false
+	}
+	return true
 }
 
 // activeServingCountLocked returns the number of sender mappings in the
@@ -932,7 +1008,7 @@ func (m *Manager) tickSenderMappings() {
 				sm.PreServeState = ""
 				changed = true
 				log.Info().
-					Str("file_id", string(sm.FileID)).
+					Str("file_id", logID(string(sm.FileID))).
 					Str("recipient", sm.Recipient.String()).
 					Str("restored_state", string(reclaimedState)).
 					Dur("stalled_for", now.Sub(sm.LastServedAt)).
@@ -952,7 +1028,7 @@ func (m *Manager) tickSenderMappings() {
 					// is the intent's, on the next pass of this same tick.
 					m.store.DropRef(sm.FileHash)
 					m.noteCleanupLocked(pendingCleanup{
-						FileID: id, TransmitHash: sm.FileHash, NotedAt: now,
+						FileID: id, TransmitHashes: []string{sm.FileHash}, NotedAt: now,
 					})
 					m.cleanupsDirty = true
 				}
@@ -1073,7 +1149,10 @@ func (m *Manager) RemoveSenderMapping(fileID domain.FileID) bool {
 	}
 
 	delete(m.senderMaps, fileID)
-	intent := pendingCleanup{FileID: fileID, TransmitHash: releaseHash, NotedAt: time.Now()}
+	intent := pendingCleanup{FileID: fileID, NotedAt: time.Now()}
+	if releaseHash != "" {
+		intent.TransmitHashes = []string{releaseHash}
+	}
 	if releaseHash != "" && m.store != nil {
 		m.store.DropRef(releaseHash)
 	}
@@ -1089,20 +1168,22 @@ func (m *Manager) RemoveSenderMapping(fileID domain.FileID) bool {
 	m.mu.Unlock()
 
 	if persisted != nil {
-		log.Error().Err(persisted).Str("file_id", string(fileID)).
+		log.Error().Err(persisted).Str("file_id", logID(string(fileID))).
 			Msg("file_transfer: could not record the erasure of an orphaned mapping; deferring it to the maintenance tick")
 		return true
 	}
 
 	if releaseHash != "" {
-		remaining, done := m.runCleanupIntent(intent)
-		m.mu.Lock()
-		m.settleCleanupLocked(remaining, done)
-		m.mu.Unlock()
+		if remaining, done, ran := m.attemptCleanup(intent); ran {
+			m.mu.Lock()
+			m.settleCleanupLocked(remaining, done)
+			m.flushCleanupsLocked()
+			m.mu.Unlock()
+		}
 	}
 
 	log.Info().
-		Str("file_id", string(fileID)).
+		Str("file_id", logID(string(fileID))).
 		Msg("file_transfer: removed orphaned sender mapping")
 
 	return true
@@ -1141,11 +1222,20 @@ func (m *Manager) CleanupTransferByMessageID(fileID domain.FileID) {
 	// dropping the map entry; the actual file unlinks happen outside
 	// the mutex (file I/O must never run under m.mu).
 	var receiverCompletedPath string
+	var receiverFileName string
+	var receiverFileHash string
 	var receiverFound bool
 	if mapping, ok := m.receiverMaps[fileID]; ok {
 		receiverCompletedPath = m.backfillCompletedPath(mapping)
+		receiverFileName = mapping.FileName
+		receiverFileHash = mapping.FileHash
 		receiverFound = true
 		delete(m.receiverMaps, fileID)
+		// Whether this file may actually be unlinked — one file can belong to
+		// several messages — is decided by the erasure itself, on every
+		// attempt, not here: see pathOwnershipLocked. Deciding it once, when
+		// the work is written down, is deciding it about a state that will have
+		// changed by the time the unlink runs.
 	}
 
 	// The erasure the unlinks below still owe is written HERE, in the same
@@ -1156,11 +1246,18 @@ func (m *Manager) CleanupTransferByMessageID(fileID domain.FileID) {
 	// attempted.
 	intent := pendingCleanup{FileID: fileID, NotedAt: time.Now()}
 	if releaseHash != "" {
-		intent.TransmitHash = releaseHash
+		intent.TransmitHashes = []string{releaseHash}
 	}
 	if receiverFound {
-		intent.CompletedPath = receiverCompletedPath
-		intent.PartialPath = partialDownloadPath(m.downloadDir, fileID)
+		// Name and hash go in even when the path is known: a download still
+		// being verified has no path yet, and they are what finds the file if
+		// its verifier renames it after this mapping is gone.
+		intent.Downloads = []pendingDownload{{
+			Path: receiverCompletedPath,
+			Name: receiverFileName,
+			Hash: receiverFileHash,
+		}}
+		intent.Partials = []string{partialDownloadPath(m.downloadDir, fileID)}
 	}
 	if !senderFound && !receiverFound {
 		m.mu.Unlock()
@@ -1184,23 +1281,33 @@ func (m *Manager) CleanupTransferByMessageID(fileID domain.FileID) {
 		// there, and the tick re-persists before it touches a file.
 		m.cleanupsDirty = true
 		m.mu.Unlock()
-		log.Error().Err(err).Str("file_id", string(fileID)).
+		log.Error().Err(err).Str("file_id", logID(string(fileID))).
 			Msg("file_transfer: could not record the erasure of a deleted message; deferring it to the maintenance tick")
 		return
 	}
 	m.mu.Unlock()
 
-	remaining, done := m.runCleanupIntent(intent)
-	m.mu.Lock()
-	m.settleCleanupLocked(remaining, done)
-	m.mu.Unlock()
+	erased := false
+	if remaining, done, ran := m.attemptCleanup(intent); ran {
+		erased = done
+		m.mu.Lock()
+		m.settleCleanupLocked(remaining, done)
+		// Written through NOW, not at the next maintenance tick: the intent
+		// that just went names the deleted message and the files it carried,
+		// and until this write the disk still holds it.
+		m.flushCleanupsLocked()
+		m.mu.Unlock()
+	}
 
-	log.Info().
-		Str("file_id", string(fileID)).
+	// Same gate as every other "a deletion finished" line: the digest keeps the
+	// id out of the file, but the line itself still says that an attachment of
+	// this conversation was destroyed, and when.
+	deletionLog().Info().
+		Str("file_id", logID(string(fileID))).
 		Bool("sender_removed", senderFound).
 		Bool("sender_ref_released", releaseHash != "").
 		Bool("receiver_removed", receiverFound).
-		Bool("erased", done).
+		Bool("erased", erased).
 		Msg("file_transfer: transfer cleaned up by message id")
 }
 
@@ -1224,7 +1331,7 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 			// All states except tombstone hold a ref to the transmit blob.
 			if mapping.State != senderTombstone {
 				senderHashes = append(senderHashes, mapping.FileHash)
-				intents[id] = pendingCleanup{FileID: id, TransmitHash: mapping.FileHash, NotedAt: notedAt}
+				intents[id] = pendingCleanup{FileID: id, TransmitHashes: []string{mapping.FileHash}, NotedAt: notedAt}
 			}
 			senderIDs = append(senderIDs, id)
 		}
@@ -1234,15 +1341,18 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 	type receiverCleanup struct {
 		fileID        domain.FileID
 		completedPath string
+		fileName      string
+		fileHash      string
 		state         receiverState
 	}
 	var receiverEntries []receiverCleanup
 	for id, mapping := range m.receiverMaps {
 		if mapping.Sender == peer {
-			cp := m.backfillCompletedPath(mapping)
 			receiverEntries = append(receiverEntries, receiverCleanup{
 				fileID:        id,
-				completedPath: cp,
+				completedPath: m.backfillCompletedPath(mapping),
+				fileName:      mapping.FileName,
+				fileHash:      mapping.FileHash,
 				state:         mapping.State,
 			})
 		}
@@ -1259,8 +1369,12 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 		intent := intents[entry.fileID]
 		intent.FileID = entry.fileID
 		intent.NotedAt = notedAt
-		intent.CompletedPath = entry.completedPath
-		intent.PartialPath = partialDownloadPath(m.downloadDir, entry.fileID)
+		intent.Downloads, _ = addDownload(intent.Downloads, pendingDownload{
+			Path: entry.completedPath,
+			Name: entry.fileName,
+			Hash: entry.fileHash,
+		})
+		intent.Partials, _ = addString(intent.Partials, partialDownloadPath(m.downloadDir, entry.fileID))
 		intents[entry.fileID] = intent
 	}
 
@@ -1294,7 +1408,10 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 	settled := make([]pendingCleanup, 0, len(intents))
 	outcomes := make([]bool, 0, len(intents))
 	for _, intent := range intents {
-		remaining, done := m.runCleanupIntent(intent)
+		remaining, done, ran := m.attemptCleanup(intent)
+		if !ran {
+			continue
+		}
 		settled = append(settled, remaining)
 		outcomes = append(outcomes, done)
 	}
@@ -1302,6 +1419,7 @@ func (m *Manager) CleanupPeerTransfers(peer domain.PeerIdentity) {
 	for i, remaining := range settled {
 		m.settleCleanupLocked(remaining, outcomes[i])
 	}
+	m.flushCleanupsLocked()
 	m.mu.Unlock()
 
 	log.Info().

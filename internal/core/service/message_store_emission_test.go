@@ -26,7 +26,7 @@ func TestOutboxCarriesTheEmissionProofAcrossAReopen(t *testing.T) {
 	}
 	owner := domain.PeerIdentityFromWire(self.Address)
 	database := newTestStateDB(t, owner)
-	store := chatlog.NewStore(database.Executor(), owner)
+	store := testChatlogStore(database.Executor(), owner)
 	adapter := NewMessageStoreAdapter(NewChatlogGateway(store, owner), self, nil, nil)
 
 	const (
@@ -51,7 +51,7 @@ func TestOutboxCarriesTheEmissionProofAcrossAReopen(t *testing.T) {
 	// A second repository over the same database is what the node meets
 	// after a restart.
 	reopened := NewMessageStoreAdapter(
-		NewChatlogGateway(chatlog.NewStore(database.Executor(), owner), owner), self, nil, nil)
+		NewChatlogGateway(testChatlogStore(database.Executor(), owner), owner), self, nil, nil)
 	rows, err := reopened.UndeliveredOutgoing()
 	if err != nil {
 		t.Fatalf("UndeliveredOutgoing: %v", err)
@@ -94,5 +94,67 @@ func TestAdapterSatisfiesTheEmissionJournal(t *testing.T) {
 	var outbox node.DeliveryOutbox = (*MessageStoreAdapter)(nil)
 	if _, ok := outbox.(node.DeliveryEmissionJournal); !ok {
 		t.Fatal("MessageStoreAdapter no longer implements node.DeliveryEmissionJournal")
+	}
+}
+
+// TestIncomingMessagesAreStoredUnderTheSharedDeletePolicy: the flag decides who
+// may have a message removed from this side, and the product's answer is
+// "either participant". It has no interface, so `sender-delete` on the wire is
+// not a choice anybody made — it is what an un-updated build stamps.
+//
+// Migration 0007 rewrote the history carrying it. Without the same rule at the
+// door, the next message from that build brings it back, and with it the
+// refusal the user reads as "the peer refused to delete the message".
+func TestIncomingMessagesAreStoredUnderTheSharedDeletePolicy(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	self, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	owner := domain.PeerIdentityFromWire(self.Address)
+	store := testChatlogStore(newTestStateDB(t, owner).Executor(), owner)
+	adapter := NewMessageStoreAdapter(NewChatlogGateway(store, owner), self, nil, nil)
+
+	peer := domain.PeerIdentityFromWire("3333333333333333333333333333333333333333")
+	cases := []struct {
+		name  string
+		id    protocol.MessageID
+		topic string
+		flag  protocol.MessageFlag
+		want  protocol.MessageFlag
+	}{
+		{"an older build's author-only default", "44444444-4444-4444-8444-444444444444", "dm", protocol.MessageFlagSenderDelete, protocol.MessageFlagAnyDelete},
+		{"the value that predates the column having one", "55555555-5555-4555-8555-555555555555", "dm", "", protocol.MessageFlagAnyDelete},
+		{"a refusal somebody meant", "66666666-6666-4666-8666-666666666666", "dm", protocol.MessageFlagImmutable, protocol.MessageFlagImmutable},
+		{"an expiry contract, not a policy", "77777777-7777-4777-8777-777777777777", "dm", protocol.MessageFlagAutoDeleteTTL, protocol.MessageFlagAutoDeleteTTL},
+		{"outside a conversation there is no second participant", "88888888-8888-4888-8888-888888888888", "global", protocol.MessageFlagSenderDelete, protocol.MessageFlagSenderDelete},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recipient := owner.String()
+			if tc.topic != "dm" {
+				recipient = "*"
+			}
+			if got := adapter.StoreMessage(protocol.Envelope{
+				ID:        tc.id,
+				Topic:     tc.topic,
+				Sender:    peer.String(),
+				Recipient: recipient,
+				Flag:      tc.flag,
+				CreatedAt: time.Now().UTC(),
+				Payload:   []byte("sealed"),
+			}, false); got != node.StoreInserted {
+				t.Fatalf("StoreMessage = %v, want inserted", got)
+			}
+			entry, found, err := store.EntryByID(ctx, domain.MessageID(tc.id))
+			if err != nil || !found {
+				t.Fatalf("EntryByID: found=%v err=%v", found, err)
+			}
+			if protocol.MessageFlag(entry.Flag) != tc.want {
+				t.Errorf("stored flag = %q, want %q", entry.Flag, tc.want)
+			}
+		})
 	}
 }

@@ -34,7 +34,7 @@ func reactionControlFixtureWithRefusals(
 	store := newTestChatlogStore(t, self)
 	bus := ebus.New()
 	t.Cleanup(func() { bus.Shutdown() })
-	refusals := newWipeTombstoneSet(func() wipeTombstoneJournal { return store })
+	refusals := newWipeTombstoneSet(func() deleteTaskList { return store })
 	refusals.Hydrate(context.Background(), time.Now().UTC())
 	adapter := NewReactionControlAdapter(
 		NewChatlogGateway(store, self), refusals, newRemovalGate(), bus, nil)
@@ -54,41 +54,42 @@ func remoteFact(sender domain.PeerIdentity, id, emoji string, clock uint64) doma
 	}
 }
 
-// A reaction can arrive before the message it is about — nothing orders the two
-// and they travel by different paths. Dropping it would lose it for good: the
-// sender has no reason to repeat a fact it believes delivered.
-func TestAFactAheadOfItsMessageWaitsForIt(t *testing.T) {
+// A fact that arrives BEFORE its message is dropped, and the author's next
+// offer applies it once the message is here.
+//
+// It used to be held in the database until the message landed. That row named a
+// message this node did not have — which, after a deletion, is exactly what a
+// deleted message looks like from here — so every offer for something the user
+// had erased wrote its id back onto the disk for an hour at a time. The
+// re-offer is what makes dropping affordable: its author keeps offering the
+// facts it holds, so nothing is lost except the promptness of the first chip.
+func TestAFactAheadOfItsMessageIsDroppedAndOfferedAgain(t *testing.T) {
 	self := controlIdentity("11")
 	sender := controlIdentity("22")
 	adapter, store, _ := reactionControlFixture(t, self)
 	ctx := context.Background()
-	// A conversation has to exist before a fact may WAIT in it — otherwise the
-	// held rows are bounded per identity only, and identities are free (§9.5).
+	// A conversation has to exist for the batch to be admitted at all.
 	appendMessage(t, store, self, sender, "earlier")
 
-	if err := adapter.ApplyReactionFacts(ctx, sender, []domain.ReactionFact{
-		remoteFact(sender, "m1", "👍", 1),
-	}); err != nil {
+	offer := []domain.ReactionFact{remoteFact(sender, "m1", "👍", 1)}
+	if err := adapter.ApplyReactionFacts(ctx, sender, offer); err != nil {
 		t.Fatalf("apply ahead of the message: %v", err)
 	}
-	shown := reactionsOn(t, store, "m1", self)
-	if len(shown) != 0 {
+	if shown := reactionsOn(t, store, "m1", self); len(shown) != 0 {
 		t.Fatal("a reaction is showing on a message this node does not have")
 	}
+	// And NOTHING was written down about the id.
+	if held := heldFactsWaiting(t, store); held != 0 {
+		t.Fatalf("%d rows are waiting for a message this node does not have", held)
+	}
 
-	// The message lands. Releasing is what MessageStoreAdapter does on an
-	// insert; the point checked here is that the held fact is still there to
-	// release.
+	// The message lands, and the peer offers the fact again on its timer.
 	appendMessage(t, store, self, sender, "m1")
-	released, err := store.ReleaseHeldReactions(ctx, domain.ReactionScopeForPeer(sender), "m1", time.Now().UTC())
-	if err != nil {
-		t.Fatalf("release: %v", err)
+	if err := adapter.ApplyReactionFacts(ctx, sender, offer); err != nil {
+		t.Fatalf("apply after the message landed: %v", err)
 	}
-	if released != 1 {
-		t.Fatalf("released %d facts, want the one that was waiting", released)
-	}
-	if shown = reactionsOn(t, store, "m1", self); len(shown) != 1 {
-		t.Fatalf("after release: %d reactions", len(shown))
+	if shown := reactionsOn(t, store, "m1", self); len(shown) != 1 {
+		t.Fatalf("the re-offered fact did not apply: %d reactions", len(shown))
 	}
 }
 
@@ -206,10 +207,10 @@ func TestAFactAboutADeletedMessageIsDropped(t *testing.T) {
 	now := time.Now().UTC()
 
 	appendMessage(t, store, self, sender, "m6")
-	if _, err := store.DeleteMessageWithTombstone(ctx, "m6", now.Add(time.Hour)); err != nil {
+	if _, err := store.DeleteByID(ctx, "m6"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	refusals.Note(ctx, []domain.MessageID{"m6"}, now)
+	refusals.Note([]domain.MessageID{"m6"}, now)
 
 	if err := adapter.ApplyReactionFacts(ctx, sender, []domain.ReactionFact{
 		remoteFact(sender, "m6", "👍", 1),
@@ -341,11 +342,12 @@ func TestAnUnreadableChatlogIsNotReadAsAMissingMessage(t *testing.T) {
 	}
 }
 
-// A fact about a message we do not have, from someone we have never exchanged
-// one with, is dropped rather than held. Holding is the only unbounded thing in
-// this table, and the ceilings that bound it are per identity — which costs
-// nothing to mint, so on their own they bound nothing.
-func TestAStrangersFactAboutAnUnknownMessageIsNotHeld(t *testing.T) {
+// A fact about a message this node does not have leaves nothing behind,
+// whoever sends it. The stranger's batch is refused at the door — one read for
+// the batch rather than one per fact, so a stranger cannot multiply our work by
+// the size of a batch they choose — and a known peer's fact is looked up and
+// then dropped.
+func TestAFactAboutAMessageWeDoNotHaveIsNeverWrittenDown(t *testing.T) {
 	self := controlIdentity("11")
 	stranger := controlIdentity("b1")
 	known := controlIdentity("b2")
@@ -358,18 +360,20 @@ func TestAStrangersFactAboutAnUnknownMessageIsNotHeld(t *testing.T) {
 		t.Fatalf("apply from a stranger: %v", err)
 	}
 	if held := heldFactsWaiting(t, store); held != 0 {
-		t.Fatalf("a stranger's fact was held: %d waiting", held)
+		t.Fatalf("a stranger's fact was written down: %d waiting", held)
 	}
 
-	// Someone we do talk to is still allowed to be early.
 	appendMessage(t, store, self, known, "earlier")
 	if err := adapter.ApplyReactionFacts(ctx, known, []domain.ReactionFact{
 		remoteFact(known, "unknown", "🔥", 1),
 	}); err != nil {
 		t.Fatalf("apply from a known peer: %v", err)
 	}
-	if held := heldFactsWaiting(t, store); held != 1 {
-		t.Fatalf("a known peer could not be early: %d waiting", held)
+	if held := heldFactsWaiting(t, store); held != 0 {
+		t.Fatalf("a known peer's fact about an absent message was written down: %d waiting", held)
+	}
+	if shown := reactionsOn(t, store, "unknown", self); len(shown) != 0 {
+		t.Fatalf("a reaction on a message we do not have is showing: %#v", shown)
 	}
 }
 
@@ -390,15 +394,14 @@ func heldFactsWaiting(t *testing.T, store *chatlog.Store) int {
 	return swept
 }
 
-// The whole point of holding a fact is that the message arriving makes it
-// visible — and that has to hold through the REAL path, MessageStoreAdapter's
-// insert, not a hand-rolled call to ReleaseHeldReactions.
+// A message arriving still wakes the UI for its conversation's reactions.
 //
-// It also pins the other half: the UI is told. The chips are drawn from a cache
-// loaded once per conversation, so a release nobody announces is a reaction the
-// user does not see until they leave the chat and come back — which is exactly
-// the scenario holding the fact existed for.
-func TestAHeldFactAppearsWhenItsMessageIsStored(t *testing.T) {
+// The fact is no longer waiting in the database when the message lands — it was
+// dropped and will be offered again — so what this pins is the other half: the
+// arrival path publishes, and a re-offer that applies a fact a moment later has
+// a UI that is listening. Without the wake, the chip waits for the user to
+// switch conversations.
+func TestAReofferAfterTheMessageLandsShowsAndWakesTheUI(t *testing.T) {
 	self := controlIdentity("11")
 	sender := controlIdentity("c1")
 	store := newTestChatlogStore(t, self)
@@ -412,18 +415,16 @@ func TestAHeldFactAppearsWhenItsMessageIsStored(t *testing.T) {
 	messages.attachEventBus(bus)
 	ctx := context.Background()
 
-	// A conversation exists, so an early fact may wait.
 	appendMessage(t, store, self, sender, "earlier")
-	if err := adapter.ApplyReactionFacts(ctx, sender, []domain.ReactionFact{
-		remoteFact(sender, "late", "👍", 1),
-	}); err != nil {
+	offer := []domain.ReactionFact{remoteFact(sender, "late", "👍", 1)}
+	if err := adapter.ApplyReactionFacts(ctx, sender, offer); err != nil {
 		t.Fatalf("apply ahead of the message: %v", err)
 	}
 	if shown := reactionsOn(t, store, "late", self); len(shown) != 0 {
 		t.Fatal("a reaction is showing on a message this node does not have")
 	}
 
-	woken := make(chan domain.PeerIdentity, 1)
+	woken := make(chan domain.PeerIdentity, 4)
 	bus.Subscribe(ebus.TopicReactionsChanged, func(peer domain.PeerIdentity) { woken <- peer })
 
 	// The message lands through the door the node really uses.
@@ -435,8 +436,12 @@ func TestAHeldFactAppearsWhenItsMessageIsStored(t *testing.T) {
 		t.Fatalf("the message was not inserted: %v", result)
 	}
 
+	// The peer offers it again on its timer.
+	if err := adapter.ApplyReactionFacts(ctx, sender, offer); err != nil {
+		t.Fatalf("re-offer: %v", err)
+	}
 	if shown := reactionsOn(t, store, "late", self); len(shown) != 1 {
-		t.Fatalf("the held fact did not appear when its message landed: %d reactions", len(shown))
+		t.Fatalf("the re-offered fact did not appear: %d reactions", len(shown))
 	}
 	select {
 	case peer := <-woken:
@@ -444,7 +449,7 @@ func TestAHeldFactAppearsWhenItsMessageIsStored(t *testing.T) {
 			t.Fatalf("the UI was told about %s, want %s", peer, sender)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("the release never told the UI: the chip waits for a conversation change")
+		t.Fatal("nothing told the UI: the chip waits for a conversation change")
 	}
 }
 
@@ -492,21 +497,17 @@ func TestARedeliveredMessageReleasesWhatAnEarlierPassLeftPending(t *testing.T) {
 	}
 }
 
-// The refusal of a deleted id and the re-offer of a reaction run on different
-// clocks, and until this was fixed the difference was a loop with no end.
+// An offer for a message this node deleted is never DRAWN, whatever else
+// happens to it — while the refusal is alive it is dropped outright, and after
+// the refusal is gone it is held, invisible, and swept.
 //
-// The tombstone is sized by the sender's MESSAGE reseed horizon — past a week
-// nobody re-sends the envelope, so a refusal has nothing left to refuse. A
-// reaction has no such horizon: a peer offers the facts it holds for as long as
-// it holds them. So the tombstone expired first, the next offer was taken as a
-// pending fact, the sweep dropped it an hour later, and the offer after that
-// put it back — for ever, each round re-creating a row that names a message the
-// user destroyed.
-//
-// What ends it is knowledge about the id that outlives the tombstone. The
-// second half of the test is the one that matters: a fresh process, whose
-// memory of the deletion can only come from the database.
-func TestAnOfferForADeletedMessageIsStillRefusedAfterItsTombstoneExpires(t *testing.T) {
+// The second half is what the "no traces" contract costs, stated as a test
+// rather than left to be discovered. Nothing durable remembers the deletion, so
+// a process that never saw it happen cannot tell this id from a message that is
+// merely late — and it answers by dropping the offer rather than by writing the
+// id down. The peer goes on offering it for as long as it holds the fact; every
+// offer costs one read and leaves nothing behind.
+func TestAnOfferForADeletedMessageIsNeverDrawn(t *testing.T) {
 	self := controlIdentity("11")
 	sender := controlIdentity("b9")
 	store := newTestChatlogStore(t, self)
@@ -516,7 +517,7 @@ func TestAnOfferForADeletedMessageIsStillRefusedAfterItsTombstoneExpires(t *test
 
 	start := time.Now().UTC()
 	now := start
-	refusals := newWipeTombstoneSet(func() wipeTombstoneJournal { return store })
+	refusals := newWipeTombstoneSet(func() deleteTaskList { return store })
 	refusals.Hydrate(ctx, now)
 	adapter := NewReactionControlAdapter(
 		NewChatlogGateway(store, self), refusals, newRemovalGate(), bus,
@@ -527,127 +528,56 @@ func TestAnOfferForADeletedMessageIsStillRefusedAfterItsTombstoneExpires(t *test
 	// batch is refused at the door.
 	appendMessage(t, store, self, sender, "kept")
 	appendMessage(t, store, self, sender, "gone")
-	if _, err := store.DeleteMessageWithTombstone(ctx, "gone", now.Add(wipeTombstoneTTL)); err != nil {
+	if _, err := store.DeleteByID(ctx, "gone"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	refusals.Note(ctx, []domain.MessageID{"gone"}, now)
+	refusals.Note([]domain.MessageID{"gone"}, now)
 
-	// The peer reacts AFTER the deletion, so nothing at delete time could have
-	// recorded that this id carries reactions. The live tombstone is the only
-	// thing that knows, and this offer is its one chance to say so.
+	// The peer reacts AFTER the deletion, while the refusal is still alive.
 	now = start.Add(time.Hour)
 	if err := adapter.ApplyReactionFacts(ctx, sender, []domain.ReactionFact{
 		remoteFact(sender, "gone", "👍", 1),
 	}); err != nil {
-		t.Fatalf("apply while the tombstone is alive: %v", err)
+		t.Fatalf("apply while the refusal is alive: %v", err)
+	}
+	if held := heldFactsWaiting(t, store); held != 0 {
+		t.Fatalf("a refused offer was held instead of dropped: %d waiting", held)
 	}
 
 	// Two weeks on, in a process that never saw the deletion happen.
 	now = start.Add(2 * wipeTombstoneTTL)
-	reloaded := newWipeTombstoneSet(func() wipeTombstoneJournal { return store })
+	reloaded := newWipeTombstoneSet(func() deleteTaskList { return store })
 	reloaded.Hydrate(ctx, now)
 	if refused, _ := reloaded.Refuses("gone", now); refused {
-		t.Fatal("the fixture proves nothing: the message tombstone is still refusing this id")
-	}
-	restarted := NewReactionControlAdapter(
-		NewChatlogGateway(store, self), reloaded, newRemovalGate(), bus,
-		func() time.Time { return now })
-	if err := adapter.ApplyReactionFacts(ctx, sender, []domain.ReactionFact{
-		remoteFact(sender, "gone", "👍", 1),
-	}); err != nil {
-		t.Fatalf("apply after the tombstone expired: %v", err)
-	}
-	if err := restarted.ApplyReactionFacts(ctx, sender, []domain.ReactionFact{
-		remoteFact(sender, "gone", "👍", 1),
-	}); err != nil {
-		t.Fatalf("apply in the restarted process: %v", err)
-	}
-
-	if shown := reactionsOn(t, store, "gone", self); len(shown) != 0 {
-		t.Fatalf("a reaction on a deleted message is showing: %#v", shown)
-	}
-	// The sweep runs on the test's clock, not the wall one: the rows this is
-	// looking for were written two weeks into the future, and a sweep measured
-	// from now() would find nothing and pass while the loop is wide open.
-	waiting, err := store.SweepHeldReactions(ctx, now.Add(2*chatlog.HeldReactionTTL))
-	if err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	if waiting != 0 {
-		t.Fatalf("%d reactions on a deleted message were waiting for it to come back", waiting)
-	}
-}
-
-// The case nothing at delete time could have seen: the message went while it
-// had no reactions, the node was down or the peer silent for longer than the
-// tombstone lasts, and the FIRST offer ever arrives with nothing left to answer
-// it. That offer is held — from here it is indistinguishable from a fact whose
-// message is merely late — and what must not happen is the next one being held
-// too, and the one after that, for ever.
-//
-// The sweep is what ends it. The router runs it on a timer (sweepHeldReactions);
-// this drives the same store call directly, on the test's clock.
-func TestTheFirstOfferAfterTheTombstoneIsHeldOnceAndThenRefused(t *testing.T) {
-	self := controlIdentity("11")
-	sender := controlIdentity("b9")
-	store := newTestChatlogStore(t, self)
-	bus := ebus.New()
-	t.Cleanup(func() { bus.Shutdown() })
-	ctx := context.Background()
-
-	start := time.Now().UTC()
-	now := start
-	refusals := newWipeTombstoneSet(func() wipeTombstoneJournal { return store })
-	refusals.Hydrate(ctx, now)
-	appendMessage(t, store, self, sender, "kept")
-	appendMessage(t, store, self, sender, "gone")
-	if _, err := store.DeleteMessageWithTombstone(ctx, "gone", now.Add(wipeTombstoneTTL)); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	refusals.Note(ctx, []domain.MessageID{"gone"}, now)
-
-	// Two weeks later. Nothing has ever been offered for this id, so no refusal
-	// could have been recorded on the way.
-	now = start.Add(2 * wipeTombstoneTTL)
-	reloaded := newWipeTombstoneSet(func() wipeTombstoneJournal { return store })
-	reloaded.Hydrate(ctx, now)
-	if refused, _ := reloaded.Refuses("gone", now); refused {
-		t.Fatal("the fixture proves nothing: the message tombstone is still refusing this id")
+		t.Fatal("the fixture proves nothing: the id is still refused in the new process")
 	}
 	restarted := NewReactionControlAdapter(
 		NewChatlogGateway(store, self), reloaded, newRemovalGate(), bus,
 		func() time.Time { return now })
 
 	offer := []domain.ReactionFact{remoteFact(sender, "gone", "👍", 1)}
-	if err := restarted.ApplyReactionFacts(ctx, sender, offer); err != nil {
-		t.Fatalf("first offer: %v", err)
-	}
-	// It waits, and that is correct: at this point the node cannot tell a
-	// deleted message from one that has not arrived yet.
-	swept, err := store.SweepHeldReactions(ctx, now.Add(2*chatlog.HeldReactionTTL))
-	if err != nil {
-		t.Fatalf("sweep: %v", err)
-	}
-	if swept != 1 {
-		t.Fatalf("the sweep took %d facts, want the one that was waiting", swept)
-	}
-
-	// Everything after the sweep is answered without a row.
-	now = now.Add(4 * chatlog.HeldReactionTTL)
 	for i := range 3 {
 		if err := restarted.ApplyReactionFacts(ctx, sender, offer); err != nil {
-			t.Fatalf("offer %d after the sweep: %v", i, err)
+			t.Fatalf("offer %d in the restarted process: %v", i, err)
 		}
+		// Dropped, and nothing written down. From here the node cannot tell a
+		// deleted message from one that has not arrived yet — which is exactly
+		// why it must not record either.
+		if shown := reactionsOn(t, store, "gone", self); len(shown) != 0 {
+			t.Fatalf("a reaction on a deleted message is showing: %#v", shown)
+		}
+		if held := heldFactsWaiting(t, store); held != 0 {
+			t.Fatalf("offer %d left %d rows naming a message the user deleted", i, held)
+		}
+		now = now.Add(4 * chatlog.HeldReactionTTL)
+	}
+
+	// The message stays gone and nothing of it was ever drawn.
+	if _, found, err := store.EntryByID(ctx, "gone"); err != nil || found {
+		t.Fatalf("the deleted message came back: found=%v err=%v", found, err)
 	}
 	if shown := reactionsOn(t, store, "gone", self); len(shown) != 0 {
 		t.Fatalf("a reaction on a deleted message is showing: %#v", shown)
-	}
-	again, err := store.SweepHeldReactions(ctx, now.Add(2*chatlog.HeldReactionTTL))
-	if err != nil {
-		t.Fatalf("second sweep: %v", err)
-	}
-	if again != 0 {
-		t.Fatalf("%d reactions were waiting again: the hold-and-sweep loop is still turning", again)
 	}
 }
 

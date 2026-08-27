@@ -31,7 +31,26 @@ import (
 // request. It lives until the peer acknowledges it (any terminal status) or
 // until the scheduler gives up on it.
 type DeleteIntent struct {
+	// Kind is what the peer is being asked for. It is read before anything
+	// else about the row: a message request names an id, a conversation
+	// request names none, and the two are dispatched as different commands.
+	Kind DeleteIntentKind
+	// MessageID is set on a message request and empty on a conversation
+	// one. A thread wipe deliberately carries no ids — naming them is how a
+	// peer would learn of messages that never reached them — so the request
+	// outlives the ids it was born from.
 	MessageID domain.MessageID
+	// RequestID binds a conversation request to the ack that settles it, so
+	// an answer to a wipe the user has already replaced cannot retire the
+	// current one.
+	//
+	// On a MESSAGE request it names the wipe that is CARRYING it, if any: a
+	// per-message request made before a wipe is neither dispatched nor counted
+	// while that wipe stands, and goes with it when the peer answers (see
+	// coveredByAStandingWipe). Non-empty is therefore a normal state for a
+	// message request, not a corrupt one — what settles such a request is still
+	// its id, never this field.
+	RequestID domain.ConversationDeleteRequestID
 	Peer      domain.PeerIdentity
 	// CreatedAt is when the user asked, kept for diagnostics and for the
 	// log line that reports a written-off request. It is NOT a deadline:
@@ -104,8 +123,8 @@ func noteDeleteIntent(ctx context.Context, db execContext, intent DeleteIntent) 
 	}
 
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO message_delete_intents (message_id, peer, created_at, next_attempt_at, attempts, held, owed, refuse_until)
-		VALUES (?, ?, ?, ?, ?, ?, 1, '')
+		INSERT INTO message_delete_intents (kind, message_id, request_id, peer, created_at, next_attempt_at, attempts, held, owed, refuse_until)
+		VALUES ('message', ?, '', ?, ?, ?, ?, ?, 1, '')
 		ON CONFLICT(message_id) DO UPDATE SET
 			-- A refusal-only row names no peer; an owed one does, and its
 			-- peer is never rewritten. A message id belongs to exactly one
@@ -124,7 +143,7 @@ func noteDeleteIntent(ctx context.Context, db execContext, intent DeleteIntent) 
 		int(intent.Hold),
 	)
 	if err != nil {
-		return fmt.Errorf("chatlog: note delete intent %s: %w", intent.MessageID, err)
+		return fmt.Errorf("chatlog: note delete intent: %w", err)
 	}
 	return nil
 }
@@ -151,40 +170,38 @@ type readWriteContext interface {
 // DeleteWithIntent removes the message and records the peer-side delete
 // intent in ONE transaction.
 //
-// The three halves are one invariant seen from three sides: the user's copy
-// is gone, somebody still owes us the peer's copy, and a replay of the same
-// envelope will be refused rather than re-inserted. Committing them
-// separately leaves crash windows in which the local row is destroyed and
-// nothing will ever ask the peer, or in which the row is gone but its
-// refusal is not — and the next relay retry hands the message back.
+// The two halves are one invariant seen from both sides: the user's copy is
+// gone, and somebody still owes us the peer's copy. Committing them separately
+// leaves a crash window in which the local row is destroyed and nothing will
+// ever ask the peer.
+//
+// The intent is also what refuses a REPLAY of the same envelope, and it does
+// that without being a record of anything: while it exists this node is openly
+// carrying the task "have this id deleted at the peer", so recognising the id
+// is inherent to the job. When the peer answers, the row goes, and with it the
+// last durable mention of the message anywhere here — which is why no separate
+// tombstone outlives it. See wipe_tombstone_set.go for what carries the answer
+// after that, and for the window this leaves open.
 //
 // Reports whether a row was actually removed; a missing row is not an error
 // (the recovery path deletes an id that is already gone) and the intent is
 // recorded either way.
-func (s *Store) DeleteWithIntent(ctx context.Context, intent DeleteIntent, tombstoneUntil time.Time) (bool, error) {
+func (s *Store) DeleteWithIntent(ctx context.Context, intent DeleteIntent) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("chatlog: begin delete-with-intent %s: %w", intent.MessageID, err)
+		return false, fmt.Errorf("chatlog: begin delete-with-intent: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	removed, err := deleteMessageTx(ctx, tx, s.identityAddr, intent.MessageID)
+	removed, err := deleteMessageTx(ctx, tx, intent.MessageID)
 	if err != nil {
 		return false, err
 	}
 	if err := noteDeleteIntent(ctx, tx, intent); err != nil {
 		return false, err
 	}
-	// The refusal is the third face of the same fact. A row deleted
-	// without its tombstone can be put straight back by a replay of the
-	// same envelope, and a tombstone written after the commit leaves that
-	// window open for however long the second write takes — or forever,
-	// if the process dies in it.
-	if err := noteWipeTombstones(ctx, tx, []domain.MessageID{intent.MessageID}, tombstoneUntil); err != nil {
-		return false, err
-	}
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("chatlog: commit delete-with-intent %s: %w", intent.MessageID, err)
+		return false, fmt.Errorf("chatlog: commit delete-with-intent: %w", err)
 	}
 	return removed, nil
 }
@@ -255,30 +272,91 @@ func (s *Store) HoldDeleteIntents(ctx context.Context, ids []domain.MessageID, u
 // statement with more placeholders than SQLite takes.
 const holdDeleteIntentBatch = 128
 
-// DeleteIntentCountsByPeer reports how many deletions each peer still owes
-// us. Drives the "waiting for the peer" indicator in the UI, so it is a
-// user-facing number, not diagnostics.
-func (s *Store) DeleteIntentCountsByPeer(ctx context.Context) (map[domain.PeerIdentity]int, error) {
+// PendingDeletes is what one peer still owes us. The two are counted apart
+// because they are different sentences on screen: a number of messages the
+// peer has not confirmed erasing, and a whole conversation they have not
+// confirmed clearing. Folding the wipe into the number would report "1
+// message waiting" for a thread of a thousand.
+type PendingDeletes struct {
+	Messages     int
+	Conversation bool
+}
+
+// Any reports whether anything at all is outstanding for this peer.
+func (p PendingDeletes) Any() bool {
+	return p.Messages > 0 || p.Conversation
+}
+
+// DeleteIntentCountsByPeer reports what each peer still owes us. Drives the
+// "waiting for the peer" indicator in the UI, so it is user-facing, not
+// diagnostics.
+func (s *Store) DeleteIntentCountsByPeer(ctx context.Context) (map[domain.PeerIdentity]PendingDeletes, error) {
+	// The same exclusion as the sweep: a request the wipe speaks for is not a
+	// second thing the user is waiting for, and counting it would put "N
+	// messages waiting to be deleted" on a chat whose wipe has just been
+	// confirmed.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT peer, COUNT(*) FROM message_delete_intents WHERE owed = 1 GROUP BY peer`)
+		SELECT i.peer, i.kind, COUNT(*) FROM message_delete_intents AS i
+		WHERE i.owed = 1
+		  AND NOT (`+coveredByAStandingWipe+`)
+		GROUP BY i.peer, i.kind`)
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: count delete intents per peer: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	counts := make(map[domain.PeerIdentity]int)
+	counts := make(map[domain.PeerIdentity]PendingDeletes)
 	for rows.Next() {
 		var (
 			peer  string
+			kind  string
 			count int
 		)
-		if err := rows.Scan(&peer, &count); err != nil {
+		if err := rows.Scan(&peer, &kind, &count); err != nil {
 			return nil, fmt.Errorf("chatlog: scan delete intent count: %w", err)
 		}
-		counts[domain.PeerIdentityFromWire(peer)] = count
+		identity := domain.PeerIdentityFromWire(peer)
+		pending := counts[identity]
+		switch DeleteIntentKind(kind) {
+		case DeleteIntentConversation:
+			pending.Conversation = true
+		case DeleteIntentMessage:
+			pending.Messages += count
+		default:
+			return nil, fmt.Errorf("chatlog: delete intent of unknown kind %q owed by %s", kind, identity)
+		}
+		counts[identity] = pending
 	}
 	return counts, rows.Err()
 }
+
+// coveredByAStandingWipe matches a per-message request whose peer also has a
+// conversation request that was made no earlier than it.
+//
+// Such a request is CARRIED but not SENT. The wipe asks that peer to erase
+// everything they hold, which is everything the narrower request asks for, so
+// sending both puts two questions about the same rows on the wire and gives the
+// peer two chances to answer one of them with a refusal — a refusal the user
+// reads as "the peer would not delete it" about a chat they have already
+// cleared.
+//
+// It is kept rather than deleted because the row is still the only thing on
+// this disk that names the deleted id, and naming it is what refuses a late
+// re-delivery after a restart (OwedDeleteIntentMessageIDs). It goes when the
+// wipe that covers it is answered, in the same transaction — see
+// SettleConversationDeleteIntent.
+//
+// The link is the wipe's request id, stamped onto these rows when the wipe is
+// written (noteConversationDeleteIntent). A request made AFTER the wipe carries
+// no stamp and is therefore not covered — the peer was already asked to erase
+// everything before that message existed, so that wipe cannot answer for it.
+const coveredByAStandingWipe = `
+	i.kind = 'message' AND i.request_id <> '' AND EXISTS (
+		SELECT 1 FROM message_delete_intents w
+		WHERE w.kind = 'conversation'
+		  AND w.peer = i.peer
+		  AND w.owed = 1
+		  AND w.request_id = i.request_id)`
 
 // DueDeleteIntents returns the intents whose next attempt is due, oldest
 // first, capped at limit. A non-positive limit returns nothing rather than
@@ -290,10 +368,11 @@ func (s *Store) DueDeleteIntents(ctx context.Context, now time.Time, limit int) 
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT message_id, peer, created_at, next_attempt_at, attempts, held
-		FROM message_delete_intents
-		WHERE owed = 1 AND next_attempt_at <= ?
-		ORDER BY next_attempt_at ASC
+		SELECT `+deleteIntentColumns+`
+		FROM message_delete_intents AS i
+		WHERE i.owed = 1 AND i.next_attempt_at <= ?
+		  AND NOT (`+coveredByAStandingWipe+`)
+		ORDER BY i.next_attempt_at ASC
 		LIMIT ?`,
 		now.UTC().Format(time.RFC3339Nano), limit)
 	if err != nil {
@@ -312,15 +391,48 @@ func (s *Store) DueDeleteIntents(ctx context.Context, now time.Time, limit int) 
 	return out, rows.Err()
 }
 
+// OwedDeleteIntentMessageIDs lists the ids whose deletion this node has still
+// not had confirmed by the peer.
+//
+// This is the one durable answer to a replay, and it is allowed to be durable
+// because it is not a record of anything: the row is a TASK — "have this id
+// deleted at the peer" — that this node is openly carrying, and recognising the
+// id it names is inherent to carrying it. It disappears when the task settles,
+// which is also the moment the peer's own copy is gone and the replay has no
+// source left.
+//
+// Read once at startup into the in-memory window rather than queried per
+// arrival: the set is the deletions still in flight, and the alternative puts a
+// database round-trip on the hot path of every message.
+func (s *Store) OwedDeleteIntentMessageIDs(ctx context.Context) ([]domain.MessageID, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT message_id FROM message_delete_intents
+		WHERE kind = 'message' AND owed = 1 AND message_id IS NOT NULL AND message_id <> ''`)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: select owed delete intent ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []domain.MessageID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("chatlog: scan an owed delete intent id: %w", err)
+		}
+		ids = append(ids, domain.MessageID(id))
+	}
+	return ids, rows.Err()
+}
+
 // DeleteIntentByID reads one OWED intent. The scheduler uses it to check
 // an inbound ack against the peer the request was actually addressed to;
 // a row that has settled and only lingers to refuse the id is not a
 // request any more, so an ack cannot match it.
 func (s *Store) DeleteIntentByID(ctx context.Context, messageID domain.MessageID) (DeleteIntent, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT message_id, peer, created_at, next_attempt_at, attempts, held
+		SELECT `+deleteIntentColumns+`
 		FROM message_delete_intents
-		WHERE message_id = ? AND owed = 1`, string(messageID))
+		WHERE message_id = ? AND kind = 'message' AND owed = 1`, string(messageID))
 
 	intent, err := scanDeleteIntent(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -342,30 +454,82 @@ func (s *Store) RecordDeleteIntentAttempt(ctx context.Context, messageID domain.
 		WHERE message_id = ?`,
 		nextAttemptAt.UTC().Format(time.RFC3339Nano), string(messageID))
 	if err != nil {
-		return fmt.Errorf("chatlog: record delete intent attempt %s: %w", messageID, err)
+		return fmt.Errorf("chatlog: record delete intent attempt: %w", err)
 	}
 	return nil
+}
+
+// DropDeleteIntentUnlessCarried retires a per-message request unless a standing
+// wipe is carrying it, and says which of the two happened.
+//
+// A request that a wipe carries is not answerable on its own any more. It was
+// sent before the wipe existed, so the peer may still answer it — and if that
+// answer is a refusal, publishing it puts "the peer would not delete it" on a
+// chat the user has already cleared, which is the message this whole feature
+// exists to stop. The wipe asks for that message too and will be answered in
+// its own right.
+//
+// The row is left alone in that case, not deleted: it is what refuses a late
+// re-delivery of the id across a restart, and it goes when the wipe it rides on
+// is answered (DropConversationDeleteIntent).
+//
+// One transaction, because the caller decides whether to tell the user based on
+// the answer: reading "not carried" and deleting a moment later would let a
+// wipe started in between lose the row it had just taken over.
+func (s *Store) DropDeleteIntentUnlessCarried(ctx context.Context, messageID domain.MessageID) (settled, carried bool, err error) {
+	if messageID == "" {
+		return false, false, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, false, fmt.Errorf("chatlog: begin drop delete intent: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var carriedRow int
+	err = tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM message_delete_intents AS i
+			WHERE i.message_id = ? AND (`+coveredByAStandingWipe+`))`,
+		string(messageID)).Scan(&carriedRow)
+	if err != nil {
+		return false, false, fmt.Errorf("chatlog: check whether a wipe carries the request: %w", err)
+	}
+	if carriedRow == 1 {
+		return false, true, nil
+	}
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM message_delete_intents
+		WHERE message_id = ? AND kind = 'message'`, string(messageID))
+	if err != nil {
+		return false, false, fmt.Errorf("chatlog: drop delete intent: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, false, fmt.Errorf("chatlog: commit drop delete intent: %w", err)
+	}
+	dropped, _ := res.RowsAffected()
+	return dropped > 0, false, nil
 }
 
 // DropDeleteIntent removes the intent and reports whether it was there.
 // Called on any terminal outcome: the peer acknowledged the request, or the
 // scheduler gave up on it.
 func (s *Store) DropDeleteIntent(ctx context.Context, messageID domain.MessageID) (bool, error) {
-	// Settled, not forgotten: the peer owes nothing further, but the id
-	// must keep being refused for as long as a replay of it is plausible.
-	// The row goes when its refusal runs out (ReapWipeTombstones).
+	// The request GOES. It named the message in order to ask for it, and the
+	// asking is over; a settled row kept for its id would be a durable note
+	// that this message existed and was destroyed, which is the trace the
+	// deletion was for.
 	//
-	// What survives is only what a refusal needs — the id and its expiry.
-	// The peer, the schedule and the attempt count described a request
-	// that no longer exists, and keeping them would leave "this id
-	// belonged to a conversation with that identity" on disk for a day
-	// after the deletion the user asked for.
+	// Nothing durable takes its place. From here the id is refused only by the
+	// in-memory window (wipe_tombstone_set.go), and after a restart not at all
+	// — deliberately, because anything that kept refusing it would be a record
+	// of the deletion, and the peer has by now confirmed erasing their copy,
+	// which is what stops the replay at its source.
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE message_delete_intents
-		SET owed = 0, held = 0, peer = '', created_at = '', next_attempt_at = '', attempts = 0
-		WHERE message_id = ? AND owed = 1`, string(messageID))
+		DELETE FROM message_delete_intents
+		WHERE message_id = ? AND kind = 'message' AND owed = 1`, string(messageID))
 	if err != nil {
-		return false, fmt.Errorf("chatlog: settle delete intent %s: %w", messageID, err)
+		return false, fmt.Errorf("chatlog: settle delete intent: %w", err)
 	}
 	settled, _ := res.RowsAffected()
 	return settled > 0, nil
@@ -376,23 +540,37 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
+// deleteIntentColumns is the column list every intent read shares, in the
+// order scanDeleteIntent expects. One constant so a new column cannot be
+// added to one query and forgotten in another.
+const deleteIntentColumns = `kind, message_id, request_id, peer, created_at, next_attempt_at, attempts, held`
+
 func scanDeleteIntent(scanner rowScanner) (DeleteIntent, error) {
 	var (
-		messageID     string
+		kind          string
+		messageID     sql.NullString
+		requestID     string
 		peer          string
 		createdAt     string
 		nextAttemptAt string
 		attempts      int
 		held          int
 	)
-	if err := scanner.Scan(&messageID, &peer, &createdAt, &nextAttemptAt, &attempts, &held); err != nil {
+	if err := scanner.Scan(&kind, &messageID, &requestID, &peer, &createdAt, &nextAttemptAt, &attempts, &held); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return DeleteIntent{}, err
 		}
 		return DeleteIntent{}, fmt.Errorf("chatlog: scan delete intent: %w", err)
 	}
+	// A row whose kind the scheduler cannot read is worse than no row: it
+	// would be dispatched as whatever the zero value happens to mean.
+	if !DeleteIntentKind(kind).Valid() {
+		return DeleteIntent{}, fmt.Errorf("chatlog: delete intent of unknown kind %q", kind)
+	}
 	return DeleteIntent{
-		MessageID:     domain.MessageID(messageID),
+		Kind:          DeleteIntentKind(kind),
+		MessageID:     domain.MessageID(messageID.String),
+		RequestID:     domain.ConversationDeleteRequestID(requestID),
 		Peer:          domain.PeerIdentityFromWire(peer),
 		CreatedAt:     parseOptionalTime(createdAt),
 		NextAttemptAt: parseOptionalTime(nextAttemptAt),
@@ -412,203 +590,26 @@ type ConversationWipeScope struct {
 	IDs []domain.MessageID
 }
 
-// DeleteConversationWithIntents erases the deletable rows of a thread and
-// records what the peer now owes us — ONE intent per message, in the same
-// transaction.
-//
-// A conversation wipe is N message deletions, not a different kind of
-// thing. Saying so in the data is what removes the whole parallel
-// apparatus a bulk request used to need: its own request table, its own
-// row-set table, its own scheduler, its own retry and ack, and — on the
-// receiving side — a frozen candidate set, a survivor set, a cache of
-// answers, and a boundary to describe rows the request could not name.
-// None of it survives the observation that "delete this thread" and
-// "delete this message" differ only in how many ids are involved.
-//
-// What follows from it is not just less code: the request is exact (ids,
-// never a timestamp, so no clock enters it), it is idempotent (a re-issued
-// wipe re-notes the same ids), it needs no size cap (each id travels on
-// its own), and a partly-delivered wipe is simply the intents that have
-// not settled yet.
-//
-// Immutable rows are left standing: the flag is a promise no bulk gesture
-// overrides. Returns the ids actually removed, so the caller can run the
-// side effects a database cannot — file-transfer cleanup and UI eviction.
-//
-// The requests are written PARKED, due at `dueAt`. Whether a message ever
-// reached the wire is the node's answer and cannot be had inside a
-// transaction, so the requests are written where they belong — atomically
-// with the rows — and released by the caller once it has that answer.
-// Nothing can dispatch a request naming a message the peer never saw,
-// because until then there is nothing due to dispatch.
-func (s *Store) DeleteConversationWithIntents(ctx context.Context, peer domain.PeerIdentity, scope ConversationWipeScope, unsent ConversationWipeClassification, now, tombstoneUntil time.Time) (ConversationWipeResult, error) {
-	if peer.IsZero() {
-		return ConversationWipeResult{}, fmt.Errorf("chatlog: delete conversation: peer is required")
-	}
-	if len(scope.IDs) == 0 {
-		return ConversationWipeResult{}, nil
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ConversationWipeResult{}, fmt.Errorf("chatlog: begin delete-conversation %s: %w", peer, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	result := ConversationWipeResult{Removed: make([]domain.MessageID, 0, len(scope.IDs))}
-	for _, id := range scope.IDs {
-		// Classify BEFORE the delete and inside the transaction. The
-		// answer to "can the peer have this?" is written on the very row
-		// about to be destroyed, so reading it here makes the deletion
-		// and its classification one fact. Asking the node for it
-		// afterwards cannot: the row is gone by then, and a crash in
-		// between leaves a request nobody can classify any more.
-		neverEmitted, err := unsent.covers(ctx, tx, id)
-		if err != nil {
-			return ConversationWipeResult{}, err
-		}
-
-		gone, err := deleteMessageTx(ctx, tx, s.identityAddr, id)
-		if err != nil {
-			return ConversationWipeResult{}, err
-		}
-		if gone {
-			result.Removed = append(result.Removed, id)
-		}
-		if neverEmitted {
-			// Nobody has ever seen this message, so nobody is asked
-			// about it: the request would be how the peer learns its id.
-			// Only the refusal below is recorded.
-			result.Recalled = append(result.Recalled, id)
-			continue
-		}
-		// The intent is noted for every remaining id in scope, not only
-		// the rows that were still here: one already removed by a
-		// per-message delete keeps that deletion's own intent
-		// (noteDeleteIntent is keyed by message id and preserves the
-		// schedule it finds), and one removed by something else is
-		// still owed by the peer.
-		if err := noteDeleteIntent(ctx, tx, DeleteIntent{
-			MessageID:     id,
-			Peer:          peer,
-			CreatedAt:     now,
-			NextAttemptAt: now,
-		}); err != nil {
-			return ConversationWipeResult{}, err
-		}
-		result.Owed++
-	}
-
-	// The conversation's ORPHANED reactions go last, once the messages are
-	// gone, because "orphaned" is decided against the rows that are left.
-	//
-	// It has to be a scope-wide statement rather than a consequence of deleting
-	// the messages: a fact still WAITING for a message this node never received
-	// has no message row to be deleted through, and if that message ever arrives
-	// the repair pass would make it visible in a conversation the user erased.
-	//
-	// And it deliberately spares the reactions of a message that SURVIVED — an
-	// immutable one, which this wipe keeps by design. Erasing those would not
-	// stick: the peer re-offers the fact, the message is there, and the chip
-	// comes back. See DeleteOrphanReactions.
-	if _, err := deleteOrphanReactionsTx(ctx, tx, s.identityAddr, domain.ReactionScopeForPeer(peer)); err != nil {
-		return ConversationWipeResult{}, err
-	}
-
-	// The refusals go in the same commit as the deletions, so no row can
-	// be gone while a replay of its envelope is still welcome. The caller
-	// also marks the ids in memory BEFORE calling — that covers the
-	// window between reading the scope and this commit, which no
-	// transaction can reach into.
-	if err := noteWipeTombstones(ctx, tx, scope.IDs, tombstoneUntil); err != nil {
-		return ConversationWipeResult{}, err
-	}
-
-	// The REACTION refusals go the other way — they are dropped — but ONLY if
-	// the conversation is actually gone.
-	//
-	// That condition is the whole of it. With no message left, an offer from
-	// this peer is refused at the door, because the admission check asks whether
-	// a conversation exists at all; keeping a row per erased id would then spend
-	// a bounded table on ids nothing will ever ask about. But this wipe KEEPS
-	// immutable messages, and one survivor is enough to keep the conversation
-	// admitting offers — and then every refusal dropped here is an hour of
-	// held rows waiting to happen, once per id, as soon as the tombstones go.
-	//
-	// By SCOPE, not by the ids this wipe touched: everything deleted from this
-	// conversation EARLIER is refused too, and those ids are in no list the wipe
-	// has — the scope column exists so they can be found at all.
-	if _, err := forgetRefusalsIfConversationGoneTx(ctx, tx, s.identityAddr, peer); err != nil {
-		return ConversationWipeResult{}, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return ConversationWipeResult{}, fmt.Errorf("chatlog: commit delete-conversation %s: %w", peer, err)
-	}
-	return result, nil
-}
-
-// ConversationWipeClassification is the caller's answer to "which of these
-// can the peer not possibly hold?", and how much it is worth.
-//
-// Two witnesses contribute. Proven names the ids the DELIVERY ENGINE
-// reported while it was frozen — it covers a message withheld so recently
-// that its durable mark had not landed yet. The rows carry the other half
-// and cover a message whose retry entry the engine dropped long ago.
-//
-// Trusted is what makes either of them usable. The row's mark is only
-// meaningful while nothing can emit the message behind the transaction's
-// back, which is exactly what the freeze buys. A caller that could NOT
-// stop the engine passes Trusted=false, and every message in scope becomes
-// a request — the peer is asked about ids they may not resolve, rather
-// than a message being deleted here while a copy escapes to them with
-// nothing left to recall it.
-type ConversationWipeClassification struct {
-	Trusted bool
-	Proven  map[domain.MessageID]struct{}
-}
-
-func (c ConversationWipeClassification) covers(ctx context.Context, tx queryContext, id domain.MessageID) (bool, error) {
-	if !c.Trusted {
-		return false, nil
-	}
-	if _, proven := c.Proven[id]; proven {
-		return true, nil
-	}
-	return messageNeverEmittedTx(ctx, tx, id)
-}
-
 // ConversationWipeResult is what one wipe transaction did.
 type ConversationWipeResult struct {
 	// Removed are the ids whose row was actually deleted — what the UI
-	// evicts, never the ids merely considered.
+	// evicts, never the ids merely considered. A wipe of a thread this node
+	// has already emptied removes nothing and is still a wipe: the request
+	// it leaves behind is the whole point of it.
 	Removed []domain.MessageID
-	// Recalled are the ids the rows themselves proved never reached the
-	// wire. No request was written for them and none ever will be.
-	Recalled []domain.MessageID
-	// Owed is how many requests the peer now has to answer.
-	Owed int
 }
 
-// messageNeverEmittedTx reads the row's durable proof that the message
-// never went out. A row that is already gone answers "no proof", which is
-// the cautious direction: the request is written and the peer is asked.
-func messageNeverEmittedTx(ctx context.Context, tx queryContext, id domain.MessageID) (bool, error) {
-	var metadata sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT metadata FROM messages WHERE id = ?`, string(id)).Scan(&metadata)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("chatlog: read emission mark %s: %w", id, err)
-	}
-	return NeverEmitted(metadata.String), nil
-}
-
-// ConversationCandidateIDs lists the rows a wipe of this conversation
-// would remove, read on its own so the caller can mark those ids BEFORE
-// the transaction takes them: inside a transaction there is no moment at
-// which anything could act on them.
+// ConversationCandidateIDs lists the rows a wipe of this conversation would
+// remove: every non-immutable message of the thread, whoever wrote it.
+//
+// Read on its own so the caller can refuse those ids BEFORE the transaction
+// takes them — inside a transaction there is no moment at which anything could
+// act on them — and read WITHOUT a bound of any kind. The request that arrives
+// from a peer says "erase this conversation", not "erase this conversation as
+// it stood at some moment": it carried a moment once, and reconciling one
+// machine's clock with rows stamped by another's went wrong in one direction or
+// the other every time. What a repeat costs is stated where the repeat is
+// handled: it erases whatever is there again, and is answered again.
 func (s *Store) ConversationCandidateIDs(ctx context.Context, peer domain.PeerIdentity) (ConversationWipeScope, error) {
 	if peer.IsZero() {
 		return ConversationWipeScope{}, fmt.Errorf("chatlog: conversation candidate ids: peer is required")
@@ -623,7 +624,7 @@ func (s *Store) ConversationCandidateIDs(ctx context.Context, peer domain.PeerId
 		ORDER BY created_at ASC`,
 		s.identityAddr, id, id, s.identityAddr, FlagImmutable)
 	if err != nil {
-		return ConversationWipeScope{}, fmt.Errorf("chatlog: select conversation %s rows: %w", peer, err)
+		return ConversationWipeScope{}, fmt.Errorf("chatlog: select conversation rows: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -631,12 +632,12 @@ func (s *Store) ConversationCandidateIDs(ctx context.Context, peer domain.PeerId
 	for rows.Next() {
 		var messageID string
 		if err := rows.Scan(&messageID); err != nil {
-			return ConversationWipeScope{}, fmt.Errorf("chatlog: scan conversation %s row: %w", peer, err)
+			return ConversationWipeScope{}, fmt.Errorf("chatlog: scan conversation row: %w", err)
 		}
 		ids = append(ids, domain.MessageID(messageID))
 	}
 	if err := rows.Err(); err != nil {
-		return ConversationWipeScope{}, fmt.Errorf("chatlog: read conversation %s rows: %w", peer, err)
+		return ConversationWipeScope{}, fmt.Errorf("chatlog: read conversation rows: %w", err)
 	}
 	return ConversationWipeScope{IDs: ids}, nil
 }

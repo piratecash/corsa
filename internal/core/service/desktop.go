@@ -411,7 +411,7 @@ func (c *DesktopClient) wireSubServices() {
 	// wired after the node is already accepting connections would be
 	// empty for exactly the window in which a replay of a message
 	// deleted before the restart arrives.
-	c.wipeTombstones = newWipeTombstoneSet(func() wipeTombstoneJournal {
+	c.wipeTombstones = newWipeTombstoneSet(func() deleteTaskList {
 		if c.chatlog == nil {
 			return nil
 		}
@@ -422,6 +422,10 @@ func (c *DesktopClient) wireSubServices() {
 		return store
 	})
 	c.wipeTombstones.Hydrate(context.Background(), time.Now().UTC())
+	// A deletion spans two stores that no transaction covers together; this
+	// finishes the ones whose file half never landed. See
+	// attachment_reconcile.go.
+	c.reconcileOrphanAttachments(context.Background())
 	c.removals = newRemovalGate()
 	c.store = NewMessageStoreAdapter(c.chatlog, c.id, c.wipeTombstones, c.removals)
 	c.dm = NewDMCrypto(c.rpc, c.chatlog, c.id)

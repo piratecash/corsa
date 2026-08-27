@@ -58,8 +58,8 @@ func upgradeWriteRestartRead(t *testing.T, generation legacyGeneration) {
 	if err != nil {
 		t.Fatalf("read legacy conversation: %v", err)
 	}
-	if len(before) != 3 {
-		t.Fatalf("legacy conversation has %d entries, want the 3 fixture rows: %+v", len(before), before)
+	if len(before) != 4 {
+		t.Fatalf("legacy conversation has %d entries, want the 4 fixture rows: %+v", len(before), before)
 	}
 
 	// --- write through the upgraded database ------------------------------
@@ -87,12 +87,13 @@ func upgradeWriteRestartRead(t *testing.T, generation legacyGeneration) {
 		t.Fatalf("SchemaVersion after restart = %s, want %s", got, want)
 	}
 
-	after, err := chatlog.NewStore(restarted.Executor(), self).Read(context.Background(), "dm", peer)
+	after, err := chatlog.NewStore(restarted.Executor(), self).
+		Read(context.Background(), "dm", peer)
 	if err != nil {
 		t.Fatalf("read after restart: %v", err)
 	}
-	if len(after) != 4 {
-		t.Fatalf("conversation has %d entries after restart, want 3 legacy + 1 new: %+v", len(after), after)
+	if len(after) != 5 {
+		t.Fatalf("conversation has %d entries after restart, want 4 legacy + 1 new: %+v", len(after), after)
 	}
 
 	byID := make(map[string]chatlog.Entry, len(after))
@@ -156,8 +157,17 @@ func TestRollbackToThePreviousBinaryStillReadsTheFile(t *testing.T) {
 
 			after := tableDump(t, old, generation.tables)
 			for table, rows := range before {
-				if got := after[table]; got != rows {
-					t.Fatalf("table %s changed for the rolled-back binary:\nbefore:\n%s\nafter:\n%s", table, rows, got)
+				want := rows
+				if table == "messages" {
+					// The rolled-back binary reads the deletion policy the
+					// upgrade normalized (0007), and that is the point: it
+					// keeps answering deletion requests the way the newer
+					// side of the conversation expects. Everything else it
+					// reads must still be the row it wrote.
+					want = withDeletePolicyBackfilled(t, rows)
+				}
+				if got := after[table]; got != want {
+					t.Fatalf("table %s changed for the rolled-back binary:\nwant:\n%s\nafter:\n%s", table, want, got)
 				}
 			}
 		})

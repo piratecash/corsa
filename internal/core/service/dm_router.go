@@ -61,9 +61,13 @@ type RouterPeerState struct {
 	// only lasting trace of a deletion in the UI — the row itself is gone
 	// the moment the user asks — so without it a request handed to an
 	// offline peer would be invisible until the day it completes.
-	// A whole-thread wipe needs no field of its own: it IS N of these
-	// requests, so the count reports it correctly.
 	PendingDeletes int
+	// PendingConversationDelete says the user cleared this chat and the peer
+	// has not confirmed clearing theirs. Apart from the count because it is
+	// a different sentence: a wipe is one request about the conversation, so
+	// folding it in would report "1 message waiting" for a thread of a
+	// thousand.
+	PendingConversationDelete bool
 }
 
 // RouterSnapshot is guaranteed consistent. The UI never writes to it.
@@ -313,6 +317,12 @@ type DMRouter struct {
 	// Entries expire on a TTL (wipeTombstoneTTL); the wipeTombstoneReaperLoop
 	// goroutine launched from Start() prunes stale entries.
 	wipeTombstones *wipeTombstoneSet
+	// beforeDropDeleteIntentForTest runs between the ack handler's read of a
+	// request and its attempt to retire it. Production leaves it nil; a test
+	// installs it to occupy that window, which is the only way to reach the
+	// state where the row is retired by somebody else while an answer for it is
+	// in flight.
+	beforeDropDeleteIntentForTest func()
 
 	// deleteCheckpoint coalesces the WAL truncations that follow
 	// deletions. A thread wipe reaches this node as one message_delete
@@ -340,6 +350,13 @@ type DMRouter struct {
 	// dispatchControlDeleteFn, for the wipe path.
 	// Production code leaves this nil and runs the real dispatch.
 	dispatchControlConversationDeleteFn func(ctx context.Context, peer domain.PeerIdentity, requestID domain.ConversationDeleteRequestID) error
+
+	// dispatchControlConversationDeleteAckFn is the same seam for the ANSWER.
+	// A test that drives a request through the real inbound handler needs to
+	// read what went back without standing up the rpc/identity stack — and the
+	// answer is half of the contract, so a test that could not see it would be
+	// testing the easy half.
+	dispatchControlConversationDeleteAckFn func(ctx context.Context, peer domain.PeerIdentity, ack domain.ConversationDeleteAckPayload) error
 
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
 	pendingScrollToEnd     bool
@@ -638,10 +655,6 @@ func (r *DMRouter) ShutdownDrain(timeout time.Duration) bool {
 	r.opClosed = true
 	r.opMu.Unlock()
 
-	// Before the loops go: a pending checkpoint must not fire against a
-	// database that is closing.
-	r.deleteCheckpoint.stop()
-
 	if r.loopCancel != nil {
 		r.loopCancel()
 	}
@@ -657,6 +670,15 @@ func (r *DMRouter) ShutdownDrain(timeout time.Duration) bool {
 	case <-time.After(timeout):
 		drained = false
 	}
+
+	// AFTER the drain, not before it. A deletion finishing inside the drain
+	// asks for a checkpoint, and a checkpointer stopped first refuses that
+	// request outright — so the pages of the last message the user deleted
+	// stay legible in the write-ahead log, on a path that reported the
+	// deletion as done. Stopping here means every request the drain produced
+	// is either already run or owed, and stop() runs what is owed
+	// synchronously before the composition root closes the database.
+	r.deleteCheckpoint.stop()
 
 	// Repository work stops LAST: everything above may still have been
 	// writing a terminal outcome, and cancelling their context earlier is
@@ -1397,6 +1419,20 @@ func (r *DMRouter) Start() {
 	r.loopCtx, r.loopCancel = context.WithCancel(context.Background())
 	r.opCtx, r.opCancel = context.WithCancel(context.Background())
 
+	// One checkpoint at startup, on the retrying path. storage.Open truncates
+	// the log before handing the database over, but a busy reader can defeat it
+	// there and it only WARNS on an ordinary open — refusing to start over a
+	// checkpoint would be an outage of our own making. What the log may hold at
+	// that moment is the previous run's deletions, so somebody has to keep
+	// asking, and this is the component that does.
+	//
+	// Asked HERE and not in the constructor. The checkpointer runs on a timer
+	// and reads opCtx when it fires; arming it before this line is a read of a
+	// field Start is about to write. It also gave a router that was built and
+	// never started — every fixture that only needs the struct — a background
+	// timer that kept retrying against a database the test had already closed.
+	r.deleteCheckpoint.request()
+
 	// 1. Subscribe to DM-specific ebus events.
 	r.subscribeEvents()
 
@@ -1453,7 +1489,6 @@ func (r *DMRouter) Start() {
 			r.wipeTombstoneReaperLoop(r.loopCtx)
 		}()
 	}
-
 }
 
 // runStartup loads initial data from the database and then replays any
@@ -3761,16 +3796,22 @@ func (r *DMRouter) restorePeerUnread(peer domain.PeerIdentity, ids map[domain.Me
 	r.notify(UIEventSidebarUpdated)
 }
 
-// now reads the router's clock. nil means production, where the clock is the
-// wall clock; tests that reason about future or past timestamps install their
-// own instead of sleeping.
+// now reads THIS NODE'S clock, always in UTC. nil means production, where the
+// clock is the wall clock; tests that reason about future or past timestamps
+// install their own instead of sleeping.
+//
+// The deletion paths make decisions with it, which is why it matters that they
+// go through here rather than calling time.Now: what a wipe reaches depends on
+// where the requester's boundary lands relative to the moment their request
+// arrived HERE (see wipeBoundaryInOurFrame), and two nodes whose clocks differ
+// is the case that has to be provable in a test.
 func (r *DMRouter) now() time.Time {
 	if r.presenceClock == nil {
 		// A router built as a bare struct literal — only tests do that, and
 		// only the ones with no interest in time.
-		return time.Now()
+		return time.Now().UTC()
 	}
-	return r.presenceClock()
+	return r.presenceClock().UTC()
 }
 
 // deliverDecryptedMessage puts a freshly decrypted message where it belongs

@@ -153,6 +153,33 @@ func (a *MessageStoreAdapter) admitWrite(envelope protocol.Envelope) (func(), bo
 	return a.removals.admitWrite(domain.PeerIdentityFromWire(peer))
 }
 
+// sharedDeletePolicy is the deletion policy a direct message is STORED under,
+// whatever the sender stamped on it.
+//
+// The flag decides who may have a message removed from this side, and the
+// answer the product gives is "either participant" (any-delete). It has never
+// been reachable from the interface, so `sender-delete` and the empty value are
+// not choices anybody made — they are what an older build stamped. Migration
+// 0007 rewrote the history that carried them; this is the same rule at the
+// door, for the messages an un-updated peer is still sending today. Without it
+// the old answer keeps arriving, and with it the refusal the user reads as
+// "the peer refused to delete the message".
+//
+// `immutable` is a real decision and survives. `auto-delete-ttl` is an expiry
+// contract rather than a deletion policy and is left alone. Anything outside a
+// direct conversation has no second participant to grant this to.
+func sharedDeletePolicy(topic string, flag protocol.MessageFlag) protocol.MessageFlag {
+	if topic != "dm" {
+		return flag
+	}
+	switch flag {
+	case protocol.MessageFlagSenderDelete, "":
+		return protocol.MessageFlagAnyDelete
+	default:
+		return flag
+	}
+}
+
 // StoreMessage persists an inbound or outbound envelope and classifies the
 // outcome so the node can decide whether it saw a new message or a
 // duplicate. Matches the node.MessageStore contract.
@@ -171,8 +198,11 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		// longer exists — and opens it again, as a message from any
 		// stranger would. Storing it now would leave a row the deletion
 		// has already looked past.
-		log.Debug().
-			Str("id", string(envelope.ID)).
+		// Gated: the line says a conversation of this user's is being erased
+		// right now, and it is written on the arrival path of every message
+		// that meets a wipe in progress.
+		deletionLog().Debug().
+			Str("id", logID(string(envelope.ID))).
 			Msg("chatlog store deferred a message: its conversation is being removed")
 		return node.StoreDeferred
 	}
@@ -186,8 +216,11 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		// failure: it IS one — we had this message and destroyed it — and
 		// the node's duplicate path re-sends the delivery receipt, which
 		// stops the sender retrying a message we are never going to keep.
-		log.Debug().
-			Str("id", string(envelope.ID)).
+		// Gated for the same reason, and it is the sharper of the two: it says
+		// that THIS id was deleted here, which is exactly the fact the database
+		// no longer keeps.
+		deletionLog().Debug().
+			Str("id", logID(string(envelope.ID))).
 			Str("topic", envelope.Topic).
 			Msg("chatlog store refused a re-delivery of a deleted message")
 		return node.StoreDuplicate
@@ -204,7 +237,7 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		// Deferred keeps the message with the SENDER and answers when
 		// the database can give an answer.
 		log.Warn().
-			Str("id", string(envelope.ID)).
+			Str("id", logID(string(envelope.ID))).
 			Str("topic", envelope.Topic).
 			Msg("chatlog store deferred a message: the refusals of deleted ids are unreadable")
 		return node.StoreDeferred
@@ -220,7 +253,7 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		Recipient:      envelope.Recipient,
 		Body:           string(envelope.Payload),
 		CreatedAt:      envelope.CreatedAt.Format(time.RFC3339Nano),
-		Flag:           string(envelope.Flag),
+		Flag:           string(sharedDeletePolicy(envelope.Topic, envelope.Flag)),
 		DeliveryStatus: status,
 		TTLSeconds:     envelope.TTLSeconds,
 	}

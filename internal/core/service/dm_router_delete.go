@@ -137,7 +137,7 @@ func (r *DMRouter) thawAfterClassification(ctx context.Context, peer domain.Peer
 	defer cancel()
 	if err := r.client.ThawConversationDelivery(thawCtx, peer, []domain.MessageID{target}); err != nil {
 		log.Debug().Err(err).
-			Str("target", string(target)).
+			Str("target", logID(string(target))).
 			Msg("dm_router: SendMessageDelete: releasing the freeze bookkeeping failed")
 	}
 }
@@ -223,7 +223,7 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 	frozenNeverEmitted, freezeErr := r.client.FreezeMessageDelivery(ctx, target)
 	if freezeErr != nil {
 		log.Warn().Err(freezeErr).
-			Str("target", string(target)).
+			Str("target", logID(string(target))).
 			Msg("dm_router: SendMessageDelete: could not stop the delivery; the row's proof will not be trusted")
 	}
 	thawOnExit := true
@@ -269,9 +269,9 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 		}
 		if derivedPeer != peer {
 			log.Warn().
-				Str("target", string(target)).
-				Str("caller_peer", peer.String()).
-				Str("derived_peer", derivedPeer.String()).
+				Str("target", logID(string(target))).
+				Str("caller_peer", logID(peer.String())).
+				Str("derived_peer", logID(derivedPeer.String())).
 				Msg("dm_router: SendMessageDelete: caller peer did not match the row; using derived peer")
 		}
 		peer = derivedPeer
@@ -302,8 +302,8 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 
 	} else {
 		log.Debug().
-			Str("target", string(target)).
-			Str("peer", peer.String()).
+			Str("target", logID(string(target))).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: SendMessageDelete: target already absent locally; scheduling the peer-side deletion only")
 	}
 
@@ -312,13 +312,12 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 	// our receipt, so the id has to be refused from here on — otherwise
 	// such an echo resurfaces as a bubble the user already deleted.
 	//
-	// Volatile mark only. The durable half rides the deletion's own
-	// transaction below, so the row and its refusal land together and a
-	// rollback leaves neither. Writing it here instead would put an
-	// hour's refusal of a LIVE message on disk whenever that transaction
-	// fails: metadata about a message that still exists, and a trap that
-	// swallows its next legitimate re-delivery.
-	r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC())
+	// In memory, before anything is decided, and covering the window until the
+	// transaction below commits. What carries the refusal across a restart is
+	// the REQUEST that transaction writes — while the peer still owes us their
+	// copy, the id is one this node is openly asking about, so refusing it
+	// records nothing extra. See wipe_tombstone_set.go.
+	r.wipeTombstones.Note([]domain.MessageID{target}, time.Now().UTC())
 
 	now := time.Now().UTC()
 	intent := chatlog.DeleteIntent{
@@ -334,10 +333,10 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 	if found {
 		if err := r.removeLocalMessage(ctx, store, peer, target, route, intent); err != nil {
 			// Nothing was committed, so the row is still here and the
-			// mark above names a live message. Drop it: a refusal for a
-			// row the user can still see is both a record of it and a
-			// trap for its next legitimate re-delivery.
-			r.wipeTombstones.Forget(ctx, []domain.MessageID{target})
+			// refusal above names a live message. Lift it: a refusal for a
+			// row the user can still see is a trap for its next legitimate
+			// re-delivery.
+			r.wipeTombstones.Forget([]domain.MessageID{target})
 			return route, err
 		}
 		if route.CancelsDelivery() {
@@ -351,10 +350,9 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 			}
 		}
 	} else {
-		// The recovery path: no row to delete, so no transaction for the
-		// refusal to ride. It is written on its own — the id is exactly
-		// the one a late echo would re-insert.
-		r.wipeTombstones.Note(ctx, []domain.MessageID{target}, time.Now().UTC())
+		// The recovery path: no row to delete. The refusal planted above
+		// stands on its own — the id is exactly the one a late echo would
+		// insert for the first time.
 		if route.SchedulesPeerDeletion() {
 			if err := store.NoteDeleteIntent(ctx, intent); err != nil {
 				return route, fmt.Errorf("schedule peer-side delete of %s: %w", target, err)
@@ -378,40 +376,61 @@ func (r *DMRouter) SendMessageDelete(ctx context.Context, peer domain.PeerIdenti
 	r.refreshPendingDeleteCounts()
 
 	if !r.peerReachable(peer) {
-		log.Info().
-			Str("target", string(target)).
-			Str("peer", peer.String()).
+		deletionLog().Info().
+			Str("target", logID(string(target))).
+			Str("peer", logID(peer.String())).
 			Str("route", string(route)).
 			Msg("dm_router: message deleted locally; peer-side deletion scheduled until the peer is reachable")
 		return route, nil
 	}
 
 	r.dispatchScheduledDelete(ctx, store, intent, now)
-	log.Info().
-		Str("target", string(target)).
-		Str("peer", peer.String()).
+	deletionLog().Info().
+		Str("target", logID(string(target))).
+		Str("peer", logID(peer.String())).
 		Str("route", string(route)).
 		Msg("dm_router: message deleted locally; message_delete dispatched, awaiting peer ack")
 	return route, nil
 }
 
-// dispatchScheduledDelete sends one message_delete for the intent and
-// charges the attempt. Shared by the immediate send in
-// SendMessageDelete and the sweep, so both count attempts the same way:
-// an attempt is one dispatch this node actually made, successful or not.
-// A failed send is exactly the case the backoff exists for.
+// dispatchScheduledDelete sends one request for the intent and charges the
+// attempt. Shared by the immediate send in SendMessageDelete and the sweep, so
+// both count attempts the same way: an attempt is one dispatch this node
+// actually made, successful or not. A failed send is exactly the case the
+// backoff exists for.
+//
+// The two kinds differ only in what goes on the wire and in what the charge is
+// written against — one is keyed by message id, the other by peer.
 func (r *DMRouter) dispatchScheduledDelete(ctx context.Context, store *chatlog.Store, intent chatlog.DeleteIntent, now time.Time) {
+	attempts := intent.Attempts + 1
+	nextAttemptAt := now.Add(deleteIntentBackoff(attempts))
+
+	if intent.Kind == chatlog.DeleteIntentConversation {
+		if err := r.dispatchConversationDelete(ctx, intent.Peer, intent.RequestID); err != nil {
+			log.Debug().Err(err).
+				Str("peer", logID(intent.Peer.String())).
+				Str("request_id", logID(string(intent.RequestID))).
+				Int("attempt", attempts).
+				Msg("dm_router: conversation_delete send failed; charging the attempt and backing off")
+		}
+		if err := store.RecordConversationDeleteAttempt(ctx, intent.Peer, intent.RequestID, nextAttemptAt); err != nil {
+			log.Warn().Err(err).
+				Str("peer", logID(intent.Peer.String())).
+				Msg("dm_router: charging a conversation-delete attempt failed; the sweep may re-send early")
+		}
+		return
+	}
+
 	if err := r.dispatchMessageDelete(ctx, intent.Peer, intent.MessageID); err != nil {
 		log.Debug().Err(err).
-			Str("target", string(intent.MessageID)).
-			Str("peer", intent.Peer.String()).
-			Int("attempt", intent.Attempts+1).
+			Str("target", logID(string(intent.MessageID))).
+			Str("peer", logID(intent.Peer.String())).
+			Int("attempt", attempts).
 			Msg("dm_router: message_delete send failed; charging the attempt and backing off")
 	}
-	attempts := intent.Attempts + 1
-	if err := store.RecordDeleteIntentAttempt(ctx, intent.MessageID, now.Add(deleteIntentBackoff(attempts))); err != nil {
+	if err := store.RecordDeleteIntentAttempt(ctx, intent.MessageID, nextAttemptAt); err != nil {
 		log.Warn().Err(err).
-			Str("target", string(intent.MessageID)).
+			Str("target", logID(string(intent.MessageID))).
 			Msg("dm_router: charging a delete-intent attempt failed; the sweep may re-send early")
 	}
 }
@@ -440,24 +459,16 @@ func (r *DMRouter) peerReachable(peer domain.PeerIdentity) bool {
 
 // removeLocalMessage destroys the local copy: the chatlog row and every
 // per-message trace under its id, any backing file-transfer state, and
-// its place in the live UI. The refusal of the id — and, when the route
-// owes the peer a deletion, the intent — is written in the SAME
-// transaction as the row. They are one invariant seen from three sides,
-// and a crash between separate commits leaves either a destroyed message
-// nobody will ever ask the peer about, or one whose next replay is
-// welcomed straight back in.
+// its place in the live UI. When the route owes the peer a deletion, the
+// request is written in the SAME transaction as the row: a crash between
+// separate commits would leave a destroyed message nobody will ever ask
+// the peer about.
 //
 // It deliberately publishes no outcome: that belongs to whoever knows
 // the request is finished. For a local or recalled route that is the
 // caller, immediately; for the scheduled ones it is the ack handler or
 // the intent's expiry, possibly days later.
 func (r *DMRouter) removeLocalMessage(ctx context.Context, store *chatlog.Store, peer domain.PeerIdentity, target domain.MessageID, route domain.MessageDeleteRoute, intent chatlog.DeleteIntent) error {
-	// The volatile mark is already in place (SendMessageDelete plants it
-	// before deciding anything); Mark is idempotent and hands back the
-	// expiry the durable half commits with, inside the same transaction
-	// as the row.
-	expiry := r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC())
-
 	// The reaction queue is bracketed around the delete ITSELF, and around
 	// nothing else: it names reactions rather than messages, so it cannot see
 	// this coming, and a frame built from the record a moment ago would
@@ -479,12 +490,12 @@ func (r *DMRouter) removeLocalMessage(ctx context.Context, store *chatlog.Store,
 	var removed bool
 	if route.SchedulesPeerDeletion() {
 		var err error
-		if removed, err = store.DeleteWithIntent(ctx, intent, expiry); err != nil {
+		if removed, err = store.DeleteWithIntent(ctx, intent); err != nil {
 			return fmt.Errorf("delete %s and schedule the peer-side removal: %w", target, err)
 		}
 	} else {
 		var err error
-		if removed, err = store.DeleteMessageWithTombstone(ctx, target, expiry); err != nil {
+		if removed, err = store.DeleteByID(ctx, target); err != nil {
 			return fmt.Errorf("delete chatlog entry %s: %w", target, err)
 		}
 	}
@@ -508,8 +519,8 @@ func (r *DMRouter) removeLocalMessage(ctx context.Context, store *chatlog.Store,
 		// a deletion that did not happen and mark every read in flight as
 		// stale.
 		log.Debug().
-			Str("target", string(target)).
-			Str("peer", peer.String()).
+			Str("target", logID(string(target))).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: local copy of the message was already gone")
 		return nil
 	}
@@ -517,37 +528,65 @@ func (r *DMRouter) removeLocalMessage(ctx context.Context, store *chatlog.Store,
 	r.evictDeletedMessageFromUI(peer, target)
 	r.checkpointAfterDelete(ctx, store)
 
-	log.Info().
-		Str("target", string(target)).
-		Str("peer", peer.String()).
+	deletionLog().Info().
+		Str("target", logID(string(target))).
+		Str("peer", logID(peer.String())).
 		Str("route", string(route)).
 		Msg("dm_router: local copy of the message removed")
 	return nil
 }
 
-// checkpointAfterDelete retires the write-ahead log so the pages that
-// held the removed message stop existing in the file, not just in the
-// database's logical view. secure_delete zeroes the freed page, but in
-// WAL mode that zeroing is itself a log frame — the original bytes sit
-// in the -wal until a checkpoint folds it back.
+// deleteCheckpointWait is the deadline this path puts on the truncation.
 //
-// Best-effort: a busy checkpoint is not a failed deletion, and the
-// automatic one still comes.
-func (r *DMRouter) checkpointAfterDelete(ctx context.Context, store *chatlog.Store) {
-	if err := store.CheckpointWAL(ctx); err != nil {
-		log.Debug().Err(err).Msg("dm_router: wal checkpoint after delete did not complete; the automatic one will retire the pages")
+// It is an UPPER bound and not a promise: `wal_checkpoint(TRUNCATE)` waits for
+// the readers holding the log inside SQLite, up to the connection's
+// busy_timeout (five seconds), and the driver in use does not interrupt a
+// running pragma when the context expires. So a deletion that meets a live
+// reader can hold this path for that timeout, once, and then answer.
+//
+// That is accepted rather than tuned around. The readers here are single
+// queries — a conversation load, a preview refresh — so the obstacle clears in
+// milliseconds in every ordinary case, and the alternative to waiting is
+// telling somebody a message is gone while its bytes are still in a file.
+const deleteCheckpointWait = 500 * time.Millisecond
+
+// checkpointAfterDelete retires the write-ahead log so the pages that held the
+// removed message stop existing in the file, not just in the database's logical
+// view. secure_delete zeroes the freed page, but in WAL mode that zeroing is
+// itself a log frame — the original bytes sit in the -wal until a checkpoint
+// folds it back.
+//
+// It REPORTS whether that happened, and the callers that tell somebody a
+// deletion is finished — the ack this node sends, the outcome it publishes —
+// wait for a true answer. That is the whole point of the contract: "deleted"
+// said over a log that still holds the message is a promise the file does not
+// keep, and after it is said the request is retired and nothing looks at that
+// id again.
+//
+// A failure still hands the work to the retrying checkpointer, so the pages do
+// leave; what the caller loses is the right to call it done yet.
+func (r *DMRouter) checkpointAfterDelete(ctx context.Context, store *chatlog.Store) bool {
+	attemptCtx, cancel := context.WithTimeout(ctx, deleteCheckpointWait)
+	defer cancel()
+
+	if err := store.CheckpointWAL(attemptCtx); err != nil {
+		log.Debug().Err(err).
+			Msg("dm_router: the write-ahead log still holds a deletion; not reporting it finished yet")
+		r.checkpointSoonAfterDelete()
+		return false
 	}
+	return true
 }
 
 // checkpointSoonAfterDelete asks for a checkpoint without taking one per
 // row.
 //
-// A thread wipe reaches the receiver as N separate message_delete
-// commands, so a checkpoint per deletion is N truncations of the
-// write-ahead log — every one of them waiting on readers and rewriting
-// the file — for hours on a long thread, on a device that has to sleep.
-// The sender's side of the same wipe pays exactly one, after its single
-// transaction.
+// A burst of separate message_delete commands — a peer working through a
+// backlog of single deletions — would otherwise mean one truncation of the
+// write-ahead log per row, every one of them waiting on readers and
+// rewriting the file, on a device that has to sleep. A thread wipe is not
+// among them any more: it arrives as ONE command and pays exactly one
+// truncation, like the sender's side of it.
 //
 // Coalescing keeps the guarantee that matters: the pages holding a
 // deleted message leave the log promptly, rather than whenever the
@@ -792,7 +831,7 @@ func (r *DMRouter) retryPendingDeleteReconcile(ctx context.Context) {
 		}
 		r.mu.Unlock()
 		if left <= 0 {
-			log.Warn().Str("peer", peer.String()).Msg("dm_router: giving up on the post-deletion sidebar refresh; the row keeps the deleted message until something else touches this conversation")
+			log.Warn().Str("peer", logID(peer.String())).Msg("dm_router: giving up on the post-deletion sidebar refresh; the row keeps the deleted message until something else touches this conversation")
 		}
 	}
 }
@@ -848,8 +887,8 @@ func (r *DMRouter) onControlMessage(event protocol.LocalChangeEvent) {
 	cmd, payload, sender, ok := r.client.DecryptIncomingControlMessage(event)
 	if !ok {
 		log.Debug().
-			Str("message_id", event.MessageID).
-			Str("envelope_sender", event.Sender).
+			Str("message_id", logID(event.MessageID)).
+			Str("envelope_sender", logID(event.Sender)).
 			Msg("dm_router: control DM decrypt failed or non-control inner command")
 		return
 	}
@@ -861,6 +900,10 @@ func (r *DMRouter) onControlMessage(event protocol.LocalChangeEvent) {
 		r.handleInboundMessageDelete(sender, payload)
 	case domain.DMCommandMessageDeleteAck:
 		r.handleInboundMessageDeleteAck(sender, payload)
+	case domain.DMCommandConversationDelete:
+		r.handleInboundConversationDelete(sender, payload)
+	case domain.DMCommandConversationDeleteAck:
+		r.handleInboundConversationDeleteAck(sender, payload)
 	default:
 		log.Debug().
 			Str("command", string(cmd)).
@@ -887,14 +930,14 @@ func (r *DMRouter) handleInboundMessageDelete(envelopeSender domain.PeerIdentity
 	var payload domain.MessageDeletePayload
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		log.Debug().Err(err).
-			Str("envelope_sender", envelopeSender.String()).
+			Str("envelope_sender", logID(envelopeSender.String())).
 			Msg("dm_router: message_delete payload malformed; dropping")
 		return
 	}
 	if !payload.Valid() {
 		log.Debug().
-			Str("envelope_sender", envelopeSender.String()).
-			Str("target_id", string(payload.TargetID)).
+			Str("envelope_sender", logID(envelopeSender.String())).
+			Str("target_id", logID(string(payload.TargetID))).
 			Msg("dm_router: message_delete payload invalid; dropping")
 		return
 	}
@@ -914,7 +957,7 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 		// sitting in a chatlog that is merely unreachable right now.
 		// `error` keeps their intent alive so the next sweep asks again.
 		log.Warn().
-			Str("target", string(target)).
+			Str("target", logID(string(target))).
 			Msg("dm_router: applyInboundDelete: chatlog store unavailable")
 		return domain.MessageDeleteStatusError
 	}
@@ -922,7 +965,7 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 	entry, found, err := store.EntryByID(r.opContext(), target)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("target", string(target)).
+			Str("target", logID(string(target))).
 			Msg("dm_router: applyInboundDelete: lookup failed")
 		return domain.MessageDeleteStatusError
 	}
@@ -936,17 +979,28 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 		// to ask again.
 		//
 		// Refusing it costs nothing when the row really was deleted
-		// earlier: the tombstone expires on its own hour.
-		if err := store.NoteWipeTombstones(r.opContext(), []domain.MessageID{target},
-			r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC())); err != nil {
-			// not_found is terminal — it retires the sender's request —
-			// and it is only true if the message stays away. Without a
-			// durable refusal a restart forgets it, the in-flight copy
-			// lands, and nobody is left to ask. `error` costs the sender
-			// one retry instead.
-			log.Warn().Err(err).
-				Str("target", string(target)).
-				Msg("dm_router: applyInboundDelete: refusing an unseen target did not persist; answering error so the sender asks again")
+		// earlier: the refusal expires on its own.
+		//
+		// In memory only, and this is the one place that leaves a real
+		// window: `not_found` is terminal, so the sender retires the
+		// request, and a copy that lands after THIS process restarts has
+		// nothing left to turn it away. Writing the id down instead would
+		// mean keeping a list of messages this node was asked to delete and
+		// never had — a record of the peer's deletions, on our disk, past
+		// the moment either of us needed it.
+		r.wipeTombstones.Note([]domain.MessageID{target}, r.now())
+
+		// `not_found` is TERMINAL — the sender retires the request on it — so
+		// it may not be said over a log that still holds the message. This is
+		// the path a busy first attempt comes back to: the row went, the
+		// truncation was refused, we answered `error`, and the retry arrives
+		// here with nothing left to delete. Without this the second attempt
+		// would close the request while the bytes were still in the sidecar,
+		// which is exactly the hole the first attempt refused to leave.
+		//
+		// It also costs nothing in the ordinary case: the log is clean, the
+		// checkpoint is a no-op, and the answer goes out.
+		if !r.checkpointAfterDelete(r.opContext(), store) {
 			return domain.MessageDeleteStatusError
 		}
 		return domain.MessageDeleteStatusNotFound
@@ -955,17 +1009,17 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 	flag := protocol.MessageFlag(entry.Flag)
 	if flag == protocol.MessageFlagImmutable {
 		log.Warn().
-			Str("target", string(target)).
-			Str("envelope_sender", envelopeSender.String()).
+			Str("target", logID(string(target))).
+			Str("envelope_sender", logID(envelopeSender.String())).
 			Msg("dm_router: applyInboundDelete: target is immutable")
 		return domain.MessageDeleteStatusImmutable
 	}
 
 	if !authorizedToDelete(flag, envelopeSender, domain.PeerIdentityFromWire(entry.Sender), domain.PeerIdentityFromWire(entry.Recipient)) {
 		log.Warn().
-			Str("target", string(target)).
-			Str("envelope_sender", envelopeSender.String()).
-			Str("target_sender", entry.Sender).
+			Str("target", logID(string(target))).
+			Str("envelope_sender", logID(envelopeSender.String())).
+			Str("target_sender", logID(entry.Sender)).
 			Str("flag", string(flag)).
 			Msg("dm_router: applyInboundDelete: envelope sender not authorized for this flag")
 		return domain.MessageDeleteStatusDenied
@@ -973,13 +1027,13 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 
 	// Bracketed like the local delete: a reaction frame built a moment ago must
 	// not reach the peer about a message this node is erasing right now.
+	r.wipeTombstones.Note([]domain.MessageID{target}, time.Now().UTC())
 	resumeReactions := r.client.HoldReactionSends(envelopeSender)
-	inboundRemoved, err := store.DeleteMessageWithTombstone(r.opContext(), target,
-		r.wipeTombstones.Mark([]domain.MessageID{target}, time.Now().UTC()))
+	inboundRemoved, err := store.DeleteByID(r.opContext(), target)
 	resumeReactions()
 	if err != nil {
 		log.Warn().Err(err).
-			Str("target", string(target)).
+			Str("target", logID(string(target))).
 			Msg("dm_router: applyInboundDelete: chatlog DeleteByID failed")
 		// The row is authorized for deletion and is still here. Saying
 		// not_found would retire the sender's intent over a database
@@ -993,12 +1047,20 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 			r.fileBridge.OnMessageDeleted(target)
 		}
 	})
-	// The peer asked us to destroy this message — the deletion the
-	// protocol exists to deliver, and it gets the same on-disk treatment
-	// as our own. Coalesced rather than immediate: a thread wipe arrives
-	// as N of these commands, and a truncation per row would run for
-	// hours on a long thread.
-	r.checkpointSoonAfterDelete()
+	// The peer asked us to destroy this message — the deletion the protocol
+	// exists to deliver — and it gets the same on-disk treatment as our own,
+	// BEFORE we answer them.
+	//
+	// Order matters here, and so does the ANSWER. `deleted` is what makes the
+	// requester retire their request: after it, nothing anywhere will look at
+	// this message again. Saying it while the pages that held it are still
+	// legible in the -wal file would make that the final state.
+	//
+	// So a log that will not truncate is answered `error` instead. The row is
+	// already gone from the database — this costs the requester one more
+	// round-trip of an idempotent request, and the next attempt finds nothing
+	// to delete and a log it can retire.
+	truncated := r.checkpointAfterDelete(r.opContext(), store)
 
 	// Drop the deleted bubble from the live conversation cache and
 	// refresh the sidebar preview. The conversation peer (relative to
@@ -1015,9 +1077,19 @@ func (r *DMRouter) applyInboundDelete(envelopeSender domain.PeerIdentity, target
 	}
 	r.evictDeletedMessageFromUI(threadPeer, target)
 
-	log.Info().
-		Str("target", string(target)).
-		Str("envelope_sender", envelopeSender.String()).
+	if !truncated {
+		// The row is gone from the database and the screen, but the pages that
+		// held it are still in the log. `deleted` is terminal for the
+		// requester, so answering it here would make "still readable in a
+		// sidecar" the final state. `error` costs one more round-trip of an
+		// idempotent request; the next attempt finds nothing to delete and a
+		// log it can retire.
+		return domain.MessageDeleteStatusError
+	}
+
+	deletionLog().Info().
+		Str("target", logID(string(target))).
+		Str("envelope_sender", logID(envelopeSender.String())).
 		Msg("dm_router: applied inbound message_delete")
 
 	return domain.MessageDeleteStatusDeleted
@@ -1066,7 +1138,7 @@ func (r *DMRouter) replyMessageDeleteAck(peer domain.PeerIdentity, target domain
 	})
 	if err != nil {
 		log.Warn().Err(err).
-			Str("target", string(target)).
+			Str("target", logID(string(target))).
 			Msg("dm_router: marshal message_delete_ack failed")
 		return
 	}
@@ -1074,8 +1146,8 @@ func (r *DMRouter) replyMessageDeleteAck(peer domain.PeerIdentity, target domain
 	defer cancel()
 	if _, err := r.client.SendControlMessage(ctx, peer, domain.DMCommandMessageDeleteAck, payload); err != nil {
 		log.Warn().Err(err).
-			Str("target", string(target)).
-			Str("peer", peer.String()).
+			Str("target", logID(string(target))).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: send message_delete_ack failed; requester will retry")
 	}
 }
@@ -1099,14 +1171,14 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	var ack domain.MessageDeleteAckPayload
 	if err := json.Unmarshal([]byte(payloadJSON), &ack); err != nil {
 		log.Debug().Err(err).
-			Str("envelope_sender", envelopeSender.String()).
+			Str("envelope_sender", logID(envelopeSender.String())).
 			Msg("dm_router: message_delete_ack payload malformed; dropping")
 		return
 	}
 	if !ack.Valid() {
 		log.Debug().
-			Str("envelope_sender", envelopeSender.String()).
-			Str("target_id", string(ack.TargetID)).
+			Str("envelope_sender", logID(envelopeSender.String())).
+			Str("target_id", logID(string(ack.TargetID))).
 			Str("status", string(ack.Status)).
 			Msg("dm_router: message_delete_ack payload invalid; dropping")
 		return
@@ -1115,7 +1187,7 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	store := r.client.chatlog.Store()
 	if store == nil {
 		log.Warn().
-			Str("target", string(ack.TargetID)).
+			Str("target", logID(string(ack.TargetID))).
 			Msg("dm_router: message_delete_ack: chatlog store unavailable; intent left scheduled")
 		return
 	}
@@ -1124,13 +1196,13 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	intent, found, err := store.DeleteIntentByID(ctx, ack.TargetID)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("target", string(ack.TargetID)).
+			Str("target", logID(string(ack.TargetID))).
 			Msg("dm_router: message_delete_ack: intent lookup failed; the sweep will re-issue")
 		return
 	}
 	if !found {
 		log.Debug().
-			Str("target", string(ack.TargetID)).
+			Str("target", logID(string(ack.TargetID))).
 			Str("status", string(ack.Status)).
 			Msg("dm_router: message_delete_ack for an unknown intent; dropping")
 		return
@@ -1140,9 +1212,9 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 	// scheduled so the real peer's ack can still settle it.
 	if intent.Peer != envelopeSender {
 		log.Warn().
-			Str("target", string(ack.TargetID)).
-			Str("expected_peer", intent.Peer.String()).
-			Str("actual_envelope_sender", envelopeSender.String()).
+			Str("target", logID(string(ack.TargetID))).
+			Str("expected_peer", logID(intent.Peer.String())).
+			Str("actual_envelope_sender", logID(envelopeSender.String())).
 			Msg("dm_router: message_delete_ack from unexpected peer; intent kept")
 		return
 	}
@@ -1158,8 +1230,8 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 		// burning the give-up budget at double rate. An ack is the
 		// answer to an attempt, not another attempt.
 		log.Info().
-			Str("target", string(ack.TargetID)).
-			Str("peer", envelopeSender.String()).
+			Str("target", logID(string(ack.TargetID))).
+			Str("peer", logID(envelopeSender.String())).
 			Int("attempts", intent.Attempts).
 			Msg("dm_router: message_delete_ack: peer reported a transient failure; intent kept")
 		return
@@ -1178,9 +1250,22 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 		removed, err := store.DeleteByID(ctx, ack.TargetID)
 		resumeReactions()
 		if err != nil {
+			// The local copy may still be here, so NOTHING below may run: the
+			// request stays, the UI is not told the deletion finished, and the
+			// sweep asks again. Reporting success on a failed delete is how a
+			// message the user destroyed comes back after a restart with
+			// nobody left to remove it — the peer has answered, so if the
+			// request went too, no path would ever look at this id again.
 			log.Warn().Err(err).
-				Str("target", string(ack.TargetID)).
-				Msg("dm_router: message_delete_ack: defensive DeleteByID failed")
+				Str("target", logID(string(ack.TargetID))).
+				Msg("dm_router: message_delete_ack: the local copy could not be removed; keeping the request so the sweep retries")
+			return
+		}
+		if removed {
+			// A row that came BACK after its refusal expired and is being
+			// removed again: its pages are in the log like any other
+			// deletion's, and nothing else on this path would retire them.
+			r.checkpointSoonAfterDelete()
 		}
 		r.withFileOps(envelopeSender, removed, func() {
 			if r.fileBridge != nil {
@@ -1190,20 +1275,85 @@ func (r *DMRouter) handleInboundMessageDeleteAck(envelopeSender domain.PeerIdent
 		r.evictDeletedMessageFromUI(envelopeSender, ack.TargetID)
 	}
 
-	if _, err := store.DropDeleteIntent(ctx, ack.TargetID); err != nil {
-		// The peer has answered; leaving the row means the sweep
-		// re-asks, which the peer answers idempotently. Log and move
-		// on rather than withholding the outcome from the user.
-		log.Warn().Err(err).
-			Str("target", string(ack.TargetID)).
-			Msg("dm_router: message_delete_ack: dropping the intent failed; the sweep may re-ask")
+	if r.beforeDropDeleteIntentForTest != nil {
+		r.beforeDropDeleteIntentForTest()
 	}
+	settled, carried, err := store.DropDeleteIntentUnlessCarried(ctx, ack.TargetID)
+	if carried {
+		// The answer arrived for a request a wipe has since taken over. The
+		// request was already on the wire when the user cleared the chat, so
+		// the peer answers it on its own terms — and `denied` here would be
+		// "the peer would not delete it" about a conversation the user has been
+		// told is gone. The wipe asks for this message too and is answered in
+		// its own right; nothing is published, and the row stays until that
+		// answer comes.
+		deletionLog().Debug().
+			Str("target", logID(string(ack.TargetID))).
+			Str("status", string(ack.Status)).
+			Msg("dm_router: message_delete_ack for a request the wipe carries; the wipe answers for it")
+		r.refreshPendingDeleteCounts()
+		return
+	}
+	if err != nil {
+		// The request is still on disk, so the sweep will ask again and the
+		// "waiting for the peer" indicator is still true. Publishing a settled
+		// outcome here would put the UI in two states at once: "the messages
+		// are gone" and a pending marker that keeps re-dispatching.
+		log.Warn().Err(err).
+			Str("target", logID(string(ack.TargetID))).
+			Msg("dm_router: message_delete_ack: dropping the request failed; it stays scheduled and the outcome is not published")
+		r.refreshPendingDeleteCounts()
+		return
+	}
+	if !settled {
+		// The row went while this answer was in flight — the wipe that carried
+		// it was answered first, or an earlier copy of this same ack settled
+		// it. Either way the request is retired, and an answer to a retired
+		// request is dropped: publishing here would report a refusal for a
+		// deletion nothing is waiting for any more.
+		deletionLog().Debug().
+			Str("target", logID(string(ack.TargetID))).
+			Str("status", string(ack.Status)).
+			Msg("dm_router: message_delete_ack for a request that was already retired; dropping")
+		r.refreshPendingDeleteCounts()
+		return
+	}
+	// The truncation is attempted here, and its FAILURE does not stop the
+	// outcome from being published.
+	//
+	// The distinction is exact. An answer that will be re-asked — the ack this
+	// node sends a peer — can be withheld until the log is clean, because the
+	// peer asks again and nothing is lost. A report to our OWN user cannot: the request has just been
+	// retired, so no sweep will come back, a repeat of the peer's ack is
+	// dropped as unknown, and withholding it means the pending indicator
+	// disappears while "the messages are deleted" is never said. The
+	// information would be gone for good.
+	//
+	// The physical erasure is still guaranteed — by the retrying
+	// checkpointer, which is what checkpointAfterDelete hands the work to
+	// — just not by this line.
+	//
+	// The whole split, and what it costs, is in docs/dm-commands.md §"Why
+	// an outcome is reported before the log is truncated".
+	r.checkpointAfterDelete(ctx, store)
+	// The refusal of this id STAYS. An ack says the peer removed the row from their
+	// database; it says nothing about the copies of the envelope that may
+	// still be sitting in a relay's buffer or an inbox queue, and those are
+	// exactly what the refusal exists to turn away. Dropping it on the ack
+	// dropping it on the ack re-opens the window inside the same process — no
+	// restart needed.
+	//
+	// It expires on its own, at the sender's reseed horizon
+	// (wipeTombstoneTTL), which is the moment a replay stops being
+	// possible. Memory is not the disk: the contract this design keeps is
+	// that nothing is WRITTEN DOWN, and a bounded in-memory set that
+	// expires by itself is not a record of anything.
 
 	r.refreshPendingDeleteCounts()
 
-	log.Info().
-		Str("target", string(ack.TargetID)).
-		Str("peer", envelopeSender.String()).
+	deletionLog().Info().
+		Str("target", logID(string(ack.TargetID))).
+		Str("peer", logID(envelopeSender.String())).
 		Str("status", string(ack.Status)).
 		Int("attempts", intent.Attempts).
 		Msg("dm_router: message_delete completed")
@@ -1294,19 +1444,19 @@ func (r *DMRouter) processDeleteRetryDue(ctx context.Context, now time.Time) {
 
 	var (
 		dispatchedPerPeer = make(map[domain.PeerIdentity]int, len(due))
-		absent            []domain.MessageID
-		throttled         []domain.MessageID
+		absent            parkedIntents
+		throttled         parkedIntents
 	)
 	for _, intent := range due {
 		if r.expireDeleteIntent(ctx, store, intent, now) {
 			continue
 		}
 		if !r.peerReachable(intent.Peer) {
-			absent = append(absent, intent.MessageID)
+			absent.add(intent)
 			continue
 		}
 		if dispatchedPerPeer[intent.Peer] >= deleteIntentPerPeerPerSweep {
-			throttled = append(throttled, intent.MessageID)
+			throttled.add(intent)
 			continue
 		}
 
@@ -1327,8 +1477,8 @@ func (r *DMRouter) processDeleteRetryDue(ctx context.Context, now time.Time) {
 	// goroutine that runs the wipe; if that goroutine never gets there —
 	// a panic between Begin and the launch, a scheduling stall past the
 	// TTL — the latch would pin the conversation shut for good. Swept
-	// here rather than from a loop of its own: it is the same subsystem
-	// on a fitting cadence, and a wipe is now N of these intents anyway.
+	// here rather than from a loop of its own: it is the same subsystem on
+	// a fitting cadence, and the wipe's own request is swept here too.
 	r.reapStaleWipeReservations(now)
 }
 
@@ -1341,8 +1491,8 @@ func (r *DMRouter) reapStaleWipeReservations(now time.Time) {
 	}
 	for _, stranded := range r.convDeleteRetry.pruneStaleReservations(now, convDeleteReservationTTL) {
 		log.Warn().
-			Str("peer", stranded.peer.String()).
-			Str("request_id", string(stranded.requestID)).
+			Str("peer", logID(stranded.peer.String())).
+			Str("request_id", logID(string(stranded.requestID))).
 			Msg("dm_router: wipe reservation stranded past its TTL; releasing the barrier")
 		r.publishConversationDeleteOutcome(ebus.ConversationDeleteOutcome{
 			Peer:               stranded.peer,
@@ -1351,21 +1501,54 @@ func (r *DMRouter) reapStaleWipeReservations(now time.Time) {
 	}
 }
 
+// parkedIntents is one sweep's set of requests to park, kept apart by what
+// they are keyed on: a message request is parked by id, a conversation request
+// by peer. Collected rather than parked one by one because a request to a
+// contact who never comes back is kept indefinitely — the parked set is not a
+// backlog that drains but a floor the sweep pays every tick, forever.
+type parkedIntents struct {
+	messages      []domain.MessageID
+	conversations []domain.PeerIdentity
+}
+
+func (p *parkedIntents) add(intent chatlog.DeleteIntent) {
+	if intent.Kind == chatlog.DeleteIntentConversation {
+		p.conversations = append(p.conversations, intent.Peer)
+		return
+	}
+	p.messages = append(p.messages, intent.MessageID)
+}
+
+func (p parkedIntents) len() int {
+	return len(p.messages) + len(p.conversations)
+}
+
 // holdDeleteIntents parks a batch without charging any of it, and says so
 // in the log at debug: a held intent looks like an idle one from the
 // outside, and the reason it is idle is the interesting part.
-func (r *DMRouter) holdDeleteIntents(ctx context.Context, store *chatlog.Store, ids []domain.MessageID, until time.Time) {
-	if len(ids) == 0 {
+func (r *DMRouter) holdDeleteIntents(ctx context.Context, store *chatlog.Store, parked parkedIntents, until time.Time) {
+	if parked.len() == 0 {
 		return
 	}
-	if err := store.HoldDeleteIntents(ctx, ids, until); err != nil {
-		log.Warn().Err(err).
-			Int("intents", len(ids)).
-			Msg("dm_router: parking delete intents failed; they may hold the head of the sweep queue")
-		return
+	if len(parked.messages) > 0 {
+		if err := store.HoldDeleteIntents(ctx, parked.messages, until); err != nil {
+			log.Warn().Err(err).
+				Int("intents", len(parked.messages)).
+				Msg("dm_router: parking delete intents failed; they may hold the head of the sweep queue")
+			return
+		}
+	}
+	if len(parked.conversations) > 0 {
+		if err := store.HoldConversationDeleteIntents(ctx, parked.conversations, until); err != nil {
+			log.Warn().Err(err).
+				Int("intents", len(parked.conversations)).
+				Msg("dm_router: parking conversation-delete intents failed; they may hold the head of the sweep queue")
+			return
+		}
 	}
 	log.Debug().
-		Int("intents", len(ids)).
+		Int("message_intents", len(parked.messages)).
+		Int("conversation_intents", len(parked.conversations)).
 		Time("until", until).
 		Msg("dm_router: delete intents parked; no attempt charged")
 }
@@ -1398,8 +1581,10 @@ func (r *DMRouter) refreshPendingDeleteCounts() {
 	changed := false
 	r.mu.Lock()
 	for peer, state := range r.peers {
-		if state.PendingDeletes != counts[peer] {
-			state.PendingDeletes = counts[peer]
+		pending := counts[peer]
+		if state.PendingDeletes != pending.Messages || state.PendingConversationDelete != pending.Conversation {
+			state.PendingDeletes = pending.Messages
+			state.PendingConversationDelete = pending.Conversation
 			changed = true
 		}
 	}
@@ -1428,12 +1613,12 @@ func (r *DMRouter) reviveDeleteIntentsForPeer(peer domain.PeerIdentity) {
 
 	revived, err := store.ReviveDeleteIntentsForPeer(ctx, peer, now)
 	if err != nil {
-		log.Warn().Err(err).Str("peer", peer.String()).Msg("dm_router: reviving delete intents failed; they wake on their own schedule")
+		log.Warn().Err(err).Str("peer", logID(peer.String())).Msg("dm_router: reviving delete intents failed; they wake on their own schedule")
 	}
 	if revived > 0 {
 		log.Info().
-			Str("peer", peer.String()).
-			Int64("message_intents", revived).
+			Str("peer", logID(peer.String())).
+			Int64("intents", revived).
 			Msg("dm_router: peer is back; pending deletions re-armed")
 	}
 }
@@ -1453,21 +1638,53 @@ func (r *DMRouter) reviveDeleteIntentsForPeer(peer domain.PeerIdentity) {
 // dropped with the rest of their history when the identity is removed
 // (chatlog.DeleteByPeer).
 func (r *DMRouter) expireDeleteIntent(ctx context.Context, store *chatlog.Store, intent chatlog.DeleteIntent, now time.Time) bool {
+	if intent.Kind == chatlog.DeleteIntentConversation {
+		// A wipe is NEVER written off. Giving up on it would leave the one
+		// state this product may not produce: erased here, still there at the
+		// peer, and nothing left that will ever ask again. The row is tiny, the
+		// backoff caps at an hour, and it goes when the contact goes — that is
+		// a cheaper price than a conversation the user believes is gone.
+		return false
+	}
 	if intent.Attempts < deleteIntentGiveUpAttempts {
 		return false
 	}
-	if _, err := store.DropDeleteIntent(ctx, intent.MessageID); err != nil {
+	// The sweep works from a snapshot, and a wipe can be written between the
+	// read and this line. Dropping the row then would take a request the wipe
+	// is carrying — with it the durable refusal of that id — and announce
+	// Abandoned for a deletion that is still going to be delivered.
+	settled, carried, err := store.DropDeleteIntentUnlessCarried(ctx, intent.MessageID)
+	if err != nil {
 		log.Warn().Err(err).
-			Str("target", string(intent.MessageID)).
+			Str("target", logID(string(intent.MessageID))).
 			Msg("dm_router: dropping an expired delete intent failed; will retry on the next sweep")
 		return true
 	}
+	if carried || !settled {
+		// Carried: the wipe answers for it, and its budget is not this one's to
+		// spend. Already gone: somebody else retired it, and the outcome that
+		// belonged to it has been published by whoever did.
+		return true
+	}
+	// Same reason as on the ack path: the row that just went was the last
+	// mention of this message here, and its page stays legible in the
+	// write-ahead log until a checkpoint retires it.
+	r.checkpointSoonAfterDelete()
 
-	log.Warn().
-		Str("target", string(intent.MessageID)).
-		Str("peer", intent.Peer.String()).
+	// Behind the diagnostics gate, although it reports a FAILURE — the one
+	// place that exception does not apply.
+	//
+	// The exception exists because a support case must be able to see what went
+	// wrong. Here it can: the user is told directly, on their own screen, by the
+	// Abandoned outcome published two lines down. The log line is not the only
+	// channel, and what it would leave behind is a permanent note that a
+	// deletion was wanted and never delivered — after the request that made it
+	// legitimate has just been dropped. Unfinished work may be written down;
+	// this is no longer unfinished work.
+	deletionLog().Warn().
+		Str("target", logID(string(intent.MessageID))).
+		Str("peer", logID(intent.Peer.String())).
 		Int("attempts", intent.Attempts).
-		Time("created_at", intent.CreatedAt).
 		Msg("dm_router: delete intent unanswered after the full attempt budget; giving up on the peer-side deletion")
 
 	r.refreshPendingDeleteCounts()

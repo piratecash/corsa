@@ -330,57 +330,24 @@ func (s *Store) HasConversationWith(ctx context.Context, peer domain.PeerIdentit
 // ceiling caps how many exist at once, the sweep caps how long they last. The
 // cutoff is `first_seen_at` because `updated_at` is refreshable by the sender —
 // see HeldReactionTTL.
-// It also RECORDS what it drops. A fact that waited out the window is a fact
-// whose message did not come, and the author of that fact keeps offering it —
-// so without a record the next offer is held again, swept again, and offered
-// again, indefinitely. Which reason the message is missing does not matter
-// here: deleted, lost, or never sent, the answer for the offers that follow is
-// the same until the message actually arrives, and storing one erases the
-// record (see reaction_refusals.go).
+// What it drops is NOT written down. A fact that waited out the window is a
+// fact whose message did not come, and its author keeps offering it, so the
+// next offer is held again and swept again — churn this used to end by
+// recording the id for good. That record could not be told apart from "the user
+// deleted this message here", and it outlived the deletion by design, so it was
+// the one durable trace left after a wipe. The churn is invisible (held facts
+// draw nothing), bounded by the per-actor ceilings, and it stops the moment the
+// sender stops offering — which the reaction transport's own acknowledgement is
+// what settles.
 //
-// One transaction, and the ids are read before the delete: afterwards the rows
-// that named them are gone.
+// One transaction: the delete is all of it.
 func (s *Store) SweepHeldReactions(ctx context.Context, now time.Time) (int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("chatlog: begin sweep of held reactions: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	cutoff := now.UTC().Add(-HeldReactionTTL).Format(sortableStamp)
-	rows, err := tx.QueryContext(ctx, `
-		SELECT DISTINCT scope, message_id FROM message_reactions
-		WHERE pending = 1 AND first_seen_at < ?`, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("chatlog: find held reactions to sweep: %w", err)
-	}
-	var expired []scopedID
-	for rows.Next() {
-		var scope, id string
-		if err := rows.Scan(&scope, &id); err != nil {
-			_ = rows.Close()
-			return 0, fmt.Errorf("chatlog: scan a swept id: %w", err)
-		}
-		expired = append(expired, scopedID{
-			Scope:     domain.ReactionScope(scope),
-			MessageID: domain.MessageID(id),
-		})
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return 0, fmt.Errorf("chatlog: read the swept ids: %w", err)
-	}
-
-	res, err := tx.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM message_reactions
 		WHERE pending = 1 AND first_seen_at < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("chatlog: sweep held reactions: %w", err)
-	}
-	if err := refuseReactionsForTx(ctx, tx, s.identityAddr, expired, now); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("chatlog: commit the sweep of held reactions: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil

@@ -54,6 +54,21 @@ func (b *withdrawalBacklog) note(peer domain.PeerIdentity, ids []domain.MessageI
 	b.noted = now
 }
 
+// owes reports whether anything is still owed for this peer.
+//
+// Read by the wipe before it calls itself finished: the rows are gone, so a
+// repeat of the request finds an empty scope and would withdraw nothing — and
+// answering `applied` then would retire the requester's request while this node
+// is still holding messages of that conversation, queued to go out.
+func (b *withdrawalBacklog) owes(peer domain.PeerIdentity) bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.owed[peer]) > 0
+}
+
 // take removes and returns everything owed, so a pass that fails can
 // re-note exactly what it did not manage.
 func (b *withdrawalBacklog) take() map[domain.PeerIdentity][]domain.MessageID {
@@ -100,8 +115,10 @@ func (r *DMRouter) withdrawDeletedDeliveries(ctx context.Context, peer domain.Pe
 
 	if _, err := r.client.CancelConversationDelivery(callCtx, peer, ids); err != nil {
 		r.withdrawals.note(peer, ids, time.Now().UTC())
+		// A failure line, so it stays at its level — but the peer is a digest
+		// like everywhere else on this path.
 		log.Warn().Err(err).
-			Str("peer", peer.String()).
+			Str("peer", logID(peer.String())).
 			Int("messages", len(ids)).
 			Msg("dm_router: withdrawing the deliveries of deleted messages failed; owed until the next sweep")
 		return err
@@ -119,8 +136,11 @@ func (r *DMRouter) retryOwedWithdrawals(ctx context.Context) {
 		// path stays broken is retried at the sweep's cadence rather than
 		// forgotten.
 		if err := r.withdrawDeletedDeliveries(ctx, peer, ids); err == nil {
-			log.Info().
-				Str("peer", peer.String()).
+			// A success on this path says a deletion completed, and names the
+			// peer whose conversation it was: same gate and same digest as
+			// every other line of its kind.
+			deletionLog().Info().
+				Str("peer", logID(peer.String())).
 				Int("messages", len(ids)).
 				Msg("dm_router: the deliveries of deleted messages were withdrawn on a retry")
 		}

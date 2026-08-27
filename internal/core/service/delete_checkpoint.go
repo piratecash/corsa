@@ -141,6 +141,16 @@ func (c *deleteCheckpointer) run() {
 
 	store := c.store()
 	if store == nil {
+		// NOT a success. The router asks for a checkpoint at startup on
+		// purpose, before the composition root is guaranteed to have finished
+		// opening the database — the point of that request is to retire a
+		// write-ahead log that a busy reader kept alive through storage.Open.
+		// Returning here as if the work were done cancelled exactly that
+		// request, and nothing else would ever make it: the deletions of the
+		// previous run stay legible in the sidecar until some unrelated
+		// deletion happens to ask again.
+		failed = true
+		log.Debug().Msg("dm_router: wal checkpoint deferred: the chatlog is not open yet")
 		return
 	}
 	if err := store.CheckpointWAL(c.ctx()); err != nil {
@@ -162,16 +172,32 @@ func (c *deleteCheckpointer) retryDelayLocked() time.Duration {
 	return delay
 }
 
-// stop cancels a pending checkpoint, refuses further requests, and waits
-// for a run already under way. Called on shutdown: the checkpoint writes,
-// so it has to be finished before the database is closed, and a
-// time.AfterFunc goroutine is joined by nothing else.
+// stop refuses further requests, waits for a run already under way, and — if a
+// checkpoint was still owed — RUNS it rather than dropping it.
+//
+// Dropping it was the hole. The coalescing window is a second, and a user who
+// deletes a message and closes the application lands inside it every time: the
+// timer is cancelled, the process exits, and the pages holding what they just
+// erased stay in the write-ahead log until some later run happens to fill it.
+// The deletion was reported as done.
+//
+// Called on shutdown, so the checkpoint has to finish before the database is
+// closed — which is also why it is done here, synchronously, rather than handed
+// to a goroutine nothing joins.
 func (c *deleteCheckpointer) stop() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	c.stopped = true
+	// `running` counts as owed. A pass under way when the process starts
+	// shutting down cannot report its own failure any more — its deferred
+	// handler sees stopped=true and stands down without re-arming or recording
+	// anything — so a BUSY database at that instant would leave the deletion in
+	// the log with nobody left to retire it. It also cannot cover frames written
+	// after it began. One extra truncation at shutdown is the cheaper side of
+	// this trade by a wide margin.
+	owed := c.pending || c.timer != nil || c.failures > 0 || c.running
 	c.pending = false
 	c.failures = 0
 	if c.timer != nil {
@@ -181,7 +207,24 @@ func (c *deleteCheckpointer) stop() {
 	done := c.inFlight
 	c.mu.Unlock()
 
+	// WAIT FIRST. SQLite refuses a checkpoint that overlaps another one
+	// outright — busy, without consulting the busy handler — so running the
+	// final pass while one is under way would return BUSY, and the pass we
+	// interrupted has already seen stopped=true and will not re-arm. The
+	// deletion would stay in the log with nothing left to retire it.
 	if done != nil {
 		<-done
+	}
+
+	if owed {
+		if store := c.store(); store != nil {
+			if err := store.CheckpointWAL(c.ctx()); err != nil {
+				// Nothing left to retry with — the process is going. Said
+				// out loud because what stays behind is the content of a
+				// deleted message, in a file the user believes is clean.
+				log.Warn().Err(err).
+					Msg("dm_router: the write-ahead log still holds a deletion at shutdown; the next start truncates it")
+			}
+		}
 	}
 }

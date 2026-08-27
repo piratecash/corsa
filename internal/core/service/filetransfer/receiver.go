@@ -204,6 +204,14 @@ func (m *Manager) RegisterFileReceive(
 		return fmt.Errorf("file %s: invalid announce metadata: file name is empty", fileID)
 	}
 
+	// The namespace lock, briefly, because registering is what makes a .part
+	// path live: the path is derived from the file id, so an erasure that has
+	// just decided no transfer owns that id must not have one appear — and
+	// start writing — before its unlink. Everything a download writes follows a
+	// registration, so ordering the registration orders the writes.
+	m.downloadNamespaceMu.Lock()
+	defer m.downloadNamespaceMu.Unlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -226,7 +234,7 @@ func (m *Manager) RegisterFileReceive(
 	m.saveMappingsLocked()
 
 	log.Info().
-		Str("file_id", string(fileID)).
+		Str("file_id", logID(string(fileID))).
 		Str("sender", sender.String()).
 		Str("file_name", safeFileName).
 		Msg("file_transfer: registered receiver mapping")
@@ -280,13 +288,18 @@ func (m *Manager) StartDownload(fileID domain.FileID) error {
 	mapping.DownloadedSentAt = time.Time{}
 
 	snap := m.prepareResumeLocked(fileID, mapping)
+	generation := mapping.Generation
 	m.saveMappingsLocked()
 	m.mu.Unlock()
 
-	m.truncatePartialFile(snap)
+	if !m.truncatePartialFile(snap, generation) {
+		// A chunk landed while this restart was being prepared. The sweep will
+		// resume from the offset that chunk left behind.
+		return nil
+	}
 
 	log.Info().
-		Str("file_id", string(fileID)).
+		Str("file_id", logID(string(fileID))).
 		Str("sender", snap.sender.String()).
 		Uint64("offset", snap.startOffset).
 		Uint32("chunk_size", snap.chunkSize).
@@ -341,6 +354,18 @@ func (m *Manager) HandleChunkResponse(
 	prep.writeMu.Lock()
 	defer prep.writeMu.Unlock()
 
+	// And the .part stripe, from here to the end of the call.
+	//
+	// The ownership checks below and the write that follows them have to be one
+	// step as far as the FILE is concerned: an erasure of a deleted message
+	// looking for that .part must find either a file to remove or a transfer
+	// that is going to write one, never the gap between the two. It is taken
+	// INSIDE writeMu — order writePartialMu → stripe → downloadNamespaceMu —
+	// because two handlers of the same chunk must still be able to race as far
+	// as writeMu, which is where that race is decided.
+	releasePartial := m.lockPartial(resp.FileID)
+	defer releasePartial()
+
 	// Pre-write revalidation. validateChunkResponseLocked snapshotted
 	// the mapping (state, generation, NextOffset) under m.mu, but
 	// released the lock before we serialised on writeMu. A concurrent
@@ -369,7 +394,7 @@ func (m *Manager) HandleChunkResponse(
 		// Nothing was written yet, so there is no orphan partial to
 		// unlink — just drop the chunk silently.
 		log.Debug().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", prep.offset).
 			Msg("file_transfer: pre-write check found mapping removed; dropping chunk")
 		return
@@ -379,7 +404,7 @@ func (m *Manager) HandleChunkResponse(
 		// straggler from the previous attempt. Drop silently — DO NOT
 		// touch the .part on disk.
 		log.Debug().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", prep.offset).
 			Msg("file_transfer: pre-write check found generation mismatch; dropping chunk")
 		return
@@ -390,7 +415,7 @@ func (m *Manager) HandleChunkResponse(
 		// the mapping owns the partial and the canonical bytes belong
 		// to the winner.
 		log.Debug().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", prep.offset).
 			Msg("file_transfer: pre-write check found stale offset; dropping duplicate chunk")
 		return
@@ -401,20 +426,20 @@ func (m *Manager) HandleChunkResponse(
 		// it would race the SHA-256 check and could fail an otherwise
 		// healthy download. Drop silently.
 		log.Debug().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", prep.offset).
 			Msg("file_transfer: pre-write check found non-downloading state; dropping chunk")
 		return
 	default:
 		log.Warn().
 			Int("status", int(preStatus)).
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Msg("file_transfer: unknown pre-write classifyChunkOwnership status; dropping chunk")
 		return
 	}
 
 	if err := writeChunkToFile(prep.partialPath, prep.offset, prep.chunkData, prep.fileSize); err != nil {
-		log.Error().Err(err).Str("file_id", string(resp.FileID)).Msg("file_transfer: write chunk failed")
+		log.Error().Err(err).Str("file_id", logID(string(resp.FileID))).Msg("file_transfer: write chunk failed")
 		return
 	}
 
@@ -435,10 +460,26 @@ func (m *Manager) HandleChunkResponse(
 		// or peer wipe). Our write is unowned; unlink the partial to
 		// avoid a silent disk leak.
 		//
-		// safeRemoveInDownloadDir validates the path stays under
-		// downloadDir and ignores ErrNotExist, so the call is safe
-		// when the cleanup path already removed our file.
-		m.safeRemoveInDownloadDir(prep.partialPath, "chunk-response post-cleanup orphan")
+		// Durably: these are the bytes of a message that has just been
+		// deleted, and this handler is the only thing that knows they
+		// exist — the mapping is gone. If the unlink does not take, the
+		// erasure is written down like any other unfinished one.
+		if err := m.eraseInDownloadDir(prep.partialPath); err != nil {
+			log.Warn().Err(err).Str("file_id", logID(string(resp.FileID))).
+				Msg("file_transfer: the partial of a deleted message could not be removed; recording the erasure")
+			m.mu.Lock()
+			m.noteCleanupLocked(pendingCleanup{
+				FileID:   resp.FileID,
+				Partials: []string{prep.partialPath},
+				NotedAt:  time.Now(),
+			})
+			m.cleanupsDirty = true
+			if err := m.saveMappingsLockedErr(); err != nil {
+				log.Error().Err(err).Str("file_id", logID(string(resp.FileID))).
+					Msg("file_transfer: could not record the erasure of an orphaned partial")
+			}
+			m.mu.Unlock()
+		}
 		return
 	case chunkCommitGenerationMismatch:
 		// A fresh mapping for the same FileID exists at a different
@@ -446,7 +487,7 @@ func (m *Manager) HandleChunkResponse(
 		// new mapping's own lifecycle (verifier, cleanup, retry)
 		// handles the file. Our chunk is silently dropped.
 		log.Debug().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", prep.offset).
 			Msg("file_transfer: stale chunk for replaced mapping dropped without unlinking partial")
 		return
@@ -457,7 +498,7 @@ func (m *Manager) HandleChunkResponse(
 		// and owns the partial. Drop our chunk silently — DO NOT
 		// unlink the partial, it belongs to the healthy attempt.
 		log.Debug().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", prep.offset).
 			Msg("file_transfer: stale duplicate chunk dropped without unlinking partial")
 		return
@@ -470,14 +511,14 @@ func (m *Manager) HandleChunkResponse(
 		// the completed path. DO NOT unlink — that would corrupt
 		// the verifier's view and abort a healthy download.
 		log.Debug().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", prep.offset).
 			Msg("file_transfer: duplicate chunk for already-verifying mapping dropped without unlinking partial")
 		return
 	default:
 		log.Warn().
 			Int("status", int(status)).
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Msg("file_transfer: unknown commitChunkProgressLocked status; dropping chunk")
 		return
 	}
@@ -489,7 +530,7 @@ func (m *Manager) HandleChunkResponse(
 
 	if err := m.requestNextChunk(resp.FileID, prep.sender, nextOffset, prep.chunkSize); err != nil {
 		log.Warn().Err(err).
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", nextOffset).
 			Msg("file_transfer: request next chunk failed, will retry via stall detector")
 	}
@@ -529,7 +570,7 @@ func (m *Manager) HandleFileDownloadedAck(
 		currentEpoch := mapping.ServingEpoch
 		m.mu.Unlock()
 		log.Warn().
-			Str("file_id", string(ack.FileID)).
+			Str("file_id", logID(string(ack.FileID))).
 			Str("sender", senderIdentity.String()).
 			Uint64("received_epoch", ack.Epoch).
 			Uint64("current_epoch", currentEpoch).
@@ -543,7 +584,7 @@ func (m *Manager) HandleFileDownloadedAck(
 	m.mu.Unlock()
 
 	log.Info().
-		Str("file_id", string(ack.FileID)).
+		Str("file_id", logID(string(ack.FileID))).
 		Str("sender", senderIdentity.String()).
 		Msg("file_transfer: transfer completed (receiver)")
 }
@@ -552,6 +593,14 @@ func (m *Manager) HandleFileDownloadedAck(
 // to available state. The partial file is deleted from disk. The user can
 // re-initiate the download later by clicking the download button again.
 func (m *Manager) CancelDownload(fileID domain.FileID) error {
+	// The stripe FIRST, before the state is published. Resetting to available
+	// is what lets a new download start, and the .part of that new download
+	// lives at the same path as the one this cancel is about to remove — so
+	// holding the id across both is what keeps the removal from taking the new
+	// attempt's file.
+	release := m.lockPartial(fileID)
+	defer release()
+
 	m.mu.Lock()
 	mapping, ok := m.receiverMaps[fileID]
 	if !ok {
@@ -591,14 +640,17 @@ func (m *Manager) CancelDownload(fileID domain.FileID) error {
 	m.saveMappingsLocked()
 	m.mu.Unlock()
 
-	// Clean up partial file outside the lock (I/O operation).
+	// Clean up partial file outside the lock (I/O operation), under this file
+	// id's .part stripe: the same file is written by chunk handlers, renamed by
+	// a verifier and erased by a deleted message's cleanup, and all four take
+	// this lock.
 	partialPath := partialDownloadPath(m.downloadDir, fileID)
 	if err := os.Remove(partialPath); err != nil && !os.IsNotExist(err) {
 		log.Warn().Err(err).Str("path", partialPath).
 			Msg("file_transfer: remove partial file on cancel failed")
 	}
 
-	log.Info().Str("file_id", string(fileID)).Msg("file_transfer: download cancelled")
+	log.Info().Str("file_id", logID(string(fileID))).Msg("file_transfer: download cancelled")
 	return nil
 }
 
@@ -639,7 +691,7 @@ func (m *Manager) RestartDownload(fileID domain.FileID) error {
 	m.saveMappingsLocked()
 	m.mu.Unlock()
 
-	log.Info().Str("file_id", string(fileID)).Msg("file_transfer: failed download restarted")
+	log.Info().Str("file_id", logID(string(fileID))).Msg("file_transfer: failed download restarted")
 	return nil
 }
 
@@ -697,10 +749,15 @@ func (m *Manager) ForceRetryChunk(fileID domain.FileID) error {
 
 	// waitingRoute → downloading with partial file validation and rollback.
 	snap := m.prepareResumeLocked(fileID, rm)
+	generation := rm.Generation
 	m.saveMappingsLocked()
 	m.mu.Unlock()
 
-	m.truncatePartialFile(snap)
+	if !m.truncatePartialFile(snap, generation) {
+		// As above: the snapshot is behind, and the sweep will pick the
+		// transfer up from where it actually is.
+		return nil
+	}
 
 	if err := m.sendChunkWithRollback(snap); err != nil {
 		return fmt.Errorf("file %s: chunk request failed: %w", fileID, err)
@@ -748,7 +805,7 @@ func (m *Manager) prepareResumeLocked(
 		info, err := os.Stat(partialPath)
 		if err != nil || uint64(info.Size()) < resumeOffset {
 			log.Warn().
-				Str("file_id", string(fileID)).
+				Str("file_id", logID(string(fileID))).
 				Uint64("expected_offset", resumeOffset).
 				Err(err).
 				Msg("file_transfer: partial file missing or truncated, restarting from offset 0")
@@ -758,7 +815,7 @@ func (m *Manager) prepareResumeLocked(
 			// tampered. Restart from scratch to avoid requesting chunks at
 			// an impossible offset.
 			log.Warn().
-				Str("file_id", string(fileID)).
+				Str("file_id", logID(string(fileID))).
 				Uint64("partial_size", uint64(info.Size())).
 				Uint64("file_size", rm.FileSize).
 				Msg("file_transfer: partial file exceeds file size, restarting from offset 0")
@@ -798,19 +855,49 @@ func (m *Manager) prepareResumeLocked(
 }
 
 // truncatePartialFile removes a stale .part file when restarting a download
-// from offset 0. writeChunkToFile uses WriteAt which only overwrites the
+// from offset 0, and reports whether the SNAPSHOT it was given is still the
+// truth. False means a chunk was accepted after the resume was decided: the
+// file was left alone, and the request built from that snapshot must not be
+// sent either — its offset is behind, and the rollback that follows a failed
+// send would undo progress this transfer has already counted. writeChunkToFile uses WriteAt which only overwrites the
 // prefix of an existing file — any trailing bytes from a previous larger
 // attempt would remain, causing hash verification to fail. Must be called
 // WITHOUT m.mu held (performs file I/O).
-func (m *Manager) truncatePartialFile(snap resumeSnapshot) {
+func (m *Manager) truncatePartialFile(snap resumeSnapshot, generation uint64) bool {
 	if !snap.truncatePartial {
-		return
+		return true
 	}
+	// Under the file id's stripe, and only while the mapping this snapshot was
+	// taken from is STILL the one that owns the id. "Idempotent local I/O" was
+	// true of the syscall and false of its meaning: the path is derived from
+	// the id, so a transfer cancelled and started again writes to the same
+	// place, and a resume working from an old snapshot would delete the new
+	// attempt's download.
+	release := m.lockPartial(snap.fileID)
+	defer release()
+
+	m.mu.Lock()
+	rm, ok := m.receiverMaps[snap.fileID]
+	// The generation says the transfer was not replaced; the OFFSET says
+	// nothing has been accepted into the file since this resume was decided.
+	// A chunk that was in flight when the snapshot was taken lands between the
+	// two, writes real bytes and moves NextOffset — and removing the file then
+	// throws away a chunk this transfer has already counted, sending it back to
+	// a hole that only fails at hash verification.
+	stale := !ok || rm.Generation != generation || rm.NextOffset != snap.startOffset
+	m.mu.Unlock()
+	if stale {
+		log.Debug().Str("file_id", logID(string(snap.fileID))).
+			Msg("file_transfer: the partial moved on since this resume was decided; leaving it alone")
+		return false
+	}
+
 	path := partialDownloadPath(m.downloadDir, snap.fileID)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		log.Warn().Err(err).Str("file_id", string(snap.fileID)).
+		log.Warn().Err(err).Str("file_id", logID(string(snap.fileID))).
 			Msg("file_transfer: remove stale partial file on restart failed")
 	}
+	return true
 }
 
 // sendChunkWithRollback sends the initial chunk_request for a resume and
@@ -907,14 +994,14 @@ func (m *Manager) validateChunkResponseLocked(
 	chunkData, err := base64.RawURLEncoding.DecodeString(resp.Data)
 	if err != nil {
 		m.mu.Unlock()
-		log.Error().Err(err).Str("file_id", string(resp.FileID)).Msg("file_transfer: decode chunk data failed")
+		log.Error().Err(err).Str("file_id", logID(string(resp.FileID))).Msg("file_transfer: decode chunk data failed")
 		return chunkReceivePrep{}, fmt.Errorf("decode: %w", err)
 	}
 
 	if uint32(len(chunkData)) > mapping.ChunkSize {
 		m.mu.Unlock()
 		log.Warn().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Int("chunk_bytes", len(chunkData)).
 			Uint32("max_chunk_size", mapping.ChunkSize).
 			Msg("file_transfer: chunk_response exceeds requested size, dropping")
@@ -930,7 +1017,7 @@ func (m *Manager) validateChunkResponseLocked(
 	if uint32(len(chunkData)) < mapping.ChunkSize && endOffset < mapping.FileSize {
 		m.mu.Unlock()
 		log.Warn().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Int("chunk_bytes", len(chunkData)).
 			Uint32("expected_chunk_size", mapping.ChunkSize).
 			Uint64("end_offset", endOffset).
@@ -942,7 +1029,7 @@ func (m *Manager) validateChunkResponseLocked(
 	if len(chunkData) == 0 && mapping.BytesReceived < mapping.FileSize {
 		m.mu.Unlock()
 		log.Warn().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("offset", resp.Offset).
 			Msg("file_transfer: empty chunk_response before transfer complete, dropping")
 		return chunkReceivePrep{}, fmt.Errorf("empty chunk")
@@ -951,7 +1038,7 @@ func (m *Manager) validateChunkResponseLocked(
 	if resp.Offset != mapping.NextOffset {
 		m.mu.Unlock()
 		log.Warn().
-			Str("file_id", string(resp.FileID)).
+			Str("file_id", logID(string(resp.FileID))).
 			Uint64("resp_offset", resp.Offset).
 			Uint64("expected_offset", mapping.NextOffset).
 			Msg("file_transfer: stale/duplicate chunk_response, ignoring")
@@ -973,7 +1060,7 @@ func (m *Manager) validateChunkResponseLocked(
 	}
 
 	log.Info().
-		Str("file_id", string(resp.FileID)).
+		Str("file_id", logID(string(resp.FileID))).
 		Uint64("offset", resp.Offset).
 		Int("chunk_bytes", len(chunkData)).
 		Uint64("bytes_received_so_far", mapping.BytesReceived+uint64(len(chunkData))).
@@ -1263,6 +1350,117 @@ func (m *Manager) activeDownloadCountLocked() int {
 	return count
 }
 
+// erasureVerdict is what the manager knows about a downloaded file at the
+// moment something is about to unlink it.
+type erasureVerdict int
+
+const (
+	// erasureFree — no mapping resolves to this file and none is going to.
+	erasureFree erasureVerdict = iota
+	// erasureOwnedByAnother — another message still shows this file. Not ours
+	// to erase, and never will be: the message that holds it takes it along
+	// when it goes.
+	erasureOwnedByAnother
+	// erasureMayBeClaimed — a download in flight is going to land on this
+	// path. Neither erase nor forget: ask again later, when that download has
+	// either taken the file (owned) or given up (free).
+	erasureMayBeClaimed
+)
+
+// pathOwnershipLocked says who, if anyone, holds the file at path. Caller MUST
+// hold m.mu.
+//
+// One FILE can belong to several messages: a download whose name and content
+// match one already here is not written twice, it maps to the same path
+// (completedDownloadPath). Erasing it because ONE of those messages is being
+// deleted takes the attachment out of every other conversation that shows it.
+//
+// The question is asked at the moment of the unlink, on every attempt, and not
+// once when the deletion is scheduled. An intent can wait minutes between
+// attempts, and in that time the file can acquire an owner it did not have —
+// so a decision made when the intent was written is a decision about a state
+// that no longer exists.
+//
+// The third answer is what keeps the file from becoming unerasable. A download
+// still in flight has no path yet, and if it were treated as an owner the
+// erasure would be dropped — leaving nothing to erase the file with when that
+// download is cancelled and no message ever claims it.
+func (m *Manager) pathOwnershipLocked(path, fileHash string) erasureVerdict {
+	if path == "" {
+		return erasureFree
+	}
+	name := filepath.Base(path)
+	verdict := erasureFree
+	for _, mapping := range m.receiverMaps {
+		if m.backfillCompletedPath(mapping) == path {
+			return erasureOwnedByAnother
+		}
+		// Same name is not the same file. A download of DIFFERENT content under
+		// the same name is stored beside this one, under a name of its own, so
+		// it never claims this path — and treating it as a claimant would hold
+		// the erasure for as long as that unrelated download lasts.
+		//
+		// An intent written before the hash was recorded has none to compare;
+		// those fall back to the name alone, which only ever costs an extra
+		// attempt.
+		if fileHash != "" && mapping.FileHash != fileHash {
+			continue
+		}
+		// A download with the file's name and bytes on disk finishes by asking
+		// for a destination, and the answer for content already here is THIS
+		// file. It has no path to compare yet, so the NAME is what there is —
+		// both the name as it came from the sender and the name the store gives
+		// it when something else already occupies the plain one.
+		if (mapping.State == receiverDownloading || mapping.State == receiverVerifying) &&
+			nameResolvesTo(mapping.FileName, mapping.FileHash, name) {
+			verdict = erasureMayBeClaimed
+		}
+	}
+	return verdict
+}
+
+// nameResolvesTo reports whether a download of fileName/fileHash can end up
+// stored under base.
+//
+// Two forms, because completedDownloadPath uses two: the sanitized name as it
+// arrived, and — when a different file already holds that name — the same name
+// with the first six hex digits of the hash in brackets. Comparing only the
+// first missed exactly the case where sharing is most likely: the second copy
+// of a file whose plain name is taken.
+func nameResolvesTo(fileName, fileHash, base string) bool {
+	if fileName == "" || base == "" {
+		return false
+	}
+	plain := domain.SanitizeFileName(fileName)
+	if plain == base {
+		return true
+	}
+	if fileHash == "" {
+		return false
+	}
+	ext := filepath.Ext(plain)
+	return fmt.Sprintf("%s (%s)%s", strings.TrimSuffix(plain, ext), hashPrefix(fileHash), ext) == base
+}
+
+// verifierStandingLocked says whether a verifier still owns its transfer, and —
+// when it does not — whether somebody else now owns the same file id.
+//
+// The second answer is what decides the fate of the .part: a transfer that was
+// cancelled and started again writes to the same path, so a verifier of the
+// previous attempt must leave that file alone.
+func (m *Manager) verifierStandingLocked(fileID domain.FileID, mapping *receiverFileMapping, generation uint64) (stillOurs, takenOver bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, exists := m.receiverMaps[fileID]
+	if !exists {
+		return false, false
+	}
+	if current == mapping && mapping.State == receiverVerifying && mapping.Generation == generation {
+		return true, false
+	}
+	return false, true
+}
+
 // backfillCompletedPath resolves the on-disk location of a completed download
 // when CompletedPath is empty (legacy entries persisted before the field was
 // added). Only probes when the mapping is in a completed or waiting_ack state
@@ -1310,8 +1508,9 @@ func (m *Manager) onDownloadComplete(
 	partialPath, expectedHash string,
 	sender domain.PeerIdentity,
 ) {
-	// Caller contract: the per-mapping writePartialMu must be held by
-	// the caller across this entire function. HandleChunkResponse
+	// Caller contract: the per-mapping writePartialMu AND this file id's .part
+	// stripe (Manager.lockPartial) must both be held by the caller across this
+	// entire function. HandleChunkResponse
 	// grabs it before writeChunkToFile and keeps it through the
 	// commit + state transition + verify + rename sequence so a
 	// duplicate final chunk cannot poison the partial in any gap.
@@ -1341,7 +1540,7 @@ func (m *Manager) onDownloadComplete(
 	// repeating markReceiverFailed + removePartial + return in each branch.
 	failVerification := func(err error, msg string) {
 		m.markReceiverFailed(mapping, receiverVerifying, generation)
-		log.Error().Err(err).Str("file_id", string(fileID)).Msg(msg)
+		log.Error().Err(err).Str("file_id", logID(string(fileID))).Msg(msg)
 		// Delete .part only if this verifier still owns the mapping.
 		if m.receiverStateIs(fileID, receiverFailed, generation) {
 			_ = os.Remove(partialPath)
@@ -1366,15 +1565,57 @@ func (m *Manager) onDownloadComplete(
 	// Both MkdirAll and Rename must succeed before acknowledging the
 	// transfer — if the verified file cannot be persisted, the sender
 	// must not release its transmit copy.
+	// Choosing the destination and moving the file onto it happen under the
+	// download-namespace lock, so an erasure cannot decide that this path is
+	// unowned and unlink it between the two. Released as soon as the file is
+	// there: from that moment the mapping — still verifying — is what makes an
+	// erasure leave the path alone.
+	// The .part stripe is the CALLER's (HandleChunkResponse holds it from its
+	// ownership checks through this call, exactly as it holds writePartialMu),
+	// and the namespace of the directory this file moves into is taken here.
+	// Together they are what stops a cancel recycling the id — or a new attempt
+	// writing the same .part — between the check below and the rename.
+	m.downloadNamespaceMu.Lock()
+
+	// Whether this transfer still exists is asked HERE, under the same lock the
+	// rename happens under and the erasure of a deleted message takes.
+	//
+	// The rename is what creates a file: before it there is a .part that the
+	// mapping names, after it a download that only this verifier knows the path
+	// of. A message deleted in between leaves an erasure that goes looking for a
+	// file which is not there yet, finishes, and is dropped — and the rename
+	// then puts the file on disk with nothing left that knows about it. Asking
+	// before the rename means a deletion either finds the file (it renamed
+	// first) or stops it from ever being written.
+	stillOurs, takenOver := m.verifierStandingLocked(fileID, mapping, generation)
+	if !stillOurs {
+		// The .part goes with it — unless the id has been TAKEN OVER. Its path
+		// is derived from the file id, so a transfer cancelled and started
+		// again writes to the very same place, and that file is the new
+		// attempt's, not this verifier's to delete. Ownership, not inode
+		// identity: a filesystem is free to hand the same inode to the file
+		// that replaced ours.
+		if !takenOver {
+			_ = os.Remove(partialPath)
+		}
+		m.downloadNamespaceMu.Unlock()
+		log.Info().Str("file_id", logID(string(fileID))).
+			Bool("taken_over", takenOver).
+			Msg("file_transfer: the transfer was cancelled or deleted before its file was stored; nothing is written")
+		return
+	}
+
 	completedPath := completedDownloadPath(m.downloadDir, mapping.FileName, mapping.FileHash)
 
 	// Verify the completed path stays within the downloads directory.
 	if err := ensureWithinDir(m.downloadDir, completedPath); err != nil {
+		m.downloadNamespaceMu.Unlock()
 		failVerification(err, "file_transfer: completed path escapes download directory")
 		return
 	}
 
 	if err := os.MkdirAll(filepath.Dir(completedPath), 0o700); err != nil {
+		m.downloadNamespaceMu.Unlock()
 		failVerification(err, "file_transfer: create download dir failed")
 		return
 	}
@@ -1385,12 +1626,15 @@ func (m *Manager) onDownloadComplete(
 	// verified file for a symlink or different file in that gap will be
 	// detected by the inode mismatch.
 	if err := verifyFileIdentity(partialPath, verifiedInfo); err != nil {
+		m.downloadNamespaceMu.Unlock()
 		failVerification(err, "file_transfer: partial file identity changed before rename")
 		return
 	}
 
-	if err := os.Rename(partialPath, completedPath); err != nil {
-		failVerification(err, "file_transfer: move completed file failed")
+	renameErr := os.Rename(partialPath, completedPath)
+	m.downloadNamespaceMu.Unlock()
+	if renameErr != nil {
+		failVerification(renameErr, "file_transfer: move completed file failed")
 		return
 	}
 
@@ -1405,7 +1649,7 @@ func (m *Manager) onDownloadComplete(
 	}
 
 	log.Info().
-		Str("file_id", string(fileID)).
+		Str("file_id", logID(string(fileID))).
 		Str("path", completedPath).
 		Msg("file_transfer: file verified and stored")
 }
@@ -1463,7 +1707,7 @@ func (m *Manager) finalizeVerifiedDownload(
 		currentGeneration := mapping.Generation
 		m.mu.Unlock()
 		log.Info().
-			Str("file_id", string(fileID)).
+			Str("file_id", logID(string(fileID))).
 			Bool("entry_present", ok).
 			Bool("same_pointer", ok && current == mapping).
 			Str("state", string(currentState)).
@@ -1474,7 +1718,24 @@ func (m *Manager) finalizeVerifiedDownload(
 		// up only if our inode is still there: a newer attempt may have
 		// atomically overwritten completedPath with its own legitimately
 		// verified file, in which case we must not delete it.
-		m.removeOwnedFileInDownloadDir(completedPath, verifiedInfo, "post-verify cancel/delete cleanup")
+		if !m.removeOwnedFileInDownloadDir(completedPath, verifiedInfo, "post-verify cancel/delete cleanup") {
+			// The file this verifier renamed is still there and nothing else
+			// knows about it: the mapping is gone. Written down as work owed,
+			// which is the one durable note this design allows, so the tick
+			// and a restart can both finish it.
+			m.mu.Lock()
+			m.noteCleanupLocked(pendingCleanup{
+				FileID:    fileID,
+				Downloads: []pendingDownload{{Path: completedPath, Name: mapping.FileName, Hash: mapping.FileHash}},
+				NotedAt:   time.Now(),
+			})
+			m.cleanupsDirty = true
+			if err := m.saveMappingsLockedErr(); err != nil {
+				log.Error().Err(err).Str("file_id", logID(string(fileID))).
+					Msg("file_transfer: could not record the erasure of a file left by a cancelled verifier")
+			}
+			m.mu.Unlock()
+		}
 		return false
 	}
 	mapping.State = receiverWaitingAck
@@ -1497,7 +1758,7 @@ func (m *Manager) finalizeVerifiedDownload(
 		// This mirrors PrepareAndSend where Commit failure after a sent DM
 		// is non-fatal — the in-memory mapping serves the current session.
 		log.Error().Err(err).
-			Str("file_id", string(fileID)).
+			Str("file_id", logID(string(fileID))).
 			Str("completed_path", completedPath).
 			Msg("file_transfer: persist waiting_ack failed after rename — proceeding in memory, will reconcile on restart")
 	}
@@ -1578,7 +1839,7 @@ func (m *Manager) sendFileDownloaded(fileID domain.FileID, sender domain.PeerIde
 
 	if err := m.sendCommand(sender, payload); err != nil {
 		log.Debug().Err(err).
-			Str("file_id", string(fileID)).
+			Str("file_id", logID(string(fileID))).
 			Uint64("serving_epoch", epoch).
 			Uint64("generation", gen).
 			Msg("file_transfer: send file_downloaded failed")
@@ -1698,7 +1959,7 @@ func (m *Manager) tickReceiverMappings() {
 				rm.State = receiverWaitingRoute
 				changed = true
 				log.Info().
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Str("sender", rm.Sender.String()).
 					Msg("file_transfer: sender unreachable, pausing download")
 				continue
@@ -1752,7 +2013,7 @@ func (m *Manager) tickReceiverMappings() {
 				rm.State = receiverCompleted
 				rm.CompletedAt = now
 				log.Info().
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Str("sender", rm.Sender.String()).
 					Msg("file_transfer: waiting_ack retries exhausted, completing locally")
 				continue
@@ -1790,13 +2051,20 @@ func (m *Manager) tickReceiverMappings() {
 			})
 
 			log.Info().
-				Str("file_id", string(rm.FileID)).
+				Str("file_id", logID(string(rm.FileID))).
 				Str("sender", rm.Sender.String()).
 				Uint64("offset", snap.startOffset).
 				Msg("file_transfer: sender reachable again, resuming download")
 
-		// --- TTL cleanup for terminal receiver mappings ---
-		case receiverCompleted, receiverFailed:
+		// --- TTL cleanup for a download that ended with nothing to show ---
+		//
+		// FAILED only. A COMPLETED mapping is the one thing that ties a message
+		// to the file it delivered, and dropping it on an age alone leaves the
+		// file on disk with nothing that can ever name it again: clearing that
+		// chat months later erases the message and cannot erase its attachment.
+		// It goes when the message goes (CleanupTransferByMessageID) or when
+		// the contact does — never on a timer.
+		case receiverFailed:
 			if now.Sub(rm.CompletedAt) > tombstoneTTL {
 				delete(m.receiverMaps, id)
 				changed = true
@@ -1838,9 +2106,8 @@ func (m *Manager) executeReceiverAction(a receiverTickAction) {
 		m.guardedChunkRetry(a)
 
 	case actionCleanupFailed:
-		log.Warn().Str("file_id", string(a.fileID)).Msg("file_transfer: download failed after max chunk retries")
-		partialPath := partialDownloadPath(m.downloadDir, a.fileID)
-		_ = os.Remove(partialPath)
+		log.Warn().Str("file_id", logID(string(a.fileID))).Msg("file_transfer: download failed after max chunk retries")
+		m.removeFailedPartial(a)
 
 	case actionRetryFileDownloaded:
 		m.sendFileDownloaded(a.fileID, a.sender)
@@ -1869,17 +2136,41 @@ func (m *Manager) guardedChunkRetry(a receiverTickAction) {
 	m.mu.Unlock()
 
 	if err != nil {
-		log.Warn().Err(err).Str("file_id", string(a.fileID)).Msg("file_transfer: marshal stalled chunk retry failed")
+		log.Warn().Err(err).Str("file_id", logID(string(a.fileID))).Msg("file_transfer: marshal stalled chunk retry failed")
 		return
 	}
 
 	log.Info().
-		Str("file_id", string(a.fileID)).
+		Str("file_id", logID(string(a.fileID))).
 		Uint64("offset", a.offset).
 		Msg("file_transfer: retrying stalled chunk request")
 
 	if err := m.sendCommand(a.sender, payload); err != nil {
-		log.Warn().Err(err).Str("file_id", string(a.fileID)).Msg("file_transfer: stalled chunk retry failed")
+		log.Warn().Err(err).Str("file_id", logID(string(a.fileID))).Msg("file_transfer: stalled chunk retry failed")
+	}
+}
+
+// removeFailedPartial drops the .part of a download that ran out of retries.
+//
+// Under the file id's stripe and guarded by the generation the action was built
+// for: the path is shared with any transfer registered for that id since, and
+// this action is dispatched from a tick that may be several moments old.
+func (m *Manager) removeFailedPartial(a receiverTickAction) {
+	release := m.lockPartial(a.fileID)
+	defer release()
+
+	m.mu.Lock()
+	rm, ok := m.receiverMaps[a.fileID]
+	stale := !ok || rm.Generation != a.generation
+	m.mu.Unlock()
+	if stale {
+		log.Debug().Str("file_id", logID(string(a.fileID))).
+			Msg("file_transfer: a newer attempt owns this id; its partial is not the failed one's to remove")
+		return
+	}
+	if err := os.Remove(partialDownloadPath(m.downloadDir, a.fileID)); err != nil && !os.IsNotExist(err) {
+		log.Warn().Err(err).Str("file_id", logID(string(a.fileID))).
+			Msg("file_transfer: remove partial file of a failed download failed")
 	}
 }
 
@@ -1887,11 +2178,17 @@ func (m *Manager) guardedChunkRetry(a receiverTickAction) {
 // the chunk_request payload in a single lock acquisition, then sends outside
 // the lock. On send failure, the rollback is also generation-guarded.
 //
-// truncatePartialFile runs before the guarded send — it is idempotent local
-// I/O and safe to execute even if state changed (the file is already stale).
+// truncatePartialFile runs before the guarded send, and carries the generation
+// this action was built for: the file it removes is shared with whatever
+// transfer holds the id now, so removing it is guarded, not idempotent.
 func (m *Manager) guardedResume(a receiverTickAction) {
-	// Idempotent local I/O — safe without guard.
-	m.truncatePartialFile(a.snap)
+	if !m.truncatePartialFile(a.snap, a.generation) {
+		// The snapshot this action was built from is behind: a chunk was
+		// accepted after the tick decided to resume. Sending its request would
+		// ask for bytes the transfer already has, and a failed send would roll
+		// the offset back over them.
+		return
+	}
 
 	m.mu.Lock()
 	rm, ok := m.receiverMaps[a.fileID]
@@ -1904,7 +2201,7 @@ func (m *Manager) guardedResume(a receiverTickAction) {
 	m.mu.Unlock()
 
 	if err != nil {
-		log.Warn().Err(err).Str("file_id", string(a.fileID)).Msg("file_transfer: marshal resume chunk request failed")
+		log.Warn().Err(err).Str("file_id", logID(string(a.fileID))).Msg("file_transfer: marshal resume chunk request failed")
 		return
 	}
 
@@ -1923,7 +2220,7 @@ func (m *Manager) guardedResume(a receiverTickAction) {
 		m.mu.Unlock()
 
 		log.Warn().Err(sendErr).
-			Str("file_id", string(a.fileID)).
+			Str("file_id", logID(string(a.fileID))).
 			Uint64("offset", a.snap.startOffset).
 			Msg("file_transfer: resume chunk request failed, rolled back to waiting_route")
 	}

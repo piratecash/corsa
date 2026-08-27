@@ -293,6 +293,11 @@ func (fs *FileStore) removeAllForHash(fileHash string) error {
 		return fmt.Errorf("file_store: list transmit files for %s: %w", fileHash, err)
 	}
 	var failed error
+	// The directory the blob lives in is flushed whether or not this call found
+	// anything to remove: a retry after a failed flush sees an empty glob, and
+	// reporting success there would retire the record that owes the erasure
+	// over a directory entry that was never made durable.
+	purged := map[string]struct{}{fs.baseDir: {}}
 	for _, path := range matches {
 		if err := ensureWithinDir(fs.baseDir, path); err != nil {
 			// Not a file this store may delete. Counted as DONE rather
@@ -305,8 +310,24 @@ func (fs *FileStore) removeAllForHash(fileHash string) error {
 				Msg("file_store: purge skipped — path escapes the transmit dir")
 			continue
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			failed = errors.Join(failed, fmt.Errorf("file_store: remove %s: %w", path, err))
+		if err := os.Remove(path); err != nil {
+			if !os.IsNotExist(err) {
+				failed = errors.Join(failed, fmt.Errorf("file_store: remove %s: %w", path, err))
+			}
+			continue
+		}
+		purged[filepath.Dir(path)] = struct{}{}
+	}
+	// An unlink reaches the disk when the directory entry does. The caller
+	// treats a nil error as "the blob is gone" and drops the record that owed
+	// its removal, so an unflushed directory is a file that can come back with
+	// nothing left to erase it.
+	for dir := range purged {
+		if err := syncDirectory(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// A directory that is not there has no entry to flush and no blob
+			// left to erase; anything else means the removal is not durable
+			// yet and the caller must keep owing it.
+			failed = errors.Join(failed, fmt.Errorf("file_store: flush %s: %w", dir, err))
 		}
 	}
 	return failed

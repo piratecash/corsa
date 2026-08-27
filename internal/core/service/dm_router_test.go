@@ -6374,6 +6374,7 @@ func TestSeedAndRefreshLastIncomingFromChatlog(t *testing.T) {
 		t.Fatalf("evidence survived the deletion of every incoming message: %v", drained.LastIncomingAt.Time())
 	}
 }
+
 func TestLastIncomingRefusesFutureTimestamps(t *testing.T) {
 	r := newTestRouter()
 	peer := domaintest.ID("future-dated-peer")
@@ -6518,6 +6519,7 @@ func TestReconcileAppliesWhenNothingMoved(t *testing.T) {
 		t.Fatalf("last incoming = %v, want the surviving message %v", got, older)
 	}
 }
+
 func TestSeedLastIncomingRetriesTheScan(t *testing.T) {
 	client, id := newTestDesktopClientWithNode(t)
 	cl := client.chatLog
@@ -6802,7 +6804,7 @@ func TestRepeatedDeleteDoesNotMoveTheVersion(t *testing.T) {
 
 	r := newSyncTestRouter()
 	r.client = client
-	r.wipeTombstones = newWipeTombstoneSet(func() wipeTombstoneJournal { return client.chatLog })
+	r.wipeTombstones = newWipeTombstoneSet(func() deleteTaskList { return client.chatLog })
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(peer)
 	r.mu.Unlock()

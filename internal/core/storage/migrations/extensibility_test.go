@@ -69,7 +69,7 @@ func TestNextSubsystemAddsATableWithoutTouchingChatlog(t *testing.T) {
 	if err := executor.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages`).Scan(&messages); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if messages != 4 {
-		t.Fatalf("messages = %d, want the 4 fixture rows", messages)
+	if messages != 5 {
+		t.Fatalf("messages = %d, want the 5 fixture rows", messages)
 	}
 }

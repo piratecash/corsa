@@ -947,7 +947,7 @@ func newTestDesktopClientWithNodeAndDB(t *testing.T) (*DesktopClient, *identity.
 
 	svc := node.NewService(cfg, id, ebus.New())
 	database := newTestStateDB(t, domain.PeerIdentityFromWire(id.Address))
-	store := chatlog.NewStore(database.Executor(), domain.PeerIdentityFromWire(id.Address))
+	store := testChatlogStore(database.Executor(), domain.PeerIdentityFromWire(id.Address))
 
 	// WaitBackground must run before TempDir cleanup to avoid
 	// "directory not empty" races caused by async disk writes

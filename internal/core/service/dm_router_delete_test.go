@@ -1,18 +1,30 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+
 	"github.com/piratecash/corsa/internal/core/chatlog"
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/storage"
+	"github.com/piratecash/corsa/internal/core/storage/migrations"
 )
 
 // dispatchCounter is a thread-safe test recorder for control-DM
@@ -205,6 +217,203 @@ func TestProcessDeleteRetryDuePacesOnePeer(t *testing.T) {
 	}
 }
 
+// TestALateRefusalIsNotShownForAChatTheUserHasCleared closes the loop that made
+// this feature necessary in the first place.
+//
+// A per-message request goes out; the user then clears the chat; the peer's
+// answer to the OLD request arrives afterwards and says `denied`. Nothing about
+// excluding it from future sweeps helps — it was already on the wire. Publishing
+// that answer puts "the peer refused the delete request" on a conversation the
+// user has been told is gone on both sides.
+//
+// The wipe asks for that message too and is answered in its own right, so the
+// late answer is dropped and the row stays: it is what refuses a re-delivery of
+// the id until the wipe settles.
+func TestALateRefusalIsNotShownForAChatTheUserHasCleared(t *testing.T) {
+	t.Parallel()
+
+	r, c, _, _ := newTestDMRouterForDelete(t)
+	bus := ebus.New()
+	var (
+		outcomesMu sync.Mutex
+		outcomes   []ebus.MessageDeleteOutcome
+	)
+	bus.Subscribe(ebus.TopicMessageDeleteCompleted, func(o ebus.MessageDeleteOutcome) {
+		outcomesMu.Lock()
+		outcomes = append(outcomes, o)
+		outcomesMu.Unlock()
+	}, ebus.WithSync())
+	r.eventBus = bus
+
+	ctx := context.Background()
+	const target = domain.MessageID("e4f5a6b7-c8d9-4e0f-8a1b-c2d3e4f5a6b7")
+	peer := domaintest.ID("peer")
+	store := c.chatlog.Store()
+	now := time.Now().UTC()
+
+	// The request the user made before clearing the chat, already dispatched.
+	if err := store.NoteDeleteIntent(ctx, chatlog.DeleteIntent{
+		MessageID: target, Peer: peer, CreatedAt: now, NextAttemptAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("NoteDeleteIntent: %v", err)
+	}
+	// And the wipe, which from here asks for everything including that message.
+	if err := store.NoteConversationDeleteIntent(ctx, chatlog.DeleteIntent{
+		Kind: chatlog.DeleteIntentConversation, Peer: peer,
+		RequestID: domain.ConversationDeleteRequestID("11111111-2222-4333-8444-555555555555"),
+		CreatedAt: now, NextAttemptAt: now,
+	}); err != nil {
+		t.Fatalf("NoteConversationDeleteIntent: %v", err)
+	}
+
+	ack, err := domain.MarshalMessageDeleteAckPayload(domain.MessageDeleteAckPayload{
+		TargetID: target,
+		Status:   domain.MessageDeleteStatusDenied,
+	})
+	if err != nil {
+		t.Fatalf("marshal the ack: %v", err)
+	}
+	r.handleInboundMessageDeleteAck(peer, ack)
+
+	outcomesMu.Lock()
+	published := append([]ebus.MessageDeleteOutcome(nil), outcomes...)
+	outcomesMu.Unlock()
+	if len(published) != 0 {
+		t.Errorf("a refusal was reported for a cleared chat: %+v", published)
+	}
+	// The row stays: it is the refusal of that id until the wipe is answered.
+	if _, found, err := store.DeleteIntentByID(ctx, target); err != nil || !found {
+		t.Errorf("the late answer took the request the wipe carries: found=%v err=%v", found, err)
+	}
+}
+
+// TestAnAnswerForAnAlreadyRetiredRequestIsDropped pins the third line of the
+// rule: an answer for a request we have already retired is dropped.
+//
+// The row can go while the answer is in flight — the wipe that carried it is
+// answered first, or an earlier copy of the same ack settled it. Reporting it
+// anyway shows the user a refusal for a deletion nothing is waiting for.
+func TestAnAnswerForAnAlreadyRetiredRequestIsDropped(t *testing.T) {
+	t.Parallel()
+
+	r, c, _, _ := newTestDMRouterForDelete(t)
+	bus := ebus.New()
+	var (
+		outcomesMu sync.Mutex
+		outcomes   []ebus.MessageDeleteOutcome
+	)
+	bus.Subscribe(ebus.TopicMessageDeleteCompleted, func(o ebus.MessageDeleteOutcome) {
+		outcomesMu.Lock()
+		outcomes = append(outcomes, o)
+		outcomesMu.Unlock()
+	}, ebus.WithSync())
+	r.eventBus = bus
+
+	ctx := context.Background()
+	const target = domain.MessageID("f5a6b7c8-d9e0-4f1a-8b2c-d3e4f5a6b7c8")
+	peer := domaintest.ID("peer")
+	store := c.chatlog.Store()
+	now := time.Now().UTC()
+
+	if err := store.NoteDeleteIntent(ctx, chatlog.DeleteIntent{
+		MessageID: target, Peer: peer, CreatedAt: now, NextAttemptAt: now,
+	}); err != nil {
+		t.Fatalf("NoteDeleteIntent: %v", err)
+	}
+	ack, err := domain.MarshalMessageDeleteAckPayload(domain.MessageDeleteAckPayload{
+		TargetID: target,
+		Status:   domain.MessageDeleteStatusDenied,
+	})
+	if err != nil {
+		t.Fatalf("marshal the ack: %v", err)
+	}
+	// The row goes between the handler's read of the intent and its drop —
+	// which is what a wipe answered in that window does.
+	r.beforeDropDeleteIntentForTest = func() {
+		if _, err := store.DropDeleteIntent(ctx, target); err != nil {
+			t.Errorf("dropping the row from under the handler: %v", err)
+		}
+	}
+	r.handleInboundMessageDeleteAck(peer, ack)
+
+	outcomesMu.Lock()
+	published := append([]ebus.MessageDeleteOutcome(nil), outcomes...)
+	outcomesMu.Unlock()
+	if len(published) != 0 {
+		t.Errorf("an answer for a retired request was reported: %+v", published)
+	}
+}
+
+// TestTheSweepDoesNotWriteOffARequestAWipeHasTakenOver pins the same rule on
+// the other path.
+//
+// The sweep works from a snapshot. A wipe written after that snapshot was read
+// takes over the requests made before it — and the sweep, holding a row with an
+// exhausted budget, would otherwise write that row off: delete it (with the
+// durable refusal of the id), and tell the user the deletion was abandoned,
+// while the wipe that carries it is still going to be delivered.
+func TestTheSweepDoesNotWriteOffARequestAWipeHasTakenOver(t *testing.T) {
+	t.Parallel()
+
+	r, c, _, _ := newTestDMRouterForDelete(t)
+	bus := ebus.New()
+	var (
+		outcomesMu sync.Mutex
+		outcomes   []ebus.MessageDeleteOutcome
+	)
+	bus.Subscribe(ebus.TopicMessageDeleteCompleted, func(o ebus.MessageDeleteOutcome) {
+		outcomesMu.Lock()
+		outcomes = append(outcomes, o)
+		outcomesMu.Unlock()
+	}, ebus.WithSync())
+	r.eventBus = bus
+
+	ctx := context.Background()
+	const target = domain.MessageID("a6b7c8d9-e0f1-4a2b-8c3d-e4f5a6b7c8d9")
+	peer := domaintest.ID("peer")
+	store := c.chatlog.Store()
+	now := time.Now().UTC()
+
+	if err := store.NoteDeleteIntent(ctx, chatlog.DeleteIntent{
+		MessageID: target, Peer: peer, CreatedAt: now.Add(-time.Hour),
+		NextAttemptAt: now.Add(-time.Minute), Attempts: deleteIntentGiveUpAttempts,
+	}); err != nil {
+		t.Fatalf("NoteDeleteIntent: %v", err)
+	}
+	// The snapshot the sweep would be holding.
+	due, err := store.DueDeleteIntents(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("DueDeleteIntents: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("the fixture did not produce one due request: %d", len(due))
+	}
+	// The user clears the chat after that read.
+	if err := store.NoteConversationDeleteIntent(ctx, chatlog.DeleteIntent{
+		Kind: chatlog.DeleteIntentConversation, Peer: peer,
+		RequestID: domain.ConversationDeleteRequestID("22222222-3333-4444-8555-666666666666"),
+		CreatedAt: now, NextAttemptAt: now,
+	}); err != nil {
+		t.Fatalf("NoteConversationDeleteIntent: %v", err)
+	}
+
+	if !r.expireDeleteIntent(ctx, store, due[0], now) {
+		t.Fatal("the sweep kept working on a request a wipe had taken over")
+	}
+
+	if _, found, err := store.DeleteIntentByID(ctx, target); err != nil || !found {
+		t.Errorf("the sweep deleted a request the wipe carries: found=%v err=%v", found, err)
+	}
+	outcomesMu.Lock()
+	published := append([]ebus.MessageDeleteOutcome(nil), outcomes...)
+	outcomesMu.Unlock()
+	for _, outcome := range published {
+		if outcome.Abandoned {
+			t.Errorf("the sweep reported a deletion as abandoned while a wipe carries it: %+v", outcome)
+		}
+	}
+}
+
 // TestProcessDeleteRetryDueExpiresAnUnansweredIntent pins the only way
 // an intent dies without an ack: the peer had the whole TTL and never
 // answered. The user hears about it through the Abandoned outcome —
@@ -266,6 +475,64 @@ func TestProcessDeleteRetryDueExpiresAnUnansweredIntent(t *testing.T) {
 	}
 	if outcome.Attempts != deleteIntentGiveUpAttempts {
 		t.Errorf("outcome.Attempts = %d, want the full budget %d", outcome.Attempts, deleteIntentGiveUpAttempts)
+	}
+}
+
+// TestGivingUpOnADeletionLeavesNothingInTheLog pins where the failure is
+// reported when a deletion is written off.
+//
+// Failure lines normally stay visible, because a support case must be able to
+// see what went wrong. This one does not need to: the user is told on their own
+// screen, by the Abandoned outcome. What the line would leave behind instead is
+// a permanent note that a deletion was wanted and never delivered — written
+// after the request that justified it has been dropped, so it is no longer the
+// unfinished work that a durable note is allowed to be.
+func TestGivingUpOnADeletionLeavesNothingInTheLog(t *testing.T) {
+	var captured bytes.Buffer
+	restoreLogger := log.Logger
+	log.Logger = zerolog.New(&captured).Level(zerolog.TraceLevel)
+	t.Cleanup(func() { log.Logger = restoreLogger })
+
+	r, c, _, _ := newTestDMRouterForDelete(t)
+	var abandoned bool
+	bus := ebus.New()
+	bus.Subscribe(ebus.TopicMessageDeleteCompleted, func(o ebus.MessageDeleteOutcome) {
+		abandoned = abandoned || o.Abandoned
+	}, ebus.WithSync())
+	r.eventBus = bus
+
+	const target = domain.MessageID("c3d4e5f6-a7b8-4c9d-8e0f-a1b2c3d4e5f6")
+	peer := domaintest.ID("peer")
+	store := c.chatlog.Store()
+	now := time.Now().UTC()
+	asked := now.Add(-30 * 24 * time.Hour)
+
+	if err := store.NoteDeleteIntent(context.Background(), chatlog.DeleteIntent{
+		MessageID:     target,
+		Peer:          peer,
+		CreatedAt:     asked,
+		NextAttemptAt: now.Add(-time.Minute),
+		Attempts:      deleteIntentGiveUpAttempts,
+	}); err != nil {
+		t.Fatalf("NoteDeleteIntent: %v", err)
+	}
+	captured.Reset()
+
+	r.processDeleteRetryDue(context.Background(), now)
+
+	written := captured.String()
+	if strings.Contains(written, "giving up on the peer-side deletion") {
+		t.Error("the log states that a deletion was wanted and never delivered")
+	}
+	if strings.Contains(written, asked.Format(time.RFC3339)) {
+		t.Error("the moment the user asked for the deletion is in the log")
+	}
+	if strings.Contains(written, string(target)) || strings.Contains(written, peer.String()) {
+		t.Error("an identifier of the abandoned deletion is in the log")
+	}
+	// And the user is told, which is why the line is not needed.
+	if !abandoned {
+		t.Error("nothing told the user their deletion was abandoned")
 	}
 }
 
@@ -1376,6 +1643,12 @@ func TestAuthorizedToDelete(t *testing.T) {
 // that copy land minutes later and stay forever, while the sender treats
 // not_found as success and retires the request, leaving nobody to ask
 // again.
+//
+// The refusal is in MEMORY, and this test also pins what that costs: nothing
+// on disk names the id. A list of "messages this node was asked to delete and
+// never had" is a record of the PEER's deletions kept on our side, past the
+// moment either of us needed it, and the window it would close — a copy landing
+// after this process restarts — is the price of not keeping one.
 func TestApplyInboundDeleteRefusesATargetItNeverSaw(t *testing.T) {
 	t.Parallel()
 
@@ -1390,12 +1663,12 @@ func TestApplyInboundDeleteRefusesATargetItNeverSaw(t *testing.T) {
 	if refused, _ := r.wipeTombstones.Refuses(target, time.Now().UTC()); !refused {
 		t.Fatal("the id was not refused; a late delivery of it would settle in permanently")
 	}
-	live, err := c.chatlog.Store().LiveWipeTombstones(context.Background(), time.Now().UTC())
+	owed, err := c.chatlog.Store().OwedDeleteIntentMessageIDs(context.Background())
 	if err != nil {
-		t.Fatalf("LiveWipeTombstones: %v", err)
+		t.Fatalf("OwedDeleteIntentMessageIDs: %v", err)
 	}
-	if _, ok := live[target]; !ok {
-		t.Error("the refusal did not survive to disk; a restart would let the late copy in")
+	if len(owed) != 0 {
+		t.Errorf("a message we never had was written down as a deletion: %v", owed)
 	}
 }
 
@@ -1438,6 +1711,88 @@ func TestStoreRefusesAReDeliveryOfADeletedMessage(t *testing.T) {
 	}
 	if _, found, err := c.chatlog.Store().EntryByID(ctx, target); err != nil || found {
 		t.Fatalf("the deleted message was written back: found=%v err=%v", found, err)
+	}
+}
+
+// TestTheRequestItselfRefusesTheReplayAfterARestart pins the durable half of
+// the replay defence — and, in its second act, exactly how far it goes.
+//
+// Nothing on this disk records a deletion any more. What survives a restart is
+// the REQUEST: while the peer has not confirmed erasing their copy, this node
+// is openly carrying "delete this id", and a process that reloads that work
+// list recognises the id for free. When the peer answers, the row goes, and the
+// id stops being refused — by design, because the peer's copy is gone and the
+// replay has no source left.
+func TestTheRequestItselfRefusesTheReplayAfterARestart(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	r, c, myAddr, _ := newTestDMRouterForDelete(t)
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	const target = domain.MessageID("50000000-2222-4444-8888-cccccccccccc")
+
+	envelope := protocol.Envelope{
+		ID:        protocol.MessageID(target),
+		Topic:     "dm",
+		Sender:    peer.String(),
+		Recipient: myAddr.String(),
+		Payload:   []byte("ciphertext"),
+		CreatedAt: time.Now().UTC(),
+	}
+	if got := c.store.StoreMessage(envelope, false); got != node.StoreInserted {
+		t.Fatalf("StoreMessage = %v, want inserted", got)
+	}
+	// The peer is unreachable, so the request stays owed — the state this test
+	// is about.
+	r.peerReachableFn = func(domain.PeerIdentity) bool { return false }
+	if _, err := r.SendMessageDelete(ctx, peer, target); err != nil {
+		t.Fatalf("SendMessageDelete: %v", err)
+	}
+
+	// A new process over the same database: nothing of the previous run's
+	// memory, only what the database holds.
+	store := c.chatlog.Store()
+	restarted := newWipeTombstoneSet(func() deleteTaskList { return store })
+	restarted.Hydrate(ctx, time.Now().UTC())
+	afterRestart := NewMessageStoreAdapter(
+		NewChatlogGateway(store, myAddr), c.id, restarted, newRemovalGate())
+
+	if got := afterRestart.StoreMessage(envelope, false); got != node.StoreDuplicate {
+		t.Fatalf("StoreMessage after the restart = %v, want duplicate: the owed request should still refuse it", got)
+	}
+	if _, found, err := store.EntryByID(ctx, target); err != nil || found {
+		t.Fatalf("a replay resurrected the message across a restart: found=%v err=%v", found, err)
+	}
+
+	// The peer confirms. The request goes, and with it the last thing here that
+	// knew this id — which is the whole point, and the cost: a replay from a
+	// relay that never saw our receipt is accepted from now on.
+	if _, err := store.DropDeleteIntent(ctx, target); err != nil {
+		t.Fatalf("DropDeleteIntent: %v", err)
+	}
+	settled := newWipeTombstoneSet(func() deleteTaskList { return store })
+	settled.Hydrate(ctx, time.Now().UTC())
+	if refused, known := settled.Refuses(target, time.Now().UTC()); refused || !known {
+		t.Fatalf("after the peer answered: refused=%v known=%v, want the id forgotten entirely", refused, known)
+	}
+
+	// And this is the consequence, written down rather than argued in a
+	// comment: a copy delivered from here on IS stored again.
+	//
+	// It is the price of the contract and not an oversight. The only ways to
+	// refuse this envelope are a durable list of the ids this node has deleted
+	// — the trace the whole design exists to remove — or telling relays which
+	// ids to drop, which hands a third party the fact we refuse to write down
+	// about ourselves. The window needs a relay that never managed to deliver
+	// its copy (so it never got our ack for it) AND a restart on this side; the
+	// user can delete the message again.
+	//
+	// If this assertion ever starts failing, something began remembering
+	// deletions across restarts, and that is the thing to go looking at.
+	afterSettlement := NewMessageStoreAdapter(
+		NewChatlogGateway(store, myAddr), c.id, settled, newRemovalGate())
+	if got := afterSettlement.StoreMessage(envelope, false); got != node.StoreInserted {
+		t.Fatalf("StoreMessage = %v, want it accepted: the accepted gap is not what this test describes any more", got)
 	}
 }
 
@@ -1702,5 +2057,431 @@ func TestDeletingAMessageTellsTheUIToReloadTheChips(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("deleting a message never told the UI to reload the conversation's chips")
+	}
+}
+
+// TestSettlingADeletionRetiresItFromTheWriteAheadLog pins the last step of a
+// deletion, in the FILE.
+//
+// The request row is the one place the id legitimately survives its message —
+// it is the job "have this deleted at the peer". When the peer answers, that
+// row goes, and the id has no business being anywhere on this disk. But a
+// deleted row lives on in the write-ahead log until a checkpoint retires its
+// page, and nothing on the ack path used to ask for one: the id stayed legible
+// in the sidecar until some later, unrelated deletion happened to trigger a
+// truncation. The deletion had already been reported as finished.
+//
+// Nothing here calls CheckpointWAL. The production path has to ask for it, or
+// the test fails — which is the whole point, since the earlier version of this
+// check called it by hand and could not have noticed.
+func TestSettlingADeletionRetiresItFromTheWriteAheadLog(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	self, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	owner := domain.PeerIdentityFromWire(self.Address)
+	path := filepath.Join(t.TempDir(), "state.db")
+	database, err := storage.Open(ctx, storage.Config{
+		ExplicitPath: path, Owner: owner, Catalog: migrations.Catalog(),
+	})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	store := testChatlogStore(database.Executor(), owner)
+
+	client := &DesktopClient{id: self, appCfg: config.App{Version: "test"}, chatLog: store}
+	client.wireSubServices()
+	r := &DMRouter{
+		client:         client,
+		seenMessageIDs: make(map[string]struct{}),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerGen:        make(map[domain.PeerIdentity]uint64),
+		cache:          NewConversationCache(),
+		withdrawals:    newWithdrawalBacklog(),
+	}
+	r.wipeTombstones = client.wipeTombstones
+	r.deleteCheckpoint = newDeleteCheckpointer(
+		func() *chatlog.Store { return store }, r.opContext)
+	// The coalescing window is a second in production; a test that waited it
+	// out would be a second slower for nothing.
+	r.deleteCheckpoint.delay = time.Millisecond
+
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	const target = domain.MessageID("60000000-2222-4444-8888-cccccccccccc")
+	insertChatlogEntry(t, client.chatlog, owner, chatlog.Entry{
+		ID: string(target), Sender: owner.String(), Recipient: peer.String(),
+		Body: "ciphertext", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Flag: string(protocol.MessageFlagAnyDelete),
+	})
+	now := time.Now().UTC()
+	if err := store.NoteDeleteIntent(ctx, chatlog.DeleteIntent{
+		MessageID: target, Peer: peer, CreatedAt: now, NextAttemptAt: now,
+	}); err != nil {
+		t.Fatalf("NoteDeleteIntent: %v", err)
+	}
+	if _, err := store.DeleteByID(ctx, target); err != nil {
+		t.Fatalf("DeleteByID: %v", err)
+	}
+
+	payload, err := domain.MarshalMessageDeleteAckPayload(domain.MessageDeleteAckPayload{
+		TargetID: target,
+		Status:   domain.MessageDeleteStatusDeleted,
+	})
+	if err != nil {
+		t.Fatalf("MarshalMessageDeleteAckPayload: %v", err)
+	}
+	r.handleInboundMessageDeleteAck(peer, payload)
+
+	// No polling and no window. The checkpoint runs BEFORE the ack path
+	// publishes its outcome, so by the time the call returns the pages are out
+	// of the log — that is the whole point of the ordering, and a test that
+	// waited would pass just as well on the version that only scheduled one.
+	if seen := filesNaming(t, path, string(target)); seen != "" {
+		t.Fatalf("the ack returned while the id was still in %s: the deletion was reported finished before the pages left the log", seen)
+	}
+}
+
+// filesNaming reports which of the database files still contain the value, as
+// raw bytes. Names the file so a failure says whether the page is in the main
+// database or only in the log.
+func filesNaming(t *testing.T, path, value string) string {
+	t.Helper()
+	found := make([]string, 0, 2)
+	for _, file := range []string{path, path + "-wal"} {
+		raw, err := os.ReadFile(file)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if bytes.Contains(raw, []byte(value)) {
+			found = append(found, filepath.Base(file))
+		}
+	}
+	return strings.Join(found, ", ")
+}
+
+// TestAnAckDoesNotReportSuccessWhileTheLocalCopyIsStillHere pins the ordering
+// of the ack path against a database that refuses to write.
+//
+// The peer has confirmed deleting THEIR copy, which is what makes this
+// dangerous: the request is the only thing left that would ever ask again, and
+// the local row is the only copy the user can still see. Retiring the request
+// and publishing "deleted" on a failed local delete leaves the message on this
+// disk with nothing scheduled to remove it, and the user told it is gone.
+//
+// So a failure here changes nothing: the request stays, the UI is not told, and
+// the sweep tries again.
+func TestAnAckDoesNotReportSuccessWhileTheLocalCopyIsStillHere(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	c, id, executor := newTestDesktopClientWithNodeAndDB(t)
+	myAddr := domain.PeerIdentityFromWire(id.Address)
+	r := &DMRouter{
+		client:         c,
+		seenMessageIDs: make(map[string]struct{}),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerGen:        make(map[domain.PeerIdentity]uint64),
+		cache:          NewConversationCache(),
+		withdrawals:    newWithdrawalBacklog(),
+	}
+	r.wipeTombstones = c.wipeTombstones
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	const target = domain.MessageID("70000000-2222-4444-8888-cccccccccccc")
+
+	insertChatlogEntry(t, c.chatlog, myAddr, chatlog.Entry{
+		ID: string(target), Sender: myAddr.String(), Recipient: peer.String(),
+		Body: "ciphertext", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Flag: string(protocol.MessageFlagAnyDelete),
+	})
+	now := time.Now().UTC()
+	if err := c.chatlog.Store().NoteDeleteIntent(ctx, chatlog.DeleteIntent{
+		MessageID: target, Peer: peer, CreatedAt: now, NextAttemptAt: now,
+	}); err != nil {
+		t.Fatalf("NoteDeleteIntent: %v", err)
+	}
+
+	// The outcome reaches the UI through the bus, so that is where a false
+	// "deleted" would be observed.
+	bus := ebus.New()
+	t.Cleanup(func() { bus.Shutdown() })
+	outcomes := make(chan ebus.MessageDeleteOutcome, 4)
+	bus.Subscribe(ebus.TopicMessageDeleteCompleted, func(outcome ebus.MessageDeleteOutcome) {
+		outcomes <- outcome
+	})
+	r.eventBus = bus
+
+	// The message row refuses to go, and ONLY the message row: a trigger that
+	// aborts the delete leaves every other write — the request row above all —
+	// working normally. That separation is the point. A closed database would
+	// fail both halves and the test would pass for the wrong reason, since the
+	// request would survive by accident rather than by decision.
+	if _, err := executor.ExecContext(ctx, `
+		CREATE TRIGGER refuse_message_delete BEFORE DELETE ON messages
+		BEGIN SELECT RAISE(ABORT, 'the disk said no'); END`); err != nil {
+		t.Fatalf("install the failing delete: %v", err)
+	}
+
+	payload, err := domain.MarshalMessageDeleteAckPayload(domain.MessageDeleteAckPayload{
+		TargetID: target,
+		Status:   domain.MessageDeleteStatusDeleted,
+	})
+	if err != nil {
+		t.Fatalf("MarshalMessageDeleteAckPayload: %v", err)
+	}
+	r.handleInboundMessageDeleteAck(peer, payload)
+
+	select {
+	case outcome := <-outcomes:
+		t.Fatalf("the ack reported %+v while the local copy is still here", outcome)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The message is still here — that is the premise — and so is the request
+	// that will remove it.
+	if _, found, err := c.chatlog.Store().EntryByID(ctx, target); err != nil || !found {
+		t.Fatalf("the fixture did not hold: found=%v err=%v", found, err)
+	}
+	if _, found := deleteIntentFor(t, c, string(target)); !found {
+		t.Fatal("the request was retired while the message it names is still on disk: nothing will ever remove it")
+	}
+}
+
+// TestAnAckDoesNotReopenTheReplayWindow is the correction of a mistake made in
+// review: the refusal of a deleted id was being lifted the moment the peer
+// acknowledged the deletion.
+//
+// An ack says the peer removed the row from THEIR database. It says nothing
+// about the copies of the envelope that may still be sitting in a relay's
+// buffer or an inbox queue — and those are the only reason the refusal exists.
+// Lifting it on the ack re-opened the window inside the same process: no
+// restart, no exotic timing, just a late delivery of the copy that was always
+// going to arrive.
+//
+// The entries expire on their own at the sender's reseed horizon, which is the
+// moment a replay stops being possible. They are memory, not disk: the contract
+// is that nothing is written down.
+func TestAnAckDoesNotReopenTheReplayWindow(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	r, c, myAddr, _ := newTestDMRouterForDelete(t)
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	const target = domain.MessageID("80000000-2222-4444-8888-cccccccccccc")
+
+	envelope := protocol.Envelope{
+		ID:        protocol.MessageID(target),
+		Topic:     "dm",
+		Sender:    peer.String(),
+		Recipient: myAddr.String(),
+		Payload:   []byte("ciphertext"),
+		CreatedAt: time.Now().UTC(),
+	}
+	if got := c.store.StoreMessage(envelope, false); got != node.StoreInserted {
+		t.Fatalf("StoreMessage = %v, want inserted", got)
+	}
+	if _, err := r.SendMessageDelete(ctx, peer, target); err != nil {
+		t.Fatalf("SendMessageDelete: %v", err)
+	}
+
+	// The peer confirms. This is the moment the refusal used to be dropped.
+	payload, err := domain.MarshalMessageDeleteAckPayload(domain.MessageDeleteAckPayload{
+		TargetID: target,
+		Status:   domain.MessageDeleteStatusDeleted,
+	})
+	if err != nil {
+		t.Fatalf("MarshalMessageDeleteAckPayload: %v", err)
+	}
+	r.handleInboundMessageDeleteAck(peer, payload)
+
+	// A relay hands the old envelope over, in the same process, right after.
+	if got := c.store.StoreMessage(envelope, false); got != node.StoreDuplicate {
+		t.Fatalf("StoreMessage after the ack = %v, want duplicate: the ack is the peer's database, not the queues", got)
+	}
+	if _, found, err := c.chatlog.Store().EntryByID(ctx, target); err != nil || found {
+		t.Fatalf("a replay right after the ack resurrected the message: found=%v err=%v", found, err)
+	}
+}
+
+// TestABusyLogIsNotReportedAsAFinishedDeletion is the checkpoint contract under
+// the condition that actually breaks it: another reader is holding the
+// write-ahead log, so `wal_checkpoint(TRUNCATE)` cannot run.
+//
+// The row is gone from the database — that part is durable — but the pages that
+// held it are still legible in the -wal file. `deleted` is terminal for the
+// requester: after it the request is retired and nothing anywhere looks at that
+// id again, which would make "still readable in a sidecar" the final state. So
+// the answer is `error`, the requester asks once more, and the next attempt
+// finds nothing to delete and a log it can retire.
+func TestABusyLogIsNotReportedAsAFinishedDeletion(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	self, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	myAddr := domain.PeerIdentityFromWire(self.Address)
+	path := filepath.Join(t.TempDir(), "state.db")
+	database, err := storage.Open(ctx, storage.Config{
+		ExplicitPath: path, Owner: myAddr, Catalog: migrations.Catalog(),
+	})
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	executor := database.Executor()
+
+	c := &DesktopClient{id: self, appCfg: config.App{Version: "test"}, chatLog: testChatlogStore(executor, myAddr)}
+	c.wireSubServices()
+	r := &DMRouter{
+		client:         c,
+		seenMessageIDs: make(map[string]struct{}),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerGen:        make(map[domain.PeerIdentity]uint64),
+		cache:          NewConversationCache(),
+		withdrawals:    newWithdrawalBacklog(),
+	}
+	r.wipeTombstones = c.wipeTombstones
+	r.deleteCheckpoint = newDeleteCheckpointer(
+		func() *chatlog.Store { return c.chatlog.Store() }, r.opContext)
+
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	const target = domain.MessageID("90000000-2222-4444-8888-cccccccccccc")
+	insertChatlogEntry(t, c.chatlog, myAddr, chatlog.Entry{
+		ID: string(target), Sender: peer.String(), Recipient: myAddr.String(),
+		Body: "ciphertext", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Flag: string(protocol.MessageFlagAnyDelete),
+	})
+
+	// A reader that holds the log open for the whole of the deletion.
+	reader, err := executor.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("open the blocking reader: %v", err)
+	}
+	var one int
+	if err := reader.QueryRowContext(ctx, `SELECT 1 FROM messages LIMIT 1`).Scan(&one); err != nil {
+		t.Fatalf("the blocking reader read nothing: %v", err)
+	}
+	defer func() { _ = reader.Rollback() }()
+
+	status := r.applyInboundDelete(peer, target)
+	if status != domain.MessageDeleteStatusError {
+		t.Fatalf("status = %s, want error: the log still holds the message and `deleted` is terminal", status)
+	}
+	// The row itself IS gone — the refusal is about the FILE, not the database.
+	if _, found, err := c.chatlog.Store().EntryByID(ctx, target); err != nil || found {
+		t.Fatalf("the message survived the delete: found=%v err=%v", found, err)
+	}
+
+	// The RETRY, with the reader still holding the log. The row is gone, so
+	// this arrives at the "nothing to delete" path — which is terminal for the
+	// sender, and must therefore refuse just as firmly. Answering not_found
+	// here would close the request over a log that still holds the message,
+	// undoing what the first attempt refused to do.
+	if status := r.applyInboundDelete(peer, target); status != domain.MessageDeleteStatusError {
+		t.Fatalf("the retry answered %s while the log was still busy: not_found is terminal", status)
+	}
+	if seen := filesNaming(t, path, string(target)); seen == "" {
+		t.Fatal("the fixture proves nothing: the log no longer holds the message")
+	}
+
+	// The reader lets go, the peer asks again, and now it can be answered —
+	// and only now are the bytes actually gone.
+	if err := reader.Rollback(); err != nil {
+		t.Fatalf("release the blocking reader: %v", err)
+	}
+	if status := r.applyInboundDelete(peer, target); status != domain.MessageDeleteStatusNotFound {
+		t.Fatalf("the retry answered %s, want not_found once the log is free", status)
+	}
+	if seen := filesNaming(t, path, string(target)); seen != "" {
+		t.Fatalf("not_found was answered while the id was still in %s", seen)
+	}
+}
+
+// TestABusyLogStillReportsTheOutcomeToTheUser is the other side of the
+// checkpoint contract, and it is the one a previous round got wrong.
+//
+// An answer that will be re-asked can be withheld: the ack this node sends a
+// peer, because the peer asks again. A report to our OWN user cannot. By the
+// time this path runs the request has been retired, so no sweep comes back and
+// a repeat of the peer's ack is dropped as an answer to nothing — withholding
+// the outcome means the pending indicator disappears and "the messages are
+// deleted" is never said. The information is gone for good.
+//
+// So a log that will not truncate delays the truncation, not the answer.
+func TestABusyLogStillReportsTheOutcomeToTheUser(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	c, _, executor := newTestDesktopClientWithNodeAndDB(t)
+	r := &DMRouter{
+		client:         c,
+		seenMessageIDs: make(map[string]struct{}),
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerGen:        make(map[domain.PeerIdentity]uint64),
+		cache:          NewConversationCache(),
+		withdrawals:    newWithdrawalBacklog(),
+	}
+	r.wipeTombstones = c.wipeTombstones
+	r.deleteCheckpoint = newDeleteCheckpointer(
+		func() *chatlog.Store { return c.chatlog.Store() }, r.opContext)
+
+	bus := ebus.New()
+	t.Cleanup(func() { bus.Shutdown() })
+	outcomes := make(chan ebus.MessageDeleteOutcome, 4)
+	bus.Subscribe(ebus.TopicMessageDeleteCompleted, func(outcome ebus.MessageDeleteOutcome) {
+		outcomes <- outcome
+	})
+	r.eventBus = bus
+
+	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	const target = domain.MessageID("a0000000-2222-4444-8888-cccccccccccc")
+	now := time.Now().UTC()
+	if err := c.chatlog.Store().NoteDeleteIntent(ctx, chatlog.DeleteIntent{
+		MessageID: target, Peer: peer, CreatedAt: now, NextAttemptAt: now,
+	}); err != nil {
+		t.Fatalf("NoteDeleteIntent: %v", err)
+	}
+
+	// A reader holds the log for the whole of the ack.
+	reader, err := executor.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("open the blocking reader: %v", err)
+	}
+	var one int
+	if err := reader.QueryRowContext(ctx, `SELECT 1 FROM messages LIMIT 1`).Scan(&one); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("the blocking reader read nothing: %v", err)
+	}
+	defer func() { _ = reader.Rollback() }()
+
+	payload, err := domain.MarshalMessageDeleteAckPayload(domain.MessageDeleteAckPayload{
+		TargetID: target,
+		Status:   domain.MessageDeleteStatusDeleted,
+	})
+	if err != nil {
+		t.Fatalf("MarshalMessageDeleteAckPayload: %v", err)
+	}
+	r.handleInboundMessageDeleteAck(peer, payload)
+
+	select {
+	case outcome := <-outcomes:
+		if outcome.Target != target || outcome.Abandoned {
+			t.Fatalf("outcome = %+v, want the settled deletion of %s", outcome, target)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the outcome was never published: the request is retired and nothing will report it again")
+	}
+
+	// And the request really is gone, which is what makes the lost outcome
+	// unrecoverable rather than merely late.
+	if _, found := deleteIntentFor(t, c, string(target)); found {
+		t.Fatal("the fixture proves nothing: the request is still scheduled")
 	}
 }

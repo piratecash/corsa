@@ -170,7 +170,10 @@ func (a *ReactionControlAdapter) ApplyReactionFacts(
 		// facts are about to have nothing to be about. There is no sender-side
 		// retry to hand them back to, and holding them would put them back into
 		// the conversation the wipe is removing.
-		log.Debug().Str("peer", sender.String()).Int("facts", len(facts)).
+		// The gated logger: this line says a conversation of this user's is
+		// being erased right now, which is the fact the deletion paths do not
+		// state. The peer is a digest even when it is turned on.
+		deletionLog().Debug().Str("peer", logID(sender.String())).Int("facts", len(facts)).
 			Msg("reactions dropped: their conversation is being removed")
 		return nil
 	}
@@ -178,18 +181,20 @@ func (a *ReactionControlAdapter) ApplyReactionFacts(
 
 	// Asked once for the batch, not per fact: it is a property of the sender,
 	// and the answer cannot change under a lease we already hold.
-	holdable, err := store.HasConversationWith(ctx, sender)
+	haveConversation, err := store.HasConversationWith(ctx, sender)
 	if err != nil {
 		return err
 	}
-	if !holdable {
+	if !haveConversation {
 		// And the whole batch is over here, not fact by fact. No conversation
 		// means no message of theirs is in this node at all, so every fact would
 		// be looked up and then dropped — one SQLite read per fact, which is a
 		// stranger multiplying our work by the size of a batch they choose. The
 		// lease is held while we say so, which is what makes "no conversation"
 		// still true when we act on it.
-		log.Debug().Str("peer", sender.String()).Int("facts", len(facts)).
+		// An empty conversation is what a wipe leaves behind, so this line
+		// names the peer of a thread that was very likely just erased.
+		deletionLog().Debug().Str("peer", logID(sender.String())).Int("facts", len(facts)).
 			Msg("reactions from a peer with no conversation here are dropped")
 		return nil
 	}
@@ -208,7 +213,7 @@ func (a *ReactionControlAdapter) ApplyReactionFacts(
 				fact.Key.MessageID, fact.Key.Actor, sender)
 			break
 		}
-		applied, err := a.writeOne(ctx, store, sender, fact, now, holdable)
+		applied, err := a.writeOne(ctx, store, sender, fact, now)
 		changed = changed || applied
 		if errors.Is(err, errDeletionUnreadable) {
 			// Counted and reported once for the batch: the condition is
@@ -223,7 +228,7 @@ func (a *ReactionControlAdapter) ApplyReactionFacts(
 		}
 	}
 	if unreadable > 0 {
-		log.Warn().Str("peer", sender.String()).Int("reactions", unreadable).
+		log.Warn().Str("peer", logID(sender.String())).Int("reactions", unreadable).
 			Msg("reactions were dropped: the refusals of deleted ids are unreadable")
 	}
 	if changed {
@@ -239,33 +244,25 @@ func (a *ReactionControlAdapter) writeOne(
 	sender domain.PeerIdentity,
 	fact domain.ReactionFact,
 	now time.Time,
-	holdable bool,
 ) (bool, error) {
 	refused, known := a.refusesDeletedID(fact.Key.MessageID, now)
 	switch {
 	case refused:
-		// The tombstone that answered here expires on the MESSAGE clock — a
-		// week, the horizon past which no copy of the envelope is re-sent —
-		// while the peer offering this fact has no horizon at all. Recording
-		// the id durably is what keeps the answer after the tombstone goes;
-		// without it the offer after that is taken as a fact waiting for its
-		// message, swept an hour later, and offered again, for ever.
+		// Dropped, and NOTHING is written down about the id.
 		//
-		// This is the only moment the two facts are in one place: a reaction
-		// made AFTER the deletion left nothing at delete time to notice.
-		if err := store.RefuseReactionsFor(ctx, domain.ReactionScopeForPeer(sender), fact.Key.MessageID, now); err != nil {
-			// Logged rather than returned, and the fact is still dropped. The
-			// user's deletion holds either way; what a failure costs is the
-			// refusal surviving this tombstone, and failing the batch would
-			// not buy that back.
-			log.Warn().Err(err).
-				Str("peer", sender.String()).
-				Str("id", string(fact.Key.MessageID)).
-				Msg("a deleted id could not be recorded as refusing reactions; its offers can return once the tombstone expires")
-		}
-		log.Debug().
-			Str("peer", sender.String()).
-			Str("id", string(fact.Key.MessageID)).
+		// This used to record the id for good, because the author of the fact
+		// keeps offering it and the answer had to outlive the refusal that
+		// produced it. But that record could not be told from "the user deleted
+		// this message here", and it was kept precisely after the deletion had
+		// otherwise finished — the one durable trace a wipe could not remove.
+		// What is left instead is churn: the offer after this one is held
+		// invisibly, swept an hour later, and offered again, bounded by the
+		// per-actor ceilings and ended by the sender's own acknowledgement.
+		// Gated: digests keep the ids out of the file, but the line still says
+		// that THIS message was deleted here, which is the fact itself.
+		deletionLog().Debug().
+			Str("peer", logID(sender.String())).
+			Str("id", logID(string(fact.Key.MessageID))).
 			Msg("a reaction naming a deleted message was dropped")
 		return false, nil
 	case !known:
@@ -284,66 +281,35 @@ func (a *ReactionControlAdapter) writeOne(
 
 	// LookupEntryInConversation, not HasEntryInConversation: the latter answers
 	// `err == nil && found`, so a transient database error becomes "the message
-	// is not here" — and the fact is then HELD, occupies the actor's quota, and
-	// is swept an hour later having never been shown. This is a decision point,
-	// and a decision made on a swallowed error is the wrong decision silently.
+	// is not here" — and the fact is then dropped rather than applied. This is a
+	// decision point, and a decision made on a swallowed error is the wrong
+	// decision silently.
 	present, err := store.LookupEntryInConversation(ctx, sender, fact.Key.MessageID)
 	if err != nil {
 		return false, fmt.Errorf(
 			"service: cannot tell whether %s is in this conversation: %w", fact.Key.MessageID, err)
 	}
 	if !present {
-		if !holdable {
-			// A fact about a message we do not have, from someone we have never
-			// exchanged one with.
-			// Holding it is what the per-actor ceilings
-			// bound — and an identity costs nothing to mint, so on their own
-			// they bound "as many identities as the attacker cares to make,
-			// times the ceiling". Requiring a conversation makes that number
-			// the people the user actually talks to.
-			return false, nil
-		}
-		// The message is not here, so the question "was it deleted here" is
-		// worth a read — and this is the read the tombstone's expiry used to
-		// leave unanswered. Asked here rather than at the top of the function
-		// so a conversation whose messages are all present pays nothing for it.
-		forGood, err := store.ReactionsRefusedFor(ctx, domain.ReactionScopeForPeer(sender), fact.Key.MessageID, now)
-		if err != nil {
-			return false, fmt.Errorf(
-				"service: cannot tell whether %s was deleted here: %w", fact.Key.MessageID, err)
-		}
-		if forGood {
-			log.Debug().
-				Str("peer", sender.String()).
-				Str("id", string(fact.Key.MessageID)).
-				Msg("a reaction naming a message deleted here long ago was dropped")
-			return false, nil
-		}
-		// Held facts change nothing the user can see, so this deliberately does
-		// not count as a change: waking the UI for a row it cannot draw would
-		// be a redraw per arriving reaction on a message that may never come.
-		held, err := store.HoldReactionFact(ctx, fact, now)
-		if err != nil {
-			return false, err
-		}
-		if !held {
-			// Refused by a ceiling, or superseded. Nothing to release, and
-			// nothing to look again for.
-			return false, nil
-		}
-		// Then look again. The message can land — and be released — in the
-		// window between the lookup above and this write, on the other
-		// goroutine; the release names rows that exist, so it would not see
-		// this one, and the fact would stay pending until the sweep took it an
-		// hour later. Releasing here closes that window: the second lookup is
-		// after the row exists, so either it saw the message or the release did.
-		landed, lookupErr := store.LookupEntryInConversation(ctx, sender, fact.Key.MessageID)
-		if lookupErr != nil || !landed {
-			return false, lookupErr
-		}
-		released, releaseErr := store.ReleaseHeldReactions(
-			ctx, domain.ReactionScopeForPeer(sender), fact.Key.MessageID, now)
-		return released > 0, releaseErr
+		// A fact about a message this node does not have is DROPPED, and
+		// nothing about it is written down.
+		//
+		// It used to be held — a `pending` row carrying the message id, the
+		// conversation, the actor and the time it first arrived — so that a
+		// reaction overtaking its message on the wire would still be applied
+		// when the message landed. That row is indistinguishable from a record
+		// of a message this node deleted: after a wipe the offers keep coming,
+		// and each one wrote the id back onto the disk for an hour at a time.
+		// The only durable trace this design permits is WORK NOT YET DONE —
+		// a deletion the peer has not confirmed, an attachment whose files
+		// would not unlink — and this was not that. A held reaction asked for
+		// nothing and waited for nobody; it simply remembered an id.
+		//
+		// What is lost is promptness, not the reaction. Its author re-offers
+		// the facts it holds on a timer for as long as it holds them
+		// (ReactionsToReoffer), so once the message arrives the next offer
+		// applies it — the chip appears a cycle later than it used to instead
+		// of instantly.
+		return false, nil
 	}
 	return store.ApplyReactionFact(ctx, fact, now)
 }

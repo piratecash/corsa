@@ -2,10 +2,12 @@ package filetransfer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -76,13 +78,32 @@ type persistedTransferEntry struct {
 // any other arrangement has a window in which the files are unreachable
 // and nothing knows they should be gone.
 type persistedCleanup struct {
-	FileID        domain.FileID `json:"file_id"`
-	TransmitHash  string        `json:"transmit_hash,omitempty"`
-	CompletedPath string        `json:"completed_path,omitempty"`
-	PartialPath   string        `json:"partial_path,omitempty"`
-	NotedAt       time.Time     `json:"noted_at"`
-	Attempts      int           `json:"attempts,omitempty"`
-	NextAttemptAt time.Time     `json:"next_attempt_at,omitempty"`
+	FileID domain.FileID `json:"file_id"`
+	// The singular fields are what files written before an erasure could owe
+	// SEVERAL files carried. They are read and folded into the lists below, and
+	// no longer written: a file id can be given more to erase than it was first
+	// told, and one slot per kind loses whichever came first.
+	TransmitHash  string `json:"transmit_hash,omitempty"`
+	CompletedPath string `json:"completed_path,omitempty"`
+	PartialPath   string `json:"partial_path,omitempty"`
+	FileHash      string `json:"file_hash,omitempty"`
+
+	TransmitHashes []string            `json:"transmit_hashes,omitempty"`
+	Downloads      []persistedDownload `json:"downloads,omitempty"`
+	Partials       []string            `json:"partials,omitempty"`
+
+	NotedAt       time.Time `json:"noted_at"`
+	Attempts      int       `json:"attempts,omitempty"`
+	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
+}
+
+// persistedDownload is one receiver-side file an erasure owes. Path is empty
+// for a message deleted while its download was still being verified — the name
+// and the content are what find that file afterwards.
+type persistedDownload struct {
+	Path string `json:"path,omitempty"`
+	Name string `json:"name,omitempty"`
+	Hash string `json:"hash,omitempty"`
 }
 
 // persistedTransferFile is the top-level JSON structure written to disk.
@@ -234,15 +255,38 @@ func (m *Manager) saveMappingsLockedErr() error {
 
 	cleanups := make([]persistedCleanup, 0, len(m.pendingCleanups))
 	for _, intent := range m.pendingCleanups {
-		cleanups = append(cleanups, persistedCleanup{
-			FileID:        intent.FileID,
-			TransmitHash:  intent.TransmitHash,
-			CompletedPath: intent.CompletedPath,
-			PartialPath:   intent.PartialPath,
-			NotedAt:       intent.NotedAt,
-			Attempts:      intent.Attempts,
-			NextAttemptAt: intent.NextAttemptAt,
-		})
+		downloads := make([]persistedDownload, 0, len(intent.Downloads))
+		for _, download := range intent.Downloads {
+			downloads = append(downloads, persistedDownload(download))
+		}
+		written := persistedCleanup{
+			FileID:         intent.FileID,
+			TransmitHashes: intent.TransmitHashes,
+			Downloads:      downloads,
+			Partials:       intent.Partials,
+			NotedAt:        intent.NotedAt,
+			Attempts:       intent.Attempts,
+			NextAttemptAt:  intent.NextAttemptAt,
+		}
+		// The singular fields are filled in as well while the erasure owes one
+		// of a kind, which is the ordinary case. They are what a PREVIOUS build
+		// reads: without them a downgrade would load the file, find no work in
+		// it, and leave the files of a deleted message on disk with nothing
+		// left that knows they should go. An erasure that owes several is
+		// beyond what those fields can say, and an old build reading it recovers
+		// what it can — nothing — which is why they are written whenever they
+		// can carry the whole truth.
+		if len(intent.TransmitHashes) == 1 {
+			written.TransmitHash = intent.TransmitHashes[0]
+		}
+		if len(intent.Partials) == 1 {
+			written.PartialPath = intent.Partials[0]
+		}
+		if len(downloads) == 1 && downloads[0].Path != "" {
+			written.CompletedPath = downloads[0].Path
+			written.FileHash = downloads[0].Hash
+		}
+		cleanups = append(cleanups, written)
 	}
 
 	pf := persistedTransferFile{
@@ -302,15 +346,31 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 		if m.pendingCleanups == nil {
 			m.pendingCleanups = make(map[domain.FileID]*pendingCleanup, len(pf.Cleanups))
 		}
-		m.pendingCleanups[entry.FileID] = &pendingCleanup{
-			FileID:        entry.FileID,
-			TransmitHash:  entry.TransmitHash,
-			CompletedPath: entry.CompletedPath,
-			PartialPath:   entry.PartialPath,
-			NotedAt:       entry.NotedAt,
-			Attempts:      entry.Attempts,
-			NextAttemptAt: entry.NextAttemptAt,
+		restored := &pendingCleanup{
+			FileID:         entry.FileID,
+			TransmitHashes: entry.TransmitHashes,
+			Partials:       entry.Partials,
+			NotedAt:        entry.NotedAt,
+			Attempts:       entry.Attempts,
+			NextAttemptAt:  entry.NextAttemptAt,
 		}
+		for _, download := range entry.Downloads {
+			restored.Downloads, _ = addDownload(restored.Downloads, pendingDownload(download))
+		}
+		// A file written by an older build carries one of each, and a file
+		// written by this one carries them TWICE — once in the lists, once in
+		// the singular fields a previous build can read. Folded in either way:
+		// the adders match on value, so the duplicate collapses and an older
+		// file's only copy is not lost.
+		restored.TransmitHashes, _ = addString(restored.TransmitHashes, entry.TransmitHash)
+		restored.Partials, _ = addString(restored.Partials, entry.PartialPath)
+		if entry.CompletedPath != "" {
+			restored.Downloads, _ = addDownload(restored.Downloads, pendingDownload{
+				Path: entry.CompletedPath,
+				Hash: entry.FileHash,
+			})
+		}
+		m.pendingCleanups[entry.FileID] = restored
 	}
 	if len(pf.Cleanups) > 0 {
 		log.Info().Int("pending", len(pf.Cleanups)).
@@ -325,7 +385,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			// Validate state before inserting into the state machine.
 			if _, ok := validSenderStates[sm.State]; !ok {
 				log.Warn().
-					Str("file_id", string(sm.FileID)).
+					Str("file_id", logID(string(sm.FileID))).
 					Str("state", string(sm.State)).
 					Msg("file_transfer: persisted sender entry has unknown state, skipping")
 				continue
@@ -338,7 +398,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			if sm.PreServeState != "" {
 				if _, ok := validSenderStates[sm.PreServeState]; !ok {
 					log.Warn().
-						Str("file_id", string(sm.FileID)).
+						Str("file_id", logID(string(sm.FileID))).
 						Str("pre_serve_state", string(sm.PreServeState)).
 						Msg("file_transfer: persisted sender entry has invalid pre_serve_state, clearing")
 					sm.PreServeState = ""
@@ -349,7 +409,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			// Validate hash before using it as a ref-count key or glob pattern.
 			if err := domain.ValidateFileHash(sm.FileHash); err != nil {
 				log.Warn().Err(err).
-					Str("file_id", string(sm.FileID)).
+					Str("file_id", logID(string(sm.FileID))).
 					Msg("file_transfer: persisted sender entry has invalid file hash, skipping")
 				continue
 			}
@@ -369,7 +429,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			if sm.State != senderTombstone {
 				if m.store != nil && !m.store.HasFile(sm.FileHash) {
 					log.Warn().
-						Str("file_id", string(sm.FileID)).
+						Str("file_id", logID(string(sm.FileID))).
 						Str("file_hash", sm.FileHash).
 						Str("prev_state", string(sm.State)).
 						Msg("file_transfer: sender mapping has no transmit file on disk, tombstoning")
@@ -388,7 +448,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 				// Resurrect to completed so the file can be served again.
 				if m.store != nil && m.store.HasFile(sm.FileHash) {
 					log.Info().
-						Str("file_id", string(sm.FileID)).
+						Str("file_id", logID(string(sm.FileID))).
 						Str("file_hash", sm.FileHash).
 						Msg("file_transfer: tombstone sender has transmit file on disk, resurrecting to completed")
 					sm.State = senderCompleted
@@ -416,7 +476,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			// counterparty — refuse it rather than register a peer-less entry.
 			if sm.Recipient.IsZero() {
 				log.Warn().
-					Str("file_id", string(sm.FileID)).
+					Str("file_id", logID(string(sm.FileID))).
 					Msg("file_transfer: persisted sender entry has empty peer, skipping")
 				continue
 			}
@@ -429,7 +489,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			// Validate state before inserting into the state machine.
 			if _, ok := validReceiverStates[rm.State]; !ok {
 				log.Warn().
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Str("state", string(rm.State)).
 					Msg("file_transfer: persisted receiver entry has unknown state, skipping")
 				continue
@@ -439,7 +499,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			// all-zero peer (the zero identity). Refuse a peer-less mapping.
 			if rm.Sender.IsZero() {
 				log.Warn().
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Msg("file_transfer: persisted receiver entry has empty peer, skipping")
 				continue
 			}
@@ -449,13 +509,13 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			// must not resurrect entries that runtime code would refuse to register.
 			if err := domain.ValidateFileHash(rm.FileHash); err != nil {
 				log.Warn().Err(err).
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Msg("file_transfer: persisted receiver entry has invalid file hash, skipping")
 				continue
 			}
 			if rm.FileSize == 0 {
 				log.Warn().
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Msg("file_transfer: persisted receiver entry has zero file size, skipping")
 				continue
 			}
@@ -465,7 +525,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 
 			if rm.FileName == "unnamed" && strings.TrimSpace(entry.FileName) == "" {
 				log.Warn().
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Msg("file_transfer: persisted receiver entry has empty file name, skipping")
 				continue
 			}
@@ -478,7 +538,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			if rm.CompletedPath != "" && m.downloadDir != "" {
 				if err := ensureWithinDir(m.downloadDir, rm.CompletedPath); err != nil {
 					log.Warn().
-						Str("file_id", string(rm.FileID)).
+						Str("file_id", logID(string(rm.FileID))).
 						Str("path", rm.CompletedPath).
 						Msg("file_transfer: persisted completed_path escapes download dir, clearing")
 					rm.CompletedPath = ""
@@ -492,7 +552,7 @@ func (m *Manager) loadMappings() (activeHashes map[string]int) {
 			m.receiverMaps[rm.FileID] = rm
 
 		default:
-			log.Warn().Str("role", entry.Role).Str("file_id", string(entry.FileID)).
+			log.Warn().Str("role", entry.Role).Str("file_id", logID(string(entry.FileID))).
 				Msg("file_transfer: unknown role in persisted entry, skipping")
 		}
 	}
@@ -550,7 +610,7 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 			rm.DownloadedSentAt = time.Time{} // will fire on next tickReceiverMappings tick
 			rm.DownloadedBackoff = initialRetryTimeout
 			log.Info().
-				Str("file_id", string(rm.FileID)).
+				Str("file_id", logID(string(rm.FileID))).
 				Str("path", completedPath).
 				Msg("file_transfer: reconciled verifying → waiting_ack (completed file found)")
 			continue
@@ -568,7 +628,7 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 			// prepareResumeLocked when the resume fires.
 			if partialSize > rm.FileSize {
 				log.Warn().
-					Str("file_id", string(rm.FileID)).
+					Str("file_id", logID(string(rm.FileID))).
 					Uint64("partial_size", partialSize).
 					Uint64("file_size", rm.FileSize).
 					Msg("file_transfer: partial file exceeds file size, resetting to offset 0")
@@ -585,7 +645,7 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 			rm.NextOffset = partialSize
 			rm.BytesReceived = partialSize
 			log.Info().
-				Str("file_id", string(rm.FileID)).
+				Str("file_id", logID(string(rm.FileID))).
 				Uint64("offset", rm.NextOffset).
 				Msg("file_transfer: reconciled verifying → waiting_route (partial file found)")
 			continue
@@ -598,7 +658,7 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 		rm.State = receiverFailed
 		rm.CompletedAt = time.Now()
 		log.Warn().
-			Str("file_id", string(rm.FileID)).
+			Str("file_id", logID(string(rm.FileID))).
 			Msg("file_transfer: reconciled verifying → failed (no files on disk)")
 	}
 	return repaired
@@ -608,9 +668,18 @@ func (m *Manager) reconcileVerifyingOnStartup() bool {
 // Atomic JSON write
 // ---------------------------------------------------------------------------
 
-// atomicWriteJSON marshals v to indented JSON and writes it atomically:
-// write to a temporary file in the same directory, then rename over the target.
-// This prevents corruption if the process crashes mid-write.
+// atomicWriteJSON marshals v to indented JSON and writes it durably: into a
+// temporary file in the same directory, flushed to the platter, then renamed
+// over the target, and the directory flushed after the rename.
+//
+// The rename alone gives ATOMICITY — a reader sees the old file or the new one,
+// never half of one. It does not give DURABILITY, and here the two are not
+// interchangeable: this file records which attachments belong to which message,
+// and it is written right after the message's deletion has committed in SQLite.
+// Without the flushes, a power cut in that window brings back a mapping — and
+// with it a file on disk — for a message the database no longer has and nobody
+// will ever ask about again. An fsync per state change is affordable at the rate
+// a person sends files.
 func atomicWriteJSON(path string, v interface{}) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -623,8 +692,8 @@ func atomicWriteJSON(path string, v interface{}) error {
 	}
 
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return fmt.Errorf("write temp file: %w", err)
+	if err := writeFileSynced(tmpPath, data); err != nil {
+		return err
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
@@ -636,7 +705,80 @@ func atomicWriteJSON(path string, v interface{}) error {
 		return fmt.Errorf("rename temp to target: %w", err)
 	}
 
+	// The rename itself is a directory operation, and an unflushed directory
+	// can lose it while keeping both files — the old content back under the
+	// old name.
+	if err := syncDir(dir); err != nil {
+		return err
+	}
 	return nil
+}
+
+// writeFileSynced writes the whole content and flushes it before returning.
+func writeFileSynced(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("flush temp file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	return nil
+}
+
+// syncDir flushes a directory entry so a rename survives a power cut.
+//
+// Not every platform lets a directory be opened or flushed — Windows does not,
+// and some filesystems answer EINVAL — and there the rename's durability is the
+// filesystem's business. Those refusals are tolerated BY NAME.
+//
+// Anything else is reported. A blanket "flush failed, carry on" would turn a
+// disk that is failing (EIO) into a success, and the caller would tell the user
+// their attachment record is safely written when it is not.
+// syncDirectory is syncDir behind a seam. The erasure paths report an unlink as
+// finished only once the directory entry is on disk, and a test that pins that
+// ordering has to be able to make the flush fail — no portable filesystem
+// operation does it on demand.
+var syncDirectory = syncDir
+
+func syncDir(dir string) error {
+	handle, err := os.Open(dir)
+	if err != nil {
+		if unsupportedDirSync(err) {
+			log.Debug().Err(err).Str("dir", dir).
+				Msg("file_transfer: directory flushing is unsupported here; relying on the filesystem")
+			return nil
+		}
+		return fmt.Errorf("open directory for flushing: %w", err)
+	}
+	defer func() { _ = handle.Close() }()
+
+	if err := handle.Sync(); err != nil {
+		if unsupportedDirSync(err) {
+			log.Debug().Err(err).Str("dir", dir).
+				Msg("file_transfer: directory flushing is unsupported here; relying on the filesystem")
+			return nil
+		}
+		return fmt.Errorf("flush directory: %w", err)
+	}
+	return nil
+}
+
+// unsupportedDirSync reports the errors that mean "this platform does not do
+// that", as opposed to "the disk is in trouble".
+func unsupportedDirSync(err error) bool {
+	return errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENOTSUP) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, os.ErrPermission)
 }
 
 // TransfersMappingsPath builds the identity-scoped path for the transfers JSON

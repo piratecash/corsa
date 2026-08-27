@@ -491,7 +491,7 @@ func TestFocusReclaimedAfterADeferredDrawIsScrolledIntoView(t *testing.T) {
 
 // Focus can leave the menu without the menu having moved it. items is rebuilt
 // every frame from live state, so the row holding focus can simply stop being in
-// the list — the peer goes offline and "Delete chat and ask the peer" leaves, a row
+// the list — the peer goes offline and "Delete chat for both sides" leaves, a row
 // opens a confirmation and the whole set is swapped. drive pulls focus back to
 // the first row, and the list has to follow it there for the same reason it
 // follows a Tab.

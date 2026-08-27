@@ -53,6 +53,25 @@ const (
 	// MessageDeleteAckPayload. Also a control DM and not stored.
 	DMCommandMessageDeleteAck DMCommand = "message_delete_ack"
 
+	// DMCommandConversationDelete is the control DM that asks the peer to
+	// erase everything they still hold of the conversation the two share.
+	//
+	// It names NO messages. That is what makes it the request a wipe needs:
+	// a list of ids tells the peer about messages that never reached them,
+	// and it cannot be re-issued once the local rows — and with them the
+	// ids — are gone. Authorship is not consulted on the receiving side
+	// either, unlike DMCommandMessageDelete: the gesture behind it is a
+	// mutual forgetting the user confirms twice, and per-message authority
+	// would leave each side holding the half the other wrote.
+	//
+	// Immutable messages survive it, as they survive everything else.
+	DMCommandConversationDelete DMCommand = "conversation_delete"
+
+	// DMCommandConversationDeleteAck is the control DM the peer sends back
+	// to report how a conversation_delete was resolved. Carries
+	// ConversationDeleteAckPayload. Control DM, never stored.
+	DMCommandConversationDeleteAck DMCommand = "conversation_delete_ack"
+
 	// DMCommandDecryptFailed is the control DM a recipient sends after a
 	// CONFIRMED crypto-fail (docs/protocol/identity-lookup.md §4.10): the
 	// envelope authenticated — signature and both addresses verified — but
@@ -73,6 +92,8 @@ func (c DMCommand) Valid() bool {
 		DMCommandFileAnnounce,
 		DMCommandMessageDelete,
 		DMCommandMessageDeleteAck,
+		DMCommandConversationDelete,
+		DMCommandConversationDeleteAck,
 		DMCommandDecryptFailed:
 		return true
 	default:
@@ -89,6 +110,8 @@ func (c DMCommand) IsControl() bool {
 	switch c {
 	case DMCommandMessageDelete,
 		DMCommandMessageDeleteAck,
+		DMCommandConversationDelete,
+		DMCommandConversationDeleteAck,
 		DMCommandDecryptFailed:
 		return true
 	default:
@@ -242,13 +265,14 @@ func MarshalMessageDeleteAckPayload(p MessageDeleteAckPayload) (string, error) {
 }
 
 // ConversationDeleteRequestID identifies one "delete chat for everyone"
-// gesture on THIS node. It never leaves the process: the wipe puts no
-// bulk command on the wire, so there is nothing to bind an ack to. What
-// it does bind is the two halves of the local operation —
-// BeginConversationDelete latches the outgoing barrier and returns the
-// id, CompleteConversationDelete presents it to claim the same latch —
-// so a goroutine that arrives late cannot finish a wipe that a newer
-// click has already replaced.
+// gesture. It binds three things to the same press of the button: the two
+// halves of the local operation (BeginConversationDelete latches the
+// outgoing barrier and returns the id, CompleteConversationDelete presents
+// it to claim the same latch, so a goroutine that arrives late cannot
+// finish a wipe a newer click has already replaced), the durable request
+// that outlives them both, and the peer's ack — which echoes it, so an
+// answer to a wipe the user has since re-issued cannot settle the current
+// one.
 //
 // Format mirrors MessageID (UUID v4) so the same generator can be used
 // (protocol.NewMessageID() returns a UUID v4 string), but the type is

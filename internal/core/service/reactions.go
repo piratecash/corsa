@@ -29,7 +29,6 @@ type reactionStore interface {
 	NextReactionClock(ctx context.Context, self domain.PeerIdentity) (domain.ReactionClock, error)
 	ReleaseHeldReactions(ctx context.Context, scope domain.ReactionScope, messageID domain.MessageID, now time.Time) (int, error)
 	SweepHeldReactions(ctx context.Context, now time.Time) (int, error)
-	TrimReactionRefusals(ctx context.Context, keep int) (int, error)
 	ReleaseArrivedReactions(ctx context.Context, now time.Time) ([]domain.ReactionScope, error)
 	ConversationsWithReactionsBy(ctx context.Context, actor domain.PeerIdentity) ([]domain.ReactionScope, error)
 	ReactionFactsByKey(ctx context.Context, scope domain.ReactionScope, actor domain.PeerIdentity, keys []domain.ReactionKey) ([]domain.ReactionFact, error)

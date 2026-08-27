@@ -39,6 +39,16 @@ const (
 	// per-message work around it. See docs/storage.md for the residual
 	// -wal window and what closes it.
 	//
+	//
+	// synchronous=FULL is stated rather than inherited. In WAL mode SQLite's
+	// own default is FULL, but it is a COMPILE-TIME default: a driver built
+	// with SQLITE_DEFAULT_WAL_SYNCHRONOUS=1 gives NORMAL, and then a COMMIT
+	// returns before the write-ahead log has reached the platter. Every other
+	// database would call that an acceptable trade; this one tells a user
+	// their messages are deleted, and a power cut a moment later must not
+	// bring them back. The cost is one fsync per commit, paid by a client
+	// that writes at human speed.
+	//
 	// journal_mode is deliberately NOT here. It is a property of the FILE,
 	// not of a connection, and switching it needs an exclusive lock that
 	// SQLite refuses immediately — without consulting busy_timeout — while
@@ -46,5 +56,5 @@ const (
 	// every pooled connection retry that switch and made two processes
 	// starting against the same fresh file race, with the loser failing to
 	// start at all. ensureWALMode does it once, with a retry.
-	sqliteDSNOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=secure_delete(1)"
+	sqliteDSNOptions = "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=secure_delete(1)&_pragma=synchronous(FULL)"
 )

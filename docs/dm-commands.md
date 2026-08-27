@@ -99,35 +99,24 @@ package domain
 type DMCommand string
 
 const (
-    DMCommandFileAnnounce      DMCommand = "file_announce"
-    DMCommandMessageDelete     DMCommand = "message_delete"
-    DMCommandMessageDeleteAck  DMCommand = "message_delete_ack"
+    DMCommandFileAnnounce          DMCommand = "file_announce"
+    DMCommandMessageDelete         DMCommand = "message_delete"
+    DMCommandMessageDeleteAck      DMCommand = "message_delete_ack"
+    DMCommandConversationDelete    DMCommand = "conversation_delete"
+    DMCommandConversationDeleteAck DMCommand = "conversation_delete_ack"
 )
 
 // Valid accepts the empty command (the regular text-DM case) plus the
-// three named values. Empty must remain valid because callers that
-// build a plain text OutgoingDM leave Command unset; rejecting it here
-// would force every caller to special-case the empty string.
-func (c DMCommand) Valid() bool {
-    switch c {
-    case "", DMCommandFileAnnounce, DMCommandMessageDelete, DMCommandMessageDeleteAck:
-        return true
-    default:
-        return false
-    }
-}
+// named values. Empty must remain valid because callers that build a
+// plain text OutgoingDM leave Command unset; rejecting it here would
+// force every caller to special-case the empty string.
+func (c DMCommand) Valid() bool { ... }
 
 // IsControl reports whether the command identifies a control DM
-// (message_delete, message_delete_ack). The empty command and
+// (message_delete, message_delete_ack, conversation_delete,
+// conversation_delete_ack, decrypt_failed). The empty command and
 // DMCommandFileAnnounce are data DMs, not control.
-func (c DMCommand) IsControl() bool {
-    switch c {
-    case DMCommandMessageDelete, DMCommandMessageDeleteAck:
-        return true
-    default:
-        return false
-    }
-}
+func (c DMCommand) IsControl() bool { ... }
 ```
 
 `OutgoingDM.Command` switches type from `FileAction` to `DMCommand`.
@@ -169,7 +158,38 @@ type MessageDeleteAckPayload struct {
     TargetID MessageID           `json:"target_id"`
     Status   MessageDeleteStatus `json:"status"`
 }
+
+// The whole-thread request names NO message: the ids of a conversation are
+// the one thing a wipe must not put on the wire, both because some of them
+// may never have reached the peer and because the request has to outlive
+// the rows it came from.
+type ConversationDeletePayload struct {
+    // The id of the gesture, echoed by the ack. Nothing else: no moment,
+    // no message ids.
+    RequestID ConversationDeleteRequestID `json:"request_id"`
+}
+
+type ConversationDeleteStatus string
+
+const (
+    ConversationDeleteStatusApplied ConversationDeleteStatus = "applied" // peer erased what it held; terminal
+    ConversationDeleteStatusError   ConversationDeleteStatus = "error"   // peer could not decide; NOT terminal
+)
+
+type ConversationDeleteAckPayload struct {
+    RequestID ConversationDeleteRequestID `json:"request_id"`
+    Status    ConversationDeleteStatus    `json:"status"`
+    // No count. It carried one, and "I removed three" tells a requester who
+    // held two that the other side had a message they never saw — the same
+    // thing the request itself is built not to reveal.
+}
 ```
+
+There is no `denied` among the conversation statuses, and the absence is
+the design: a per-message request can be refused because the message's own
+flag reserves it to its author, while a thread wipe is not about any one
+message. Refusing the ones the requester did not write is what used to
+leave each side holding half a conversation the user believed was gone.
 
 Both payloads are encoded as JSON in the encrypted plaintext's
 `command_data`. `Body` is empty for control DMs — control DMs travel on a
@@ -201,14 +221,22 @@ Each chat message carries a `protocol.MessageFlag` recorded in
 | `sender-delete`     | Only the original sender of the target message.               |
 | `any-delete`        | The original sender or recipient.                             |
 | `auto-delete-ttl`   | Same as `sender-delete` until the TTL elapses, then expires.  |
-| empty / unknown     | Treated as `sender-delete` (current default policy).          |
+| empty / unknown     | Treated as `sender-delete`. Legacy only — see below.           |
 
 The flag is stamped by the AUTHOR at send time and travels with the row,
 so it is the author's own answer to "may my counterpart erase this from
 their side too". `DMCrypto.SendDirectMessage` stamps `any-delete` on outgoing DMs
 (`defaultOutgoingMessageFlag`): a conversation is shared, and a user
 deleting a message from it expects it gone, not gone from their own
-screen while the other copy stands. `immutable` is the absolute end of that scale — the
+screen while the other copy stands.
+
+`sender-delete` and the empty value are therefore LEGACY, not choices: the
+flag has never been reachable from the interface, so a row carrying either
+is one an older build stamped. Migration `0007_delete_policy_backfill`
+rewrites them to `any-delete` for `topic = 'dm'`, leaving `immutable` and
+`auto-delete-ttl` alone. Before that backfill, deleting a message the peer
+had written came back `denied`, and clearing a thread erased only the
+messages the requester had not written. `immutable` is the absolute end of that scale — the
 "this row is part of the permanent record" promise (legal evidence,
 tamper-evident logs) that not even the author can revoke.
 
@@ -484,18 +512,16 @@ was meant to prevent.
 
 Lifecycle:
 
-1. `SendMessageDelete` removes the local row, records the intent, and
-   plants the refusal of the id — **all in one transaction**
-   (`chatlog.DeleteWithIntent`; the local-only routes take
-   `DeleteMessageWithTombstone`, which is the same commit minus the
-   intent). They are one invariant seen from three sides: the user's
-   copy is gone, somebody still owes us the peer's, and a replay of the
-   same envelope will be refused rather than re-inserted. Separate
-   commits leave crash windows in which the copy is destroyed and nobody
-   will ever ask the peer, or in which the row is gone but its refusal
-   is not — and the next relay retry hands the message back. When the
-   peer is reachable the request also goes out immediately, which is an
-   optimisation over waiting for the next sweep and nothing more.
+1. `SendMessageDelete` removes the local row and records the intent —
+   **in one transaction** (`chatlog.DeleteWithIntent`; the local-only
+   routes take plain `DeleteByID`). They are one invariant seen from both
+   sides: the user's copy is gone, and somebody still owes us the peer's.
+   Separate commits leave a crash window in which the copy is destroyed
+   and nobody will ever ask the peer. The request is ALSO what refuses a
+   replay of the same envelope — see §"Replay after a deletion" — and it
+   needs no separate row to do it. When the peer is reachable the request
+   also goes out immediately, which is an optimisation over waiting for
+   the next sweep and nothing more.
 2. `deleteRetryLoop` sweeps due intents every 5 s (`deleteRetryTickPeriod`).
    For each one:
    - `deleteIntentGiveUpAttempts` (720) dispatches made and unanswered
@@ -646,13 +672,114 @@ Outside that claim, a dispatch already in flight is on the wire, and a
 peer that received the message earlier — with a receipt lost or never
 sent — keeps its copy, which is why `withdraw` still schedules.
 
-Every deleted id is refused for the next hour — including on the recovery
-path, where the row is already absent — so a late echo of the envelope
-from some relay's in-flight buffer is re-deleted instead of re-creating
-the row the delete was meant to leave gone. The refusal lives in the same
-`message_delete_intents` row as the request the peer owes us
-(`refuse_until`), and outlives it: the ack means the peer will not keep
-the message, not that a stale copy cannot still arrive.
+#### Replay after a deletion
+
+A deleted id has to be refused for a while: a late echo of the envelope
+from some relay's in-flight buffer would otherwise re-create the row the
+delete was meant to leave gone. Nothing durable records that a deletion
+happened, so the refusal is assembled from things that exist for other
+reasons:
+
+* **the task.** While the peer has not confirmed erasing their copy, the
+  `message_delete_intents` row names the id, and a process that reloads
+  its work list at startup (`OwedDeleteIntentMessageIDs`) recognises it
+  for free. This is the only half that survives a restart, and it lives
+  exactly as long as the job does.
+
+  It is also the general rule: **the only thing this design may WRITE DOWN
+  about a deleted message is WORK NOT YET DONE.** A request the peer has
+  not answered qualifies; so does an attachment whose files would not
+  unlink (`filetransfer.pendingCleanup`). Both describe a future action
+  and both disappear the moment it happens. A refusal on disk qualified as
+  neither — it described the past and was kept precisely because the past
+  was over.
+
+  The rule is about the DISK, and the in-memory window below is the stated
+  exception: it holds plain message ids for as long as a replay is
+  possible, which is longer than the deletion takes. It expires, and it
+  does not survive the process — so it cannot be read by anyone holding the
+  file, which is what the rule is for. Removing it would mean either a
+  durable list of deleted ids or telling relays what to drop; both are
+  worse, and both are described below.
+
+  Its bound, stated exactly, is `maxWipeTombstones` PLUS the deletions this
+  node still owes a peer. The cap governs what the process ACCUMULATES —
+  the ids it deleted itself — and past it the oldest of those are evicted,
+  which means a late copy of one of them can be stored again; that eviction
+  is logged. The deletions still owed are exempt, because they are not
+  accumulation: they are read from the work queue on disk, their number
+  falls as the peers confirm (the list is re-read on the reaper's tick and
+  kept equal to it), and they name exactly the messages a sender may still
+  be re-sending — the ones the cap's own ordering rule says to keep last.
+
+##### Why a refusal can be evicted before its horizon
+
+This is rule 4 — nothing is written down — meeting a set that therefore has
+to live in memory. The shape of the argument is the same as for the repeat
+above: three properties, any two of which can hold.
+
+* **M1 — the set is bounded.** It lives as long as the process and its
+  size is chosen by the user (one wipe names a whole conversation), so
+  without a cap it is an unbounded structure that grows with use. This
+  codebase has shipped that leak twice already, in the ban maps and in
+  `seenReceipts`.
+* **M2 — nothing about a deleted message is written down.** A refusal
+  that outlived the process would have to be on disk, and a durable list
+  of deleted ids is the exact trace the whole design removes.
+* **M3 — no refusal ends before its horizon**, so no late copy of a
+  deleted message is ever stored again.
+
+**M1 ∧ M2 ⇒ ¬M3.** M2 forces the set into memory, M1 caps it, and a
+capped set past its cap must drop something that has not expired. The
+order makes the loss the least-bad one available — the oldest go first,
+and the oldest are the deletions whose senders are likeliest to have
+stopped re-sending — but something goes.
+
+**What the residual case actually needs:** more than `maxWipeTombstones`
+deletions inside eight days on one node, AND a copy of one of the evicted
+messages still undelivered at a relay, AND that relay delivering it after
+the eviction. What the user sees is one old message reappearing in a
+conversation they cleared; deleting it again is a working repair, and
+nothing about it is silent — the eviction is logged.
+
+**If M3 matters more, the lever is M1, and it is a number:**
+`maxWipeTombstones` is a constant in one file, ~110 bytes an entry. Ten
+times the cap is ten times the memory and ten times the protection.
+Dropping M2 instead — a durable list — closes it completely and is the
+thing this design exists not to do.
+* **the answer.** A refused replay is reported as a DUPLICATE, and the
+  node's duplicate branch answers the frame with `ack_delete` — the
+  backlog-release signal (`shouldAckOnStoreResult`). The hop that pushed
+  it drops the message from its backlog, and the original sender's retry
+  loop has already ended on the delivery receipt. Answering stops a replay
+  at its source; remembering would only stop it here.
+* **the peer's own deletion.** When the request settles, the peer has
+  erased their copy: there is nothing left to replay from, which is why
+  the refusal can end with the task.
+* **memory**, for the rest: `wipeTombstoneSet` holds what THIS process
+  deleted, for `wipeTombstoneTTL` (8 days, the sender's reseed horizon).
+
+**What this leaves open, and why it stays open.** A relay may hold a copy
+it never managed to deliver — so it never got our ack for it — of a message
+we received by another path and then deleted. Delivered after a restart,
+that copy comes back.
+
+It is narrower than it sounds: under `CORSA_TRANSIT_FORWARD_ONCE` a relay
+is a pure forwarder and holds nothing, and every copy that WAS delivered
+released its hop on arrival. But it is real, and there are exactly two ways
+to close it. One is a durable list of the ids this node deleted — the trace
+the design exists to remove. The other is telling relays which ids to drop,
+which hands a third party the fact we refuse to record about ourselves:
+that this user deleted this message. Between a rare resurrection the user
+can delete again and a deletion notice broadcast to strangers, this takes
+the resurrection.
+
+Migration `0007_conversation_delete` removed the records earlier builds
+kept (`message_delete_intents` rows with `owed = 0`, `reaction_refusals`,
+and reactions held for a message that never came); the same trade applies
+to reactions, where an offer for a message that is gone is now dropped
+rather than written down, and its author's next re-offer applies it if the
+message ever arrives.
 
 The refusals are read once at startup into memory, and the inbound store
 consults that memory rather than the database on every message — and only
@@ -701,9 +828,37 @@ The state database therefore runs with `secure_delete` on (freed pages
 are overwritten, see [storage.md](storage.md)), and every deletion
 follows the commit with a `wal_checkpoint(TRUNCATE)`: in WAL mode the
 zeroing is itself a log frame, and the original bytes live in the `-wal`
-file until a checkpoint retires them. The checkpoint is best-effort — a
-busy one is not a failed deletion, and the automatic checkpoint still
-comes.
+file until a checkpoint retires them.
+
+#### Why an outcome is reported before the log is truncated
+
+This is rule 1 — the deletion is carried out and SAID to be done — held
+against the physical erasure, which finishes later. The split is deliberate,
+and its two halves are not symmetric:
+
+* **the ack this node sends a PEER is withheld** until the log is clean.
+  That answer will be re-asked — the peer's request stands until it is
+  answered — so withholding costs a retry and nothing else, and a busy
+  log therefore produces `error` rather than a claim of success.
+* **the report to our OWN user is not.** The request has just been
+  retired, so no sweep comes back, and a repeat of the peer's ack is
+  dropped as unknown. Withholding it means the pending indicator
+  disappears and "the messages are deleted" is never said — the outcome
+  is not delayed, it is LOST. That is the rule the split rests on: *an
+  answer that will be re-asked can be withheld; a report to our own user
+  cannot.*
+
+The local paths (our own deletion, both sides of a wipe) ignore the
+result for the same reason: there is nobody to re-ask, and the physical
+guarantee is held by the retrying checkpointer, which keeps trying until
+it succeeds.
+
+What that costs, stated plainly: between "deleted" appearing on screen
+and the checkpoint succeeding, the original bytes can still be in the
+`-wal` file. It is eventual, not immediate, and only when SQLite answers
+`BUSY` — which needs a concurrent reader holding a transaction open past
+`busy_timeout`. To make it immediate the report would have to wait on the
+log, and the case above says what that costs instead.
 
 **Every** deletion means both sides, deliberately: our own removals
 (`removeLocalMessage`, the local conversation wipe), the deletions we
@@ -724,25 +879,60 @@ schedulers with ids that no longer resolve. Per-PEER state
 (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`)
 describes the conversation rather than the message and is untouched.
 
-### Bulk wipe ("Delete chat and ask the peer")
+### Clearing a chat ("Delete chat for both sides")
 
-A conversation wipe is N message deletions and nothing else. There is no
-bulk command on the wire, no request of its own, no scheduler of its own
-and no acknowledgement of its own: "delete this thread" and "delete this
-message" differ only in how many ids are involved, and saying so in the
-data is what removed the entire parallel apparatus the bulk form used to
-need — a second intent table, a row-set table, an answers table, a
-receiver-side frozen candidate set, a survivor set, a cache of committed
-answers, and a timestamp boundary to describe the rows a single request
-could not name.
+A conversation wipe is ONE request about the conversation. It names no
+messages at all, and everything else about it follows from that.
 
-What follows is not only less code. The request is exact (ids, never a
-clock, so a peer whose clock lags cannot lose a message written after the
-wipe); it is idempotent (a re-issued wipe re-notes the same ids); it needs
-no size cap (each id travels on its own control DM); and a partly
-delivered wipe is simply the intents that have not settled yet — visible
-in the same "N waiting for the peer to delete" count as any other pending
-deletion.
+#### The rule
+
+This is the whole behaviour, and it is deliberately this small:
+
+1. **A command arrives — we delete — we say it is done.**
+2. **It arrives again — we delete again and say it again.** Five arrivals,
+   five wipes, five answers. Authority is the envelope: sealed to the
+   recipient's key, its sender signed by theirs. Nothing else is checked.
+3. **An answer for a request we have already retired is dropped.** Not an
+   error, not a second report; the packet goes.
+4. **Nothing is written down about having applied one.** No moment, no
+   request id, no record of the wipe.
+5. **Our own request is never written off** until the peer answers it.
+
+Everything below follows from those five. Three of the consequences cost
+something, and each has a section of its own saying what it costs:
+
+* a repeat can take a message written after the click — §"Why a repeat can
+  take a new message";
+* the outcome reaches our user before the write-ahead log is truncated —
+  §"Why an outcome is reported before the log is truncated";
+* a refusal can be evicted before its horizon — §"Why a refusal can be
+  evicted before its horizon".
+
+None of the three can be removed without dropping one of the five rules
+above, so a change that removes one has to name which rule it drops.
+
+It was, for one release, N ordinary `message_delete` requests — one per id,
+answered per id. That is what shipped broken. The receiver applies the
+per-message rule to each of them, so under an author-only flag it honoured
+the deletions of the messages the REQUESTER had not written and refused the
+rest: the user watched their conversation disappear here while their own
+half of it stood on the other side, and got one "the peer refused the
+delete request" per surviving message. Worse, the split could not be
+repaired — the ids went with the rows, and a settled request blanks the
+peer it belonged to, so nothing was left that could ask again.
+
+Naming no ids fixes all three:
+
+* **authority** — the request is about the thread, so the receiver does not
+  ask who wrote what. A wipe is a mutual forgetting, confirmed twice in the
+  UI before it is sent;
+* **privacy** — nothing tells the peer about a message that never reached
+  them, without any per-row classification to get right;
+* **repair** — the request can be made when the local thread is already
+  empty, which is the only way an already-split conversation can be
+  finished.
+
+Immutable rows survive it, on both sides, as they survive everything else.
 
 `CompleteConversationDelete`, under the outgoing barrier and after the
 in-flight send drain:
@@ -752,150 +942,222 @@ in-flight send drain:
    BEFORE they disappear: inside the transaction there is no moment at
    which anything could act on them;
 2. FREEZES the node's deliveries for exactly those ids
-   (`FreezeOutgoingDeliveriesTo`), which stops every path that could put
-   them on the wire and reports what the node knows about them. A freeze
-   rather than the cancellation because it is reversible — see below;
-3. deletes exactly those rows, writes ONE DELETE INTENT PER MESSAGE for
-   the messages the peer may hold, and records the refusal of every id —
-   **in one transaction** (`chatlog.DeleteConversationWithIntents`).
-   Either the conversation is gone AND somebody is bound to ask the peer
-   for each message, or nothing happened and the user can click again; a
-   half-applied wipe is the one outcome they cannot see. File-transfer
-   cleanup and UI eviction run after the commit, on the ids the
-   transaction actually removed;
+   (`FreezeOutgoingDeliveriesTo`), so nothing can hand the peer a message
+   the user is erasing. A freeze rather than the cancellation because it is
+   reversible — see below. It is no longer load-bearing for WHAT the peer
+   is told: the request carries no ids, so a freeze that fails costs the
+   wipe nothing but the guarantee that no copy escapes mid-transaction;
+3. deletes exactly those rows and writes ONE conversation request — **in
+   one transaction**
+   (`chatlog.DeleteConversationWithIntent`). Either the conversation is
+   gone AND somebody is bound to ask the peer, or nothing happened and the
+   user can click again; a half-applied wipe is the one outcome they cannot
+   see. File-transfer cleanup and UI eviction run after the commit, on the
+   ids the transaction actually removed;
 4. ends the freeze. On commit that is the real withdrawal
-   (`CancelOutgoingDeliveriesTo`, one pass, scoped to the ids it took),
-   so a queued message cannot be handed over after the thread is gone —
-   while an immutable row, which survives the wipe, keeps its delivery
-   instead of being stranded in "sending" forever. On a transaction that
-   FAILED it is a thaw: the rows are still here, the messages are still
-   the user's, and cancelling them would have left pending messages that
-   never arrive with a thread still on screen. That reversibility is the
-   whole reason the freeze exists; a cancellation cannot be taken back;
+   (`CancelOutgoingDeliveriesTo`, one pass, scoped to the ids it took), so a
+   queued message cannot be handed over after the thread is gone — while an
+   immutable row, which survives the wipe, keeps its delivery instead of
+   being stranded in "sending" forever. On a transaction that FAILED it is a
+   thaw: the rows are still here, the messages are still the user's, and
+   cancelling them would have left pending messages that never arrive with a
+   thread still on screen;
 5. lets the barrier down — it exists to stop a send racing the wipe, and
-   holding it until the peer answers would leave the user unable to write
-   to that conversation for as long as the peer stays away.
+   holding it until the peer answers would leave the user unable to write to
+   that conversation for as long as the peer stays away.
 
-Nothing is dispatched from there. Every message of the thread is now an
-ordinary delete intent, and the delete scheduler owns it: it paces
-requests per peer, parks them while the peer is away, wakes them the
-moment the peer connects, and settles each on its own ack. The pacing
-matters more here than anywhere else — a wipe of a long thread is a lot
-of requests — and it is the pacing that already exists rather than a
-second policy that has to agree with it.
+An EMPTY thread still writes the request. That is the repair path, not a
+corner case: a conversation an older build cleared here while the peer
+refused the user's own messages has nothing left to name, and asking for
+the conversation needs nothing to name.
 
-Authorship is not consulted for the LOCAL removal: the user is erasing
-their own view of a conversation, which is theirs to do for either side's
-messages. What each peer-side request may do is the peer's own answer,
-carried per message by their ack, exactly as for a single deletion.
-Immutable rows survive on both sides.
+Nothing is dispatched from there. The request is an ordinary row of the
+delete scheduler, which owns it exactly as it owns a single deletion: it
+paces per peer, parks while the peer is away, wakes on their connection,
+charges an attempt per dispatch, and gives up after the same budget with an
+Abandoned outcome. One request per peer at a time, enforced by a partial
+unique index rather than by the scheduler remembering to check.
 
-The barrier itself is the only thing this path still schedules.
-`BeginConversationDelete` latches it synchronously so a send cannot slip
-in between the click and the wipe; `CompleteConversationDelete` releases
-it; and a reservation whose owner never came back — a panic between the
-two, a scheduling stall past `convDeleteReservationTTL` — is released by
-the delete sweep, which publishes a failed outcome so the user is not
-left looking at a conversation they cannot write to.
+**The wipe CARRIES the per-message requests made before it.** Those rows
+stay on disk and are not sent: the wipe asks the peer for everything they
+ask for, so dispatching both puts two questions about the same rows on the
+wire and gives the peer two chances to refuse one of them — a refusal the
+user would read as "the peer would not delete it" about a chat they have
+already cleared. They are not counted as "waiting" either, for the same
+reason.
 
-**Messages that never went out.** A message nobody has ever seen is not
-asked about, because the request naming it would be how the peer learns
-it existed — the rule the single-message `recalled` route keeps, applied
-per row. Whether a message reached the wire is the node's answer, and the
-only moment it is authoritative is the cancellation.
+They are kept rather than deleted because the row is the only thing on this
+disk that still names the deleted id, and naming it is what refuses a late
+re-delivery across a restart (the in-memory window does not survive one, and
+the wipe names no ids). They go in the same transaction that retires the
+wipe, once the peer has answered it: the peer has erased their whole side by
+then, so there is nothing left to re-deliver from.
 
-The wipe is TWO-PHASE against the delivery engine, because the question
-cannot be answered atomically otherwise. Classify then delete, and a
-message can go out in between — a row read as "never emitted" is already
-at the peer by the time it is destroyed, and no request is ever written
-for it. Delete then classify, and the only witness left is the node's
-memory, which does not survive a restart and is emptied when a retry runs
-out of attempts.
+A per-message deletion asked for AFTER the wipe keeps its own request. It
+names a message that arrived once the peer had already been asked to erase
+everything, so that wipe never asked about it. The two are told apart by
+their own stamps, both written by this node's clock — there is no comparison
+between machines here.
 
-So the wipe FREEZES first (`freeze_conversation_delivery`). A freeze stops
-every path that could put the named messages on the wire — the retry tick
-skips them without charging an attempt, the backlog replay withholds them
-— and returns what the node knows about them at that instant. Nothing can
-move while it holds, so the transaction then reads chatlog's
-`never_emitted` mark (docs/chatlog.md) from each row it deletes, unions it
-with the node's answer, and writes a request only for the messages the
-peer may actually hold. Deletion and classification are one fact, like the
-deletion and its refusal.
+**On the receiving side** (`handleInboundConversationDelete`):
 
-A freeze is used rather than the cancellation because the cancellation
-cannot be undone: if the transaction then failed, the user would be left
-with messages still on screen that nothing will ever send. The freeze ends
-one of two ways — the cancellation withdraws the deliveries for good on
-commit, or a thaw puts them back on abort. A cancellation that FAILS after
-a commit leaves them frozen — the correct state, since the rows are gone
-and nothing may send them — and OWED: the withdrawal is idempotent, so the
-delete sweep retries it until it succeeds. Until then this process still
-holds the payload of a deleted conversation, and no second wipe can help,
-chatlog having no rows left to name.
+1. read the non-immutable rows of the thread with the envelope sender —
+   authorship is NOT consulted;
+2. erase them in one transaction
+   (`DeleteConversationForPeerRequest`), and no request of our own: we owe
+   the peer nothing for a deletion they asked for, and an intent written
+   here would bounce the wipe back at them forever;
+3. run the same side effects a local wipe runs — file cleanup, UI eviction,
+   reaction reload, one WAL truncation for the whole thread;
+4. reply `conversation_delete_ack { request_id, status }`.
 
-The single-message delete takes the same freeze for its one id, and for
-the same reason: it classifies from the row's mark, which means nothing
-while the message can still go out. The freeze has no TTL, so EVERY exit
-ends it — including the early ones, an immutable message or a row that
-could not be read — because a freeze that outlives its decision stops
-that message being sent for the life of the process with nothing able to
-release it.
+`applied` is terminal and settles the request; `error` is not, and the
+sweep asks again on the backoff already charged.
 
-The freeze also fixes the order. The local deletion now commits FIRST and
-the withdrawal follows: withdrawing is irreversible, and running it first
-means a transaction that then fails leaves the row on screen in "sending"
-with every delivery hook already destroyed. The message cannot go out
-while the transaction runs, so deleting first costs nothing and keeps the
-failure recoverable.
+An `applied` the requester cannot ACT on does not settle it either. If
+dropping the request fails, or — on the per-message path — if the defensive
+local delete fails, nothing is published and the row stays: the peer has
+answered, so the request is the only thing that would ever ask again, and
+retiring it while the local copy may still be here leaves a message the
+user destroyed with nobody left to remove it. The UI would also be in two
+states at once — "the messages are deleted" beside a pending indicator that
+keeps re-dispatching. An ack echoing a request
+id other than the pending one is refused: it answers a wipe the user has
+already replaced.
 
-A withdrawal that fails after the row is gone is NOT thawed — that
-message is not the user's any more — and not dropped either. It is OWED:
-the delete sweep retries it, because until it succeeds this process is
-still holding the payload of a deleted message and no later deletion can
-name it, the row being gone.
+**The request carries no moment, and applying it is not idempotent —
+deliberately.** It means "erase this conversation", and the receiver erases
+whatever it holds when the request arrives. Five arrivals are five wipes and
+five answers.
 
-A freeze that cannot be taken at all is the one case where no
-classification is made. The rows' marks are only meaningful while nothing
-can emit behind the transaction's back, so every message in scope becomes
-a request instead — the peer is asked about ids they may not resolve,
-rather than a message being deleted here while a copy escapes to them with
-nothing left to recall it.
+The alternative was tried and removed. A boundary — the moment the user
+clicked — made a repeat harmless, and it cost a comparison between two
+machines' clocks: the boundary came from the requester's clock, the rows it
+was compared against were stamped by the receiver's. A peer running minutes
+ahead kept the messages only it held; correcting for the difference turned a
+delivery delay into a correction and erased what the peer wrote while the
+request was in flight. Three designs, three ways to be wrong in one direction
+or the other. What is left has no clock in it at all.
 
-This replaced an earlier parked-then-released design, in which the
-requests were written parked and the node's cancellation released them
-afterwards. Parking put the privacy rule behind a timeout: a crash, a
-stall or a cancellation that errored left the requests un-released, and
-after the grace they went out as written. There is now no such state. A
-request either exists and is due, or was never written.
+What the receiver DOES check is the envelope, and that is the whole of the
+authorization: the body is sealed to the recipient's box key and the sender's
+identity is signed with the sender's key, so a request that decrypts and
+verifies came from the one peer this conversation is with. Authorship of the
+individual rows is not consulted (that is the difference from
+`message_delete`), no clock is consulted, and no memory of previous requests
+is kept — the receiving side is completely stateless about wipes. A note
+saying which conversation was erased and when is exactly the trace a deletion
+exists to remove.
 
-`recalled` is a claim that requires PROOF, and the proof now survives a
-restart. A send that is WITHHELD because the recipient is unreachable
-writes the chatlog's `never_emitted` mark (docs/chatlog.md), and the
-mark is withdrawn — durably, before the frame goes out — the moment the
-message is emitted, so the reseeded entry inherits the claim instead of
-guessing at it.
+#### Why a repeat can take a new message
 
-The mark is the only proof; its absence is not the opposite claim.
-Everything the outbox does not know reads as emitted: rows from builds
-before the mark existed, a mark lost to a crash, a message emitted by a
-path that outlived its scheduler entry. That direction is the deliberate
-one — announcing an id costs the peer a request they answer `not_found`,
-while an unprovable "never emitted" would leave a delivered message with
-them and nothing left to ask.
+This follows from rules 2, 4 and 5 of §"The rule". **It is a consequence of
+three requirements of which any two can be satisfied, not a defect in the
+implementation** — which is why it is written out here rather than re-derived
+each time it is noticed.
 
-**What a wipe promises.** The thread is gone here, and each message
-becomes a request the peer answers for itself. Under the current default
-flag (`any-delete`) they honour it; a message an OLDER build stamped
-`sender-delete` and its author wrote is theirs to keep, so they answer
-`denied` and their copy stays. The confirmation says so rather than
-promising both sides unconditionally, and the outcome is visible per
-message instead of being hidden behind a single bulk answer.
+The behaviour: a message written between two arrivals of the same request is
+taken by the second one. Sharpest form — the ack is lost, the requester writes
+a new message M, the sweep re-dispatches, and the repeat erases M on the peer's
+side while the requester keeps it.
+
+The three requirements:
+
+* **R1 — the request is never written off.** Otherwise the state it exists to
+  prevent becomes reachable: erased here, still there at the peer, and nothing
+  left that will ever ask again.
+* **R2 — nothing on disk records that a wipe was applied.** A ledger of applied
+  `request_id`s is precisely a note saying "a conversation was erased here, at
+  this time", which is the trace a deletion exists to remove.
+* **R3 — a repeat does not touch messages written after the click.**
+
+**R1 ∧ R2 ⇒ ¬R3.** To satisfy R3 the receiver must separate "what existed when
+the request was made" from "what was written since". It has three sources of
+information and no others: the request, its own database, its own clock.
+
+* The request cannot carry the SET. Naming ids is how a peer learns of messages
+  that never reached them, and the request has to outlive the rows it came
+  from — that is why it names none.
+* The request cannot carry a usable MOMENT. The moment is in the requester's
+  clock; the rows it would be compared against are stamped by the receiver's.
+  Three designs were tried: the newest stamp the requester holds (leaves
+  standing the message only the peer has — the copy still in a relay buffer);
+  `max(stamp, click)` (leaves it standing when the peer's clock runs ahead);
+  and a skew correction from the envelope (counts delivery delay as skew, so a
+  request delivered after an offline peer returns erases everything they wrote
+  meanwhile). Each is wrong in one direction or the other, and the errors are
+  unbounded in the cases that matter.
+* The receiver cannot remember having applied it — that is R2.
+* The requester cannot stop asking — that is R1.
+
+What remains is "erase what I hold now", and a repeat therefore takes what
+arrived since. ∎
+
+**The residual harm is bounded.** It needs a lost ack AND a message written in
+the gap before the next sweep (5 s plus backoff). What it takes are messages in
+a conversation the user has just asked to erase, and the requester's own copy of
+that thread is empty on their screen.
+
+**If R3 is the priority, one of R1 or R2 has to go**, and the choice belongs to
+whoever owns the product decision:
+
+* drop R2 — the receiver remembers applied `request_id`s. Closes the case
+  completely and durably, at the cost of a record that a deletion happened;
+* drop R1 — the requester abandons the wipe once the conversation resumes.
+  Keeps the disk clean, at the cost of a wipe the peer may never have received
+  being dropped silently.
+
+A fourth option would be the actual fix, and nobody has named one yet.
+
+**The request is never written off.** A per-message deletion gives up after
+its attempt budget and reports Abandoned; a wipe does not, because the
+state it would leave behind — erased here, still there at the peer, and
+nothing that will ever ask again — is the one this gesture may not produce.
+The row is small, the backoff caps at an hour, and it goes when the contact
+goes. The pending indicator stands until the peer confirms.
+
+**The receiving side stops its own deliveries too.** Rows leaving the
+database is half the job: a message of that thread still sitting in this
+node's delivery queue would be handed over after the wipe and re-open, on
+the requester's side, the conversation they just cleared. So the inbound
+path freezes the scope, erases, and withdraws — the same three steps as a
+local wipe, thawing instead if the transaction rolls back.
+
+**The barrier** is the only thing this path schedules besides the request.
+`BeginConversationDelete` latches it synchronously so a send cannot slip in
+between the click and the wipe; `CompleteConversationDelete` releases it;
+and a reservation whose owner never came back — a panic between the two, a
+scheduling stall past `convDeleteReservationTTL` — is released by the
+delete sweep, which publishes a failed outcome so the user is not left
+looking at a conversation they cannot write to.
+
+**The freeze has no TTL**, so every exit from a wipe ends it: on commit the
+withdrawal takes over, on a rollback the thaw puts the messages back. A
+withdrawal that fails AFTER the commit is not thawed — those messages are
+not the user's any more — and not dropped either: it is owed, and the
+delete sweep retries it until it succeeds.
+
+**The status the sender sees.** Two events, not one: at click time "chat
+cleared here; deletion of the messages at the peer is scheduled", and when
+the request settles "the messages at the peer have been deleted". The
+wording states what the mechanism does and never suggests the peer decides
+anything: it does not consent, refuse or keep — it carries the deletion out
+when it is next reachable. The lasting indicator is the conversation
+header's "deletion at the peer is scheduled", which stands until that
+happens.
+
+**Messages that never went out** are no longer a case this path has to
+reason about. The single-message route still keeps its `recalled` rule
+(above): a message the node can prove never reached the wire is deleted
+without telling the peer anything. A thread wipe reaches the same end by
+carrying no ids at all.
 
 **Late delivery limitation (unchanged).** A message the peer SENT before
-receiving the deletions but that was still in flight lands afterwards and
-is outside the wipe. The tombstone set cancels the neighbouring class —
-the SAME envelope re-delivered after being wiped — but a brand-new
-in-flight message stays visible until the user deletes it.
+receiving the request but that was still in flight lands afterwards and is
+outside the wipe. The in-memory refusal set cancels the neighbouring class
+— the SAME envelope re-delivered after being wiped, while this process
+lives — but a brand-new in-flight message stays visible until the user
+deletes it.
 
 ### Wire flow
 
@@ -911,7 +1173,7 @@ sequenceDiagram
     A->>A: chatlog.DeleteByID(M) + cleanup + UI eviction
     A->>A: record durable DeleteIntent{target=M, peer=B}
     A->>NA: send_control_message{topic="dm-control", Command=message_delete}
-    Note over A: dispatched now only if B is reachable; otherwise the sweep sends it when B returns
+    Note over A: dispatched now only if B is reachable — otherwise the sweep sends it when B returns
     NA-->>NB: encrypted envelope on topic dm-control
     Note over NB,B: NO chatlog write, NO LocalChangeNewMessage
     NB-->>B: LocalChangeNewControlMessage
@@ -936,6 +1198,37 @@ sequenceDiagram
 ```
 
 *Diagram 1 — message_delete propagation with control topic and ack*
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Alice desktop
+    participant NA as Alice node
+    participant NB as Bob node
+    participant B as Bob desktop
+    A->>A: confirm twice, latch the outgoing barrier, drain in-flight sends
+    A->>A: read the thread's non-immutable ids, freeze their deliveries
+    A->>A: one transaction: delete rows + write one conversation request
+    A->>A: withdraw the frozen deliveries, release the barrier
+    Note over A: status: "cleared here, the deletion at the peer is scheduled"
+    A->>NA: send_control_message{Command=conversation_delete, request_id}
+    Note over A: dispatched now only if B is reachable — otherwise the sweep sends it when B returns
+    NA-->>NB: encrypted envelope on topic dm-control
+    NB-->>B: LocalChangeNewControlMessage
+    B->>B: erase every non-immutable row of the thread with A — authorship not consulted
+    B->>B: file cleanup + UI eviction + one WAL truncation
+    B->>NB: send_control_message{Command=conversation_delete_ack, status=applied}
+    NB-->>NA: encrypted ack on topic dm-control
+    NA-->>A: LocalChangeNewControlMessage
+    alt request_id matches the pending request
+        A->>A: drop the conversation request — status "the messages are deleted at the peer"
+    else superseded request_id
+        Note over A: refused with a warn — it answers a wipe already replaced
+    end
+    Note over A: never answered: the request is KEPT and re-dispatched, for as long as it takes
+```
+
+*Diagram 2 — conversation_delete: one request for the whole thread, applied without consulting authorship*
 
 ### Storage rules for control DMs
 
@@ -985,7 +1278,7 @@ Consequences:
    at its entry gate (`trackRelayMessage`). Same reasoning as #5:
    the retry loop only consults `s.topics["dm"]`, so a control entry
    in `relayRetry` would be a dead state burning the
-   `maxRelayRetryEntries` quota until tombstone TTL.
+   `maxRelayRetryEntries` quota until its own expiry.
 
 ### Failure modes
 
@@ -1002,18 +1295,77 @@ Consequences:
 | Application crashes during in-flight retry | n/a                                                      | The intent is durable; the next start resumes the same schedule. The local row was already removed at request time, so nothing on this side is left half-done. |
 | Peer never answers any of the 720 dispatches | n/a                                                    | The intent is written off: warn log with `target_id` + peer, `TopicMessageDeleteCompleted` with `Abandoned=true`. The user's copy is gone; the peer's may not be. |
 | Peer has not been reachable once since the click | n/a                                                | The intent is kept past the TTL: nothing has been asked yet, so there is nothing to give up on. It goes out on the first tick after they return. |
+| `conversation_delete` arrives and the thread is empty there | Erase nothing, reply ack `applied`. | Terminal: the two sides are consistent, the request is dropped. |
+| `conversation_delete` arrives, receiver's chatlog unavailable or the transaction fails | Reply ack `error`. Warn log. The thread stays. | Keeps the request, re-issues on the backoff already charged. |
+| `conversation_delete_ack` echoes a superseded `request_id` | n/a | Refused with a warn log: it answers a wipe the user has already replaced. The current request stays. |
+| Peer never answers the wipe, for any number of attempts | n/a | The request STANDS. It is never written off: "erased here, still there, nobody will ask again" is the state a wipe may not end in. The pending indicator keeps saying the deletion at the peer is scheduled. |
+| The same `conversation_delete` arrives twice (lost ack) | Erases whatever the thread holds now — usually nothing — and answers again. Nothing is recorded about having applied it. | Terminal on the ack; the repeat costs one round-trip. |
+
+### Logging
+
+**The deletion paths write nothing by default.** Not the ids, which have
+been digests for a while (`internal/core/logid`) — the LINES. "message_delete
+completed, 3 removed, 14:07:22" states that this user destroyed something,
+how much of it and when, in a plain-text file that no checkpoint, no
+`secure_delete` and no migration ever touches. Anonymising the identifiers
+left the record standing; removing the lines is what the contract actually
+asks for.
+
+Set `CORSA_DELETION_DIAGNOSTICS` to any non-empty value to get them back,
+digests and all, for a support case.
+
+The rule for what is gated, since it is not obvious from the call sites:
+
+* a line reporting that a deletion SUCCEEDED goes through `deletionLog()`.
+  Nobody needs it in ordinary operation — the outcome the user cares about
+  is on their screen;
+* a line reporting a FAILURE stays at its normal level. Those describe a
+  node that is not doing what it promised — a wipe that cannot be
+  delivered, a checkpoint that will not run, a peer that keeps answering
+  `error` — and a support case with no way to see them is worse for the
+  user than the fact that something went wrong once.
 
 ### Migration notes
 
-`chatlog.Entry.Flag` already exists and is populated from the envelope on
-arrival, so no schema change is needed. Existing rows whose `Flag` is
-empty fall under the "treated as sender-delete" default and remain
-deletable by the original sender. Operators who want a stricter policy
-must wait for the planned per-thread default-flag setting (out of scope
-for this iteration).
+`chatlog.Entry.Flag` is populated from the envelope on arrival, and never
+rewritten at runtime. ONE forward-only migration,
+`0007_conversation_delete`, brings existing databases to the current model.
+It is a single step because it is a single change — the wipe became a
+request about the conversation, and everything the per-message model wrote
+down stopped being something this node may keep — and the runner puts the
+whole file in one transaction, so a database has all of it or none:
 
-`message_delete` is **not** wire-compatible with peers that only
-understand data DMs. Control DMs use `Topic == "dm-control"` and the
+* it rewrites `sender-delete` and the empty flag
+  to `any-delete` for `topic = 'dm'`, leaving `immutable` and
+  `auto-delete-ttl` alone. Those values were never a choice — the flag has
+  no UI, so a row carrying one is a row an older build stamped — and
+  leaving them in place is what made a peer answer `denied` to the deletion
+  of a message they had written. Its post-condition (`Migration.Invariant`)
+  is that no direct message is left on an author-only policy;
+* it adds `kind` and `request_id` to `message_delete_intents` plus a
+  partial unique index on `peer` where `kind = 'conversation'`. A
+  conversation request stores `NULL` in `message_id`: it names no message,
+  and `kind` says so explicitly rather than leaving the scheduler to infer
+  it from a null;
+* it erases what earlier builds remembered ABOUT deletions — the refusal
+  rows (`owed = 0`), the `refuse_until` stamps on the requests that remain,
+  and all of `reaction_refusals` — see §"Replay after a deletion";
+* it drops the reactions still waiting for a message this node does not
+  have (`message_reactions` with `pending = 1`), which is the same trace in
+  the reaction table.
+
+Its post-condition (`Migration.Invariant`) asserts every one of those
+claims, because only two of the statements declare a schema object and the
+runner's own shape check would not notice the rest.
+
+A peer that has not migrated keeps answering `denied` to deletions of
+messages it wrote before the backfill — its copy carries the flag its build
+stamped, and nothing on this side can change that. The conversation wipe
+does not depend on the flag at all, so it repairs those threads for both
+sides once BOTH ends run a build that understands `conversation_delete`.
+
+`message_delete` and `conversation_delete` are **not** wire-compatible with
+peers that only understand data DMs. Control DMs use `Topic == "dm-control"` and the
 `send_control_message` frame, so old peers will not decode them as regular
 `directmsg.PlainMessage` rows; they will reject or drop the unknown topic /
 frame. Rollout must therefore gate outgoing control DMs on an explicit
@@ -1205,12 +1557,14 @@ package domain
 type DMCommand string
 
 const (
-    DMCommandFileAnnounce      DMCommand = "file_announce"
-    DMCommandMessageDelete     DMCommand = "message_delete"
-    DMCommandMessageDeleteAck  DMCommand = "message_delete_ack"
+    DMCommandFileAnnounce          DMCommand = "file_announce"
+    DMCommandMessageDelete         DMCommand = "message_delete"
+    DMCommandMessageDeleteAck      DMCommand = "message_delete_ack"
+    DMCommandConversationDelete    DMCommand = "conversation_delete"
+    DMCommandConversationDeleteAck DMCommand = "conversation_delete_ack"
 )
 
-// Valid принимает пустую команду (обычный текстовый DM) плюс три
+// Valid принимает пустую команду (обычный текстовый DM) плюс
 // именованные. Empty обязан остаться валидным: caller, который строит
 // плейн-текстовый OutgoingDM, не выставляет Command — отклонять
 // empty здесь означало бы заставлять каждого вызывающего
@@ -1276,7 +1630,39 @@ type MessageDeleteAckPayload struct {
     TargetID MessageID           `json:"target_id"`
     Status   MessageDeleteStatus `json:"status"`
 }
+
+// Запрос на весь тред не называет НИ ОДНОГО сообщения: идентификаторы
+// переписки — единственное, чего очистка не должна класть в сеть, и
+// потому что часть из них могла не дойти до пира, и потому что запрос
+// обязан пережить строки, из которых он родился.
+type ConversationDeletePayload struct {
+    // Идентификатор жеста, который эхом возвращает ack. Больше ничего:
+    // ни момента, ни id сообщений.
+    RequestID ConversationDeleteRequestID `json:"request_id"`
+}
+
+type ConversationDeleteStatus string
+
+const (
+    ConversationDeleteStatusApplied ConversationDeleteStatus = "applied" // пир стёр то, что держал; терминальный
+    ConversationDeleteStatusError   ConversationDeleteStatus = "error"   // пир не смог решить; НЕ терминальный
+)
+
+type ConversationDeleteAckPayload struct {
+    RequestID ConversationDeleteRequestID `json:"request_id"`
+    Status    ConversationDeleteStatus    `json:"status"`
+    // Счётчика нет. Он был, и «удалил три» сообщает тому, у кого было два,
+    // что у собеседника было сообщение, которого он не видел, — ровно то,
+    // чего сам запрос не раскрывает.
+}
 ```
+
+Среди статусов очистки нет `denied`, и это осознанно: поштучный запрос
+можно отклонить, потому что флаг сообщения закрепляет его за автором, а
+очистка треда — не про отдельное сообщение. Отказ по тем, которых
+запрашивающий не писал, и есть то поведение, из-за которого у каждой
+стороны оставалась половина переписки, которую пользователь считал
+удалённой.
 
 Обе нагрузки кодируются JSON в `command_data` зашифрованного plaintext.
 `Body` для control DM пустой — control DM едут на отдельном wire-топике
@@ -1309,7 +1695,7 @@ retry: стороны согласованы, поэтому `handleInboundMessa
 | `sender-delete`     | Только автор сообщения.                                          |
 | `any-delete`        | Автор или получатель.                                            |
 | `auto-delete-ttl`   | Как `sender-delete` до истечения TTL, далее автоматически.       |
-| пусто / неизвестен  | Трактуется как `sender-delete` (текущий дефолт).                 |
+| пусто / неизвестен  | Трактуется как `sender-delete`. Только legacy — см. ниже.         |
 
 Флаг штампует АВТОР в момент отправки, и он едет вместе со строкой —
 это собственный ответ автора на вопрос «вправе ли собеседник стереть это
@@ -1317,6 +1703,16 @@ retry: стороны согласованы, поэтому `handleInboundMessa
 `any-delete` (`defaultOutgoingMessageFlag`): переписка общая, и
 пользователь, удаляющий из неё сообщение, ожидает, что его не станет, а
 не что оно исчезнет только с его экрана.
+
+Поэтому `sender-delete` и пустое значение — это LEGACY, а не выбор: флаг
+никогда не был доступен из интерфейса, так что строка с любым из них —
+строка, которую проштамповал старый билд. Миграция
+`0007_delete_policy_backfill` переписывает их в `any-delete` для
+`topic = 'dm'`, не трогая `immutable` и `auto-delete-ttl`. До этого
+backfill-а удаление сообщения, написанного собеседником, возвращалось как
+`denied`, а очистка треда стирала только те сообщения, которых
+запрашивающий не писал.
+
 `immutable` — абсолютный край этой шкалы: обещание «эта строка — часть
 постоянной записи» (юридические доказательства, tamper-evident логи),
 которое не отменяет даже автор.
@@ -1606,17 +2002,15 @@ generic-цепочку cleanup. Сейчас один хук:
 
 Жизненный цикл:
 
-1. `SendMessageDelete` удаляет локальную строку, записывает intent и
-   ставит отказ по этому id — **всё одной транзакцией**
-   (`chatlog.DeleteWithIntent`; чисто локальные маршруты берут
-   `DeleteMessageWithTombstone` — тот же коммит без intent). Это один
-   инвариант с трёх сторон: копии пользователя нет, кто-то всё ещё
-   должен нам копию пира, и повторная доставка того же конверта будет
-   отклонена, а не вставлена заново. Раздельные коммиты оставляют окна,
-   в которых копия уничтожена, а попросить пира уже некому, — либо
-   строки нет, а отказа по ней нет тоже, и ближайший relay-retry
-   возвращает сообщение. Если пир достижим, запрос уходит сразу — это
-   лишь оптимизация относительно ближайшего свипа.
+1. `SendMessageDelete` удаляет локальную строку и записывает intent —
+   **одной транзакцией** (`chatlog.DeleteWithIntent`; чисто локальные
+   маршруты берут обычный `DeleteByID`). Это один инвариант с двух
+   сторон: копии пользователя нет, и кто-то всё ещё должен нам копию
+   пира. Раздельные коммиты оставляют окно, в котором копия уничтожена,
+   а попросить пира уже некому. Этот же запрос отклоняет повторную
+   доставку конверта — см. §«Повторная доставка после удаления», —
+   и отдельная строка для этого не нужна. Если пир достижим, запрос
+   уходит сразу — это лишь оптимизация относительно ближайшего свипа.
 2. `deleteRetryLoop` каждые 5 с (`deleteRetryTickPeriod`) обходит
    наступившие intent-ы. Для каждого:
    - `deleteIntentGiveUpAttempts` (720) сделанных и неотвеченных
@@ -1767,13 +2161,112 @@ origin-отправки и retry-тика, которые сами учитыв�
 получивший сообщение раньше (с потерянной или неотправленной
 квитанцией), сохранит копию — поэтому `withdraw` планирует.
 
-Каждый удалённый id ближайший час отклоняется — включая recovery-путь,
-где строки уже нет, — поэтому поздний echo конверта из in-flight буфера
-какого-нибудь релея будет удалён повторно, а не создаст заново строку,
-которой удаление и должно было не оставить. Отказ живёт в той же строке
-`message_delete_intents`, что и долг пира (`refuse_until`), и переживает
-его: ack означает, что пир не сохранит сообщение, а не что устаревшая
-копия больше не может прийти.
+#### Повторная доставка после удаления
+
+Удалённый id какое-то время нужно отклонять: иначе поздний echo конверта
+из in-flight буфера какого-нибудь релея создаст заново строку, которой
+удаление и должно было не оставить. Ничто на диске не хранит факта
+удаления, поэтому отказ собирается из того, что существует по другим
+причинам:
+
+* **задание.** Пока пир не подтвердил, что стёр свою копию, строка
+  `message_delete_intents` называет этот id, и процесс, перечитавший на
+  старте свой список работ (`OwedDeleteIntentMessageIDs`), узнаёт его
+  бесплатно. Это единственная половина, переживающая перезапуск, и живёт
+  она ровно столько, сколько живёт задание.
+
+  Это же и общее правило: **единственное, что этот дизайн вправе ЗАПИСАТЬ
+  об удалённом сообщении, — НЕЗАКОНЧЕННАЯ РАБОТА.** Запрос, на который пир
+  не ответил, подходит; подходит и вложение, файлы которого не удалось
+  стереть (`filetransfer.pendingCleanup`). Оба описывают будущее действие и
+  оба исчезают в момент, когда оно происходит. Отказ на диске не подходил
+  ни под то, ни под другое: он описывал прошлое и хранился именно потому,
+  что прошлое уже закончилось.
+
+  Правило — про ДИСК, и описанное ниже окно в памяти есть явное
+  исключение: оно держит открытые id столько, сколько возможен повтор, то
+  есть дольше самого удаления. Оно истекает и не переживает процесс —
+  значит недоступно тому, у кого есть файл, а правило именно про это.
+  Убрать его — значит либо завести долговечный список удалённых id, либо
+  сообщать релеям, что выбрасывать; оба варианта хуже, и оба описаны ниже.
+
+  Его граница, если называть точно, — `maxWipeTombstones` ПЛЮС удаления,
+  которые узел ещё должен пиру. Кап управляет тем, что процесс НАКАПЛИВАЕТ
+  — id, которые он удалил сам, — и за капом вытесняются самые старые из
+  них, а значит поздняя копия такого сообщения может быть сохранена снова;
+  вытеснение логируется. Отказы по незакрытым удалениям исключены из капа,
+  потому что это не накопление: они читаются с рабочей очереди на диске, их
+  число падает по мере подтверждений от пиров (список перечитывается на тике
+  реапера и держится равным ему), и они называют ровно те сообщения, которые
+  отправитель ещё может переслать, — то есть те, которые собственное правило
+  капа велит держать до последнего.
+
+##### Почему отказ может быть вытеснен раньше своего горизонта
+
+Это пункт 4 — ничего не записывается — против набора, который поэтому
+вынужден жить в памяти. Форма рассуждения та же, что и про повтор выше: три
+свойства, из которых одновременно выполнимы любые два.
+
+* **M1 — набор ограничен.** Он живёт столько же, сколько процесс, а его размер
+  выбирает пользователь (одна очистка называет целую переписку) — без капа это
+  структура, растущая от использования. В этой кодовой базе такая утечка уже
+  выезжала дважды: ban-карты и `seenReceipts`.
+* **M2 — про удалённое сообщение ничего не записывается.** Отказ, переживающий
+  процесс, обязан лежать на диске, а долговечный список удалённых id — ровно
+  тот след, который весь дизайн и убирает.
+* **M3 — ни один отказ не кончается раньше своего горизонта**, то есть поздняя
+  копия удалённого сообщения не сохраняется никогда.
+
+**M1 ∧ M2 ⇒ ¬M3.** M2 загоняет набор в память, M1 его ограничивает, а
+ограниченный набор за пределом обязан выбросить что-то ещё не истёкшее.
+Порядок делает потерю наименее плохой из доступных — первыми уходят самые
+старые, а самые старые принадлежат удалениям, чьи отправители вероятнее всего
+уже перестали слать, — но что-то уходит.
+
+**Что нужно, чтобы остаточный случай сработал:** больше `maxWipeTombstones`
+удалений за восемь суток на одном узле, И недоставленная копия одного из
+вытесненных сообщений у релея, И доставка её после вытеснения. Пользователь
+увидит одно старое сообщение, вернувшееся в очищенную переписку; удалить его
+ещё раз — рабочее исправление, и молчанием это не сопровождается: вытеснение
+пишется в лог.
+
+**Если M3 важнее, рычаг — M1, и это число:** `maxWipeTombstones` — константа в
+одном файле, ~110 байт на запись. Кап в десять раз больше — это в десять раз
+больше памяти и в десять раз больше защиты. Снять вместо этого M2 (долговечный
+список) закрывает случай полностью и является ровно тем, чего этот дизайн
+делать не должен.
+* **ответ.** Отклонённый повтор отдаётся как ДУБЛИКАТ, и ветка дубликата в
+  узле отвечает на кадр `ack_delete` — сигналом освобождения бэклога
+  (`shouldAckOnStoreResult`). Хоп, который его прислал, выбрасывает
+  сообщение, а цикл ретраев отправителя давно закончился на receipt-е о
+  доставке. Ответ останавливает повтор в источнике; память остановила бы
+  его только здесь.
+* **удаление у пира.** Когда запрос закрыт, копия пира стёрта: повторять
+  больше нечего и неоткуда, поэтому отказ и может закончиться вместе с
+  заданием.
+* **память** — на всё остальное: `wipeTombstoneSet` держит то, что удалил
+  ЭТОТ процесс, в течение `wipeTombstoneTTL` (8 суток — горизонт
+  переотправки у отправителя).
+
+**Что остаётся незакрытым и почему остаётся.** Релей может держать копию,
+которую так и не смог нам доставить (а значит, и ack на неё не получал), —
+копию сообщения, которое мы получили другим путём и потом удалили. Если он
+доставит её после перезапуска процесса, сообщение вернётся.
+
+Окно уже, чем кажется: при `CORSA_TRANSIT_FORWARD_ONCE` релей — чистый
+форвардер и не держит ничего, а каждая ДОСТАВЛЕННАЯ копия освободила свой
+хоп при получении. Но окно реально, и закрыть его можно ровно двумя
+способами. Первый — долговечный список удалённых id, то есть тот самый
+след, ради отсутствия которого всё и делается. Второй — сообщать релеям,
+какие id выбросить, то есть отдать третьей стороне факт, который мы
+отказываемся записывать даже про себя: что этот пользователь удалил это
+сообщение. Между редким воскрешением, которое пользователь может удалить
+ещё раз, и рассылкой уведомления об удалении посторонним выбрано первое.
+Миграция `0007_conversation_delete` убрала записи, которые вели прежние
+билды (строки `message_delete_intents` с `owed = 0`, `reaction_refusals` и
+висящие реакции `pending = 1`); тот же размен
+принят и для реакций: предложение реакции на удалённое сообщение теперь
+невидимо висит и вычищается свипом, а не отклоняется навсегда.
 
 Отказы читаются один раз на старте в память, и входящий store спрашивает
 именно память, а не базу, на каждом сообщении — и только для DM-трафика.
@@ -1823,8 +2316,35 @@ reaper всё равно ретраит своим тиком; троттлин�
 (освобождённые страницы перезаписываются, см. [storage.md](storage.md)),
 а каждое удаление после коммита делает `wal_checkpoint(TRUNCATE)`: в
 режиме WAL само обнуление — это тоже фрейм лога, и исходные байты живут
-в файле `-wal` до чекпойнта. Чекпойнт best-effort: busy — это не провал
-удаления, автоматический чекпойнт всё равно придёт.
+в файле `-wal` до чекпойнта.
+
+#### Почему исход сообщается до усечения журнала
+
+Это пункт 1 — удаление выполняется и о нём СООБЩАЕТСЯ — против физического
+стирания, которое заканчивается позже. Разделение осознанное, и половины у
+него не симметричны:
+
+* **ack, который узел шлёт ПИРУ, придерживается** до чистого журнала. Этот
+  ответ переспросят — запрос пира стоит, пока на него не ответят, — поэтому
+  задержка стоит одного ретрая и больше ничего, и на грязном журнале
+  отдаётся `error`, а не заявление об успехе;
+* **отчёт СВОЕМУ пользователю — нет.** Запрос только что снят, значит свипа
+  не будет, а повторный ack пира отбрасывается как неизвестный. Придержать
+  его — значит, что индикатор ожидания исчезнет, а «сообщения удалены» не
+  будет сказано никогда: исход не отложен, а ПОТЕРЯН. На этом и держится
+  правило: *ответ, который переспросят, можно придержать; отчёт своему
+  пользователю — нельзя.*
+
+Локальные пути (собственное удаление, обе стороны очистки) игнорируют
+результат по той же причине: переспрашивать некому, а физическую гарантию
+держит повторяющий чекпойнтер — он не прекращает попытки, пока не выйдет.
+
+Чего это стоит, прямым текстом: между появлением «удалено» на экране и
+успешным чекпойнтом исходные байты могут ещё лежать в `-wal`. Это eventual,
+а не immediate, и только когда SQLite ответил `BUSY` — для чего нужен
+параллельный читатель, держащий транзакцию дольше `busy_timeout`. Чтобы
+было immediate, отчёт пришлось бы ждать журнала, а чего стоит это —
+написано выше.
 
 **Каждое** — это намеренно обе стороны: наши собственные удаления
 (`removeLocalMessage`, локальная очистка переписки), удаления, которые мы
@@ -1846,177 +2366,279 @@ retry-планировщики id-шниками, которые больше н
 `peer_established`, `decrypt_recovery_cycles`) описывает переписку, а не
 сообщение, и не трогается.
 
-### Массовая очистка («Удалить чат и попросить собеседника»)
+### Очистка чата («Удалить чат у обеих сторон»)
 
-Очистка переписки — это N удалений сообщений и ничего больше. На проводе
-нет отдельной массовой команды, нет собственного запроса, собственного
-планировщика и собственного подтверждения: «удали этот тред» и «удали это
-сообщение» отличаются только количеством id, и записать это прямо в
-данных — то, что убрало весь параллельный аппарат, который массовой форме
-раньше требовался: вторую таблицу заявок, таблицу наборов строк, таблицу
-ответов, замороженный набор кандидатов у получателя, набор survivors, кэш
-зафиксированных ответов и границу по времени для строк, которые запрос не
-мог перечислить.
+Очистка переписки — это ОДИН запрос про переписку. Он не называет ни
+одного сообщения, и всё остальное следует из этого.
 
-Следствие — не только меньше кода. Запрос точен (id, а не часы, поэтому
-пир с отстающими часами не потеряет сообщение, написанное после очистки);
-он идемпотентен (повторная очистка перезаписывает те же id); ему не нужен
-лимит размера (каждый id едет своим control DM); а частично доставленная
-очистка — это просто те intent-ы, которые ещё не закрылись, и видны они в
-том же счётчике «N ждут удаления у собеседника», что и любое другое
-удаление.
+#### Правило
 
-`CompleteConversationDelete` под поднятым барьером и после слива
-in-flight отправок:
+Это всё поведение целиком, и оно намеренно такое маленькое:
 
-1. читает id, которые заберёт очистка (`ConversationCandidateIDs` —
-   каждая non-immutable строка треда), и помечает их против позднего echo
-   ДО того, как они исчезнут: внутри транзакции нет момента, в который на
-   них можно среагировать;
+1. **Пришла команда — удаляем — сообщаем, что готово.**
+2. **Пришла ещё раз — снова удаляем и снова сообщаем.** Пять приходов —
+   пять очисток, пять ответов. Право — это конверт: запечатан ключом
+   получателя, отправитель подписан своим. Больше ничего не проверяется.
+3. **Ответ на задачу, которую мы уже сняли, дропаем.** Не ошибка, не
+   второй отчёт — пакет просто уходит.
+4. **Ничего о применении не записывается.** Ни момента, ни request id, ни
+   отметки о том, что очистка была.
+5. **Свой запрос не списывается** никогда, пока пир на него не ответил.
+
+Всё, что ниже, следует из этих пяти пунктов. Три следствия чего-то стоят, и
+у каждого свой раздел — чего именно:
+
+* повтор может забрать сообщение, написанное после клика — §«Почему повтор
+  может забрать новое сообщение»;
+* исход доходит до нашего пользователя раньше, чем усечён журнал
+  упреждающей записи, — §«Почему исход сообщается до усечения журнала»;
+* отказ может быть вытеснен раньше своего горизонта — §«Почему отказ может
+  быть вытеснен раньше своего горизонта».
+
+Ни одно из трёх не убирается без отмены одного из пяти пунктов выше,
+поэтому изменение, которое его убирает, обязано назвать, какой пункт
+отменяет.
+
+Один релиз она была N обычными `message_delete` — по запросу на каждый
+id, с ответом на каждый. Именно это и уехало сломанным. Получатель
+применяет к каждому поштучное правило, поэтому под author-only флагом он
+honoured удаления тех сообщений, которых ЗАПРАШИВАЮЩИЙ не писал, и
+отказывал по остальным: пользователь видел, как переписка исчезает у него,
+пока его собственная половина оставалась у собеседника, и получал по
+одному «Пир отказал в удалении сообщения» на каждое выжившее сообщение.
+Хуже того, расхождение нельзя было починить — id уходили вместе со
+строками, а закрытый запрос обнуляет пира, которому принадлежал, так что
+переспросить было нечем.
+
+Отсутствие id чинит все три проблемы:
+
+* **полномочия** — запрос про тред, поэтому получатель не спрашивает, кто
+  что писал. Очистка — взаимное забывание, которое пользователь
+  подтверждает в интерфейсе дважды;
+* **приватность** — пир ничего не узнаёт о сообщении, которое до него не
+  дошло, и для этого не нужна построчная классификация, в которой можно
+  ошибиться;
+* **починка** — запрос можно сделать, когда локальный тред уже пуст, а это
+  единственный способ доделать уже расщеплённую переписку.
+
+`immutable`-строки переживают очистку с обеих сторон, как переживают всё
+остальное.
+
+`CompleteConversationDelete`, под исходящим барьером и после слива
+незавершённых отправок:
+
+1. читает id, которые заберёт очистка (`ConversationCandidateIDs` — все
+   не-`immutable` строки треда), и метит их против позднего эха ДО того,
+   как они исчезнут: внутри транзакции нет момента, в который с ними
+   что-то можно было бы сделать;
 2. ЗАМОРАЖИВАЕТ доставки узла ровно по этим id
-   (`FreezeOutgoingDeliveriesTo`): это останавливает все пути, способные
-   положить их на провод, и возвращает то, что узел о них знает.
-   Заморозка, а не отмена, потому что её можно отыграть — см. ниже;
-3. удаляет ровно эти строки, пишет ПО ОДНОМУ DELETE-INTENT НА СООБЩЕНИЕ
-   для тех, которые пир может держать, и ставит отказ по каждому id —
-   **одной транзакцией** (`chatlog.DeleteConversationWithIntents`). Либо
-   переписки нет И кто-то обязан спросить пира по каждому сообщению, либо
-   не произошло ничего и пользователь может нажать снова; наполовину
-   применённая очистка — единственный исход, которого он не увидит.
-   Cleanup file-transfer и вытеснение из UI идут ПОСЛЕ коммита, по тем
-   id, которые транзакция действительно удалила;
-4. заканчивает заморозку. При коммите это настоящий отзыв
-   (`CancelOutgoingDeliveriesTo`, одним проходом, ограниченным забранными
-   id), чтобы стоящее в очереди сообщение не ушло к пиру после
-   исчезновения треда, — а immutable-строка, пережившая очистку,
-   сохраняет свою доставку вместо того, чтобы навсегда застрять в
-   «отправляется». При УПАВШЕЙ транзакции это оттаивание: строки на
-   месте, сообщения по-прежнему пользовательские, и отмена оставила бы
-   его с тредом на экране и сообщениями, которые никогда не дойдут. Ради
-   этой обратимости заморозка и существует: отмену не отыграть;
-5. опускает барьер — он нужен, чтобы отправка не гонялась с очисткой, а
-   держать его до ответа пира значило бы лишить пользователя возможности
-   писать в этот чат на всё время его отсутствия.
+   (`FreezeOutgoingDeliveriesTo`), чтобы ничто не отдало пиру сообщение,
+   которое пользователь стирает. Заморозка, а не отмена, потому что она
+   обратима — см. ниже. От неё больше не зависит, ЧТО скажут пиру: запрос
+   не несёт id, поэтому неудавшаяся заморозка стоит очистке только
+   гарантии, что копия не убежит посреди транзакции;
+3. удаляет ровно эти строки и пишет ОДИН запрос про переписку —
+   **в одной транзакции**
+   (`chatlog.DeleteConversationWithIntent`). Либо переписки нет И
+   кто-то обязан спросить пира, либо не произошло ничего и пользователь
+   может нажать снова; наполовину применённая очистка — единственный исход,
+   которого он не увидит. Очистка файлов и вытеснение из UI идут после
+   коммита, по тем id, которые транзакция реально удалила;
+4. заканчивает заморозку. На коммите это настоящий отзыв
+   (`CancelOutgoingDeliveriesTo`, один проход, по забранным id), чтобы
+   сообщение из очереди не отдали после того, как тред исчез — при этом
+   `immutable`-строка, пережившая очистку, сохраняет свою доставку и не
+   застревает в «отправляется» навсегда. На ОТКАТЕ транзакции это оттайка:
+   строки на месте, сообщения по-прежнему пользовательские, и отмена
+   оставила бы висящие сообщения, которые никогда не уйдут;
+5. опускает барьер — он существует, чтобы отправка не обогнала очистку, а
+   держать его до ответа пира значило бы запретить пользователю писать в
+   этот чат на всё время его отсутствия.
 
-Отсюда ничего не отправляется. Каждое сообщение треда теперь обычный
-delete intent, и владеет им планировщик удалений: он дозирует запросы на
-пира, паркует их, пока пира нет, будит в момент подключения и закрывает
-каждый его собственным ack. Дозирование здесь важнее, чем где-либо ещё —
-очистка длинного треда это много запросов, — и это то самое дозирование,
-которое уже есть, а не вторая политика, которая должна с ним совпадать.
+ПУСТОЙ тред всё равно пишет запрос. Это путь починки, а не краевой случай:
+переписке, которую старый билд стёр здесь, пока пир отказывал по
+сообщениям самого пользователя, нечего называть — а запросу про переписку
+и не нужно ничего называть.
 
-Авторство не учитывается при ЛОКАЛЬНОМ удалении: пользователь стирает
-свой вид переписки, и это его право для сообщений любой из сторон. Что
-позволено запросу у пира — ответ самого пира, приходящий его ack-ом по
-каждому сообщению, ровно как при одиночном удалении. Immutable-строки
-остаются с обеих сторон.
+Оттуда ничего не отправляется. Запрос — обычная строка планировщика
+удалений, который владеет им ровно так же, как одиночным удалением: держит
+темп по пиру, паркует, пока пир недоступен, будит на его подключении,
+заряжает попытку на каждую отправку и сдаётся после того же бюджета с
+исходом Abandoned. Один запрос на пира одновременно — это гарантирует
+частичный уникальный индекс, а не память планировщика.
 
-Единственное, что этот путь ещё планирует, — сам барьер.
+**Очистка НЕСЁТ поштучные запросы, сделанные до неё.** Эти строки остаются
+на диске и не отправляются: очистка просит у пира всё, о чём просят они, и
+отправка обоих кладёт на провод два вопроса про одни и те же строки и даёт
+пиру два шанса отказать в одном из них — а отказ пользователь прочитает как
+«собеседник не стал удалять» про чат, который он уже очистил. По той же
+причине они не считаются и в «ждут удаления».
+
+Их не удаляют, потому что строка — единственное на этом диске, что ещё
+называет удалённый id, а назвать его — это и есть отказ поздней повторной
+доставке после рестарта (окно в памяти рестарт не переживает, а очистка id
+не называет). Они уходят той же транзакцией, которая снимает очистку, когда
+пир на неё ответил: к этому моменту он стёр всю свою сторону, и повторять
+доставку больше неоткуда.
+
+Поштучное удаление, запрошенное ПОСЛЕ очистки, сохраняет свой запрос: оно
+называет сообщение, пришедшее уже после того, как пира попросили стереть
+всё, — про него та очистка не спрашивала. Различаются они по собственным
+штампам, оба написаны часами этого узла: сравнения между машинами здесь нет.
+
+**На принимающей стороне** (`handleInboundConversationDelete`):
+
+1. прочитать не-`immutable` строки треда с отправителем конверта —
+   авторство НЕ проверяется;
+2. стереть их в одной транзакции
+   (`DeleteConversationForPeerRequest`) и без собственного запроса: мы
+   ничего не должны пиру за удаление, о котором он же и попросил, а intent
+   здесь гонял бы очистку между сторонами бесконечно;
+3. выполнить те же побочные эффекты, что и локальная очистка: чистка
+   файлов, вытеснение из UI, перезагрузка реакций, одна усечка WAL на весь
+   тред;
+4. ответить `conversation_delete_ack { request_id, status }`.
+
+`applied` терминален и закрывает запрос; `error` — нет, и свип спросит
+снова на уже заряженном backoff-е. Ack с чужим `request_id` отклоняется:
+он отвечает на очистку, которую пользователь уже заменил.
+
+`applied`, которым запрашивающий не может ВОСПОЛЬЗОВАТЬСЯ, тоже ничего не
+закрывает. Если снять запрос не удалось — или, на поштучном пути, не
+удалось защитное локальное удаление, — не публикуется ничего и строка
+остаётся: пир уже ответил, значит запрос — единственное, что когда-либо
+спросит снова, и снять его, пока локальная копия, возможно, ещё здесь,
+значит оставить уничтоженное пользователем сообщение без единого пути,
+который его удалит. UI при этом оказался бы в двух состояниях сразу —
+«сообщения удалены» рядом с индикатором запланированного удаления, который
+продолжает переотправлять запрос.
+
+**Запрос не несёт момента, и применение не идемпотентно — намеренно.** Он
+значит «сотри эту переписку», и получатель стирает то, что держит на момент
+прихода. Пять приходов — пять очисток и пять ответов.
+
+Альтернативу пробовали и убрали. Граница — момент клика — делала повтор
+безвредным и стоила сравнения часов двух машин: граница приходила из часов
+запрашивающего, а строки, с которыми её сравнивали, проштампованы часами
+получателя. Пир с часами вперёд сохранял сообщения, которые есть только у
+него; поправка на разницу превращала задержку доставки в поправку и стирала
+написанное пиром, пока запрос шёл. Три схемы, три способа ошибиться в одну
+или другую сторону. В том, что осталось, часов нет вовсе.
+
+Что получатель ПРОВЕРЯЕТ — это конверт, и в нём вся авторизация: тело
+запечатано box-ключом получателя, а идентичность отправителя подписана его
+ключом, поэтому запрос, который расшифровался и проверился, пришёл от того
+единственного пира, с кем эта переписка. Авторство отдельных строк не
+проверяется (в этом отличие от `message_delete`), часы не проверяются, память
+о прошлых запросах не ведётся — принимающая сторона полностью безсостоянийна
+относительно очисток. Запись о том, какую переписку стёрли и когда, — ровно
+тот след, ради отсутствия которого удаление и существует.
+
+#### Почему повтор может забрать новое сообщение
+
+Это следует из пунктов 2, 4 и 5 §«Правило». **Это следствие трёх требований,
+из которых одновременно выполнимы любые два, а не ошибка реализации** —
+поэтому рассуждение записано здесь, а не выводится заново каждый раз.
+
+Поведение: сообщение, написанное между двумя приходами одного и того же
+запроса, заберёт второй. Самая острая форма — ack потерян, запрашивающий пишет
+новое сообщение M, свип переотправляет запрос, и повтор стирает M у
+собеседника, тогда как у запрашивающего оно остаётся.
+
+Три требования:
+
+* **R1 — запрос никогда не списывается.** Иначе достижимо состояние, ради
+  недопущения которого он и существует: у меня стёрто, у собеседника нет, и
+  спросить больше некому.
+* **R2 — на диске не остаётся записи о том, что очистка применена.** Журнал
+  применённых `request_id` — это ровно заметка «здесь стёрли переписку тогда-то»,
+  то есть тот след, ради отсутствия которого удаление и делается.
+* **R3 — повтор не трогает сообщения, написанные после клика.**
+
+**R1 ∧ R2 ⇒ ¬R3.** Чтобы выполнить R3, получатель должен отделить «то, что
+существовало в момент запроса» от «написанного с тех пор». Источников у него
+ровно три: сам запрос, собственная база, собственные часы.
+
+* Запрос не может нести НАБОР. Называть id — это способ рассказать пиру о
+  сообщениях, которые до него не дошли, и запрос обязан пережить строки, из
+  которых возник; поэтому он не называет ни одного.
+* Запрос не может нести пригодный МОМЕНТ. Момент — в часах запрашивающего,
+  строки, с которыми его сравнивать, проштампованы часами получателя. Пробовали
+  три схемы: самый свежий штамп у запрашивающего (оставляет в живых сообщение,
+  которое есть только у пира, — копию из буфера релея); `max(штамп, клик)`
+  (оставляет его же, когда часы пира спешат); поправка на перекос из конверта
+  (засчитывает задержку доставки как перекос, и запрос, доставленный после
+  возвращения пира из офлайна, стирает всё, что тот написал за это время).
+  Каждая ошибается в одну или другую сторону, и в значимых случаях ошибка не
+  ограничена.
+* Получатель не может помнить, что уже применил, — это R2.
+* Запрашивающий не может перестать спрашивать — это R1.
+
+Остаётся «стереть то, что держу сейчас», а значит повтор забирает пришедшее с
+тех пор. ∎
+
+**Остаточный вред ограничен.** Нужен потерянный ack И сообщение, написанное в
+промежутке до следующего свипа (5 с плюс backoff). Забираются сообщения в
+переписке, которую пользователь только что попросил стереть, и его собственная
+копия этого треда у него на экране пуста.
+
+**Если приоритет — R3, снимать придётся R1 или R2:**
+
+* снять R2 — получатель помнит применённые `request_id`. Закрывает случай
+  полностью и надёжно, ценой записи о том, что удаление состоялось;
+* снять R1 — запрашивающий бросает очистку, когда переписка возобновилась.
+  Диск остаётся чистым, ценой молча брошенной очистки, которую собеседник мог
+  и не получить.
+
+Четвёртый вариант и был бы настоящим фиксом; пока его никто не назвал.
+
+**Запрос никогда не списывается.** Поштучное удаление сдаётся после своего
+бюджета попыток и сообщает Abandoned; очистка — нет, потому что состояние,
+которое она бы оставила (у нас стёрто, у собеседника нет, и спросить больше
+некому), — ровно то, которого этот жест не имеет права допустить. Строка
+маленькая, backoff упирается в час, и она уходит вместе с контактом.
+Индикатор ожидания стоит, пока собеседник не подтвердит.
+
+**Принимающая сторона останавливает и свои доставки.** Уход строк из базы —
+половина дела: сообщение этого треда, оставшееся в очереди доставки узла,
+уедет уже после очистки и заново откроет у запрашивающего переписку,
+которую он только что очистил. Поэтому входящий путь замораживает scope,
+стирает и отзывает — те же три шага, что и локальная очистка, с оттайкой
+при откате транзакции.
+
+**Что видит отправитель.** Два события, а не одно: в момент клика «чат
+очищен у вас, удаление сообщений у собеседника запланировано», а при
+закрытии запроса — «сообщения у собеседника удалены». Формулировки
+описывают механику и нигде не намекают, что собеседник что-то решает: он не
+соглашается, не отказывает и не «оставляет у себя» — он выполняет удаление,
+когда окажется на связи. Долгоживущий индикатор — строка в шапке чата
+«удаление у собеседника запланировано», которая стоит до этого момента.
+
+**Барьер** — единственное, что этот путь планирует помимо запроса.
 `BeginConversationDelete` защёлкивает его синхронно, чтобы отправка не
-проскочила между кликом и очисткой; `CompleteConversationDelete`
+проскочила между кликом и очисткой; `CompleteConversationDelete` его
 отпускает; а резервацию, к которой владелец не вернулся (паника между
-этими двумя, застрявшее планирование дольше `convDeleteReservationTTL`),
-освобождает свип удалений, публикуя неуспешный исход, — чтобы
-пользователь не смотрел на чат, в который не может писать.
+двумя шагами, застрявшее планирование дольше `convDeleteReservationTTL`),
+освобождает свип удалений, публикуя неуспешный исход, — чтобы пользователь
+не остался перед чатом, в который не может писать.
 
-**Сообщения, которые не ушли.** О сообщении, которого никто не видел, не
-спрашивают: запрос, называющий его, и был бы тем, из чего пир узнал бы о
-его существовании, — правило маршрута `recalled` для одиночного удаления,
-применённое построчно. Ушло ли сообщение на провод — ответ узла, и
-авторитетен он ровно в момент отмены.
+**У заморозки нет TTL**, поэтому её завершает любой выход из очистки: на
+коммите эстафету принимает отзыв, на откате — оттайка. Отзыв, упавший
+ПОСЛЕ коммита, не оттаивают — эти сообщения уже не пользовательские — и не
+выбрасывают: он owed, и свип удалений повторяет его до успеха.
 
-Очистка ДВУХФАЗНА относительно движка доставки, потому что иначе на
-вопрос нельзя ответить атомарно. Классифицировать, потом удалить —
-сообщение успеет уйти между этими шагами: строка, прочитанная как «не
-уходило», уже у собеседника к моменту уничтожения, и запрос по ней не
-пишется никогда. Удалить, потом классифицировать — единственным
-свидетелем остаётся память узла, которая не переживает перезапуск и
-опустошается, когда у ретрая кончаются попытки.
-
-Поэтому очистка сначала ЗАМОРАЖИВАЕТ (`freeze_conversation_delivery`).
-Заморозка останавливает все пути, способные положить названные сообщения
-на провод, — тик ретраев пропускает их, не тратя попытку, backlog-реплей
-их придерживает — и возвращает то, что узел знает о них в этот момент.
-Пока заморозка держит, ничто не двигается, поэтому транзакция читает
-отметку `never_emitted` (docs/chatlog.md) с каждой удаляемой строки,
-объединяет её с ответом узла и пишет запрос только для сообщений, которые
-собеседник действительно может держать. Удаление и классификация — один
-факт, как удаление и его отказ.
-
-Заморозка, а не отмена, потому что отмену не отыграть: если бы транзакция
-затем упала, у пользователя остались бы сообщения на экране, которые уже
-никто никогда не отправит. Заморозка заканчивается одним из двух способов
-— отмена окончательно отзывает доставки при коммите, либо оттаивание
-возвращает их при откате. Отмена, УПАВШАЯ после коммита, оставляет их
-замороженными — это корректно, строк больше нет и отправлять их нельзя, —
-и в ДОЛГУ: отзыв идемпотентен, поэтому свип удалений повторяет его до
-успеха. До тех пор процесс держит payload удалённой переписки, и повторная
-очистка не поможет — называть в chatlog уже нечего.
-
-Удаление одного сообщения берёт ту же заморозку на свой единственный id и
-по той же причине: оно классифицирует по отметке строки, а она ничего не
-значит, пока сообщение может уйти. TTL у заморозки нет, поэтому её
-завершает КАЖДЫЙ выход — включая ранние: immutable-сообщение или строку,
-которую не удалось прочитать, — потому что заморозка, пережившая своё
-решение, останавливает отправку этого сообщения на всю жизнь процесса, и
-снять её уже нечем.
-
-Заморозка же чинит и порядок. Локальное удаление теперь коммитится
-ПЕРВЫМ, отзыв идёт после: отзыв необратим, и выполненный первым он
-оставляет — при упавшей затем транзакции — строку на экране в состоянии
-«отправляется», у которой все delivery-хуки уже уничтожены. Пока идёт
-транзакция, сообщение уйти не может, поэтому удалять первым ничего не
-стоит, а отказ остаётся исправимым.
-
-Отзыв, упавший после исчезновения строки, НЕ оттаивается — это сообщение
-больше не пользовательское — и не выбрасывается. Он становится ДОЛГОМ:
-свип удалений повторяет его, потому что до успеха процесс держит payload
-удалённого сообщения, а назвать этот id уже некому — строки нет.
-
-Заморозка, которую вообще не удалось взять, — единственный случай, когда
-классификация не делается. Отметки на строках что-то значат лишь пока
-никто не может отправить сообщение за спиной транзакции, поэтому вместо
-классификации запрос получает каждое сообщение в scope: пусть собеседника
-спросят про id, которые он не сможет разрешить, чем сообщение будет
-удалено здесь, а его копия уйдёт к нему, и отозвать её будет уже нечем.
-
-Это заменило более раннюю схему «припарковать и освободить», где запросы
-писались припаркованными, а освобождала их пришедшая позже отмена.
-Парковка ставила приватное правило за таймаут: крэш, зависание или ошибка
-отмены оставляли запросы неосвобождёнными, и по истечении grace они
-уходили как записаны. Такого состояния больше нет: запрос либо существует
-и наступил, либо не был написан вовсе.
-
-`recalled` — утверждение, требующее ДОКАЗАТЕЛЬСТВА, и теперь
-доказательство переживает перезапуск. Отправка, ПРИДЕРЖАННАЯ из-за
-недоступности получателя, ставит в chatlog отметку `never_emitted`
-(docs/chatlog.md), а в момент, когда сообщение всё-таки уходит, отметка
-снимается — на диске, до записи фрейма, — так что восстановленная запись
-наследует утверждение, а не угадывает его.
-
-Отметка — единственное доказательство; её отсутствие не является
-обратным утверждением. Всё, чего outbox не знает, читается как
-«уходило»: строки от сборок до появления отметки, отметка, потерянная в
-крэше, сообщение, отправленное путём, пережившим свою запись в
-планировщике. Направление выбрано намеренно: объявленный id стоит
-собеседнику одного запроса, на который он ответит `not_found`, а
-недоказуемое «не уходило» оставило бы доставленное сообщение у него, и
-попросить о нём было бы уже нечем.
-
-**Что обещает очистка.** Тред исчезает здесь, а каждое сообщение
-становится запросом, на который собеседник отвечает сам. Под текущим
-дефолтным флагом (`any-delete`) он его выполняет; сообщение, которое
-СТАРАЯ сборка пометила `sender-delete` и написал он сам, — его право
-оставить, поэтому он ответит `denied` и его копия останется.
-Подтверждение так и говорит, а не обещает безусловное удаление у обеих
-сторон, и исход виден по каждому сообщению, а не спрятан за одним общим
-ответом.
+**Сообщения, которые не уходили в сеть**, этому пути больше не нужно
+разбирать. Маршрут одиночного удаления сохраняет своё правило `recalled`
+(выше): сообщение, про которое узел может доказать, что оно не попало в
+сеть, удаляется, ничего не сообщая пиру. Очистка треда приходит к тому же
+результату, не неся id вовсе.
 
 **Ограничение поздней доставки (без изменений).** Сообщение, которое пир
-ОТПРАВИЛ до получения удалений, но которое было ещё в полёте, придёт
-после и в очистку не входит. Набор тумбстоунов закрывает соседний класс —
-ТОТ ЖЕ конверт, доставленный повторно после удаления, — но новое
-сообщение в полёте остаётся видимым, пока пользователь его не удалит.
+ОТПРАВИЛ до получения запроса и которое было в полёте, приходит после и
+оказывается вне очистки. Набор отказов в памяти закрывает соседний класс —
+ТОТ ЖЕ конверт, доставленный повторно после удаления, пока жив процесс, —
+но новое сообщение в полёте останется на экране, пока пользователь не
+удалит его.
 
 ### Сетевой поток
 
@@ -2032,7 +2654,7 @@ sequenceDiagram
     A->>A: chatlog.DeleteByID(M) + cleanup + вытеснение из UI
     A->>A: записываем durable DeleteIntent{target=M, peer=B}
     A->>NA: send_control_message{topic="dm-control", Command=message_delete}
-    Note over A: отправляем сразу только если B достижим; иначе свип отправит, когда B вернётся
+    Note over A: отправляем сразу только если B достижим — иначе свип отправит, когда B вернётся
     NA-->>NB: зашифрованный конверт на топике dm-control
     Note over NB,B: НЕТ chatlog INSERT, НЕТ LocalChangeNewMessage
     NB-->>B: LocalChangeNewControlMessage
@@ -2057,6 +2679,37 @@ sequenceDiagram
 ```
 
 *Диаграмма 1 — Распространение message_delete с control-топиком и ack*
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Десктоп Алисы
+    participant NA as Узел Алисы
+    participant NB as Узел Боба
+    participant B as Десктоп Боба
+    A->>A: двойное подтверждение, барьер, слив незавершённых отправок
+    A->>A: читает не-immutable id треда, замораживает их доставки
+    A->>A: одна транзакция: строки + один запрос про переписку
+    A->>A: отзывает замороженные доставки, опускает барьер
+    Note over A: статус: «чат очищен у вас, удаление у собеседника запланировано»
+    A->>NA: send_control_message{Command=conversation_delete, request_id}
+    Note over A: отправляется сразу, только если B достижим — иначе свип отправит по возвращении
+    NA-->>NB: зашифрованный конверт на топике dm-control
+    NB-->>B: LocalChangeNewControlMessage
+    B->>B: стирает все не-immutable строки треда с A — авторство не проверяется
+    B->>B: чистка файлов + вытеснение из UI + одна усечка WAL
+    B->>NB: send_control_message{Command=conversation_delete_ack, status=applied}
+    NB-->>NA: зашифрованный ack на топике dm-control
+    NA-->>A: LocalChangeNewControlMessage
+    alt request_id совпадает с ожидаемым
+        A->>A: снимает запрос — статус «сообщения у собеседника удалены»
+    else устаревший request_id
+        Note over A: отклонён с warn — отвечает на уже заменённую очистку
+    end
+    Note over A: не ответил: запрос ОСТАЁТСЯ и переотправляется, сколько бы ни потребовалось
+```
+
+*Диаграмма 2 — conversation_delete: один запрос на весь тред, применяется без проверки авторства*
 
 ### Правила хранения control DM
 
@@ -2105,7 +2758,7 @@ Control DM не попадают в chatlog **на обеих сторонах**
    входе (`trackRelayMessage`). По той же причине, что и #5: retry
    loop читает только `s.topics["dm"]`, и control-запись в
    `relayRetry` была бы мёртвым состоянием, которое жжёт квоту
-   `maxRelayRetryEntries` до tombstone TTL.
+   `maxRelayRetryEntries` до собственного истечения.
 
 ### Сценарии отказа
 
@@ -2122,18 +2775,70 @@ Control DM не попадают в chatlog **на обеих сторонах**
 | Креш приложения во время in-flight retry  | n/a                                                    | Intent durable; следующий старт продолжает то же расписание. Локальная строка удалена ещё в момент запроса, поэтому на этой стороне ничего не осталось наполовину сделанным. |
 | Пир не ответил на все 720 отправок | n/a                                                       | Intent списывается: warn-лог с `target_id` и пиром, `TopicMessageDeleteCompleted` с `Abandoned=true`. Копии пользователя нет; копия пира, возможно, осталась. |
 | Пир ни разу не был достижим с момента клика | n/a                                                  | Intent сохраняется и после TTL: спрашивать ещё не начинали, значит и сдаваться не от чего. Уйдёт на первом тике после его возвращения. |
+| Пришёл `conversation_delete`, а тред там пуст | Ничего не стирает, отвечает ack `applied`. | Терминально: стороны согласованы, запрос снят. |
+| Пришёл `conversation_delete`, но chatlog недоступен или транзакция упала | Ответ ack `error`, warn-лог. Тред остаётся. | Запрос сохраняется, повтор на уже заряженном backoff-е. |
+| `conversation_delete_ack` с устаревшим `request_id` | n/a | Отклоняется с warn-логом: отвечает на очистку, которую пользователь уже заменил. Текущий запрос остаётся. |
+| Пир не отвечает на очистку, сколько бы ни было попыток | n/a | Запрос ОСТАЁТСЯ. Он не списывается никогда: «у нас стёрто, у него нет, и спросить больше некому» — состояние, которым очистка не имеет права закончиться. Индикатор продолжает говорить, что удаление у собеседника запланировано. |
+| Один и тот же `conversation_delete` пришёл дважды (потерян ack) | Стирает то, что в треде есть сейчас — обычно ничего — и отвечает снова. О факте применения не записывается ничего. | Терминально по ack; повтор стоит одного round-trip. |
+
+### Логирование
+
+**Пути удаления по умолчанию не пишут ничего.** Не идентификаторы — они уже
+давно дайджесты (`internal/core/logid`), — а САМИ СТРОКИ. «message_delete
+completed, удалено 3, 14:07:22» сообщает, что этот пользователь что-то
+уничтожил, сколько именно и когда, в текстовом файле, которого не касается ни
+чекпойнт, ни `secure_delete`, ни миграция. Обезличивание идентификаторов
+оставляло запись на месте; контракт требует убрать строки.
+
+`CORSA_DELETION_DIAGNOSTICS` с любым непустым значением возвращает их
+обратно — с дайджестами — для разбора обращения в поддержку.
+
+Правило, что именно закрыто, потому что по местам вызова оно не очевидно:
+
+* строка о том, что удаление УДАЛОСЬ, идёт через `deletionLog()`. В обычной
+  работе она никому не нужна — исход, который важен пользователю, у него на
+  экране;
+* строка об ОШИБКЕ остаётся на своём уровне. Она описывает узел, который не
+  делает обещанного (очистка не доходит, чекпойнт не выполняется, пир
+  отвечает `error`), и обращение в поддержку без возможности это увидеть
+  хуже для пользователя, чем сам факт, что однажды что-то пошло не так.
 
 ### Замечания по миграции
 
-`chatlog.Entry.Flag` уже существует и заполняется из конверта при
-приёме — миграция схемы не нужна. Существующие строки с пустым `Flag`
-попадают под дефолт "трактуется как sender-delete" и остаются
-удаляемыми оригинальным отправителем. Оператор, желающий более жёсткой
-политики, ждёт настройки per-thread default-flag (вне скоупа этой
-итерации).
+`chatlog.Entry.Flag` заполняется из конверта при приёме и никогда не
+переписывается в рантайме. Существующие базы приводят к текущей модели две
+forward-only миграции:
 
-`message_delete` **не** совместим по wire с пирами, которые понимают
-только data DM. Control DM используют `Topic == "dm-control"` и frame
+* `0007_delete_policy_backfill` переписывает `sender-delete` и пустой флаг
+  в `any-delete` для `topic = 'dm'`, не трогая `immutable` и
+  `auto-delete-ttl`. Эти значения никогда не были выбором — у флага нет
+  UI, значит строка с ним проштампована старым билдом, — и именно они
+  заставляли пира отвечать `denied` на удаление написанного им сообщения.
+  Постусловие (`Migration.Invariant`): ни одного DM не осталось на
+  author-only политике;
+* добавляет `kind` и `request_id` в `message_delete_intents` плюс частичный
+  уникальный индекс по `peer` при `kind = 'conversation'`. Запрос про
+  переписку кладёт в `message_id` `NULL`: он не называет сообщение, и `kind`
+  говорит об этом явно, вместо того чтобы планировщик выводил смысл строки
+  из NULL-а;
+* стирает то, что прежние билды помнили О удалениях, — строки-отказы
+  (`owed = 0`), штампы `refuse_until` на оставшихся запросах и всю
+  `reaction_refusals`, см. §«Повторная доставка после удаления»;
+* удаляет реакции, ждущие сообщения, которого у узла нет
+  (`message_reactions` с `pending = 1`), — тот же след в таблице реакций.
+
+Постусловие (`Migration.Invariant`) проверяет каждое из этих утверждений:
+схемный объект объявляют лишь два statement-а из дюжины, остальное
+собственная проверка формы у раннера не заметила бы.
+
+Пир, который не мигрировал, продолжит отвечать `denied` на удаление
+сообщений, написанных им до backfill-а: у его копии флаг того билда, и с
+нашей стороны это не изменить. Очистка переписки от флага не зависит
+вовсе, поэтому она чинит такие треды для обеих сторон, как только ОБА
+конца понимают `conversation_delete`.
+
+`message_delete` и `conversation_delete` **не** совместимы по wire с
+пирами, которые понимают только data DM. Control DM используют `Topic == "dm-control"` и frame
 `send_control_message`, поэтому старые пиры не декодируют их как обычные
 `directmsg.PlainMessage`; они отклонят или отбросят неизвестный topic /
 frame. Раскатку нужно гейтить явной peer capability или минимальной

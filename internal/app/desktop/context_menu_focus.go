@@ -174,7 +174,7 @@ func (m *menuFocusState) drive(gtx layout.Context, items []event.Tag, keys menuN
 		//
 		// Or the menu HELD focus and the item holding it is no longer in the
 		// list. That is not an edge case: items is rebuilt every frame from
-		// live state, so "Delete chat and ask the peer" leaves the moment the peer
+		// live state, so "Delete chat for both sides" leaves the moment the peer
 		// goes offline, "Delete message" the moment contextMenuDeleteEnabled
 		// stops agreeing, and choosing a row that opens a confirmation swaps
 		// the whole set. Whatever the cause, the frame is about to end without

@@ -792,7 +792,11 @@ func TestTombstoneCleanupAfterTTL(t *testing.T) {
 		LastServedAt: time.Now(),
 	}
 
-	// Expired completed receiver — should be cleaned.
+	// Expired completed receiver — must be KEPT. It is the only thing that
+	// ties the message to the file it delivered, so an age-based eviction
+	// leaves the attachment on disk with nothing able to name it: clearing that
+	// chat later erases the message and cannot erase the file. It goes with the
+	// message, not with a timer.
 	m.receiverMaps["expired-recv"] = &receiverFileMapping{
 		FileID:      "expired-recv",
 		State:       receiverCompleted,
@@ -830,8 +834,8 @@ func TestTombstoneCleanupAfterTTL(t *testing.T) {
 	if _, ok := m.senderMaps["expired-completed"]; ok {
 		t.Error("expired completed sender should be removed")
 	}
-	if _, ok := m.receiverMaps["expired-recv"]; ok {
-		t.Error("expired completed receiver should be removed")
+	if _, ok := m.receiverMaps["expired-recv"]; !ok {
+		t.Error("an old completed download lost the mapping that ties its message to the file")
 	}
 	if _, ok := m.receiverMaps["expired-failed"]; ok {
 		t.Error("expired failed receiver should be removed")

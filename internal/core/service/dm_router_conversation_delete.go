@@ -62,7 +62,7 @@ var ErrConversationDeleteReservationLost = errors.New("conversation wipe: reserv
 //
 // Why not wait for the ack: a conversation the user asked to destroy
 // must not sit on this disk while a peer who may be offline for days
-// decides. That wait is what used to make "Delete chat and ask the peer"
+// decides. That wait is what used to make "Delete chat for both sides"
 // unavailable offline at all. The failure the old ordering protected
 // against — the network half never completing — is now expressed
 // instead as a request the scheduler keeps carrying and, at the very
@@ -70,31 +70,28 @@ var ErrConversationDeleteReservationLost = errors.New("conversation wipe: reserv
 // remain. Nothing in that path can leave the user's own history
 // standing against their instruction.
 //
-// Authorization deliberately diverges from message_delete:
+// Authorization deliberately diverges from message_delete, and the wipe has
+// a command of its own (dm_router_conversation_delete_wire.go) because it
+// must:
 //
-//   - message_delete (single row): runs authorizedToDelete per row
-//     so a per-flag matrix decides whether the requesting peer may
-//     touch THIS message. The sender of the row owns its lifecycle
-//     under the default sender-delete policy.
-//   - the bulk wipe (whole thread): erases every non-immutable
-//     row of the conversation regardless of authorship. Reusing
-//     authorizedToDelete would refuse all rows the requester did
-//     not author — under the default sender-delete that means HALF
-//     the thread survives on each side after a "wipe everything"
-//     gesture, which directly contradicts the user-visible promise
-//     "Delete chat and ask the peer". The bulk gesture is a mutual
-//     consent to forget the conversation and is initiated by an
-//     explicit two-click confirmation in the UI, so it carries
-//     stronger authority over peer-authored rows than a single
-//     message_delete would. Immutable rows are the only carve-out
-//     and stay on both sides.
+//   - message_delete (single row) runs authorizedToDelete per row, so the
+//     message's own flag decides whether the requesting peer may touch it.
+//     An author-only flag reserves it to whoever wrote it.
+//   - conversation_delete (whole thread) erases every non-immutable row
+//     regardless of authorship. Per-row authorization here refuses exactly
+//     the rows the requester WROTE, so half the thread survives on each
+//     side after a "clear everything" gesture — the user's screen empties
+//     while their own messages stand on the other side. That is not a
+//     stricter rule but a broken one, and it is what shipped for one
+//     release. The gesture is a mutual forgetting, confirmed twice in the
+//     UI before it is sent; immutable rows are the only carve-out and stay
+//     on both sides.
 //
-// Design contract: docs/dm-commands.md.
+// Design contract: docs/dm-commands.md §"Clearing a chat".
 
-// The reservation is all this file schedules on its own now: the
-// peer's half is N ordinary delete intents, which the same sweep
-// drives under the same policy as any single deletion — one set of
-// rules, because there is only one kind of request.
+// The reservation is all this file schedules on its own: the peer's half is
+// ONE conversation request, which the same sweep drives under the same
+// pacing, parking and give-up budget as any single deletion.
 const (
 	// convDeleteReservationTTL bounds how long a reservation may stay
 	// installed by BeginConversationDelete without
@@ -484,7 +481,7 @@ func (r *DMRouter) BeginConversationDelete(peer domain.PeerIdentity) (domain.Con
 	// throw away on a duplicate click.
 	if r.convDeleteRetry.has(peer) {
 		log.Debug().
-			Str("peer", peer.String()).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: BeginConversationDelete: wipe already in-flight (cheap pre-check); ignoring duplicate request")
 		return "", nil
 	}
@@ -520,7 +517,7 @@ func (r *DMRouter) BeginConversationDelete(peer domain.PeerIdentity) (domain.Con
 	})
 	if !added {
 		log.Debug().
-			Str("peer", peer.String()).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: BeginConversationDelete: wipe already in-flight for this peer; ignoring duplicate request")
 		return "", nil
 	}
@@ -615,8 +612,8 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 	// nothing was sent under this requestID.
 	if !r.convDeleteRetry.claimForCompletion(peer, requestID, time.Now().UTC()) {
 		log.Warn().
-			Str("peer", peer.String()).
-			Str("request_id", string(requestID)).
+			Str("peer", logID(peer.String())).
+			Str("request_id", logID(string(requestID))).
 			Msg("dm_router: CompleteConversationDelete: reservation gone at claim (TTL reaper raced the goroutine startup); abandoning dispatch")
 		return ErrConversationDeleteReservationLost
 	}
@@ -647,8 +644,8 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 	case <-drainCtx.Done():
 		cancelDrain()
 		log.Warn().
-			Str("peer", peer.String()).
-			Str("request_id", string(requestID)).
+			Str("peer", logID(peer.String())).
+			Str("request_id", logID(string(requestID))).
 			Err(drainCtx.Err()).
 			Msg("dm_router: CompleteConversationDelete: inflight send drain timed out; dropping the reservation rather than wiping around an unfinished send")
 		r.convDeleteRetry.removeReservedIfMatch(peer, requestID)
@@ -701,7 +698,7 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 	// nothing left in it to send.
 	resumeReactions := r.client.HoldReactionSends(peer)
 	wipeCtx, cancelWipe := context.WithTimeout(ctx, conversationWipeBudget)
-	deleted, owed, localOK := r.wipeConversationLocally(wipeCtx, peer)
+	deleted, localOK := r.wipeConversationLocally(wipeCtx, peer, requestID)
 	cancelWipe()
 	if localOK {
 		// Inside the gate: see ForgetConversationState. Only after a wipe that
@@ -726,8 +723,8 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 		// conversation they asked to erase is still on this disk, and
 		// clicking again is the only thing that changes that.
 		log.Warn().
-			Str("peer", peer.String()).
-			Str("request_id", string(requestID)).
+			Str("peer", logID(peer.String())).
+			Str("request_id", logID(string(requestID))).
 			Msg("dm_router: conversation wipe failed; nothing was changed on either side")
 		r.publishConversationDeleteOutcome(ebus.ConversationDeleteOutcome{
 			Peer:               peer,
@@ -736,23 +733,23 @@ func (r *DMRouter) CompleteConversationDelete(ctx context.Context, peer domain.P
 		return fmt.Errorf("wipe the conversation with %s: the local thread is unchanged", peer)
 	}
 
-	log.Info().
-		Str("peer", peer.String()).
-		Str("request_id", string(requestID)).
+	deletionLog().Info().
+		Str("peer", logID(peer.String())).
+		Str("request_id", logID(string(requestID))).
 		Int("deleted_local", deleted).
-		Int("owed_by_peer", owed).
-		Msg("dm_router: conversation wiped locally; the peer owes one deletion per message")
+		Msg("dm_router: conversation wiped locally; the peer owes one wipe of their side")
 
-	// Nothing is dispatched from here. Every message of the thread is now
-	// an ordinary delete intent, and the delete scheduler owns them: it
-	// paces them per peer, parks them while the peer is away, wakes them
-	// the moment the peer connects, and settles each one on its own ack.
-	// A wipe is not a separate kind of request, so it does not need a
-	// separate dispatcher, retry loop or acknowledgement.
+	// Nothing is dispatched from here. The request the transaction just
+	// wrote is an ordinary row of the delete scheduler, which owns it
+	// exactly as it owns a single deletion: it paces it per peer, parks it
+	// while the peer is away, wakes it the moment they connect, and settles
+	// it on their ack. The wipe needs no dispatcher, retry loop or
+	// acknowledgement of its own — only its own COMMAND, because what it
+	// asks for cannot be said in message ids.
 	r.publishConversationDeleteOutcome(ebus.ConversationDeleteOutcome{
-		Peer:    peer,
-		Deleted: deleted,
-		Owed:    owed,
+		Peer:      peer,
+		Deleted:   deleted,
+		Requested: true,
 	})
 	return nil
 }
@@ -776,195 +773,150 @@ func (r *DMRouter) SendConversationDelete(ctx context.Context, peer domain.PeerI
 	return r.CompleteConversationDelete(ctx, peer, requestID)
 }
 
-// wipeConversationLocally erases the thread with the peer from this
-// side: every non-immutable row, its per-message journal traces, any
-// backing file-transfer state, and the deliveries this node still owed
-// the peer for messages it is about to destroy. What the peer owes us in
-// return is ONE DELETE INTENT PER MESSAGE — the same rows the scheduler
-// already drives for a single deletion, because a conversation wipe is N
-// message deletions and nothing else.
+// wipeConversationLocally erases the thread with the peer from this side:
+// every non-immutable row, its per-message journal traces, any backing
+// file-transfer state, and the deliveries this node still owed the peer for
+// messages it is about to destroy. What the peer owes us in return is ONE
+// REQUEST — that they clear their side of the conversation — written in the
+// same transaction as the deletions.
 //
 // It runs at CLICK time, under the outgoing barrier, not after any peer
 // answers. Waiting for a peer who may be offline for days is exactly the
 // exposure the wipe exists to end, and it is what made "Delete chat for
 // everyone" unavailable offline.
 //
-// Immutable rows survive, as they do everywhere else. Authorship is NOT
-// consulted for the LOCAL removal: the user is erasing their own view of
-// a conversation, which is theirs to do for either side's messages. What
-// each peer-side request may do is their own answer, carried by their ack
-// per message.
+// Immutable rows survive, here and there. Authorship is consulted on NEITHER
+// side: the user is erasing a conversation, which is not a pile of individual
+// messages with individual owners but the thing the two of them made together,
+// and asking per message is what used to leave each side holding the half the
+// other wrote.
+//
+// An EMPTY thread is still wiped, and that is the repair path rather than a
+// no-op: a conversation an older build erased here while the peer refused the
+// user's own messages has nothing left to name, and the request carries no ids
+// precisely so it can still be made.
 //
 // Returns how many rows went and ok==false when nothing happened at all
-// (chatlog unavailable, the candidate read failed, or the transaction
-// rolled back), so the caller can say so rather than report a wipe that
-// did not run.
-func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.PeerIdentity) (deleted int, owed int, ok bool) {
+// (chatlog unavailable, the candidate read failed, or the transaction rolled
+// back), so the caller can say so rather than report a wipe that did not run.
+func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.PeerIdentity, requestID domain.ConversationDeleteRequestID) (deleted int, ok bool) {
 	store := r.client.chatlog.Store()
 	if store == nil {
 		log.Warn().
-			Str("peer", peer.String()).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: wipeConversationLocally: chatlog store unavailable")
-		return 0, 0, false
+		return 0, false
 	}
 
-	// One reading of the thread defines the wipe: these are the ids
-	// marked against replays, the ids the transaction deletes, and the
-	// ids the peer is asked about. A second read inside the transaction
-	// would destroy rows this one never saw — rows nobody marked and
-	// nobody will ask the peer for.
+	// One reading of the thread defines the wipe: these are the ids marked
+	// against replays and the ids the transaction deletes. A second read
+	// inside the transaction would destroy rows this one never saw — rows
+	// nobody marked and nobody refuses afterwards.
 	scope, err := store.ConversationCandidateIDs(ctx, peer)
 	if err != nil {
 		log.Warn().Err(err).
-			Str("peer", peer.String()).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: wipeConversationLocally: chatlog read failed; nothing wiped")
-		return 0, 0, false
-	}
-	if len(scope.IDs) == 0 {
-		// No messages this wipe may take, but the conversation can still hold
-		// reactions WAITING for messages that never arrived — and the
-		// transaction below never runs to take them. Orphans only: a thread of
-		// immutable messages also reports no candidates, and those messages keep
-		// their reactions because they keep existing.
-		// Both halves in ONE call, because they are one commit: the waiting
-		// facts, and the refusals of everything removed from this conversation
-		// one message at a time before today. The deleting transaction — what
-		// forgets them on the ordinary path — never runs here, and nothing else
-		// can name those ids, because their messages are long gone.
-		//
-		// Whether the refusals go is the store's decision: a thread of immutable
-		// messages reports no candidates either, and there they must stay, or
-		// each one is an hour of held rows waiting to happen as soon as the
-		// tombstones expire.
-		dropped, forgotten, err := store.WipeEmptyConversationReactions(ctx, peer)
-		if err != nil {
-			// NOT a successful wipe. Reporting success here would have the
-			// caller empty the send queue and tell the user the thread is gone,
-			// while the only thing that was in it is still on this disk and can
-			// surface again the moment its message arrives. Nothing was written
-			// either — one transaction — so "nothing wiped" is the truth and not
-			// a report over rows that already went.
-			log.Warn().Err(err).Str("peer", peer.String()).
-				Msg("dm_router: wipeConversationLocally: the reactions of an empty thread could not be wiped; nothing wiped")
-			return 0, 0, false
-		}
-		if dropped > 0 {
-			log.Debug().Str("peer", peer.String()).Int("reactions", dropped).
-				Msg("dm_router: wipeConversationLocally: dropped the reactions of a thread with no messages")
-			// Same reason as on the ordinary path: the chips come from a cache
-			// only this event reloads.
-			r.publishReactionsChanged(peer)
-		}
-		if dropped > 0 || forgotten {
-			// Same class of deletion as any other, so the pages leave the
-			// write-ahead log now rather than at the next automatic checkpoint —
-			// what the user asked to erase should not sit in the WAL because it
-			// happened to be the only thing in the thread. The refusals count:
-			// each names a message this user destroyed.
-			r.checkpointAfterDelete(ctx, store)
-		}
-		return 0, 0, true
+		return 0, false
 	}
 
-	// Stop the node from sending anything in scope BEFORE reading what
-	// the rows say about it. Without this the classification races the
-	// delivery engine in both directions: a message can go out between
-	// the read and the delete (so a row read as "never emitted" is
-	// already at the peer, and no request is written for it), or its mark
-	// can be cleared by an emission the transaction never saw.
+	// Stop the node from sending anything in scope BEFORE the transaction
+	// takes it. A message that goes out between the read and the delete is one
+	// the user destroyed here and handed over anyway.
 	//
-	// A freeze rather than the cancellation, because the cancellation
-	// cannot be undone: if the transaction below then failed, the user
-	// would be left with messages still on screen that nothing will ever
-	// send. The freeze is ended either way — by the cancellation on
-	// success, by a thaw on failure.
-	frozen, err := r.client.FreezeConversationDelivery(ctx, peer, scope.IDs)
-	classification := chatlog.ConversationWipeClassification{
-		Trusted: err == nil,
-		Proven:  frozen.NeverEmitted,
-	}
-	if err != nil {
-		// Without the freeze nothing can be classified: a row's mark only
-		// means something while nothing may emit the message behind the
-		// transaction's back. Every message in scope becomes a request —
-		// the peer is asked about ids they may not resolve, rather than a
-		// message being deleted here while a copy escapes to them with
-		// nothing left to recall it.
-		log.Warn().Err(err).
-			Str("peer", peer.String()).
-			Msg("dm_router: wipeConversationLocally: could not stop deliveries; asking the peer about every message in scope")
+	// A freeze rather than the cancellation, because the cancellation cannot
+	// be undone: if the transaction below then failed, the user would be left
+	// with messages still on screen that nothing will ever send. The freeze is
+	// ended either way — by the cancellation on success, by a thaw on failure.
+	if len(scope.IDs) > 0 {
+		if _, err := r.client.FreezeConversationDelivery(ctx, peer, scope.IDs); err != nil {
+			// The wipe STOPS. A message still queued would go out after the
+			// erasure, and — because the request carries no ids — it would land
+			// on the peer either before their wipe (deleted, fine) or AFTER it,
+			// where nothing can name it: their request is already answered,
+			// their refusals cover the ids they erased, and this one is not
+			// among them. It would sit in a conversation both users believe is
+			// gone, permanently.
+			//
+			// Nothing has been destroyed at this point, so refusing costs the
+			// user a retry and no history.
+			log.Warn().Err(err).
+				Msg("dm_router: wipeConversationLocally: could not stop deliveries; refusing to erase what we might still send")
+			return 0, false
+		}
 	}
 
-	// Volatile marks only: the durable ones ride the transaction below,
-	// so a row and its refusal land together. These cover the window
-	// before that commit, which no transaction can reach into.
-	now := time.Now().UTC()
-	expiry := r.wipeTombstones.Mark(scope.IDs, now)
+	// Volatile marks only: the durable ones ride the transaction below, so a
+	// row and its refusal land together. These cover the window before that
+	// commit, which no transaction can reach into.
+	now := r.now()
 
-	// One transaction for the rows, the requests the peer now owes us and
-	// the refusal of every id. Either the conversation is gone AND
-	// somebody is bound to ask the peer for each message, or nothing
-	// happened and the user can click again — a half-applied wipe is the
-	// one outcome they cannot see.
-	//
-	// The classification is part of it. Whether a message ever reached
-	// the wire is written on the row the transaction is about to destroy
-	// (chatlog's never_emitted mark), so it is read there, and a request
-	// is written only for the messages the peer may actually hold. That
-	// is what removes the parked-then-released dance and the grace it
-	// needed: there is no window in which an unclassified request exists,
-	// and no timeout that could expire into sending one.
-	wiped, err := store.DeleteConversationWithIntents(ctx, peer, scope, classification, now, expiry)
+	// Refused BEFORE the transaction opens, so a copy of one of these messages
+	// arriving while it runs is turned away rather than stored behind the wipe.
+	// They expire on their own at the sender's reseed horizon. Not lifted when
+	// the peer acknowledges the wipe: an ack is their database, not the relay
+	// buffers and inbox queues that may still hold copies of these envelopes.
+	r.wipeTombstones.Note(scope.IDs, now)
+
+	// One transaction for the rows and the request the peer now owes us. Either
+	// the conversation is gone AND somebody is bound to ask the peer, or
+	// nothing happened and the user can click again — a half-applied wipe is
+	// the one outcome they cannot see.
+	wiped, err := store.DeleteConversationWithIntent(ctx, peer, scope, chatlog.DeleteIntent{
+		Kind:      chatlog.DeleteIntentConversation,
+		Peer:      peer,
+		RequestID: requestID,
+		// When the user asked. Diagnostics only — the request carries no
+		// moment on the wire and the peer compares nothing against it.
+		CreatedAt:     now,
+		NextAttemptAt: now,
+	})
 	if err != nil {
 		log.Warn().Err(err).
-			Str("peer", peer.String()).
+			Str("peer", logID(peer.String())).
 			Msg("dm_router: wipeConversationLocally: transactional wipe failed; the thread is untouched")
-		// The rows are still here, so the messages are still the user's:
-		// the freeze has to end or they would sit unsent forever.
+		// The rows are still here, so the messages are still the user's: the
+		// freeze has to end or they would sit unsent forever.
 		//
-		// DETACHED, unlike the two steps above: this is the compensation
-		// for one of them failing, and the most likely reason to be here
-		// is that the wipe's context was cancelled or timed out. Handing
-		// it that same context would make it fail exactly when it is
-		// needed. detachedCtx keeps the values and drops both the
-		// deadline and the cancellation — see its own comment.
-		thawCtx, cancelThaw := context.WithTimeout(r.detachedCtx(ctx), conversationCompensationBudget)
-		thawErr := r.client.ThawConversationDelivery(thawCtx, peer, scope.IDs)
-		cancelThaw()
-		if thawErr != nil {
-			log.Error().Err(thawErr).
-				Str("peer", peer.String()).
-				Msg("dm_router: wipeConversationLocally: the wipe failed AND its deliveries stayed frozen; they will resume after a restart")
+		// DETACHED, unlike the steps above: this is the compensation for one
+		// of them failing, and the most likely reason to be here is that the
+		// wipe's context was cancelled or timed out. Handing it that same
+		// context would make it fail exactly when it is needed. detachedCtx
+		// keeps the values and drops both the deadline and the cancellation.
+		if len(scope.IDs) > 0 {
+			thawCtx, cancelThaw := context.WithTimeout(r.detachedCtx(ctx), conversationCompensationBudget)
+			thawErr := r.client.ThawConversationDelivery(thawCtx, peer, scope.IDs)
+			cancelThaw()
+			if thawErr != nil {
+				log.Error().Err(thawErr).
+					Str("peer", logID(peer.String())).
+					Msg("dm_router: wipeConversationLocally: the wipe failed AND its deliveries stayed frozen; they will resume after a restart")
+			}
 		}
-		// The thread is still here, so the ids we pre-marked name rows
-		// that are alive. Leaving those marks would keep a day's worth
-		// of "id of a message that exists" on disk — the metadata class
-		// the wipe exists to remove, only about the wrong messages — and
-		// would swallow a legitimate re-delivery of any of them.
-		r.wipeTombstones.Forget(ctx, scope.IDs)
-		return 0, 0, false
+		// The thread is still here, so the ids refused above name rows that are
+		// alive, and a refusal for a live row would swallow its next legitimate
+		// re-delivery.
+		r.wipeTombstones.Forget(scope.IDs)
+		return 0, false
 	}
 
 	// Now stop what we still owed the peer, scoped to what the wipe took:
-	// immutable rows survive it, and cancelling their delivery would
-	// strand a message the user can still see in "sending" with nothing
-	// left to send it.
+	// immutable rows survive it, and cancelling their delivery would strand a
+	// message the user can still see in "sending" with nothing left to send it.
 	//
-	// A failure here does not undo the wipe, for the same reason the
-	// single-message withdraw does not stop for one: the outage is what
-	// the user is deleting around.
-	owed = wiped.Owed
 	// The rows are gone, so the node is holding the payload of a deleted
-	// conversation, kept off the wire only by the freeze. A failure here
-	// does not thaw — that would hand the peer what the user just erased —
-	// and it is not dropped either: it is owed, and the delete sweep
-	// retries it until it succeeds.
-	_ = r.withdrawDeletedDeliveries(ctx, peer, scope.IDs)
+	// conversation, kept off the wire only by the freeze. A failure here does
+	// not thaw — that would hand the peer what the user just erased — and it
+	// is not dropped either: it is owed, and the delete sweep retries it until
+	// it succeeds.
+	if len(scope.IDs) > 0 {
+		_ = r.withdrawDeletedDeliveries(ctx, peer, scope.IDs)
+	}
 
-	// Under the file barrier: it moves the peer's history counter first, so
-	// a registration in flight stands down instead of re-creating a mapping
-	// this is about to remove. Taken even with no bridge, because the
-	// version move is what every chatlog read in flight checks.
+	// Under the file barrier: it moves the peer's history counter first, so a
+	// registration in flight stands down instead of re-creating a mapping this
+	// is about to remove. Taken even with no bridge, because the version move
+	// is what every chatlog read in flight checks.
 	r.withFileOps(peer, len(wiped.Removed) > 0, func() {
 		if r.fileBridge == nil {
 			return
@@ -976,15 +928,23 @@ func (r *DMRouter) wipeConversationLocally(ctx context.Context, peer domain.Peer
 
 	r.evictWipedConversationFromUI(peer, wiped.Removed)
 	// The chips are drawn from a per-conversation cache the window holds, and
-	// the ONLY thing that reloads it is this event. Evicting the messages is not
-	// enough: a message that survived the wipe — an immutable one — is still on
-	// screen with whatever chips were cached for it, and the facts of the erased
-	// messages stay in the window's memory until the user leaves the chat.
+	// the ONLY thing that reloads it is this event. Evicting the messages is
+	// not enough: a message that survived the wipe — an immutable one — is
+	// still on screen with whatever chips were cached for it, and the facts of
+	// the erased messages stay in the window's memory until the user leaves
+	// the chat.
 	r.publishReactionsChanged(peer)
-	if len(wiped.Removed) > 0 {
-		r.checkpointAfterDelete(ctx, store)
-	}
-	return len(wiped.Removed), owed, true
+	// What the transaction took leaves the write-ahead log now rather than at
+	// the next automatic checkpoint: a truncation per THREAD, which is what
+	// makes it affordable where a truncation per row was not.
+	//
+	// Unconditional, including the repair click on an already-empty thread.
+	// "Nothing was removed" is a statement about MESSAGES, and the same
+	// transaction also clears the conversation's orphaned reactions — rows that
+	// name the message each fact was for. Deciding by the message count left
+	// exactly those ids legible in the log.
+	r.checkpointAfterDelete(ctx, store)
+	return len(wiped.Removed), true
 }
 
 // evictWipedConversationFromUI removes the given message IDs from the
@@ -1074,308 +1034,6 @@ const (
 	conversationCompensationBudget = 5 * time.Second
 )
 
-// wipeTombstoneTTL bounds how long a deleted id is refused before a
-// re-delivery of it is allowed to re-create the row.
-//
-// It has to outlast the window in which that re-delivery can happen, and
-// that window belongs to the SENDER: their node keeps retrying a message
-// until its delivery receipt arrives — 20 attempts on a schedule that
-// caps at 11 minutes, about 3.5 hours by default, and configurable
-// higher (CORSA_DELIVERY_RETRY_MAX_ATTEMPTS). A refusal shorter than
-// that expires while copies of the message are still being sent, which
-// is the resurrection it exists to prevent.
-//
-// The bound is not the retry budget but the SENDER'S RESEED HORIZON. A
-// restart resets their attempt counter, and their outbox re-injects
-// anything undelivered from the last week, so a message can be sent again
-// long after its original 3.5-hour budget was spent. Past that horizon
-// nobody re-sends it, which makes the horizon — not the budget — the
-// point at which a refusal has nothing left to refuse.
-//
-// A little over the week, so the two do not expire in the same instant.
-// The cost is one small row per deleted message for that long, which the
-// reaper removes as soon as it owes nothing and refuses nothing.
-const wipeTombstoneTTL = 8 * 24 * time.Hour
-
-// wipeTombstoneReapPeriod is how often the reaper goroutine prunes
-// stale entries. Independent of TTL — must be small enough that the
-// peak set size stays bounded under heavy wipe activity.
-const wipeTombstoneReapPeriod = 5 * time.Minute
-
-// wipeTombstoneSet records ids of rows the wipe path just removed,
-// with a TTL eviction model. The handler for new inbound messages
-// (DMRouter.onNewMessage) consults this set on every event so a
-// late-replayed envelope cannot resurrect a wiped row by silently
-// re-inserting it through storeIncomingMessage.
-type wipeTombstoneSet struct {
-	mu      sync.Mutex
-	entries map[domain.MessageID]time.Time // id → expiresAt
-	// journal resolves the durable half. The replay window and a
-	// restart overlap: the process that wiped the thread can be gone by
-	// the time the echo lands, and a tombstone lost with it resurrects
-	// exactly the rows the user destroyed.
-	journal func() wipeTombstoneJournal
-	// unloaded is set when the startup load FAILED. The memory half is
-	// then not a complete answer, so Has consults the database instead
-	// of reporting "not refused" for everything the load never saw.
-	unloaded bool
-	// nextReload throttles that fallback. Has runs on the INBOUND path —
-	// the node calls StoreMessage synchronously for every arriving
-	// message — and a database that is wedged rather than merely late
-	// answers each retry only after busy_timeout. Without a floor between
-	// attempts every message pays that timeout, and a slow disk becomes a
-	// stalled receive path. Retrying at a bounded rate keeps the recovery
-	// (the reaper retries on its own tick regardless) without putting the
-	// disk's health on the critical path of every message.
-	nextReload time.Time
-}
-
-// wipeTombstoneReloadFloor is the least time between two fallback loads
-// from the inbound path. Short enough that a database that recovers is
-// picked up long before the reaper's own tick, long enough that a wedged
-// one is asked once per interval instead of once per message.
-const wipeTombstoneReloadFloor = 5 * time.Second
-
-// wipeTombstoneJournal is the durable half of the tombstone set.
-type wipeTombstoneJournal interface {
-	NoteWipeTombstones(ctx context.Context, ids []domain.MessageID, expiresAt time.Time) error
-	DropWipeTombstones(ctx context.Context, ids []domain.MessageID) error
-	LiveWipeTombstones(ctx context.Context, now time.Time) (map[domain.MessageID]time.Time, error)
-	ReapWipeTombstones(ctx context.Context, now time.Time) (int64, error)
-}
-
-// newWipeTombstoneSet builds the set over a journal RESOLVER, for the
-// reason given on newInboundConversationDeleteSeenSet: the store is opened
-// after the router is built.
-func newWipeTombstoneSet(journal func() wipeTombstoneJournal) *wipeTombstoneSet {
-	return &wipeTombstoneSet{
-		entries: make(map[domain.MessageID]time.Time),
-		journal: journal,
-	}
-}
-
-func (s *wipeTombstoneSet) durableJournal() wipeTombstoneJournal {
-	if s == nil || s.journal == nil {
-		return nil
-	}
-	return s.journal()
-}
-
-// Hydrate loads the tombstones that outlived the last process. Called
-// once at startup, before any inbound message is handled: Has stays a
-// pure memory lookup afterwards, because putting a query on the arrival
-// path of every message to catch a rare replay is the wrong trade.
-func (s *wipeTombstoneSet) Hydrate(ctx context.Context, now time.Time) {
-	journal := s.durableJournal()
-	if journal == nil {
-		return
-	}
-	live, err := journal.LiveWipeTombstones(ctx, now)
-	if err != nil {
-		// Leaves the set UNLOADED, not merely empty: an empty set that
-		// claims to be loaded would let every replay through until the
-		// next restart. Has retries the load while this is set — at a
-		// bounded rate, see nextReload — and the reaper retries it on
-		// its own tick regardless, which is what makes the throttle safe
-		// to apply to the inbound path.
-		s.mu.Lock()
-		s.unloaded = true
-		s.mu.Unlock()
-		log.Warn().Err(err).
-			Msg("dm_router: loading refusals failed; falling back to a per-message lookup until the next attempt")
-		return
-	}
-	s.mu.Lock()
-	for id, expiry := range live {
-		if current, ok := s.entries[id]; !ok || expiry.After(current) {
-			s.entries[id] = expiry
-		}
-	}
-	s.unloaded = false
-	s.mu.Unlock()
-	if len(live) > 0 {
-		log.Info().Int("refusals", len(live)).Msg("dm_router: refusals restored")
-	}
-}
-
-// Forget drops the given ids from both halves of the set. Called when a
-// wipe that pre-marked them rolled back: the rows are alive after all, and
-// a mark for a live row is both a record of a message that still exists
-// and a trap that would swallow its next legitimate re-delivery.
-func (s *wipeTombstoneSet) Forget(ctx context.Context, ids []domain.MessageID) {
-	if s == nil || len(ids) == 0 {
-		return
-	}
-	s.mu.Lock()
-	for _, id := range ids {
-		delete(s.entries, id)
-	}
-	s.mu.Unlock()
-
-	journal := s.durableJournal()
-	if journal == nil {
-		return
-	}
-	if err := journal.DropWipeTombstones(ctx, ids); err != nil {
-		log.Warn().Err(err).
-			Int("ids", len(ids)).
-			Msg("dm_router: dropping the tombstones of a rolled-back wipe failed; they expire on their own TTL")
-	}
-}
-
-// Mark inserts every id into the VOLATILE half only, and returns the
-// expiry it used. For a deletion that runs in a transaction: the durable
-// half rides that commit, so the row and its refusal land together, while
-// this covers the window before it — the moment between deciding to delete
-// an id and committing, in which a replay can still arrive.
-func (s *wipeTombstoneSet) Mark(ids []domain.MessageID, now time.Time) time.Time {
-	expiry := now.Add(wipeTombstoneTTL)
-	if s == nil || len(ids) == 0 {
-		return expiry
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, id := range ids {
-		s.entries[id] = expiry
-	}
-	return expiry
-}
-
-// Note inserts every id with an expiry of now+TTL, in both halves. For
-// deletions with no transaction of their own to ride. Called after a
-// successful wipe (the sender's click-time wipe AND receiver-side sweep)
-// so both sides are protected against late re-delivery. A nil
-// receiver is a no-op so test fixtures that do not need tombstone
-// behaviour can leave the field unset without nil-panicking
-// production call sites.
-func (s *wipeTombstoneSet) Note(ctx context.Context, ids []domain.MessageID, now time.Time) {
-	if s == nil || len(ids) == 0 {
-		return
-	}
-	expiry := s.Mark(ids, now)
-
-	journal := s.durableJournal()
-	if journal == nil {
-		return
-	}
-	if err := journal.NoteWipeTombstones(ctx, ids, expiry); err != nil {
-		// This process still refuses the replay; what is lost is the
-		// refusal surviving a restart inside the replay window.
-		log.Warn().Err(err).
-			Int("ids", len(ids)).
-			Msg("dm_router: persisting wipe tombstones failed; a replay after a restart could resurrect the rows")
-	}
-}
-
-// Refuses reports whether id is currently tombstoned (present and not
-// expired), and whether it could answer at all.
-//
-// known=false is not "no". It means the durable half has not been read and
-// a memory miss therefore proves nothing — the caller must treat the
-// message as undecidable rather than as allowed. A nil receiver is a
-// deployment without the feature and answers "not refused, known".
-func (s *wipeTombstoneSet) Refuses(id domain.MessageID, now time.Time) (refused, known bool) {
-	if s == nil {
-		return false, true
-	}
-	// Memory ALWAYS first, whatever the load did. It holds the marks a
-	// deletion in progress has just made — the ones covering the window
-	// before its transaction commits — and those exist nowhere else yet.
-	if s.hasInMemory(id, now) {
-		return true, true
-	}
-	if !s.isUnloaded() {
-		return false, true
-	}
-
-	// The startup load failed, so a memory miss proves nothing. Retry the
-	// load rather than querying for this one id: it answers the same
-	// question, costs the same read, and — unlike a lookup — ends the
-	// fallback for every message after this one. But not on every
-	// message: see nextReload. A caller inside the throttle window is
-	// told "unknown" rather than "not refused" — the throttle bounds what
-	// the inbound path PAYS, and must not turn into permission to
-	// re-create a row the user deleted.
-	if !s.claimReload(now) {
-		return false, false
-	}
-	s.Hydrate(context.Background(), now)
-	if s.isUnloaded() {
-		return false, false
-	}
-	return s.hasInMemory(id, now), true
-}
-
-func (s *wipeTombstoneSet) isUnloaded() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.unloaded
-}
-
-// claimReload reports whether this caller should pay for a fallback load,
-// and books the next slot if so.
-func (s *wipeTombstoneSet) claimReload(now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.unloaded || now.Before(s.nextReload) {
-		return false
-	}
-	s.nextReload = now.Add(wipeTombstoneReloadFloor)
-	return true
-}
-
-func (s *wipeTombstoneSet) hasInMemory(id domain.MessageID, now time.Time) bool {
-	if s == nil {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	expiry, ok := s.entries[id]
-	if !ok {
-		return false
-	}
-	if !expiry.After(now) {
-		// Expired — drop opportunistically and report miss.
-		delete(s.entries, id)
-		return false
-	}
-	return true
-}
-
-// reloadIfUnloaded retries a startup load that failed. A no-op once the
-// set is loaded, which is the normal case.
-func (s *wipeTombstoneSet) reloadIfUnloaded(ctx context.Context, now time.Time) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	unloaded := s.unloaded
-	s.mu.Unlock()
-	if unloaded {
-		s.Hydrate(ctx, now)
-	}
-}
-
-// reap drops every entry whose expiry has passed, in memory and on disk.
-func (s *wipeTombstoneSet) reap(ctx context.Context, now time.Time) {
-	s.mu.Lock()
-	for id, expiry := range s.entries {
-		if !expiry.After(now) {
-			delete(s.entries, id)
-		}
-	}
-	s.mu.Unlock()
-
-	journal := s.durableJournal()
-	if journal == nil {
-		return
-	}
-	if _, err := journal.ReapWipeTombstones(ctx, now); err != nil {
-		log.Warn().Err(err).
-			Msg("dm_router: reaping wipe tombstones failed; retrying on the next tick")
-	}
-}
-
 // suppressIfWipeTombstoned is the inbound-event guard used by
 // onNewMessage. When the freshly-stored message id matches a
 // recently-wiped tombstone, the row is removed again from chatlog,
@@ -1438,9 +1096,15 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	resumeReactions()
 	if err != nil {
 		log.Warn().Err(err).
-			Str("message_id", event.MessageID).
 			Msg("dm_router: tombstone re-DELETE failed; falling back to regular new-message UI so the row is at least visible")
 		return false
+	}
+	if removed {
+		// A wiped message that was re-delivered and inserted before the
+		// refusal caught it. Its body reached the log on the way in and
+		// again on the way out; nothing else on this path retires those
+		// pages.
+		r.checkpointSoonAfterDelete()
 	}
 	// removed==false means DeleteByID idempotently reported the row
 	// was already gone (concurrent cleanup, double-fire of the same
@@ -1483,8 +1147,11 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	r.seenMessageIDs[event.MessageID] = struct{}{}
 	r.mu.Unlock()
 
-	log.Debug().
-		Str("message_id", event.MessageID).
+	// Behind the diagnostics gate: "this id was refused because it had been
+	// deleted here" is a statement that the user deleted that message, with the
+	// time attached, in a file nothing ever truncates.
+	deletionLog().Debug().
+		Str("message_id", logID(event.MessageID)).
 		Msg("dm_router: suppressed re-delivery of wiped message")
 	return true
 }
@@ -1524,11 +1191,14 @@ func (r *DMRouter) wipeTombstoneReaperLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			// Retry a load that failed at startup before reaping: while
-			// it is outstanding every arrival costs a database lookup,
-			// and the reaper is the only thing that comes back around.
-			r.wipeTombstones.reloadIfUnloaded(ctx, now.UTC())
-			r.wipeTombstones.reap(ctx, now.UTC())
+			// Re-read the deletions still owed before reaping. It both
+			// retries a load that failed — while one is outstanding every
+			// arrival costs a database lookup, and the reaper is the only
+			// thing that comes back around — and RETIRES the refusals whose
+			// deletions the peers have since confirmed, which is the only
+			// way that set ever shrinks.
+			r.wipeTombstones.Hydrate(ctx, now.UTC())
+			r.wipeTombstones.reap(now.UTC())
 			// RELEASE BEFORE SWEEP, and the order is load-bearing. Both look at
 			// pending rows; the sweep destroys the ones past their TTL. If a
 			// release failed and stayed failed for longer than the TTL, sweeping
@@ -1637,7 +1307,7 @@ func (r *DMRouter) reofferConversation(
 		return r.client.SendReactionFacts(peer, facts)
 	})
 	if err != nil {
-		log.Debug().Err(err).Str("peer", peer.String()).Msg("re-offer page not queued")
+		log.Debug().Err(err).Str("peer", logID(peer.String())).Msg("re-offer page not queued")
 	}
 }
 
@@ -1656,20 +1326,4 @@ func (r *DMRouter) sweepHeldReactions(ctx context.Context, now time.Time) {
 			Msg("reactions waiting for a message that never arrived were dropped")
 	}
 
-	// The refusals of deleted ids have no expiry — one that expires is the
-	// offer loop starting again — so their bound is a count, and this is the
-	// timer that applies it. Here rather than on the write path because the
-	// write is the moment a deletion is being recorded: making it pay for a
-	// trim would put a scan of the table into the user's delete.
-	trimmed, err := store.TrimReactionRefusals(ctx, chatlog.MaxReactionRefusals)
-	if err != nil {
-		log.Warn().Err(err).Msg("the refusals of deleted ids could not be trimmed")
-		return
-	}
-	if trimmed > 0 {
-		// Worth a line above debug: each id dropped here is one whose reaction
-		// offers can start being accepted again.
-		log.Info().Int("ids", trimmed).
-			Msg("the least recently offered refusals of deleted ids were dropped")
-	}
 }

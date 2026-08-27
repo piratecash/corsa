@@ -10,6 +10,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/logid"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -111,12 +112,12 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	}
 	wireRecipient := recipient.String()
 
-	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_wait").Str("msg_id", string(messageID)).Msg("peer_mu_reader")
+	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_wait").Str("msg_id", logid.Of(string(messageID))).Msg("peer_mu_reader")
 	s.peerMu.RLock()
-	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_held").Str("msg_id", string(messageID)).Msg("peer_mu_reader")
-	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_wait").Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
+	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_held").Str("msg_id", logid.Of(string(messageID))).Msg("peer_mu_reader")
+	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_wait").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
-	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_held").Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
+	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_held").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 	s.gossipMu.Lock()
 
 	// Authorship gate first, on a read-only pass: the filter below shares
@@ -125,10 +126,10 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	if foreign := s.backlogEnvelopeIsForeign(messageID, wireRecipient); foreign {
 		s.gossipMu.Unlock()
 		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released_foreign").Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
+		log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released_foreign").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 		s.peerMu.RUnlock()
-		log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released_foreign").Str("msg_id", string(messageID)).Msg("peer_mu_reader")
-		log.Warn().Str("message_id", string(messageID)).Str("recipient", wireRecipient).Msg("cancel_outgoing_delivery_rejected_foreign_envelope")
+		log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released_foreign").Str("msg_id", logid.Of(string(messageID))).Msg("peer_mu_reader")
+		log.Warn().Str("message_id", logid.Of(string(messageID))).Str("recipient", logid.Of(wireRecipient)).Msg("cancel_outgoing_delivery_rejected_foreign_envelope")
 		return result, fmt.Errorf("cancel outgoing delivery %s: %w: message was not originated by this node", messageID, protocol.ErrInvalidCancelDelivery)
 	}
 
@@ -165,9 +166,9 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 
 	s.gossipMu.Unlock()
 	s.deliveryMu.Unlock()
-	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released").Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
+	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released").Str("msg_id", logid.Of(string(messageID))).Msg("delivery_mu_writer")
 	s.peerMu.RUnlock()
-	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released").Str("msg_id", string(messageID)).Msg("peer_mu_reader")
+	log.Trace().Str("site", "CancelOutgoingDelivery").Str("phase", "lock_released").Str("msg_id", logid.Of(string(messageID))).Msg("peer_mu_reader")
 
 	for _, delta := range affected {
 		s.emitPeerPendingChanged(delta.Address, delta.Count)
@@ -176,9 +177,13 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggregate)
 	}
 
-	log.Info().
-		Str("message_id", string(messageID)).
-		Str("recipient", wireRecipient).
+	// Rendered, not named: a cancellation happens because a message was
+	// deleted, so this line would otherwise say which message and whose
+	// conversation — the record the deletion just removed from the database.
+	// See internal/core/logid.
+	logid.DeletionLog().Info().
+		Str("message_id", logid.Of(string(messageID))).
+		Str("recipient", logid.Of(wireRecipient)).
 		Bool("backlog_removed", result.BacklogRemoved).
 		Bool("retry_cancelled", result.RetryCancelled).
 		Bool("outbound_cleared", result.OutboundCleared).
@@ -240,7 +245,7 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 		return ok
 	}
 
-	log.Trace().Str("site", "CancelOutgoingDeliveriesTo").Str("phase", "lock_wait").Str("recipient", wireRecipient).Msg("peer_mu_reader")
+	log.Trace().Str("site", "CancelOutgoingDeliveriesTo").Str("phase", "lock_wait").Str("recipient", logid.Of(wireRecipient)).Msg("peer_mu_reader")
 	s.peerMu.RLock()
 	s.deliveryMu.Lock()
 	s.gossipMu.Lock()
@@ -326,7 +331,7 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 	s.gossipMu.Unlock()
 	s.deliveryMu.Unlock()
 	s.peerMu.RUnlock()
-	log.Trace().Str("site", "CancelOutgoingDeliveriesTo").Str("phase", "lock_released").Str("recipient", wireRecipient).Msg("peer_mu_reader")
+	log.Trace().Str("site", "CancelOutgoingDeliveriesTo").Str("phase", "lock_released").Str("recipient", logid.Of(wireRecipient)).Msg("peer_mu_reader")
 
 	for _, delta := range affected {
 		s.emitPeerPendingChanged(delta.Address, delta.Count)
@@ -335,8 +340,12 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggregate)
 	}
 
-	log.Info().
-		Str("recipient", wireRecipient).
+	// The recipient is rendered rather than named: this line reports a
+	// withdrawal, which happens because messages were deleted, and a log that
+	// says whose conversation was erased is the trace the deletion removed from
+	// the database. See internal/core/logid.
+	logid.DeletionLog().Info().
+		Str("recipient", logid.Of(wireRecipient)).
 		Int("messages", len(withdrawn)).
 		Msg("cancel_outgoing_deliveries_to_recipient")
 

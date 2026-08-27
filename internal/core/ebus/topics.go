@@ -94,21 +94,22 @@ const (
 	//   func(outcome ebus.MessageDeleteOutcome)
 	TopicMessageDeleteCompleted = "message.delete.completed"
 
-	// TopicConversationDeleteCompleted is emitted by DMRouter ONCE, at
-	// click time, when a "delete chat for everyone" finishes locally.
+	// TopicConversationDeleteCompleted is emitted by DMRouter TWICE for one
+	// "delete chat for everyone", because the gesture finishes in two
+	// places and the user has to be told about both:
 	//
-	// There is no peer-side status on this topic and no second event
-	// later, because there is no bulk request on the wire: a wipe is N
-	// message deletions, each settled by its own ack through
-	// TopicMessageDeleteCompleted and counted in the per-peer pending
-	// total. What this event describes is the local half — the only part
-	// that is finished when the user lets go of the button:
-	//
-	//   - Deleted / Owed: rows removed here, and how many deletions the
-	//     peer now owes. Owed=0 means the thread was already empty.
-	//   - LocalCleanupFailed: the wipe did not run at all. It is
+	//   - at click time (Settled == false): the local thread is gone and
+	//     the peer has been asked to clear theirs. Deleted counts the rows
+	//     removed here; Requested says a request now exists — true even
+	//     for an empty thread, which is the case the repair path is for.
+	//     LocalCleanupFailed says the wipe did not run at all: it is
 	//     all-or-nothing, so the thread is untouched here AND nothing was
-	//     recorded for the peer; the user has to re-issue.
+	//     recorded for the peer, and the user has to re-issue.
+	//   - when the request settles (Settled == true): the peer's answer. A
+	//     user who only ever saw the first event could not tell a finished
+	//     wipe from one still waiting. There is no third, "gave up" event:
+	//     the request is never written off, because erased-here-but-not-there
+	//     with nobody left to ask is the state this must not produce.
 	//
 	// The payload contract lives on the struct — see
 	// ebus.ConversationDeleteOutcome.

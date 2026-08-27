@@ -1199,6 +1199,32 @@ func TestOpenEnablesSecureDelete(t *testing.T) {
 	}
 }
 
+// TestOpenCommitsSynchronously pins the other half of what makes a deletion
+// mean something: that the commit reporting it has reached the disk.
+//
+// In WAL mode a COMMIT under synchronous=NORMAL returns once the write-ahead
+// log is in the operating system's cache, and a power cut moments later brings
+// the messages back — while the user has been told they are gone. FULL is
+// SQLite's own default, but a compile-time one: a driver built with
+// SQLITE_DEFAULT_WAL_SYNCHRONOUS=1 hands out NORMAL and nothing in this
+// repository would notice. Hence the DSN states it, and this test is what
+// stops an edit of the option string from quietly dropping it.
+func TestOpenCommitsSynchronously(t *testing.T) {
+	t.Parallel()
+
+	database := openTest(t, filepath.Join(t.TempDir(), "state.db"), testCatalog())
+
+	const synchronousFull = 2
+	var synchronous int
+	if err := database.Executor().QueryRowContext(context.Background(), `PRAGMA synchronous`).Scan(&synchronous); err != nil {
+		t.Fatalf("read synchronous: %v", err)
+	}
+	if synchronous != synchronousFull {
+		t.Fatalf("synchronous = %d, want %d (FULL): a deletion the user was told about could be undone by a power cut",
+			synchronous, synchronousFull)
+	}
+}
+
 // TestFileURIPlacesTheWholePathInTheName covers the DSN's name half on both
 // filesystem layouts. Only one of them can be observed on the machine running
 // this test, which is why fileURI takes the separator as an argument: the

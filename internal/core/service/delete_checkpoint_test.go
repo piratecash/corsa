@@ -121,3 +121,45 @@ func waitForCheckpointAttempts(t *testing.T, probe *checkpointProbe, want int) {
 		}
 	}
 }
+
+// TestTheStartupCheckpointWaitsForTheDatabase pins the one request nobody
+// re-issues.
+//
+// The router asks for a checkpoint as it starts, deliberately before the
+// composition root is guaranteed to have finished opening the chatlog: the
+// point of that request is to retire a write-ahead log that a busy reader kept
+// alive through storage.Open, which holds the deletions of the PREVIOUS run.
+// Treating "no store yet" as success cancelled exactly that request, and no
+// other path would ever make it — the pages stay legible until some unrelated
+// deletion happens to ask again.
+func TestTheStartupCheckpointWaitsForTheDatabase(t *testing.T) {
+	t.Parallel()
+
+	owner := domain.PeerIdentityFromWire("1111111111111111111111111111111111111111")
+	probe := &checkpointProbe{
+		// Not open yet — the state the startup request can legitimately meet.
+		store:   nil,
+		reached: make(chan struct{}, 8),
+	}
+	checkpointer := &deleteCheckpointer{
+		store:    probe.current,
+		ctx:      context.Background,
+		delay:    time.Millisecond,
+		retryCap: 5 * time.Millisecond,
+	}
+	t.Cleanup(checkpointer.stop)
+
+	checkpointer.request()
+	// It comes back on its own while the database is still closed.
+	waitForCheckpointAttempts(t, probe, 2)
+
+	probe.heal(newTestChatlogStore(t, owner))
+	before := probe.attempts()
+	waitForCheckpointAttempts(t, probe, before+1)
+
+	settled := probe.attempts()
+	time.Sleep(40 * time.Millisecond)
+	if got := probe.attempts(); got != settled {
+		t.Errorf("the checkpointer kept running after it finally succeeded: %d → %d", settled, got)
+	}
+}

@@ -102,10 +102,13 @@ func TestMessageDeleteOutcomeCaptions(t *testing.T) {
 	}
 }
 
-// The bulk wipe's captions. One event, at click time: the thread is gone
-// here and every message of it is now an ordinary pending deletion, so
-// what the caption reports is the local result and how many requests the
-// peer now owes. There is no peer-side conversation status to wait for.
+// The wipe's captions. It has two moments — the click, when this side is
+// finished, and the peer's answer, when the other side is — and the wording
+// has to tell them apart: "scheduled" is not the same news as "deleted".
+//
+// There is no third caption for giving up, because the request is never given
+// up on: "erased here, still there, nobody will ask again" is the state this
+// must not produce, so the pending line stands until the peer confirms.
 func TestConversationDeleteOutcomeCaptions(t *testing.T) {
 	peer := domain.PeerIdentityFromWire("2222222222222222222222222222222222222222")
 
@@ -122,17 +125,22 @@ func TestConversationDeleteOutcomeCaptions(t *testing.T) {
 			want:    w.t("status.clear_chat_local_cleanup_failed"),
 		},
 		{
-			name:    "a finished wipe reports what the peer now owes",
-			outcome: ebus.ConversationDeleteOutcome{Peer: peer, Deleted: 3, Owed: 3},
-			want:    w.tCount("status.clear_chat_scheduled_count", 3),
+			name:    "a dispatched wipe says the peer was asked, not how many messages",
+			outcome: ebus.ConversationDeleteOutcome{Peer: peer, Deleted: 3, Requested: true},
+			want:    w.t("status.clear_chat_scheduled"),
 		},
 		{
-			name:    "a single message reads in the singular",
-			outcome: ebus.ConversationDeleteOutcome{Peer: peer, Deleted: 1, Owed: 1},
-			want:    w.tCount("status.clear_chat_scheduled_count", 1),
+			name:    "an already empty thread is still a request, because the peer may hold the rest",
+			outcome: ebus.ConversationDeleteOutcome{Peer: peer, Deleted: 0, Requested: true},
+			want:    w.t("status.clear_chat_scheduled"),
 		},
 		{
-			name:    "an already empty thread says so",
+			name:    "the peer's answer is its own news",
+			outcome: ebus.ConversationDeleteOutcome{Peer: peer, Settled: true, Status: domain.ConversationDeleteStatusApplied},
+			want:    w.t("status.clear_chat_confirmed"),
+		},
+		{
+			name:    "nothing local and nothing asked says so",
 			outcome: ebus.ConversationDeleteOutcome{Peer: peer},
 			want:    w.t("status.clear_chat_empty"),
 		},

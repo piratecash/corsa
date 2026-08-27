@@ -167,29 +167,39 @@ type FileDownloadCompletedResult struct {
 }
 
 // ConversationDeleteOutcome is the payload for
-// TopicConversationDeleteCompleted, published ONCE, at click time, by the
-// side that ran the wipe.
+// TopicConversationDeleteCompleted. A wipe publishes it twice, and the two
+// moments are told apart by Settled:
 //
-// There is no peer-side status here any more, because there is no
-// peer-side conversation request any more: a wipe is N message deletions,
-// and each of them settles on its own ack through
-// TopicMessageDeleteCompleted and the per-peer pending count. What this
-// event describes is the LOCAL half — the only part that is finished when
-// the user lets go of the button.
+// At CLICK TIME (Settled == false) it describes the local half, the only
+// part that is finished when the user lets go of the button:
 //
 //   - Deleted: rows removed from this side.
-//   - Owed: how many deletions the peer now owes, i.e. how many requests
-//     the scheduler is carrying for this conversation. Zero when the
-//     thread was already empty.
-//   - LocalCleanupFailed: the wipe did not run at all. All-or-nothing:
-//     the thread is untouched here AND nothing was recorded for the peer,
-//     so there is no outstanding request and no partially erased
+//   - Requested: the peer now owes us a wipe of their side. True even when
+//     Deleted is zero — a thread this node had already emptied is exactly
+//     the case the request exists for.
+//   - LocalCleanupFailed: the wipe did not run at all. All-or-nothing: the
+//     thread is untouched here AND nothing was recorded for the peer, so
+//     there is no outstanding request and no partially erased
 //     conversation. The user has to re-issue.
+//
+// When the request SETTLES (Settled == true) it describes the peer's half:
+// Status carries their answer. The
+// click-time fields are not repeated there — that news was already delivered.
+//
+// There is no abandoned face to this outcome, deliberately. A wipe is not
+// written off after any number of unanswered attempts: "erased here, still
+// there, and nobody will ask again" is the one state the gesture may not end
+// in, so the request outlives the silence and the pending indicator says so
+// until the peer answers.
 type ConversationDeleteOutcome struct {
 	Peer               domain.PeerIdentity
 	Deleted            int
-	Owed               int
+	Requested          bool
 	LocalCleanupFailed bool
+
+	Settled  bool
+	Status   domain.ConversationDeleteStatus
+	Attempts int
 }
 
 // MessageDeleteOutcome is the payload for TopicMessageDeleteCompleted.

@@ -656,7 +656,7 @@ sequenceDiagram
     Reader->>SendCh: shut the send gate — every later producer<br/>is answered SendChanClosed
     Reader->>Socket: rawConn.Close() — unblocks a writer parked in Write
     Reader->>Writer: close(closing) — the writer's exit signal
-    Note over Writer: releases the queue residue without writing it;<br/>sendCh itself is NEVER closed as a channel
+    Note over Writer: releases the queue residue without writing it —<br/>sendCh itself is NEVER closed as a channel
     Writer->>Reader: close(writerExited)
     Note over Reader: registry entry is removed only after the writer returned
 ```
@@ -1425,7 +1425,7 @@ sequenceDiagram
     Reader->>SendCh: взводит send gate — любой следующий продюсер<br/>получает SendChanClosed
     Reader->>Socket: rawConn.Close() — разблокирует writer'а, стоящего в Write
     Reader->>Writer: close(closing) — сигнал выхода writer'у
-    Note over Writer: отпускает остаток очереди, не записывая его;<br/>сам sendCh как канал НИКОГДА не закрывается
+    Note over Writer: отпускает остаток очереди, не записывая его —<br/>сам sendCh как канал НИКОГДА не закрывается
     Writer->>Reader: close(writerExited)
     Note over Reader: запись реестра снимается только после возврата writer'а
 ```

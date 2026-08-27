@@ -48,3 +48,31 @@ func TestShouldAckOnStoreResult(t *testing.T) {
 		})
 	}
 }
+
+// TestARefusedReDeliveryReleasesThePreviousHop is the transport half of the
+// deletion contract, pinned where the decision is actually made.
+//
+// A message the user deleted is refused by the store adapter, which reports it
+// as a DUPLICATE — we had it and destroyed it, which is exactly what a
+// duplicate is. This test is here to say what that reporting BUYS: the
+// duplicate branch acks, `ack_delete` goes back to the hop that pushed the
+// frame, and that hop releases the message from its backlog. Answering is what
+// stops a replay at its source; remembering the id would only stop it here, and
+// remembering is the thing a deletion may not do.
+//
+// If this table ever stopped acking duplicates, a deleted message would be
+// re-pushed by every hop that still held it, on every reconnect, for as long as
+// the sender's reseed horizon — and nothing in the service layer would notice.
+func TestARefusedReDeliveryReleasesThePreviousHop(t *testing.T) {
+	t.Parallel()
+
+	// What MessageStoreAdapter.StoreMessage returns for a deleted id, as the
+	// node sees it after storeIncomingMessage maps StoreDuplicate.
+	const (
+		storedByUs = false
+		noFailure  = ""
+	)
+	if !shouldAckOnStoreResult(storedByUs, noFailure) {
+		t.Fatal("a refused re-delivery of a deleted message is not acked: the previous hop keeps it and pushes it again")
+	}
+}

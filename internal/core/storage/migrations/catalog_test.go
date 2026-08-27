@@ -173,8 +173,19 @@ func TestEveryLegacyGenerationIsAdoptedWithoutDataLoss(t *testing.T) {
 
 			after := tableDump(t, database.Executor(), generation.tables)
 			for table, rows := range before {
-				if got := after[table]; got != rows {
-					t.Fatalf("table %s changed across the migration:\nbefore:\n%s\nafter:\n%s", table, rows, got)
+				want := rows
+				if table == "messages" {
+					// The ONE thing the catalog rewrites rather than carries:
+					// the deletion policy of a direct message. See
+					// 0007_conversation_delete.sql — the old value was a
+					// build default nobody could choose, and leaving it in
+					// place is what made a peer refuse a deletion. Every other
+					// field of every row, including the flag of everything
+					// outside a conversation, still has to arrive untouched.
+					want = withDeletePolicyBackfilled(t, rows)
+				}
+				if got := after[table]; got != want {
+					t.Fatalf("table %s changed across the migration:\nwant:\n%s\nafter:\n%s", table, want, got)
 				}
 			}
 

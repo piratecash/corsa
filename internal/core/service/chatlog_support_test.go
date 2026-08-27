@@ -35,7 +35,7 @@ func newTestStateDB(t *testing.T, owner domain.PeerIdentity) *storage.Database {
 // newTestChatlogStore is newTestStateDB plus the repository on top of it.
 func newTestChatlogStore(t *testing.T, owner domain.PeerIdentity) *chatlog.Store {
 	t.Helper()
-	return chatlog.NewStore(newTestStateDB(t, owner).Executor(), owner)
+	return testChatlogStore(newTestStateDB(t, owner).Executor(), owner)
 }
 
 // newClosedChatlogStore returns a repository whose database is already closed,
@@ -51,5 +51,10 @@ func newClosedChatlogStore(t *testing.T, owner domain.PeerIdentity) *chatlog.Sto
 	}
 	// The pool is closed but the handle stays usable as an Executor: every
 	// call now returns sql.ErrConnDone.
-	return chatlog.NewStore(executor, owner)
+	return testChatlogStore(executor, owner)
+}
+
+// testChatlogStore builds a chatlog store the way the composition root does.
+func testChatlogStore(db storage.Executor, owner domain.PeerIdentity) *chatlog.Store {
+	return chatlog.NewStore(db, owner)
 }

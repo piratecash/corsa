@@ -177,14 +177,14 @@ type Window struct {
 	ctxMenuDelete           widget.Clickable
 	ctxMenuDeleteConfirm    widget.Clickable
 	ctxMenuDeleteCancel     widget.Clickable
-	ctxMenuClearChat        widget.Clickable // "Delete chat and ask the peer" — wipe here, request theirs
+	ctxMenuClearChat        widget.Clickable // "Delete chat for both sides" — wipe here, request theirs
 	ctxMenuClearChatConfirm widget.Clickable
 	ctxMenuClearChatCancel  widget.Clickable
 	ctxMenuAlias            widget.Clickable
 	ctxMenuAliasSave        widget.Clickable
 	ctxMenuAliasCancel      widget.Clickable
 	showDeleteConfirm       bool // true when "Delete identity" confirmation step is shown
-	showClearChatConfirm    bool // true when "Delete chat and ask the peer" confirmation step is shown
+	showClearChatConfirm    bool // true when "Delete chat for both sides" confirmation step is shown
 	showAliasEditor         bool // true when alias input is shown
 	aliasEditor             widget.Editor
 
@@ -938,7 +938,7 @@ func (w *Window) startPolling(window *app.Window) {
 		w.eventBus.Subscribe(ebus.TopicMessageDeleteCompleted, func(outcome ebus.MessageDeleteOutcome) {
 			w.handleMessageDeleteOutcome(outcome)
 		})
-		// Conversation-wide wipe (sidebar "Delete chat and ask the peer")
+		// Conversation-wide wipe (sidebar "Delete chat for both sides")
 		// reaches its terminal status the same way: the UI runs the
 		// two-phase BeginConversationDelete + CompleteConversationDelete
 		// which only report local errors, while the wire-side
@@ -2086,7 +2086,7 @@ func (w *Window) handleContextMenuActions(gtx layout.Context) {
 		}
 	}
 
-	// "Delete chat and ask the peer" — opens its own confirm step. Mirrors
+	// "Delete chat for both sides" — opens its own confirm step. Mirrors
 	// the "Delete identity" two-click flow above; kept as a separate
 	// state flag so the user can see at a glance which destructive
 	// action they are about to confirm (the two share the menu card
@@ -2946,6 +2946,9 @@ func (w *Window) pendingDeletesCaption(peer domain.PeerIdentity) string {
 	state, ok := w.snap.Peers[peer]
 	if !ok || state == nil {
 		return ""
+	}
+	if state.PendingConversationDelete {
+		return w.t("chat.wipe_pending")
 	}
 	if state.PendingDeletes == 0 {
 		return ""
@@ -6716,7 +6719,7 @@ func (w *Window) layoutContextMenuItems(gtx layout.Context) layout.Dimensions {
 		}),
 		sc.row(nil, layout.Spacer{Height: unit.Dp(2)}.Layout),
 		sc.row(clearTag, func(gtx layout.Context) layout.Dimensions {
-			// "Delete chat and ask the peer" (bulk wipe both sides), never
+			// "Delete chat for both sides" (bulk wipe both sides), never
 			// dimmed: the local thread goes at once and the peer's
 			// half is scheduled until they acknowledge it, so an
 			// offline peer delays the request rather than blocking
@@ -6779,7 +6782,7 @@ func (w *Window) layoutDeleteConfirmMenu(gtx layout.Context) layout.Dimensions {
 }
 
 // layoutClearChatConfirmMenu renders the confirmation step for the
-// "Delete chat and ask the peer" sidebar action. Visual structure mirrors
+// "Delete chat for both sides" sidebar action. Visual structure mirrors
 // layoutDeleteConfirmMenu so the user reads the same shape for both
 // destructive sidebar actions; the body text and button widgets are
 // the only differences. Kept as a separate menu (rather than reusing
@@ -7264,22 +7267,25 @@ func (w *Window) handleConversationDeleteOutcome(outcome ebus.ConversationDelete
 	}
 }
 
-// conversationDeleteOutcomeCaption is the wording for a finished wipe.
+// conversationDeleteOutcomeCaption is the wording for a wipe, at each of the
+// two moments it has: the click, when this side is finished, and the peer's
+// answer, when the other side is.
 //
-// One event, at click time, because that is when the wipe is finished as
-// far as this side is concerned: the thread is gone and every message of
-// it is now an ordinary pending deletion. What the peer does with those
-// is reported per message — by the conversation header's "N waiting for
-// the peer to delete" count, which is the lasting feedback, and by the
-// status line as each ack lands.
+// The click-time wording says the deletion at the peer is scheduled rather
+// than counting messages: there is nothing to count, and nothing to decide —
+// the peer carries the request out, it is not asked to consent. The lasting
+// feedback is the conversation header's pending line, which stands until the
+// peer confirms, because the request is never given up on.
 func (w *Window) conversationDeleteOutcomeCaption(outcome ebus.ConversationDeleteOutcome) string {
 	switch {
 	case outcome.LocalCleanupFailed:
-		// No count: the transaction rolled back, so nothing was
+		// No request either: the transaction rolled back, so nothing was
 		// removed here and no peer was ever asked.
 		return w.t("status.clear_chat_local_cleanup_failed")
-	case outcome.Owed > 0:
-		return w.tCount("status.clear_chat_scheduled_count", outcome.Owed)
+	case outcome.Settled:
+		return w.t("status.clear_chat_confirmed")
+	case outcome.Requested:
+		return w.t("status.clear_chat_scheduled")
 	default:
 		return w.t("status.clear_chat_empty")
 	}

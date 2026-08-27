@@ -117,9 +117,12 @@ func (d *DMCrypto) SendControlMessage(
 // would reject the frame with ErrCodeInvalidSendMessage before
 // storeIncomingMessage ever runs the topic-aware control branch.
 //
-// Flag is set to MessageFlagSenderDelete: control DMs are sender-emitted
-// and follow the same default policy as data DMs. This matches what
-// SendDirectMessage stamps onto outbound frames.
+// Flag is set to MessageFlagSenderDelete because the frame validator
+// demands a valid one, and NOT because the value means anything here:
+// control DMs are never chatlog rows, so nobody ever reads this flag back
+// to decide who may delete what. Data DMs are stamped any-delete
+// (defaultOutgoingMessageFlag) — a different question, asked of rows that
+// do get stored.
 func buildControlMessageFrame(senderAddress, recipient, messageID, ciphertext string, createdAt time.Time) protocol.Frame {
 	return protocol.Frame{
 		Type:       "send_control_message",

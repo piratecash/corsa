@@ -484,6 +484,30 @@ func prepare(ctx context.Context, db *sql.DB, cfg Config, location Location, now
 		return nil, err
 	}
 
+	// The write-ahead log is truncated before this database is called ready.
+	//
+	// Two things live in it that must not outlive their reason. A migration run
+	// leaves the pre-migration image of every page a step rewrote, so a step
+	// that touches message rows keeps the old content readable in a sidecar
+	// file until somebody checkpoints. And a previous RUN of this application
+	// may have died between a deletion and its checkpoint, leaving the bytes of
+	// erased messages there — the automatic checkpoint fires at ~1000 pages,
+	// which a quiet client can take days to reach.
+	//
+	// After a migration this is mandatory: those pages exist because this very
+	// Open rewrote them, and declaring the database ready with them still in
+	// the log would be this process leaving the trace. On an ordinary open it
+	// is best-effort — the log may hold nothing sensitive at all, and refusing
+	// to start over a busy checkpoint would be an outage we inflicted on
+	// ourselves.
+	migrated := len(bootstrap)+len(applied) > 0
+	if err := checkpointWAL(ctx, db); err != nil {
+		if migrated {
+			return nil, err
+		}
+		log.Warn().Err(err).Msg("storage: could not truncate the write-ahead log at startup; the next deletion or checkpoint retires it")
+	}
+
 	// Re-applied here because a sidecar can appear at any point above, and
 	// because NOTHING that can fail may run after the ready line: a monitor
 	// reading it would otherwise count a process that never started as up.
@@ -645,6 +669,48 @@ const walSwitchTimeout = 5 * time.Second
 // microseconds; this only has to be short enough not to add visible startup
 // latency.
 const walSwitchInterval = 25 * time.Millisecond
+
+// checkpointRetryWindow bounds how long a startup checkpoint keeps trying.
+//
+// `wal_checkpoint(TRUNCATE)` is refused while any reader still holds the log,
+// and at startup that reader can only be a connection this process just used,
+// finishing its work. The window matches the busy timeout the DSN sets for
+// every other statement: long enough for that, short enough not to become
+// startup latency anybody notices.
+const checkpointRetryWindow = 5 * time.Second
+
+// checkpointRetryInterval is the poll interval of that wait.
+const checkpointRetryInterval = 50 * time.Millisecond
+
+// checkpointWAL folds the write-ahead log back into the database file and
+// truncates it, retrying while a reader holds it.
+//
+// The retry is the point. A single attempt reports BUSY and leaves the pages
+// where they were, which for the content this file holds is not a state to
+// shrug at: what is in the log is the previous image of everything a deletion
+// or a data migration rewrote.
+func checkpointWAL(ctx context.Context, db *sql.DB) error {
+	deadline := time.Now().Add(checkpointRetryWindow)
+	for {
+		var busy, logFrames, checkpointed int
+		if err := db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+			return fmt.Errorf("storage: truncate the write-ahead log: %w", err)
+		}
+		if busy == 0 {
+			log.Debug().Int("checkpointed_frames", checkpointed).Msg("storage: write-ahead log truncated")
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("storage: truncate the write-ahead log: still held by a reader after %s (%d frames left)",
+				checkpointRetryWindow, logFrames)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("storage: truncate the write-ahead log: %w", ctx.Err())
+		case <-time.After(checkpointRetryInterval):
+		}
+	}
+}
 
 // ensureWALMode puts the FILE into WAL journal mode, retrying while another
 // process is doing the same.

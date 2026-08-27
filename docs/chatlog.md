@@ -265,23 +265,22 @@ CREATE TABLE IF NOT EXISTS message_delete_intents (
 );
 ```
 
-One row carries the two facts a deleted id needs, because they are two
-facts about one message:
+One row is one TASK: this peer still has to be asked to delete this
+message.
 
-- **`owed`** — the peer still has to be asked. Cleared, not deleted, when
-  their ack settles it.
-- **`refuse_until`** — ignore a re-delivery of this id until then. A
-  deletion removes the chatlog row AND clears the router's dedup gate for
-  its id, which is exactly what lets a relay or inbox replay put the row
-  straight back; the refusal is the answer. On disk rather than in memory
-  alone because the replay window and a restart overlap.
+- **`owed`** — the peer still has to be asked. Always 1 on a row written
+  by this build; the column and the filters that read it are kept because
+  a rollback to an older binary can still write `owed = 0` rows, and those
+  must not be mistaken for work.
+- **`refuse_until`** — vestigial, always empty. It used to hold "ignore a
+  re-delivery of this id until then", which made the row outlive the
+  request and turned it into a durable record that a message had been
+  deleted here. Migration `0007_conversation_delete` cleared it; what refuses a replay now is in
+  §"Replay after a deletion" of `docs/dm-commands.md`.
 
-They are independent on purpose. A request to a contact who never returns
-is kept indefinitely while its refusal expires within the hour; a
-receiver asked to delete a message it has not received yet gets a row
-that owes nobody anything and only refuses (`peer` is empty there —
-nobody is being asked, so there is no conversation to name). The row is
-removed once it owes nothing and refuses nothing.
+The row is removed the moment the peer answers. Nothing takes its place —
+that is the contract: a deletion leaves no note of itself, so the only
+thing that can name a deleted id is a job that has not finished yet.
 
 `held` says why a row is not due, when it is not. There is exactly one
 reason: `HoldPeerAbsent` — the peer could not be asked at all, so a
@@ -296,10 +295,15 @@ so a request for a message the peer cannot have is never written at all.
 A parked one would have been a privacy rule with a timeout attached: any
 stall past the timeout sends it.
 
-A whole-conversation wipe writes N of these rows and nothing else: it is
-N message deletions, so it needs no request of its own, no row-set table,
-no answers table and no scheduler of its own. See
-[dm-commands.md](dm-commands.md) §"Bulk wipe".
+A whole-conversation wipe writes ONE row of a different KIND. It names no
+message — `message_id` is NULL and `kind` is `conversation` — because the
+ids of a thread are the one thing such a request must not carry: some of
+them may never have reached the peer, and the request has to outlive the
+rows it came from. It shares this table, the scheduler, the pacing, the
+parking and the give-up budget with per-message requests; what differs is
+the command it dispatches and that the receiver applies it without
+consulting authorship. See [dm-commands.md](dm-commands.md) §"Clearing a
+chat".
 
 ### Entry fields
 
@@ -482,7 +486,7 @@ The `flag` column has a CHECK constraint enforcing these values.
 
 Two deletion methods are available:
 
-- **`DeleteByID(messageID domain.MessageID)`** — removes a single message by primary key, together with every per-message trace under the same id: its `seen_ack` and `delivery_failed` journal rows (migration 0003), any resend intents keyed on it (migration 0004) and its reactions (migration 0006). Those rows are durable records that a message with this id existed and how its delivery went, so leaving them behind would keep exactly the metadata the deletion was for. When there WERE reactions, the same transaction records the id in `reaction_refusals`: their author re-offers the facts it holds indefinitely, so without it the next offer after the deletion tombstone expires would put them back. Per-PEER state (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) describes the conversation rather than the message and is untouched. All of it commits in one transaction, so a row can never outlive its journal entries or the reverse. Returns true if a message row was found.
+- **`DeleteByID(messageID domain.MessageID)`** — removes a single message by primary key, together with every per-message trace under the same id: its `seen_ack` and `delivery_failed` journal rows (migration 0003), any resend intents keyed on it (migration 0004) and its reactions (migration 0006). Those rows are durable records that a message with this id existed and how its delivery went, so leaving them behind would keep exactly the metadata the deletion was for. Nothing is written down about the id whose traces these were — a row saying "reactions naming this id are refused" would outlive the deletion and record it. Per-PEER state (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) describes the conversation rather than the message and is untouched. All of it commits in one transaction, so a row can never outlive its journal entries or the reverse. Returns true if a message row was found.
 - **`DeleteByPeer(identity)`** — the whole-conversation wipe: its messages, their journal rows, the peer's pending delete intents and every reaction in that conversation, in one transaction. The reactions go by `scope` rather than through a join on `messages`, which is the interesting half: a reaction that arrived before the message it is about has no message row to join through, and matching by scope is the only thing that reaches it. The intents go because their ids are the last rows naming an erased thread; the cost is that peer-side deletions scheduled earlier are abandoned.
 - **`CheckpointWAL()`** — folds the write-ahead log back into the file and truncates it. `secure_delete` (see [storage.md](storage.md)) overwrites the freed page, but in WAL mode that overwrite is itself a log frame and the original bytes live in the `-wal` until a checkpoint retires them. Best-effort: a busy checkpoint is not a failed deletion. Called after every deletion commits — our own, the ones a peer asks us to perform, and the TTL sweep.
 - **`DeleteExpired()`** — removes every auto-delete-ttl message whose lifetime has elapsed. It READS the ids first and then deletes each through the same path `DeleteByID` takes, all in one transaction:
@@ -511,21 +515,22 @@ destroy must not survive on disk. What survives instead is the INTENT to
 have the peer delete their copy, in `message_delete_intents`
 (`delete_intents.go`):
 
-- **`DeleteWithIntent(intent, tombstoneUntil)`** — the entry point:
-  removes the message, records the intent, and plants the refusal of the
-  id in ONE transaction. Separate commits leave a crash window with the
-  local copy destroyed and nobody left to ask the peer — or with the row
-  gone and its refusal not written, so the next relay retry hands the
-  message straight back.
-- **`DeleteMessageWithTombstone(id, until)`** — the same commit minus
-  the intent, for a deletion that owes the peer nothing.
-- **`DeleteMessages(ids, until)`** — a batch in ONE transaction,
+- **`DeleteWithIntent(intent)`** — the entry point: removes the message
+  and records the intent in ONE transaction. Separate commits leave a
+  crash window with the local copy destroyed and nobody left to ask the
+  peer. The intent is also what refuses a replay of the same envelope
+  while it is owed, so no second row is written for that.
+- **`DeleteByID(id)`** — the same commit minus the intent, for a deletion
+  that owes the peer nothing.
+- **`DeleteMessages(ids)`** — a batch in ONE transaction,
   reporting which ids were actually there. The receiver of a
   conversation wipe deletes a thread this way: one commit per row meant
   one fsync per message, an order of magnitude more than the sender's
   side of the same wipe. All-or-nothing per batch, so a caller that hits
   an error can retry (delete is idempotent) or fall back to one at a
   time to isolate the row that fails.
+- **`OwedDeleteIntentMessageIDs()`** — the ids of the deletions still in
+  flight, read once at startup into the router's in-memory refusal set.
 - **`NoteDeleteIntent(intent)`** — records or re-arms one intent on its
   own (used by the recovery path, where there is no row to delete). A
   re-issue takes the new due time and attempt count but keeps the
@@ -565,15 +570,21 @@ deletion".
 
 The whole-conversation wipe goes through the same table:
 
-- **`DeleteConversationWithIntents(peer, scope, now, tombstoneUntil)`** —
+- **`DeleteConversationWithIntent(peer, scope, intent)`** —
   removes every deletable row of the thread and their per-message journal
-  traces, writes ONE intent per message, and plants the refusal of every
-  id it takes — in ONE transaction. Immutable rows stay: the flag is a
-  promise no bulk gesture overrides. Returns the ids actually removed, so
+  traces, plants the refusal of every id it takes, and writes ONE
+  conversation request — in ONE transaction. Immutable rows stay: the flag
+  is a promise no gesture overrides. Returns the ids actually removed, so
   the caller can run what a database cannot: file-transfer cleanup and UI
   eviction. All-or-nothing by design — a wipe that cannot record what the
   peer owes us must leave the thread standing rather than erase it with
-  nobody scheduled to ask.
+  nobody scheduled to ask. An EMPTY scope still writes the request: a
+  thread already emptied here is exactly the case a request naming no ids
+  exists for.
+- **`DeleteConversationForPeerRequest(peer, scope)`** — the
+  receiving half of the same gesture: identical erasure, and deliberately
+  no request of our own. We owe the peer nothing for a deletion they asked
+  for, and an intent written here would bounce the wipe back at them.
 - **`ConversationCandidateIDs(peer)`** — the same row set, read on its
   own. The caller marks those ids BEFORE the transaction takes them,
   because inside a transaction there is no moment at which anything could
@@ -610,8 +621,16 @@ Four things about it are not obvious from the columns:
 - `op = 0` is a tombstone, not an absence. Deleting the row on "cleared" would
   leave a delayed duplicate of the "set" with nothing to compare against, and
   the reaction would come back;
-- `pending = 1` is a fact that arrived BEFORE the message it talks about. It is
-  released when the message lands, and swept if it never does;
+- `pending = 1` was a fact that arrived BEFORE the message it talks about,
+  released when the message landed and swept if it never did. **Nothing writes
+  it any more** and migration `0007_conversation_delete` deleted the rows that
+  had it. Such a row names a message this node does not have, which is exactly
+  what a message the user DELETED looks like from here, and the offers kept
+  putting the id back for an hour at a time. A fact about a message that is not
+  here is now dropped, and its author's periodic re-offer applies it once the
+  message arrives (`service/reaction_control.go`). The column and its indexes
+  stay: applied facts read `pending = 0`, and a rollback to an older build must
+  still find the shape its ledger promises;
 - a conversation wipe erases the ORPHANED reactions of the scope — the ones with
   no message left in the conversation — rather than reaching them through the
   message rows, and the TTL sweep deletes each expired message through the same path a
@@ -641,91 +660,22 @@ every fact this user ever stated and sort the result in a temporary B-tree. The
 tiebreak columns are what removes the sort entirely: the query needs a TOTAL
 order to page safely, and rowid — the obvious tiebreak — cannot go in an index.
 
-The same migration adds a second, much smaller table: the ids whose reactions
-this node refuses — the message is not here and did not come.
+The same migration added a second, much smaller table, `reaction_refusals`:
+the ids whose reactions this node refuses because the message is not here and
+did not come. **It is retired.** Migration `0007_conversation_delete` empties it and nothing writes
+it any more.
 
-```sql
-CREATE TABLE IF NOT EXISTS reaction_refusals (
-    scope      TEXT NOT NULL,  -- the conversation, and the only handle a wipe has
-    message_id TEXT NOT NULL,
-    refused_at TEXT NOT NULL,  -- last touch, not birth: the trim orders by it
-    PRIMARY KEY (scope, message_id)
-);
-```
+It was there to end a loop: the author of a reaction re-offers the facts it
+holds for as long as it holds them, so an offer for a message that is gone was
+held, swept an hour later, and offered again, indefinitely. A permanent record
+of the id ended that — and was also a permanent record, on this disk, that
+something in this conversation was deleted, kept long after the deletion itself
+had finished. That is the one trace a deletion must not leave, so the loop is
+accepted instead: the offers are held invisibly, bounded by the per-actor
+ceilings, swept on the same timer, and they stop when the sender stops offering.
 
-It exists because two refusals expire on different clocks. The deletion
-tombstone (`message_delete_intents.refuse_until`) is sized by the sender's
-reseed horizon — past a week no copy of the MESSAGE is re-sent, so the refusal
-has nothing left to refuse. A reaction has no horizon: its author re-offers the
-facts it holds for as long as it holds them, because nothing on that transport
-reports arrival. So the tombstone went first, the next offer was accepted as a
-`pending` fact, the sweep took it an hour later, and the offer after that put it
-back — a row naming a message the user destroyed, re-created for as long as both
-nodes run.
-
-There are three writers, ordered by how much they know:
-
-- the delete of a message that HAD reactions, in the same transaction, so the
-  loop never starts for the case that can be seen coming;
-- an offer refused while the tombstone is still alive — a reaction made after
-  the deletion, which nothing at delete time could have noticed;
-- the sweep of a fact that waited out `HeldReactionTTL`. This is the one that
-  needs no foresight and closes the rest: a first offer arriving days after the
-  tombstone expired is held once — indistinguishable, at that moment, from a
-  fact whose message is merely late — and the sweep turns "waited a whole window
-  for nothing" into the answer for every offer after it. That write is guarded
-  by the message being absent, so a release that loses the race with the sweep
-  cannot refuse an id whose message is on screen.
-
-Not every deletion writes a row: messages also expire on their own timer, and a
-row per deleted id would be a second copy of the message table that never
-shrinks.
-
-Both the guard on that write and the read below ask about the message's
-MEMBERSHIP of the conversation, not about the id existing somewhere: ids are
-chosen by their sender, so a peer can put a message in ITS conversation under an
-id this node deleted in another.
-
-One eraser: storing a message with that id IN THAT CONVERSATION. A re-delivery
-or a reseed days later makes the refusal wrong, and its author is still offering
-the fact, so the next offer has to apply. That is what keeps "did not come" from
-silently meaning "never will". Scoped exactly like the write it undoes — lifting
-id-wide would clear a refusal the sweep could never record again, because the id
-now exists. The insert and the lift are ONE commit: a caller reads an error as
-"not stored" and publishes no arrival event, so a row committed under a reported
-failure would be a message nothing announces — and the next copy of it is a
-duplicate, silent by design.
-
-There is no expiry column, because an id that expires is the loop starting
-again. The bound is a count instead — `chatlog.MaxReactionRefusals`, trimmed
-least-recently-touched first on the same timer that sweeps held facts — and the
-READ moves `refused_at`, so what survives the trim is what somebody is still
-pushing at. The touch has an hour's floor: it runs on the arrival path of every
-refused fact, while the trim measures in days. The read itself happens only when
-the message is NOT in `messages`, so an id that legitimately came back is judged
-by its own presence rather than by a row nobody cleaned up.
-
-A conversation WIPE goes the other way and DROPS the conversation's refusals —
-but only when the conversation is really gone. With no messages left, an offer
-from that peer is refused at the door by the "do we have a conversation with this
-peer" check, so keeping the rows would spend a bounded table on ids nothing will
-ask about. The wipe KEEPS immutable messages, though, and one survivor is enough
-to keep the conversation admitting offers, so the drop is conditional on the
-transaction finding nothing left. `DeleteByPeer` — contact removal — has no such
-condition: it takes every message of the peer.
-
-That drop is by SCOPE and not by the ids the wipe touched, which is what the
-column is for: everything deleted from this conversation EARLIER is refused too,
-and those ids are in no list a wipe holds — no query over `messages` can name
-them any more. It also runs on the wipe of a thread with NOTHING to delete, which
-never opens the deleting transaction at all; that is the only path left for a
-conversation whose messages went one at a time. There it shares ONE commit with
-the drop of the facts still waiting in that thread (`WipeEmptyConversationReactions`),
-because the caller reports "nothing was wiped" on an error and would otherwise
-be saying so over rows that are already gone — while skipping the event that
-redraws the chips. If the conversation ever starts
-again, the sweep records what it has to. What this table is for is the
-single-message delete, where the conversation lives on.
+The table itself is left in place, empty, so that a rollback to a build between
+migrations 0006 and 0007 still finds the schema its ledger says exists.
 
 The full model is in `docs/refactoring/reactions-protocol.md`.
 
@@ -1414,23 +1364,23 @@ CREATE TABLE IF NOT EXISTS message_delete_intents (
 );
 ```
 
-Одна строка несёт два факта, которые нужны удалённому id, потому что это
-два факта об одном сообщении:
+Одна строка — это одно ЗАДАНИЕ: этого пира ещё нужно попросить удалить это
+сообщение.
 
-- **`owed`** — пира ещё нужно попросить. При его ack сбрасывается, а не
-  удаляется.
-- **`refuse_until`** — игнорировать повторную доставку этого id до
-  указанного момента. Удаление убирает строку chatlog И сбрасывает
-  dedup-gate роутера по её id — ровно это позволяет replay через relay или
-  inbox вставить строку обратно; отказ и есть ответ. На диске, а не только
-  в памяти, потому что окно replay и рестарт пересекаются.
+- **`owed`** — пира ещё нужно попросить. В строках, которые пишет этот
+  билд, всегда 1; столбец и читающие его фильтры сохранены потому, что
+  откат на старый бинарь всё ещё может записать строки с `owed = 0`, и
+  принимать их за работу нельзя.
+- **`refuse_until`** — рудимент, всегда пуст. Раньше здесь лежало
+  «игнорировать повторную доставку этого id до такого-то момента», из-за
+  чего строка переживала запрос и превращалась в долговечную запись о том,
+  что здесь удалили сообщение. Миграция `0007_conversation_delete` его очистила; чем повторная
+  доставка отклоняется теперь — см. §«Повторная доставка после удаления» в
+  `docs/dm-commands.md`.
 
-Они независимы намеренно. Запрос к контакту, который не возвращается,
-хранится бессрочно, а его отказ истекает за час; получатель, которого
-попросили удалить ещё не полученное сообщение, получает строку, которая
-никому ничего не должна и только отказывает (`peer` там пуст — никого не
-просят, значит и переписку называть нечем). Строка уходит, когда ничего
-не должна и ни от чего не отказывается.
+Строка уходит в тот момент, когда пир ответил. На её место не приходит
+ничего — в этом и контракт: удаление не оставляет записи о себе, поэтому
+назвать удалённый id может только ещё не законченная работа.
 
 `held` говорит, ПОЧЕМУ строка не наступила, если не наступила. Причина
 ровно одна: `HoldPeerAbsent` — пира вообще нельзя было спросить, и
@@ -1445,10 +1395,14 @@ backoff-а спрашивал бы пира, транспорт которого
 не пишется вообще. Припаркованный был бы приватным правилом с
 приделанным таймаутом: любое зависание дольше таймаута его отправляет.
 
-Очистка всей переписки пишет N таких строк и ничего больше: это N
-удалений сообщений, поэтому ей не нужны ни собственная заявка, ни таблица
-наборов строк, ни таблица ответов, ни собственный планировщик. См.
-[dm-commands.md](dm-commands.md) §«Массовая очистка».
+Очистка всей переписки пишет ОДНУ строку другого ВИДА. Она не называет
+сообщений — `message_id` равен NULL, а `kind` равен `conversation`, —
+потому что идентификаторы треда как раз и есть то, чего такой запрос нести
+не должен: часть из них могла не дойти до пира, а сам запрос обязан
+пережить строки, из которых родился. Таблица, планировщик, темп, парковка
+и бюджет отказа у неё общие с поштучными запросами; различаются только
+команда, которую она отправляет, и то, что получатель применяет её, не
+проверяя авторство. См. [dm-commands.md](dm-commands.md) §«Очистка чата».
 
 ### Поля записи
 
@@ -1630,7 +1584,7 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 
 Два метода удаления:
 
-- **`DeleteByID(messageID domain.MessageID)`** — удаляет одно сообщение по первичному ключу вместе со всеми per-message следами под тем же id: строками журналов `seen_ack` и `delivery_failed` (миграция 0003), resend-intent-ами, ключёванными на него (миграция 0004), и его реакциями (миграция 0006). Эти строки — долговечная запись о том, что сообщение с таким id существовало и как прошла доставка, поэтому оставлять их — значит сохранять ровно ту метаинформацию, ради которой удаляли. Если реакции БЫЛИ, та же транзакция записывает id в `reaction_refusals`: их автор предлагает удерживаемые факты бессрочно, и без этой записи первое же предложение после истечения надгробия вернуло бы строки обратно. Per-PEER состояние (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) описывает переписку, а не сообщение, и не трогается. Всё это коммитится одной транзакцией, поэтому строка не может пережить свои журнальные записи и наоборот. Возвращает true, если строка сообщения найдена.
+- **`DeleteByID(messageID domain.MessageID)`** — удаляет одно сообщение по первичному ключу вместе со всеми per-message следами под тем же id: строками журналов `seen_ack` и `delivery_failed` (миграция 0003), resend-intent-ами, ключёванными на него (миграция 0004), и его реакциями (миграция 0006). Эти строки — долговечная запись о том, что сообщение с таким id существовало и как прошла доставка, поэтому оставлять их — значит сохранять ровно ту метаинформацию, ради которой удаляли. Про id, которому эти следы принадлежали, не записывается ничего: строка «реакции с этим id отклоняются» пережила бы удаление и тем самым его зафиксировала. Per-PEER состояние (`decrypt_recovery_jobs`, `peer_established`, `decrypt_recovery_cycles`) описывает переписку, а не сообщение, и не трогается. Всё это коммитится одной транзакцией, поэтому строка не может пережить свои журнальные записи и наоборот. Возвращает true, если строка сообщения найдена.
 - **`DeleteByPeer(identity)`** — очистка всей переписки: её сообщения, их журнальные строки, ожидающие delete intent-ы этого пира и все реакции этой беседы, одной транзакцией. Реакции удаляются по `scope`, а не через join с `messages`, и это самая интересная половина: у реакции, пришедшей раньше своего сообщения, строки для join-а нет вовсе, и достать её можно только по scope. Intent-ы уходят, потому что их id — последние строки, называющие стёртую переписку; цена в том, что запланированные ранее удаления у пира отменяются.
 - **`CheckpointWAL()`** — сворачивает write-ahead log обратно в файл и усекает его. `secure_delete` (см. [storage.md](storage.md)) перезаписывает освобождённую страницу, но в режиме WAL сама эта перезапись — тоже фрейм лога, и исходные байты живут в `-wal` до чекпойнта. Best-effort: busy — это не провал удаления. Вызывается после коммита каждого удаления — своего, выполненного по просьбе пира и TTL-свипа.
 - **`DeleteExpired()`** — удаляет все auto-delete-ttl сообщения, время жизни которых истекло. Сначала ЧИТАЕТ их id, затем удаляет каждое тем же путём, что и `DeleteByID`, всё одной транзакцией:
@@ -1658,20 +1612,21 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 должна оставаться на диске. Вместо неё остаётся INTENT попросить пира
 удалить свою копию — в `message_delete_intents` (`delete_intents.go`):
 
-- **`DeleteWithIntent(intent, tombstoneUntil)`** — основная точка
-  входа: удаляет сообщение, записывает intent и ставит отказ по id — в
-  ОДНОЙ транзакции. Раздельные коммиты оставляют окно, в котором
-  локальная копия уничтожена, а попросить пира уже некому, — или строки
-  нет, а отказ по ней не записан, и ближайший relay-retry возвращает
-  сообщение обратно.
-- **`DeleteMessageWithTombstone(id, until)`** — тот же коммит без
-  intent, для удаления, которое пиру ничего не должно.
-- **`DeleteMessages(ids, until)`** — пачка в ОДНОЙ транзакции с
+- **`DeleteWithIntent(intent)`** — основная точка входа: удаляет
+  сообщение и записывает intent в ОДНОЙ транзакции. Раздельные коммиты
+  оставляют окно, в котором локальная копия уничтожена, а попросить пира
+  уже некому. Пока intent не закрыт, он же отклоняет повторную доставку
+  того же конверта — отдельной строки для этого не пишется.
+- **`DeleteByID(id)`** — тот же коммит без intent, для удаления, которое
+  пиру ничего не должно.
+- **`DeleteMessages(ids)`** — пачка в ОДНОЙ транзакции с
   отчётом, какие id реально были. Получатель очистки переписки удаляет
   тред именно так: коммит на строку означал fsync на сообщение — на
   порядок дороже стороны отправителя за ту же работу. Пачка «всё или
   ничего», поэтому вызывающий может повторить (удаление идемпотентно)
   или перейти на построчный режим, чтобы изолировать сбойную строку.
+- **`OwedDeleteIntentMessageIDs()`** — id незакрытых удалений; читается
+  один раз на старте в набор отказов роутера в памяти.
 - **`NoteDeleteIntent(intent)`** — записывает или перевзводит intent сам
   по себе (нужно recovery-пути, где удалять нечего). Повторная выдача
   берёт новый срок и новый счётчик попыток, но сохраняет исходный
@@ -1709,15 +1664,21 @@ sidebar остаётся пустым, а 5-секундный тикер чер
 
 Очистка всей переписки идёт через ту же таблицу:
 
-- **`DeleteConversationWithIntents(peer, scope, now, tombstoneUntil)`** —
+- **`DeleteConversationWithIntent(peer, scope, intent)`** —
   удаляет каждую удаляемую строку треда и их per-message журнальные следы,
-  пишет ПО ОДНОМУ intent на сообщение и ставит отказ по каждому забранному
-  id — ОДНОЙ транзакцией. Immutable-строки остаются: этот флаг — обещание,
-  которое массовый жест не отменяет. Возвращает id, которые действительно
+  ставит отказ по каждому забранному id и пишет ОДИН запрос про переписку —
+  ОДНОЙ транзакцией. Immutable-строки остаются: этот флаг — обещание,
+  которое жест очистки не отменяет. Возвращает id, которые действительно
   удалены, чтобы вызывающий выполнил то, чего база не умеет: cleanup
   file-transfer и вытеснение из UI. «Всё или ничего» намеренно: очистка,
   которая не смогла записать долг пира, обязана оставить тред на месте, а
-  не стереть его, не запланировав никого, кто спросит.
+  не стереть его, не запланировав никого, кто спросит. ПУСТОЙ scope всё
+  равно пишет запрос: тред, уже опустошённый здесь, — ровно тот случай,
+  ради которого запрос не называет id.
+- **`DeleteConversationForPeerRequest(peer, scope)`** —
+  принимающая половина того же жеста: то же стирание и намеренно без
+  собственного запроса. Мы ничего не должны пиру за удаление, о котором он
+  же и попросил, а intent здесь гонял бы очистку обратно к нему.
 - **`ConversationCandidateIDs(peer)`** — тот же набор строк, прочитанный
   отдельно. Вызывающий помечает эти id ДО того, как их заберёт транзакция
   (внутри транзакции нет момента, в который на них можно среагировать), и
@@ -1754,8 +1715,16 @@ CREATE TABLE IF NOT EXISTS message_reactions (
 - `op = 0` — надгробие, а не отсутствие. Удаление строки на «снял» оставило бы
   задержавшийся дубль «поставил» без того, с чем сравнивать, и реакция
   вернулась бы;
-- `pending = 1` — факт, пришедший РАНЬШЕ своего сообщения. Освобождается, когда
-  сообщение приходит, и выметается, если оно так и не пришло;
+- `pending = 1` — факт, пришедший РАНЬШЕ своего сообщения: раньше он
+  освобождался, когда сообщение приходило, и выметался, если не приходило.
+  **Больше туда никто не пишет**, а миграция `0007_conversation_delete` удалила
+  такие строки. Строка называет сообщение, которого у узла нет, — а именно так
+  отсюда выглядит УДАЛЁННОЕ пользователем сообщение, и предложения возвращали
+  его id на диск каждый час заново. Факт о сообщении, которого здесь нет, теперь
+  отбрасывается, а периодическое перепредложение автора применит его, когда
+  сообщение придёт (`service/reaction_control.go`). Столбец и индексы остаются:
+  применённые факты читаются по `pending = 0`, а откат на старый билд должен
+  найти форму, обещанную его журналом;
 - стирание беседы удаляет ОСИРОТЕВШИЕ реакции этого scope — те, для которых в
   беседе не осталось сообщения, — а не достаёт их через строки сообщений, а
   TTL-сметка удаляет каждое истёкшее сообщение тем же путём, что и удаление,
@@ -1784,89 +1753,23 @@ CREATE TABLE IF NOT EXISTS message_reactions (
 тайбрейка убирают сортировку целиком: пагинации нужен ТОТАЛЬНЫЙ порядок, а
 очевидный тайбрейк `rowid` в индекс не кладётся.
 
-Та же миграция добавляет вторую, куда более скромную таблицу — идентификаторы
-сообщений, реакции на которые узел отказывается принимать навсегда.
+Та же миграция добавляла вторую, куда более скромную таблицу
+`reaction_refusals` — идентификаторы сообщений, реакции на которые узел не
+принимает, потому что сообщения здесь нет и оно не пришло. **Она выведена из
+употребления.** Миграция `0007_conversation_delete` её опустошает, и больше в неё никто не пишет.
 
-```sql
-CREATE TABLE IF NOT EXISTS reaction_refusals (
-    scope      TEXT NOT NULL,  -- беседа, и единственная ручка, которая есть у стирания
-    message_id TEXT NOT NULL,
-    refused_at TEXT NOT NULL,  -- последнее касание, а не рождение: по нему идёт trim
-    PRIMARY KEY (scope, message_id)
-);
-```
+Она закрывала цикл: автор реакции предлагает удерживаемые факты столько,
+сколько их держит, поэтому предложение по удалённому сообщению зависало,
+через час его забирала сметка, и следующее предложение возвращало его снова —
+и так бесконечно. Постоянная запись об id этот цикл заканчивала — и была при
+этом постоянной записью на этом диске о том, что в этой беседе что-то удалили,
+живущей заметно дольше самого удаления. Это ровно тот след, которого удаление
+оставлять не должно, поэтому цикл принят как плата: предложения невидимо висят,
+ограничены потолками на актора, вычищаются тем же таймером и прекращаются,
+когда отправитель перестаёт их слать.
 
-Она есть потому, что два отказа истекают по разным часам. Надгробие удаления
-(`message_delete_intents.refuse_until`) отмерено горизонтом переотправки
-ОТПРАВИТЕЛЯ: после недели копию СООБЩЕНИЯ уже никто не шлёт, и отказу нечего
-отказывать. У реакции такого горизонта нет — автор предлагает удерживаемые факты
-столько, сколько их держит, потому что на этом транспорте ничто не сообщает о
-доставке. Поэтому надгробие уходило первым, следующее предложение принималось
-как `pending`-факт, через час его забирала сметка, а предложение после этого
-создавало его снова — строка, называющая уничтоженное пользователем сообщение,
-пересоздавалась ровно столько, сколько работают оба узла.
-
-Писателей три, по убыванию осведомлённости:
-
-- удаление сообщения, у которого БЫЛИ реакции, — в той же транзакции, чтобы для
-  предвидимого случая цикл вообще не начинался;
-- предложение, отказанное при ещё живом надгробии, — реакция, поставленная уже
-  после удаления, которую в момент удаления заметить было нечем;
-- сметка факта, простоявшего `HeldReactionTTL`. Именно она не требует
-  предвидения и закрывает остальное: первое предложение, пришедшее через дни
-  после истечения надгробия, придерживается один раз — в этот момент оно
-  неотличимо от факта, чьё сообщение просто задерживается, — а сметка
-  превращает «прождал всё окно впустую» в ответ для всех последующих
-  предложений. Эта запись защищена условием отсутствия сообщения: освобождение,
-  проигравшее гонку сметке, не должно отказать id, чьё сообщение на экране.
-
-Не на каждое удаление: сообщения ещё и истекают по своему сроку, и строка на
-каждый удалённый id была бы второй копией таблицы сообщений, которая никогда не
-уменьшается.
-
-И охрана этой записи, и чтение ниже спрашивают о ПРИНАДЛЕЖНОСТИ сообщения
-беседе, а не о том, что id где-то существует: id выбирает отправитель, поэтому
-пир может положить сообщение в СВОЮ беседу под id, который мы удалили в другой.
-
-Стиратель один — сохранение сообщения с этим id В ЭТОЙ БЕСЕДЕ. Переотправка или
-reseed через дни делают отказ неверным, а автор факта всё ещё его предлагает,
-поэтому следующее предложение обязано примениться; это и не даёт «не пришло»
-тихо означать «не придёт никогда». Снятие заскоуплено ровно так же, как запись,
-которую оно отменяет: снятие по одному id стёрло бы отказ, который сметка уже не
-сможет записать заново, — id ведь теперь существует. Вставка и снятие — ОДИН коммит: вызывающий читает
-ошибку как «не сохранено» и не публикует событие прихода, поэтому строка,
-закоммиченная под сообщённой ошибкой, была бы сообщением, о котором никто не
-объявит, — а следующая его копия уже дубликат и молчит по построению.
-
-Колонки срока нет: id, который истекает, — это возвращение того самого цикла.
-Ограничение вместо срока — счётное (`chatlog.MaxReactionRefusals`), а trim
-выбрасывает наименее недавно тронутые на том же таймере, что метёт придержанные
-факты. `refused_at` двигает само ЧТЕНИЕ, поэтому trim переживают те id, в
-которые кто-то всё ещё стучится. У касания есть часовой порог: оно живёт на
-пути прихода каждого отказанного факта, а trim меряет днями. Само чтение
-происходит только когда сообщения НЕТ в `messages`, поэтому id, вернувшийся
-законно, судится по своему присутствию, а не по строке, которую никто не убрал.
-
-Стирание беседы идёт в обратную сторону и УДАЛЯЕТ её отказы — но только если
-беседы действительно не осталось. Без сообщений предложение от этого пира
-отбивается на входе проверкой «есть ли у нас беседа с этим пиром», так что
-хранить строки — тратить ограниченную таблицу на id, о которых никто не спросит.
-Но стирание СОХРАНЯЕТ immutable-сообщения, и одного выжившего достаточно, чтобы
-беседа продолжала принимать предложения, поэтому удаление обусловлено тем, что
-транзакция не нашла ничего живого. У `DeleteByPeer` (удаление контакта) такого
-условия нет: он забирает все сообщения пира.
-
-Удаление идёт по SCOPE, а не по списку id, которые тронуло стирание, — ради
-этого колонка и существует: всё, что удалили из беседы РАНЬШЕ, тоже отказано, и
-этих id нет ни в одном списке — запрос по `messages` их уже не назовёт. Оно же
-работает при стирании беседы, в которой удалять НЕЧЕГО: там удаляющая транзакция
-не открывается вовсе, и это единственный путь для беседы, сообщения которой
-удалили по одному. Там оно делит ОДИН коммит с удалением фактов, всё ещё ждущих
-в этой беседе (`WipeEmptyConversationReactions`): вызывающий на ошибке
-сообщает «ничего не стёрто» — и иначе говорил бы это поверх уже удалённых строк,
-пропустив событие, которое перерисовывает чипы. Если
-беседа начнётся заново, нужное запишет сметка. Таблица существует ради удаления
-ОДНОГО сообщения, когда беседа продолжает жить.
+Сама таблица оставлена на месте пустой, чтобы откат на билд между миграциями
+0006 и 0007 нашёл схему, о наличии которой говорит его собственный журнал.
 
 Полная модель — в `docs/refactoring/reactions-protocol.md`.
 

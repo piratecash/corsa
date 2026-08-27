@@ -14,6 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/logid"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -326,8 +327,8 @@ func (d *DMCrypto) CancelMessageDelivery(ctx context.Context, to domain.PeerIden
 		HooksRemoved: reply.Count,
 	}
 	log.Debug().
-		Str("message_id", string(messageID)).
-		Str("recipient", to.String()).
+		Str("message_id", logid.Of(string(messageID))).
+		Str("recipient", logid.Of(to.String())).
 		Int("hooks_removed", cancellation.HooksRemoved).
 		Bool("never_emitted", cancellation.NeverEmitted).
 		Msg("dm_crypto: outgoing delivery cancelled")
@@ -392,7 +393,7 @@ func (d *DMCrypto) CancelConversationDelivery(ctx context.Context, peer domain.P
 	}
 
 	log.Debug().
-		Str("peer", peer.String()).
+		Str("peer", logid.Of(peer.String())).
 		Int("messages", result.Cancelled).
 		Int("never_emitted", len(result.NeverEmitted)).
 		Msg("dm_crypto: outgoing deliveries to the peer cancelled")
@@ -438,7 +439,7 @@ func (d *DMCrypto) FreezeConversationDelivery(ctx context.Context, peer domain.P
 		result.NeverEmitted[domain.MessageID(id)] = struct{}{}
 	}
 	log.Debug().
-		Str("peer", peer.String()).
+		Str("peer", logid.Of(peer.String())).
 		Int("frozen", result.Frozen).
 		Int("never_emitted", len(result.NeverEmitted)).
 		Msg("dm_crypto: deliveries to the peer frozen for a wipe")

@@ -50,7 +50,9 @@ func newTestDMRouterForConversationDelete(t *testing.T) (*DMRouter, *DesktopClie
 	return r, c, domain.PeerIdentityFromWire(id.Address), counter
 }
 
-// convDispatchCounter records conversation_delete dispatches.
+// convDispatchCounter records conversation_delete dispatches. The request
+// carries nothing but its own id — no moment, no message ids — so that is all
+// there is to record.
 type convDispatchCounter struct {
 	mu    sync.Mutex
 	calls []domain.ConversationDeleteRequestID
@@ -58,8 +60,8 @@ type convDispatchCounter struct {
 
 func (d *convDispatchCounter) record(_ context.Context, _ domain.PeerIdentity, requestID domain.ConversationDeleteRequestID) error {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.calls = append(d.calls, requestID)
-	d.mu.Unlock()
 	return nil
 }
 
@@ -83,10 +85,10 @@ func seedConversation(t *testing.T, c *DesktopClient, myAddr, peer domain.PeerId
 	}
 }
 
-// pendingDeletesFor reports how many deletions the peer still owes us —
-// the count the conversation header renders, and, after a wipe, the whole
-// of what "the peer's half" now is.
-func pendingDeletesFor(t *testing.T, c *DesktopClient, peer domain.PeerIdentity) int {
+// pendingWorkFor reports what the peer still owes us: the per-message
+// deletions the conversation header counts, and whether a whole-thread wipe
+// is outstanding.
+func pendingWorkFor(t *testing.T, c *DesktopClient, peer domain.PeerIdentity) chatlog.PendingDeletes {
 	t.Helper()
 	counts, err := c.chatlog.Store().DeleteIntentCountsByPeer(context.Background())
 	if err != nil {
@@ -95,8 +97,18 @@ func pendingDeletesFor(t *testing.T, c *DesktopClient, peer domain.PeerIdentity)
 	return counts[peer]
 }
 
+// conversationIntentFor reads the outstanding wipe request for the peer.
+func conversationIntentFor(t *testing.T, c *DesktopClient, peer domain.PeerIdentity) (chatlog.DeleteIntent, bool) {
+	t.Helper()
+	intent, found, err := c.chatlog.Store().ConversationDeleteIntentForPeer(context.Background(), peer)
+	if err != nil {
+		t.Fatalf("ConversationDeleteIntentForPeer: %v", err)
+	}
+	return intent, found
+}
+
 // TestConversationDeleteWipesLocallyForAnOfflinePeer is the case the old
-// model refused outright: "Delete chat and ask the peer" with the peer
+// model refused outright: "Delete chat for both sides" with the peer
 // offline. The thread must be gone here the moment the user confirms,
 // and the peer's half owed as a durable request.
 func TestConversationDeleteWipesLocallyForAnOfflinePeer(t *testing.T) {
@@ -123,10 +135,16 @@ func TestConversationDeleteWipesLocallyForAnOfflinePeer(t *testing.T) {
 		t.Fatalf("%d rows survived the wipe; an offline peer must not keep the local thread alive", len(entries))
 	}
 
-	// The peer's half is three ordinary delete requests, one per
-	// message — there is no separate conversation request to carry.
-	if owed := pendingDeletesFor(t, c, peer); owed != 3 {
-		t.Errorf("the peer owes %d deletions, want 3: one per wiped message", owed)
+	// The peer's half is ONE request about the conversation. Not three, one
+	// per message: those are answered per message, under each message's own
+	// flag, which is what used to leave the requester's own half standing on
+	// the other side.
+	pending := pendingWorkFor(t, c, peer)
+	if !pending.Conversation {
+		t.Error("the wipe left no request for the peer's side")
+	}
+	if pending.Messages != 0 {
+		t.Errorf("the wipe wrote %d per-message requests; a thread is asked for as a thread", pending.Messages)
 	}
 
 	// The barrier is down: the user can write to the conversation again
@@ -142,7 +160,7 @@ func TestConversationDeleteWipesLocallyForAnOfflinePeer(t *testing.T) {
 func TestConversationDeleteDispatchesToAReachablePeer(t *testing.T) {
 	t.Parallel()
 
-	r, c, myAddr, _ := newTestDMRouterForConversationDelete(t)
+	r, c, myAddr, counter := newTestDMRouterForConversationDelete(t)
 	r.peerReachableFn = func(domain.PeerIdentity) bool { return true }
 
 	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -152,15 +170,15 @@ func TestConversationDeleteDispatchesToAReachablePeer(t *testing.T) {
 		t.Fatalf("SendConversationDelete: %v", err)
 	}
 
-	if owed := pendingDeletesFor(t, c, peer); owed != 1 {
-		t.Fatalf("the peer owes %d deletions, want 1", owed)
+	if !pendingWorkFor(t, c, peer).Conversation {
+		t.Fatal("the wipe left no request for the peer's side")
 	}
 
-	// One sweep is all it takes: the request is an ordinary intent, so
-	// the delete scheduler picks it up like any other.
+	// One sweep is all it takes: the request is an ordinary row of the delete
+	// scheduler, so it is picked up like any other.
 	r.processDeleteRetryDue(context.Background(), time.Now().UTC())
 
-	intent, found := deleteIntentFor(t, c, "f4000000-2222-4444-8888-cccccccccccc")
+	intent, found := conversationIntentFor(t, c, peer)
 	if !found {
 		t.Fatal("the request vanished instead of being dispatched")
 	}
@@ -169,6 +187,17 @@ func TestConversationDeleteDispatchesToAReachablePeer(t *testing.T) {
 	}
 	if !intent.NextAttemptAt.After(time.Now().UTC()) {
 		t.Errorf("next_attempt_at = %s, want it behind the backoff", intent.NextAttemptAt)
+	}
+
+	// And what went out is the wipe, carrying the id of this gesture.
+	counter.mu.Lock()
+	calls := append([]domain.ConversationDeleteRequestID(nil), counter.calls...)
+	counter.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("dispatched %d requests, want exactly one conversation_delete", len(calls))
+	}
+	if calls[0] != intent.RequestID {
+		t.Errorf("dispatched request id %s, want the stored %s", calls[0], intent.RequestID)
 	}
 }
 
@@ -205,17 +234,20 @@ func TestConversationDeleteKeepsImmutableRows(t *testing.T) {
 	}
 }
 
-// TestWipeDoesNotAskAboutMessagesThatNeverWentOut pins the privacy rule
-// the single-message withdrawal already keeps under the name `recalled`:
-// a message the node can prove never reached the wire is not requested
-// from the peer, because the request naming it would be how they learn it
-// existed.
-func TestWipeDoesNotAskAboutMessagesThatNeverWentOut(t *testing.T) {
+// TestWipeAsksForTheThreadWithoutNamingMessages is the privacy rule, kept by
+// construction instead of by classification.
+//
+// The old model wrote one request per id and therefore had to decide, per row
+// and inside the transaction, which ids the peer could possibly hold: a
+// message that never reached the wire must not be named, because the request
+// would be how they learn it existed. One request about the conversation
+// answers that by never asking it — nothing on the wire names a message.
+func TestWipeAsksForTheThreadWithoutNamingMessages(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	r, c, myAddr, _ := newTestDMRouterForConversationDelete(t)
-	r.peerReachableFn = func(domain.PeerIdentity) bool { return false }
+	r, c, myAddr, counter := newTestDMRouterForConversationDelete(t)
+	r.peerReachableFn = func(domain.PeerIdentity) bool { return true }
 	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 	const (
@@ -231,31 +263,27 @@ func TestWipeDoesNotAskAboutMessagesThatNeverWentOut(t *testing.T) {
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Flag:      string(protocol.MessageFlagAnyDelete),
 	})
-
-	// The freeze is what says which never reached the wire, and it says
-	// so while nothing can emit them any more.
-	r.client.freezeConversationDeliveryFn = func(context.Context, domain.PeerIdentity, []domain.MessageID) (ConversationFreeze, error) {
-		return ConversationFreeze{
-			Frozen:       2,
-			NeverEmitted: map[domain.MessageID]struct{}{domain.MessageID(unsent): {}},
-		}, nil
-	}
-	r.client.cancelConversationDeliveryFn = func(context.Context, domain.PeerIdentity) (ConversationCancellation, error) {
-		return ConversationCancellation{Cancelled: 1}, nil
-	}
-	r.client.thawConversationDeliveryFn = func(context.Context, domain.PeerIdentity, []domain.MessageID) error {
-		return nil
+	if err := c.chatlog.Store().MarkNeverEmitted(ctx, []domain.MessageID{domain.MessageID(unsent)}); err != nil {
+		t.Fatalf("MarkNeverEmitted: %v", err)
 	}
 
 	if err := r.SendConversationDelete(ctx, peer); err != nil {
 		t.Fatalf("SendConversationDelete: %v", err)
 	}
 
-	if _, found := deleteIntentFor(t, c, sent); !found {
-		t.Error("no request for a message that did go out")
+	// Neither id is owed per message — not the one the peer holds, and not
+	// the one they never saw.
+	for _, id := range []string{sent, unsent} {
+		if _, found := deleteIntentFor(t, c, id); found {
+			t.Errorf("a per-message request was written for %s", id)
+		}
 	}
-	if _, found := deleteIntentFor(t, c, unsent); found {
-		t.Error("the peer is being asked to delete a message that never left this node")
+	intent, found := conversationIntentFor(t, c, peer)
+	if !found {
+		t.Fatal("the wipe left no request at all")
+	}
+	if intent.MessageID != "" {
+		t.Errorf("the request names %s; a wipe must name no message", intent.MessageID)
 	}
 
 	// Both rows are gone locally either way.
@@ -266,68 +294,29 @@ func TestWipeDoesNotAskAboutMessagesThatNeverWentOut(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("%d rows survived the wipe", len(entries))
 	}
-}
 
-// TestWipeNeedsNoAnswerToWithholdARequest pins what replaced the parking.
-// The proof that a message never went out is written on the row, so the
-// transaction that destroys the row decides, and no request for such a
-// message is ever written — not written-and-parked, which is a privacy
-// rule with a timeout on it. A cancellation that never answers changes
-// nothing.
-func TestWipeNeedsNoAnswerToWithholdARequest(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	r, c, myAddr, _ := newTestDMRouterForConversationDelete(t)
-	r.peerReachableFn = func(domain.PeerIdentity) bool { return true }
-	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-
-	const (
-		sent   = "83333333-4444-4555-8666-777777777777"
-		unsent = "84444444-4444-4555-8666-777777777777"
-	)
-	seedConversation(t, c, myAddr, peer, sent)
-	seedConversation(t, c, myAddr, peer, unsent)
-	if err := c.chatlog.Store().MarkNeverEmitted(ctx, []domain.MessageID{domain.MessageID(unsent)}); err != nil {
-		t.Fatalf("MarkNeverEmitted: %v", err)
-	}
-
-	// The node cannot be reached at all, so it contributes nothing.
-	r.client.cancelConversationDeliveryFn = func(context.Context, domain.PeerIdentity) (ConversationCancellation, error) {
-		return ConversationCancellation{}, errors.New("node unreachable")
-	}
-
-	if err := r.SendConversationDelete(ctx, peer); err != nil {
-		t.Fatalf("SendConversationDelete: %v", err)
-	}
-
-	if _, found := deleteIntentFor(t, c, unsent); found {
-		t.Error("the peer is being asked about a message that never left this node")
-	}
-	if _, found := deleteIntentFor(t, c, sent); !found {
-		t.Error("a failed cancellation swallowed the request for a message that did go out")
-	}
-
-	// Nothing is parked: what exists is due, what is not due does not
-	// exist. There is no state a timeout could turn into a leak.
-	due, err := c.chatlog.Store().DueDeleteIntents(ctx, time.Now().UTC(), 16)
-	if err != nil {
-		t.Fatalf("DueDeleteIntents: %v", err)
-	}
-	if len(due) != 1 {
-		t.Fatalf("due = %d, want exactly the one request", len(due))
-	}
-	if string(due[0].MessageID) != sent {
-		t.Errorf("due request names %s, want %s", due[0].MessageID, sent)
+	r.processDeleteRetryDue(ctx, time.Now().UTC())
+	counter.mu.Lock()
+	dispatched := len(counter.calls)
+	counter.mu.Unlock()
+	if dispatched != 1 {
+		t.Errorf("dispatched %d requests for a two-message thread, want one", dispatched)
 	}
 }
 
-// TestFailedFreezeAsksAboutEverything: a row's mark only means something
-// while nothing can emit the message behind the transaction's back. If the
-// delivery engine could not be stopped, the classification is not made at
-// all — the peer is asked about ids they may not resolve, rather than a
-// message being deleted here while a copy escapes to them.
-func TestFailedFreezeAsksAboutEverything(t *testing.T) {
+// TestAWipeThatCannotStopItsOwnDeliveriesDoesNotRun.
+//
+// The freeze is not a nicety here. A message still queued would go out AFTER
+// the local rows are erased, and — because the request carries no ids — it
+// would land on the peer after their side has been cleared and answered for:
+// their request is settled, their refusals cover the ids they erased, and this
+// one is not among them. It would sit in a conversation both users believe is
+// gone, and nothing would ever name it again.
+//
+// So the wipe stops before it destroys anything. The user is told it did not
+// run and can click again; the earlier behaviour — erase anyway, ask the peer
+// anyway — traded a retry for a message that outlives the conversation.
+func TestAWipeThatCannotStopItsOwnDeliveriesDoesNotRun(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -335,24 +324,34 @@ func TestFailedFreezeAsksAboutEverything(t *testing.T) {
 	r.peerReachableFn = func(domain.PeerIdentity) bool { return false }
 	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
-	const unsent = "85555555-4444-4555-8666-777777777777"
-	seedConversation(t, c, myAddr, peer, unsent)
-	if err := c.chatlog.Store().MarkNeverEmitted(ctx, []domain.MessageID{domain.MessageID(unsent)}); err != nil {
-		t.Fatalf("MarkNeverEmitted: %v", err)
-	}
+	const target = "85555555-4444-4555-8666-777777777777"
+	seedConversation(t, c, myAddr, peer, target)
 
 	r.client.freezeConversationDeliveryFn = func(context.Context, domain.PeerIdentity, []domain.MessageID) (ConversationFreeze, error) {
 		return ConversationFreeze{}, errors.New("node unreachable")
 	}
+	cancelled := false
 	r.client.cancelConversationDeliveryFn = func(context.Context, domain.PeerIdentity) (ConversationCancellation, error) {
-		return ConversationCancellation{}, errors.New("node unreachable")
+		cancelled = true
+		return ConversationCancellation{}, nil
 	}
 
-	if err := r.SendConversationDelete(ctx, peer); err != nil {
-		t.Fatalf("SendConversationDelete: %v", err)
+	if err := r.SendConversationDelete(ctx, peer); err == nil {
+		t.Fatal("the wipe reported success although it could not stop the messages it was erasing")
 	}
-	if _, found := deleteIntentFor(t, c, unsent); !found {
-		t.Error("the mark was trusted although nothing could stop the message from going out")
+
+	entries, err := c.chatlog.Store().Read(ctx, "dm", peer)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("%d rows left; the thread was erased although a copy could still go out", len(entries))
+	}
+	if pendingWorkFor(t, c, peer).Conversation {
+		t.Error("a wipe that did not run still asked the peer to clear their side")
+	}
+	if cancelled {
+		t.Error("a wipe that did not run withdrew the deliveries anyway")
 	}
 }
 
@@ -367,9 +366,7 @@ func TestAbortedWipeThawsTheDeliveries(t *testing.T) {
 	r.peerReachableFn = func(domain.PeerIdentity) bool { return true }
 	peer := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
-	// An id the intent writer refuses (not a UUID v4) makes the wipe's
-	// transaction roll back — the failure the abort path is for.
-	const target = "not-a-uuid"
+	const target = "86666666-4444-4555-8666-777777777777"
 	seedConversation(t, c, myAddr, peer, target)
 
 	var thawed []domain.MessageID
@@ -387,8 +384,11 @@ func TestAbortedWipeThawsTheDeliveries(t *testing.T) {
 		return ConversationFreeze{Frozen: 1}, nil
 	}
 
-	if err := r.SendConversationDelete(ctx, peer); err == nil {
-		t.Fatal("the wipe reported success against a dead database")
+	// A request with no id is refused by the intent writer, so the wipe's
+	// transaction rolls back with the rows still in place — the failure the
+	// abort path is for, reached through the code that would meet it.
+	if deleted, ok := r.wipeConversationLocally(ctx, peer, ""); ok {
+		t.Fatalf("a wipe whose request could not be written reported success (%d rows)", deleted)
 	}
 	if cancelled {
 		t.Error("an aborted wipe withdrew the deliveries anyway; they can never be sent again")
@@ -398,6 +398,18 @@ func TestAbortedWipeThawsTheDeliveries(t *testing.T) {
 	}
 	if string(thawed[0]) != target {
 		t.Errorf("thawed %v, want the wipe's own scope", thawed)
+	}
+
+	// The thread is untouched: all or nothing, so the user can click again.
+	entries, err := c.chatlog.Store().Read(ctx, "dm", peer)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("%d rows after a rolled-back wipe, want the thread untouched", len(entries))
+	}
+	if pendingWorkFor(t, c, peer).Conversation {
+		t.Error("a rolled-back wipe still left a request for the peer")
 	}
 }
 
@@ -552,71 +564,6 @@ func TestWipingAThreadOfOnlyHeldReactionsIsAllOrNothing(t *testing.T) {
 	}
 	if swept != 0 {
 		t.Fatalf("the wipe left %d waiting reactions behind", swept)
-	}
-}
-
-// A thread whose messages were all deleted one at a time still has state: the
-// refusals those deletions recorded. The wipe of it never opens the deleting
-// transaction — there is nothing to delete — so this is the only path that can
-// forget them, and their ids are in no list anybody holds: the scope is what
-// finds them.
-//
-// The second half is the condition. A thread of immutable messages reports no
-// candidates either, and there the refusals must STAY: the conversation is alive,
-// its offers are admitted, and a refusal dropped is an hour of held rows waiting
-// to happen once the tombstones expire.
-func TestWipingAnEmptyThreadForgetsItsRefusalsButAnImmutableOneKeepsThem(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	r, c, myAddr, _ := newTestDMRouterForConversationDelete(t)
-	r.removals = c.removals
-	r.peerReachableFn = func(domain.PeerIdentity) bool { return false }
-	store := c.chatlog.Store()
-	now := time.Now().UTC()
-
-	empty := domain.PeerIdentityFromWire("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	kept := domain.PeerIdentityFromWire("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	for _, peer := range []domain.PeerIdentity{empty, kept} {
-		if err := store.RefuseReactionsFor(ctx,
-			domain.ReactionScopeForPeer(peer), "deleted-long-ago", now); err != nil {
-			t.Fatalf("refuse for %s: %v", peer, err)
-		}
-	}
-	// The one thread that is not really empty: an immutable message no wipe may
-	// take, which keeps the conversation admitting offers.
-	if err := store.Append(ctx, "dm", myAddr, chatlog.Entry{
-		ID:        "7d111111-2222-4333-8444-555555555555",
-		Sender:    kept.String(),
-		Recipient: myAddr.String(),
-		Body:      "ciphertext",
-		Flag:      chatlog.FlagImmutable,
-		CreatedAt: now.Format(time.RFC3339Nano),
-	}); err != nil {
-		t.Fatalf("seed the immutable message: %v", err)
-	}
-
-	for _, peer := range []domain.PeerIdentity{empty, kept} {
-		if err := r.SendConversationDelete(ctx, peer); err != nil {
-			t.Fatalf("SendConversationDelete(%s): %v", peer, err)
-		}
-	}
-
-	gone, err := store.ReactionsRefusedFor(ctx,
-		domain.ReactionScopeForPeer(empty), "deleted-long-ago", now)
-	if err != nil {
-		t.Fatalf("read the empty thread's refusal: %v", err)
-	}
-	if gone {
-		t.Fatal("wiping a thread with nothing in it left the refusals of what was deleted from it earlier")
-	}
-	still, err := store.ReactionsRefusedFor(ctx,
-		domain.ReactionScopeForPeer(kept), "deleted-long-ago", now)
-	if err != nil {
-		t.Fatalf("read the immutable thread's refusal: %v", err)
-	}
-	if !still {
-		t.Fatal("a thread that still holds an immutable message lost its refusals: the hold-and-sweep loop can start again")
 	}
 }
 
