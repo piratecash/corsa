@@ -210,6 +210,15 @@ type Window struct {
 	touchKbdTags [4]int8
 	touchKbd     touchKeyboardState
 
+	// paneCompact is THIS frame's single-pane decision, recorded by layoutMain
+	// — the one place that makes it — for the handlers that run deep inside the
+	// contact list, where selecting a peer is navigation rather than a
+	// side-by-side update. isCompactLayout cannot be re-asked down there: a
+	// contact row's gtx is constrained to the sidebar, 30% of the window in the
+	// two-pane layout, so every row would answer "compact". Written before any
+	// row lays out and read on the same frame, exactly like rootSize.
+	paneCompact bool
+
 	// Context menu state for right-click on recipient buttons.
 	contextMenuPeer         domain.PeerIdentity // fingerprint of the peer whose context menu is open
 	contextMenuPos          image.Point
@@ -2928,6 +2937,9 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 	status := w.snap.NodeStatus
 	recipients := w.snapRecipients()
 	compact := w.isCompactLayout(gtx)
+	// Published for the contact rows below, which cannot ask it themselves
+	// (see paneCompact).
+	w.paneCompact = compact
 	w.ensureSelectedRecipient(recipients, compact)
 
 	if compact {
@@ -2993,7 +3005,9 @@ func (w *Window) layoutMain(gtx layout.Context) layout.Dimensions {
 }
 
 // layoutMainCompact is the single-pane phone variant of layoutMain: the
-// contact list when no conversation is active, the open chat otherwise.
+// contact list when no conversation is active, the open chat otherwise. Which
+// is why nothing on this layout may select a peer except the tap that means
+// "open this chat" — see openMenu in layoutRecipientButton.
 // Navigation back to the list goes through the header button
 // (compactBackBtn → DeselectPeer, handled in handleActions). The
 // keyboardTailRow wrappers mirror the two-pane layout: header and
@@ -3391,30 +3405,6 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 
 	return layout.Inset{Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		fpStr := fingerprint.String()
-		for btn.Clicked(gtx) {
-			w.recipientEditor.SetText(fpStr)
-			w.router.SetSendStatus(w.t("status.chat_selected"))
-			w.router.SelectPeer(fingerprint)
-			w.focusComposerPending = true
-			// A touch tap on a contact means "I want to type to them": raise
-			// the keyboard, because the FocusCmd below won't on Windows. A
-			// mouse/keyboard selection leaves it down (touchDrivenInput is a
-			// recency gate on the last touch press).
-			//
-			// EXCEPT after a long-press: the long-press timer opens the
-			// context menu while the finger is still down, then the finger's
-			// Release still completes this outer Clickable — so btn.Clicked
-			// fires a frame LATER, after openMenu's own reset. Guard on the
-			// live menu state instead: if this peer's menu is open right now,
-			// the click is the tail of a long-press and must NOT raise the
-			// keyboard over the menu. A normal tap dismisses any open menu on
-			// Press (clearing contextMenuPeer) before this Release fires, so
-			// it is not caught by this guard.
-			menuOpenForPeer := !w.contextMenuPeer.IsZero() && w.contextMenuPeer.String() == fpStr
-			if pointerClickedThisFrame(btn, gtx) && w.touchDrivenInput(gtx) && !menuOpenForPeer {
-				w.composerKeyboardPending = true
-			}
-		}
 
 		// Detect right-click (secondary button) or touch long-press for
 		// the context menu. Position comes from the window-level cursor
@@ -3426,9 +3416,21 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 			w.showDeleteConfirm = false
 			w.showClearChatConfirm = false
 			w.showAliasEditor = false
-			// Auto-select this identity so the user sees the chat.
-			w.recipientEditor.SetText(fpStr)
-			w.router.SelectPeer(fingerprint)
+			// Two panes: auto-select this identity so the chat appears beside
+			// the list the menu was opened from.
+			//
+			// One pane: NOT selected. There a selection is navigation — the
+			// conversation REPLACES the contact list — so asking a contact for
+			// its menu would carry the user into that contact's chat and leave
+			// them there when the menu closed. Selecting also clears the unread
+			// badge and sends seen receipts, which a chat nobody has looked at
+			// must not do. Every item of this menu acts on contextMenuPeer
+			// (copy, alias, delete identity, delete chat), so none of them
+			// needs an active conversation.
+			if !w.paneCompact {
+				w.recipientEditor.SetText(fpStr)
+				w.router.SelectPeer(fingerprint)
+			}
 			// Focus goes to the MENU's first item, not to the composer.
 			// Focusing the composer (which this used to do) put focus on a
 			// widget hidden under the overlay: Tab kept walking the background,
@@ -3478,6 +3480,50 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 		w.cancelLongPressOnMultiTouch(rc)
 		if rc.longPressTriggered(gtx) {
 			openMenu(rc.pressCursor)
+		}
+
+		// The "⋯" button is laid out INSIDE the row's own Clickable, and Gio
+		// hands the press to both, so one tap on it produces a menu click AND a
+		// row click on the same frame. It is answered here, above the row's
+		// click, so that the row can tell a tap that asked for the menu from a
+		// tap that asked for the conversation: below, the row's handler would
+		// have run first, seen no menu, and navigated — which is what put phone
+		// users in a chat they had not opened. The button lays itself out
+		// further down; its rectangle (menuAnchorForClick) comes from the
+		// PREVIOUS frame either way.
+		menuBtn := w.recipientMenuButton(fingerprint)
+		for menuBtn.Clicked(gtx) {
+			openMenu(w.menuAnchorForClick(menuBtn, gtx))
+		}
+
+		for btn.Clicked(gtx) {
+			// Menu open for THIS row, on this frame or the one before: either
+			// the "⋯" click handled above, or the tail of a long-press — the
+			// timer opens the menu while the finger is still down, and the
+			// finger's Release then still completes this Clickable a frame
+			// later. A normal tap dismisses any open menu on Press (clearing
+			// contextMenuPeer) before its own Release fires, so it is never
+			// caught here.
+			menuOpenForPeer := !w.contextMenuPeer.IsZero() && w.contextMenuPeer.String() == fpStr
+			if menuOpenForPeer {
+				// This tap asked for the menu, so it is not also a request to
+				// open the conversation: openMenu above has already done
+				// whatever this layout wants selected, and the composer is left
+				// alone — its focus would land under the overlay and its
+				// keyboard would come up over it.
+				continue
+			}
+			w.recipientEditor.SetText(fpStr)
+			w.router.SetSendStatus(w.t("status.chat_selected"))
+			w.router.SelectPeer(fingerprint)
+			w.focusComposerPending = true
+			// A touch tap on a contact means "I want to type to them": raise
+			// the keyboard, because the FocusCmd below won't on Windows. A
+			// mouse/keyboard selection leaves it down (touchDrivenInput is a
+			// recency gate on the last touch press).
+			if pointerClickedThisFrame(btn, gtx) && w.touchDrivenInput(gtx) {
+				w.composerKeyboardPending = true
+			}
 		}
 
 		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
@@ -3543,12 +3589,10 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 										// "⋯" — always-available touch path to the
 										// contact menu (long-press is limited by
-										// Gio's pointer-grab threshold).
-										mb := w.recipientMenuButton(fingerprint)
-										for mb.Clicked(gtx) {
-											openMenu(w.menuAnchorForClick(mb, gtx))
-										}
-										return w.menuDotsButton(gtx, mb, color.NRGBA{R: 160, G: 175, B: 195, A: 255}, w.t("context.menu_button_contact"))
+										// Gio's pointer-grab threshold). Its clicks
+										// are answered above the row's own, where
+										// the ordering matters.
+										return w.menuDotsButton(gtx, menuBtn, color.NRGBA{R: 160, G: 175, B: 195, A: 255}, w.t("context.menu_button_contact"))
 									}),
 								)
 							}),

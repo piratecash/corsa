@@ -1103,6 +1103,14 @@ The sort pipeline in `snapRecipients()`:
 
 When `ReachableIDs` is nil (probe not completed or failed), all peers are treated as offline, and the sort degrades gracefully to 2-tier (unread first, then by timestamp).
 
+### Single-pane navigation and the contact menu
+
+Below the 600 dp breakpoint the UI shows one pane at a time, and the pane rule is `ActivePeer`: no peer selected means the contact list, a selected peer means that conversation. Selecting IS navigating there, which makes "who may select" the whole question.
+
+Opening a contact's menu (a right-click, a 500 ms long-press, or the row's `⋯` button) selects the contact only in the **two-pane** layout, where the chat simply fills the pane beside the list the menu was opened from. In the **single-pane** layout it selects nothing: the selection would replace the contact list with a conversation the user never asked to open and leave them in it when the menu closed, and it would additionally clear the unread badge and send seen receipts for a chat nobody has looked at. Every item of the menu acts on `contextMenuPeer` — copy identity, set an alias, delete the identity, delete the chat for both sides — so none of them needs an active conversation. The layout is read from `Window.paneCompact`, recorded by `layoutMain`, the only place that measures the window against the breakpoint; a contact row cannot measure it itself, because its own constraints are the sidebar's and fall below the breakpoint in both layouts.
+
+The `⋯` button is laid out INSIDE the row's own `Clickable`, and Gio delivers the press to both, so one tap on it produces a menu click AND a row click on the same frame. `layoutRecipientButton` therefore answers the menu button ABOVE the row's own click: the row's handler then sees the menu already open for its peer and drops the click instead of selecting. Answering them the other way round is the original defect — the row selected first, the menu opened after, and the phone user was already in the chat. The same check catches the tail of a long-press, where the finger's Release completes the row's `Clickable` a frame after the timer opened the menu. An ordinary tap dismisses any open menu on Press, before its own Release, so it is never mistaken for either.
+
 ### Фразы со счётчиком (формы множественного числа)
 
 Подпись, в которой есть число, обязана с ним согласовываться, и какие
@@ -1142,6 +1150,14 @@ Sidebar список контактов использует 4-уровневу�
 2. `sortSidebarPeers()` — применяет 4-уровневую сортировку используя `RouterSnapshot.Peers` и `RouterSnapshot.NodeStatus.ReachableIDs`
 
 Когда `ReachableIDs` равен nil (проба не завершена или не удалась), все peers считаются offline, и сортировка корректно деградирует до 2-уровневой (непрочитанные первыми, затем по timestamp).
+
+### Однопанельная навигация и меню контакта
+
+Ниже порога 600 dp интерфейс показывает одну панель за раз, и правило панели — `ActivePeer`: нет выбранного контакта — список, есть — его диалог. Выбор ТАМ и есть переход, поэтому весь вопрос в том, кому позволено выбирать.
+
+Открытие меню контакта (правый клик, долгое удержание 500 мс или кнопка `⋯`) выбирает контакт только в **двухпанельной** раскладке, где чат просто заполняет панель рядом со списком, из которого меню вызвали. В **однопанельной** не выбирает ничего: выбор заменил бы список контактов диалогом, который пользователь не просил открывать, и оставил бы его там после закрытия меню, а кроме того снял бы бейдж непрочитанного и отправил seen-квитанции по чату, на который никто не смотрел. Все пункты меню работают с `contextMenuPeer` — скопировать identity, задать псевдоним, удалить identity, удалить чат у обеих сторон, — поэтому активный диалог им не нужен. Раскладка берётся из `Window.paneCompact`, его записывает `layoutMain` — единственное место, где ширина окна сравнивается с порогом; сама строка контакта измерить это не может: её ограничения — это ограничения сайдбара, и они меньше порога в обеих раскладках.
+
+Кнопка `⋯` раскладывается ВНУТРИ собственного `Clickable` строки, и Gio отдаёт нажатие обоим, поэтому один тап по ней даёт на одном кадре и клик по меню, и клик по строке. Поэтому `layoutRecipientButton` обрабатывает кнопку меню ВЫШЕ клика по строке: обработчик строки видит, что меню для этого контакта уже открыто, и отбрасывает клик вместо выбора. Обратный порядок — это и есть исходный дефект: сначала строка выбирала контакт, потом открывалось меню, и пользователь телефона уже был в чате. Та же проверка ловит хвост долгого удержания, где Release пальца завершает `Clickable` строки на кадр позже, чем таймер открыл меню. Обычный тап гасит открытое меню на Press, до своего Release, поэтому его ни с тем, ни с другим не спутать.
 
 ### RPC architecture
 
