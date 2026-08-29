@@ -3,6 +3,8 @@ package desktop
 import (
 	"fmt"
 	"strings"
+
+	"gioui.org/io/system"
 )
 
 type languageOption struct {
@@ -1589,6 +1591,32 @@ func normalizeLanguage(code string) string {
 		return strings.ToLower(strings.TrimSpace(code))
 	default:
 		return "en"
+	}
+}
+
+// textDirections holds the writing direction of every supported language whose
+// script does not run left to right. A language absent from the map runs left
+// to right, which is also what a zero system.Locale means, so the map carries
+// only the exceptions and cannot drift out of step with the default.
+var textDirections = map[string]system.TextDirection{
+	"ar": system.RTL,
+}
+
+// textLocale is what the text shaper is told about the language on screen.
+//
+// It is derived from the application's own language rather than the host's:
+// the interface is drawn in the language the user picked here, and the shaper
+// has to lay it out in that language's direction whatever the operating system
+// is set to. Direction is not cosmetic — it decides where a line begins, which
+// side its punctuation and neutral characters settle on, and which way the
+// caret and the selection travel in an editor.
+func textLocale(code string) system.Locale {
+	code = normalizeLanguage(code)
+	return system.Locale{
+		// BCP-47 primary subtag, which is the form the language codes are
+		// already stored and persisted in.
+		Language:  code,
+		Direction: textDirections[code],
 	}
 }
 

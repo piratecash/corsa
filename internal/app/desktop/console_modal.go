@@ -1192,7 +1192,8 @@ func (c *consoleModal) layoutPeersTab(gtx layout.Context, snap service.RouterSna
 			title := material.Label(c.theme(), unit.Sp(20), c.parent.t("console.peers_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
-			summary := material.Body1(c.theme(), activePeerSummary(c.parent, activePeers))
+			summaryText := activePeerSummary(c.parent, activePeers)
+			summary := material.Body1(c.theme(), summaryText)
 			summary.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -1202,7 +1203,10 @@ func (c *consoleModal) layoutPeersTab(gtx layout.Context, snap service.RouterSna
 					return c.layoutInfoRows(gtx, rows)
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
-				layout.Rigid(summary.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					// Translated phrase around a count: direction from itself.
+					return summary.Layout(directedByContent(gtx, summaryText))
+				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					if len(activePeers) == 0 {
@@ -1289,7 +1293,10 @@ func (c *consoleModal) layoutConsoleInput(gtx layout.Context) layout.Dimensions 
 									editor := material.Editor(c.theme(), &c.consoleEditor, c.parent.t("console.placeholder"))
 									editor.Color = color.NRGBA{R: 244, G: 247, B: 252, A: 255}
 									editor.HintColor = color.NRGBA{R: 117, G: 130, B: 148, A: 255}
-									return editorTouchKeyboardArea(gtx, &c.touchKbdTag, &c.parent.touchKbd, editor.Layout)
+									// A command is not a sentence: left to
+									// right in every interface language, or
+									// the caret walks backwards through it.
+									return editorTouchKeyboardArea(leftToRight(gtx), &c.touchKbdTag, &c.parent.touchKbd, editor.Layout)
 								})
 							})
 						}),
@@ -1361,6 +1368,9 @@ func (c *consoleModal) layoutConsoleSuggestions(gtx layout.Context, suggestions 
 }
 
 func (c *consoleModal) layoutConsoleSuggestionItem(gtx layout.Context, command string, selected bool) layout.Dimensions {
+	// A command name, same as the line it will be inserted into.
+	gtx = leftToRight(gtx)
+
 	btn := c.suggestionButton(command)
 	return material.Clickable(gtx, btn, func(gtx layout.Context) layout.Dimensions {
 		bg := color.NRGBA{R: 34, G: 46, B: 62, A: 255}
@@ -1409,7 +1419,8 @@ func (c *consoleModal) layoutConsoleHistoryCard(gtx layout.Context, entry *conso
 							command := material.Body1(c.theme(), "> "+entry.Command)
 							command.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 							command.Font.Weight = 600
-							return command.Layout(gtx)
+							// A command line, prompt included.
+							return command.Layout(leftToRight(gtx))
 						}),
 						layout.Rigid(layout.Spacer{Width: unit.Dp(12)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1423,7 +1434,7 @@ func (c *consoleModal) layoutConsoleHistoryCard(gtx layout.Context, entry *conso
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					label := material.Body2(c.theme(), entry.CreatedAt.Format("2006-01-02 15:04:05"))
 					label.Color = color.NRGBA{R: 167, G: 179, B: 196, A: 255}
-					return label.Layout(gtx)
+					return label.Layout(leftToRight(gtx))
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(10)}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -2049,7 +2060,21 @@ func newConsoleDonateEntries() []consoleDonateEntry {
 	return entries
 }
 
+// layoutSelectableOutput draws what a command printed.
+//
+// Usually that is not language — JSON, addresses, counters, errors from the
+// node — but not always: the greeting the console opens with is translated,
+// and so is anything a command answers with in the interface's own words.
+// Direction therefore comes from the text rather than from the category, which
+// gives the node's output left to right and the greeting whatever its own
+// language reads as. See text_direction.go.
+//
+// The fallback is leftToRight rather than the interface, because output with no
+// strong character at all — a column of counters, an "1.2.3.4:9000" — is data,
+// and data reads left to right whatever language the window is in.
 func (c *consoleModal) layoutSelectableOutput(gtx layout.Context, entry *consoleEntry) layout.Dimensions {
+	gtx = directedByContent(leftToRight(gtx), entry.Output)
+
 	textColor := color.NRGBA{R: 208, G: 216, B: 228, A: 255}
 	if entry.Failed {
 		textColor = color.NRGBA{R: 255, G: 168, B: 168, A: 255}
@@ -2067,7 +2092,19 @@ func (c *consoleModal) layoutSelectableOutput(gtx layout.Context, entry *console
 	return entry.OutputText.Layout(gtx, c.theme().Shaper, font.Font{Typeface: c.theme().Face}, c.theme().TextSize, textMaterial, selectionMaterial)
 }
 
+// layoutSelectableText draws one selectable string: a peer address, a version,
+// a transfer's file name, a node error — and also the peer health meta line,
+// which is translated. The callers are not all one category, so the direction
+// comes from the string itself: an address answers left to right on its own
+// Latin, and a translated line answers in its own language. See
+// text_direction.go.
+//
+// The fallback is leftToRight rather than the interface, because a string with
+// no strong character here — "1.2.3.4:9000", a byte count — is data, and data
+// reads left to right whatever language the window is in.
 func (c *consoleModal) layoutSelectableText(gtx layout.Context, sel *widget.Selectable, text string, textColor color.NRGBA) layout.Dimensions {
+	gtx = directedByContent(leftToRight(gtx), text)
+
 	textMacro := op.Record(gtx.Ops)
 	paint.ColorOp{Color: textColor}.Add(gtx.Ops)
 	textMaterial := textMacro.Stop()
@@ -2101,7 +2138,8 @@ func (c *consoleModal) layoutDonateSection(gtx layout.Context) layout.Dimensions
 					label := material.Body2(c.theme(), consoleDonateURL)
 					label.Color = color.NRGBA{R: 124, G: 177, B: 255, A: 255}
 					label.Font.Weight = 600
-					return label.Layout(gtx)
+					// A URL is an address, not a sentence.
+					return label.Layout(leftToRight(gtx))
 				})
 			}),
 		}
@@ -2242,7 +2280,13 @@ func (c *consoleModal) card(gtx layout.Context, titleText string, rows []string,
 				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					label := material.Body1(c.theme(), text)
 					label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
-					return label.Layout(gtx)
+					// A row is a translated label in front of a technical
+					// value, so it is neither purely one nor the other: its own
+					// first strong character decides, which puts the Arabic
+					// label first and leaves the value as a left-to-right run
+					// inside it. A row that turns out to be all data falls back
+					// to left to right rather than to the interface.
+					return label.Layout(directedByContent(leftToRight(gtx), text))
 				}))
 				children = append(children, layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout))
 			}
@@ -2267,7 +2311,10 @@ func (c *consoleModal) layoutInfoRows(gtx layout.Context, rows []string) layout.
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				label := material.Body1(c.theme(), text)
 				label.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
-				return label.Layout(gtx)
+				// Same shape as the rows in card: translated label, technical
+				// value, direction from the row itself, left to right when the
+				// row turns out to be all value.
+				return label.Layout(directedByContent(leftToRight(gtx), text))
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
 		)
@@ -3610,7 +3657,8 @@ func (c *consoleModal) layoutTrafficGraph(gtx layout.Context) layout.Dimensions 
 		lbl := material.Caption(c.theme(), formatBytes(int64(gridVal))+"/s")
 		lbl.Color = labelColor
 		stack := op.Offset(image.Pt(0, y-gtx.Dp(unit.Dp(7)))).Push(gtx.Ops)
-		lbl.Layout(gtx)
+		// An axis label is a rate, not a phrase.
+		lbl.Layout(leftToRight(gtx))
 		stack.Pop()
 	}
 
@@ -3701,16 +3749,19 @@ func (c *consoleModal) drawTrafficBadges(gtx layout.Context, totalWidth, height 
 	measureGtx.Constraints.Min = image.Point{}
 	measureGtx.Constraints.Max = image.Pt(totalWidth, height)
 
+	// Each badge is a translated phrase carrying a byte count, so it is neither
+	// purely language nor purely data: its own first strong character decides,
+	// which keeps the count as a left-to-right run inside an Arabic phrase.
 	inMacro := op.Record(gtx.Ops)
 	inLbl := material.Caption(c.theme(), inText)
 	inLbl.Color = trafficInSolid
-	inDims := inLbl.Layout(measureGtx)
+	inDims := inLbl.Layout(directedByContent(measureGtx, inText))
 	inCall := inMacro.Stop()
 
 	outMacro := op.Record(gtx.Ops)
 	outLbl := material.Caption(c.theme(), outText)
 	outLbl.Color = trafficOutSolid
-	outDims := outLbl.Layout(measureGtx)
+	outDims := outLbl.Layout(directedByContent(measureGtx, outText))
 	outCall := outMacro.Stop()
 
 	// box size: widest text + padding, both lines stacked

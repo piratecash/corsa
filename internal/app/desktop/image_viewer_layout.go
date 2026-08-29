@@ -419,6 +419,9 @@ func (v *imageViewer) layoutCaption(gtx layout.Context, align layout.Direction, 
 	if !ok {
 		return layout.Dimensions{}
 	}
+	// A file name and a `2 / 5 · 840 kB · 1280×960` meta line are technical:
+	// left to right in every interface language (see text_direction.go).
+	gtx = leftToRight(gtx)
 	return align.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical, Alignment: alignmentFor(align)}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -893,7 +896,8 @@ func (v *imageViewer) layoutDeleteConfirmRows(gtx layout.Context, item viewerIte
 				label := material.Caption(v.parent.theme, item.name)
 				label.Color = color.NRGBA{R: 140, G: 155, B: 178, A: 255}
 				label.MaxLines = 1
-				return label.Layout(gtx)
+				// A file name, not a sentence.
+				return label.Layout(leftToRight(gtx))
 			})
 		}),
 		layout.Rigid(v.parent.contextMenuSeparator),

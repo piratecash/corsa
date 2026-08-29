@@ -96,13 +96,17 @@ func (c *consoleModal) layoutFileTab(gtx layout.Context) layout.Dimensions {
 			title := material.Label(c.theme(), unit.Sp(20), c.parent.t("console.file_title"))
 			title.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
-			summary := material.Body1(c.theme(), c.fileSummaryText(transfers))
+			summaryText := c.fileSummaryText(transfers)
+			summary := material.Body1(c.theme(), summaryText)
 			summary.Color = color.NRGBA{R: 196, G: 205, B: 218, A: 255}
 
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(title.Layout),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(8)}.Layout),
-				layout.Rigid(summary.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					// Translated phrase around counts: direction from itself.
+					return summary.Layout(directedByContent(gtx, summaryText))
+				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(14)}.Layout),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					if len(transfers) == 0 {

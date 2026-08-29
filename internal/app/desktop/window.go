@@ -596,10 +596,9 @@ func newAppTheme() *material.Theme {
 	theme := material.NewTheme()
 	theme.Shaper = text.NewShaper(text.WithCollection(appFontCollection()))
 	// Keep the bundled Go face for normal text and fall back to the bundled
-	// emoji family for picker choices and emoji embedded in messages. Both
-	// families ship with the binary — see emoji_font.go for why the emoji one
-	// cannot be left to the host.
-	theme.Face = font.Typeface("Go, " + string(emojiTypeface))
+	// emoji, Arabic and CJK families behind it. All of them ship with the
+	// binary — see fonts.go for why none of them can be left to the host.
+	theme.Face = appThemeFace()
 	theme.Bg = color.NRGBA{R: 18, G: 21, B: 26, A: 255}
 	theme.Fg = color.NRGBA{R: 235, G: 239, B: 244, A: 255}
 	theme.ContrastBg = color.NRGBA{R: 36, G: 67, B: 126, A: 255}
@@ -1109,6 +1108,14 @@ func (w *Window) loop(window *app.Window) error {
 			w.readLaunchDeepLinkOnce(e)
 		case app.FrameEvent:
 			gtx := app.NewContext(&w.ops, e)
+			// Gio leaves Context.Locale zero and documents that it does so
+			// (layout.Context), and a zero Locale reads as left-to-right. The
+			// language on screen is this application's own choice rather than
+			// the host's, so it is the one the shaper has to be told about:
+			// without this the Arabic interface is laid out left-to-right,
+			// which puts its punctuation, its alignment and the caret in the
+			// composer on the wrong side.
+			gtx.Locale = textLocale(w.language)
 			w.layout(gtx)
 			e.Frame(gtx.Ops)
 		}
@@ -3232,6 +3239,8 @@ func (w *Window) layoutMyIdentityButton(gtx layout.Context, known int) layout.Di
 }
 
 func (w *Window) layoutMyIdentityAddress(gtx layout.Context) (layout.Dimensions, widget.TextInfo) {
+	// An address is an identifier: left to right in every interface language.
+	gtx = leftToRight(gtx)
 	style := material.Caption(w.theme, w.snap.MyAddress.String())
 	textMacro := op.Record(gtx.Ops)
 	paint.ColorOp{Color: color.NRGBA{R: 167, G: 181, B: 199, A: 255}}.Add(gtx.Ops)
@@ -3364,6 +3373,10 @@ func (w *Window) identitySearchEditorStyle() material.EditorStyle {
 func (w *Window) layoutIdentitySearchEditor(gtx layout.Context) layout.Dimensions {
 	return layout.Inset{Top: identitySearchTextTopInset}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		semantic.DescriptionOp(w.t("clients.search_label")).Add(gtx.Ops)
+		// What is typed here is an identity, not a sentence: left to right in
+		// every interface language, or the caret walks backwards through the
+		// fingerprint being corrected.
+		gtx = leftToRight(gtx)
 		return editorTouchKeyboardArea(gtx, &w.touchKbdTags[1], &w.touchKbd, w.identitySearchEditorStyle().Layout)
 	})
 }
@@ -3496,11 +3509,15 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 									Alignment: layout.Middle,
 								}.Layout(gtx,
 									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-										title := material.Body1(w.theme, w.peerDisplayName(fingerprint))
+										// An alias when the contact has one and a
+										// fingerprint when it does not; both answer
+										// the same way, from their own content.
+										name := w.peerDisplayName(fingerprint)
+										title := material.Body1(w.theme, name)
 										title.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 										title.Font.Weight = 600
 										title.MaxLines = 1
-										return title.Layout(gtx)
+										return title.Layout(directedByContent(gtx, name))
 									}),
 									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 										if !contactRow {
@@ -3544,7 +3561,10 @@ func (w *Window) layoutRecipientButton(gtx layout.Context, status service.NodeSt
 								label := material.Body2(w.theme, ellipsize(preview, 44))
 								label.Color = color.NRGBA{R: 187, G: 197, B: 212, A: 255}
 								label.MaxLines = 1
-								return label.Layout(gtx)
+								// The preview is somebody's message, and the
+								// fingerprint standing in for a thread with none
+								// is Latin, so one rule serves both.
+								return label.Layout(directedByContent(gtx, preview))
 							}),
 						)
 					}),
@@ -3745,7 +3765,10 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							label := material.Caption(w.theme, labelText)
 							label.Color = fg
-							return label.Layout(gtx)
+							// A translated phrase carrying counts: its own
+							// first strong character decides, which leaves the
+							// numbers as a left-to-right run inside it.
+							return label.Layout(directedByContent(gtx, labelText))
 						}),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							if strings.TrimSpace(breakdownText) == "" {
@@ -3754,7 +3777,9 @@ func (w *Window) layoutNetworkStatus(gtx layout.Context, status service.NodeStat
 							return layout.Inset{Top: unit.Dp(2)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 								label := material.Caption(w.theme, breakdownText)
 								label.Color = color.NRGBA{R: 214, G: 221, B: 232, A: 220}
-								return label.Layout(gtx)
+								// H/D/S/R counters: telemetry, no language in
+								// it at all.
+								return label.Layout(leftToRight(gtx))
 							})
 						}),
 					)
@@ -4024,14 +4049,23 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 									lbl.TextSize = unit.Sp(15)
 									lbl.Color = color.NRGBA{R: 130, G: 235, B: 190, A: 255}
 									lbl.MaxLines = 1
-									return lbl.Layout(gtx)
+									// A fingerprint is an identifier, not a word.
+									return lbl.Layout(leftToRight(gtx))
 								}),
 							)
 						}
+						// "Message body for: NAME  ID: fingerprint" is a
+						// sentence, so it has to be arranged in the direction
+						// the interface is read in. Left as written, the
+						// Arabic build strands the label on the left and the
+						// name it introduces on the right — see
+						// inReadingOrder. Every child here is a label, a value
+						// or a spacer, none of which has a side of its own, so
+						// reversing them is the whole of it.
 						return layout.Flex{
 							Axis:      layout.Horizontal,
 							Alignment: layout.Baseline,
-						}.Layout(gtx, children...)
+						}.Layout(gtx, inReadingOrder(gtx, children...)...)
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						if w.attachedFile == "" {
@@ -4082,6 +4116,16 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 												Alignment: layout.Middle,
 											}.Layout(gtx,
 												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+													// The draft is the user's own text, so it
+													// takes its direction from itself rather
+													// than from the interface: an Arabic
+													// message typed into an English build
+													// reads right to left, and an English one
+													// typed into the Arabic build does not.
+													// An empty draft keeps the interface's
+													// direction, which is where its caret and
+													// its hint belong.
+													gtx = directedByContent(gtx, w.messageEditor.Text())
 													return editorTouchKeyboardArea(gtx, &w.touchKbdTags[0], &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
 														dims := layoutComposerEditorContent(gtx, totalLines, editor.Layout)
 														if w.emojiPicker.takeSoftKeyboardSuppression(gtx.Enabled()) {
@@ -4256,6 +4300,9 @@ func (w *Window) layoutAttachedFilePreview(gtx layout.Context) layout.Dimensions
 
 	fileName := filepath.Base(w.attachedFile)
 
+	// A path, not a sentence.
+	gtx = leftToRight(gtx)
+
 	// Outer inset to separate the chip from the editor below.
 	return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		// Draw chip with a 1px border and rounded corners.
@@ -4279,7 +4326,8 @@ func (w *Window) layoutAttachedFilePreview(gtx layout.Context) layout.Dimensions
 						lbl := material.Body2(w.theme, fileName)
 						lbl.Color = nameFg
 						lbl.MaxLines = 1
-						return lbl.Layout(gtx)
+						// A path, not a sentence.
+						return lbl.Layout(leftToRight(gtx))
 					}),
 					layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 					// Close / cancel button "×".
@@ -4386,7 +4434,7 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					lbl := material.Body2(w.theme, caption)
 					lbl.Color = captionFg
-					return lbl.Layout(gtx)
+					return lbl.Layout(directedByContent(gtx, caption))
 				}),
 				layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 			)
@@ -4500,7 +4548,8 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 							lbl := material.Body2(w.theme, payload.FileName)
 							lbl.Font.Weight = font.Bold
 							lbl.Color = nameFg
-							return lbl.Layout(gtx)
+							// A file name, not a sentence.
+							return lbl.Layout(leftToRight(gtx))
 						}),
 					)
 				}
@@ -4527,7 +4576,8 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 				}
 				lbl := material.Caption(w.theme, sizeText)
 				lbl.Color = sizeFg
-				return lbl.Layout(gtx)
+				// Byte counts and a percentage: no language in it.
+				return lbl.Layout(leftToRight(gtx))
 			}),
 			layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 		)
@@ -6080,13 +6130,13 @@ func (w *Window) bubbleHeader(message service.DirectMessage, author string, isMi
 				label := material.Caption(w.theme, author)
 				label.Color = ui.MessageAuthorColor(isMine)
 				label.MaxLines = 1
-				return label.Layout(gtx)
+				return label.Layout(directedByContent(gtx, author))
 			}),
 			layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				label := material.Caption(w.theme, message.Timestamp.Local().Format(chatTimestampLayout))
 				label.Color = color.NRGBA{R: 160, G: 185, B: 220, A: 255}
-				return label.Layout(gtx)
+				return label.Layout(leftToRight(gtx))
 			}),
 			layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -6108,6 +6158,11 @@ func (w *Window) bubbleBody(message service.DirectMessage, isMine bool) layout.W
 		if message.Command == domain.DMCommandFileAnnounce && message.CommandData != "" {
 			return w.layoutFileCard(gtx, message, isMine)
 		}
+
+		// The message is its author's text, not its reader's: direction comes
+		// from the body itself, so an Arabic message reads right to left in
+		// every build and an English one left to right in the Arabic build.
+		gtx = directedByContent(gtx, message.Body)
 
 		sel := w.messageSelectable(message.ID)
 		sel.SetText(message.Body)
@@ -6165,7 +6220,8 @@ func (w *Window) bubbleStatus(message service.DirectMessage, isMine bool) layout
 	return func(gtx layout.Context) layout.Dimensions {
 		label := material.Caption(w.theme, text)
 		label.Color = ui.MessageStatusColor()
-		return label.Layout(gtx)
+		// Ticks and a timestamp: technical, and left to right everywhere.
+		return label.Layout(leftToRight(gtx))
 	}
 }
 
@@ -6507,7 +6563,8 @@ func (w *Window) layoutIdentityPanelContent(gtx layout.Context) layout.Dimension
 			label.Color = color.NRGBA{R: 190, G: 204, B: 222, A: 255}
 			label.Alignment = text.Middle
 			label.MaxLines = 2
-			return label.Layout(gtx)
+			// An address is an identifier: left to right in every language.
+			return label.Layout(leftToRight(gtx))
 		}),
 		layout.Rigid(layout.Spacer{Height: unit.Dp(18)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -7010,10 +7067,26 @@ func (w *Window) layoutClearChatConfirmMenu(gtx layout.Context) layout.Dimension
 	)
 }
 
+// aliasEditorContext is the context the alias field is given events with and
+// drawn in. An alias is a name somebody wrote, and a name carries its own
+// direction — the reader's interface language has no say in it.
+//
+// It is a context of its own rather than the menu's, because the menu around
+// the field is translated interface: its header, its save and its cancel read
+// in the interface's language whatever the name in the field happens to be.
+//
+// Both callers need it. widget.Editor reads the locale out of the context it
+// is handed EVENTS with, so the drain that turns Enter into a save and an
+// arrow key into caret movement has to see the same direction the text is
+// drawn in, or the field would be styled one way and steered the other.
+func (w *Window) aliasEditorContext(gtx layout.Context) layout.Context {
+	return directedByContent(gtx, w.aliasEditor.Text())
+}
+
 func (w *Window) layoutAliasEditorMenu(gtx layout.Context) layout.Dimensions {
 	// Handle Enter key as save shortcut.
 	for {
-		ev, ok := w.aliasEditor.Update(gtx)
+		ev, ok := w.aliasEditor.Update(w.aliasEditorContext(gtx))
 		if !ok {
 			break
 		}
@@ -7048,6 +7121,9 @@ func (w *Window) layoutAliasEditorMenu(gtx layout.Context) layout.Dimensions {
 				ed := material.Editor(w.theme, &w.aliasEditor, w.t("context.alias_placeholder"))
 				ed.Color = color.NRGBA{R: 245, G: 247, B: 250, A: 255}
 				ed.HintColor = color.NRGBA{R: 120, G: 135, B: 158, A: 255}
+				// The field, and only the field, reads in the alias's own
+				// direction — see aliasEditorContext.
+				gtx = w.aliasEditorContext(gtx)
 				gtx.Constraints.Min.X = gtx.Dp(unit.Dp(160))
 				return editorTouchKeyboardArea(gtx, &w.touchKbdTags[2], &w.touchKbd, ed.Layout)
 			})
@@ -8003,13 +8079,15 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 								lbl := material.Caption(w.theme, header)
 								lbl.Color = barColor
 								lbl.Font.Weight = font.Bold
-								return lbl.Layout(gtx)
+								// Author then timestamp: the author decides, as
+								// it does in the bubble header above.
+								return lbl.Layout(directedByContent(gtx, quotedAuthor))
 							}),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								label := material.Caption(w.theme, quotedBody)
 								label.Color = color.NRGBA{R: 170, G: 185, B: 210, A: 255}
 								label.MaxLines = 2
-								return label.Layout(gtx)
+								return label.Layout(directedByContent(gtx, quotedBody))
 							}),
 						)
 					})
@@ -8289,7 +8367,7 @@ func (w *Window) layoutFailedSends(gtx layout.Context) layout.Dimensions {
 										label := material.Caption(w.theme, preview)
 										label.Color = color.NRGBA{R: 210, G: 185, B: 185, A: 255}
 										label.MaxLines = 1
-										return label.Layout(gtx)
+										return label.Layout(directedByContent(gtx, preview))
 									}),
 								)
 							})
@@ -8380,7 +8458,7 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 										label := material.Caption(w.theme, quotedBody)
 										label.Color = color.NRGBA{R: 180, G: 195, B: 218, A: 255}
 										label.MaxLines = 1
-										return label.Layout(gtx)
+										return label.Layout(directedByContent(gtx, quotedBody))
 									}),
 								)
 							})

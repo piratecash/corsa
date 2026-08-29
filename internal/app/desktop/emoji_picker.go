@@ -675,6 +675,13 @@ func (w *Window) emojiPickerDescriptor(panel *ui.EmojiPickerState, mode ui.Emoji
 			},
 		},
 		SearchWrap: func(gtx layout.Context, editor layout.Widget) layout.Dimensions {
+			// The query is the user's own text — an English word searched from
+			// the Arabic interface, an Arabic one from the English build — so
+			// it takes its direction from itself and not from the language
+			// around it. The picker hands its search editor to this wrapper
+			// before laying it out, which makes this the last point before the
+			// editor turns key presses into caret movement.
+			gtx = directedByContent(gtx, panel.Search.Text())
 			return editorTouchKeyboardArea(gtx, &w.touchKbdTags[3], &w.touchKbd, editor)
 		},
 		SearchIcon: w.searchIcon,

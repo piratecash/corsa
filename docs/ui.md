@@ -98,10 +98,24 @@ keyboard returns focus to the My identity card.
 
 ### Fonts
 
-Both font families ship inside the binary: the Go faces for text, and Noto
-Color Emoji for emoji, registered under the family name `Corsa Emoji`. The
-theme asks for `Go, Corsa Emoji`, and an exact family match beats anything on
-the host, so the emoji a user sees are the ones this build carries.
+Four families ship inside the binary: the Go faces for Latin, Cyrillic and
+Greek, Noto Color Emoji for emoji, Noto Sans Arabic for Arabic, and the SC cut
+of Noto Sans CJK for Chinese, Japanese and Korean. The three bundled files are
+registered under names of this project's own — `Corsa Emoji`, `Corsa Arabic`,
+`Corsa CJK` — and the theme asks for `Go, Corsa Emoji, Corsa Arabic, Corsa
+CJK`. An exact family match beats anything on the host, so the glyphs a user
+sees are the ones this build carries.
+
+Nothing is left to the host's font set, and each half of that rule was learnt
+from a bug. The first was emoji, described below. The second was Arabic, and
+there nothing was wrong with the renderer — the font simply was not there.
+go-text scans `/system/fonts`, `/system/font` and `/data/fonts` on Android and
+no other directory, so on a device that keeps its Arabic face anywhere else
+(`/product/fonts`, a vendor overlay, a mounted font module) the shaper found no
+glyph for a single Arabic letter and drew `.notdef`: one hollow box per code
+point, for the whole interface. Chinese survived on the same device only
+because its CJK font happened to sit in a directory that is scanned, which is
+why it is bundled too rather than left to that coincidence.
 
 The family name matters as much as the file. `emoji` is a GENERIC family in the
 font matcher, alongside `serif` and `monospace`, and the fontconfig
@@ -111,8 +125,8 @@ and the bundled bytes were never reached. A name nothing else can claim ends
 that competition, at the price of no longer falling back to the platform font
 for an emoji this build does not carry.
 
-The emoji font is bundled because the platform fonts are not interchangeable
-for this renderer. Gio draws outlines, SVG and BITMAP glyphs and skips anything
+The emoji font is bundled for a second reason on top of that: the platform
+fonts are not interchangeable for this renderer. Gio draws outlines, SVG and BITMAP glyphs and skips anything
 else without a word, while Windows keeps the colour glyphs of Segoe UI Emoji in
 a COLR table: on Windows every emoji rendered as blank space, and the regional
 indicator pairs behind flags fell back to their plain letter outlines and
@@ -128,13 +142,155 @@ other shapes every emoji the picker offers and fails on any that comes back as
 `.notdef` — shaping rather than a `cmap` lookup, because flags are ligatures of
 two regional indicators and the rainbow flag is a ZWJ sequence.
 
-The cost is about ten megabytes in every binary, the Android package included,
-where the platform font would have done. That is the price of the same emoji
-everywhere and of not depending on what the host happens to have installed —
-a Linux desktop without an emoji font had the identical blank-glyph problem.
-The font is parsed once per process and its face shared between windows, which
-the Gio API explicitly allows; the licence travels with it as
-`internal/app/desktop/assets/fonts/OFL.txt`.
+`TestBundledFontsDrawEveryTranslatedRune` asks of the script fonts the question
+the Arabic build failed: for every string in the `ar` and `zh` translations,
+every rune belonging to that script has to shape to something other than
+`.notdef`. It is asked of the strings that actually reach the screen rather
+than of a sample alphabet, so a translator reaching for a letter outside the
+bundled coverage fails here instead of in front of the user. Only runes of the
+script a font is bundled for are its business — the Latin and the format verbs
+mixed into those strings are the Go faces' job.
+
+The CJK file is a single face on purpose. The `.ttc` that ships the ten
+language cuts together would have every one of them parsed at startup to use
+one, and the cuts differ in which variant they select by default rather than in
+what they cover, so the SC cut answers for Japanese and Korean text as well.
+The two script files come from `notofonts/arabic` as
+`NotoSansArabic-Regular.ttf` and from `notofonts/noto-cjk` as
+`NotoSansCJKsc-Regular.otf`.
+
+Building the collection costs about 30 ms and about 34 MiB of heap, once per
+process, almost all of it the CJK face. That is paid at startup on every
+platform, phones included, because Gio's shaper takes its collection whole and
+has no way to parse a face the first time a rune needs it.
+
+The cost is about twenty-seven megabytes in every binary, the Android package
+included, where the platform fonts would often have done. That is the price of
+the same glyphs everywhere and of not depending on what the host happens to
+have installed — a Linux desktop without an emoji font had the identical
+blank-glyph problem, and the Arabic interface had it on Android. Each font is
+parsed once per process and its face shared between windows, which the Gio API
+explicitly allows; the licence travels with them as
+`internal/app/desktop/assets/fonts/OFL.txt` — all three are SIL Open Font
+License 1.1.
+
+### Text direction
+
+`layout.Context.Locale` is documented by Gio as never being populated
+automatically, and a zero `Locale` reads as left-to-right. The frame loop fills
+it from the application's own language (`textLocale`, `i18n.go`) before laying
+anything out: the interface is drawn in the language the user picked here
+rather than in the host's, so that is the language the shaper has to be told
+about.
+
+`textDirections` carries only the exceptions — today `ar` alone. The zero value
+of `system.TextDirection` is already left-to-right, so a language absent from
+the map cannot drift out of step with the default, and a language added to the
+selector without a direction is caught by `TestTextLocaleDirection`.
+
+What the locale decides is text: where a line begins, which side neutral
+characters and punctuation settle on, and which way the caret and the selection
+travel in an editor. It does NOT mirror the layout — the sidebar stays on the
+left, icons keep their side of a row, and message bubbles keep their
+author-based alignment. Mirroring the containers is a separate change.
+
+The frame's locale is a default, not a verdict, because three kinds of text
+share the window and the interface language answers for only one of them
+(`text_direction.go`).
+
+**Translated interface text** takes the frame's locale and needs nothing.
+
+**Technical text** is not language at all: identities, `corsa:` addresses, file
+names, byte counts, timestamps, commands and everything the node says about
+itself. `leftToRight` pins it, and it is not cosmetic — inside an editor the
+locale decides which way the caret and the arrow keys travel, so correcting a
+fingerprint in the Arabic interface would otherwise walk the caret backwards
+through a string with no right-to-left character in it. The overrides sit on
+the identity search editor, the console input, the console command line and its
+timestamp, the command suggestions, the donate URL, the traffic graph's axis
+labels, the file card's name and byte counts, the attached-file chip, the
+network status breakdown, the `corsa:` address in the sidebar and in the
+identity panel, the fingerprint above the composer, the bubble timestamp and
+delivery line, and the image viewer's caption and delete confirmation.
+
+They are leaves, not subtrees, on purpose. An override placed on a card or a
+panel reaches the translated labels, buttons and error text sitting next to the
+data — which is how the console, the file card and the network status line each
+lost their Arabic once already.
+
+**Free user text** belongs to whoever wrote it rather than to whoever is
+reading it, so `directedByContent` takes its direction from the text: the
+message body, the composer draft, the contact alias, the emoji and reaction
+search, the sidebar preview, the contact name, the reply quote and the
+failed-send preview. An Arabic message reads right to left inside the English
+build and an English one left to right inside the Arabic build.
+
+`directedByContent` also answers wherever the two categories arrive through the
+same code path, which is more places than it first looks. The console's
+`layoutSelectableText` carries peer addresses AND the translated peer-health
+meta line; `layoutSelectableOutput` carries the node's raw output AND the
+translated greeting the console opens with. The info rows, the peer and file
+summaries, the traffic badges and the network status line are each a translated
+phrase wrapped around a number. In all of them the string's own first strong
+character is the right decider: it puts the Arabic first and leaves the address
+or the count as a left-to-right run inside it, which is what forcing the whole
+path either way would break.
+
+Those paths compose the two helpers — `directedByContent(leftToRight(gtx), s)`
+— so that a string which decides NOTHING falls back to data rather than to the
+interface. `1.2.3.4:9000` and `4/500 | 996` have no strong character at all,
+and inheriting the Arabic frame would have right-aligned them.
+`TestDataFallbackComposition` pins that.
+
+An editor reads the locale out of the context it is handed EVENTS with, not the
+one it is drawn with, so the override has to come before the event drain — and
+still reach no further than the field. `aliasEditorContext` is that seam: the
+drain and the editor row both take it, while the menu's header, save and cancel
+stay in the interface's language. The emoji and reaction search is set in
+`SearchWrap` for the same reason, before the picker lays its editor out.
+
+`contentDirection` is the first-strong-character rule of UAX#9 (P2/P3). Strong
+means bidi class L, R or AL, read from the Unicode tables in
+`golang.org/x/text/unicode/bidi` rather than from a list of scripts kept by
+hand — such a list is wrong the moment a right-to-left script is encoded, and
+has nowhere to put the invisible marks that exist purely to answer this
+question (U+200E is L, U+200F is R, U+061C is AL). Text with no strong
+character — an empty draft, a byte counter, a row of Arabic-Indic digits, which
+are class AN — keeps the interface language's direction rather than inventing
+one.
+
+The answer is ONE direction per widget, which is coarser than UAX#9: the
+algorithm resolves a base direction per PARAGRAPH, so in `hello\nمرحبا` the
+second line should stand on its own. It does not, because a Gio text widget
+carries a single Locale — `widget.Label` and `widget.Editor` build one
+`text.Parameters` for everything they hold. The Arabic line still READS
+correctly, since go-text resolves bidi runs inside that base; what it loses is
+its alignment and the side its trailing punctuation settles on. Buying the
+paragraph would mean one widget per paragraph, which for the message body and
+the composer is worse than the defect: a `Selectable` per paragraph cannot be
+selected or copied across a line break, and an `Editor` per paragraph is not an
+editor. `TestContentDirection` pins both halves of this so the limit cannot
+change unnoticed.
+
+`layout.Context` is a value, so both helpers return a context instead of
+changing one, and an override reaches its own subtree and nothing else.
+
+`inReadingOrder` is the third helper and it arranges rather than shapes.
+`layout.Flex` places children in the order it is handed them and knows nothing
+about direction, so a row written as "label, name, ID, fingerprint" keeps that
+arrangement in Arabic: the label stranded on the left, the name it introduces
+stranded on the right, and the flexed child's text pushed to the far side of
+its box because right-to-left text starts there. The row overflows nothing — it
+measures the same 68px at every width in every language — it simply reads
+backwards, which looks like the field has collided with the card around it.
+The composer's "Message body for: NAME  ID: fingerprint" header takes it.
+
+Reversal is only valid for a row whose children are symmetric: labels, values
+and spacers, none of which has a side of its own. A row with an icon that must
+stay on the leading edge, or a one-sided inset, needs its own decision and must
+not be handed to it. That is why the helper exists per row rather than being
+applied to every `Flex` in the package, and why the containers listed above as
+NOT mirrored are still not mirrored.
 
 ### Shared UI components
 
@@ -1168,11 +1324,25 @@ Window (Gio event loop)
 
 ### Шрифты
 
-Оба семейства едут внутри бинаря: Go-начертания для текста и Noto Color Emoji
-для эмодзи, зарегистрированный под именем семейства `Corsa Emoji`. Тема просит
-`Go, Corsa Emoji`, а точное совпадение семейства выигрывает у любого
-установленного в системе шрифта, поэтому пользователь видит те эмодзи, которые
+Четыре семейства едут внутри бинаря: Go-начертания для латиницы, кириллицы и
+греческого, Noto Color Emoji для эмодзи, Noto Sans Arabic для арабского и
+SC-начертание Noto Sans CJK для китайского, японского и корейского. Три
+встроенных файла зарегистрированы под собственными именами проекта — `Corsa
+Emoji`, `Corsa Arabic`, `Corsa CJK`, — а тема просит `Go, Corsa Emoji, Corsa
+Arabic, Corsa CJK`. Точное совпадение семейства выигрывает у любого
+установленного в системе шрифта, поэтому пользователь видит те глифы, которые
 несёт эта сборка.
+
+Системному набору шрифтов не доверено ничего, и каждая половина этого правила
+выучена на баге. Первая — эмодзи, о ней ниже. Вторая — арабский, и там с
+рендерером всё было в порядке: шрифта просто не было. go-text на Android
+сканирует `/system/fonts`, `/system/font` и `/data/fonts` и больше ничего,
+поэтому на устройстве, которое держит арабское начертание где-то ещё
+(`/product/fonts`, вендорский оверлей, подмонтированный шрифтовой модуль),
+шейпер не находил глифа ни для одной арабской буквы и рисовал `.notdef` —
+по пустому квадрату на кодовую точку, на весь интерфейс. Китайский на том же
+устройстве уцелел только потому, что его CJK-шрифт случайно оказался в
+сканируемом каталоге; поэтому он тоже встроен, а не оставлен на эту случайность.
 
 Имя семейства важно не меньше самого файла. `emoji` — это ОБЩЕЕ (generic)
 семейство в подсистеме подбора шрифтов, наравне с `serif` и `monospace`, и
@@ -1182,8 +1352,8 @@ Emoji на Windows, и до встроенных байтов дело не до
 никто больше не претендует, снимает эту конкуренцию — ценой того, что для
 эмодзи, которого в сборке нет, отката на системный шрифт больше не будет.
 
-Эмодзи-шрифт встроен потому, что системные шрифты для нашего рендерера не
-взаимозаменяемы. Gio рисует контуры, SVG и БИТМАПЫ, а всё остальное молча
+У эмодзи-шрифта поверх этого есть вторая причина быть встроенным: системные
+шрифты для нашего рендерера не взаимозаменяемы. Gio рисует контуры, SVG и БИТМАПЫ, а всё остальное молча
 пропускает, тогда как Windows хранит цветные глифы Segoe UI Emoji в таблице
 COLR: на Windows каждое эмодзи выводилось пустым местом, а пары региональных
 индикаторов, из которых состоят флаги, откатывались на обычные контуры букв и
@@ -1199,13 +1369,152 @@ COLR: на Windows каждое эмодзи выводилось пустым �
 именно шейпинг, а не поиск в `cmap`, потому что флаги это лигатуры двух
 региональных индикаторов, а радужный флаг — ZWJ-последовательность.
 
-Цена — около десяти мегабайт в каждом бинаре, включая Android-пакет, где
-хватило бы системного шрифта. Это плата за одинаковые эмодзи везде и за
+`TestBundledFontsDrawEveryTranslatedRune` задаёт скриптовым шрифтам тот вопрос,
+на котором арабская сборка провалилась: для каждой строки переводов `ar` и `zh`
+каждая руна соответствующего письма обязана шейпиться во что-то отличное от
+`.notdef`. Вопрос задаётся строкам, которые реально доходят до экрана, а не
+образцовому алфавиту, — переводчик, потянувшийся за буквой вне покрытия
+встроенного шрифта, падает здесь, а не перед пользователем. Шрифта касаются
+только руны того письма, ради которого он встроен: латиница и глаголы формата,
+подмешанные в те же строки, — забота Go-начертаний.
+
+CJK-файл намеренно одно начертание. `.ttc` с десятью языковыми вариантами
+заставил бы разбирать на старте все десять ради одного, а варианты отличаются
+не покрытием, а тем, какую форму выбирают по умолчанию, — поэтому SC-начертание
+отвечает и за японский, и за корейский текст. Оба скриптовых файла взяты из
+`notofonts/arabic` как `NotoSansArabic-Regular.ttf` и из `notofonts/noto-cjk`
+как `NotoSansCJKsc-Regular.otf`.
+
+Сборка коллекции стоит около 30 мс и около 34 МиБ кучи, один раз на процесс,
+и почти всё это — CJK-начертание. Плата берётся на старте на любой платформе,
+включая телефоны: шейпер Gio принимает коллекцию целиком и не умеет разбирать
+начертание в момент, когда его руна впервые понадобилась.
+
+Цена — около двадцати семи мегабайт в каждом бинаре, включая Android-пакет, где
+часто хватило бы системных шрифтов. Это плата за одинаковые глифы везде и за
 независимость от того, что установлено у пользователя: Linux-десктоп без
-эмодзи-шрифта имел ровно ту же проблему с пустыми глифами. Шрифт разбирается
-один раз на процесс, а его face переиспользуется между окнами — Gio это прямо
-разрешает; лицензия едет рядом с ним в
-`internal/app/desktop/assets/fonts/OFL.txt`.
+эмодзи-шрифта имел ровно ту же проблему с пустыми глифами, а арабский интерфейс
+имел её на Android. Каждый шрифт разбирается один раз на процесс, а его face
+переиспользуется между окнами — Gio это прямо разрешает; лицензия едет рядом с
+ними в `internal/app/desktop/assets/fonts/OFL.txt` — все три под SIL Open Font
+License 1.1.
+
+### Направление письма
+
+`layout.Context.Locale` в Gio, по его собственной документации, никогда не
+заполняется автоматически, а нулевой `Locale` читается как слева направо.
+Цикл кадра заполняет его из языка самого приложения (`textLocale`, `i18n.go`)
+до того, как что-либо раскладывается: интерфейс рисуется на языке, который
+выбрал здесь пользователь, а не на системном, значит именно о нём и должен
+знать шейпер.
+
+`textDirections` содержит только исключения — сегодня один `ar`. Нулевое
+значение `system.TextDirection` и так означает слева направо, поэтому язык,
+отсутствующий в карте, не может разъехаться со значением по умолчанию, а язык,
+добавленный в переключатель без направления, ловится тестом
+`TestTextLocaleDirection`.
+
+Локаль решает вопросы текста: где начинается строка, на какую сторону садятся
+нейтральные символы и пунктуация, куда едут курсор и выделение в редакторе.
+Раскладку она НЕ зеркалит — сайдбар остаётся слева, иконки сохраняют свою
+сторону строки, пузыри сообщений сохраняют выравнивание по автору. Зеркалирование
+контейнеров — отдельная задача.
+
+Локаль кадра — это значение по умолчанию, а не приговор: в окне живут три вида
+текста, и язык интерфейса отвечает только за один из них
+(`text_direction.go`).
+
+**Переведённый интерфейс** берёт локаль кадра, и делать с ним ничего не надо.
+
+**Технический текст** языком не является вовсе: identity, адреса `corsa:`,
+имена файлов, размеры, таймстемпы, команды и всё, что узел сообщает о себе.
+Его фиксирует `leftToRight`, и это не косметика — внутри редактора локаль
+решает, куда едут курсор и стрелки, поэтому правка отпечатка в арабском
+интерфейсе иначе гоняла бы курсор задом наперёд по строке, в которой нет ни
+одного RTL-символа. Переопределения стоят на поле поиска identity, на вводе
+консоли, на командной строке истории и её таймстемпе, на подсказках команд, на
+URL доната, на подписях осей графика трафика, на имени файла и счётчиках байт в
+карточке файла, на чипе прикреплённого файла, на разбивке статуса сети, на
+адресе `corsa:` в сайдбаре и в панели identity, на отпечатке над композером, на
+таймстемпе и строке доставки в пузыре, а также на подписи и подтверждении
+удаления в просмотрщике изображений.
+
+Это листья, а не поддеревья, и намеренно. Переопределение, поставленное на
+карточку или панель, дотягивается до переведённых подписей, кнопок и текстов
+ошибок, лежащих рядом с данными, — именно так консоль, карточка файла и строка
+статуса сети уже однажды потеряли свой арабский.
+
+**Свободный пользовательский текст** принадлежит тому, кто его написал, а не
+тому, кто читает, поэтому `directedByContent` берёт направление из самого
+текста: тело сообщения, черновик композера, алиас контакта, поиск эмодзи и
+реакций, превью в сайдбаре, имя контакта, цитата ответа и превью
+неотправленного. Арабское сообщение читается справа налево в английской
+сборке, английское — слева направо в арабской.
+
+`directedByContent` отвечает и всюду, где обе категории приходят одним и тем же
+путём, — а таких мест больше, чем кажется. Через `layoutSelectableText` идут и
+адреса пиров, И переведённая meta-строка здоровья пира; через
+`layoutSelectableOutput` — и сырой вывод узла, И переведённое приветствие, с
+которого консоль начинается. Info-строки, сводки по пирам и файлам, бейджи
+трафика и строка статуса сети — это переведённая фраза вокруг числа. Везде там
+правильный решатель — собственный первый сильный символ строки: он ставит
+арабское первым и оставляет адрес или счётчик LTR-прогоном внутри. Именно это
+сломало бы принудительное направление всего пути в любую сторону.
+
+Эти пути композируют оба хелпера — `directedByContent(leftToRight(gtx), s)`, —
+чтобы строка, которая не решает НИЧЕГО, откатывалась к данным, а не к
+интерфейсу. В `1.2.3.4:9000` и `4/500 | 996` сильных символов нет вовсе, и
+наследование арабского кадра прижало бы их вправо. Это зафиксировано в
+`TestDataFallbackComposition`.
+
+Редактор читает локаль из того контекста, с которым ему отдают СОБЫТИЯ, а не из
+того, с которым его рисуют, поэтому переопределение обязано стоять до слива
+событий — и при этом не дотягиваться дальше самого поля. Этот шов —
+`aliasEditorContext`: его берут и слив событий, и строка с редактором, а
+заголовок меню, «сохранить» и «отменить» остаются на языке интерфейса. Поиск
+эмодзи и реакций выставлен в `SearchWrap` по той же причине — до того, как
+пикер разложит свой редактор.
+
+`contentDirection` — правило первого сильного символа из UAX#9 (P2/P3).
+«Сильный» — это bidi-класс L, R или AL, читаемый из юникодных таблиц
+`golang.org/x/text/unicode/bidi`, а не из списка письменностей, поддерживаемого
+руками: такой список ошибается в момент, когда кодируют очередную RTL-письменность,
+и ему некуда девать невидимые метки, существующие ровно ради этого вопроса
+(U+200E — это L, U+200F — R, U+061C — AL). Текст без сильного символа — пустой
+черновик, счётчик байтов, строка арабо-индийских цифр (класс AN) — сохраняет
+направление языка интерфейса, а не выдумывает своё.
+
+Ответ — ОДНО направление на виджет, и это грубее UAX#9: алгоритм разрешает
+базовое направление на КАЖДЫЙ абзац, поэтому в `hello\nمرحبا` вторая строка
+должна стоять сама за себя. Она не стоит: текстовый виджет Gio несёт одну
+Locale — `widget.Label` и `widget.Editor` строят один `text.Parameters` на всё,
+что в них лежит. ЧИТАЕТСЯ арабская строка всё равно правильно, потому что
+go-text разрешает bidi-прогоны внутри этой базы; теряются выравнивание и
+сторона, на которую садится завершающая пунктуация. Купить абзац можно только
+виджетом на абзац, а для тела сообщения и композера это хуже самого дефекта:
+`Selectable` на абзац нельзя выделить и скопировать через перенос строки, а
+`Editor` на абзац — уже не редактор. Обе половины зафиксированы в
+`TestContentDirection`, чтобы предел не сдвинулся незаметно.
+
+`layout.Context` — значение, поэтому оба хелпера возвращают контекст, а не
+меняют существующий: переопределение достаётся своему поддереву и никому больше.
+
+`inReadingOrder` — третий хелпер, и он не про начертание, а про расстановку.
+`layout.Flex` ставит детей в том порядке, в каком их отдали, и про направление
+не знает ничего, поэтому строка, написанная как «подпись, имя, ID, отпечаток»,
+сохраняет эту расстановку и в арабском: подпись брошена слева, имя, которое она
+вводит, — справа, а текст flexed-ребёнка уезжает к дальнему краю своей коробки,
+потому что RTL-текст оттуда и начинается. Строка при этом ничего не переполняет
+— она меряется теми же 68px на любой ширине и любом языке, — она просто
+читается наоборот, и это выглядит так, будто поле налезло на карточку вокруг.
+Хелпер взяла шапка композера «Message body for: ИМЯ  ID: отпечаток».
+
+Разворот допустим только для строки с симметричными детьми: подписи, значения и
+спейсеры, ни у одного из которых нет своей стороны. Строке с иконкой, которая
+обязана остаться на ведущем крае, или с односторонним отступом нужно
+собственное решение, и отдавать её сюда нельзя. Поэтому хелпер применяется
+построчно, а не ко всем `Flex` пакета, — и поэтому контейнеры, перечисленные
+выше как НЕ зеркалимые, по-прежнему не зеркалятся.
 
 ### Общие компоненты интерфейса
 
