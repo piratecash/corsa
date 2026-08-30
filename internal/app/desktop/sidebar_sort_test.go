@@ -74,21 +74,26 @@ func TestSidebarPeerTierNilReachableIDs(t *testing.T) {
 // TestSortSidebarPeers verifies the full 4-tier sorting:
 //
 //  1. Online + unread (by unread count desc)
-//  2. Online, no unread (by timestamp desc)
+//  2. Online, no unread (most recent activity, i.e. input order)
 //  3. Offline + unread (by unread count desc)
-//  4. Offline, no unread (by timestamp desc)
+//  4. Offline, no unread (most recent activity, i.e. input order)
+//
+// The input arrives in the router's most-recent-activity order, and the sort
+// groups it into tiers without disturbing that order inside a tier. The
+// preview timestamps below deliberately contradict it: they are what the
+// senders' clocks printed, and the sidebar does not rank by them.
 func TestSortSidebarPeers(t *testing.T) {
 	now := time.Now()
 	snap := makeSnap(
 		map[domain.PeerIdentity]*service.RouterPeerState{
 			domaintest.ID("on-unread-5"):     {Unread: 5, Preview: service.ConversationPreview{Timestamp: now.Add(-1 * time.Hour)}},
 			domaintest.ID("on-unread-2"):     {Unread: 2, Preview: service.ConversationPreview{Timestamp: now.Add(-2 * time.Hour)}},
-			domaintest.ID("on-read-recent"):  {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-10 * time.Minute)}},
-			domaintest.ID("on-read-old"):     {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-3 * time.Hour)}},
+			domaintest.ID("on-read-recent"):  {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-3 * time.Hour)}},
+			domaintest.ID("on-read-old"):     {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-10 * time.Minute)}},
 			domaintest.ID("off-unread-7"):    {Unread: 7, Preview: service.ConversationPreview{Timestamp: now.Add(-30 * time.Minute)}},
 			domaintest.ID("off-unread-1"):    {Unread: 1, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Minute)}},
-			domaintest.ID("off-read-recent"): {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-20 * time.Minute)}},
-			domaintest.ID("off-read-old"):    {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Hour)}},
+			domaintest.ID("off-read-recent"): {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Hour)}},
+			domaintest.ID("off-read-old"):    {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-20 * time.Minute)}},
 		},
 		map[domain.PeerIdentity]bool{
 			domaintest.ID("on-unread-5"):    true,
@@ -98,10 +103,10 @@ func TestSortSidebarPeers(t *testing.T) {
 		},
 	)
 
-	// Start with scrambled order.
+	// Activity order: what happened most recently comes first, tiers mixed.
 	peers := []domain.PeerIdentity{
-		domaintest.ID("off-read-old"), domaintest.ID("on-read-old"), domaintest.ID("off-unread-1"), domaintest.ID("on-unread-2"),
-		domaintest.ID("off-read-recent"), domaintest.ID("on-unread-5"), domaintest.ID("on-read-recent"), domaintest.ID("off-unread-7"),
+		domaintest.ID("off-unread-1"), domaintest.ID("on-read-recent"), domaintest.ID("off-read-recent"), domaintest.ID("on-unread-5"),
+		domaintest.ID("off-unread-7"), domaintest.ID("on-unread-2"), domaintest.ID("on-read-old"), domaintest.ID("off-read-old"),
 	}
 
 	sortSidebarPeers(peers, snap)
@@ -109,12 +114,12 @@ func TestSortSidebarPeers(t *testing.T) {
 	expected := []domain.PeerIdentity{
 		domaintest.ID("on-unread-5"),     // tier 0, unread 5
 		domaintest.ID("on-unread-2"),     // tier 0, unread 2
-		domaintest.ID("on-read-recent"),  // tier 1, recent timestamp
-		domaintest.ID("on-read-old"),     // tier 1, older timestamp
+		domaintest.ID("on-read-recent"),  // tier 1, more recent activity
+		domaintest.ID("on-read-old"),     // tier 1, less recent activity
 		domaintest.ID("off-unread-7"),    // tier 2, unread 7
 		domaintest.ID("off-unread-1"),    // tier 2, unread 1
-		domaintest.ID("off-read-recent"), // tier 3, recent timestamp
-		domaintest.ID("off-read-old"),    // tier 3, older timestamp
+		domaintest.ID("off-read-recent"), // tier 3, more recent activity
+		domaintest.ID("off-read-old"),    // tier 3, less recent activity
 	}
 
 	for i, want := range expected {
@@ -124,13 +129,17 @@ func TestSortSidebarPeers(t *testing.T) {
 	}
 }
 
-// TestSortSidebarPeersUnreadTiebreakByTimestamp verifies that peers
-// with equal unread counts within the same tier are sorted by timestamp.
-func TestSortSidebarPeersUnreadTiebreakByTimestamp(t *testing.T) {
+// TestSortSidebarPeersUnreadTiebreakByActivity verifies that peers with equal
+// unread counts within the same tier keep the activity order they arrived in,
+// and specifically that a larger preview timestamp does not overtake it: that
+// timestamp belongs to the peer's own clock.
+func TestSortSidebarPeersUnreadTiebreakByActivity(t *testing.T) {
 	now := time.Now()
 	snap := makeSnap(
 		map[domain.PeerIdentity]*service.RouterPeerState{
-			domaintest.ID("a"): {Unread: 3, Preview: service.ConversationPreview{Timestamp: now.Add(-5 * time.Minute)}},
+			// "a" claims the newer time; "b" is the one something actually
+			// happened in most recently.
+			domaintest.ID("a"): {Unread: 3, Preview: service.ConversationPreview{Timestamp: now.Add(time.Hour)}},
 			domaintest.ID("b"): {Unread: 3, Preview: service.ConversationPreview{Timestamp: now.Add(-1 * time.Minute)}},
 		},
 		map[domain.PeerIdentity]bool{
@@ -139,12 +148,11 @@ func TestSortSidebarPeersUnreadTiebreakByTimestamp(t *testing.T) {
 		},
 	)
 
-	peers := []domain.PeerIdentity{domaintest.ID("a"), domaintest.ID("b")}
+	peers := []domain.PeerIdentity{domaintest.ID("b"), domaintest.ID("a")}
 	sortSidebarPeers(peers, snap)
 
-	// Same unread count → b has a more recent timestamp, so b comes first.
 	if peers[0] != domaintest.ID("b") || peers[1] != domaintest.ID("a") {
-		t.Fatalf("expected [b, a], got %v", peers)
+		t.Fatalf("expected [b, a] — the order things happened in — got %v", peers)
 	}
 }
 
@@ -175,9 +183,10 @@ func TestSortSidebarPeersReachabilityChange(t *testing.T) {
 	peers = []domain.PeerIdentity{domaintest.ID("was-offline"), domaintest.ID("always-online")}
 	sortSidebarPeers(peers, snap)
 
-	// Now was-offline has a more recent timestamp → should be first in tier 1.
+	// Both are tier 1 now, and was-offline is the one the router lists first
+	// as the more recent activity.
 	if peers[0] != domaintest.ID("was-offline") {
-		t.Fatalf("after: expected was-offline first (more recent), got %v", peers)
+		t.Fatalf("after: expected was-offline first (more recent activity), got %v", peers)
 	}
 }
 
@@ -206,40 +215,45 @@ func TestSortSidebarPeersClearUnreadMovesToReadTier(t *testing.T) {
 	// User opens peer-a's chat → unread cleared.
 	peerState[domaintest.ID("peer-a")].Unread = 0
 
-	peers = []domain.PeerIdentity{domaintest.ID("peer-a"), domaintest.ID("peer-b")}
+	// The router lists peer-b first: it is the conversation something
+	// happened in most recently.
+	peers = []domain.PeerIdentity{domaintest.ID("peer-b"), domaintest.ID("peer-a")}
 	sortSidebarPeers(peers, snap)
 
-	// Both are now tier 1 (online, read). peer-b has a more recent timestamp.
+	// Both are now tier 1 (online, read), so that order survives.
 	if peers[0] != domaintest.ID("peer-b") {
-		t.Fatalf("after clear: expected peer-b first (more recent), got %v", peers)
+		t.Fatalf("after clear: expected peer-b first (more recent activity), got %v", peers)
 	}
 }
 
-// TestSortSidebarPeersPreviewRefreshUpdatesOrder verifies that when
-// a preview timestamp changes, the next sort reflects the new order
-// without needing a separate trigger.
-func TestSortSidebarPeersPreviewRefreshUpdatesOrder(t *testing.T) {
+// TestSortSidebarPeersNewMessageMovesPeerUp verifies that a new message moves
+// its conversation to the top of its tier on the next sort, with no separate
+// trigger — and that it does so because the ROUTER moved it to the front of
+// the order it publishes, not because of anything in the preview's timestamp.
+// The peer's clock is left an hour behind throughout to make that explicit.
+func TestSortSidebarPeersNewMessageMovesPeerUp(t *testing.T) {
 	now := time.Now()
 	peerState := map[domain.PeerIdentity]*service.RouterPeerState{
-		domaintest.ID("peer-old"):    {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-2 * time.Hour)}},
-		domaintest.ID("peer-recent"): {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-1 * time.Hour)}},
+		domaintest.ID("peer-quiet"): {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-2 * time.Hour)}},
+		domaintest.ID("peer-busy"):  {Unread: 0, Preview: service.ConversationPreview{Timestamp: now.Add(-1 * time.Hour)}},
 	}
 	snap := makeSnap(peerState, nil) // all offline
 
-	peers := []domain.PeerIdentity{domaintest.ID("peer-old"), domaintest.ID("peer-recent")}
+	peers := []domain.PeerIdentity{domaintest.ID("peer-busy"), domaintest.ID("peer-quiet")}
 	sortSidebarPeers(peers, snap)
 
-	if peers[0] != domaintest.ID("peer-recent") {
-		t.Fatalf("before refresh: expected peer-recent first, got %v", peers)
+	if peers[0] != domaintest.ID("peer-busy") {
+		t.Fatalf("before the message: expected peer-busy first, got %v", peers)
 	}
 
-	// Simulate preview refresh — peer-old gets a new message.
-	peerState[domaintest.ID("peer-old")].Preview.Timestamp = now
+	// A message lands in peer-quiet's conversation: the router promotes it to
+	// the front of PeerOrder, and its stamp — the sender's — stays behind.
+	peerState[domaintest.ID("peer-quiet")].Preview.Body = "just arrived"
 
-	peers = []domain.PeerIdentity{domaintest.ID("peer-old"), domaintest.ID("peer-recent")}
+	peers = []domain.PeerIdentity{domaintest.ID("peer-quiet"), domaintest.ID("peer-busy")}
 	sortSidebarPeers(peers, snap)
 
-	if peers[0] != domaintest.ID("peer-old") {
-		t.Fatalf("after refresh: expected peer-old first (newest timestamp), got %v", peers)
+	if peers[0] != domaintest.ID("peer-quiet") {
+		t.Fatalf("after the message: expected peer-quiet first, got %v", peers)
 	}
 }

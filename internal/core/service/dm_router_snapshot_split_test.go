@@ -22,7 +22,7 @@ func newSnapshotTestRouter(t *testing.T) *DMRouter {
 		client:         client,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 64),
 		startupDone:    make(chan struct{}),

@@ -188,7 +188,7 @@ func newRouterOver(t *testing.T, c *DesktopClient) *DMRouter {
 	t.Helper()
 	r := &DMRouter{
 		client:          c,
-		seenMessageIDs:  make(map[string]struct{}),
+		seenMessageIDs:  make(map[string]messageGate),
 		peers:           make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:         make(map[domain.PeerIdentity]uint64),
 		cache:           NewConversationCache(),

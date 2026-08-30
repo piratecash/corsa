@@ -147,7 +147,7 @@ sequenceDiagram
     UI->>UI: user clicks on peer in sidebar
     UI->>SVC: FetchConversation(peerAddress)
     SVC->>LOG: chatLog.Read("dm", peerAddress)
-    Note over LOG: SELECT from messages table<br/>WHERE conversation matches peer<br/>ORDER BY created_at ASC
+    Note over LOG: SELECT from messages table<br/>WHERE conversation matches peer<br/>ORDER BY created_at ASC, rowid ASC
     LOG-->>SVC: []Entry
     SVC->>SVC: fetch trusted contacts
     SVC->>SVC: decryptDirectMessages()
@@ -169,7 +169,7 @@ sequenceDiagram
 
     UI->>SVC: FetchConversationPreviews()
     SVC->>LOG: ReadLastEntryPerPeer()
-    Note over LOG: ROW_NUMBER() window function<br/>per peer, ORDER BY created_at DESC,<br/>rowid DESC (deterministic tiebreaker)
+    Note over LOG: ROW_NUMBER() window function<br/>per peer, ORDER BY rowid DESC<br/>(last row to ARRIVE, not largest stamp)
     LOG-->>SVC: map[peer]→Entry
     SVC->>LOG: ListConversations()
     LOG-->>SVC: []ConversationSummary (with UnreadCount)
@@ -343,7 +343,8 @@ signatures:
 - `AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
 - `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
 - `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
-- `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)` — the LAST ARRIVED row, with its arrival sequence in `Entry.RowID`
+- `MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error)` — where a message landed in the local arrival order, and whether the store holds it at all; the sidebar asks it about a message it learned of from the live event stream, which carries no such number
 - `UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
 - `HasEntryID(ctx context.Context, topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
 - `HasEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
@@ -420,6 +421,28 @@ On startup, `DMRouter.initializeFromDB()` restores sidebar state from the chatlo
   IDs rather than a count because the database is ahead of the event stream —
   the same message arrives from both — and adding an id twice changes nothing.
   Peers with unread messages are promoted to the front of `peerOrder`.
+- **Which row is LAST**: `ReadLastEntry()`, `ReadLastEntryPerPeer()` and
+  `ListConversations()` answer this by `rowid` — the local insertion counter —
+  and not by `created_at`. The column holds what the SENDER printed, and the
+  node accepts a message dated up to ten minutes into the future and
+  arbitrarily far into the past, so the largest stamp is not the last message:
+  a peer whose clock lags writes an answer that ranks below the reply we sent
+  before it, and the sidebar goes on showing our own message while the badge
+  counts theirs. Text order is not time order either, which the same file
+  documents at `LastIncomingAtPerPeer` below. `rowid` is the order in which
+  THIS node learned of the rows. Reuse after a delete cannot invert the order
+  of the rows that are STILL THERE — SQLite hands out `max(rowid)+1`, so a
+  reused value only ever goes to a row inserted after every remaining row —
+  but it does mean a deleted row and its replacement can share a number, so
+  nothing outside the store may treat equal sequences as proof of being the
+  same message; the router separates those by its own deletion epoch. The conversation itself is NOT
+  reordered — `Read()` and `ReadLast()` stay in `created_at` order, with
+  `rowid` as the tie-break so rows sharing a second (wire stamps have
+  second resolution) come back in the order they were written rather than in
+  whatever order the sorter chose. So a message delivered long after it was
+  written sits in its chronological place in the thread and still counts as
+  the newest thing in the sidebar, which is also what the badge and the
+  conversation order already say about it.
 - **Last-online evidence**: `LastIncomingAtPerPeer()` returns, per
   conversation, the creation time of the newest message the peer wrote. The
   sidebar spends it as the weakest form of "last online" — a message can only
@@ -1007,7 +1030,7 @@ HandleLocalFrame("fetch_dm_headers")
 # Preview load (on startup with retry + on new message) — DesktopClient reads chatlog directly
 FetchConversationPreviews(ctx)
   ├── chatLog.ReadLastEntryPerPeer(ctx)
-  │     └── ROW_NUMBER() window per peer, ORDER BY created_at DESC, rowid DESC
+  │     └── ROW_NUMBER() window per peer, ORDER BY rowid DESC
   ├── chatLog.ListConversations(ctx)
   │     └── returns []ConversationSummary with UnreadCount
   └── decrypt each preview + merge UnreadCount
@@ -1022,7 +1045,7 @@ FetchConversation(ctx, peerAddress)
 # Single preview reload (after new message arrives)
 FetchSinglePreview(ctx, peerAddress)
   ├── chatLog.ReadLastEntry(ctx, "dm", peerAddress)
-  │     └── SELECT … ORDER BY created_at DESC, rowid DESC LIMIT 1
+  │     └── SELECT … ORDER BY rowid DESC LIMIT 1
   └── decrypt single preview
 ```
 
@@ -1249,7 +1272,7 @@ sequenceDiagram
     UI->>UI: пользователь нажимает на peer в боковой панели
     UI->>SVC: FetchConversation(peerAddress)
     SVC->>LOG: chatLog.Read("dm", peerAddress)
-    Note over LOG: SELECT из таблицы messages<br/>WHERE диалог совпадает с peer<br/>ORDER BY created_at ASC
+    Note over LOG: SELECT из таблицы messages<br/>WHERE диалог совпадает с peer<br/>ORDER BY created_at ASC, rowid ASC
     LOG-->>SVC: []Entry
     SVC->>SVC: получение trusted contacts
     SVC->>SVC: decryptDirectMessages()
@@ -1271,7 +1294,7 @@ sequenceDiagram
 
     UI->>SVC: FetchConversationPreviews()
     SVC->>LOG: ReadLastEntryPerPeer()
-    Note over LOG: ROW_NUMBER() оконная функция<br/>по peer, ORDER BY created_at DESC,<br/>rowid DESC (детерминированный тайбрейкер)
+    Note over LOG: ROW_NUMBER() оконная функция<br/>по peer, ORDER BY rowid DESC<br/>(последняя ПРИБЫВШАЯ строка, а не наибольший штамп)
     LOG-->>SVC: map[peer]→Entry
     SVC->>LOG: ListConversations()
     LOG-->>SVC: []ConversationSummary (с UnreadCount)
@@ -1442,7 +1465,8 @@ SQLite через общую state-базу, и отмена обязана ех
 - `AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
 - `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
 - `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
-- `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)`
+- `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)` — ПОСЛЕДНЯЯ ПРИБЫВШАЯ строка, её порядковый номер приходит в `Entry.RowID`
+- `MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error)` — куда сообщение легло в локальном порядке прибытия и держит ли хранилище его вообще; сайдбар спрашивает это про сообщение, о котором узнал из живого потока событий, где такого номера нет
 - `UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
 - `HasEntryID(ctx context.Context, topic string, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
 - `HasEntryInConversation(ctx context.Context, peerAddress domain.PeerIdentity, id domain.MessageID) bool`
@@ -1520,6 +1544,28 @@ stateDiagram-v2
   которого и есть бейдж. Именно ID, а не счёт: база опережает поток событий —
   одно сообщение приходит из обоих источников, — а повторное добавление id
   ничего не меняет. Peers с непрочитанными продвигаются в начало `peerOrder`.
+- **Какая строка ПОСЛЕДНЯЯ**: `ReadLastEntry()`, `ReadLastEntryPerPeer()` и
+  `ListConversations()` отвечают на это по `rowid` — локальному счётчику
+  вставки, — а не по `created_at`. В колонке лежит то, что напечатал
+  ОТПРАВИТЕЛЬ, а нода принимает сообщение с датой до десяти минут вперёд и
+  сколь угодно далеко назад, поэтому наибольший штамп — не последнее
+  сообщение: у peer'а с отстающими часами ответ оказывается ниже нашей
+  реплики, отправленной до него, и сайдбар продолжает показывать наше
+  сообщение, пока бейдж считает их. Текстовый порядок тоже не равен
+  временному — это задокументировано ниже, у `LastIncomingAtPerPeer`.
+  `rowid` — это порядок, в котором ЭТОТ узел узнал о строках. Переиспользование
+  после удаления не переворачивает порядок ОСТАВШИХСЯ строк: SQLite выдаёт
+  `max(rowid)+1`, поэтому переиспользованное значение достаётся только строке,
+  вставленной позже всех оставшихся. Но это значит, что удалённая строка и её
+  замена могут делить один номер, поэтому за пределами хранилища равные
+  последовательности нельзя считать доказательством, что это одно и то же
+  сообщение; роутер различает их своей эпохой удалений. Сам диалог НЕ переупорядочивается — `Read()` и `ReadLast()`
+  остаются в порядке `created_at`, с `rowid` как тайбрейкером, чтобы строки
+  одной секунды (штампы на проводе секундные) возвращались в порядке записи,
+  а не в том, который выбрал сортировщик. Поэтому сообщение, доставленное
+  сильно позже написания, стоит в треде на своём хронологическом месте и при
+  этом считается самым свежим событием в сайдбаре — ровно то же самое про него
+  уже говорят бейдж и порядок диалогов.
 - **Свидетельство last-online**: `LastIncomingAtPerPeer()` возвращает по
   каждому диалогу время создания самого свежего сообщения, написанного
   собеседником. Sidebar тратит это как самую слабую форму «последний раз

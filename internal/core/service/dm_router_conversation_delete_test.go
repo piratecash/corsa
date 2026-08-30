@@ -36,7 +36,7 @@ func newTestDMRouterForConversationDelete(t *testing.T) (*DMRouter, *DesktopClie
 	counter := &convDispatchCounter{}
 	r := &DMRouter{
 		client:                              c,
-		seenMessageIDs:                      make(map[string]struct{}),
+		seenMessageIDs:                      make(map[string]messageGate),
 		peers:                               make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:                             make(map[domain.PeerIdentity]uint64),
 		cache:                               NewConversationCache(),

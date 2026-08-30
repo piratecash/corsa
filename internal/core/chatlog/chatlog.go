@@ -53,6 +53,18 @@ type Entry struct {
 	DeliveryStatus string `json:"delivery_status,omitempty"`
 	TTLSeconds     int    `json:"ttl_seconds,omitempty"`
 	Metadata       string `json:"metadata,omitempty"` // arbitrary JSON for future extensibility
+	// RowID is the row's arrival sequence — SQLite's rowid, the order in
+	// which THIS node learned of the messages. It is filled only by the
+	// readers that answer "which row is last" (see lastArrivedOrder), because
+	// they are the only ones whose answer has to be compared against an
+	// answer from somewhere else: the sidebar learns about a message twice,
+	// once from the store and once from the live event, and the two carry no
+	// other value that can order them. Zero means "not asked for", not "first
+	// row".
+	//
+	// Kept out of the JSON surface: it is an internal ordering handle, not a
+	// fact about the message, and the console dumps entries verbatim.
+	RowID int64 `json:"-"`
 }
 
 // ConversationSummary holds metadata for a single conversation peer.
@@ -183,12 +195,20 @@ func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress doma
 	return n > 0, nil
 }
 
-// Read returns the conversation entries in ascending time order. The context
-// deadline is propagated to SQLite so callers can bound I/O time.
+// Read returns the conversation entries in ascending time order, rows of the
+// same second in the order they were written. The context deadline is
+// propagated to SQLite so callers can bound I/O time.
+//
+// The rowid tie-break is not cosmetic. Wire timestamps have second
+// resolution, so a question and its answer share a stamp routinely, and
+// created_at alone left those rows to the sorter: the plan for this query
+// walks the two directions of the conversation as separate index legs, so a
+// four-message exchange inside one second came back grouped by direction
+// rather than as a conversation.
 func (s *Store) Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
 	query, args := s.peerQuery(topic, peerAddress,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
-		 FROM messages WHERE `, ` ORDER BY created_at ASC`)
+		 FROM messages WHERE `, ` ORDER BY created_at ASC, rowid ASC`)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -277,15 +297,20 @@ func (s *Store) UndeliveredOutgoing(ctx context.Context, self domain.PeerIdentit
 }
 
 // ReadLast returns the newest n entries of a conversation, oldest first.
+//
+// Both halves carry the rowid tie-break, and the outer one is what the thread
+// is actually read in: without it the re-ordering was a no-op over rows that
+// share a second, so a conversation held inside one second came back in the
+// inner query's DESCENDING order — the whole exchange upside down.
 func (s *Store) ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error) {
 	// Use a subquery to get the last N, then re-order ascending.
 	innerQuery, args := s.peerQuery(topic, peerAddress,
-		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
+		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata, rowid AS row_id
 		 FROM messages WHERE `, ` ORDER BY created_at DESC, rowid DESC LIMIT ?`)
 	args = append(args, n)
 
 	query := fmt.Sprintf(`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
-		FROM (%s) sub ORDER BY created_at ASC`, innerQuery)
+		FROM (%s) sub ORDER BY created_at ASC, row_id ASC`, innerQuery)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -297,19 +322,30 @@ func (s *Store) ReadLast(ctx context.Context, topic string, peerAddress domain.P
 }
 
 // ListConversations lists every DM conversation. Conversations with unread
-// messages come first, then by last message time.
+// messages come first, then by the arrival of their last message.
+//
+// LastMessage is the created_at OF THE LAST ARRIVED ROW, not the largest
+// created_at in the conversation — see lastArrivedOrder for why those differ
+// and why this one is the honest answer. The join is what fetches it: the
+// aggregate finds the row (MAX(rowid)) and the join reads its stamp, rather
+// than relying on SQLite's bare-column-with-max behaviour, which is easy to
+// break by accident and impossible to notice when it is.
 func (s *Store) ListConversations(ctx context.Context) ([]ConversationSummary, error) {
 	selfAddr := s.identityAddr
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT
-			CASE WHEN sender = ? THEN recipient ELSE sender END AS peer_address,
-			MAX(created_at) AS last_message,
-			COUNT(*) AS cnt,
-			SUM(CASE WHEN sender != ? AND recipient = ? AND delivery_status != 'seen' THEN 1 ELSE 0 END) AS unread_count
-		FROM messages
-		WHERE topic = 'dm' AND (sender = ? OR recipient = ?)
-		GROUP BY peer_address
-		ORDER BY (unread_count > 0) DESC, last_message DESC`,
+		SELECT grouped.peer_address, last.created_at AS last_message, grouped.cnt, grouped.unread_count
+		FROM (
+			SELECT
+				CASE WHEN sender = ? THEN recipient ELSE sender END AS peer_address,
+				MAX(rowid) AS last_rowid,
+				COUNT(*) AS cnt,
+				SUM(CASE WHEN sender != ? AND recipient = ? AND delivery_status != 'seen' THEN 1 ELSE 0 END) AS unread_count
+			FROM messages
+			WHERE topic = 'dm' AND (sender = ? OR recipient = ?)
+			GROUP BY peer_address
+		) grouped
+		JOIN messages last ON last.rowid = grouped.last_rowid
+		ORDER BY (grouped.unread_count > 0) DESC, grouped.last_rowid DESC`,
 		selfAddr, selfAddr, selfAddr, selfAddr, selfAddr,
 	)
 	if err != nil {
@@ -590,15 +626,17 @@ func parseStoredTimestamp(raw string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// ReadLastEntry returns the newest entry of a conversation, nil when empty.
+// ReadLastEntry returns the LAST ARRIVED entry of a conversation, nil when
+// empty. This is the sidebar's preview, and "last" here means insertion
+// order — see lastArrivedOrder.
 func (s *Store) ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error) {
 	query, args := s.peerQuery(topic, peerAddress,
-		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
-		 FROM messages WHERE `, ` ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata, rowid
+		 FROM messages WHERE `, ` ORDER BY rowid DESC LIMIT 1`)
 
 	row := s.db.QueryRowContext(ctx, query, args...)
 	var e Entry
-	err := row.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata)
+	err := row.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata, &e.RowID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -608,19 +646,75 @@ func (s *Store) ReadLastEntry(ctx context.Context, topic string, peerAddress dom
 	return &e, nil
 }
 
-// ReadLastEntryPerPeer returns the newest entry of every DM conversation,
-// keyed by peer address.
+// lastArrivedOrder is why the three "which row is last" readers below order by
+// rowid rather than by created_at.
+//
+// created_at is the timestamp the SENDER printed, and the sidebar is the one
+// surface where trusting it changes what the user sees. Two things go wrong
+// when the largest stamp is taken to be the last message:
+//
+//   - a peer whose clock lags writes a message that reads as OLDER than the
+//     reply we sent a moment earlier. The node accepts it — drift is tolerated
+//     by design, up to ten minutes into the future and without bound into the
+//     past — the badge counts it, the row jumps to the top of the sidebar, and
+//     the preview keeps showing our own older reply until real time catches up
+//     with our stamp;
+//   - the column is TEXT and text order is not time order. "…00Z" sorts ABOVE
+//     "…00.5Z" ('Z' > '.'), and a zone offset moves the instant by hours while
+//     the printed digits keep their order. The same hazard is documented at
+//     LastIncomingAtPerPeer, which solved it by comparing in Go; here the
+//     ordering is what has to change, so it moves off the column entirely.
+//
+// rowid is the local insertion counter: the order in which THIS node learned
+// of the messages, which no remote clock can reach. Reuse after a delete
+// cannot invert it — SQLite hands out max(rowid)+1, so a reused value is only
+// ever given to a row inserted after every row still present.
+//
+// The chat history itself is deliberately NOT reordered (see Read/ReadLast):
+// a thread is read as the chronology its authors dated, while the sidebar
+// answers "what happened here last", which is also what the badge counts and
+// what moved the conversation to the top. A message delivered long after it
+// was written therefore appears in its chronological place in the thread and
+// still shows up as the newest thing in the sidebar.
+
+// MessageSeq returns a message's arrival sequence — the same number
+// ReadLastEntry hands up as Entry.RowID — and whether the store holds the id
+// at all. The sidebar asks it about a message it learned of from the live
+// event stream, which carries no such number: the event says WHAT arrived, the
+// store says WHERE it landed, and only the second one can be compared with the
+// row already on screen.
+//
+// A missing id is reported as absence, not as an error: the row can be
+// deleted between the event and this question, and a caller that cannot order
+// its message simply applies it as before.
+func (s *Store) MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error) {
+	if messageID == "" {
+		return 0, false, nil
+	}
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `SELECT rowid FROM messages WHERE id = ?`, string(messageID)).Scan(&seq)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("chatlog: message seq %s: %w", messageID, err)
+	}
+	return seq, true, nil
+}
+
+// ReadLastEntryPerPeer returns the last arrived entry of every DM
+// conversation, keyed by peer address. See lastArrivedOrder.
 func (s *Store) ReadLastEntryPerPeer(ctx context.Context) (map[string]Entry, error) {
 	selfAddr := s.identityAddr
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
+		SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata, row_id
 		FROM (
 			SELECT
 				m.id, m.sender, m.recipient, m.body, m.created_at,
-				m.flag, m.delivery_status, m.ttl_seconds, m.metadata,
+				m.flag, m.delivery_status, m.ttl_seconds, m.metadata, m.rowid AS row_id,
 				ROW_NUMBER() OVER (
 					PARTITION BY CASE WHEN m.sender = ? THEN m.recipient ELSE m.sender END
-					ORDER BY m.created_at DESC, m.rowid DESC
+					ORDER BY m.rowid DESC
 				) AS rn
 			FROM messages m
 			WHERE m.topic = 'dm' AND (m.sender = ? OR m.recipient = ?)
@@ -636,7 +730,7 @@ func (s *Store) ReadLastEntryPerPeer(ctx context.Context) (map[string]Entry, err
 	result := make(map[string]Entry)
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata); err != nil {
+		if err := rows.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata, &e.RowID); err != nil {
 			continue
 		}
 		peer := e.Recipient

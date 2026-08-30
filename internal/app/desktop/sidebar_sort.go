@@ -42,12 +42,18 @@ func sidebarPeerTier(peer domain.PeerIdentity, snap service.RouterSnapshot) int 
 //
 // Tiers:
 //  1. Online + unread — by unread count descending
-//  2. Online, no unread — by last message timestamp descending
+//  2. Online, no unread — by most recent activity
 //  3. Offline + unread — by unread count descending
-//  4. Offline, no unread — by last message timestamp descending
+//  4. Offline, no unread — by most recent activity
 //
-// SliceStable preserves the input order (from PeerOrder via
-// mergeRecipientOrder) as a tiebreaker when all sort keys are equal.
+// "Most recent activity" is the router's own PeerOrder, which the input
+// already carries (mergeRecipientOrder) and SliceStable preserves: the router
+// moves a conversation to the front of that list when a message is applied to
+// it, so the order is the order things happened HERE. It deliberately is not
+// the preview's timestamp — that is the time the sender's clock printed, and a
+// peer whose clock runs fast could otherwise hold the top of the sidebar for
+// as long as it kept sending, while one running slow sank below conversations
+// nothing had happened in.
 func sortSidebarPeers(peers []domain.PeerIdentity, snap service.RouterSnapshot) {
 	sort.SliceStable(peers, func(i, j int) bool {
 		pi, pj := peers[i], peers[j]
@@ -69,7 +75,8 @@ func sortSidebarPeers(peers []domain.PeerIdentity, snap service.RouterSnapshot) 
 			}
 		}
 
-		// Within the same tier and equal unread count: most recent activity first.
-		return psi.Preview.Timestamp.After(psj.Preview.Timestamp)
+		// Same tier, same unread count: keep the input order, which is the
+		// router's most-recent-activity order.
+		return false
 	})
 }

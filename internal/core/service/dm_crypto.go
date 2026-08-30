@@ -141,6 +141,61 @@ func (d *DMCrypto) notePreviewDecryptSuccess(entry *chatlog.Entry, plain *direct
 	})
 }
 
+// messageSeq asks the store where a message landed in the local arrival
+// order. Zero on every failure, and deliberately so: the number exists only to
+// order two previews against each other, so "unknown" has to mean "cannot be
+// ordered" — never "oldest", which would let a lookup failure drop a live
+// message from the sidebar. Bounded so a slow database delays a message rather
+// than holding the decrypt path open.
+func (d *DMCrypto) messageSeq(ctx context.Context, messageID domain.MessageID) int64 {
+	if d.chatlog == nil || d.chatlog.Store() == nil || messageID == "" {
+		return 0
+	}
+	// The caller's context is deliberately stripped of its cancellation. On
+	// the send path it has already been spent on the RPC, so a deadline
+	// reached just as the node accepted the message would leave the sequence
+	// unknown on a send that SUCCEEDED — and an echo without a sequence is
+	// refused by the sidebar, putting back the symptom this ordering exists to
+	// remove. The question here is a single indexed read of a row that is
+	// already committed; it gets its own short bound instead.
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	seq, ok, err := d.chatlog.Store().MessageSeq(readCtx, messageID)
+	if err != nil {
+		log.Warn().Err(err).
+			Str("message_id", logid.Of(string(messageID))).
+			Msg("dm_crypto: could not read the message's arrival sequence; the sidebar cannot order it")
+		return 0
+	}
+	if !ok {
+		// Normal: the row can be deleted between the event and this question,
+		// and a headless node may store nothing at all.
+		return 0
+	}
+	return seq
+}
+
+// previewTimestamp reads a stored row's created_at for the sidebar.
+//
+// A row whose stamp cannot be parsed still has a body, and the body is what
+// the sidebar shows, so the preview is built either way with the zero time —
+// which costs nothing now that the sidebar orders conversations by when
+// things happened here rather than by this column. What the zero time must
+// not do is pass silently: an unparsable created_at means some writer put a
+// format in there that this build does not understand, and that is worth a
+// line in the log rather than a preview that quietly claims January 1, year 1.
+func previewTimestamp(entry *chatlog.Entry) time.Time {
+	ts, err := parseTimestamp(entry.CreatedAt)
+	if err != nil {
+		log.Warn().
+			Str("message_id", logid.Of(entry.ID)).
+			Str("created_at", entry.CreatedAt).
+			Msg("dm_crypto: unreadable created_at on a stored row; the sidebar shows it without a time")
+		return time.Time{}
+	}
+	return ts.UTC()
+}
+
 // NewDMCrypto wires the three dependencies that the DM crypto path needs.
 func NewDMCrypto(rpc *LocalRPCClient, chatlog *ChatlogGateway, id *identity.Identity) *DMCrypto {
 	return &DMCrypto{rpc: rpc, chatlog: chatlog, id: id}
@@ -226,7 +281,16 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		}
 	}
 
-	now := time.Now().UTC()
+	// One message, one timestamp. The wire carries RFC3339, whose resolution
+	// is a second, and the same instant is handed back to the caller for the
+	// sidebar. Keeping the nanoseconds on the returned copy made the UI's
+	// moment up to a second AHEAD of the row every other reader sees, and the
+	// sidebar takes the newer of two stamps as the newer message: everything
+	// written inside the rest of that second — our own next message, and the
+	// peer's reply — then read as OLDER than what was already on screen, and
+	// the preview kept showing the message before it. Truncating here rather
+	// than formatting twice is what makes the two provably the same value.
+	now := time.Now().UTC().Truncate(time.Second)
 	createdAt := now.Format(time.RFC3339)
 
 	reply, err := d.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{
@@ -280,6 +344,12 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		CommandData:   msg.CommandData,
 		Timestamp:     now,
 		ReceiptStatus: "sent",
+		// The node has accepted and stored the row by now, so this echo can
+		// carry its place in the local order. Without it the caller's
+		// optimistic sidebar update would be unorderable against a message
+		// that arrived while this send was in flight, and a slow send would
+		// put its own text back over a newer one.
+		Seq: d.messageSeq(ctx, domain.MessageID(messageID)),
 	}, nil
 }
 
@@ -540,7 +610,18 @@ func (d *DMCrypto) DecryptIncomingMessage(ctx context.Context, event protocol.Lo
 
 	ts, parseErr := parseTimestamp(event.CreatedAt)
 	if parseErr != nil {
-		ts = time.Now().UTC()
+		// The row's own time is unreadable, so this one is invented — and an
+		// invented moment must still be a moment the chatlog could hold.
+		// Second resolution is what every stored created_at has; a value with
+		// nanoseconds would outrank every honest row of the same second and
+		// freeze the sidebar on this message. Logged rather than swallowed:
+		// an unparsable created_at is a row somebody wrote in a format we do
+		// not understand, and that is worth knowing about.
+		ts = time.Now().UTC().Truncate(time.Second)
+		log.Warn().
+			Str("message_id", logid.Of(event.MessageID)).
+			Str("created_at", event.CreatedAt).
+			Msg("dm_crypto: unreadable created_at on an incoming message; showing the time it was decrypted")
 	}
 
 	status := "delivered"
@@ -586,6 +667,10 @@ func (d *DMCrypto) DecryptIncomingMessage(ctx context.Context, event protocol.Lo
 		CommandData:   msg.CommandData,
 		Timestamp:     ts,
 		ReceiptStatus: status,
+		// The event says WHAT arrived; only the store can say where it landed
+		// in the local order, and the sidebar needs that to compare this
+		// message with whatever is already on the row.
+		Seq: d.messageSeq(ctx, domain.MessageID(event.MessageID)),
 	}
 	d.noteDecryptSuccess(decrypted)
 	return decrypted
@@ -787,9 +872,29 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 	if err != nil {
 		return nil, fmt.Errorf("chatlog summaries: %w", err)
 	}
+	// The summaries also carry the ORDER: the store returns them newest
+	// arrival first, and that is the order the sidebar seeds itself in. The
+	// entries above are a map, so walking them directly gave the startup a
+	// different order every launch, and the sort that hid it ranked
+	// conversations by the timestamps their senders printed.
+	order := make([]string, 0, len(summaries))
+	ranked := make(map[string]struct{}, len(summaries))
 	for _, conv := range summaries {
+		if _, seen := ranked[conv.PeerAddress]; !seen {
+			ranked[conv.PeerAddress] = struct{}{}
+			order = append(order, conv.PeerAddress)
+		}
 		if conv.UnreadCount > 0 {
 			unreadByPeer[conv.PeerAddress] = conv.UnreadCount
+		}
+	}
+	// Defensive: a conversation with a last row but no summary cannot happen —
+	// both read the same table — and dropping it would be a worse answer than
+	// an unordered tail.
+	for peerAddr := range lastEntries {
+		if _, seen := ranked[peerAddr]; !seen {
+			ranked[peerAddr] = struct{}{}
+			order = append(order, peerAddr)
 		}
 	}
 
@@ -803,7 +908,13 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 	}
 
 	out := make([]ConversationPreview, 0, len(lastEntries))
-	for peerAddr, entry := range lastEntries {
+	for _, peerAddr := range order {
+		entry, ok := lastEntries[peerAddr]
+		if !ok {
+			// A summary without a last row: the conversation was emptied
+			// between the two reads. There is no preview to build.
+			continue
+		}
 		peer := domain.PeerIdentityFromWire(peerAddr)
 		senderRaw := entry.Sender
 		sender := domain.PeerIdentityFromWire(senderRaw)
@@ -818,13 +929,14 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 				// without this report, recovery for a never-opened chat
 				// would not start at all.
 				d.noteDecryptFailure(DecryptFailureMissingSenderKey, entry.ID, entry.Sender, entry.Recipient)
-				ts, _ := parseTimestamp(entry.CreatedAt)
+				ts := previewTimestamp(&entry)
 				out = append(out, ConversationPreview{
 					PeerAddress: peer,
 					Sender:      sender,
 					Body:        "",
-					Timestamp:   ts.UTC(),
+					Timestamp:   ts,
 					UnreadCount: unreadByPeer[peerAddr],
+					Seq:         entry.RowID,
 				})
 				continue
 			}
@@ -836,25 +948,27 @@ func (d *DMCrypto) FetchConversationPreviews(ctx context.Context) ([]Conversatio
 			if errors.Is(decryptErr, directmsg.ErrSealedUnreadable) {
 				d.noteDecryptFailure(DecryptFailureSealedUnreadable, entry.ID, entry.Sender, entry.Recipient)
 			}
-			ts, _ := parseTimestamp(entry.CreatedAt)
+			ts := previewTimestamp(&entry)
 			out = append(out, ConversationPreview{
 				PeerAddress: peer,
 				Sender:      sender,
 				Body:        "",
-				Timestamp:   ts.UTC(),
+				Timestamp:   ts,
 				UnreadCount: unreadByPeer[peerAddr],
+				Seq:         entry.RowID,
 			})
 			continue
 		}
 
 		d.notePreviewDecryptSuccess(&entry, message)
-		ts, _ := parseTimestamp(entry.CreatedAt)
+		ts := previewTimestamp(&entry)
 		out = append(out, ConversationPreview{
 			PeerAddress: peer,
 			Sender:      sender,
 			Body:        message.Body,
-			Timestamp:   ts.UTC(),
+			Timestamp:   ts,
 			UnreadCount: unreadByPeer[peerAddr],
+			Seq:         entry.RowID,
 		})
 	}
 
@@ -894,18 +1008,19 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 		contact, ok := contacts[senderRaw]
 		if !ok || contact.PubKey == "" {
 			d.noteDecryptFailure(DecryptFailureMissingSenderKey, entry.ID, entry.Sender, entry.Recipient)
-			ts, _ := parseTimestamp(entry.CreatedAt)
+			ts := previewTimestamp(entry)
 			return &ConversationPreview{
 				PeerAddress: peerAddress,
 				Sender:      sender,
 				Body:        "",
-				Timestamp:   ts.UTC(),
+				Timestamp:   ts,
+				Seq:         entry.RowID,
 			}, nil
 		}
 		senderPubKey = contact.PubKey
 	}
 
-	ts, _ := parseTimestamp(entry.CreatedAt)
+	ts := previewTimestamp(entry)
 
 	message, decryptErr := directmsg.DecryptForIdentity(d.id, senderRaw, senderPubKey, entry.Recipient, entry.Body)
 	if decryptErr != nil {
@@ -916,7 +1031,8 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 			PeerAddress: peerAddress,
 			Sender:      sender,
 			Body:        "",
-			Timestamp:   ts.UTC(),
+			Timestamp:   ts,
+			Seq:         entry.RowID,
 		}, nil
 	}
 
@@ -925,7 +1041,8 @@ func (d *DMCrypto) FetchSinglePreview(ctx context.Context, peerAddress domain.Pe
 		PeerAddress: peerAddress,
 		Sender:      sender,
 		Body:        message.Body,
-		Timestamp:   ts.UTC(),
+		Timestamp:   ts,
+		Seq:         entry.RowID,
 	}, nil
 }
 

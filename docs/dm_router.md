@@ -265,8 +265,69 @@ question instead of answering it:
   list" would otherwise read as "read" for an id nothing can re-add.
 - **LastIncomingAt is a maximum** over the incoming timestamps, so a late
   reader can only lose.
-- **Preview takes the newer message**, comparing timestamps; an older read
-  never overwrites a newer one.
+- **Preview is ordered by ARRIVAL SEQUENCE, never by the timestamp.** The
+  stamp on a message is the SENDER's clock, and the node accepts messages up
+  to ten minutes into the future and arbitrarily far into the past, so
+  comparing it dropped live messages from any peer whose clock disagreed with
+  ours: a peer running behind wrote a message that read as older than the
+  reply we had just sent, one running ahead was refused outright, and both
+  left the badge counting a message the sidebar would not show. The ordering
+  key is instead where the row landed in the local chatlog —
+  `ConversationPreview.Seq`, the chatlog rowid, resolved once per message by
+  `DMCrypto.messageSeq` and carried on `DirectMessage.Seq`. Every
+  forward-moving path (the send echo, the live event, the startup seed, the
+  post-message reconciliation) goes through one rule, `applyPreviewLocked`,
+  which refuses a preview whose sequence is lower than the one on screen.
+  "Whoever wrote last" cannot serve as that rule: the node releases its lock
+  across the SQLite write and publishes afterwards, a send applies its own
+  echo from its own goroutine, and the event bus delivers asynchronously — so
+  the later WRITE is not the later MESSAGE. A sequence of zero means unknown
+  (no store to ask, or the row is already gone), and the two unknowns are not
+  the same case. An incoming preview that cannot be placed does NOT displace
+  one that can — otherwise a send whose own row could not be located
+  afterwards puts its older text back over a message that arrived while it was
+  in flight, which is the original race with an extra step. Standing aside is
+  only half an answer, though, because the message may well BE the newest one:
+  the apply reports `applyPreviewUnplaceable` and the caller re-reads the
+  conversation from the store (`repairPreviewFromStore`), which knows both
+  which row is last and where it landed. Without that read a single failed
+  lookup would leave the old text on the row until the next message, with the
+  badge already counting the new one. The same read runs when the row is
+  UNPLACED and the message is written onto it (`previewTakenUnplaced`): an
+  unordered row is a defect wherever it came from, since the next arrival
+  would win by nothing more than the moment it was applied and a slow answer
+  holding a real sequence could walk in later and overwrite. And if that read
+  fails too — the likely case, since it fails for the same reasons the
+  sequence lookup did — the peer is QUEUED (`pendingPreviewRepair`) and swept
+  by the retry tick the delete path already runs (`runRetrySweep`), a dozen
+  attempts a few seconds apart before it gives up with a warning. The queue is
+  not belt-and-braces: it is the only way back to such a row. `pollHealth`,
+  whose header pass rediscovers messages through the dedup gate, is deferred
+  from `initializeFromDB` and runs ONCE per process, and the network cannot
+  re-announce the message either — a re-delivery is a duplicate the node
+  stores and publishes nothing for. Reopening the dedup gate is therefore a
+  hint for a later pass, never a retry. Every path that reads the preview from
+  the store and fails queues the same way — the mid-switch reload
+  (`reloadAndRefreshPreview`, whose cache fallback cannot place a row), the
+  sidebar refresh after a repair pass (`refreshPreviewForPeer`), and the
+  rebuild after a deletion moved under a message (`recoverFromStaleApply`) —
+  because none of them has anything else that comes back. When NOTHING carries a sequence,
+  there is no order to respect and the writer wins, as it did before the field
+  existed. The sequence is resolved on a context stripped of the caller's
+  cancellation: on the send path that context has already been spent on the
+  RPC, and a deadline reached just as the node accepted the message would
+  otherwise leave a SUCCESSFUL send unplaceable. The deletion does not go
+  through the rule — it moves the preview backwards by definition and carries
+  its own compare-and-set.
+- **Our own sent message goes through the same guards**
+  (`applyOwnSentMessage`). A send is slow enough for the conversation to be
+  wiped underneath it, and the sequence cannot separate the echo of a deleted
+  row from the row that replaced it: SQLite hands out `max(rowid)+1`, so a row
+  deleted from the end of the table gives its number to the next insert, and
+  the check accepts an equal sequence. What separates them is the history
+  epoch — a deletion bumps it, and an apply holding the older one is stale by
+  construction — which is why the send captures the whole `peerStamp` before
+  its RPC rather than only the lifecycle generation.
 
 Idempotent merges order ADDITIONS against each other and nothing else. A read
 taken before something moved the peer BACKWARDS — a deletion, a mark-seen, an
@@ -612,8 +673,9 @@ To prevent data races (which cause Go runtime fatals that are uncatchable):
    appears immediately. Fetches conversation previews with retry (up to 3
    attempts with linear backoff) to handle transient DB/node failures.
    Calls `resetIdentityState()` to clear all identity-specific state, then
-   `seedPreviews()` to populate the `peers` map (sorted: unread first by
-   count desc, then by most recent timestamp). Delegates peer selection to
+   `seedPreviews()` to populate the `peers` map (unread first by count desc;
+   everything else keeps the order the store returned, which is newest
+   arrival first). Delegates peer selection to
    `AutoSelectPeer()`, which handles the full lifecycle: optimistic unread
    clear, `loadConversation()`, `doMarkSeen()`, and rollback on failure.
    Before the call, `activePeer` is cleared so `selectPeerCore` always
@@ -624,10 +686,13 @@ To prevent data races (which cause Go runtime fatals that are uncatchable):
    UI-critical fields fresh without polling.
 
    Because ebus events arrive in parallel with `initializeFromDB`,
-   `seedPreviews()` guards against the startup race: if the ebus event-path
-   already delivered fresher data for a peer (newer timestamp),
-   `seedPreviews` skips that peer instead of overwriting with stale startup
-   snapshot data.
+   `seedPreviews()` can meet a preview the event path has already written —
+   and that one can be either NEWER than its own read (a message stored while
+   the query ran) or OLDER (the startup replay re-delivers rows the database
+   has held for days). It therefore cannot assume either way and goes through
+   `applyPreviewLocked` like everything else: the arrival sequence decides. A
+   peer whose preview the seed does not take also keeps its position in
+   `peerOrder`, since the startup order is about the same stale answer.
 
    `resetIdentityState()` clears `peers`, `peerOrder`, `activePeer`,
    `peerClicked`, `activeMessages`, `seenMessageIDs`, `initialSynced`,
@@ -664,8 +729,28 @@ To prevent data races (which cause Go runtime fatals that are uncatchable):
      so the user sees the message in the open chat instead of a blank
      screen. Without this fallback, a transient chatlog failure during
      mid-switch would silently discard a successfully decrypted message.
-   - **Sound notifications**: `UIEventBeep` is emitted for every incoming
-     message (sender ≠ us) in `onNewMessage`, covering three code paths:
+   - **Sound notifications**: `UIEventBeep` is emitted ONCE PER MESSAGE, not
+     once per event. One `announce` value, computed at the top of
+     `onNewMessage`, answers for all of its paths: the message is incoming
+     (sender ≠ us), it is not a startup replay, and it has not been announced
+     before. That last fact is recorded ON THE ID, in `messageGate.announced`,
+     and it is the only thing the dedup gate's eviction does NOT reopen —
+     reopening asks for the message to be TRIED again, not announced again.
+     It means the sound QUESTION IS SETTLED, not that a sound was made:
+     startup replay re-delivers old messages in silence, the first header sync
+     claims ids it must not announce, and a deletion pins an id so
+     re-deliveries are ignored. Recording only the ring left all of those
+     looking unannounced, so the next event for one of them rang for a message
+     the badge was already counting. Both paths that settle a message —
+     `onNewMessage` and the header repair — go through
+     `markMessageHandledLocked`, which closes the gate and settles the sound
+     together, and both read the previous value before writing it.
+     Neither of the two facts that used to answer this could: the gate itself
+     is reopened on purpose by every path that fails to apply a message, and
+     the badge is a set keyed by message id, which a repeat does not move and
+     which the conversation ON SCREEN never raises at all. Between them they
+     let one message ring twice with nothing to show for it. The paths reached
+     are
      (1) non-active peer, (2) active peer mid-switch (cache not yet loaded),
      (3) active peer with cache ready. The repair-path in
      `repairUnreadFromHeaders` emits `UIEventBeep` **only for non-active
@@ -1066,8 +1151,71 @@ chatlog, и питают его два источника, которые нев
   некому вернуть.
 - **LastIncomingAt — максимум** по временам входящих, поэтому опоздавший
   читатель может только проиграть.
-- **Preview берёт более новое сообщение** по timestamp; старое чтение никогда
-  не затирает более новое.
+- **Preview упорядочен по работе, а не по timestamp.** Штамп сообщения — это
+  часы ОТПРАВИТЕЛЯ, а нода принимает сообщения с датой до десяти минут вперёд
+  и сколь угодно далеко назад, поэтому сравнение по нему выбрасывало из
+  сайдбара живые сообщения любого peer'а, чьи часы расходятся с нашими: у
+  отстающего сообщение читалось как более старое, чем только что отправленный
+  нами ответ, у забегающего отвергалось целиком, и в обоих случаях бейдж
+  считал сообщение, которого сайдбар не показывал. Вместо этого живой путь —
+  только что сохранённое или только что отправленное сообщение — применяется
+  Ключ порядка — куда строка легла в локальном chatlog:
+  `ConversationPreview.Seq` (rowid), разрешаемый один раз на сообщение в
+  `DMCrypto.messageSeq` и переносимый в `DirectMessage.Seq`. Все
+  forward-пути (эхо отправки, живое событие, стартовый seed, сверка после
+  сообщения) идут через одно правило `applyPreviewLocked`, которое отвергает
+  превью с меньшей последовательностью, чем у стоящего на строке. «Кто записал
+  последним» правилом быть не может: нода отпускает свой мьютекс на время
+  записи в SQLite и публикует после, отправка применяет своё эхо из
+  собственной горутины, ebus доставляет асинхронно — поэтому более поздняя
+  ЗАПИСЬ не означает более позднее СООБЩЕНИЕ. Ноль означает «неизвестно» (нечего
+  спросить или строка уже удалена), и эти два «неизвестно» — разные случаи.
+  Входящее превью, которое невозможно разместить в порядке, НЕ вытесняет то,
+  которое разместить можно: иначе отправка, чью собственную строку не удалось
+  найти после успеха, возвращает свой более старый текст поверх сообщения,
+  пришедшего пока она летела, — та же исходная гонка через лишний шаг. Цена
+  просто отойти в сторону — половина ответа: сообщение вполне может БЫТЬ самым
+  свежим. Применение возвращает `applyPreviewUnplaceable`, а вызывающий
+  перечитывает диалог из хранилища (`repairPreviewFromStore`), которое знает и
+  какая строка последняя, и куда она легла. Без этого чтения один сбой поиска
+  оставил бы старый текст на строке до следующего сообщения, причём бейдж
+  новое уже считал бы. То же чтение запускается, когда строка НЕУПОРЯДОЧЕНА и
+  сообщение на неё записано (`previewTakenUnplaced`): неупорядоченная строка —
+  дефект независимо от происхождения, потому что следующее прибытие выиграет у
+  неё лишь моментом применения, а медленный ответ с настоящей
+  последовательностью может прийти позже и перезаписать. Если и это чтение
+  упало — а это вероятный случай, оно падает по тем же причинам, что и поиск
+  последовательности, — peer ставится в очередь (`pendingPreviewRepair`), и её
+  подметает тот же retry-тик, который уже гоняет путь удаления
+  (`runRetrySweep`): дюжина попыток с интервалом в несколько секунд, потом
+  warning. Очередь — не подстраховка, а единственная дорога обратно к такой
+  строке: `pollHealth`, чей проход по заголовкам находит сообщения заново
+  через dedup-набор, вызывается `defer`-ом из `initializeFromDB` РОВНО ОДИН
+  РАЗ за процесс, а сеть повторно объявить сообщение не может — повторная
+  доставка для ноды дубликат, она ничего не сохраняет и ничего не публикует.
+  Поэтому возврат id в dedup-набор — подсказка будущему проходу, а не
+  повтор. В очередь становится КАЖДЫЙ путь, который читал превью из хранилища
+  и не смог: reload при переключении диалога (`reloadAndRefreshPreview`, чей
+  фолбэк из кэша строку разместить не может), обновление сайдбара после
+  repair-прохода (`refreshPreviewForPeer`) и перестройка после удаления,
+  случившегося под сообщением (`recoverFromStaleApply`) — ни у одного из них
+  нет другой дороги обратно. Когда последовательности нет НИ У КОГО,
+  уважать нечего и побеждает записывающий, как было до появления поля.
+  Последовательность читается на контексте, с которого снята отмена
+  вызывающего: на пути отправки этот контекст уже потрачен на RPC, и дедлайн,
+  наступивший ровно когда нода приняла сообщение, иначе оставил бы УСПЕШНУЮ
+  отправку неразмещаемой.
+  Удаление через это правило не идёт — оно двигает превью назад по
+  определению и несёт собственный compare-and-set.
+- **Собственное отправленное сообщение проходит те же проверки**
+  (`applyOwnSentMessage`). Отправка достаточно медленная, чтобы диалог успели
+  стереть под ней, а последовательность не отличает эхо удалённой строки от
+  строки, занявшей её место: SQLite выдаёт `max(rowid)+1`, поэтому строка,
+  удалённая с конца таблицы, отдаёт свой номер следующей вставке, а проверка
+  принимает равную последовательность. Различает их history-эпоха — удаление
+  её двигает, и применение со старой эпохой устарело по построению, — поэтому
+  отправка снимает целый `peerStamp` до своего RPC, а не одну лишь
+  lifecycle-генерацию.
 
 Идемпотентные слияния упорядочивают между собой только ДОБАВЛЕНИЯ. Чтение,
 снятое до того, как что-то сдвинуло peer-а НАЗАД — удаление, mark-seen,
@@ -1416,8 +1564,9 @@ DMRouter запускает две фоновые горутины:
    Загружает превью с retry (до 3 попыток с линейным backoff) для
    обработки временных ошибок БД/ноды. Очищает состояние через
    `resetIdentityState()`, заполняет `peers` через `seedPreviews()`
-   (сортировка: сначала непрочитанные по убыванию count, затем по
-   времени последней активности). Делегирует выбор peer'а в
+   (сначала непрочитанные по убыванию count; остальные сохраняют порядок,
+   в котором их вернуло хранилище, — то есть по последнему прибытию).
+   Делегирует выбор peer'а в
    `AutoSelectPeer()`, который выполняет полный цикл: оптимистичный
    сброс unread, `loadConversation()`, `doMarkSeen()` и rollback при
    ошибке. Перед вызовом `activePeer` сбрасывается, чтобы
@@ -1429,10 +1578,13 @@ DMRouter запускает две фоновые горутины:
    поля актуальными без поллинга.
 
    Поскольку ebus-события приходят параллельно с `initializeFromDB`,
-   `seedPreviews()` защищает от startup race: если ebus event-path
-   уже доставил для peer'а более свежие данные (новый timestamp),
-   `seedPreviews` пропускает этого peer'а, а не перезаписывает stale
-   данными из стартового снимка.
+   `seedPreviews()` может встретить превью, уже записанное event-path'ом, —
+   причём оно бывает и НОВЕЕ его собственного чтения (сообщение сохранилось,
+   пока шёл запрос), и СТАРЕЕ (стартовый replay заново доставляет строки,
+   которые база держит днями). Поэтому seed ничего не предполагает и идёт
+   через `applyPreviewLocked`, как все: решает порядок прибытия. Peer, чьё
+   превью seed не взял, сохраняет и свою позицию в `peerOrder` — стартовый
+   порядок построен на том же устаревшем ответе.
 
    `resetIdentityState()` очищает `peers`, `peerOrder`, `activePeer`,
    `peerClicked`, `activeMessages`, `seenMessageIDs`, `initialSynced`,
@@ -1476,10 +1628,28 @@ DMRouter запускает две фоновые горутины:
      `updatePreviewFromStore` в фоновой goroutine, увеличивает
      `Unread` для входящих сообщений и продвигает peer'а в `peerOrder` —
      поведение идентично успешному inline-decrypt пути.
-   - **Звуковые уведомления**: `UIEventBeep` эмитится для каждого входящего
-     сообщения (sender ≠ мы) в `onNewMessage`, покрывая три code-path:
-     (1) неактивный peer, (2) активный peer mid-switch (cache ещё не
-     загружен), (3) активный peer с ready cache. Repair-path в
+   - **Звуковые уведомления**: `UIEventBeep` эмитится ОДИН РАЗ НА СООБЩЕНИЕ,
+     а не на событие. Одно значение `announce`, вычисляемое в начале
+     `onNewMessage`, отвечает за все его пути: сообщение входящее
+     (sender ≠ мы), это не стартовый replay, и о нём ещё не объявляли. Этот
+     последний факт записан НА САМОМ id — `messageGate.announced` — и он
+     единственное, чего НЕ переоткрывает eviction dedup-набора: переоткрытие
+     просит попробовать сообщение снова, а не объявить его снова. Он означает,
+     что ВОПРОС СО ЗВУКОМ ЗАКРЫТ, а не что звук прозвучал: стартовый replay
+     заново доставляет старые сообщения молча, первый header-синк забирает id,
+     о которых объявлять нельзя, а удаление пиннит id, чтобы повторные
+     доставки игнорировались. Если записывать только сам звонок, все они
+     выглядят необъявленными, и следующее событие по такому id звенит — для
+     сообщения, которое бейдж уже считает. Оба пути, закрывающих сообщение —
+     `onNewMessage` и header repair, — идут через `markMessageHandledLocked`,
+     который закрывает гейт и вопрос со звуком вместе, и оба читают прежнее
+     значение до записи. Ни один из
+     двух фактов, которыми это решалось раньше, ответить не мог: сам набор
+     намеренно переоткрывает КАЖДЫЙ путь, не сумевший применить сообщение, а
+     бейдж — множество по id, которое повтор не двигает и которое диалог НА
+     ЭКРАНЕ не поднимает вовсе. Вдвоём они и позволяли одному сообщению
+     прозвенеть дважды без единого следа на экране. Затрагиваемые пути: (1) неактивный peer, (2) активный peer mid-switch
+     (cache ещё не загружен), (3) активный peer с ready cache. Repair-path в
      `repairUnreadFromHeaders` эмитит `UIEventBeep` **только для
      неактивных peer'ов** — сообщения активного peer уже видны на экране,
      повторный beep при repair привёл бы к дублированию уведомления после

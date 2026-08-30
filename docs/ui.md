@@ -1090,18 +1090,20 @@ The sidebar contact list uses 4-tier priority sorting. This is a UI/product conc
 | Tier | Condition | Sort key |
 |------|-----------|----------|
 | 1 | Online + unread messages | Unread count descending |
-| 2 | Online, no unread | Last message timestamp descending |
+| 2 | Online, no unread | Most recent activity (`PeerOrder`) |
 | 3 | Offline + unread messages | Unread count descending |
-| 4 | Offline, no unread | Last message timestamp descending |
+| 4 | Offline, no unread | Most recent activity (`PeerOrder`) |
 
 "Online" means `ReachableIDs[identity] == true` — at least one live route exists in the routing table.
 
 The sort pipeline in `snapRecipients()`:
 
-1. `mergeRecipientOrder()` — merges peers from `Peers` map with `PeerOrder` (router's internal ordering, used as stable tiebreaker)
+1. `mergeRecipientOrder()` — merges peers from `Peers` map with `PeerOrder` (the router's most-recent-activity order: a conversation moves to the front when a message is applied to it). `sortSidebarPeers` is stable, so this order is what decides inside a tier
 2. `sortSidebarPeers()` — applies 4-tier sort using `RouterSnapshot.Peers` and `RouterSnapshot.NodeStatus.ReachableIDs`
 
-When `ReachableIDs` is nil (probe not completed or failed), all peers are treated as offline, and the sort degrades gracefully to 2-tier (unread first, then by timestamp).
+When `ReachableIDs` is nil (probe not completed or failed), all peers are treated as offline, and the sort degrades gracefully to 2-tier (unread first, then by activity).
+
+The sort deliberately does NOT rank by `Preview.Timestamp`. That stamp is the sender's own clock, and the node accepts minutes of drift: ranking by it would let a peer with a fast clock hold the top of the sidebar for as long as it kept sending, while one running slow sank below conversations nothing had happened in.
 
 ### Single-pane navigation and the contact menu
 
@@ -1138,18 +1140,20 @@ Sidebar список контактов использует 4-уровневу�
 | Уровень | Условие | Ключ сортировки |
 |---------|---------|-----------------|
 | 1 | Online + есть непрочитанные | Число непрочитанных по убыванию |
-| 2 | Online, нет непрочитанных | Время последнего сообщения по убыванию |
+| 2 | Online, нет непрочитанных | Последняя активность (`PeerOrder`) |
 | 3 | Offline + есть непрочитанные | Число непрочитанных по убыванию |
-| 4 | Offline, нет непрочитанных | Время последнего сообщения по убыванию |
+| 4 | Offline, нет непрочитанных | Последняя активность (`PeerOrder`) |
 
 "Online" означает `ReachableIDs[identity] == true` — хотя бы один живой маршрут существует в таблице маршрутизации.
 
 Конвейер сортировки в `snapRecipients()`:
 
-1. `mergeRecipientOrder()` — объединяет peers из `Peers` map с `PeerOrder` (внутренний порядок роутера, используется как стабильный tiebreaker)
+1. `mergeRecipientOrder()` — объединяет peers из `Peers` map с `PeerOrder` (порядок последней активности роутера: диалог уходит в начало, когда в него применено сообщение). `sortSidebarPeers` стабильна, поэтому именно этот порядок решает внутри уровня
 2. `sortSidebarPeers()` — применяет 4-уровневую сортировку используя `RouterSnapshot.Peers` и `RouterSnapshot.NodeStatus.ReachableIDs`
 
-Когда `ReachableIDs` равен nil (проба не завершена или не удалась), все peers считаются offline, и сортировка корректно деградирует до 2-уровневой (непрочитанные первыми, затем по timestamp).
+Когда `ReachableIDs` равен nil (проба не завершена или не удалась), все peers считаются offline, и сортировка корректно деградирует до 2-уровневой (непрочитанные первыми, затем по активности).
+
+Сортировка НАМЕРЕННО не ранжирует по `Preview.Timestamp`. Этот штамп — часы самого отправителя, а нода допускает расхождение в минуты: ранжирование по нему позволило бы peer'у со спешащими часами держать верх сайдбара, пока он пишет, а отстающему — проваливаться ниже диалогов, в которых ничего не происходило.
 
 ### Однопанельная навигация и меню контакта
 

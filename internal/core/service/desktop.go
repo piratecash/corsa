@@ -229,6 +229,13 @@ type DirectMessage struct {
 	Timestamp     time.Time
 	ReceiptStatus string
 	DeliveredAt   domain.OptionalTime
+	// Seq is where this message landed in the local arrival order (the
+	// chatlog row's sequence). Timestamp cannot serve that purpose: it is the
+	// SENDER's clock, and two peers do not share one. Zero means the store
+	// could not be asked or does not hold the row — the value is spent only
+	// on ordering, so an unknown one degrades to "cannot be ordered" rather
+	// than to "first".
+	Seq int64
 }
 
 // DMHeader is the minimal DM metadata used for sidebar population without
@@ -248,6 +255,14 @@ type ConversationPreview struct {
 	Body        string
 	Timestamp   time.Time
 	UnreadCount int // number of incoming messages with delivery_status != 'seen'
+	// Seq orders one preview against another: it is the arrival sequence of
+	// the message this preview describes. The sidebar is fed from two roads —
+	// a read of the store and the live event stream — that can answer in
+	// either order, and Timestamp cannot separate them because it belongs to
+	// the sender's clock. Zero means unknown (see DirectMessage.Seq); two
+	// previews of which either is unknown cannot be ordered, and the later
+	// writer wins as it did before this field existed.
+	Seq int64
 }
 
 // PendingMessage is the service-layer view of a pending (not yet

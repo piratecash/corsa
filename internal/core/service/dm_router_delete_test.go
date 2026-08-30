@@ -633,7 +633,7 @@ func TestApplyInboundDeleteOnRealChatlog(t *testing.T) {
 
 	r := &DMRouter{
 		client:         c,
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
@@ -838,7 +838,7 @@ func TestHandleInboundMessageDeleteAckSettlesTheIntent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &DMRouter{
 				client:         c,
-				seenMessageIDs: make(map[string]struct{}),
+				seenMessageIDs: make(map[string]messageGate),
 				peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 				peerGen:        make(map[domain.PeerIdentity]uint64),
 				cache:          NewConversationCache(),
@@ -891,7 +891,7 @@ func TestHandleInboundMessageDeleteAckKeepsTheIntentOnATransientFailure(t *testi
 
 	r := &DMRouter{
 		client:         c,
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
@@ -944,7 +944,7 @@ func TestApplyInboundDeleteReportsTransientStorageFailure(t *testing.T) {
 
 	r := &DMRouter{
 		client:         c,
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
@@ -968,7 +968,7 @@ func newTestDMRouterForDelete(t *testing.T) (*DMRouter, *DesktopClient, domain.P
 	counter := &dispatchCounter{}
 	r := &DMRouter{
 		client:                  c,
-		seenMessageIDs:          make(map[string]struct{}),
+		seenMessageIDs:          make(map[string]messageGate),
 		peers:                   make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:                 make(map[domain.PeerIdentity]uint64),
 		cache:                   NewConversationCache(),
@@ -2097,7 +2097,7 @@ func TestSettlingADeletionRetiresItFromTheWriteAheadLog(t *testing.T) {
 	client.wireSubServices()
 	r := &DMRouter{
 		client:         client,
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
@@ -2185,7 +2185,7 @@ func TestAnAckDoesNotReportSuccessWhileTheLocalCopyIsStillHere(t *testing.T) {
 	myAddr := domain.PeerIdentityFromWire(id.Address)
 	r := &DMRouter{
 		client:         c,
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
@@ -2342,7 +2342,7 @@ func TestABusyLogIsNotReportedAsAFinishedDeletion(t *testing.T) {
 	c.wireSubServices()
 	r := &DMRouter{
 		client:         c,
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),
@@ -2423,7 +2423,7 @@ func TestABusyLogStillReportsTheOutcomeToTheUser(t *testing.T) {
 	c, _, executor := newTestDesktopClientWithNodeAndDB(t)
 	r := &DMRouter{
 		client:         c,
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerGen:        make(map[domain.PeerIdentity]uint64),
 		cache:          NewConversationCache(),

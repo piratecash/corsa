@@ -293,7 +293,7 @@ func TestResetIdentityState(t *testing.T) {
 	r.activePeer = domaintest.ID("old-peer-1")
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "m1"}}
-	r.seenMessageIDs = map[string]struct{}{"old-msg-1": {}}
+	r.seenMessageIDs = map[string]messageGate{"old-msg-1": {handled: true}}
 	r.initialSynced = true
 	r.mu.Unlock()
 
@@ -809,15 +809,22 @@ func TestAutoSelectPeerClearsActiveMessages(t *testing.T) {
 	}
 }
 
-// TestSeedPreviewsSortOrder verifies that seedPreviews sorts peers:
-// unread first (by unread desc), then by most recent timestamp.
+// TestSeedPreviewsSortOrder verifies that seedPreviews puts unread
+// conversations first, by unread count descending, and leaves everything else
+// in the order it was given.
+//
+// That input order is the store's, and the store returns conversations newest
+// arrival first. The timestamps below deliberately disagree with it: they are
+// what the senders' clocks printed, and ranking by them is what let a peer
+// with a wrong clock decide where its conversation sat in the sidebar.
 func TestSeedPreviewsSortOrder(t *testing.T) {
 	r := newTestRouter()
 
 	now := time.Now()
+	// Arrival order: newest first, as the store hands them back.
 	previews := []ConversationPreview{
-		{PeerAddress: domaintest.ID("old-read"), Timestamp: now.Add(-10 * time.Hour), UnreadCount: 0},
 		{PeerAddress: domaintest.ID("new-read"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 0},
+		{PeerAddress: domaintest.ID("old-read"), Timestamp: now.Add(-10 * time.Hour), UnreadCount: 0},
 		{PeerAddress: domaintest.ID("unread-low"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 1},
 		{PeerAddress: domaintest.ID("unread-high"), Timestamp: now.Add(-5 * time.Hour), UnreadCount: 10},
 	}
@@ -828,8 +835,8 @@ func TestSeedPreviewsSortOrder(t *testing.T) {
 	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
 	r.mu.RUnlock()
 
-	// Expected: unread first sorted by unread count descending (10 > 1),
-	// then read sorted by timestamp descending (new > old).
+	// Unread first by count descending (10 > 1), then the read ones in the
+	// order they arrived.
 	expected := []domain.PeerIdentity{domaintest.ID("unread-high"), domaintest.ID("unread-low"), domaintest.ID("new-read"), domaintest.ID("old-read")}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
@@ -841,15 +848,19 @@ func TestSeedPreviewsSortOrder(t *testing.T) {
 	}
 }
 
-// TestSeedPreviewsSortOrderSameUnreadByTimestamp verifies that peers with
-// the same unread count are sorted by timestamp descending.
-func TestSeedPreviewsSortOrderSameUnreadByTimestamp(t *testing.T) {
+// TestSeedPreviewsSortOrderSameUnreadKeepsArrivalOrder verifies that peers
+// with the same unread count keep the order they were handed in — the
+// arrival order — rather than being re-ranked by the timestamps their senders
+// printed.
+func TestSeedPreviewsSortOrderSameUnreadKeepsArrivalOrder(t *testing.T) {
 	r := newTestRouter()
 
 	now := time.Now()
+	// Arrival order says "unread-new" happened last; the stamps say the
+	// opposite, because that peer's clock is behind.
 	previews := []ConversationPreview{
-		{PeerAddress: domaintest.ID("unread-old"), Timestamp: now.Add(-5 * time.Hour), UnreadCount: 3},
-		{PeerAddress: domaintest.ID("unread-new"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 3},
+		{PeerAddress: domaintest.ID("unread-new"), Timestamp: now.Add(-5 * time.Hour), UnreadCount: 3},
+		{PeerAddress: domaintest.ID("unread-old"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 3},
 		{PeerAddress: domaintest.ID("read-only"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0},
 	}
 
@@ -859,7 +870,7 @@ func TestSeedPreviewsSortOrderSameUnreadByTimestamp(t *testing.T) {
 	order := append([]domain.PeerIdentity(nil), r.peerOrder...)
 	r.mu.RUnlock()
 
-	// Same unread count → timestamp decides; read peers come last.
+	// Same unread count → arrival decides; read peers come last.
 	expected := []domain.PeerIdentity{domaintest.ID("unread-new"), domaintest.ID("unread-old"), domaintest.ID("read-only")}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %d peers, got %d: %v", len(expected), len(order), order)
@@ -938,20 +949,21 @@ func TestSeedPreviewsDoesNotRepositionFresherPeers(t *testing.T) {
 
 	// Event-path creates peer-F at position 0 with very fresh data,
 	// then peer-Old at position 1 with stale data (older than SQL).
+	// Through the live path, which is what records that these peers already
+	// have a preview — the seed asks that question and not "whose stamp is
+	// larger".
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(domaintest.ID("peer-F"))
-	r.peers[domaintest.ID("peer-F")].Preview = ConversationPreview{
+	r.applyPreviewLocked(domaintest.ID("peer-F"), ConversationPreview{
 		PeerAddress: domaintest.ID("peer-F"),
 		Body:        "fresh event",
 		Timestamp:   now, // fresher than SQL snapshot below
-	}
+		Seq:         9,   // and stored after the row the seed carries
+	})
 	r.peers[domaintest.ID("peer-F")].Unread = 1
+	// peer-Old has a row but no preview yet — a contact the header repair
+	// created before any message of its own was applied. The seed owns it.
 	r.tryEnsurePeerLocked(domaintest.ID("peer-Old"))
-	r.peers[domaintest.ID("peer-Old")].Preview = ConversationPreview{
-		PeerAddress: domaintest.ID("peer-Old"),
-		Body:        "old event",
-		Timestamp:   now.Add(-3 * time.Hour), // older than SQL
-	}
 	r.mu.Unlock()
 	// peerOrder: ["peer-F", "peer-Old"]
 
@@ -959,9 +971,9 @@ func TestSeedPreviewsDoesNotRepositionFresherPeers(t *testing.T) {
 	// peer-S has unread, peer-Old and peer-F have none.
 	// The stale SQL snapshot tries to place peer-F last (old ts in SQL).
 	previews := []ConversationPreview{
-		{PeerAddress: domaintest.ID("peer-S"), Timestamp: now.Add(-30 * time.Minute), UnreadCount: 3},
-		{PeerAddress: domaintest.ID("peer-Old"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 0},
-		{PeerAddress: domaintest.ID("peer-F"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0}, // stale for peer-F
+		{PeerAddress: domaintest.ID("peer-S"), Timestamp: now.Add(-30 * time.Minute), UnreadCount: 3, Seq: 3},
+		{PeerAddress: domaintest.ID("peer-Old"), Timestamp: now.Add(-1 * time.Hour), UnreadCount: 0, Seq: 2},
+		{PeerAddress: domaintest.ID("peer-F"), Timestamp: now.Add(-2 * time.Hour), UnreadCount: 0, Seq: 1}, // stale for peer-F
 	}
 
 	r.seedPreviews(previews, r.backwardsEpochSnapshot())
@@ -1391,11 +1403,12 @@ func TestSeedPreviewsDoesNotOverwriteFresherData(t *testing.T) {
 	// seedPreviews runs (the startup race scenario).
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(domaintest.ID("peer-1"))
-	r.peers[domaintest.ID("peer-1")].Preview = ConversationPreview{
+	r.applyPreviewLocked(domaintest.ID("peer-1"), ConversationPreview{
 		PeerAddress: domaintest.ID("peer-1"),
 		Body:        "fresh event message",
 		Timestamp:   now, // newer
-	}
+		Seq:         9,   // stored after the row the seed carries
+	})
 	for i := 0; i < 3; i++ {
 		r.markUnreadLocked(domaintest.ID("peer-1"), domain.MessageID(fmt.Sprintf("fresh-%d", i)))
 	}
@@ -1403,8 +1416,8 @@ func TestSeedPreviewsDoesNotOverwriteFresherData(t *testing.T) {
 
 	// Now seedPreviews arrives with stale data for peer-1 and new data for peer-2.
 	stalePreview := []ConversationPreview{
-		{PeerAddress: domaintest.ID("peer-1"), Body: "stale startup message", Timestamp: now.Add(-5 * time.Minute), UnreadCount: 1},
-		{PeerAddress: domaintest.ID("peer-2"), Body: "peer-2 message", Timestamp: now.Add(-1 * time.Minute), UnreadCount: 2},
+		{PeerAddress: domaintest.ID("peer-1"), Body: "stale startup message", Timestamp: now.Add(-5 * time.Minute), UnreadCount: 1, Seq: 1},
+		{PeerAddress: domaintest.ID("peer-2"), Body: "peer-2 message", Timestamp: now.Add(-1 * time.Minute), UnreadCount: 2, Seq: 2},
 	}
 	r.seedPreviews(stalePreview, r.backwardsEpochSnapshot())
 
@@ -1437,17 +1450,20 @@ func TestSeedPreviewsOverwritesOlderData(t *testing.T) {
 	// Simulate very old event-path data.
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(domaintest.ID("peer-1"))
+	// The startup replay re-delivers rows the database has held for days, so
+	// what the event path put here can be OLDER than what the seed carries.
 	r.peers[domaintest.ID("peer-1")].Preview = ConversationPreview{
 		PeerAddress: domaintest.ID("peer-1"),
 		Body:        "very old message",
 		Timestamp:   now.Add(-1 * time.Hour),
+		Seq:         1,
 	}
 	r.peers[domaintest.ID("peer-1")].Unread = 0
 	r.mu.Unlock()
 
 	// seedPreviews with newer data.
 	previews := []ConversationPreview{
-		{PeerAddress: domaintest.ID("peer-1"), Body: "newer startup message", Timestamp: now, UnreadCount: 5},
+		{PeerAddress: domaintest.ID("peer-1"), Body: "newer startup message", Timestamp: now, UnreadCount: 5, Seq: 2},
 	}
 	r.seedPreviews(previews, r.backwardsEpochSnapshot())
 
@@ -1565,7 +1581,7 @@ func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 	r.onNewMessage(event)
 
 	r.mu.RLock()
-	_, seen := r.seenMessageIDs["msg-123"]
+	seen := r.seenMessageIDs["msg-123"].handled
 	r.mu.RUnlock()
 	if !seen {
 		t.Fatal("onNewMessage should register MessageID in seenMessageIDs for repair-path dedup")
@@ -1607,7 +1623,7 @@ func TestOnNewMessageNonActivePeerRegistersSeenID(t *testing.T) {
 	r.onNewMessage(event)
 
 	r.mu.RLock()
-	_, seen := r.seenMessageIDs["msg-456"]
+	seen := r.seenMessageIDs["msg-456"].handled
 	r.mu.RUnlock()
 	if !seen {
 		t.Fatal("onNewMessage should register MessageID in seenMessageIDs even for non-active peer")
@@ -1644,9 +1660,9 @@ func TestRepairUnreadFirstSyncDoesNotDoubleCount(t *testing.T) {
 
 	r.mu.RLock()
 	unread := r.peers[domaintest.ID("peer-1")].Unread
-	_, seen1 := r.seenMessageIDs["msg-1"]
-	_, seen2 := r.seenMessageIDs["msg-2"]
-	_, seen3 := r.seenMessageIDs["msg-3"]
+	seen1 := r.seenMessageIDs["msg-1"].handled
+	seen2 := r.seenMessageIDs["msg-2"].handled
+	seen3 := r.seenMessageIDs["msg-3"].handled
 	synced := r.initialSynced
 	r.mu.RUnlock()
 
@@ -1942,7 +1958,7 @@ func TestHeaderRepairDoesNotResurrectARemovedContact(t *testing.T) {
 
 	r.mu.RLock()
 	_, resurrected := r.peers[peer]
-	_, dedupGateClosed := r.seenMessageIDs["arrives-too-late"]
+	dedupGateClosed := r.seenMessageIDs["arrives-too-late"].handled
 	r.mu.RUnlock()
 	if resurrected {
 		t.Fatal("the header repair put a removed contact back on the sidebar")
@@ -1964,8 +1980,8 @@ func TestRepairUnreadSubsequentSyncIncrements(t *testing.T) {
 	r.activePeer = domaintest.ID("peer-2")
 	r.initialSynced = true // already synced
 	// Pre-register some old messages.
-	r.seenMessageIDs["msg-old-1"] = struct{}{}
-	r.seenMessageIDs["msg-old-2"] = struct{}{}
+	r.seenMessageIDs["msg-old-1"] = messageGate{handled: true}
+	r.seenMessageIDs["msg-old-2"] = messageGate{handled: true}
 	r.mu.Unlock()
 
 	status := NodeStatus{
@@ -1999,7 +2015,7 @@ func TestStartupDoneClosedOnPanic(t *testing.T) {
 		client:         client,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		// cache intentionally nil → resetIdentityState() panics on r.cache.Load()
 		uiEvents:    make(chan UIEvent, 32),
 		startupDone: make(chan struct{}), // NOT pre-closed
@@ -2029,7 +2045,7 @@ func TestEbusBuffersDuringStartup(t *testing.T) {
 		client:         client,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 64),
 		startupDone:    make(chan struct{}),
@@ -2314,7 +2330,7 @@ func TestNotifyOverflowRetainsAllEventTypes(t *testing.T) {
 		client:         client,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 1), // capacity 1 → overflows quickly
 		startupDone:    done,
@@ -2953,7 +2969,7 @@ func TestRepairUnreadNotClearedOnFailedReload(t *testing.T) {
 	// active-peer reload path evicts it when loadConversation fails.
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		_, ok := r.seenMessageIDs["new-msg-1"]
+		ok := r.seenMessageIDs["new-msg-1"].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -2969,7 +2985,7 @@ func TestRepairUnreadNotClearedOnFailedReload(t *testing.T) {
 	r.repairUnreadFromHeaders(status)
 
 	r.mu.RLock()
-	_, seenRetry := r.seenMessageIDs["new-msg-1"]
+	seenRetry := r.seenMessageIDs["new-msg-1"].handled
 	r.mu.RUnlock()
 
 	// It will still fail (no chatlog), so the ID should be evicted again.
@@ -3023,7 +3039,7 @@ func TestOnNewMessageEventPathRollsBackSeenOnFailedReload(t *testing.T) {
 	// Poll until the goroutine evicts the message ID (replaces fixed sleep).
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		_, ok := r.seenMessageIDs["msg-rollback-1"]
+		ok := r.seenMessageIDs["msg-rollback-1"].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -3066,7 +3082,7 @@ func TestOnNewMessageNonActiveFallbackRollsBackSeenOnPreviewFailure(t *testing.T
 	// Poll until the goroutine evicts the message ID (replaces fixed sleep).
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		_, ok := r.seenMessageIDs["msg-nonactive-rollback-1"]
+		ok := r.seenMessageIDs["msg-nonactive-rollback-1"].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -3084,8 +3100,8 @@ func TestRefreshPreviewForPeerRollsBackSeenOnFailure(t *testing.T) {
 
 	// Pre-register message IDs in seenMessageIDs as repairUnreadFromHeaders does.
 	r.mu.Lock()
-	r.seenMessageIDs["repair-msg-1"] = struct{}{}
-	r.seenMessageIDs["repair-msg-2"] = struct{}{}
+	r.seenMessageIDs["repair-msg-1"] = messageGate{handled: true}
+	r.seenMessageIDs["repair-msg-2"] = messageGate{handled: true}
 	r.mu.Unlock()
 
 	// The repair path creates the row before queueing the refresh; do the
@@ -3097,8 +3113,8 @@ func TestRefreshPreviewForPeerRollsBackSeenOnFailure(t *testing.T) {
 	r.refreshPreviewForPeer(domaintest.ID("peer-1"), []string{"repair-msg-1", "repair-msg-2"})
 
 	r.mu.RLock()
-	_, seen1 := r.seenMessageIDs["repair-msg-1"]
-	_, seen2 := r.seenMessageIDs["repair-msg-2"]
+	seen1 := r.seenMessageIDs["repair-msg-1"].handled
+	seen2 := r.seenMessageIDs["repair-msg-2"].handled
 	r.mu.RUnlock()
 
 	if seen1 || seen2 {
@@ -3130,7 +3146,7 @@ func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(domaintest.ID("peer-header-only"))
 	r.peers[domaintest.ID("peer-header-only")].Unread = 1
-	r.seenMessageIDs["header-msg-1"] = struct{}{}
+	r.seenMessageIDs["header-msg-1"] = messageGate{handled: true}
 	r.mu.Unlock()
 
 	// refreshPreviewForPeer calls updatePreviewFromStore which gets nil preview
@@ -3143,7 +3159,7 @@ func TestRefreshPreviewForPeerNilPreviewPreservesPeer(t *testing.T) {
 	if ps != nil {
 		unread = ps.Unread
 	}
-	_, seenOK := r.seenMessageIDs["header-msg-1"]
+	seenOK := r.seenMessageIDs["header-msg-1"].handled
 	r.mu.RUnlock()
 
 	if !exists {
@@ -3215,7 +3231,7 @@ func TestRepairPathHeaderOnlyMessagePreservedAfterNilPreview(t *testing.T) {
 	if ps != nil {
 		unread = ps.Unread
 	}
-	_, seenOK := r.seenMessageIDs["store-failed-msg-1"]
+	seenOK := r.seenMessageIDs["store-failed-msg-1"].handled
 	r.mu.RUnlock()
 
 	if !exists {
@@ -3453,7 +3469,7 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 	// → returns without incrementing Unread.
 	if !pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
-		_, ok := r.seenMessageIDs["msg-non-active-1"]
+		ok := r.seenMessageIDs["msg-non-active-1"].handled
 		r.mu.RUnlock()
 		return !ok
 	}) {
@@ -3472,7 +3488,7 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 
 	// seenMessageIDs eviction already verified above by pollCondition.
 	r.mu.RLock()
-	_, registered := r.seenMessageIDs["msg-non-active-1"]
+	registered := r.seenMessageIDs["msg-non-active-1"].handled
 	r.mu.RUnlock()
 	if registered {
 		t.Fatal("seenMessageIDs must be rolled back after updatePreviewFromStore failure")
@@ -3906,7 +3922,7 @@ func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -4021,7 +4037,7 @@ func TestOnNewMessageNonActivePeerDecryptFailFallback(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -4139,7 +4155,7 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -4257,7 +4273,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -4378,7 +4394,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 64),
 		startupDone:    done,
@@ -4508,7 +4524,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 64),
 		startupDone:    done,
@@ -4558,7 +4574,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	ok := pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
-		_, exists := r.seenMessageIDs["stale-peer-guard-1"]
+		exists := r.seenMessageIDs["stale-peer-guard-1"].handled
 		return !exists
 	})
 	if !ok {
@@ -4623,7 +4639,7 @@ func TestReloadAndRefreshPreviewRollsBackOnLoadFailure(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
-	r.seenMessageIDs["msg-reload-fail"] = struct{}{}
+	r.seenMessageIDs["msg-reload-fail"] = messageGate{handled: true}
 	r.mu.Unlock()
 
 	// newTestRouter has no chatlog → loadConversation fails → must evict.
@@ -4633,7 +4649,7 @@ func TestReloadAndRefreshPreviewRollsBackOnLoadFailure(t *testing.T) {
 	}
 
 	r.mu.RLock()
-	_, seen := r.seenMessageIDs["msg-reload-fail"]
+	seen := r.seenMessageIDs["msg-reload-fail"].handled
 	r.mu.RUnlock()
 	if seen {
 		t.Fatal("reloadAndRefreshPreview must evict seenMessageIDs when loadConversation fails")
@@ -4702,7 +4718,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -4711,7 +4727,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
-	r.seenMessageIDs["partial-success-1"] = struct{}{}
+	r.seenMessageIDs["partial-success-1"] = messageGate{handled: true}
 	r.mu.Unlock()
 
 	// Goroutine: wait for loadConversation to populate activeMessages,
@@ -4739,7 +4755,7 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	// The critical assertion: messageID must still be in seenMessageIDs.
 	// If evictSeenMessages was called on partial success, this fails.
 	r.mu.RLock()
-	_, seen := r.seenMessageIDs["partial-success-1"]
+	seen := r.seenMessageIDs["partial-success-1"].handled
 	r.mu.RUnlock()
 	if !seen {
 		t.Fatal("seenMessageIDs was evicted on partial success — " +
@@ -4751,49 +4767,121 @@ func TestReloadAndRefreshPreviewNoEvictOnPartialSuccess(t *testing.T) {
 	<-gdone
 }
 
-// TestUpdatePreviewFromCacheFallback verifies that when loadConversation
-// succeeds but updatePreviewFromStore fails, the sidebar preview is built
-// from the last cached message instead of staying stale. This covers the
-// partial-success path in both reloadAndRefreshPreview and the repair-path
-// active-peer reload branch.
+// TestUpdatePreviewFromCacheFallback covers the fallback taken when
+// loadConversation succeeded but updatePreviewFromStore failed: the cache is
+// all that is left to describe the conversation with.
+//
+// It may fill a gap; it may not overrule. The cache is the THREAD, ordered by
+// created_at — the senders' clocks — so its last element is the last message
+// chronologically, which is a different question from the one the sidebar
+// asks. A row with nothing on it is better filled with an approximate answer
+// than left blank; a row that already carries one, put there by a path that
+// knew the arrival order, must not be overwritten by a guess.
 func TestUpdatePreviewFromCacheFallback(t *testing.T) {
-	r := newTestRouter()
-
 	peerID := domaintest.ID("peer-1")
+	me := domaintest.ID("me")
 
-	// Pre-load cache with messages as loadConversation would.
-	r.cache.Load(peerID, []DirectMessage{
-		{ID: "old-msg", Sender: domaintest.ID("me"), Recipient: peerID, Body: "my old message", Timestamp: time.Now().Add(-5 * time.Minute)},
-		{ID: "new-msg", Sender: peerID, Recipient: domaintest.ID("me"), Body: "latest from peer", Timestamp: time.Now()},
+	// A conversation whose chronological last message is OURS, while the
+	// peer's — the one that actually arrived last, from a lagging clock — sits
+	// above it. This is the shape the whole ordering change is about.
+	conversation := []DirectMessage{
+		{ID: "theirs", Sender: peerID, Recipient: me, Body: "latest from peer", Timestamp: time.Now().Add(-5 * time.Minute)},
+		{ID: "ours", Sender: me, Recipient: peerID, Body: "my message", Timestamp: time.Now()},
+	}
+
+	load := func(r *DMRouter) {
+		r.cache.Load(peerID, conversation)
+		r.mu.Lock()
+		r.activePeer = peerID
+		r.peerClicked = true
+		r.activeMessages = r.cache.Messages()
+		r.tryEnsurePeerLocked(peerID)
+		r.mu.Unlock()
+	}
+
+	t.Run("fills an empty row", func(t *testing.T) {
+		r := newTestRouter()
+		load(r)
+
+		r.updatePreviewFromCache(peerID)
+
+		r.mu.RLock()
+		preview := r.peers[peerID].Preview
+		lastIncoming := r.peers[peerID].LastIncomingAt
+		r.mu.RUnlock()
+
+		if preview.Body != "my message" {
+			t.Fatalf("preview body = %q, want the last message of the loaded thread", preview.Body)
+		}
+		// The peer's message is behind our own in the thread, and presence
+		// evidence has to reach past it.
+		if !lastIncoming.Valid() || !lastIncoming.Time().Equal(conversation[0].Timestamp) {
+			t.Fatalf("last incoming = %v, want the peer's message at %v", lastIncoming, conversation[0].Timestamp)
+		}
 	})
 
-	r.mu.Lock()
-	r.activePeer = peerID
-	r.peerClicked = true
-	r.activeMessages = r.cache.Messages()
-	r.tryEnsurePeerLocked(peerID)
-	// Set a stale preview to verify it gets updated.
-	r.peers[peerID].Preview = ConversationPreview{
-		PeerAddress: peerID,
-		Sender:      domaintest.ID("me"),
-		Body:        "stale outgoing preview",
-	}
-	r.mu.Unlock()
+	t.Run("leaves an undecryptable row alone", func(t *testing.T) {
+		r := newTestRouter()
+		load(r)
 
-	// Call updatePreviewFromCache — simulates the fallback after
-	// updatePreviewFromStore fails.
-	r.updatePreviewFromCache(peerID)
+		// What the store path writes when the last row will not decrypt: an
+		// EMPTY body — the sidebar falls back to the fingerprint — and a
+		// perfectly good place in the arrival order. Reading emptiness as
+		// "nothing here" is how the cache came to overwrite it.
+		r.mu.Lock()
+		r.applyPreviewLocked(peerID, ConversationPreview{
+			PeerAddress: peerID,
+			Sender:      peerID,
+			Body:        "",
+			Timestamp:   conversation[0].Timestamp,
+			Seq:         2,
+		})
+		r.mu.Unlock()
 
-	r.mu.RLock()
-	preview := r.peers[peerID].Preview
-	r.mu.RUnlock()
+		r.updatePreviewFromCache(peerID)
 
-	if preview.Sender != peerID {
-		t.Fatalf("preview sender = %q, want %q — must reflect last cached message", preview.Sender, peerID)
-	}
-	if preview.Body != "latest from peer" {
-		t.Fatalf("preview body = %q, want %q", preview.Body, "latest from peer")
-	}
+		r.mu.RLock()
+		preview := r.peers[peerID].Preview
+		r.mu.RUnlock()
+
+		if preview.Body != "" || preview.Seq != 2 {
+			t.Fatalf("preview = %q (seq %d), want the undecryptable last row to stand: an empty body is a decrypt failure, not an empty row",
+				preview.Body, preview.Seq)
+		}
+	})
+
+	t.Run("leaves an existing row alone", func(t *testing.T) {
+		r := newTestRouter()
+		load(r)
+
+		// What a path that knows the arrival order put there.
+		r.mu.Lock()
+		r.applyPreviewLocked(peerID, ConversationPreview{
+			PeerAddress: peerID,
+			Sender:      peerID,
+			Body:        "latest from peer",
+			Timestamp:   conversation[0].Timestamp,
+			Seq:         2,
+		})
+		r.mu.Unlock()
+
+		r.updatePreviewFromCache(peerID)
+
+		r.mu.RLock()
+		preview := r.peers[peerID].Preview
+		lastIncoming := r.peers[peerID].LastIncomingAt
+		r.mu.RUnlock()
+
+		if preview.Body != "latest from peer" {
+			t.Fatalf("preview body = %q, want %q: the cache is ordered by the senders' clocks and must not overrule a row that was ordered by arrival",
+				preview.Body, "latest from peer")
+		}
+		// The evidence still runs: it is a maximum, so the cache can raise it
+		// without being able to move it backwards.
+		if !lastIncoming.Valid() {
+			t.Fatal("last incoming was not recorded from the cache")
+		}
+	})
 }
 
 // TestUpdatePreviewFromCacheStalePeerGuard verifies that
@@ -4911,7 +4999,7 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -4920,13 +5008,12 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
+	// The row exists with nothing on it — a contact the header repair
+	// created, or a conversation opened before its first preview landed. That
+	// is the gap the cache fallback is for; it does not overwrite a row that
+	// already carries an answer (see TestUpdatePreviewFromCacheFallback).
 	r.tryEnsurePeerLocked(peerID)
-	r.peers[peerID].Preview = ConversationPreview{
-		PeerAddress: peerID,
-		Sender:      domain.PeerIdentityFromWire(id.Address),
-		Body:        "stale outgoing",
-	}
-	r.seenMessageIDs["partial-1"] = struct{}{}
+	r.seenMessageIDs["partial-1"] = messageGate{handled: true}
 	r.mu.Unlock()
 
 	// Step 1: loadConversation succeeds, populating cache with the
@@ -4956,16 +5043,17 @@ func TestPartialSuccessFallbackHelpers(t *testing.T) {
 	// cached message — this is the fallback in reloadAndRefreshPreview.
 	r.updatePreviewFromCache(peerID)
 
-	// The preview must now reflect the cached message, not the stale one.
+	// The empty row must now describe the cached message rather than stay
+	// blank while the chatlog is unavailable.
 	r.mu.RLock()
 	preview := r.peers[peerID].Preview
 	r.mu.RUnlock()
 
-	if preview.Sender == domain.PeerIdentityFromWire(id.Address) {
-		t.Fatalf("preview still shows stale outgoing message — updatePreviewFromCache fallback did not update preview")
+	if preview.Sender != peerID {
+		t.Fatalf("preview sender = %q, want the peer %q — the cache fallback did not run", preview.Sender, peerID)
 	}
-	if preview.Body == "stale outgoing" {
-		t.Fatalf("preview body still stale — cache fallback did not run")
+	if preview.Body != "partial-success message" {
+		t.Fatalf("preview body = %q, want %q", preview.Body, "partial-success message")
 	}
 }
 
@@ -5014,7 +5102,7 @@ func TestUpdatePreviewFromStoreReturnsFalseOnClosedChatlog(t *testing.T) {
 		client:         c,
 		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:      make([]domain.PeerIdentity, 0),
-		seenMessageIDs: make(map[string]struct{}),
+		seenMessageIDs: make(map[string]messageGate),
 		cache:          NewConversationCache(),
 		uiEvents:       make(chan UIEvent, 32),
 		startupDone:    done,
@@ -5191,7 +5279,7 @@ func newTestRouter() *DMRouter {
 		statusMonitor:   provider,
 		peers:           make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:       make([]domain.PeerIdentity, 0),
-		seenMessageIDs:  make(map[string]struct{}),
+		seenMessageIDs:  make(map[string]messageGate),
 		peerGen:         make(map[domain.PeerIdentity]uint64),
 		backwardsEpoch:  make(map[domain.PeerIdentity]peerEpochs),
 		removals:        client.removals,
@@ -5434,7 +5522,7 @@ func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
 
 	// Pre-seed one message as already seen.
 	r.mu.Lock()
-	r.seenMessageIDs["old-msg"] = struct{}{}
+	r.seenMessageIDs["old-msg"] = messageGate{handled: true}
 	r.mu.Unlock()
 
 	status := NodeStatus{
@@ -5451,10 +5539,10 @@ func TestRepairUnreadFromHeadersSplitLock(t *testing.T) {
 	defer r.mu.RUnlock()
 
 	// old-msg was already seen, so only 2 new messages processed.
-	if _, ok := r.seenMessageIDs["new-msg-1"]; !ok {
+	if !r.seenMessageIDs["new-msg-1"].handled {
 		t.Fatal("new-msg-1 should be in seenMessageIDs")
 	}
-	if _, ok := r.seenMessageIDs["new-msg-2"]; !ok {
+	if !r.seenMessageIDs["new-msg-2"].handled {
 		t.Fatal("new-msg-2 should be in seenMessageIDs")
 	}
 	// peer-1 gets 1 new unread (new-msg-1), peer-2 gets 1 (new-msg-2).
@@ -6228,6 +6316,10 @@ func (m *movingHistoryReader) LastIncomingAtPerPeer(ctx context.Context, now tim
 	return m.inner.LastIncomingAtPerPeer(ctx, now)
 }
 
+func (m *movingHistoryReader) MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error) {
+	return m.inner.MessageSeq(ctx, messageID)
+}
+
 func (m *movingHistoryReader) LastIncomingAtFor(ctx context.Context, peer domain.PeerIdentity, now time.Time) (time.Time, error) {
 	return m.inner.LastIncomingAtFor(ctx, peer, now)
 }
@@ -6396,23 +6488,38 @@ func TestLastIncomingRefusesFutureTimestamps(t *testing.T) {
 	if state.LastIncomingAt.Valid() {
 		t.Fatalf("a future-dated message became presence evidence: %v", state.LastIncomingAt.Time())
 	}
-	// The preview refuses it too, and for a sharper reason than a wrong
-	// timestamp: the preview merge keeps the NEWER message, so a date in the
-	// future becomes a ceiling nothing can beat — every later message,
-	// including our own replies, would be dropped, and the peer would own
-	// that sidebar row for as long as they kept it up.
-	if !state.Preview.Timestamp.IsZero() {
-		t.Fatalf("a future-dated message became the preview: %v", state.Preview.Timestamp)
+	// The PREVIEW takes it, and that is the deliberate half of the split. A
+	// forged date buys nothing there any more — the sidebar no longer orders
+	// by the stamp — while refusing the message left the user with a badge
+	// counting something the sidebar would not show. Presence is the claim
+	// worth protecting: "this contact was online at T" is evidence, and the
+	// sender is the one party who gains by choosing T.
+	if state.Preview.Body != "hi from tomorrow" {
+		t.Fatalf("preview = %q, want the message that arrived; refusing it hides a message the node accepted and stored", state.Preview.Body)
+	}
+
+	// And it pins nothing: the next message replaces it, whatever the dates.
+	r.applyDecryptedMessageToSidebar(&DirectMessage{
+		ID: "after", Sender: me, Recipient: peer, Body: "our reply",
+		Timestamp: now,
+	}, peer, peerStamp{})
+	r.notify(UIEventSidebarUpdated)
+	if body := r.Snapshot().Peers[peer].Preview.Body; body != "our reply" {
+		t.Fatalf("preview = %q after a later message, want %q: the forged date is acting as a ceiling", body, "our reply")
 	}
 }
 
-// TestDeleteKeepsForgedFutureDateOutOfSidebar closes the one path that
+// TestDeleteKeepsForgedFutureDateOutOfPresence closes the one path that
 // assigns LastIncomingAt without going through noteIncomingAtLocked. Deleting
 // the newest message promotes whatever is behind it, and if that row carries
 // a sender-chosen future date, a deletion would become the way a forged
-// timestamp reaches the sidebar — a date the live and startup paths both
-// refuse.
-func TestDeleteKeepsForgedFutureDateOutOfSidebar(t *testing.T) {
+// timestamp becomes evidence that a contact was online.
+//
+// The preview is a different question and takes the row: it says which
+// message is last, not when anybody was online, and the sidebar no longer
+// orders by its stamp. What it must not do is get stuck there, which the last
+// assertion covers.
+func TestDeleteKeepsForgedFutureDateOutOfPresence(t *testing.T) {
 	client, id := newTestDesktopClientWithNode(t)
 	cl := client.chatLog
 	me := domain.PeerIdentityFromWire(id.Address)
@@ -6470,14 +6577,23 @@ func TestDeleteKeepsForgedFutureDateOutOfSidebar(t *testing.T) {
 		t.Fatalf("last incoming after delete = %v, want the honest message %v", got, honest)
 	}
 
-	// The PREVIEW too, which the delete path assigns rather than merges: a
-	// forward-dated row left in the sidebar becomes a ceiling our own later
-	// replies cannot beat.
+	// The preview, in contrast, is whatever survived — the forged row is a
+	// real message of this conversation and the last one still stored. What
+	// must not happen is it STICKING: the next message replaces it.
+	// Sequence 4: the fixture wrote three rows, so a message arriving now sits
+	// after all of them. A live message gets this from the store in
+	// production; the fixture builds one by hand and has to say so, because
+	// an unplaceable message deliberately does not displace a placed one.
+	r.applyDecryptedMessageToSidebar(&DirectMessage{
+		ID: "d-after", Sender: peer, Recipient: me, Body: "later message",
+		Timestamp: now, Seq: 4,
+	}, peer, r.peerStampOf(peer))
+
 	r.mu.RLock()
 	preview := r.peers[peer].Preview
 	r.mu.RUnlock()
-	if !preview.Timestamp.IsZero() && preview.Timestamp.After(now) {
-		t.Fatalf("the deletion pinned the sidebar preview to %v, which is after now (%v)", preview.Timestamp, now)
+	if preview.Body != "later message" {
+		t.Fatalf("preview = %q, want %q: the forged date is acting as a ceiling the later message cannot beat", preview.Body, "later message")
 	}
 }
 
@@ -6707,7 +6823,7 @@ func TestIncompleteRecoveryReopensTheDedupGate(t *testing.T) {
 	r.presenceClock = func() time.Time { return now }
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(peer)
-	r.seenMessageIDs["arriving"] = struct{}{}
+	r.seenMessageIDs["arriving"] = messageGate{handled: true}
 	stampAtEvent := peerStamp{gen: r.peerGen[peer], epochs: r.backwardsEpoch[peer]}
 	r.moveHistoryBackwardsLocked(peer)
 	r.mu.Unlock()
@@ -6723,7 +6839,7 @@ func TestIncompleteRecoveryReopensTheDedupGate(t *testing.T) {
 	}, peer, stampAtEvent)
 
 	r.mu.RLock()
-	_, stillGated := r.seenMessageIDs["arriving"]
+	stillGated := r.seenMessageIDs["arriving"].handled
 	r.mu.RUnlock()
 	if stillGated {
 		t.Fatal("a half-finished recovery kept the message behind the dedup gate: nothing will ever pick it up")
@@ -6859,7 +6975,7 @@ func TestRefusedEnsureLeavesNoOrphanState(t *testing.T) {
 	r.mu.RLock()
 	_, row := r.peers[peer]
 	badges := len(r.unreadIDs[peer])
-	_, gated := r.seenMessageIDs["header-during-removal"]
+	gated := r.seenMessageIDs["header-during-removal"].handled
 	inOrder := false
 	for _, p := range r.peerOrder {
 		if p == peer {
@@ -7484,7 +7600,9 @@ func TestIncomingMessageApplyRefusesARemovedPeer(t *testing.T) {
 	r := newSyncTestRouter()
 	peer := domaintest.ID("removed-mid-decrypt")
 	me := r.client.Address()
-	msg := DirectMessage{ID: "late", Sender: peer, Recipient: me, Body: "hello", Timestamp: time.Now()}
+	// Seq: a message the store could place. Without one the apply still lands
+	// but reports the row as unordered, which is a different subject.
+	msg := DirectMessage{ID: "late", Sender: peer, Recipient: me, Body: "hello", Timestamp: time.Now(), Seq: 1}
 
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(peer)
@@ -7517,10 +7635,11 @@ func TestIncomingMessageApplyRefusesARemovedPeer(t *testing.T) {
 	}
 }
 
-// TestPreviewNeverPinsOnAFutureRow covers the paths that ASSIGN the preview
-// instead of merging it: the startup seed and the deletion. A forward-dated
-// row — the timestamp is the sender's, and the node accepts minutes of drift
-// — would become a ceiling that our own replies cannot beat.
+// TestPreviewNeverPinsOnAFutureRow covers what a forward-dated row may and
+// may not do. The timestamp is the sender's and the node accepts minutes of
+// drift, so such a row reaches the sidebar as an ordinary last message — and
+// it must not become a ceiling that the next message cannot beat, which is
+// what it was when the preview was ordered by that stamp.
 func TestPreviewNeverPinsOnAFutureRow(t *testing.T) {
 	r := newTestRouter()
 	peer := domaintest.ID("forward-dated-sender")
@@ -7535,16 +7654,16 @@ func TestPreviewNeverPinsOnAFutureRow(t *testing.T) {
 
 	r.mu.RLock()
 	state := r.peers[peer]
-	var pinned time.Time
+	var seeded string
 	if state != nil {
-		pinned = state.Preview.Timestamp
+		seeded = state.Preview.Body
 	}
 	r.mu.RUnlock()
-	if !pinned.IsZero() && pinned.After(now) {
-		t.Fatalf("the startup seed pinned the sidebar to %v, which is after now (%v)", pinned, now)
+	if seeded != "I am from the future" {
+		t.Fatalf("seeded preview = %q, want the row the store calls last", seeded)
 	}
 
-	// And an ordinary reply still lands.
+	// And an ordinary reply still lands on top of it.
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(peer)
 	r.setPeerPreviewLocked(peer, DirectMessage{
@@ -7826,11 +7945,63 @@ func TestUnreadIsASetNotACounter(t *testing.T) {
 	}
 }
 
-// TestPreviewMergeNeverGoesBackwards covers the other half of the ordering
-// problem. The startup read and a live message can arrive in either order,
-// and the older of the two must not overwrite the newer — with one exception,
-// the deletion, which is authoritative precisely because it removes rows.
-func TestPreviewMergeNeverGoesBackwards(t *testing.T) {
+// TestALateApplyCannotPutBackAnEarlierMessage is the interleaving the sidebar
+// is exposed to whatever the code does about locking: the node releases its
+// lock across the SQLite write and publishes the event afterwards, a send
+// applies its own echo from its own goroutine, and the event bus delivers
+// asynchronously. So two messages of one conversation can be APPLIED in the
+// opposite order to the one they were STORED in.
+//
+// Message A is written first and B second. B reaches the sidebar first; A's
+// send completes late and applies afterwards. What must decide is where the
+// rows landed, not who wrote last, and not which stamp is larger — here A's
+// stamp is even the newer of the two, because the clocks disagree.
+func TestALateApplyCannotPutBackAnEarlierMessage(t *testing.T) {
+	r := newTestRouter()
+	peer := domaintest.ID("interleaved-peer")
+	me := r.client.Address()
+	now := time.Now().UTC()
+
+	// B — stored second, applied first.
+	r.applyDecryptedMessageToSidebar(&DirectMessage{
+		ID: "B", Sender: peer, Recipient: me, Body: "their message",
+		Timestamp: now.Add(-time.Minute), Seq: 2,
+	}, peer, peerStamp{})
+
+	// A — stored first, applied last, and carrying the later stamp.
+	r.applyDecryptedMessageToSidebar(&DirectMessage{
+		ID: "A", Sender: me, Recipient: peer, Body: "our message",
+		Timestamp: now, Seq: 1,
+	}, peer, peerStamp{})
+
+	r.mu.RLock()
+	body := r.peers[peer].Preview.Body
+	r.mu.RUnlock()
+	if body != "their message" {
+		t.Fatalf("preview = %q, want %q: the message stored LAST is the last message, whoever applied it last",
+			body, "their message")
+	}
+
+	// And the sidebar is not frozen: the next message stored — sequence 3 —
+	// takes the row.
+	r.applyDecryptedMessageToSidebar(&DirectMessage{
+		ID: "C", Sender: peer, Recipient: me, Body: "the next one",
+		Timestamp: now.Add(-time.Hour), Seq: 3,
+	}, peer, peerStamp{})
+	r.mu.RLock()
+	body = r.peers[peer].Preview.Body
+	r.mu.RUnlock()
+	if body != "the next one" {
+		t.Fatalf("preview = %q, want %q", body, "the next one")
+	}
+}
+
+// TestStoredPreviewDoesNotOverwriteALiveOne covers the same rule across the
+// two roads to the sidebar. A read from the chatlog is answered outside the
+// lock, so it can land after a message it never saw; the message is the newer
+// answer and the read has to defer to it. Both carry the arrival sequence, so
+// neither has to know which of them ran first.
+func TestStoredPreviewDoesNotOverwriteALiveOne(t *testing.T) {
 	r := newTestRouter()
 	peer := domaintest.ID("merge-order-peer")
 	me := r.client.Address()
@@ -7839,33 +8010,40 @@ func TestPreviewMergeNeverGoesBackwards(t *testing.T) {
 	older := now.Add(-2 * time.Hour)
 	newer := now.Add(-time.Minute)
 
+	// A message arrives while a read of the row before it is in flight.
 	r.applyDecryptedMessageToSidebar(&DirectMessage{
-		ID: "newer", Sender: peer, Recipient: me, Body: "newer", Timestamp: newer,
+		ID: "newer", Sender: peer, Recipient: me, Body: "newer", Timestamp: newer, Seq: 7,
 	}, peer, peerStamp{})
 
-	// A slower read carrying the older row lands afterwards.
 	r.mu.Lock()
-	r.mergePreviewLocked(peer, ConversationPreview{PeerAddress: peer, Sender: peer, Body: "older", Timestamp: older})
+	applied := r.applyPreviewLocked(peer, ConversationPreview{
+		PeerAddress: peer, Sender: peer, Body: "older", Timestamp: older, Seq: 6,
+	})
 	body := r.peers[peer].Preview.Body
 	last := r.peers[peer].LastIncomingAt
 	r.mu.Unlock()
 
+	if applied != previewOlder {
+		t.Fatalf("the store's answer reported %v over a message it never saw; want previewOlder", applied)
+	}
 	if body != "newer" {
-		t.Fatalf("preview = %q, want the newer message to survive", body)
+		t.Fatalf("preview = %q, want the live message to survive", body)
 	}
 	if !last.Valid() || !last.Time().Equal(newer) {
 		t.Fatalf("last incoming = %v, want %v", last, newer)
 	}
 
-	// The same older message arriving twice changes nothing.
-	r.applyDecryptedMessageToSidebar(&DirectMessage{
-		ID: "older", Sender: peer, Recipient: me, Body: "older", Timestamp: older,
-	}, peer, peerStamp{})
-	r.mu.RLock()
+	// A read that saw the message applies normally, whatever its stamp says:
+	// the store is the authority on which row is last, and it answers that by
+	// arrival rather than by the senders' clocks.
+	r.mu.Lock()
+	applied = r.applyPreviewLocked(peer, ConversationPreview{
+		PeerAddress: peer, Sender: peer, Body: "read after it", Timestamp: older, Seq: 7,
+	})
 	body = r.peers[peer].Preview.Body
-	r.mu.RUnlock()
-	if body != "newer" {
-		t.Fatalf("preview after a replayed older message = %q, want %q", body, "newer")
+	r.mu.Unlock()
+	if applied != previewTaken || body != "read after it" {
+		t.Fatalf("preview = %q (result=%v), want the store's answer to land", body, applied)
 	}
 }
 
@@ -8079,6 +8257,10 @@ type failingHistoryReader struct {
 	scanCount      int32
 }
 
+func (f *failingHistoryReader) MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error) {
+	return f.store.MessageSeq(ctx, messageID)
+}
+
 func (f *failingHistoryReader) LastIncomingAtFor(ctx context.Context, peer domain.PeerIdentity, now time.Time) (time.Time, error) {
 	if f.failPerPeerReads {
 		return time.Time{}, errors.New("chatlog unavailable")
@@ -8135,6 +8317,10 @@ func (a *afterStatusReader) StoredMessageStatuses(ctx context.Context, ids []dom
 	return statuses, err
 }
 
+func (a *afterStatusReader) MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error) {
+	return a.inner.MessageSeq(ctx, messageID)
+}
+
 func (a *afterStatusReader) LastIncomingAtFor(ctx context.Context, peer domain.PeerIdentity, now time.Time) (time.Time, error) {
 	return a.inner.LastIncomingAtFor(ctx, peer, now)
 }
@@ -8161,6 +8347,10 @@ type interleavingReader struct {
 	inner chatHistoryReader
 	once  sync.Once
 	hook  func(peer domain.PeerIdentity)
+}
+
+func (i *interleavingReader) MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error) {
+	return i.inner.MessageSeq(ctx, messageID)
 }
 
 func (i *interleavingReader) LastIncomingAtFor(ctx context.Context, peer domain.PeerIdentity, now time.Time) (time.Time, error) {

@@ -211,6 +211,27 @@ type DMRouter struct {
 	// Guarded by mu.
 	unreadIDs map[domain.PeerIdentity]map[domain.MessageID]struct{}
 
+	// pendingPreviewRepair holds peers whose sidebar row could not be placed
+	// in the arrival order and whose immediate re-read of the store failed
+	// too. The value is the attempts left, and the sweep that drains it is
+	// the one the delete path already runs — see retryPendingPreviewRepair.
+	//
+	// It exists because there is no other way back to such a row. Reopening
+	// the message id in seenMessageIDs looks like one and is not: the header
+	// pass that would rediscover it runs ONCE per process (pollHealth is
+	// deferred from initializeFromDB), and the network cannot re-announce the
+	// message either — a re-delivery is a duplicate to the node, which stores
+	// nothing and publishes nothing. Without this queue a database that comes
+	// back a few seconds too late leaves the wrong last message on the row
+	// until the user opens the conversation, another message arrives, or the
+	// app restarts.
+	// Guarded by mu.
+	pendingPreviewRepair map[domain.PeerIdentity]previewRepairEntry
+	// previewRepairToken hands each queued repair a number, so a sweep can
+	// tell "the request I answered" from "a request that arrived while I was
+	// reading". Guarded by mu.
+	previewRepairToken uint64
+
 	// pendingDeleteReconcile holds peers whose post-deletion reconciliation
 	// did not land: a transient chatlog error, or an answer the event path
 	// kept overtaking. Nothing else re-reads a peer's history, so without
@@ -235,7 +256,7 @@ type DMRouter struct {
 	activeMessages []DirectMessage
 	cache          *ConversationCache
 	sendStatus     string
-	seenMessageIDs map[string]struct{}
+	seenMessageIDs map[string]messageGate
 	peerGen        map[domain.PeerIdentity]uint64 // bumped by RemovePeer; goroutines compare to detect stale sends
 	initialSynced  bool
 	// replayingStartup is true while the startup buffer is being drained. It
@@ -417,7 +438,7 @@ func NewDMRouter(client *DesktopClient, fileBridge *FileTransferBridge, eventBus
 		statusMonitor:   statusMonitor,
 		peers:           make(map[domain.PeerIdentity]*RouterPeerState),
 		peerOrder:       make([]domain.PeerIdentity, 0),
-		seenMessageIDs:  make(map[string]struct{}),
+		seenMessageIDs:  make(map[string]messageGate),
 		peerGen:         make(map[domain.PeerIdentity]uint64),
 		backwardsEpoch:  make(map[domain.PeerIdentity]peerEpochs),
 		fileOpMu:        make(map[domain.PeerIdentity]*sync.Mutex),
@@ -807,9 +828,11 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 		return ErrConversationDeleteInflight
 	}
 
-	r.mu.RLock()
-	gen := r.peerGen[to]
-	r.mu.RUnlock()
+	// The whole stamp, not just the lifecycle generation: a send is slow
+	// enough for the conversation to be wiped underneath it, and the echo
+	// arriving afterwards must not undo that. See applyOwnSentMessage.
+	stampBeforeSend := r.peerStampOf(to)
+	gen := stampBeforeSend.gen
 
 	r.setSendStatusNotify("sending…")
 
@@ -911,11 +934,11 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 			r.pendingScrollToEnd = true
 		}
 
-		if sent != nil {
-			r.setPeerPreviewLocked(to, *sent)
-			r.promotePeerLocked(to)
-		}
 		r.mu.Unlock()
+
+		if sent != nil {
+			r.applyOwnSentMessage(to, *sent, stampBeforeSend)
+		}
 
 		r.notify(UIEventMessagesUpdated)
 		r.notify(UIEventSidebarUpdated)
@@ -977,14 +1000,17 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 		return ErrConversationDeleteInflight
 	}
 
-	var gen uint64
+	// The stamp carries the history epoch as well as the lifecycle
+	// generation, so the echo can be refused if the conversation is wiped
+	// while the announce runs (applyOwnSentMessage). The generation may come
+	// from the caller's earlier baseline — see the doc comments above — and
+	// that overrides only the generation half; the epoch is this moment's,
+	// which is what the echo has to be measured against.
+	stampBeforeSend := r.peerStampOf(to)
 	if baseline != nil {
-		gen = *baseline
-	} else {
-		r.mu.RLock()
-		gen = r.peerGen[to]
-		r.mu.RUnlock()
+		stampBeforeSend.gen = *baseline
 	}
+	gen := stampBeforeSend.gen
 
 	r.setSendStatusNotify("sending…")
 
@@ -1107,9 +1133,11 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 			r.pendingScrollToEnd = true
 		}
 
-		r.setPeerPreviewLocked(to, *result.Sent)
-		r.promotePeerLocked(to)
 		r.mu.Unlock()
+
+		// Under the same guards as any other message: an announce is a send
+		// like any other, and the conversation can be wiped while it runs.
+		r.applyOwnSentMessage(to, *result.Sent, stampBeforeSend)
 
 		r.notify(UIEventMessagesUpdated)
 		r.notify(UIEventSidebarUpdated)
@@ -1338,6 +1366,7 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	delete(r.unreadIDs, identity)
 	delete(r.peerRefreshMu, identity)
 	delete(r.pendingDeleteReconcile, identity)
+	delete(r.pendingPreviewRepair, identity)
 	r.removePeerLocked(identity)
 	r.cache.Evict(identity)
 
@@ -1694,17 +1723,28 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	// this would otherwise write for it. A conversation new to this process
 	// has generation zero on both sides and is created normally.
 	r.mu.Lock()
+	// The sound is decided here, once, and remembered on the id itself.
+	//
+	// It cannot be decided by the dedup gate: a path that fails to apply a
+	// message REOPENS that gate on purpose, so the message can be tried
+	// again — and the retry would then announce itself a second time. Nor by
+	// the badge: it is a set keyed by message id, so a repeat moves nothing
+	// on it, and the conversation ON SCREEN raises no badge at all. Both of
+	// those are how the same message came to make a sound with nothing to
+	// show for it.
+	//
+	// So the fact recorded is the one being asked about: this message has
+	// been announced. Everything else about it may be reopened; that may not.
+	replaying := r.replayingStartup
+	announce := event.Sender != r.client.Address().String() && !replaying
 	if event.MessageID != "" {
-		r.seenMessageIDs[event.MessageID] = struct{}{}
+		// Read before writing: what is being decided is whether the sound was
+		// still owed, and the write settles it either way.
+		announce = announce && !r.seenMessageIDs[event.MessageID].announced
+		r.markMessageHandledLocked(event.MessageID)
 	}
 	stampAtEvent := peerStamp{gen: r.peerGen[peerID], epochs: r.backwardsEpoch[peerID]}
 	r.mu.Unlock()
-
-	// During startup replay, suppress beep — these are old messages
-	// already counted by seedPreviews().
-	r.mu.RLock()
-	replaying := r.replayingStartup
-	r.mu.RUnlock()
 
 	if !r.isActivePeer(peerID) {
 		// Definitely not the active conversation — update sidebar only.
@@ -1768,7 +1808,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 			r.notify(UIEventSidebarUpdated)
 		}
 		// Sound notification for incoming messages (sender is not us).
-		if event.Sender != r.client.Address().String() && !replaying {
+		if announce {
 			r.notify(UIEventBeep)
 		}
 		return
@@ -1790,7 +1830,11 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 			outcome := r.applyIncomingMessageLocked(peerID, *msg, stampAtEvent)
 			r.mu.Unlock()
 			switch outcome {
-			case applyApplied:
+			// applyPreviewUnplaceable needs no repair of its own here: this
+			// branch always follows with reloadAndRefreshPreview, which reads
+			// the conversation from the store anyway — and queues a repair
+			// itself if that read is the one that fails.
+			case applyApplied, applyPreviewUnplaceable:
 				// The file mapping goes through the same guard, and only
 				// after it: registering first would put a transfer back for
 				// a contact whose transfers were just cleaned up.
@@ -1805,7 +1849,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 			case applyPeerGone:
 			}
 		}
-		if event.Sender != r.client.Address().String() && !replaying {
+		if announce {
 			r.notify(UIEventBeep)
 		}
 		// Before the goroutine, not inside it: a removal that completes
@@ -1867,7 +1911,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	msg := r.client.DecryptIncomingMessage(r.opContext(), event)
 	if msg == nil {
 		isIncoming := event.Sender != r.client.Address().String()
-		if isIncoming && !replaying {
+		if announce {
 			r.notify(UIEventBeep)
 		}
 		r.ensurePeerForReconcile(peerID, stampAtEvent.gen)
@@ -1900,7 +1944,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		// decrypted; it has been handled as a background arrival, badge
 		// included.
 		r.notify(UIEventSidebarUpdated)
-		if isIncoming && !replaying {
+		if announce {
 			r.notify(UIEventBeep)
 		}
 		return
@@ -1910,8 +1954,9 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	r.notify(UIEventSidebarUpdated)
 
 	// Sound notification for every incoming message, regardless of which
-	// chat is currently active. Suppressed during startup replay.
-	if isIncoming && !replaying {
+	// chat is currently active. Suppressed during startup replay, and for a
+	// message this process has already announced.
+	if announce {
 		r.notify(UIEventBeep)
 	}
 
@@ -2095,11 +2140,12 @@ func (r *DMRouter) resetIdentityState() {
 	r.unreadIDs = nil
 	r.peerRefreshMu = nil
 	r.pendingDeleteReconcile = nil
+	r.pendingPreviewRepair = nil
 	r.peerOrder = nil
 	r.activePeer = domain.PeerIdentity{}
 	r.peerClicked = false
 	r.activeMessages = nil
-	r.seenMessageIDs = make(map[string]struct{})
+	r.seenMessageIDs = make(map[string]messageGate)
 	r.initialSynced = false
 	r.sendStatus = ""
 	r.pendingScrollToEnd = false
@@ -2580,11 +2626,13 @@ func (r *DMRouter) applyScannedLastIncoming(lastIncoming map[domain.PeerIdentity
 func (r *DMRouter) seedPreviews(previews []ConversationPreview, before map[domain.PeerIdentity]peerEpochs) {
 	me := r.client.Address()
 
-	// Sort: unread first by unread count descending, then by most recent activity.
-	// Within the unread group, higher unread counts rank first.
-	// This ensures deterministic sidebar order on startup. The UI layer applies
-	// its own 4-tier sort (online/offline × unread/read) using the snapshot
-	// data, so this order serves as a stable tiebreaker.
+	// Sort: unread first, higher unread counts ahead within that group.
+	// Everything else keeps the order it arrived in — the store hands these
+	// back newest-arrival first, and a STABLE sort is what preserves it.
+	// Ranking the rest by timestamp instead put the launch order in the hands
+	// of the senders' clocks, the same mistake the preview merge used to make.
+	// The UI layer applies its own 4-tier sort (online/offline × unread/read)
+	// on top, using this as its stable input.
 	sort.SliceStable(previews, func(i, j int) bool {
 		ui, uj := previews[i].UnreadCount, previews[j].UnreadCount
 		if (ui > 0) != (uj > 0) {
@@ -2593,7 +2641,7 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview, before map[domai
 		if ui > 0 && uj > 0 && ui != uj {
 			return ui > uj // within unread group: higher count first
 		}
-		return previews[i].Timestamp.After(previews[j].Timestamp)
+		return false
 	})
 
 	r.mu.Lock()
@@ -2618,20 +2666,18 @@ func (r *DMRouter) seedPreviews(previews []ConversationPreview, before map[domai
 			fresherPeers[p.PeerAddress] = struct{}{}
 			continue
 		}
-		existing := r.peers[p.PeerAddress]
-		// Skip if the ebus event-path already delivered fresher data for this
-		// peer (ebus handlers run in parallel with initializeFromDB).
-		if !existing.Preview.Timestamp.IsZero() && !existing.Preview.Timestamp.Before(p.Timestamp) {
+		// The event path runs in parallel with initializeFromDB, and what it
+		// has already written can be either NEWER than this read (a message
+		// stored while the query ran) or OLDER (the startup replay, which
+		// re-delivers messages the database has held for days). The seed
+		// therefore cannot assume it is behind, and the shared rule sorts the
+		// two out by arrival sequence. A peer it stands aside for keeps its
+		// position in peerOrder as well as its preview, since the startup
+		// order is about the same stale answer.
+		if !r.applyPreviewLocked(p.PeerAddress, p).written() {
 			fresherPeers[p.PeerAddress] = struct{}{}
 			continue
 		}
-		if r.previewIsFuture(p) {
-			// A forward-dated row would pin the sidebar from the first
-			// frame, and this path assigns rather than merges.
-			fresherPeers[p.PeerAddress] = struct{}{}
-			continue
-		}
-		existing.Preview = p
 	}
 
 	// Rebuild peerOrder: peers whose SQL data was applied are repositioned
@@ -2729,7 +2775,7 @@ func (r *DMRouter) applyDecryptedMessageToSidebar(msg *DirectMessage, peerID dom
 	// startup replay and the open conversation are exactly the cases where
 	// the peer demonstrably wrote to us.
 	outcome := r.applyIncomingMessageLocked(peerID, *msg, stamp)
-	if outcome != applyApplied {
+	if outcome != applyApplied && outcome != applyPreviewUnplaceable {
 		r.mu.Unlock()
 		if outcome == applyStale {
 			// Something in this conversation was deleted while the message
@@ -2765,6 +2811,10 @@ func (r *DMRouter) applyDecryptedMessageToSidebar(msg *DirectMessage, peerID dom
 	// mapping until the user opened that chat, and the file tab would miss
 	// it entirely.
 	r.registerFileReceiveForLivePeer(msg, peerID, stamp)
+
+	if outcome == applyPreviewUnplaceable {
+		r.repairPreviewFromStore(peerID, msg.ID)
+	}
 }
 
 // fileOpLock returns the per-peer mutex that serializes file-transfer
@@ -3036,11 +3086,11 @@ func (r *DMRouter) reconcilePeerFromStore(ctx context.Context, peer domain.PeerI
 		if !r.derivedStateMatchesLocked(peer, observed) {
 			return reconcileRetry
 		}
-		if !r.previewIsFuture(*preview) {
-			// The deletion may move the preview backwards, but not onto a
-			// forward-dated row: that ceiling outlives the deletion.
-			r.peers[peer].Preview = *preview
-		}
+		// Whatever the store now calls the last row is the last row, including
+		// one a peer dated into the future: the sidebar no longer orders by
+		// that stamp, so an odd date is a wrong time shown next to the right
+		// message rather than a ceiling nothing can beat.
+		r.peers[peer].Preview = *preview
 		r.peers[peer].LastIncomingAt = optionalTimeOrUnset(lastIncoming)
 		r.replaceUnreadLocked(peer, unseen)
 		// This assignment is itself a backwards move: a read that started
@@ -3050,12 +3100,19 @@ func (r *DMRouter) reconcilePeerFromStore(ctx context.Context, peer domain.PeerI
 	}
 
 	if r.backwardsEpoch[peer].history != observed.epochs.history {
-		// Rows left this conversation while these queries ran. The merges
+		// Rows left this conversation while these queries ran. The writes
 		// below only move forward, so applying an answer read before that
 		// would put back exactly what was removed. Re-read.
 		return reconcileRetry
 	}
-	r.mergePreviewLocked(peer, *preview)
+	// The preview is the one value here that a message arriving mid-read has
+	// already answered better, so it is the one that defers. The other two
+	// cannot be made wrong by an arrival — last-incoming takes the maximum and
+	// the badge is a set — so they apply either way, and the reconciliation
+	// still counts as applied: the caller's question is whether the sidebar
+	// matches the chatlog, and a newer message on top of it is not a failure
+	// to be retried.
+	r.applyPreviewLocked(peer, *preview)
 	r.noteIncomingAtLocked(peer, lastIncoming)
 	return reconcileApplied
 }
@@ -3083,6 +3140,11 @@ type chatHistoryReader interface {
 	// already", which a header cannot answer, and "is this id merely not
 	// written yet", which the delete path must not mistake for "read".
 	StoredMessageStatuses(ctx context.Context, ids []domain.MessageID) (map[domain.MessageID]string, error)
+	// MessageSeq is where a message landed in the local arrival order, and
+	// whether the store holds it at all. It is what makes a message learned
+	// from the event stream comparable with the row already in the sidebar —
+	// the event itself carries no such number. See previewSeqOf.
+	MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error)
 }
 
 // reconcileOutcome says what happened, because the three cases need different
@@ -3255,34 +3317,113 @@ func (r *DMRouter) peerAliveLocked(peer domain.PeerIdentity, gen uint64) bool {
 	return alive
 }
 
-// mergePreviewLocked accepts a preview only if it is not older than the one
-// on screen. The rule is what lets a SQL read and the event stream run in any
-// order: the database is ahead of the events, so both can carry the same
-// message, and neither may undo the other's newer one. Callers hold r.mu.
-// previewIsFuture refuses a preview dated after now. The timestamp is the
-// SENDER's own created_at and the node accepts minutes of clock drift, so a
-// message dated forward would not merely show a wrong time — it would become
-// the ceiling that every later preview, including our own replies, fails to
-// beat, pinning whatever the peer chose in the sidebar for as long as they
-// keep it up. Every path that assigns Preview goes through this, including
-// the two that assign rather than merge (the startup seed, and the deletion
-// that is allowed to move the value backwards).
-func (r *DMRouter) previewIsFuture(preview ConversationPreview) bool {
-	return !preview.Timestamp.IsZero() && preview.Timestamp.After(r.now())
-}
-
-func (r *DMRouter) mergePreviewLocked(peer domain.PeerIdentity, preview ConversationPreview) {
+// applyPreviewLocked writes the conversation's last message onto the sidebar,
+// and is the ONE rule every forward-moving path shares: the send echo, the
+// live event, the startup seed and the post-message reconciliation all come
+// through here.
+//
+// Ordering is by ARRIVAL SEQUENCE — where the row landed in the local chatlog
+// — because that is the only order the two roads to this function share. The
+// timestamp cannot do it: it is the SENDER's clock, and comparing against it
+// is what used to drop live messages from the sidebar (a peer running behind
+// wrote a message that read as older than the reply we had just sent; one
+// running ahead was refused outright), leaving the badge counting a message
+// the sidebar would not show. Nor can "whoever wrote last" do it: the node
+// releases its lock across the SQLite write and publishes afterwards, a send
+// applies its own echo from its own goroutine, and the event bus delivers
+// asynchronously — so the later WRITE is not the later MESSAGE.
+//
+// A sequence of zero means "unknown" (see DirectMessage.Seq), and the two
+// unknowns are not the same case:
+//
+//   - an incoming preview that cannot be placed does NOT displace one that
+//     can. It has no claim to being the newer message, and a send whose own
+//     row could not be located afterwards — a spent context, a database
+//     hiccup, a row already deleted — would otherwise put its older text back
+//     over a message that arrived while it was in flight. The cost of
+//     refusing is a row that keeps the previous text until the next message
+//     or reconciliation, with the badge already counting the new one;
+//   - when NOTHING carries a sequence — a runtime with no chatlog to ask —
+//     there is no order to respect, and the writer wins, as it did before the
+//     field existed. Refusing there would freeze the sidebar on its first
+//     message forever.
+//
+// The deletion does NOT come through here: it moves the preview BACKWARDS by
+// definition, is the one authority allowed to, and carries its own
+// compare-and-set over the values it read. Callers hold r.mu.
+func (r *DMRouter) applyPreviewLocked(peer domain.PeerIdentity, preview ConversationPreview) previewApplyResult {
 	state, ok := r.peers[peer]
 	if !ok {
-		return
+		return previewPeerGone
 	}
-	if r.previewIsFuture(preview) {
-		return
+	if preview.Seq == 0 {
+		// Nothing to place this message by, so the row cannot come out of
+		// this write ordered — whichever side is missing. Two cases, one
+		// answer to the caller:
+		//
+		//   - the row is placed: the message is kept OFF it, because an
+		//     unplaceable write would displace a message it cannot claim to
+		//     be newer than;
+		//   - the row is unplaced too: the message is written, because there
+		//     is nothing to protect and a row has to show something — but the
+		//     result is still an unordered row, which the next arrival would
+		//     otherwise win by nothing more than the moment it was applied,
+		//     and a slow answer holding a real sequence could walk in later
+		//     and overwrite.
+		//
+		// Either way the store is asked, because only it can place the row.
+		if state.Preview.Seq == 0 {
+			state.Preview = preview
+			return previewTakenUnplaced
+		}
+		return previewUnplaceable
 	}
-	if !state.Preview.Timestamp.IsZero() && preview.Timestamp.Before(state.Preview.Timestamp) {
-		return
+	if preview.Seq < state.Preview.Seq {
+		return previewOlder
 	}
 	state.Preview = preview
+	return previewTaken
+}
+
+// previewApplyResult separates the three answers, because they need different
+// things from the caller. Only one of them is a problem to solve.
+type previewApplyResult int
+
+const (
+	// previewTaken — the preview is on the row, and the row is ordered.
+	previewTaken previewApplyResult = iota
+	// previewTakenUnplaced — the preview is on the row, but neither it nor
+	// what it replaced carries a sequence, so the row is not ordered against
+	// anything: the next arrival would win by nothing more than the moment it
+	// was applied. Written and repaired.
+	previewTakenUnplaced
+	// previewOlder — a placed preview lost to a placed one. Final and
+	// correct: the sidebar already shows the later message.
+	previewOlder
+	// previewUnplaceable — the preview carries no sequence while the row
+	// does, so the two cannot be ordered. The message may well be the newest
+	// one in the conversation, and the badge has already counted it, so
+	// leaving the row alone is only half an answer: the caller re-reads the
+	// conversation from the store, which knows both which row is last and
+	// where it landed. Without that re-read a single failed sequence lookup
+	// would leave the old text on the row until the next message.
+	previewUnplaceable
+	// previewPeerGone — the contact was removed; there is no row to write to.
+	previewPeerGone
+)
+
+// written reports whether the preview reached the row. Separate from
+// needsRepair because the two questions have different answers for the same
+// value: a preview can be written and still leave the row unordered.
+func (p previewApplyResult) written() bool {
+	return p == previewTaken || p == previewTakenUnplaced
+}
+
+// needsRepair reports whether the row came out of this write without an
+// order, whether or not the write landed. The store is the only thing that
+// can settle it.
+func (p previewApplyResult) needsRepair() bool {
+	return p == previewTakenUnplaced || p == previewUnplaceable
 }
 
 // fetchUnseenIncoming reads the peer's unread ids as the database sees them.
@@ -3388,10 +3529,22 @@ func (r *DMRouter) fetchLastIncoming(ctx context.Context, peer domain.PeerIdenti
 	return at, true
 }
 
-// updatePreviewFromCache builds RouterPeerState.Preview from the last
-// message in activeMessages. Used as a fallback when updatePreviewFromStore
-// fails but loadConversation already populated the cache.
-// Guards against stale-peer race: if the user switched away (activePeer !=
+// updatePreviewFromCache fills an EMPTY preview from the loaded conversation.
+// Used when updatePreviewFromStore failed but loadConversation had already
+// populated the cache, so the row would otherwise show nothing at all.
+//
+// It may fill a gap; it may not overrule. The cache is the thread, ordered by
+// created_at — the senders' clocks — so its last element is the last message
+// CHRONOLOGICALLY, which is a different question from the one the sidebar
+// asks. In the very case this whole path exists for (a peer whose clock lags,
+// whose message arrived after our reply) the two answers disagree, and the
+// cache's is the wrong one. A preview already on screen came from the store or
+// from a live message, both of which know the arrival order; leaving it alone
+// costs a stale row until the next message or the next reconciliation, while
+// overruling it would put back exactly the symptom this ordering was changed
+// to fix.
+//
+// Guards against the stale-peer race: if the user switched away (activePeer !=
 // peer), activeMessages belong to a different conversation and must not be
 // used to rebuild this peer's preview.
 func (r *DMRouter) updatePreviewFromCache(peer domain.PeerIdentity) {
@@ -3403,11 +3556,26 @@ func (r *DMRouter) updatePreviewFromCache(peer domain.PeerIdentity) {
 	if len(r.activeMessages) == 0 {
 		return
 	}
+	// Whether it fills or defers is decided by the shared rule, not by a test
+	// of its own. Messages loaded from history carry no sequence, so this
+	// preview is unplaceable, and the rule lets it through only onto a row
+	// that has nothing orderable on it. An earlier version asked "is the body
+	// empty" instead and was wrong about the case that matters most: a row
+	// whose last message did not decrypt — a missing sender key, a rotated one
+	// — has an EMPTY body and a perfectly good sequence, and would have been
+	// overwritten by a message the thread's own ordering happened to put last.
 	last := r.activeMessages[len(r.activeMessages)-1]
 	r.setPeerPreviewLocked(peer, last)
-	// The cache holds the whole conversation, so the newest incoming message
-	// is available even when the last row is our own reply — the case that
-	// setPeerPreviewLocked alone cannot see.
+	// The evidence runs either way: it is a maximum, so the cache can raise it
+	// without being able to move it backwards.
+	r.notePeerLastIncomingFromCacheLocked(peer)
+}
+
+// notePeerLastIncomingFromCacheLocked spends the loaded conversation as
+// presence evidence. The cache holds the whole thread, so the newest incoming
+// message is available even when the last row is our own reply — the case that
+// setPeerPreviewLocked alone cannot see. Callers hold r.mu.
+func (r *DMRouter) notePeerLastIncomingFromCacheLocked(peer domain.PeerIdentity) {
 	for i := len(r.activeMessages) - 1; i >= 0; i-- {
 		if r.activeMessages[i].Sender != peer {
 			continue
@@ -3429,30 +3597,87 @@ func (r *DMRouter) updatePreviewFromCache(peer domain.PeerIdentity) {
 // to prevent redundant rediscovery on the next health poll.
 func (r *DMRouter) reloadAndRefreshPreview(peerID domain.PeerIdentity, messageID string) bool {
 	if !r.loadConversation(peerID, r.peerEpochsOf(peerID)) {
+		// Every caller of this helper treats false as "handled elsewhere":
+		// one seeds the cache from the message it decrypted, another simply
+		// ends its goroutine. Neither reads the store again, so the row is
+		// owed one from here.
+		r.queuePreviewRepair(peerID)
 		r.evictSeenMessages(messageID)
 		return false
 	}
 	if !r.updatePreviewFromStore(peerID) {
-		// chatlog query failed, but messages are in cache.
-		// Build the preview from the last cached message so the
-		// sidebar stays current. No eviction: the message is already
-		// loaded into cache, so the dedup gate must remain closed.
+		// chatlog query failed, but messages are in cache. Build the preview
+		// from the last cached message so a row with nothing on it shows
+		// something. No eviction: the message is already loaded into cache,
+		// so the dedup gate must remain closed.
 		r.updatePreviewFromCache(peerID)
+		// The cache cannot PLACE the row — its messages carry no sequence,
+		// and the fallback refuses to overrule a row that is placed — so the
+		// sidebar can be left showing the previous message with the new one
+		// visible in the open conversation. This is what asks for it again.
+		r.queuePreviewRepair(peerID)
 	}
 	return true
 }
 
-// evictSeenMessages removes message IDs from seenMessageIDs so that
-// repairUnreadFromHeaders can rediscover them on the next health poll.
-// Called when a fallback operation (updatePreviewFromStore, loadConversation)
-// fails transiently — without this rollback the dedup gate would permanently
-// suppress the message.
+// messageGate is what this process remembers about one message id. Two facts,
+// because they are reopened by different things.
+type messageGate struct {
+	// handled — the message has been through onNewMessage or the header
+	// repair and needs no rediscovery. This is the dedup gate, and a failed
+	// apply REOPENS it: the work has to be tried again.
+	handled bool
+	// announced — the SOUND QUESTION IS SETTLED for this message: either it
+	// rang, or something decided it should not and that decision is final.
+	// Both readings matter, because the paths that handle a message without
+	// ringing are ordinary: startup replay re-delivers old messages in
+	// silence, the first header sync claims ids it must not announce, and a
+	// deletion pins an id so re-deliveries are ignored. Recording only the
+	// ring left those messages looking unannounced, so the next event for one
+	// of them rang — for a message the badge was already counting.
+	//
+	// Eviction deliberately does NOT clear it: reopening the dedup gate asks
+	// for the message to be TRIED again, not announced again.
+	announced bool
+}
+
+// markMessageHandledLocked closes the dedup gate for an id AND settles the
+// sound question for it. The two go together: a message this process has dealt
+// with is not news any more, whether it was announced, deliberately silent, or
+// pinned as deleted. Callers hold r.mu.
+func (r *DMRouter) markMessageHandledLocked(id string) {
+	if id == "" {
+		return
+	}
+	r.seenMessageIDs[id] = messageGate{handled: true, announced: true}
+}
+
+// forgetMessageLocked drops everything remembered about an id. Used when the
+// message itself is gone, where even the sound is moot. Callers hold r.mu.
+func (r *DMRouter) forgetMessageLocked(id string) {
+	delete(r.seenMessageIDs, id)
+}
+
+// evictSeenMessages reopens the dedup gate so a repair pass can rediscover
+// these messages. Called when a fallback operation (updatePreviewFromStore,
+// loadConversation) fails transiently — without this rollback the gate would
+// permanently suppress the message.
+//
+// The entry itself survives if it carries anything the reopening does not
+// undo, which today is the sound.
 func (r *DMRouter) evictSeenMessages(ids ...string) {
 	r.mu.Lock()
 	for _, id := range ids {
-		if id != "" {
-			delete(r.seenMessageIDs, id)
+		if id == "" {
+			continue
 		}
+		gate := r.seenMessageIDs[id]
+		gate.handled = false
+		if gate == (messageGate{}) {
+			delete(r.seenMessageIDs, id)
+			continue
+		}
+		r.seenMessageIDs[id] = gate
 	}
 	r.mu.Unlock()
 }
@@ -3460,8 +3685,10 @@ func (r *DMRouter) evictSeenMessages(ids ...string) {
 func (r *DMRouter) refreshPreviewForPeer(peer domain.PeerIdentity, messageIDs []string) {
 	defer recoverLog("refreshPreviewForPeer")
 	if !r.updatePreviewFromStore(peer) {
-		// Preview load failed — evict from seenMessageIDs so the next
-		// repair cycle can rediscover and retry these messages.
+		// Preview load failed. The queue is what comes back for it; the
+		// eviction is a hint for any later pass over the node's headers,
+		// which is not scheduled by anything.
+		r.queuePreviewRepair(peer)
 		r.evictSeenMessages(messageIDs...)
 	}
 	r.notify(UIEventSidebarUpdated)
@@ -3503,8 +3730,10 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	// number of ever-seen messages and runs once per 5-second poll —
 	// far cheaper than holding the write lock during the header scan.
 	seenCopy := make(map[string]struct{}, len(r.seenMessageIDs))
-	for id := range r.seenMessageIDs {
-		seenCopy[id] = struct{}{}
+	for id, gate := range r.seenMessageIDs {
+		if gate.handled {
+			seenCopy[id] = struct{}{}
+		}
 	}
 	// The lifecycle generation of every peer we may touch, captured BEFORE
 	// the header scan and the status read. Both happen outside the lock, and
@@ -3592,7 +3821,7 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 	for _, a := range actions {
 		// Re-check under lock: another goroutine may have inserted the
 		// same ID between Phase 1 snapshot and now.
-		if _, ok := r.seenMessageIDs[a.id]; ok {
+		if r.seenMessageIDs[a.id].handled {
 			continue
 		}
 		onScreen := a.peer == selected && !selected.IsZero()
@@ -3630,11 +3859,12 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 			// nothing was applied is how a message disappears.
 			continue
 		}
-		r.seenMessageIDs[a.id] = struct{}{}
-
-		if triggerBeep {
+		// Read before the mark, for the same reason as the live path.
+		if triggerBeep && !r.seenMessageIDs[a.id].announced {
 			hasNew = true
 		}
+		r.markMessageHandledLocked(a.id)
+
 		if incrementUnread {
 			r.markUnreadLocked(a.peer, domain.MessageID(a.id))
 			r.promotePeerLocked(a.peer)
@@ -3843,12 +4073,17 @@ func (r *DMRouter) deliverDecryptedMessage(msg *DirectMessage, peerID domain.Pee
 	stillOpen := !gone && !stale &&
 		r.activePeer == peerID && !peerID.IsZero() &&
 		r.cache.AppendForPeer(peerID, *msg)
+	unplaceable := false
 	if stillOpen {
-		r.applyIncomingMessageLocked(peerID, *msg, stamp)
+		unplaceable = r.applyIncomingMessageLocked(peerID, *msg, stamp) == applyPreviewUnplaceable
 		r.activeMessages = r.cache.Messages()
 		r.pendingScrollToEnd = true
 	}
 	r.mu.Unlock()
+
+	if unplaceable {
+		r.repairPreviewFromStore(peerID, msg.ID)
+	}
 
 	if gone {
 		// The contact is gone: nothing to show and nothing to badge. It
@@ -3938,7 +4173,7 @@ func (r *DMRouter) applyIncomingMessageLocked(peer domain.PeerIdentity, msg Dire
 	if r.backwardsEpoch[peer].history != stamp.epochs.history {
 		return applyStale
 	}
-	r.setPeerPreviewLocked(peer, msg)
+	previewResult := r.setPeerPreviewLocked(peer, msg)
 	if _, ok := r.peers[peer]; !ok {
 		// The row was refused: a removal is running, and the stamp cannot
 		// see it — the counters it compares were already bumped by that
@@ -3946,6 +4181,13 @@ func (r *DMRouter) applyIncomingMessageLocked(peer domain.PeerIdentity, msg Dire
 		return applyPeerGone
 	}
 	r.promotePeerLocked(peer)
+	if previewResult.needsRepair() {
+		// Everything else about the message is recorded — badge, order,
+		// presence — and only its place on the row is unknown. Say so, so the
+		// caller asks the store rather than leaving the previous text there
+		// with nothing scheduled to correct it.
+		return applyPreviewUnplaceable
+	}
 	return applyApplied
 }
 
@@ -3966,7 +4208,211 @@ const (
 	// through the dedup gate. The caller re-reads the conversation from the
 	// database instead, which knows the answer exactly.
 	applyStale
+	// applyPreviewUnplaceable — the message IS on the sidebar in every way
+	// except its text: the badge counts it and the conversation has moved to
+	// the top, but its place in the arrival order could not be read, so it
+	// could not be compared with the message already on the row. The caller
+	// re-reads the conversation from the store, which knows both.
+	applyPreviewUnplaceable
 )
+
+// applyOwnSentMessage puts a message we just sent on the sidebar, under the
+// same guards every arriving message goes through.
+//
+// The send path used to write the preview directly, checking only whether the
+// CONTACT still existed. That misses the other thing that moves while a send
+// is in flight: rows leaving the conversation. A wipe, or a deletion of the
+// very message being sent, would be undone a moment later by the echo — and
+// the arrival sequence cannot separate the two, because SQLite hands out
+// max(rowid)+1 and the row deleted from the end of the table gives its number
+// to the next insert. What separates them is the epoch: a deletion bumps it,
+// and an apply holding the older one is stale by construction.
+//
+// stamp must be the peer as it was BEFORE the send, not as it is now.
+func (r *DMRouter) applyOwnSentMessage(to domain.PeerIdentity, sent DirectMessage, stamp peerStamp) {
+	r.mu.Lock()
+	outcome := r.applyIncomingMessageLocked(to, sent, stamp)
+	r.mu.Unlock()
+
+	switch outcome {
+	case applyStale:
+		// The conversation moved while the send was in flight. Which row
+		// left is not knowable from here, so the database is asked.
+		r.repairPreviewFromStore(to, sent.ID)
+	case applyPreviewUnplaceable:
+		// The message went out and was stored, but its place in the order
+		// could not be read. Same answer, different reason.
+		r.repairPreviewFromStore(to, sent.ID)
+	case applyApplied, applyPeerGone:
+	}
+}
+
+// repairPreviewFromStore re-reads the conversation because a message could not
+// be placed in the arrival order (previewUnplaceable). The sequence lookup is
+// the only thing that failed; the store answers a different question — which
+// row is last, and where it landed — so it can settle what the message could
+// not. Asynchronous like every other store read on this path: the caller is
+// finishing a live message and must not wait on a database.
+// previewRepairQueueRetries bounds how long a queued repair keeps asking. The
+// sweep runs every few seconds, so this is about a minute of a database that
+// cannot answer — well past the transient failure this exists for, and short
+// of retrying a broken store until the process ends. Matches the delete
+// path's own budget for the same reason.
+const previewRepairQueueRetries = 12
+
+func (r *DMRouter) repairPreviewFromStore(peer domain.PeerIdentity, messageID string) {
+	if r.chatHistory() == nil {
+		// No store to ask. A runtime without a chatlog places nothing and can
+		// repair nothing, and queueing work per message would be a treadmill
+		// that never arrives anywhere.
+		return
+	}
+	if !r.beginOp() {
+		return
+	}
+	go func() {
+		defer r.endOp()
+		defer recoverLog("repairPreviewFromStore")
+		if r.updatePreviewFromStore(peer) {
+			r.notify(UIEventSidebarUpdated)
+			return
+		}
+		// The read failed for the same reasons the sequence lookup did — a
+		// database busy for longer than either two-second budget — so it is
+		// handed to the sweep rather than dropped. The id also goes back
+		// through the dedup gate, which is a hint for any later pass over the
+		// node's headers, not a retry: nothing schedules another one.
+		r.queuePreviewRepair(peer)
+		r.evictSeenMessages(messageID)
+	}()
+}
+
+// previewRepairEntry is one owed repair: what is left of its budget, and the
+// token that says WHICH request it is. The token is what a sweep compares
+// against when it is done reading — see retryPendingPreviewRepair.
+type previewRepairEntry struct {
+	attemptsLeft int
+	token        uint64
+}
+
+// queuePreviewRepair records that a peer's sidebar row is still unplaced.
+//
+// A peer already in the queue keeps its remaining attempts but is given a NEW
+// token, and that is the whole point of the token: the sweep releases the
+// per-peer lock while it reads, so a message can arrive, fail to be placed and
+// ask for a repair in that window. Without a token the request would be
+// swallowed — the entry is already there, so nothing changes — and then
+// deleted by the sweep that never saw the message, leaving the sidebar showing
+// a snapshot from before it with nothing owed.
+func (r *DMRouter) queuePreviewRepair(peer domain.PeerIdentity) {
+	if peer.IsZero() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, alive := r.peers[peer]; !alive {
+		// No row to repair. A conversation removed while the read ran must
+		// not be queued: the sweep would find nothing and, worse, a
+		// reconciliation is not allowed to create the peer it repairs.
+		return
+	}
+	if r.pendingPreviewRepair == nil {
+		r.pendingPreviewRepair = make(map[domain.PeerIdentity]previewRepairEntry)
+	}
+	r.previewRepairToken++
+	entry, queued := r.pendingPreviewRepair[peer]
+	if !queued {
+		// The budget is NOT refreshed for a peer already in the queue: a
+		// conversation being written to while the database is down would
+		// otherwise renew it forever. An exhausted entry is deleted, so the
+		// next message after that starts a fresh one.
+		entry.attemptsLeft = previewRepairQueueRetries
+	}
+	entry.token = r.previewRepairToken
+	r.pendingPreviewRepair[peer] = entry
+}
+
+// retryPendingPreviewRepair is one sweep of the unplaced rows, run from the
+// same tick as the deletion's own owed reconciliations: same cause, same
+// shape, same budget discipline. A peer that runs out of attempts is dropped
+// with a warning — the row keeps a last message the store could not confirm,
+// and saying so beats asking a broken database forever.
+func (r *DMRouter) retryPendingPreviewRepair(ctx context.Context) {
+	type owedRepair struct {
+		peer  domain.PeerIdentity
+		token uint64
+	}
+
+	r.mu.RLock()
+	owed := make([]owedRepair, 0, len(r.pendingPreviewRepair))
+	for peer, entry := range r.pendingPreviewRepair {
+		owed = append(owed, owedRepair{peer: peer, token: entry.token})
+		if len(owed) >= deleteReconcileSweepLimit {
+			break
+		}
+	}
+	r.mu.RUnlock()
+	if len(owed) == 0 {
+		return
+	}
+
+	sweepCtx, cancelSweep := context.WithTimeout(ctx, deleteReconcileSweepBudget)
+	defer cancelSweep()
+
+	for _, item := range owed {
+		if sweepCtx.Err() != nil {
+			// Out of tick. Whatever is left keeps its place in the queue and
+			// its budget: these peers were never tried.
+			return
+		}
+		// TryLock (waitForLock=false), for the same reason as the deletion
+		// sweep: this goroutine is shared, and a peer already being
+		// reconciled would hold it past any budget.
+		outcome := r.reconcilePeerFromStore(sweepCtx, item.peer, false, false)
+		if outcome == reconcileBusy {
+			// Somebody else is reconciling this peer right now; their answer
+			// is at least as fresh as ours would be. Not a failed attempt.
+			continue
+		}
+
+		exhausted := false
+		r.mu.Lock()
+		entry, stillQueued := r.pendingPreviewRepair[item.peer]
+		switch {
+		case !stillQueued || entry.token != item.token:
+			// Either the queue was cleared under us (the contact was
+			// removed, the identity was reset), or a message arrived while
+			// this read was in flight and asked for a repair of its own. The
+			// answer just applied predates that request, so the entry stays
+			// exactly as the newer request left it.
+		case outcome == reconcileApplied || outcome == reconcilePeerGone:
+			delete(r.pendingPreviewRepair, item.peer)
+		default:
+			// A failed read costs an attempt whether it failed at once or
+			// spent this tick's remaining budget waiting: both are the
+			// database not answering, and a timeout that cost nothing would
+			// make the budget below unreachable — the queue would poll a hung
+			// store for the life of the process.
+			entry.attemptsLeft--
+			if entry.attemptsLeft <= 0 {
+				delete(r.pendingPreviewRepair, item.peer)
+				exhausted = true
+			} else {
+				r.pendingPreviewRepair[item.peer] = entry
+			}
+		}
+		r.mu.Unlock()
+
+		switch {
+		case exhausted:
+			log.Warn().
+				Str("peer", item.peer.String()).
+				Msg("dm_router: gave up placing the conversation's last message; the sidebar keeps the row it has")
+		case outcome == reconcileApplied:
+			r.notify(UIEventSidebarUpdated)
+		}
+	}
+}
 
 // recoverFromStaleApply rebuilds a peer from the database after a decrypted
 // message could not be applied because the conversation moved under it, and
@@ -3985,6 +4431,9 @@ const (
 // gate for the header repair to find.
 func (r *DMRouter) recoverFromStaleApply(peer domain.PeerIdentity, msg *DirectMessage) bool {
 	if !r.updatePreviewFromStore(peer) {
+		// The caller puts the message id back through the dedup gate, which
+		// nothing is scheduled to walk. The row itself is owed a re-read.
+		r.queuePreviewRepair(peer)
 		return false
 	}
 	if !r.repairBadgeFromStore(peer) {
@@ -4053,19 +4502,24 @@ func (r *DMRouter) messageStillStored(peer domain.PeerIdentity, msg *DirectMessa
 // leave LastIncomingAt behind on whichever path forgot it, and the symptom —
 // a contact whose "last online" silently disappears — is invisible until
 // someone reads the sidebar days later. Callers hold r.mu.
-func (r *DMRouter) setPeerPreviewLocked(peer domain.PeerIdentity, msg DirectMessage) {
+func (r *DMRouter) setPeerPreviewLocked(peer domain.PeerIdentity, msg DirectMessage) previewApplyResult {
 	if !r.tryEnsurePeerLocked(peer) {
-		return
+		return previewPeerGone
 	}
-	r.mergePreviewLocked(peer, ConversationPreview{
+	result := r.applyPreviewLocked(peer, ConversationPreview{
 		PeerAddress: peer,
 		Sender:      msg.Sender,
 		Body:        msg.Body,
 		Timestamp:   msg.Timestamp,
+		Seq:         msg.Seq,
 	})
+	// The evidence is recorded even when the preview was refused as older:
+	// they answer different questions, and last-incoming is a maximum that a
+	// late message cannot walk backwards.
 	if msg.Sender == peer {
 		r.noteIncomingAtLocked(peer, msg.Timestamp)
 	}
+	return result
 }
 
 // noteIncomingAtLocked advances the peer's last-incoming stamp. Monotone by

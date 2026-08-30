@@ -1001,7 +1001,7 @@ func (r *DMRouter) evictWipedConversationFromUI(peer domain.PeerIdentity, remove
 	// to be cleared; entries for surviving rows must stay so the
 	// dedup gate keeps working for them.
 	for _, id := range removedIDs {
-		delete(r.seenMessageIDs, string(id))
+		r.forgetMessageLocked(string(id))
 	}
 	// A deleted message is not an unread message. The set is authoritative
 	// for the badge, and the ids are right here — no query needed. The
@@ -1144,7 +1144,7 @@ func (r *DMRouter) suppressIfWipeTombstoned(event protocol.LocalChangeEvent) boo
 	// node.s.topics["dm"]); pushing the tombstone gate down into
 	// node admission is a tracked follow-up.
 	r.mu.Lock()
-	r.seenMessageIDs[event.MessageID] = struct{}{}
+	r.markMessageHandledLocked(event.MessageID)
 	r.mu.Unlock()
 
 	// Behind the diagnostics gate: "this id was refused because it had been
@@ -1325,5 +1325,4 @@ func (r *DMRouter) sweepHeldReactions(ctx context.Context, now time.Time) {
 		log.Debug().Int("reactions", swept).
 			Msg("reactions waiting for a message that never arrived were dropped")
 	}
-
 }

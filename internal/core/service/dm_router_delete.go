@@ -628,7 +628,7 @@ func (r *DMRouter) evictDeletedMessageFromUI(peer domain.PeerIdentity, target do
 	// drop the entry so a future re-delivery of the same ID (e.g. peer
 	// resends the message after we re-add a contact) is not silently
 	// ignored.
-	delete(r.seenMessageIDs, string(target))
+	r.forgetMessageLocked(string(target))
 	r.mu.Unlock()
 
 	// Refresh the sidebar preview from chatlog. Done outside the lock
@@ -1400,16 +1400,32 @@ func (r *DMRouter) deleteRetryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			r.processDeleteRetryDue(ctx, now.UTC())
-			// Same tick, same cause: a deletion whose sidebar refresh did
-			// not land is still showing the message it removed.
-			r.retryPendingDeleteReconcile(ctx)
-			// Same tick, same reason: something a deletion set in motion
-			// is still outstanding. A withdrawal the node refused earlier
-			// keeps the payload of a deleted message in this process.
-			r.retryOwedWithdrawals(ctx)
+			r.runRetrySweep(ctx, now.UTC())
 		}
 	}
+}
+
+// runRetrySweep is one tick, factored out for the same reason
+// processDeleteRetryDue is: the loop around it is a ticker and a select, and
+// everything worth testing is in here.
+//
+// The four sweeps share a tick because they share a cause — work this process
+// started and could not finish — and sharing one goroutine is what keeps them
+// from competing for the database. Each carries its own budget.
+func (r *DMRouter) runRetrySweep(ctx context.Context, now time.Time) {
+	r.processDeleteRetryDue(ctx, now)
+	// Same tick, same cause: a deletion whose sidebar refresh did not land is
+	// still showing the message it removed.
+	r.retryPendingDeleteReconcile(ctx)
+	// And the rows that never got a place in the arrival order: a read that
+	// failed has nothing else to bring it back, since the header pass runs
+	// once per process and a re-delivery of the message is a duplicate the
+	// node does not publish.
+	r.retryPendingPreviewRepair(ctx)
+	// Same tick, same reason: something a deletion set in motion is still
+	// outstanding. A withdrawal the node refused earlier keeps the payload of
+	// a deleted message in this process.
+	r.retryOwedWithdrawals(ctx)
 }
 
 // processDeleteRetryDue is one sweep, factored out for testability.
