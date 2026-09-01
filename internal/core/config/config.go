@@ -446,8 +446,8 @@ const (
 	// across releases so older peers continue to interpret the comparison
 	// correctly.
 	ClientVersionMajor = 2
-	ClientVersionMinor = 1
-	ClientVersionBuild = 67
+	ClientVersionMinor = 2
+	ClientVersionBuild = 68
 	// ProtocolVersion is the wire version this build emits in hello/welcome.
 	// MinimumProtocolVersion is the floor below which inbound peers are
 	// rejected. Both are bumped only by an explicit wire/runtime contract
