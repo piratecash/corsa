@@ -223,8 +223,25 @@ func (b *Bus) UnsubscribeAll(ids []SubscriptionID) {
 //
 // Publish never panics on subscriber errors — they are logged and skipped.
 func (b *Bus) Publish(topic string, args ...interface{}) {
+	b.PublishReporting(topic, args...)
+}
+
+// PublishReporting is Publish with the outcome returned instead of only
+// logged: delivered counts the subscribers that took the event, dropped
+// counts the async ones whose inbox was full.
+//
+// Almost every publisher is right to ignore this — the bus is for
+// notifications, and a dropped notification is a subscriber that will
+// catch up by other means. It exists for the few facts a subscriber can
+// learn ONLY from the event, where a silent drop is a state that never
+// gets corrected: the queued → sent transition is one, since nothing else
+// tells the sender their message left the machine.
+//
+// A zero-subscriber topic reports neither: there was nobody to deliver to
+// and nothing was lost.
+func (b *Bus) PublishReporting(topic string, args ...interface{}) (delivered, dropped int) {
 	if b == nil {
-		return
+		return 0, 0
 	}
 	b.mu.RLock()
 	handlers := make([]subscriber, len(b.subs[topic]))
@@ -232,7 +249,7 @@ func (b *Bus) Publish(topic string, args ...interface{}) {
 	b.mu.RUnlock()
 
 	if len(handlers) == 0 {
-		return
+		return 0, 0
 	}
 
 	callArgs := make([]reflect.Value, len(args))
@@ -244,7 +261,9 @@ func (b *Bus) Publish(topic string, args ...interface{}) {
 		if s.async {
 			select {
 			case s.inbox <- callArgs:
+				delivered++
 			default:
+				dropped++
 				log.Warn().
 					Str("topic", topic).
 					Uint64("sub_id", uint64(s.id)).
@@ -252,8 +271,10 @@ func (b *Bus) Publish(topic string, args ...interface{}) {
 			}
 		} else {
 			b.safeCall(topic, s.fn, callArgs)
+			delivered++
 		}
 	}
+	return delivered, dropped
 }
 
 // Shutdown signals all async subscriber drainers to stop and blocks until

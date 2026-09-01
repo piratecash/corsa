@@ -3864,7 +3864,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// (unknown_sender_key triggers a sync upstream; other codes
 		// surface in the warn log).
 		if shouldAckOnStoreResult(stored, errCode) {
-			s.enqueueAckDeleteOnSession(session, address, "dm", msg.ID, "")
+			s.enqueueAckDeleteOnSession(session, address, ackDeleteForMessage(msg.ID))
 			if !stored {
 				log.Debug().Str("node", s.identity.Address).Str("peer", string(address)).Str("id", string(msg.ID)).Msg("push_message_dedup_acked")
 			}
@@ -3893,8 +3893,14 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("push_delivery_receipt rejected: recipient does not match local identity or active subscriber")
 			return
 		}
-		s.storeDeliveryReceipt(receipt)
-		s.enqueueAckDeleteOnSession(session, address, "receipt", receipt.MessageID, receipt.Status)
+		// Acking tells the peer to delete their copy, and their copy is
+		// the only place this fact survives if our own write failed.
+		if outcome := s.storeDeliveryReceipt(receipt); outcome.ackable {
+			s.enqueueAckDeleteOnSession(session, address, ackDeleteForReceipt(receipt))
+		} else {
+			log.Warn().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).
+				Msg("receipt not acked: its delivery status could not be recorded, so the peer must keep it")
+		}
 		log.Info().Str("peer", string(address)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt")
 	case "relay_delivery_receipt":
 		// Gossip receipt path using flat Frame fields. Three paths mirror
@@ -4270,18 +4276,21 @@ func shouldAckOnStoreResult(stored bool, errCode string) bool {
 	return stored || errCode == ""
 }
 
-func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string, id protocol.MessageID, status string) {
+func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ack ackDelete) {
 	session := s.peerSession(address)
 	if session == nil || !session.authOK {
 		return
 	}
-	frame := s.buildAckDeleteFrame(ackType, id, status)
+	// Built full and stamped at the door it leaves by — the session
+	// resolved here is not necessarily the one that writes it, and the
+	// queued fallback below may be written after a reconnect.
+	frame := s.buildAckDeleteFrame(ack)
 	if s.enqueuePeerFrame(address, frame) {
-		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session").Msg("ack_delete_send")
+		log.Debug().Str("peer", string(address)).Str("type", ack.Type).Str("id", string(ack.MessageID)).Str("status", ack.Status).Str("mode", "session").Msg("ack_delete_send")
 		return
 	}
 	if s.queuePeerFrame(address, frame) {
-		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
+		log.Debug().Str("peer", string(address)).Str("type", ack.Type).Str("id", string(ack.MessageID)).Str("status", ack.Status).Str("mode", "queued").Msg("ack_delete_send")
 	}
 }
 
@@ -4302,33 +4311,86 @@ func (s *Service) sendAckDeleteToPeer(address domain.PeerAddress, ackType string
 // us the frame being acked. The queue's own fence still applies through
 // enqueueSend, so a session that died is still refused and still falls through
 // to the pending queue below.
-func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain.PeerAddress, ackType string, id protocol.MessageID, status string) {
+func (s *Service) enqueueAckDeleteOnSession(session *peerSession, address domain.PeerAddress, ack ackDelete) {
 	if session == nil {
 		return
 	}
-	frame := s.buildAckDeleteFrame(ackType, id, status)
-	if session.enqueueSend(legacyPeerSendItem(frame)) {
-		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "session_direct").Msg("ack_delete_send")
+	// The FULL frame is what this node knows; the stamp is what THIS
+	// session may receive. Keeping them apart matters at the fallback
+	// below: a downgraded copy in the pending queue would have thrown the
+	// receipt's author away for good, and the peer that eventually drains
+	// it may be a current one — which then gets an ack it cannot act on
+	// precisely, keeps both contested receipts, and re-pushes them.
+	//
+	// This is also the one path that writes to a session without passing
+	// enqueueSessionSendItem (see the comment above), so it applies the
+	// same stamp itself.
+	full := s.buildAckDeleteFrame(ack)
+	if session.enqueueSend(s.stampAckDeleteForSession(session, legacyPeerSendItem(full))) {
+		log.Debug().Str("peer", string(address)).Str("type", ack.Type).Str("id", string(ack.MessageID)).Str("status", ack.Status).Str("mode", "session_direct").Msg("ack_delete_send")
 		return
 	}
-	// sendCh full or already fenced — fall back to pending queue for later drain.
-	if s.queuePeerFrame(address, frame) {
-		log.Debug().Str("peer", string(address)).Str("type", ackType).Str("id", string(id)).Str("status", status).Str("mode", "queued").Msg("ack_delete_send")
+	// sendCh full or already fenced — fall back to pending queue for later
+	// drain, holding the full frame: the drain stamps it for whatever
+	// session finally carries it.
+	if s.queuePeerFrame(address, full) {
+		log.Debug().Str("peer", string(address)).Str("type", ack.Type).Str("id", string(ack.MessageID)).Str("status", ack.Status).Str("mode", "queued").Msg("ack_delete_send")
 	}
 }
 
 // buildAckDeleteFrame constructs a signed ack_delete frame. Extracted from
 // sendAckDeleteToPeer so the same frame can be sent on either an outbound
 // session (enqueuePeerFrame) or an inbound connection (sendAckDeleteByID).
-func (s *Service) buildAckDeleteFrame(ackType string, id protocol.MessageID, status string) protocol.Frame {
-	return protocol.Frame{
-		Type:      "ack_delete",
-		Address:   s.identity.Address,
-		AckType:   ackType,
-		ID:        string(id),
-		Status:    status,
-		Signature: identity.SignPayload(s.identity, ackDeletePayload(s.identity.Address, ackType, string(id), status)),
+// buildAckDeleteFrame builds the FULL ack — everything this node knows
+// about the receipt, signed. What a particular peer may receive is not
+// decided here: see stampAckDeleteForSession. Building the full form
+// keeps the author in the frame while it waits in the pending queue, so
+// a peer that turns out to support it still gets it.
+func (s *Service) buildAckDeleteFrame(ack ackDelete) protocol.Frame {
+	frame := protocol.Frame{
+		Type:          "ack_delete",
+		Address:       s.identity.Address,
+		AckType:       ack.Type,
+		ID:            string(ack.MessageID),
+		Status:        ack.Status,
+		ReceiptSender: ack.ReceiptSender,
 	}
+	frame.Signature = identity.SignPayload(s.identity, ackDeletePayloadForFrame(frame))
+	return frame
+}
+
+// stampAckDeleteForSession settles the SHAPE of one of our ack_delete
+// frames against the session it is about to be written to, and re-signs
+// it there.
+//
+// The version decides what is signed, not merely whether a field is set:
+// the receipt's author is inside the payload, so a peer that rebuilds the
+// older payload finds a signature it cannot reproduce and scores it as
+// forgery — ban points, not a warning. Deciding that where the frame is
+// BUILT was wrong twice over: a frame can wait in the pending queue
+// across a reconnect and be written to a session that did not exist when
+// it was signed, and the build site could only ask about the address,
+// while frames are written to a session.
+//
+// So the shape is settled at the one door every session write passes,
+// next to the delivery reference, and for the same reason: a producer
+// cannot forget what it never had to remember.
+func (s *Service) stampAckDeleteForSession(session *peerSession, item peerSendItem) peerSendItem {
+	if session == nil || item.Type != "ack_delete" || item.Address != s.identity.Address {
+		return item
+	}
+	item.Frame = s.buildAckDeleteFrameFor(ackDeleteFromFrame(item.Frame), session.version >= config.ProtocolVersionReceiptSenderAck)
+	return item
+}
+
+// buildAckDeleteFrameFor is buildAckDeleteFrame narrowed to what one
+// destination can verify. Below the floor the frame is byte-identical to
+// what this node sent before the field existed.
+func (s *Service) buildAckDeleteFrameFor(ack ackDelete, peerCarriesReceiptSender bool) protocol.Frame {
+	if !peerCarriesReceiptSender {
+		ack.ReceiptSender = ""
+	}
+	return s.buildAckDeleteFrame(ack)
 }
 
 // sendAckDeleteByID writes an ack_delete frame directly on the inbound
@@ -4337,17 +4399,17 @@ func (s *Service) buildAckDeleteFrame(ackType string, id protocol.MessageID, sta
 // connection and there is no outbound session to that peer, we acknowledge
 // on the same conn that delivered the message. The ack is silently dropped
 // if the connection has already been unregistered.
-func (s *Service) sendAckDeleteByID(connID domain.ConnID, ackType string, msgID protocol.MessageID, status string) {
+func (s *Service) sendAckDeleteByID(connID domain.ConnID, ack ackDelete) {
 	core := s.netCoreForID(connID)
 	if core == nil {
 		return
 	}
-	frame := s.buildAckDeleteFrame(ackType, msgID, status)
+	frame := s.buildAckDeleteFrameFor(ack, int(core.ProtocolVersion()) >= config.ProtocolVersionReceiptSenderAck)
 	// Fire-and-forget inbound write — route through the Network interface
 	// so a test backend can intercept it. s.runCtx tracks Service lifecycle;
 	// see network_consumer.go for the full outcome-tree contract.
 	_ = s.sendFrameViaNetwork(s.runCtx, connID, frame)
-	log.Debug().Str("addr", core.RemoteAddr()).Str("type", ackType).Str("id", string(msgID)).Str("status", status).Str("mode", "inbound_conn").Msg("ack_delete_send")
+	log.Debug().Str("addr", core.RemoteAddr()).Str("type", ack.Type).Str("id", string(ack.MessageID)).Str("status", ack.Status).Str("mode", "inbound_conn").Msg("ack_delete_send")
 }
 
 // hasOutboundSessionForInbound checks whether an active outbound session
@@ -5265,6 +5327,18 @@ func (s *Service) enqueueSessionSendItem(session *peerSession, item peerSendItem
 	if session == nil {
 		return false
 	}
+	// A frame carrying one of OUR messages is completed with the dispatch
+	// it belongs to HERE, so the serve loop's pre-wire gate and its
+	// confirmation apply to every producer without any of them having to
+	// remember. A producer that already knows the dispatch — the retry
+	// tick, which fans one attempt out to several sinks — keeps its own.
+	// See outbound_delivery_gate.go: this is the reason the reference
+	// travels with the frame instead of being an argument every send site
+	// could forget to pass.
+	item = s.withDeliveryRef(item, time.Now().UTC())
+	// An ack we authored is signed for the version of the session that
+	// actually writes it — see stampAckDeleteForSession.
+	item = s.stampAckDeleteForSession(session, item)
 	// peerAcceptsOutboundFrames resolves a dial address onto its canonical
 	// primary, so asking with the session's own address reaches the same health
 	// entry the address-keyed caller above would have reached.
@@ -5601,14 +5675,17 @@ func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) pendingKe
 		}
 		return pendingKey{Address: address, Type: "push_message", A: frame.Item.ID, B: frame.Item.Recipient}
 	case "relay_delivery_receipt":
-		return pendingKey{Address: address, Type: "relay_delivery_receipt", A: frame.ID, B: frame.Recipient, C: frame.Status}
+		// frame.Address is the receipt's AUTHOR here, and it belongs in the
+		// key: two receipts about one message from two peers are two frames,
+		// and collapsing them queues only whichever arrived first.
+		return pendingKey{Address: address, Type: "relay_delivery_receipt", A: frame.ID, B: frame.Recipient, C: frame.Status + "|" + frame.Address}
 	case "ack_delete":
 		// ack_delete must be queueable so that sendAckDeleteToPeer's
 		// fallback to queuePeerFrame works when the session's sendCh is
 		// full. Without this, a transient channel back-pressure silently
 		// drops the ack, the remote peer never clears its backlog, and
 		// the receipt is re-pushed on every reconnect.
-		return pendingKey{Address: address, Type: "ack_delete", A: frame.AckType, B: frame.ID, C: frame.Status}
+		return pendingKey{Address: address, Type: "ack_delete", A: frame.AckType, B: frame.ID, C: frame.Status + "|" + frame.ReceiptSender}
 	case "announce_peer":
 		if len(frame.Peers) > 0 {
 			return pendingKey{Address: address, Type: "announce_peer", A: frame.Peers[0]}
@@ -5666,6 +5743,11 @@ func (s *Service) flushPendingPeerFrames(address domain.PeerAddress) {
 			s.markOutboundTerminal(item.Frame, "expired", "pending queue expired")
 			continue
 		}
+		// A parked frame is a delivery like any other: wrapped with its
+		// dispatch so the session's writer takes the pre-wire gate and
+		// confirms it. Wrapping it as a legacy item left a frame that
+		// really did go out unconfirmed, so it read as queued and was
+		// re-sent on the next tick.
 		if s.enqueueSessionSendItem(session, legacyPeerSendItem(item.Frame)) {
 			s.clearOutboundQueued(item.Frame.ID)
 			continue
@@ -5812,10 +5894,24 @@ func (s *Service) flushPendingFireAndForget(id domain.ConnID, address domain.Pee
 	s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
 
 	remoteAddr := s.Network().RemoteAddr(id)
+	flushedAt := time.Now().UTC()
 	for _, item := range toSend {
 		// Fire-and-forget per-item flush — Network-routed for test
 		// observability; ctx is Service lifecycle (s.runCtx).
-		_ = s.sendFrameViaNetwork(s.runCtx, id, item.Frame)
+		// The ring is a SINK like any other, so it takes the same two
+		// steps in the same order as every other writer: the pre-wire
+		// gate first — freeze, withdrawal, then the durable claim — and
+		// the confirmation after, on the SAME stamp, so one flush counts
+		// as one attempt. A frame that is not one of ours passes the gate
+		// untouched and confirms nothing.
+		// The gate, the write and the confirmation are one step here — see
+		// writeDeliveryFrameToInbound. The ring is a SINK like any other
+		// and takes exactly what every other sink takes.
+		if err := s.writeDeliveryFrameToInbound(id, item.Frame, s.deliveryRefForFrame(item.Frame, flushedAt)); err != nil {
+			log.Debug().Str("addr", remoteAddr).Str("type", item.Frame.Type).Err(err).
+				Msg("pending_fire_and_forget_flush_failed_inbound")
+			continue
+		}
 		log.Debug().Str("addr", remoteAddr).Str("type", item.Frame.Type).Msg("pending_fire_and_forget_flushed_inbound")
 	}
 }

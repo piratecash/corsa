@@ -37,7 +37,8 @@ func TestStoreDeliveryReceipt_DropsUnsolicitedOwnIdentity(t *testing.T) {
 
 	// We never sent this message — the receipt is unsolicited and must be
 	// dropped without entering the backlog.
-	stored, count := svc.storeDeliveryReceipt(ownIdentityReceipt("phantom-1", id.Address))
+	outcome := svc.storeDeliveryReceipt(ownIdentityReceipt("phantom-1", id.Address))
+	stored, count := outcome.stored, outcome.count
 	if stored {
 		t.Fatal("unsolicited own-identity receipt must not be stored")
 	}
@@ -64,7 +65,7 @@ func TestStoreDeliveryReceipt_AcceptsSolicitedOwnIdentity(t *testing.T) {
 
 	// Record that we sent the message — now its receipt is solicited.
 	svc.sentDMIDs.Add("real-1")
-	stored, _ := svc.storeDeliveryReceipt(ownIdentityReceipt("real-1", id.Address))
+	stored := svc.storeDeliveryReceipt(ownIdentityReceipt("real-1", id.Address)).stored
 	if !stored {
 		t.Fatal("solicited own-identity receipt must be stored")
 	}
@@ -104,7 +105,7 @@ func TestStoreDeliveryReceipt_OwnBacklogCapped(t *testing.T) {
 		t.Fatalf("own backlog should sit at the cap after overflow, got %d", got)
 	}
 	// The most recent receipt must survive; the oldest must have been evicted.
-	if !svc.seenReceipts.Has(id.Address + ":own-" + fmt.Sprint(total-1) + ":delivered") {
+	if !svc.seenReceipts.Has(receiptKeyOf(ownIdentityReceipt("own-"+fmt.Sprint(total-1), id.Address))) {
 		t.Fatal("most recent receipt's dedup entry must be present")
 	}
 }
@@ -130,7 +131,7 @@ func TestStoreDeliveryReceipt_EvictionClearsShadows(t *testing.T) {
 
 	// Simulate the relayRetry entry trackRelayReceipt would attach, and confirm
 	// the dedup entry exists before eviction.
-	firstKey := recipient + ":evict-0:delivered"
+	firstKey := receiptKeyOf(first)
 	svc.deliveryMu.Lock()
 	svc.relayRetry[relayReceiptKey(first)] = relayAttempt{FirstSeen: time.Now().UTC()}
 	svc.deliveryMu.Unlock()
@@ -184,10 +185,10 @@ func TestRemoveSubscriber_DropsReceiptBacklog(t *testing.T) {
 	// kick off an async push to this fake-connID subscriber, whose failed write
 	// removes the subscriber itself — populating the maps directly isolates the
 	// disconnect-drop behaviour under test.
-	dedupKey := recipient + ":sub-msg-1:delivered"
 	svc.deliveryMu.Lock()
-	svc.receipts[recipient] = []protocol.DeliveryReceipt{ownIdentityReceipt("sub-msg-1", recipient)}
-	svc.seenReceipts.Add(dedupKey)
+	seeded := ownIdentityReceipt("sub-msg-1", recipient)
+	svc.receipts[recipient] = []protocol.DeliveryReceipt{seeded}
+	svc.seenReceipts.Add(receiptKeyOf(seeded))
 	svc.deliveryMu.Unlock()
 
 	// Subscriber disconnects → its backlog must be dropped (no store-and-forward
@@ -200,7 +201,7 @@ func TestRemoveSubscriber_DropsReceiptBacklog(t *testing.T) {
 	if stillBuffered {
 		t.Fatal("receipt backlog must be dropped when the subscriber disconnects")
 	}
-	if svc.seenReceipts.Has(dedupKey) {
+	if svc.seenReceipts.Has(receiptKeyOf(seeded)) {
 		t.Fatal("dedup shadow must be cleared so a later re-send is not suppressed")
 	}
 }
@@ -262,7 +263,7 @@ func TestStoreDeliveryReceipt_DropsRaceReceiptWithoutTouchingState(t *testing.T)
 	// Non-self sender, non-self recipient, no active subscriber: the race where
 	// the recipient's last subscriber disconnected between the handler's
 	// hasSubscriber gate and the store. The receipt must be dropped cleanly.
-	stored, _ := svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
+	stored := storedReceipt(svc, protocol.DeliveryReceipt{
 		MessageID:   msgID,
 		Sender:      "some-other-peer",
 		Recipient:   recipient,

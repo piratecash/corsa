@@ -22,9 +22,13 @@ import (
 // reset; a forging sender cannot extend it either — a CreatedAt beyond the
 // clock-skew tolerance into the future is treated as AGED, not as fresh.
 //
-// Model decision ("online-overlap"): there is no durable long-offline
-// delivery. Transit is strictly ephemeral forwarding; durable recovery
-// is the sender-owned engine, bounded by its own attempts cap / ttl.
+// Model decision ("online-overlap"): the MESH holds nothing for a
+// long-offline recipient. Transit is strictly ephemeral forwarding, and
+// recovery belongs to the sender-owned engine — which has no age ceiling
+// of its own, because it emits only into a route that exists and therefore
+// costs nothing while it waits. The ceiling here bounds what a node
+// carries for OTHER people, which is exactly what it can neither confirm
+// nor withdraw.
 
 // EnvelopeClass partitions gossip-plane envelopes by who owns their
 // lifetime. Each class maps to exactly one retentionPolicy.
@@ -36,7 +40,11 @@ const (
 	// never re-propagated by this node.
 	ClassLocalInbox EnvelopeClass = iota
 	// ClassLocalOutbox: this node authored the DM. Lifetime is owned by
-	// the sender-owned delivery engine (finite: attempts cap / ttl).
+	// the sender-owned delivery engine, and it is NOT bounded by a clock
+	// or an attempt count: it ends on the recipient's receipt, on the
+	// author withdrawing the message, or on the message's own TTL if it
+	// has one. Ageing our own undelivered message out from here would
+	// throw away the only copy that can still be delivered.
 	ClassLocalOutbox
 	// ClassTransitDM: neither party is this node. Forwarding-only and
 	// ephemeral — subject to the absolute age ceiling.

@@ -44,7 +44,7 @@ Sends a delivery or read receipt back to the original message sender.
 - a locally-sent `seen` receipt is re-sent until the original sender's `seen_ack` arrives; the original sender answers every `seen` arrival — first or duplicate — with `seen_ack`. Unlike `delivered`/`seen` (which travel BACK along the reverse relay path), `seen_ack` is routed in the ORIGINAL message direction — on relays it follows the message's forward hop, not the receipt reverse path. Emission is version-gated: `seen_ack` is only sent to peers advertising protocol ≥ 23 (a pre-v23 binary would just reject the unknown status at parse time); the gate is removed once `MinimumProtocolVersion` reaches 23. `seen_ack` is never stored in the runtime receipt set — it cannot appear in `fetch_delivery_receipts` or the backlog replay. An incoming `seen_ack` is accepted only from the identity the seen receipt was addressed to (sender binding against the pending retry entry; spoofed acks are dropped without touching the dedupe state) and is rejected on the local `send_delivery_receipt` command — it is wire-only;
 - `delivered` needs no own ack: the message retry re-triggers it on every duplicate.
 
-Retries are exponential (30s → 1m → 2m → 5m → 11m capped; early intervals only help over a direct route — transit dedup absorbs re-emissions for up to ~10 min), capped by `CORSA_DELIVERY_RETRY_MAX_ATTEMPTS` (default 20) and bounded by the message `ttl_seconds` lifetime. On a desktop node both retry sets survive restarts: messages are reseeded from chatlog rows still in `sent`, and seen receipts from the chatlog `seen_ack` journal (seen rows whose confirmation has not been recorded; reseed scans the last 7 days). When the engine gives up (TTL expiry / attempts cap), the message is finalised: outbound state goes terminal (`expired`/`failed`, visible via `fetch_pending_messages`), the pending/relay retry state is cleared, and the abandonment is journaled (`delivery_failed`) so a restart does not reseed it — the chatlog row intentionally stays at `sent`, which is the truthful "never confirmed delivered" state.
+Retries are exponential (30s → 1m → 2m → 5m → 11m capped; early intervals only help over a direct route — transit dedup absorbs re-emissions for up to ~10 min). A MESSAGE has no attempt cap: it ends when the recipient confirms it, when its author withdraws it, or when its own `ttl_seconds` expires, and the capped backoff is what paces the re-sends meanwhile — see [message_delivery.md](message_delivery.md). `CORSA_DELIVERY_RETRY_MAX_ATTEMPTS` (default 20) bounds the SEEN-RECEIPT retry only, which the far side re-triggers on every arrival. On a desktop node both retry sets survive restarts: messages are reseeded from every chatlog row still in `sent` with no horizon at all, and seen receipts from the chatlog `seen_ack` journal (seen rows whose confirmation has not been recorded; that reseed scans the last 7 days). When a message does expire, it is finalised: outbound state goes terminal (`expired`, visible via `fetch_pending_messages`), the pending/relay retry state is cleared, and the abandonment is journaled (`delivery_failed`) so a restart does not reseed it — the chatlog row intentionally stays at `sent`, which is the truthful "never confirmed delivered" state.
 
 **Response Format:**
 
@@ -68,11 +68,20 @@ Duplicate receipt:
 }
 ```
 
+Refused write:
+```json
+{
+  "type": "error",
+  "code": "store-failed"
+}
+```
+
 **Behavior:**
 - Receipts are **automatically emitted** when a live DM reaches the final recipient node
 - Full nodes **relay receipts** to the original sender via push notification or gossip
 - The receipt references the original message by UUID for correlation
 - Deduplication returns `receipt_known` for already-stored receipts
+- `store-failed` means the chatlog refused the delivery status. It is NOT the message-path meaning of that code: the message itself is on disk and unaffected, and the receipt may already have been distributed to the network. What it says is that THIS node did not record the status, so the client must not treat the conversation as read — nothing else writes that row, because the network re-send of a receipt goes to the peer rather than to our own chatlog. The receipt stays un-handled: no dedup key, the sender's retry keeps running, and the peer is not told to forget their copy, so the next arrival tries the write again
 
 ### fetch_delivery_receipts
 
@@ -224,7 +233,7 @@ sequenceDiagram
 - локально отправленная `seen`-квитанция переотправляется, пока не придёт `seen_ack` исходного отправителя; исходный отправитель отвечает `seen_ack` на каждый приход `seen` — первый или дубликат. В отличие от `delivered`/`seen` (идут НАЗАД по обратному relay-пути), `seen_ack` маршрутизируется в направлении ИСХОДНОГО сообщения — на relay-узлах он идёт по forward-хопу сообщения, а не по reverse-пути квитанций. Отправка гейтится версией: `seen_ack` уходит только пирам с protocol ≥ 23 (до-v23 бинарь лишь отбросил бы незнакомый статус на парсинге); гейт удаляется, когда `MinimumProtocolVersion` достигнет 23. `seen_ack` не сохраняется в runtime-наборе квитанций — он не может попасть в `fetch_delivery_receipts` или backlog replay. Входящий `seen_ack` принимается только от identity, которой была адресована seen-квитанция (привязка к ожидающей retry-записи; подделанные ack-и отбрасываются, не трогая dedupe-состояние), а локальная команда `send_delivery_receipt` его отклоняет — статус строго wire-only;
 - `delivered` собственного ack-а не требует: ретраи сообщения сами переоткрывают его на каждом дубликате.
 
-Ретраи экспоненциальные (30s → 1m → 2m → 5m → 11m с потолком; ранние интервалы полезны только при прямом маршруте — транзит-дедуп поглощает повторы до ~10 мин), ограничены `CORSA_DELIVERY_RETRY_MAX_ATTEMPTS` (по умолчанию 20) и временем жизни сообщения `ttl_seconds`. На desktop-ноде оба набора ретраев переживают рестарт: сообщения пересеиваются из строк chatlog со статусом `sent`, а seen-квитанции — из chatlog-журнала `seen_ack` (seen-строки без записанного подтверждения; пересев сканирует последние 7 дней). Когда движок сдаётся (истечение TTL / потолок попыток), сообщение финализируется: outbound-состояние становится терминальным (`expired`/`failed`, видно через `fetch_pending_messages`), pending/relay-retry состояние очищается, а отказ журналируется (`delivery_failed`), чтобы рестарт не пересеял его заново — строка chatlog намеренно остаётся в `sent`: это честное состояние «доставка не подтверждена».
+Ретраи экспоненциальные (30s → 1m → 2m → 5m → 11m с потолком; ранние интервалы полезны только при прямом маршруте — транзит-дедуп поглощает повторы до ~10 мин). У СООБЩЕНИЯ лимита попыток нет: оно заканчивается подтверждением получателя, отзывом автора или истечением собственного `ttl_seconds`, а темп повторов задаёт backoff с потолком — см. [message_delivery.md](message_delivery.md). `CORSA_DELIVERY_RETRY_MAX_ATTEMPTS` (по умолчанию 20) ограничивает ТОЛЬКО повторы seen-квитанций, которые дальняя сторона перезапускает при каждом прибытии. На desktop-ноде оба набора ретраев переживают рестарт: сообщения пересеиваются из ВСЕХ строк chatlog со статусом `sent`, без горизонта, а seen-квитанции — из chatlog-журнала `seen_ack` (seen-строки без записанного подтверждения; этот пересев сканирует последние 7 дней). Когда сообщение всё-таки истекает, оно финализируется: outbound-состояние становится терминальным (`expired`, видно через `fetch_pending_messages`), pending/relay-retry состояние очищается, а отказ журналируется (`delivery_failed`), чтобы рестарт не пересеял его заново — строка chatlog намеренно остаётся в `sent`: это честное состояние «доставка не подтверждена».
 
 **Формат ответа:**
 
@@ -248,11 +257,20 @@ sequenceDiagram
 }
 ```
 
+Отказ записи:
+```json
+{
+  "type": "error",
+  "code": "store-failed"
+}
+```
+
 **Поведение:**
 - Квитанции **автоматически генерируются**, когда DM достигает финального узла получателя
 - Полные ноды **передают квитанции** исходному отправителю через push или gossip
 - Квитанция ссылается на исходное сообщение по UUID для корреляции
 - Дедупликация возвращает `receipt_known` для уже сохранённых квитанций
+- `store-failed` означает, что chatlog отказал в записи статуса доставки. Это НЕ то же самое, что тот же код в message-пути: само сообщение на диске и не затронуто, а квитанция могла уже уйти в сеть. Код говорит, что ЭТОТ узел статус не записал, поэтому клиенту нельзя считать переписку прочитанной — эту строку не пишет больше ничто, ведь сетевой повтор квитанции адресован пиру, а не нашему chatlog. Квитанция остаётся необработанной: dedup-ключа нет, ретрай отправителя продолжается, пиру не сообщается забыть свою копию — и следующее прибытие снова пробует запись
 
 ### fetch_delivery_receipts
 

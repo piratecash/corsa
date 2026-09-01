@@ -374,6 +374,13 @@ func (s *Service) onPeerSessionClosedWithAttribution(
 	// Outside every domain mutex, like the other close-path side effects.
 	if isLastTotal {
 		s.forgetDatagramPeer(peerIdentity)
+		// The moment a recipient goes away is the only evidence that
+		// separates "their receipt is late" from "their receipt is not
+		// coming". Deliveries still owed to them go back to being held, so
+		// the kick that fires when they return sends at once instead of
+		// letting them sit out the rest of a backoff. Takes deliveryMu
+		// alone, and every domain mutex is released by here.
+		s.noteRecipientWentOffline(peerIdentity)
 	}
 
 	if !lastRelay {

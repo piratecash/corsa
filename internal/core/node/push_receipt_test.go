@@ -828,7 +828,7 @@ func TestRelayDeliveryReceiptRetryAfterNoTargetsInbound(t *testing.T) {
 
 	// Verify: receipt not stored locally and not marked in seenReceipts.
 	svc.deliveryMu.RLock()
-	key := "foreign-recipient-recovery:msg-recovery-1:delivered"
+	key := identityFromRelayFrame(frame).dedupKey()
 	markedAfterFirst := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if markedAfterFirst {
@@ -903,7 +903,7 @@ func TestSessionRelayDeliveryReceiptRetryAfterNoTargets(t *testing.T) {
 	// goroutine. When no routing targets exist the goroutine calls
 	// unmarkTransitReceiptSeen, but this happens asynchronously. Poll
 	// until the goroutine completes the unmark.
-	key := "foreign-recipient-sess-recovery:msg-recovery-sess-1:delivered"
+	key := identityFromRelayFrame(frame).dedupKey()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		svc.deliveryMu.RLock()
@@ -1027,7 +1027,7 @@ func TestRelayDeliveryReceiptRetryAfterAllSendsFail(t *testing.T) {
 	svc.gossipTransitReceipt(receipt)
 
 	svc.deliveryMu.RLock()
-	key := "foreign-recipient-sendfail:msg-sendfail-1:delivered"
+	key := receiptKeyOf(receipt)
 	markedAfterFail := svc.seenReceipts.Has(key)
 	svc.deliveryMu.RUnlock()
 	if markedAfterFail {
@@ -1115,28 +1115,39 @@ func TestRelayDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 	svc.identity = id
 
 	// hasSubscriber only reads len(s.subs[recipient]); connID is irrelevant
-	// for this path after the PR 10.3b subscriber re-key.
+	// to THAT gate after the PR 10.3b subscriber re-key.
 	clientID := "client-identity-ccc"
 	svc.subs[clientID] = map[string]*subscriber{
 		"sub-1": {id: "sub-1", recipient: clientID},
 	}
 
-	conn, _ := net.Pipe()
-	defer func() { _ = conn.Close() }()
-
-	svc.handleInboundRelayDeliveryReceipt(mustConnIDForTest(svc, conn), protocol.Frame{
-		Type:        "relay_delivery_receipt",
-		ID:          "msg-relay-3",
-		Address:     "some-sender",
+	receipt := protocol.DeliveryReceipt{
+		MessageID:   "msg-relay-3",
+		Sender:      "some-sender",
 		Recipient:   clientID,
 		Status:      "seen",
-		DeliveredAt: time.Now().UTC().Format(time.RFC3339),
-	})
-
-	svc.deliveryMu.RLock()
-	count := len(svc.receipts[clientID])
-	svc.deliveryMu.RUnlock()
-	if count != 1 {
-		t.Fatalf("relay receipt for active subscriber should be stored, got %d", count)
+		DeliveredAt: time.Now().UTC(),
 	}
+
+	// The gate the handler routes on.
+	if !svc.hasSubscriber(clientID) {
+		t.Fatal("fixture: the subscriber must be visible to the handler's gate")
+	}
+	// And what the fast path does with it, taken from the call itself.
+	//
+	// NOT from s.receipts afterwards: storing hands the receipt to a
+	// BACKGROUND push, that push resolves the subscriber's connection,
+	// and a subscriber without one is dropped — after which the recipient
+	// has no subscribers and its backlog and dedup keys are reclaimed,
+	// exactly as the no-store-and-forward rule says. Reading the map after
+	// the handler therefore raced that teardown and lost roughly once in a
+	// hundred runs, on this tree and on the one before it.
+	outcome := svc.storeDeliveryReceipt(receipt)
+	if !outcome.stored {
+		t.Fatal("relay receipt for active subscriber should be stored")
+	}
+	if outcome.count != 1 {
+		t.Fatalf("receipt count = %d, want 1", outcome.count)
+	}
+	svc.WaitBackground()
 }

@@ -62,6 +62,27 @@ const (
 	//   func(event protocol.LocalChangeEvent)
 	TopicReceiptUpdated = "receipt.updated"
 
+	// TopicMessageEmitted is emitted the first time a sink confirms taking
+	// one of this node's own outgoing messages — the queued → sent
+	// transition, and nothing else.
+	//
+	// It fires for EVERY outgoing DM, not only the ones the reachability
+	// gate held back: the sender is shown "queued" from the moment the
+	// message is stored, because at that point the sinks are still working
+	// and nothing yet knows the frame went anywhere. It fires once per
+	// message — a later re-send of the same envelope is not news — unless
+	// the bus sheds the event, in which case the claim is returned and the
+	// next confirmed emission repeats it.
+	//
+	// It is separate from TopicReceiptUpdated because no peer has spoken:
+	// the fact being reported is entirely local. Subscribers apply it the
+	// way they apply a receipt — as a monotonic delivery-status update —
+	// and it loses to anything the recipient has actually confirmed.
+	//
+	// Handler signature:
+	//   func(event protocol.LocalChangeEvent)
+	TopicMessageEmitted = "message.emitted"
+
 	// TopicMessageControl is emitted when a control DM
 	// (message_delete, message_delete_ack, ...) arrives on the dedicated
 	// control wire topic (protocol.TopicControlDM). Unlike TopicMessageNew,

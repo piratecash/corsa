@@ -136,10 +136,29 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 	result.BacklogRemoved = s.dropBacklogEnvelopeLocked(messageID, wireRecipient)
 	delete(s.relayRetry, relayMessageKey(messageID))
 
+	// The claim set tracks ids whose ROW still carries a durable
+	// never-emitted mark, and a withdrawn message's row is being destroyed
+	// with the mark on it. Keeping the id here would leave an entry nothing
+	// can ever consume: the withdrawal is terminal, so no later emission
+	// comes along to withdraw the claim. Purely memory — no disk write,
+	// because there will be no row to write to.
+	//
+	// OUTSIDE the retry-entry branch on purpose. The set deliberately
+	// OUTLIVES the entry — that is the whole reason it exists — so a
+	// message withdrawn after its own TTL dropped the entry, or one whose
+	// entry a concurrent refusal re-marked, would otherwise keep its id
+	// here for the life of the process.
+	delete(s.markedNeverEmitted, messageID)
 	if entry, awaiting := s.awaitingDelivered[messageID]; awaiting && entry.Envelope.Recipient == wireRecipient {
 		result.NeverEmitted = !entry.Emitted
 		delete(s.awaitingDelivered, messageID)
 		result.RetryCancelled = true
+		// The withdrawn message may have been holding this recipient's
+		// queue slot. Freeing it without promoting the next one would
+		// leave the rest of the conversation waiting out a backoff that
+		// was measuring a message no longer being delivered — the same
+		// step storeDeliveryReceipt takes when a receipt frees the slot.
+		s.promoteQueueHeadLocked(wireRecipient, time.Now().UTC())
 	}
 	// Shadow the id for a while: a backlog push that snapshotted the
 	// inbox a moment ago still holds this envelope and would hand it over
@@ -286,6 +305,9 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 			delete(s.awaitingDelivered, id)
 		}
 	}
+	// Whatever survived the scope keeps being delivered, and the queue
+	// slot the wipe just freed belongs to the oldest of them.
+	s.promoteQueueHeadLocked(wireRecipient, time.Now().UTC())
 	for id := range s.outbound {
 		if s.outbound[id].Recipient == wireRecipient && inScope(protocol.MessageID(id)) {
 			withdrawn[protocol.MessageID(id)] = struct{}{}
@@ -313,6 +335,18 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 		s.clearFreezeLocked(scope)
 	} else {
 		s.clearFreezeLocked(withdrawn)
+	}
+	// The durable never-emitted claims go the same way, and by the same
+	// argument. markedNeverEmitted deliberately OUTLIVES a retry entry —
+	// that is what it is for — so releasing only what this pass found in
+	// awaitingDelivered would strand every id whose entry had already gone
+	// (its own TTL expired) and every one a concurrent refusal re-marked.
+	// Their rows are being destroyed with the mark on them, so this is
+	// memory only: there is no row left to write to.
+	if scope != nil {
+		s.clearClaimsLocked(scope)
+	} else {
+		s.clearClaimsLocked(withdrawn)
 	}
 
 	var affected []ebus.PeerPendingDelta
@@ -405,10 +439,12 @@ func (s *Service) countPendingFramesLocked(messageID protocol.MessageID) int {
 	count := 0
 	for _, items := range s.pending {
 		for _, item := range items {
-			if item.Frame.ID != string(messageID) {
-				continue
-			}
-			if item.Frame.Type == "send_message" || item.Frame.Type == "relay_message" {
+			// Same reader as clearPendingMessageLocked, so the count and
+			// the removal can never disagree about which frames carry the
+			// message. They used to: this one read only the flat id, so a
+			// push_message was removed (once that was fixed) but never
+			// counted, and the caller under-reported what it withdrew.
+			if frameMessageID(item.Frame) == messageID {
 				count++
 			}
 		}

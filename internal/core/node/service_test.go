@@ -2470,7 +2470,7 @@ func TestV2AckDeleteClearsReceiptBacklog(t *testing.T) {
 	})
 	defer stopFull()
 
-	stored, _ := fullNode.storeDeliveryReceipt(protocol.DeliveryReceipt{
+	stored := storedReceipt(fullNode, protocol.DeliveryReceipt{
 		MessageID:   "receipt-backlog-1",
 		Sender:      fullNode.Address(),
 		Recipient:   idClient.Address,
@@ -2814,7 +2814,7 @@ func TestStoreDeliveryReceiptForSelfClearsPendingOutboundAndDoesNotRelay(t *test
 	}
 
 	svc.sentDMIDs.Add(frame.ID) // we sent this message; the delivered receipt is solicited
-	stored, _ := svc.storeDeliveryReceipt(receipt)
+	stored := storedReceipt(svc, receipt)
 	if !stored {
 		t.Fatalf("expected receipt to be stored")
 	}
@@ -3054,8 +3054,11 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 	svc.deliveryMu.RUnlock()
 
 	svc.clearRelayRetryForOutbound(protocol.Frame{
-		Type:      "relay_delivery_receipt",
-		ID:        string(receipt.MessageID),
+		Type: "relay_delivery_receipt",
+		ID:   string(receipt.MessageID),
+		// Address is the receipt's author on this frame — sendReceiptToPeer
+		// fills it from receipt.Sender, and the retry entry is keyed on it.
+		Address:   receipt.Sender,
 		Recipient: receipt.Recipient,
 		Status:    receipt.Status,
 	})
@@ -3095,8 +3098,11 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 	svc.deliveryMu.Unlock()
 	svc.trackRelayReceipt(receipt)
 	svc.clearRelayRetryForOutbound(protocol.Frame{
-		Type:      "relay_delivery_receipt",
-		ID:        string(receipt.MessageID),
+		Type: "relay_delivery_receipt",
+		ID:   string(receipt.MessageID),
+		// Address is the receipt's author on this frame — sendReceiptToPeer
+		// fills it from receipt.Sender, and the retry entry is keyed on it.
+		Address:   receipt.Sender,
 		Recipient: receipt.Recipient,
 		Status:    receipt.Status,
 	})
@@ -6245,7 +6251,7 @@ func TestReceiptDelegatedToMessageStoreBeforeEvent(t *testing.T) {
 	}
 
 	svc.sentDMIDs.Add("race-msg-1") // we sent this message; the delivered receipt is solicited
-	receiptStored, _ := svc.storeDeliveryReceipt(receipt)
+	receiptStored := storedReceipt(svc, receipt)
 	if !receiptStored {
 		t.Fatal("expected delivery receipt to be stored")
 	}

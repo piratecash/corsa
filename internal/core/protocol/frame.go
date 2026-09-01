@@ -34,14 +34,23 @@ type Frame struct {
 	// keeps legacy v10 frames indistinguishable on the wire from a v11
 	// frame with no port set — legacy parsers treat the absent field as
 	// "no advertise_port", which is the same as the v11 fallback.
-	AdvertisePort   domain.PeerPort       `json:"advertise_port,omitempty"`
-	NodeType        string                `json:"node_type,omitempty"`
-	ClientVersion   string                `json:"client_version,omitempty"`
-	ClientBuild     int                   `json:"client_build,omitempty"`
-	Services        []string              `json:"services,omitempty"`
-	Networks        []string              `json:"networks,omitempty"` // self-declared reachable network groups (hello frame)
-	Address         string                `json:"address,omitempty"`
-	Recipient       string                `json:"recipient,omitempty"`
+	AdvertisePort domain.PeerPort `json:"advertise_port,omitempty"`
+	NodeType      string          `json:"node_type,omitempty"`
+	ClientVersion string          `json:"client_version,omitempty"`
+	ClientBuild   int             `json:"client_build,omitempty"`
+	Services      []string        `json:"services,omitempty"`
+	Networks      []string        `json:"networks,omitempty"` // self-declared reachable network groups (hello frame)
+	Address       string          `json:"address,omitempty"`
+	Recipient     string          `json:"recipient,omitempty"`
+	// ReceiptSender names the AUTHOR of the receipt an ack_delete
+	// (AckType "receipt") refers to. Without it an ack names only
+	// recipient+id+status, which two receipts can share when one of them
+	// is forged — and the holder then deletes both, the genuine one
+	// included. Additive from ProtocolVersionReceiptSenderAck: senders
+	// gate it on the peer advertising that version, because the field is
+	// covered by the signature and an older verifier computes the
+	// payload without it.
+	ReceiptSender   string                `json:"receipt_sender,omitempty"`
 	PubKey          string                `json:"pubkey,omitempty"`
 	BoxKey          string                `json:"boxkey,omitempty"`
 	BoxSig          string                `json:"boxsig,omitempty"`

@@ -79,11 +79,16 @@ Publish a new message to the network. The sender's signature is validated, and t
 | `message_known` | UUID already in seen map; silently accepted (idempotent) |
 | `error` with code `message-timestamp-out-of-range` | Clock drift exceeded; message rejected |
 
+`message_stored` carries an optional `status` field. It is `"queued"` while no sink has confirmed taking the message — which is the case for every locally-authored DM at the moment the reply is written, since the sinks are still working, and stays the case indefinitely when the recipient is unreachable or every writer refused the frame (see [message_delivery.md](message_delivery.md)). `ebus.TopicMessageEmitted` moves the status to `sent` when a sink confirms. The field is absent when there is no delivery entry to report on. Only the LOCAL sender ever sees a non-empty value — a remote peer has no delivery entry of ours to report on and always receives it empty. An older client that does not know the field reads the reply exactly as before.
+
+`message_known`, the idempotent answer to a re-send of an id the node already holds, carries the same `status`.
+
 **Side effects:**
 
 - Message is persisted to storage
-- Pushed to subscribers
-- Gossiped to peers
+- The sender-owned retry entry is registered BEFORE anything is sent, so a sink's confirmation always has somewhere to land
+- Pushed to subscribers, unless the reachability gate is holding it
+- Gossiped to peers, unless the reachability gate is holding it
 
 ---
 
@@ -287,7 +292,7 @@ Retrieve messages that are queued for delivery (not yet sent or delivery failed)
 |--------|---------|
 | `queued` | Waiting for first delivery attempt |
 | `retrying` | Delivery failed; scheduling retry |
-| `failed` | Max retries exhausted |
+| `failed` | Delivery abandoned. No longer reachable for a MESSAGE — there is no attempt cap; it remains for the seen-receipt retry and for pending-ring paths |
 | `expired` | TTL exceeded before delivery |
 
 **UI Interpretation:**
@@ -481,11 +486,16 @@ sequenceDiagram
 | `message_known` | UUID уже в карте просмотренных; молча принято (идемпотентно) |
 | `error` с кодом `message-timestamp-out-of-range` | Смещение часов превышено; сообщение отклонено |
 
+`message_stored` несёт необязательное поле `status`. Оно равно `"queued"`, пока ни один приёмник не подтвердил, что взял сообщение, — а это верно для КАЖДОГО локально созданного DM в момент, когда пишется ответ, потому что приёмники ещё работают; и остаётся верным сколь угодно долго, если получатель недостижим или все writer-ы отказались от кадра (см. [message_delivery.md](message_delivery.md)). В `sent` статус переводит `ebus.TopicMessageEmitted`, когда приёмник подтвердит. Поле отсутствует, когда докладывать не о чем — нет записи доставки. Непустое значение видит только ЛОКАЛЬНЫЙ отправитель — удалённому пиру нечего сообщать о наших записях доставки, и он всегда получает пустое. Старый клиент, не знающий поля, читает ответ ровно как раньше.
+
+`message_known` — идемпотентный ответ на повторную отправку id, который узел уже держит, — несёт тот же `status`.
+
 **Побочные эффекты:**
 
 - Сообщение сохраняется в хранилище
-- Отправляется подписчикам
-- Распространяется среди пиров
+- Запись sender-owned ретрая регистрируется ДО того, как что-либо отправлено, чтобы подтверждению приёмника всегда было куда лечь
+- Отправляется подписчикам, если его не удерживает гейт достижимости
+- Распространяется среди пиров, если его не удерживает гейт достижимости
 
 ---
 
@@ -689,7 +699,7 @@ sequenceDiagram
 |--------|----------|
 | `queued` | Ожидание первой попытки доставки |
 | `retrying` | Доставка не удалась; планирование повтора |
-| `failed` | Максимум повторов исчерпан |
+| `failed` | Доставка брошена. Для СООБЩЕНИЯ более недостижим — лимита попыток нет; статус остался для повторов seen-квитанций и путей pending-ring |
 | `expired` | TTL истек до доставки |
 
 **Интерпретация UI:**

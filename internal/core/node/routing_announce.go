@@ -1532,6 +1532,27 @@ func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAd
 	return s.writeFrameToInboundConn(ctx, targetID, remoteAddr, frame)
 }
 
+// resolveInboundConn finds the tracked inbound connection for an
+// "inbound:"-prefixed address. Split out of writeFrameToInbound so a caller
+// that needs the transport's actual error — a frame carrying a user message
+// — can reach writeFrameToInboundConnErr with the same resolution.
+func (s *Service) resolveInboundConn(address domain.PeerAddress) (domain.ConnID, string, bool) {
+	remoteAddr := strings.TrimPrefix(string(address), "inbound:")
+	var targetID domain.ConnID
+	var found bool
+	s.peerMu.RLock()
+	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
+		if info.remoteAddr == remoteAddr {
+			targetID = info.id
+			found = true
+			return false
+		}
+		return true
+	})
+	s.peerMu.RUnlock()
+	return targetID, remoteAddr, found
+}
+
 // writeFrameToInboundConn marshals and writes a frame to a previously
 // resolved inbound connection identified by ConnID. The connID is
 // expected to come from a caller that has already located the target
@@ -1547,6 +1568,21 @@ func (s *Service) writeFrameToInbound(ctx context.Context, address domain.PeerAd
 // dispatches by connID, not address, so a churned replacement
 // connection at the same remoteAddr cannot pick up the bytes.
 func (s *Service) writeFrameToInboundConn(ctx context.Context, connID domain.ConnID, remoteAddr string, frame protocol.Frame) bool {
+	return s.writeFrameToInboundConnErr(ctx, connID, remoteAddr, frame) == nil
+}
+
+// writeFrameToInboundConnErr is the body, and it keeps the transport's
+// answer instead of flattening it to a bool.
+//
+// The bool wrapper above is right for the announce plane, where a frame
+// that may or may not have gone out is simply re-announced. It is NOT right
+// for a frame carrying a user message: a sync flush that ends on a timeout,
+// a cancelled context or a closing writer leaves the frame IN THE QUEUE
+// behind a live writer, so the bytes may well have left. Collapsing that to
+// "false" told the delivery subsystem the message never went out, and a
+// later deletion then skipped a peer who was holding it.
+// See refusalProvesNothingWasWritten for the full split.
+func (s *Service) writeFrameToInboundConnErr(ctx context.Context, connID domain.ConnID, remoteAddr string, frame protocol.Frame) error {
 	// Inbound TCP path: the receiving peer dispatches through
 	// handleConn's command-plane reader bound by maxCommandLineBytes
 	// (128 KiB). Use the matching writer-side budget so the sender
@@ -1568,10 +1604,10 @@ func (s *Service) writeFrameToInboundConn(ctx context.Context, connID domain.Con
 		// oversize frame.
 		if errors.Is(err, protocol.ErrFrameTooLarge) {
 			log.Error().Err(err).Str("peer", remoteAddr).Str("type", frame.Type).Msg("frame_inbound_too_large")
-			return false
+			return err
 		}
 		log.Warn().Err(err).Str("peer", remoteAddr).Msg("frame_inbound_marshal_failed")
-		return false
+		return err
 	}
 
 	// Network-routed sync send for fail-fast inbound delivery via the
@@ -1584,19 +1620,21 @@ func (s *Service) writeFrameToInboundConn(ctx context.Context, connID domain.Con
 	sendErr := s.sendFrameBytesViaNetworkSync(ctx, connID, []byte(line))
 	switch {
 	case sendErr == nil:
-		return true
+		return nil
 	case errors.Is(sendErr, ErrUnregisteredWrite):
 		// Tracked inbound connection MUST have a NetCore. If it doesn't,
 		// the state is inconsistent — fail closed rather than bypassing
 		// the NetCore writer with a raw conn.Write.
 		log.Warn().Str("peer", remoteAddr).Msg("frame_inbound_unregistered: tracked conn missing NetCore — state inconsistency")
-		return false
+		return sendErr
 	default:
 		// Buffer full, writer/chan closed, sync flush timeout, ctx
 		// canceled, or unknown sentinel — all collapse onto the legacy
-		// frame_inbound_dropped diagnostic.
+		// frame_inbound_dropped diagnostic. They do NOT all mean the same
+		// thing to a delivery; the caller that carries one classifies the
+		// error rather than reading this log line.
 		log.Debug().Err(sendErr).Str("peer", remoteAddr).Msg("frame_inbound_dropped")
-		return false
+		return sendErr
 	}
 }
 

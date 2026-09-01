@@ -5,7 +5,7 @@
 // plain map[string]struct{} that only ever shrank on the single
 // gossip-total-failure rollback path (unmarkTransitReceiptSeen). On the
 // normal path it grew one entry per unique transit receipt key
-// (recipient:messageID:status) and was never evicted, so on a long-lived
+// (recipient:messageID:status:sender) and was never evicted, so on a long-lived
 // relay node under a steady receipt / re-gossip load it climbed without
 // bound — the same unbounded-map memory hotspot that the message-ID dedup
 // already retired by moving s.seen onto rotatingBloomDedup (bloom_dedup.go).
@@ -35,7 +35,7 @@
 // collision is the same CLASS of error as a Bloom false positive (a Has can
 // suppress a genuine receipt; a Delete removes both colliding keys). The
 // difference is magnitude AND adversarial resistance, and the receipt key is
-// attacker-controlled (recipient:messageID:status comes off the wire), so the
+// attacker-controlled (recipient:messageID:status:sender comes off the wire), so the
 // hash must resist DELIBERATE collisions, not just random ones:
 //   - The Bloom was rejected here for two reasons: at the design load its
 //     false-positive rate is material (0.046%–0.32%) AND it cannot Delete a
@@ -90,7 +90,7 @@ const receiptDedupRotation = bloomDedupRotation
 const maxReceiptDedupEntries = 100_000
 
 // dedupKey is the fixed-size storage form of a receipt dedup key: the high
-// 128 bits of SHA-256 over the raw recipient:messageID:status string. A
+// 128 bits of SHA-256 over the raw recipient:messageID:status:sender string. A
 // collision-resistant hash is required because the key is attacker-controlled
 // (see the file header) — a forgeable hash would let a peer suppress a
 // victim's receipt by crafting a colliding key.

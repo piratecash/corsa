@@ -3094,9 +3094,9 @@ func (w *Window) layoutCompactChatHeader(gtx layout.Context) layout.Dimensions {
 	})
 }
 
-// layoutPendingDeletesCaption renders "N waiting to be deleted for the
-// peer" next to the conversation title, and nothing at all when the
-// count is zero.
+// layoutPendingDeletesCaption renders what this conversation still owes —
+// messages waiting to be sent, messages waiting for the peer to delete —
+// next to the conversation title, and nothing at all when it owes neither.
 //
 // A deletion removes the bubble immediately, so once the user has
 // clicked there is no message left to hang a per-row indicator on. This
@@ -3105,7 +3105,7 @@ func (w *Window) layoutCompactChatHeader(gtx layout.Context) layout.Dimensions {
 // transient status line: the status line is gone with the next event,
 // and the request can outlive it by days.
 func (w *Window) layoutPendingDeletesCaption(gtx layout.Context, peer domain.PeerIdentity) layout.Dimensions {
-	caption := w.pendingDeletesCaption(peer)
+	caption := w.headerPendingCaption(peer)
 	if caption == "" {
 		return layout.Dimensions{}
 	}
@@ -3116,6 +3116,77 @@ func (w *Window) layoutPendingDeletesCaption(gtx layout.Context, peer domain.Pee
 		return lbl.Layout(gtx)
 	})
 }
+
+// headerPendingCaption is the whole caption: what is still to be SENT and
+// what is still to be DELETED, in that order, joined into one line.
+//
+// Both halves name themselves. A bare "2 · 3" — or even "2 waiting" — does
+// not say which is which, and the two mean opposite things: one is work
+// this node still owes the wire, the other is work the peer owes us.
+func (w *Window) headerPendingCaption(peer domain.PeerIdentity) string {
+	parts := make([]string, 0, 2)
+	if queued := w.awaitingDeliveryCaption(peer); queued != "" {
+		parts = append(parts, queued)
+	}
+	if deletes := w.pendingDeletesCaption(peer); deletes != "" {
+		parts = append(parts, deletes)
+	}
+	return strings.Join(parts, " ")
+}
+
+// awaitingDeliveryCaption is what the header says about messages the
+// recipient does not have yet, or "" when there are none.
+//
+// Two kinds count, and the second is the reason the first is not enough. A
+// `queued` message never reached the wire — the recipient was not there.
+// A `sent` one did reach a writer, but no delivery receipt has come back,
+// and after a few minutes that stops meaning "in flight" and starts
+// meaning the same thing to the user: it has not arrived. The threshold
+// keeps the ordinary case — a receipt is normally back in well under a
+// second — from ever showing a number.
+//
+// The caption says NOT DELIVERED rather than "waiting to be sent", which
+// would be false for the second kind: the node has handed that one over
+// and is waiting for the answer. Not-delivered is the one sentence true of
+// both, and it is also what makes the threshold's clock defensible — it
+// runs from when the user wrote the message, not from a transition the
+// snapshot does not carry, and "written N minutes ago and still not with
+// them" is exactly the claim being made.
+//
+// Counted from the OPEN conversation's messages, which is all the header
+// has: the snapshot carries statuses for the active peer only. That is
+// also the only place this caption is drawn.
+func (w *Window) awaitingDeliveryCaption(peer domain.PeerIdentity) string {
+	if peer != w.snap.ActivePeer {
+		return ""
+	}
+	me := w.snap.MyAddress
+	now := time.Now()
+	awaiting := 0
+	for _, message := range w.snap.ActiveMessages {
+		if message.Sender != me {
+			continue
+		}
+		switch message.ReceiptStatus {
+		case "queued", "retrying":
+			awaiting++
+		case "sent":
+			if now.Sub(message.Timestamp) >= staleSendThreshold {
+				awaiting++
+			}
+		}
+	}
+	if awaiting == 0 {
+		return ""
+	}
+	return w.tCount("chat.queue_pending", awaiting)
+}
+
+// staleSendThreshold is how long a message may sit at `sent` before the
+// header counts it as still waiting. A receipt from a reachable recipient
+// is normally back in under a second; minutes without one mean the send
+// has not actually completed, whatever the tick said.
+const staleSendThreshold = 3 * time.Minute
 
 // pendingDeletesCaption is what the header says about deletions this peer
 // still owes us, or "" when they owe none.

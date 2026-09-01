@@ -335,15 +335,20 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		d.onSendSuccess(to.String())
 	}
 	return &DirectMessage{
-		ID:            string(messageID),
-		Sender:        domain.PeerIdentityFromWire(d.id.Address),
-		Recipient:     to,
-		Body:          msg.Body, // plaintext — already known to us
-		ReplyTo:       msg.ReplyTo,
-		Command:       msg.Command,
-		CommandData:   msg.CommandData,
-		Timestamp:     now,
-		ReceiptStatus: "sent",
+		ID:          string(messageID),
+		Sender:      domain.PeerIdentityFromWire(d.id.Address),
+		Recipient:   to,
+		Body:        msg.Body, // plaintext — already known to us
+		ReplyTo:     msg.ReplyTo,
+		Command:     msg.Command,
+		CommandData: msg.CommandData,
+		Timestamp:   now,
+		// The node answers "queued" when it stored the row but held the
+		// message back because the recipient is unreachable. Reporting
+		// "sent" for those was the lie the sender had no way to see
+		// through: nothing later corrects an optimistic echo until the
+		// conversation is reloaded.
+		ReceiptStatus: storedMessageStatus(reply),
 		// The node has accepted and stored the row by now, so this echo can
 		// carry its place in the local order. Without it the caller's
 		// optimistic sidebar update would be unorderable against a message
@@ -351,6 +356,16 @@ func (d *DMCrypto) SendDirectMessage(ctx context.Context, to domain.PeerIdentity
 		// put its own text back over a newer one.
 		Seq: d.messageSeq(ctx, domain.MessageID(messageID)),
 	}, nil
+}
+
+// storedMessageStatus reads the node's answer to "did this go anywhere?"
+// out of a message_stored reply. An older node — or one that put the
+// message straight on the wire — says nothing, and that means sent.
+func storedMessageStatus(reply protocol.Frame) string {
+	if reply.Status == protocol.MessageStatusQueued {
+		return MessageStatusQueued
+	}
+	return MessageStatusSent
 }
 
 // DeliveryCancellation is what the node could establish while stopping a
@@ -624,9 +639,16 @@ func (d *DMCrypto) DecryptIncomingMessage(ctx context.Context, event protocol.Lo
 			Msg("dm_crypto: unreadable created_at on an incoming message; showing the time it was decrypted")
 	}
 
-	status := "delivered"
+	status := MessageStatusDelivered
 	if event.Sender == d.id.Address {
-		status = "sent"
+		// Our own message, so the node is the only witness of whether it
+		// went anywhere — and it says so in the event. Deriving "sent"
+		// here regardless is what let this path win the race against the
+		// synchronous send reply and show a held message as sent.
+		status = MessageStatusSent
+		if event.Status == protocol.MessageStatusQueued {
+			status = MessageStatusQueued
+		}
 	}
 
 	replyTo := domain.MessageID(msg.ReplyTo)
@@ -835,12 +857,14 @@ func (d *DMCrypto) FetchConversation(ctx context.Context, peerAddress domain.Pee
 		}
 		records = append(records, MessageRecord{
 			ID:              entry.ID,
+			Seq:             entry.RowID,
 			Flag:            entry.Flag,
 			Timestamp:       ts.UTC(),
 			Sender:          entry.Sender,
 			Recipient:       entry.Recipient,
 			Body:            entry.Body,
 			PersistedStatus: entry.DeliveryStatus,
+			AwaitingWire:    awaitingWire(entry.Metadata),
 		})
 	}
 
@@ -1247,4 +1271,26 @@ func (d *DMCrypto) importIncomingDMHeaderContacts(trustedContacts, networkContac
 		return 0
 	}
 	return reply.Count
+}
+
+// awaitingWire reports the one case that downgrades a badge: nothing has
+// confirmed this row on the wire.
+//
+// Three shapes of row reach here, and the middle one is why this is not a
+// plain negation:
+//
+//   - on_wire present — the row is governed by the bit, so believe it.
+//   - on_wire absent, never_emitted present — written by the version that
+//     had only one flag, which set that flag for exactly the messages this
+//     node was HOLDING. Those are still unsent, and reporting them as sent
+//     after an upgrade would show the user a message nothing ever carried
+//     — the reported bug, reintroduced by the migration itself.
+//   - neither — a row from before any of this. It says nothing about the
+//     wire, so its persisted status stands; reading the silence as "not
+//     sent" would re-badge a user's whole unreceipted history as queued.
+func awaitingWire(metadata string) bool {
+	if onWire, known := chatlog.OnWire(metadata); known {
+		return !onWire
+	}
+	return chatlog.NeverEmitted(metadata)
 }

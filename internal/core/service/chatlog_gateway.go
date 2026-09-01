@@ -178,24 +178,35 @@ func (g *ChatlogGateway) FetchConversations(ctx context.Context) (string, error)
 // UndeliveredOutgoing returns the locally-sent DM entries still in the
 // "sent" delivery status — the durable source for the sender-side delivery
 // retry scheduler.
-func (g *ChatlogGateway) UndeliveredOutgoing(ctx context.Context, since time.Time) ([]chatlog.Entry, error) {
+func (g *ChatlogGateway) UndeliveredOutgoing(ctx context.Context, since, now time.Time) ([]chatlog.Entry, error) {
 	if g == nil || g.store == nil {
 		return nil, fmt.Errorf("chatlog not available")
 	}
-	return g.store.UndeliveredOutgoing(ctx, g.SelfAddress(), since)
+	return g.store.UndeliveredOutgoing(ctx, g.SelfAddress(), since, now)
 }
 
-// MarkNeverEmitted records that the locally-sent messages have not reached
-// the wire, so a restart can still tell "the peer cannot have this" from
-// "we cannot know".
-func (g *ChatlogGateway) MarkNeverEmitted(ctx context.Context, ids []domain.MessageID) error {
+// SentMessageIDs returns the newest ids of DMs this node authored,
+// whatever their status: the solicited-receipt gate has to survive a
+// restart even for messages the retry engine is done with.
+func (g *ChatlogGateway) SentMessageIDs(ctx context.Context, limit int) ([]domain.MessageID, error) {
+	if g == nil || g.store == nil {
+		return nil, fmt.Errorf("chatlog not available")
+	}
+	return g.store.SentMessageIDs(ctx, g.SelfAddress(), limit)
+}
+
+// MarkOnWire records that a sink confirmed the messages on the wire, so a
+// restart can tell "the sender has seen this leave" from "still queued".
+// Monotone: nothing ever clears it.
+func (g *ChatlogGateway) MarkOnWire(ctx context.Context, ids []domain.MessageID) error {
 	if g == nil || g.store == nil {
 		return fmt.Errorf("chatlog not available")
 	}
-	return g.store.MarkNeverEmitted(ctx, ids)
+	return g.store.MarkOnWire(ctx, ids)
 }
 
-// ClearNeverEmitted withdraws that claim once the messages go out.
+// ClearNeverEmitted withdraws the born-with claim before the first frame
+// goes out. Monotone in the other direction: nothing ever puts it back.
 func (g *ChatlogGateway) ClearNeverEmitted(ctx context.Context, ids []domain.MessageID) error {
 	if g == nil || g.store == nil {
 		return fmt.Errorf("chatlog not available")

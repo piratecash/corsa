@@ -2612,16 +2612,15 @@ func activePeerSummary(parent *Window, peers []service.PeerHealth) string {
 		totalIn += item.BytesReceived
 		totalOut += item.BytesSent
 	}
+	// One translated sentence per part, rather than a translated head and
+	// a hand-built English tail: the fallback used to run whenever the
+	// key was missing, which was ALWAYS — no catalogue carried it — so
+	// this summary stayed English in every language.
 	summary := parent.t("node.active_peer.summary", healthy, degraded, stalled)
-	if summary == "node.active_peer.summary" {
-		base := fmt.Sprintf("Healthy: %d, Degraded: %d, Stalled: %d", healthy, degraded, stalled)
-		if dialing > 0 || initializing > 0 || queued > 0 || retryWait > 0 {
-			base += fmt.Sprintf(" | Dialing: %d, Init: %d, Queued: %d, RetryWait: %d", dialing, initializing, queued, retryWait)
-		}
-		base += fmt.Sprintf(" | In: %s, Out: %s", formatBytes(totalIn), formatBytes(totalOut))
-		return base
+	if dialing > 0 || initializing > 0 || queued > 0 || retryWait > 0 {
+		summary += " | " + parent.t("node.active_peer.slots", dialing, initializing, queued, retryWait)
 	}
-	return summary
+	return summary + " | " + parent.t("node.active_peer.traffic", formatBytes(totalIn), formatBytes(totalOut))
 }
 
 // executeCommand parses console input and dispatches it through CommandTable.

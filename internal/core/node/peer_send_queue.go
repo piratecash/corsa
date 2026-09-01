@@ -8,6 +8,11 @@ package node
 // NetCore, so NetCore cannot possibly report its fate.
 
 import (
+	"errors"
+	"time"
+
+	"github.com/rs/zerolog/log"
+
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -25,11 +30,86 @@ import (
 type peerSendItem struct {
 	protocol.Frame
 	ticket *netcore.WriteTicket
+	// delivery names the sender-owned dispatch this frame belongs to, for
+	// the frames that carry one of OUR outgoing messages. Zero for
+	// everything else — transit traffic, announce-plane frames, receipts.
+	//
+	// It travels WITH the frame because the confirmation happens at the
+	// far end of the queue, in the session's writer loop, and the two
+	// facts it needs are decided here: which message, and which attempt.
+	// Reading the clock at the writer instead made every sink of one
+	// dispatch look like a separate attempt, so a single send charged the
+	// backoff several times over.
+	delivery deliveryDispatchRef
+}
+
+// deliveryDispatchRef identifies one attempt at one of our own messages.
+// The zero value means "not one of ours"; see peerSendItem.delivery.
+type deliveryDispatchRef struct {
+	Envelope     protocol.Envelope
+	DispatchedAt time.Time
+}
+
+// carriesDelivery reports whether the item belongs to a sender-owned
+// dispatch whose confirmation the writer owes.
+func (i peerSendItem) carriesDelivery() bool {
+	return i.delivery.Envelope.ID != "" && !i.delivery.DispatchedAt.IsZero()
 }
 
 // legacyPeerSendItem wraps a frame that carries no outbound contract.
 func legacyPeerSendItem(frame protocol.Frame) peerSendItem {
 	return peerSendItem{Frame: frame}
+}
+
+// deliveryPeerSendItem wraps a frame that carries one of our own outgoing
+// messages, so the session writer can confirm the delivery once NetCore
+// accepts it.
+func deliveryPeerSendItem(frame protocol.Frame, envelope protocol.Envelope, dispatchedAt time.Time) peerSendItem {
+	return peerSendItem{Frame: frame, delivery: deliveryDispatchRef{Envelope: envelope, DispatchedAt: dispatchedAt}}
+}
+
+// recordDeliveryRefusedByWriter logs a frame the writer would not take.
+//
+// It writes NOTHING durable, and that is the point of the two-bit model
+// rather than an omission. After a refusal the row already says both of
+// the things its readers need: the never-emitted claim came off at the
+// gate, so a deletion asks the peer rather than skipping them; and no
+// on-wire stamp was added, so the sender still reads the message as
+// queued. There is no fact left to record — and therefore none that can be
+// recorded wrongly, which is what every earlier version of this function
+// got wrong in a different way.
+//
+// The status is kept in the log line because it is worth reading during an
+// incident, not because anything branches on it.
+func (s *Service) recordDeliveryRefusedByWriter(item peerSendItem, status netcore.SendStatus) {
+	if !item.carriesDelivery() {
+		return
+	}
+	log.Debug().Str("message_id", string(item.delivery.Envelope.ID)).
+		Str("status", status.String()).
+		Msg("delivery_refused_by_writer")
+}
+
+// sendErrorProvesNothingWasWritten is the same question for the inbound
+// writer, which reports sentinels instead of statuses (network_consumer.go
+// maps one to the other).
+//
+// ErrUnknownConn / ErrUnregisteredWrite are exact for a stronger reason
+// than the others: there was no registered connection to enqueue onto, so
+// there was no queue for the frame to sit in.
+// A marshal failure is exact for the same reason: the frame never became
+// bytes, so there was nothing to enqueue.
+func sendErrorProvesNothingWasWritten(err error) bool {
+	switch {
+	case errors.Is(err, netcore.ErrSendBufferFull),
+		errors.Is(err, netcore.ErrUnknownConn),
+		errors.Is(err, ErrUnregisteredWrite),
+		errors.Is(err, protocol.ErrFrameTooLarge),
+		errors.Is(err, errDeliveryWithheld):
+		return true
+	default:
+		return false
+	}
 }
 
 // tracked reports whether the item carries an outbound contract. Tracked
@@ -101,9 +181,17 @@ func (ps *peerSession) offerSend(item peerSendItem) bool {
 // Idempotent by construction: the fence is monotonic and the drain is a
 // non-blocking sweep, which is what makes it safe for both the serve loop and a
 // concurrent Close() to call it.
-func (ps *peerSession) closeSendQueue() {
+// It RETURNS the deliveries the residue was carrying, because a frame
+// discarded here provably never reached NetCore while the durable
+// never-emitted claim for it was already withdrawn — the retry tick
+// withdraws before it hands the envelope to the sinks (emitDueDelivery).
+// Left unaccounted, the row says the message left this machine and a
+// restart before the next retry reads it as sent. Sessions are torn down
+// by a Service, which is what turns this list back into a claim; see
+// discardSendQueue and recordStrandedDeliveries.
+func (ps *peerSession) closeSendQueue() []deliveryDispatchRef {
 	if ps == nil {
-		return
+		return nil
 	}
 	ps.sendMu.Lock()
 	ps.sendClosed = true
@@ -111,12 +199,40 @@ func (ps *peerSession) closeSendQueue() {
 
 	// Producers are already refused by the flag above, so nothing can be added
 	// behind the sweep.
+	var stranded []deliveryDispatchRef
 	for {
 		select {
-		case <-ps.sendCh:
+		case item := <-ps.sendCh:
+			if item.carriesDelivery() {
+				stranded = append(stranded, item.delivery)
+			}
 		default:
-			return
+			return stranded
 		}
+	}
+}
+
+// discardSendQueue fences the queue and hands whatever it was holding to
+// the session's stranded sink. Every teardown path goes through here so
+// the accounting cannot be forgotten at one of them.
+func (ps *peerSession) discardSendQueue() {
+	stranded := ps.closeSendQueue()
+	if ps == nil || ps.onStranded == nil || len(stranded) == 0 {
+		return
+	}
+	ps.onStranded(stranded)
+}
+
+// recordStrandedDeliveries answers for frames that died in a session queue.
+//
+// This is the third place a delivery frame can fail to reach the wire,
+// alongside a writer refusal and a refused inbound write, and it is the
+// one with no error to classify: a discarded queue element provably never
+// reached NetCore, so it is exact by construction.
+func (s *Service) recordStrandedDeliveries(stranded []deliveryDispatchRef) {
+	for _, ref := range stranded {
+		log.Debug().Str("message_id", string(ref.Envelope.ID)).
+			Msg("delivery_stranded_in_discarded_session_queue")
 	}
 }
 

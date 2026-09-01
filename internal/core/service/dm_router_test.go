@@ -299,7 +299,7 @@ func TestResetIdentityState(t *testing.T) {
 
 	r.cache.Load(domaintest.ID("old-peer-1"), []DirectMessage{
 		{ID: "old-msg-1", Body: "old"},
-	})
+	}, 0)
 
 	r.resetIdentityState()
 
@@ -360,7 +360,7 @@ func TestOnReceiptUpdateActiveConversation(t *testing.T) {
 			ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1"),
 			ReceiptStatus: "sent", Timestamp: now,
 		},
-	})
+	}, 0)
 
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
@@ -406,7 +406,7 @@ func TestOnReceiptUpdateIgnoresInactiveConversation(t *testing.T) {
 
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1"), ReceiptStatus: "sent"},
-	})
+	}, 0)
 
 	event := protocol.LocalChangeEvent{
 		Type:      protocol.LocalChangeReceiptUpdate,
@@ -566,7 +566,7 @@ func TestConversationCacheMatchesPeerIntegration(t *testing.T) {
 		t.Fatal("empty cache should not match any peer")
 	}
 
-	cache.Load(domaintest.ID("peer-1"), nil)
+	cache.Load(domaintest.ID("peer-1"), nil, 0)
 	if !cache.MatchesPeer(domaintest.ID("peer-1")) {
 		t.Fatal("cache should match peer-1 after Load")
 	}
@@ -574,7 +574,7 @@ func TestConversationCacheMatchesPeerIntegration(t *testing.T) {
 		t.Fatal("cache should not match peer-2")
 	}
 
-	cache.Load(domaintest.ID("peer-2"), []DirectMessage{{ID: "m1"}})
+	cache.Load(domaintest.ID("peer-2"), []DirectMessage{{ID: "m1"}}, 0)
 	if cache.MatchesPeer(domaintest.ID("peer-1")) {
 		t.Fatal("cache should no longer match peer-1")
 	}
@@ -631,7 +631,7 @@ func TestOnReceiptUpdateActivePeerCacheMismatch(t *testing.T) {
 	// Cache is for "old-peer", but activePeer is "peer-1".
 	r.cache.Load(domaintest.ID("old-peer"), []DirectMessage{
 		{ID: "msg-old", Body: "old", Sender: domaintest.ID("me"), Recipient: domaintest.ID("old-peer")},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
@@ -660,7 +660,7 @@ func TestOnNewMessageNonActivePeerUpdatesOnlySidebar(t *testing.T) {
 
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
@@ -685,7 +685,7 @@ func TestActivePeerCacheMismatchDetection(t *testing.T) {
 	r := newTestRouter()
 
 	// Cache is for "old-peer", activePeer is "peer-1".
-	r.cache.Load(domaintest.ID("old-peer"), nil)
+	r.cache.Load(domaintest.ID("old-peer"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
@@ -710,7 +710,7 @@ func TestSelectPeerClearsActiveMessages(t *testing.T) {
 	// Set up peer-1 as active with messages.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
@@ -1109,7 +1109,7 @@ func TestSnapshotCacheReady(t *testing.T) {
 	// Load cache for peer-1, set as active.
 	// CacheReady depends on ConversationCache state (independent of r.mu),
 	// so it is recomputed on every Snapshot() call even from cache.
-	r.cache.Load(domaintest.ID("peer-1"), nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
@@ -1144,7 +1144,7 @@ func TestSelectPeerNotifiesSynchronouslyOnSwitch(t *testing.T) {
 	// Set up peer-1 as active with cached messages.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
@@ -1254,7 +1254,7 @@ func TestSelectPeerSamePeerNoRetryWhenCacheReady(t *testing.T) {
 	// Set peer-1 as active WITH valid cache.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
@@ -1308,7 +1308,7 @@ func TestSelectPeerSamePeerRetriesDoMarkSeenWhenUnreadRestored(t *testing.T) {
 	// Set up peer-1 as active with valid cache and messages loaded.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("me"), Recipient: domaintest.ID("peer-1")},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.activeMessages = r.cache.Messages()
@@ -1561,7 +1561,7 @@ func TestOnNewMessageRegistersSeenMessageID(t *testing.T) {
 	r := newTestRouter()
 
 	// Set peer-1 as active with empty cache matching.
-	r.cache.Load(domaintest.ID("peer-1"), nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.mu.Unlock()
@@ -1765,7 +1765,7 @@ func TestActiveButUnloadedConversationStillBadges(t *testing.T) {
 	r.activePeer = peer
 	r.mu.Unlock()
 	// The cache belongs to nobody yet: the conversation is still loading.
-	r.cache.Load(domain.PeerIdentity{}, nil)
+	r.cache.Load(domain.PeerIdentity{}, nil, 0)
 
 	msg := &DirectMessage{
 		ID: "arrived-while-loading", Sender: peer, Recipient: me,
@@ -1809,7 +1809,7 @@ func TestConversationLoadForANonSelectedPeerLeavesTheCacheAlone(t *testing.T) {
 	r.cache.Load(opened, []DirectMessage{{
 		ID: "already-open", Sender: opened, Recipient: me, Body: "on screen",
 		Timestamp: time.Now().Add(-time.Minute),
-	}})
+	}}, 0)
 	r.mu.Lock()
 	r.tryEnsurePeerLocked(left)
 	r.tryEnsurePeerLocked(opened)
@@ -2294,7 +2294,7 @@ func TestOnNewMessageActivePeerCacheReadyDecryptFailEmitsBeep(t *testing.T) {
 	// Cache loaded for peer-1 → MatchesPeer returns true → cache-ready path.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "existing-1", Sender: domaintest.ID("peer-1"), Body: "hello"},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
@@ -2605,7 +2605,7 @@ func TestAutoSelectPeerSamePeerIsNoOp(t *testing.T) {
 	// A true no-op must not touch unread.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "msg-1", Body: "hello", Sender: domaintest.ID("peer-1"), Recipient: domaintest.ID("me")},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
@@ -2943,7 +2943,7 @@ func TestRepairUnreadNotClearedOnFailedReload(t *testing.T) {
 	// bug is present (activeMessages non-empty → MarkConversationSeen fires).
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "old-msg", Sender: domaintest.ID("peer-1"), Body: "hi"},
-	})
+	}, 0)
 
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
@@ -3013,7 +3013,7 @@ func TestOnNewMessageEventPathRollsBackSeenOnFailedReload(t *testing.T) {
 	// Cache loaded for peer-1 → cache-ready path.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "existing-1", Sender: domaintest.ID("peer-1"), Body: "hello"},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
@@ -3258,7 +3258,7 @@ func TestRepairPathActivePeerNotDuplicateRefreshed(t *testing.T) {
 	r := newTestRouter()
 
 	// Active peer = "peer-1", cache loaded but message not in cache.
-	r.cache.Load(domaintest.ID("peer-1"), nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
@@ -3297,7 +3297,7 @@ func TestRepairPathActivePeerNotDuplicateRefreshed(t *testing.T) {
 func TestRepairPathActivePeerDoesNotBeep(t *testing.T) {
 	r := newTestRouter()
 
-	r.cache.Load(domaintest.ID("peer-1"), nil)
+	r.cache.Load(domaintest.ID("peer-1"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
@@ -3386,7 +3386,7 @@ func TestOnNewMessageActiveChatDoesNotIncrementUnread(t *testing.T) {
 	// activePeer set, peerClicked=true, cache loaded, Unread=0.
 	r.cache.Load(domaintest.ID("peer-1"), []DirectMessage{
 		{ID: "existing-1", Sender: domaintest.ID("peer-1"), Body: "hello"},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = domaintest.ID("peer-1")
 	r.peerClicked = true
@@ -3448,7 +3448,7 @@ func TestOnNewMessageNonActivePeerIncrementsUnread(t *testing.T) {
 	r.mu.Unlock()
 
 	// Load cache for peer-2 so cache.MatchesPeer(domaintest.ID("peer-1")) == false.
-	r.cache.Load(domaintest.ID("peer-2"), []DirectMessage{{ID: "m1", Body: "hi"}})
+	r.cache.Load(domaintest.ID("peer-2"), []DirectMessage{{ID: "m1", Body: "hi"}}, 0)
 
 	event := protocol.LocalChangeEvent{
 		Type:      protocol.LocalChangeNewMessage,
@@ -3567,7 +3567,7 @@ func TestRemovePeer(t *testing.T) {
 	r.activePeer = domaintest.ID("a")
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
-	r.cache.Load(domaintest.ID("a"), []DirectMessage{{ID: "msg-1"}})
+	r.cache.Load(domaintest.ID("a"), []DirectMessage{{ID: "msg-1"}}, 0)
 
 	wasActive, err := r.RemovePeer(domaintest.ID("a"))
 	if err != nil {
@@ -3720,7 +3720,7 @@ func TestRemovePeerErrorPreservesState(t *testing.T) {
 	r.activePeer = domaintest.ID("a")
 	r.peerClicked = true
 	r.activeMessages = []DirectMessage{{ID: "msg-1"}}
-	r.cache.Load(domaintest.ID("a"), []DirectMessage{{ID: "msg-1"}})
+	r.cache.Load(domaintest.ID("a"), []DirectMessage{{ID: "msg-1"}}, 0)
 
 	wasActive, rmErr := r.RemovePeer(domaintest.ID("a"))
 	if rmErr == nil {
@@ -3931,7 +3931,7 @@ func TestOnNewMessageActivePeerUpdatesPreview(t *testing.T) {
 	// Load cache for the peer so MatchesPeer returns true → inline path.
 	r.cache.Load(peerID, []DirectMessage{
 		{ID: "my-msg", Sender: domain.PeerIdentityFromWire(id.Address), Recipient: domain.PeerIdentityFromWire(peer.Address), Body: "my message"},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
@@ -4163,7 +4163,7 @@ func TestOnNewMessageMidSwitchDecryptFailFallback(t *testing.T) {
 
 	// Active peer = the message peer, but cache loaded for a DIFFERENT peer
 	// → MatchesPeer returns false → mid-switch path.
-	r.cache.Load(domaintest.ID("some-other-peer"), nil)
+	r.cache.Load(domaintest.ID("some-other-peer"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
@@ -4281,7 +4281,7 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 
 	// Active peer = the message peer, cache loaded for a DIFFERENT peer
 	// → MatchesPeer returns false → mid-switch path.
-	r.cache.Load(domaintest.ID("some-other-peer"), nil)
+	r.cache.Load(domaintest.ID("some-other-peer"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
@@ -4403,7 +4403,7 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 	// Active peer = the message peer, cache loaded for a DIFFERENT peer
 	// → MatchesPeer returns false → mid-switch path.
 	// Set Unread=1 so we can verify doMarkSeen clears it after fallback.
-	r.cache.Load(domaintest.ID("some-other-peer"), nil)
+	r.cache.Load(domaintest.ID("some-other-peer"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
@@ -4534,7 +4534,7 @@ func TestOnNewMessageMidSwitchFallbackStalePeerGuard(t *testing.T) {
 	otherPeer := domaintest.ID("other-peer")
 	r.cache.Load(otherPeer, []DirectMessage{
 		{ID: "other-1", Body: "other message", Sender: otherPeer, Recipient: domain.PeerIdentityFromWire(id.Address)},
-	})
+	}, 0)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
@@ -4790,7 +4790,7 @@ func TestUpdatePreviewFromCacheFallback(t *testing.T) {
 	}
 
 	load := func(r *DMRouter) {
-		r.cache.Load(peerID, conversation)
+		r.cache.Load(peerID, conversation, 0)
 		r.mu.Lock()
 		r.activePeer = peerID
 		r.peerClicked = true
@@ -4901,7 +4901,7 @@ func TestUpdatePreviewFromCacheStalePeerGuard(t *testing.T) {
 	// updatePreviewFromCache runs).
 	r.cache.Load(peerB, []DirectMessage{
 		{ID: "b-msg", Sender: peerB, Recipient: domaintest.ID("me"), Body: "message from B"},
-	})
+	}, 0)
 
 	r.mu.Lock()
 	r.activePeer = peerB // User already switched to B.
@@ -7514,7 +7514,7 @@ func TestMessageForAConversationLeftMidDecryptIsTreatedAsBackground(t *testing.T
 	// The cache belongs to the conversation the user switched TO.
 	r.cache.Load(opened, []DirectMessage{{
 		ID: "already-here", Sender: opened, Recipient: me, Body: "hi", Timestamp: time.Now().Add(-time.Minute),
-	}})
+	}}, 0)
 	r.mu.Lock()
 	r.activePeer = opened
 	r.activeMessages = r.cache.Messages()
@@ -7549,7 +7549,7 @@ func TestMessageForAConversationLeftMidDecryptIsTreatedAsBackground(t *testing.T
 	// The other half of the same window: the user switched away, but the new
 	// conversation has not loaded yet, so the CACHE still holds the old one.
 	// Only the selection says the message is no longer on screen.
-	r.cache.Load(left, nil)
+	r.cache.Load(left, nil, 0)
 	r.mu.Lock()
 	r.activePeer = opened
 	r.mu.Unlock()
@@ -7572,7 +7572,7 @@ func TestMessageForAConversationLeftMidDecryptIsTreatedAsBackground(t *testing.T
 	// history is still loading, so the cache belongs to the peer they left.
 	// The selection matches; only the cache says the message has nowhere to
 	// go yet, and appending it would splice it into the other thread.
-	r.cache.Load(opened, nil)
+	r.cache.Load(opened, nil, 0)
 	r.mu.Lock()
 	r.activePeer = left
 	r.mu.Unlock()
@@ -8439,5 +8439,175 @@ func TestRemovingAContactStopsTheSendQueueWhileTheHistoryGoes(t *testing.T) {
 	}
 	if c.localNode.QueuedReactionsFor(peer) != 0 {
 		t.Fatal("the removed contact still has reactions waiting")
+	}
+}
+
+// TestStartupDropsReReadTheOpenConversation: a dropped startup event is
+// not re-sent, so the re-read the log line promises has to actually
+// happen.
+//
+// PublishReporting counts an event delivered the moment it enters this
+// router's inbox, and the node's repair pass will not offer it again. If
+// the startup buffer then drops it, the row on disk says `delivered`
+// while this cache still says whatever the startup read saw — and the
+// badge stays wrong until the user reopens the conversation.
+func TestStartupDropsReReadTheOpenConversation(t *testing.T) {
+	c, id := newTestDesktopClientWithNode(t)
+
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate peer: %v", err)
+	}
+	peerID := domain.PeerIdentityFromWire(peer.Address)
+
+	boxSig := identity.SignBoxKeyBinding(peer)
+	c.localNode.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: peer.Address,
+			PubKey:  identity.PublicKeyBase64(peer.PublicKey),
+			BoxKey:  identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+			BoxSig:  boxSig,
+		}},
+	})
+
+	ciphertext, err := directmsg.EncryptForParticipants(
+		peer,
+		domain.DMRecipient{
+			Address:      domain.PeerIdentityFromWire(id.Address),
+			BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
+		},
+		domain.OutgoingDM{Body: "dropped-event message"},
+	)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	// On disk the message has moved on; only the cache is behind.
+	const messageID = "dropped-event-1"
+	if err := c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+		ID:             messageID,
+		Sender:         peer.Address,
+		Recipient:      id.Address,
+		Body:           ciphertext,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		DeliveryStatus: chatlog.StatusDelivered,
+	}); err != nil {
+		t.Fatalf("chatlog append: %v", err)
+	}
+
+	done := make(chan struct{})
+	r := &DMRouter{
+		client:         c,
+		peers:          make(map[domain.PeerIdentity]*RouterPeerState),
+		peerOrder:      make([]domain.PeerIdentity, 0),
+		seenMessageIDs: make(map[string]messageGate),
+		peerGen:        make(map[domain.PeerIdentity]uint64),
+		backwardsEpoch: make(map[domain.PeerIdentity]peerEpochs),
+		cache:          NewConversationCache(),
+		uiEvents:       make(chan UIEvent, 32),
+		startupDone:    done,
+	}
+	r.mu.Lock()
+	r.activePeer = peerID
+	r.cache.Load(peerID, []DirectMessage{{
+		ID: messageID, Sender: peerID, Recipient: domain.PeerIdentityFromWire(id.Address),
+		Body: "dropped-event message", ReceiptStatus: MessageStatusQueued,
+	}}, 0)
+	r.mu.Unlock()
+
+	// Nothing was dropped: no re-read, and the stale cache is left as-is,
+	// which is what proves the reload below is the thing being tested.
+	r.reloadAfterStartupDrops(0)
+	if got := cachedStatus(r, messageID); got != MessageStatusQueued {
+		t.Fatalf("cache status = %q without any drops, want it untouched", got)
+	}
+
+	r.reloadAfterStartupDrops(3)
+	if got := cachedStatus(r, messageID); got == MessageStatusQueued {
+		t.Error("the open conversation was not re-read after startup dropped events; its badge keeps a status the disk has moved past")
+	}
+}
+
+// cachedStatus is the router's own view of one message, which is what the
+// UI draws.
+func cachedStatus(r *DMRouter, messageID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, msg := range r.cache.Messages() {
+		if msg.ID == messageID {
+			return msg.ReceiptStatus
+		}
+	}
+	return ""
+}
+
+// TestFetchConversationCarriesTheRowSequence: the reconcile in
+// ConversationCache.Load can only tell "stored after my read" from
+// "deleted while I read" if the messages it holds carry their row's
+// arrival order. That number has to survive the WHOLE production path —
+// chatlog.Read, decryption, the DirectMessage the cache stores — and a
+// unit test that sets Seq by hand proves a state the real path may never
+// produce.
+//
+// It did not: Read left rowid out of its SELECT, so every loaded message
+// arrived with Seq 0 and the boundary was always zero, which silently
+// turned "keep what the read could not have seen" into "keep everything
+// the snapshot omits" — resurrecting deleted messages.
+func TestFetchConversationCarriesTheRowSequence(t *testing.T) {
+	c, id := newTestDesktopClientWithNode(t)
+
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate peer: %v", err)
+	}
+	boxSig := identity.SignBoxKeyBinding(peer)
+	c.localNode.HandleLocalFrame(protocol.Frame{
+		Type: "import_contacts",
+		Contacts: []protocol.ContactFrame{{
+			Address: peer.Address,
+			PubKey:  identity.PublicKeyBase64(peer.PublicKey),
+			BoxKey:  identity.BoxPublicKeyBase64(peer.BoxPublicKey),
+			BoxSig:  boxSig,
+		}},
+	})
+
+	for _, body := range []string{"first", "second"} {
+		ciphertext, err := directmsg.EncryptForParticipants(
+			peer,
+			domain.DMRecipient{
+				Address:      domain.PeerIdentityFromWire(id.Address),
+				BoxKeyBase64: identity.BoxPublicKeyBase64(id.BoxPublicKey),
+			},
+			domain.OutgoingDM{Body: body},
+		)
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+		if err := c.chatLog.Append(context.Background(), "dm", domain.PeerIdentityFromWire(id.Address), chatlog.Entry{
+			ID:        "seq-" + body,
+			Sender:    peer.Address,
+			Recipient: id.Address,
+			Body:      ciphertext,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}); err != nil {
+			t.Fatalf("chatlog append: %v", err)
+		}
+	}
+
+	messages, err := c.FetchConversation(context.Background(), domain.PeerIdentityFromWire(peer.Address))
+	if err != nil {
+		t.Fatalf("FetchConversation: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("loaded %d messages, want 2", len(messages))
+	}
+	for _, msg := range messages {
+		if msg.Seq == 0 {
+			t.Fatalf("message %q came back with Seq 0; the reconcile boundary would be zero for every real load", msg.ID)
+		}
+	}
+	if messages[0].Seq >= messages[1].Seq {
+		t.Errorf("Seq %d then %d: the sequence must follow arrival order", messages[0].Seq, messages[1].Seq)
 	}
 }

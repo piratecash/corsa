@@ -257,6 +257,22 @@ func (a *MessageStoreAdapter) StoreMessage(envelope protocol.Envelope, isOutgoin
 		DeliveryStatus: status,
 		TTLSeconds:     envelope.TTLSeconds,
 	}
+	if isOutgoing {
+		// An outgoing row is born NEVER EMITTED, in the same write that
+		// creates it. Nothing has been handed to a writer at this point —
+		// the node registers the delivery and only then starts the sends —
+		// and the claim is withdrawn (ClearNeverEmitted) before any frame
+		// goes out. It is never put back: the bit is monotone, and the
+		// question the sender's badge asks is answered by the SEPARATE
+		// on_wire stamp instead. See chatlog/emission.go.
+		//
+		// Writing it here rather than afterwards is what makes the durable
+		// state true at every instant: a crash between the row and the
+		// first attempt used to leave a message that never left the
+		// machine claiming otherwise. It costs no extra write, because it
+		// rides the insert the row needs anyway.
+		entry.Metadata = chatlog.NeverEmittedMetadata
+	}
 	inserted, err := a.chatlog.AppendReportNew(a.opContext(), envelope.Topic, domain.PeerIdentityFromWire(a.id.Address), entry)
 	if err != nil {
 		log.Error().Str("topic", envelope.Topic).Str("id", string(envelope.ID)).Err(err).Msg("chatlog append failed")
@@ -352,11 +368,64 @@ func (a *MessageStoreAdapter) UpdateDeliveryStatus(receipt protocol.DeliveryRece
 	if chatlogPeer.IsZero() {
 		return true // not our message, nothing to update
 	}
-	if _, err := a.chatlog.UpdateStatus(a.opContext(), "dm", chatlogPeer, domain.MessageID(receipt.MessageID), receipt.Status); err != nil {
+	// The result is the answer, not just the error. No row matched means
+	// this receipt is not about a message in that conversation — an id
+	// from another thread, or a peer confirming someone else's message —
+	// and reporting it as recorded would let the caller stop the retry for
+	// a message its real recipient has said nothing about.
+	updated, err := a.chatlog.UpdateStatus(a.opContext(), "dm", chatlogPeer, domain.MessageID(receipt.MessageID), receipt.Status)
+	if err != nil {
 		log.Error().Str("message_id", string(receipt.MessageID)).Str("status", receipt.Status).Err(err).Msg("chatlog update status failed")
 		return false
 	}
+	if !updated {
+		// Either the row is already at or past this status — an ordinary
+		// duplicate, and nothing is owed — or there is no such row in that
+		// conversation at all. The two are told apart by the id: ours or
+		// not.
+		if !a.knowsOutgoingMessage(receipt) {
+			log.Warn().Str("message_id", string(receipt.MessageID)).Str("from", receipt.Sender).
+				Msg("receipt ignored: no message with that id in that conversation")
+			return false
+		}
+	}
 	return true
+}
+
+// knowsOutgoingMessage reports whether the chatlog holds the message this
+// receipt names in the conversation it claims to be about.
+func (a *MessageStoreAdapter) knowsOutgoingMessage(receipt protocol.DeliveryReceipt) bool {
+	if a == nil || a.chatlog == nil {
+		return false
+	}
+	peer := receipt.Sender
+	if receipt.Sender == a.id.Address {
+		peer = receipt.Recipient
+	}
+	return a.chatlog.HasEntryInConversation(a.opContext(), peer, string(receipt.MessageID))
+}
+
+// SentMessageIDs implements node.DeliveryOutbox: the newest ids of DMs
+// this node authored, so the solicited-receipt gate survives a restart.
+//
+// Bounded by COUNT, not by age. A receipt does not expire — the recipient
+// may open a months-old conversation for the first time — so an age cutoff
+// here would be a correctness limit dressed up as a read bound, rejecting
+// a genuine `seen` as unsolicited. The count is the caller's LRU capacity,
+// which is the real limit on what can be remembered anyway.
+func (a *MessageStoreAdapter) SentMessageIDs(limit int) ([]protocol.MessageID, error) {
+	if a == nil || a.chatlog == nil {
+		return nil, nil
+	}
+	ids, err := a.chatlog.SentMessageIDs(a.opContext(), limit)
+	if err != nil {
+		return nil, err
+	}
+	sent := make([]protocol.MessageID, 0, len(ids))
+	for _, id := range ids {
+		sent = append(sent, protocol.MessageID(id))
+	}
+	return sent, nil
 }
 
 // UndeliveredOutgoing implements node.DeliveryOutbox: it returns the sealed
@@ -366,7 +435,7 @@ func (a *MessageStoreAdapter) UndeliveredOutgoing() ([]node.OutboxEntry, error) 
 	if a == nil || a.chatlog == nil {
 		return nil, nil
 	}
-	entries, err := a.chatlog.UndeliveredOutgoing(a.opContext(), time.Now().UTC().Add(-reseedHorizon))
+	entries, err := a.chatlog.UndeliveredOutgoing(a.opContext(), time.Time{}, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -390,19 +459,31 @@ func (a *MessageStoreAdapter) UndeliveredOutgoing() ([]node.OutboxEntry, error) 
 				Payload:    []byte(entry.Body),
 				CreatedAt:  createdAt.UTC(),
 			},
-			// The row carries the mark only when this node withheld the
-			// message and never got it out; everything else — including
-			// every row written before the mark existed — reads as
-			// emitted.
+			// The row carries the claim only while nothing has been
+			// handed to a writer; everything else — including every row
+			// written before the bit existed — reads as emitted, which
+			// is the safe answer for its reader (the deletion).
 			Emitted: !chatlog.NeverEmitted(entry.Metadata),
+			// The OTHER bit, read separately because its reader is the
+			// sender's badge and its safe answer points the other way.
+			//
+			// awaitingWire, not a plain negation: the answer is a
+			// TRI-STATE. A row with the stamp is believed. A row from the
+			// PREVIOUS release — never_emitted, no on_wire — was one this
+			// node was holding, so it reopens as queued and is re-sent
+			// once, which the recipient dedupes silently. A row from
+			// before either bit says nothing about the wire and keeps its
+			// persisted status, so an upgrade does not re-badge a whole
+			// unreceipted history. See chatlog/emission.go.
+			OnWire: !awaitingWire(entry.Metadata),
 		})
 	}
 	return rows, nil
 }
 
-// MarkNeverEmitted implements node.DeliveryEmissionJournal.
-func (a *MessageStoreAdapter) MarkNeverEmitted(ids []protocol.MessageID) error {
-	return a.writeEmissionMarks(ids, a.chatlog.MarkNeverEmitted)
+// MarkOnWire implements node.DeliveryEmissionJournal.
+func (a *MessageStoreAdapter) MarkOnWire(ids []protocol.MessageID) error {
+	return a.writeEmissionMarks(ids, a.chatlog.MarkOnWire)
 }
 
 // ClearNeverEmitted implements node.DeliveryEmissionJournal.
@@ -421,18 +502,28 @@ func (a *MessageStoreAdapter) writeEmissionMarks(ids []protocol.MessageID, write
 	return write(a.opContext(), converted)
 }
 
-// reseedHorizon bounds how far back the startup reseed scans for BOTH the
-// undelivered-DM bodies (UndeliveredOutgoing) and the unconfirmed seen
-// receipts (UnconfirmedSeen). Without it a restart reseeds the entire history
-// and re-injects ancient undelivered DMs into the mesh — the months-long
-// zombie-DM storm. A week comfortably covers any realistic retry window: the
-// scheduler caps a single message/receipt at ~3.5h of attempts, so anything
-// older is already abandoned in practice.
-const reseedHorizon = 7 * 24 * time.Hour
+// Undelivered outgoing DMs are reseeded with NO horizon: the scan reaches
+// as far back as the chatlog holds. A message ends when the recipient
+// confirms it, when its author withdraws it, or when its own TTL expires,
+// and a restart is none of those — so a horizon here would be the node
+// giving up on a message silently, just for having been closed and
+// reopened. See the age comment in node/delivery_retry.go.
+//
+// The reason a horizon once existed was the months-long zombie-DM storm:
+// a restart used to re-inject ancient undelivered DMs into the mesh by
+// blind-gossiping them at a recipient nobody could reach. The reachability
+// gate is what actually fixed that — a reseeded message now emits nothing
+// at all until its recipient is genuinely reachable, at which point
+// sending it is the correct thing to do rather than the storm.
+//
+// The remaining cost is a bounded one: the scan reads the rows still in
+// "sent", which is the set the user themselves can see as undelivered.
 
-// seenReseedHorizon is retained as an alias so existing references keep
-// compiling; both halves share the same window.
-const seenReseedHorizon = reseedHorizon
+// seenReseedHorizon still bounds the OTHER half of the reseed — the
+// unconfirmed seen receipts. Those keep their attempt cap (a receipt is
+// re-triggered by the far side, so an abandoned one repairs itself on the
+// next arrival), and a week comfortably outlives it.
+const seenReseedHorizon = 7 * 24 * time.Hour
 
 // UnconfirmedSeen implements node.SeenAckJournal: the seen receipts this
 // identity sent that the original senders have not confirmed with seen_ack.

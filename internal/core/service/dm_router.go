@@ -1551,7 +1551,7 @@ func (r *DMRouter) runStartup() {
 	}
 
 	if dropped > 0 {
-		log.Warn().Int("dropped", dropped).Msg("startup ebus buffer overflow: some events dropped, UI will reload from chatlog")
+		log.Warn().Int("dropped", dropped).Msg("startup ebus buffer overflow: some events dropped, the open conversation is re-read below")
 	}
 
 	// Phase 2: switch to live mode. Any events that arrived during Phase 1
@@ -1576,11 +1576,100 @@ func (r *DMRouter) runStartup() {
 	// added by whichever of them saw it.
 
 	if droppedLive > 0 {
-		log.Warn().Int("dropped", droppedLive).Msg("startup ebus live buffer overflow: some events dropped, UI will reload from chatlog")
+		log.Warn().Int("dropped", droppedLive).Msg("startup ebus live buffer overflow: some events dropped, the open conversation is re-read below")
 	}
+
+	r.reloadAfterStartupDrops(dropped + droppedLive)
 
 	r.notify(UIEventMessagesUpdated)
 	r.notify(UIEventSidebarUpdated)
+}
+
+// reloadAfterStartupDrops re-reads the OPEN conversation from the chatlog
+// when startup could not keep every event it was handed.
+//
+// A dropped event is not re-sent. The bus reported it DELIVERED the moment
+// it entered this router's inbox, so the node counts it announced and its
+// repair pass will not offer it again; the row on disk already says
+// `on_wire`, and only this cache still says `queued`. Without a re-read the
+// badge stays wrong until the user reopens the conversation or restarts —
+// and if the recipient's receipt is also lost, nothing else ever corrects
+// it. The two log lines above used to promise this reload; nothing
+// performed it.
+//
+// Only the open conversation is re-read: it is the one whose per-message
+// statuses are on screen. The sidebar's counts come from the startup read
+// and from the events that DID arrive, and every other conversation is
+// re-read when the user opens it.
+func (r *DMRouter) reloadAfterStartupDrops(dropped int) {
+	if dropped == 0 {
+		return
+	}
+	r.mu.RLock()
+	peer := r.activePeer
+	r.mu.RUnlock()
+	if peer.IsZero() {
+		return
+	}
+	if r.loadConversation(peer, r.peerEpochsOf(peer)) {
+		return
+	}
+	// A failed read is not a decision. Nothing else will re-read this
+	// conversation on its own: the dropped events are gone, and clicking
+	// the conversation that is already open is a no-op, so "the user will
+	// reopen it" is not a recovery path. Retried off the startup
+	// goroutine, which must not be held while startupDone is still
+	// unclosed.
+	//
+	// Tracked and cancellable, like every other goroutine that touches the
+	// store: an untracked one sleeping through ShutdownDrain wakes up
+	// after the chatlog and the node are closed and reads them anyway.
+	if !r.beginOp() {
+		return
+	}
+	go func() {
+		defer r.endOp()
+		r.retryReloadAfterStartupDrops(peer)
+	}()
+}
+
+// startupReloadRetries is how many times a failed re-read is offered
+// again, and the waits between them. Short and bounded: the read either
+// works within seconds or the conversation is stale until the user opens
+// another one and comes back, which does re-read.
+var startupReloadRetries = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
+
+func (r *DMRouter) retryReloadAfterStartupDrops(peer domain.PeerIdentity) {
+	defer recoverLog("retryReloadAfterStartupDrops")
+	ctx := r.loopCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for _, wait := range startupReloadRetries {
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			// Shutdown asked the loops to stop; a re-read now would run
+			// against a store that is being closed.
+			timer.Stop()
+			return
+		}
+		r.mu.RLock()
+		stillOpen := r.activePeer == peer
+		r.mu.RUnlock()
+		if !stillOpen {
+			// Switching conversations re-reads the new one, and coming
+			// back re-reads this one.
+			return
+		}
+		if r.loadConversation(peer, r.peerEpochsOf(peer)) {
+			r.notify(UIEventMessagesUpdated)
+			return
+		}
+	}
+	log.Warn().Str("peer", peer.String()).
+		Msg("startup drop re-read failed after retries; the conversation is re-read when it is next opened")
 }
 
 // onEbusLocalChange handles TopicMessageNew and TopicReceiptUpdated events
@@ -1627,6 +1716,13 @@ func (r *DMRouter) subscribeEvents() {
 		r.onEbusLocalChange(event)
 	})
 
+	// One of our own queued messages finally reached the wire. Without
+	// this the badge would sit on "queued" until the recipient's receipt
+	// arrives — and permanently if that receipt is lost.
+	r.eventBus.Subscribe(ebus.TopicMessageEmitted, func(event protocol.LocalChangeEvent) {
+		r.onEbusLocalChange(event)
+	})
+
 	// Inbound control DM (message_delete, message_delete_ack, ...).
 	// Routed through onEbusLocalChange so the buffered-during-startup
 	// pipeline applies uniformly. handleEvent dispatches by event.Type.
@@ -1666,7 +1762,12 @@ func (r *DMRouter) handleEvent(event protocol.LocalChangeEvent) {
 			return
 		}
 		r.onNewMessage(event)
-	case protocol.LocalChangeReceiptUpdate:
+	case protocol.LocalChangeReceiptUpdate, protocol.LocalChangeMessageEmitted:
+		// Both say the same thing to this layer — the delivery status of a
+		// message moved forward — and onReceiptUpdate already applies that
+		// monotonically, so an emission cannot pull a bubble back from a
+		// status the recipient has confirmed. What differs is who observed
+		// it, and only the node cares about that.
 		r.onReceiptUpdate(event)
 	case protocol.LocalChangeNewControlMessage:
 		r.onControlMessage(event)
@@ -1879,7 +1980,7 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 					seeded := r.activePeer == peerID &&
 						r.stampIsCurrentLocked(peerID, stampAtEvent)
 					if seeded {
-						r.cache.Load(peerID, []DirectMessage{*decryptedMsg})
+						r.cache.Load(peerID, []DirectMessage{*decryptedMsg}, 0)
 						r.activeMessages = r.cache.Messages()
 						r.pendingScrollToEnd = true
 					}
@@ -1994,7 +2095,7 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 
 	deliveredAt := domain.TimeFromNonZero(event.DeliveredAt)
 
-	if r.cache.UpdateStatus(event.MessageID, event.Status, deliveredAt) {
+	if r.cache.UpdateStatus(event.MessageID, event.Status, deliveredAt, true) {
 		r.mu.Lock()
 		r.activeMessages = r.cache.Messages()
 		r.mu.Unlock()
@@ -2159,7 +2260,7 @@ func (r *DMRouter) resetIdentityState() {
 		r.statusMonitor.Reset()
 	}
 
-	r.cache.Load(domain.PeerIdentity{}, nil)
+	r.cache.Load(domain.PeerIdentity{}, nil, 0)
 }
 
 // pollHealth seeds the NodeStatusMonitor from a ProbeNode RPC and
@@ -2208,6 +2309,14 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity, epochBefore
 	stamp := r.peerStampOf(peerAddress)
 	stamp.epochs = epochBefore
 
+	// The boundary the read is authoritative about, taken BEFORE it: rows
+	// at or below this one the read was in a position to return, so their
+	// absence means deletion. Anything above appeared while it ran.
+	authoritativeUpTo := r.cache.HighestSeq()
+	if r.cache.PeerAddress() != peerAddress {
+		authoritativeUpTo = 0
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	messages, err := r.client.FetchConversation(ctx, peerAddress)
 	cancel()
@@ -2230,7 +2339,7 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity, epochBefore
 		r.mu.Unlock()
 		return false
 	}
-	r.cache.Load(peerAddress, messages)
+	r.cache.Load(peerAddress, messages, authoritativeUpTo)
 	r.activeMessages = r.cache.Messages()
 	r.pendingScrollToEnd = true
 	r.mu.Unlock()
@@ -2369,7 +2478,7 @@ func (r *DMRouter) applyReceiptRepair(activePeer domain.PeerIdentity, receipts [
 			continue
 		}
 
-		if r.cache.UpdateStatus(rc.MessageID, rc.Status, domain.TimeFromNonZero(rc.DeliveredAt)) {
+		if r.cache.UpdateStatus(rc.MessageID, rc.Status, domain.TimeFromNonZero(rc.DeliveredAt), true) {
 			updated = true
 		}
 	}

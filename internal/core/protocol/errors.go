@@ -30,7 +30,22 @@ const (
 	// ErrCodeStoreDeferred is a TRANSIENT refusal: the receiving node
 	// could not decide whether it may keep the message and asks for it
 	// again rather than acknowledging one it did not store.
-	ErrCodeStoreDeferred             = "store-deferred"
+	ErrCodeStoreDeferred = "store-deferred"
+	// ErrCodeStoreFailed says the node could not write the message this
+	// node itself authored, so it did not send it either. A message the
+	// author cannot see after a restart is worse than one that was never
+	// accepted: the local database is the record the sender reasons from,
+	// and the send path exists to serve it, not the other way round.
+	// Distinct from store-deferred, which is a refusal to DECIDE and asks
+	// the peer to come back; this is a failure to WRITE, reported to the
+	// author of the message rather than to a hop.
+	//
+	// The receipt path (send_delivery_receipt) reuses the code for the
+	// same failure of the same database, but it says LESS there: the
+	// message is on disk and the receipt may already be on the network —
+	// only the delivery status was refused, so the client must not clear
+	// the unread mark. See docs/protocol/delivery.md.
+	ErrCodeStoreFailed               = "store-failed"
 	ErrCodeFrameTooLarge             = "frame-too-large"
 	ErrCodeDuplicateConnection       = "duplicate-connection"
 	ErrCodeRateLimited               = "rate-limited"
@@ -89,7 +104,11 @@ var (
 	// message and asks for it again, so the honest answer to the user is
 	// "not now", not "this failed" — and errors.Is is how a UI layer that
 	// never sees frames can tell the two apart.
-	ErrStoreDeferred             = errors.New(ErrCodeStoreDeferred)
+	ErrStoreDeferred = errors.New(ErrCodeStoreDeferred)
+	// ErrStoreFailed is the sentinel for ErrCodeStoreFailed. Unlike
+	// ErrStoreDeferred it is not a "not now": the write itself failed, and
+	// the message is on no disk and on no wire.
+	ErrStoreFailed               = errors.New(ErrCodeStoreFailed)
 	ErrFrameTooLarge             = errors.New(ErrCodeFrameTooLarge)
 	ErrDuplicateConnection       = errors.New(ErrCodeDuplicateConnection)
 	ErrRateLimited               = errors.New(ErrCodeRateLimited)
@@ -172,6 +191,8 @@ func ErrorCode(err error) string {
 		return ErrCodeSelfIdentity
 	case errors.Is(err, ErrStoreDeferred):
 		return ErrCodeStoreDeferred
+	case errors.Is(err, ErrStoreFailed):
+		return ErrCodeStoreFailed
 	default:
 		return ErrCodeProtocol
 	}
@@ -239,6 +260,8 @@ func ErrorFromCode(code string) error {
 		return ErrSelfIdentity
 	case ErrCodeStoreDeferred:
 		return ErrStoreDeferred
+	case ErrCodeStoreFailed:
+		return ErrStoreFailed
 	default:
 		return ErrProtocol
 	}

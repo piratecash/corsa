@@ -1262,7 +1262,16 @@ func (s *Service) handleRelayReceipt(receipt protocol.DeliveryReceipt) bool {
 // Only full nodes are targeted because client nodes cannot forward relay
 // messages (handleRelayMessage drops at CanForward check). Receivers
 // dedupe via seen[messageID] if gossip arrives first.
-func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []domain.PeerAddress) {
+// Returns whether at least one target ACCEPTED the frame. Every target
+// already reports that individually; the aggregate is what lets a
+// sender-owned delivery tell a fan-out that reached somebody from one
+// where every candidate was skipped or refused.
+// Returns the BEST outcome across the targets: a frame that reached a
+// writer beats one whose fate is unknown, which beats an outright refusal.
+// The middle value is not decoration — collapsing it onto "refused" makes
+// the caller record "reached nobody" for a message a peer may be holding.
+func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []domain.PeerAddress, dispatchedAt time.Time) relaySendOutcome {
+	best := relaySendRefused
 	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) {
 			continue
@@ -1276,8 +1285,14 @@ func (s *Service) tryRelayToCapableFullNodes(msg protocol.Envelope, targets []do
 		if !s.relayLimiter.allow(address) {
 			continue
 		}
-		s.sendRelayMessage(address, msg)
+		switch outcome := s.sendRelayMessage(address, msg, dispatchedAt); {
+		case outcome.leftTheNode():
+			best = relaySendHandedToPeer
+		case outcome == relaySendFateUnknown && best == relaySendRefused:
+			best = relaySendFateUnknown
+		}
 	}
+	return best
 }
 
 // relayStatusFrame returns diagnostic information about the relay subsystem
@@ -1350,11 +1365,60 @@ func (s *Service) countCapablePeers(cap domain.Capability) int {
 	return len(seen)
 }
 
+// relaySendOutcome says how far a relay frame actually got. The
+// distinction between the last two is invisible to transit forwarding —
+// which only asks "is this handled, or must I try elsewhere?" — but it is
+// everything to a sender-owned delivery: a frame parked in OUR OWN pending
+// ring has not left this machine, and calling that "sent" is how a stale
+// route used to turn into a delivered-looking message.
+type relaySendOutcome uint8
+
+const (
+	// relaySendRefused: nobody took the frame, not even our own ring.
+	relaySendRefused relaySendOutcome = iota
+	// relaySendQueuedLocally: parked in this node's pending ring, to be
+	// flushed if that peer ever comes back. Still here.
+	relaySendQueuedLocally
+	// relaySendQueuedForSession: handed to a live peer SESSION, whose
+	// writer loop confirms the delivery itself once NetCore accepts the
+	// frame. Not a confirmation here: the session's queue is in-process
+	// and its remainder is discarded when the session closes.
+	relaySendQueuedForSession
+	// relaySendHandedToPeer: written straight to a connection's writer,
+	// which is as far as this node can see.
+	relaySendHandedToPeer
+	// relaySendFateUnknown: a writer answered in a way that cannot place
+	// the frame — a sync flush that ended on a timeout or a cancelled
+	// context, a writer already tearing down. The bytes may have left.
+	//
+	// It exists because collapsing this onto "refused" is a LIE IN THE
+	// EXPENSIVE DIRECTION: the caller then records "reached nobody", and a
+	// later deletion skips a peer who is holding the message. Refused says
+	// the frame is provably still ours; this says nobody can tell, and the
+	// only honest response is to write nothing down and try again.
+	relaySendFateUnknown
+)
+
+// handled reports whether the frame needs no further attempt from the
+// caller — the question transit forwarding asks.
+func (o relaySendOutcome) handled() bool {
+	return o != relaySendRefused && o != relaySendFateUnknown
+}
+
+// leftTheNode reports whether the frame reached a writer, which is the only
+// outcome a sender-owned delivery may count as sent HERE.
+//
+// A session enqueue is deliberately not one: it is an in-process queue, and
+// the session's writer loop confirms the delivery for itself when NetCore
+// accepts the frame. Counting it here would call a message sent that a
+// session teardown could still discard, and would also double-count the
+// confirmation the writer makes.
+func (o relaySendOutcome) leftTheNode() bool { return o == relaySendHandedToPeer }
+
 // sendRelayMessage creates a relay_message frame from an envelope and sends
-// it to the specified peer. Returns true if the frame was enqueued (live
-// session) or queued (persistent fallback). Used when the routing decision
-// indicates a relay-capable next hop.
-func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Envelope) bool {
+// it to the specified peer. Used when the routing decision indicates a
+// relay-capable next hop.
+func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Envelope, dispatchedAt time.Time) relaySendOutcome {
 	frame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          string(msg.ID),
@@ -1376,27 +1440,27 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 	// the relay-only DM opt-out — signing key only, by design).
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
-	sent := s.enqueuePeerFrame(address, frame)
-	if !sent {
-		sent = s.queuePeerFrame(address, frame)
-		if sent {
-			log.Debug().
-				Str("id", string(msg.ID)).
-				Str("recipient", msg.Recipient).
-				Str("peer", string(address)).
-				Str("mode", "queued").
-				Msg("relay_message_queued")
-		}
+	outcome := relaySendRefused
+	if s.enqueuePeerSendItem(address, deliveryPeerSendItem(frame, msg, dispatchedAt)) {
+		outcome = relaySendQueuedForSession
+	} else if s.queuePeerFrame(address, frame) {
+		outcome = relaySendQueuedLocally
+		log.Debug().
+			Str("id", string(msg.ID)).
+			Str("recipient", msg.Recipient).
+			Str("peer", string(address)).
+			Str("mode", "queued").
+			Msg("relay_message_queued")
 	}
 
-	if !sent {
+	if !outcome.handled() {
 		log.Debug().
 			Str("id", string(msg.ID)).
 			Str("recipient", msg.Recipient).
 			Str("peer", string(address)).
 			Str("mode", "dropped").
 			Msg("relay_message_dropped")
-		return false
+		return relaySendRefused
 	}
 
 	// Store forwarding state for dedupe and receipt routing.
@@ -1440,7 +1504,7 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 		Str("peer", string(address)).
 		Str("mode", "session").
 		Msg("relay_message_sent")
-	return true
+	return outcome
 }
 
 // sendRelayMessageWithOrigin is the table-directed variant of sendRelayMessage.
@@ -1450,7 +1514,7 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 // NextHop) only because the routing table no longer keys on Origin. The
 // gossip path (sendRelayMessage) leaves RouteOrigin empty because gossip
 // delivery is not scoped to a specific routing-table entry.
-func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity) bool {
+func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity, dispatchedAt time.Time) relaySendOutcome {
 	frame := protocol.Frame{
 		Type:        "relay_message",
 		ID:          string(msg.ID),
@@ -1468,27 +1532,27 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 	// v27 sender-key attachment — same contract as sendRelayMessage.
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
-	sent := s.enqueuePeerFrame(address, frame)
-	if !sent {
-		sent = s.queuePeerFrame(address, frame)
-		if sent {
-			log.Debug().
-				Str("id", string(msg.ID)).
-				Str("recipient", msg.Recipient).
-				Str("peer", string(address)).
-				Str("mode", "queued").
-				Msg("relay_message_queued")
-		}
+	outcome := relaySendRefused
+	if s.enqueuePeerSendItem(address, deliveryPeerSendItem(frame, msg, dispatchedAt)) {
+		outcome = relaySendQueuedForSession
+	} else if s.queuePeerFrame(address, frame) {
+		outcome = relaySendQueuedLocally
+		log.Debug().
+			Str("id", string(msg.ID)).
+			Str("recipient", msg.Recipient).
+			Str("peer", string(address)).
+			Str("mode", "queued").
+			Msg("relay_message_queued")
 	}
 
-	if !sent {
+	if !outcome.handled() {
 		log.Debug().
 			Str("id", string(msg.ID)).
 			Str("recipient", msg.Recipient).
 			Str("peer", string(address)).
 			Str("mode", "dropped").
 			Msg("relay_message_dropped")
-		return false
+		return relaySendRefused
 	}
 
 	// Phase 3 PR 12.2 — table-directed origin send arms the hop-ack
@@ -1520,12 +1584,14 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 		FrameLine:            originLine,
 	})
 	if !stored {
+		// Same rule as the inbound path: the send has already happened
+		// and its outcome is what it is. A full relay-state table costs
+		// this forward its hop-ack tracking, not its existence.
 		log.Warn().
 			Str("id", string(msg.ID)).
 			Str("recipient", msg.Recipient).
 			Str("peer", string(address)).
-			Msg("relay_state_store_failed_outbound")
-		return false
+			Msg("relay_state_store_failed_outbound_hop_ack_disabled")
 	}
 	log.Debug().
 		Str("id", string(msg.ID)).
@@ -1534,7 +1600,7 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 		Str("origin", routeOrigin.String()).
 		Str("mode", "session").
 		Msg("relay_message_sent_table_directed")
-	return true
+	return outcome
 }
 
 func (s *Service) gossipReceipt(receipt protocol.DeliveryReceipt) {
@@ -1616,14 +1682,16 @@ func (s *Service) retryRelayDeliveries() {
 		// duplicate push_message+relay_message to the same peer (the repeated
 		// double-send visible in the capture).
 		gossipTargets := s.gossipTargetsForRelay(msg, decision)
-		s.executeGossipTargets(msg, gossipTargets)
+		// Transit: not ours, so no delivery to answer for. The zero ref
+		// keeps this path exactly as fire-and-forget as it was.
+		s.executeGossipTargets(msg, gossipTargets, deliveryDispatchRef{})
 		// Table-directed relay (Phase 1.2): mirror the logic in
 		// storeIncomingMessage — use the routing table when a next-hop
 		// is known, fall back to blind gossip relay otherwise.
 		if decision.RelayNextHop != nil {
-			s.sendTableDirectedRelay(s.runCtx, msg, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+			s.sendTableDirectedRelay(s.runCtx, msg, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops, time.Now().UTC())
 		} else {
-			s.tryRelayToCapableFullNodes(msg, gossipTargets)
+			s.tryRelayToCapableFullNodes(msg, gossipTargets, time.Now().UTC())
 		}
 	}
 	for _, receipt := range s.retryableRelayReceipts(now) {
@@ -1786,12 +1854,17 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 	}
 	// Origin-authored DMs are owned by the sender-owned delivery engine
 	// (delivery_retry.go: registerAwaitingDelivered → dispatchEnvelopeRetry),
-	// which retries finitely (TTL / attempts cap) and terminalizes durably.
+	// which paces itself on a capped backoff and ends on the recipient's
+	// receipt, the author's withdrawal, or the message's own TTL.
 	// The relay-retry contour is for TRANSIT forwarding only (relay.md
 	// INV-1/INV-2: "relay is forwarding-only — offline delivery is the
-	// sender's job"). Arming our own message here re-gossiped it forever —
-	// every mesh echo re-armed the relayRetryTTL window long past the
-	// sender-owned attempts cap, the source of the multi-day DM spam.
+	// sender's job"). Arming our own message here re-gossiped it forever,
+	// and that is a different thing from the sender's own retry: this
+	// contour re-emits BLINDLY, so every mesh echo re-armed the
+	// relayRetryTTL window and flooded the mesh whether or not the
+	// recipient was reachable. The sender's engine emits only into a
+	// route that exists, which is why waiting there costs no wire traffic
+	// at all — this was the source of the multi-day DM spam.
 	if s.identity != nil && msg.Sender == s.identity.Address {
 		return
 	}
@@ -1868,10 +1941,6 @@ func (s *Service) relayFrameAged(frame protocol.Frame, sender, recipient string)
 	return s.envelopePropagationAged(frame.Topic, sender, recipient, created.UTC(), time.Now().UTC())
 }
 
-func relayReceiptKey(receipt protocol.DeliveryReceipt) string {
-	return "receipt|" + receipt.Recipient + "|" + string(receipt.MessageID) + "|" + receipt.Status
-}
-
 // hasReceiptForMessageLocked reports whether s.receipts already contains a
 // delivery receipt for (originalSender, messageID).  Caller MUST hold
 // s.deliveryMu (RLock or Lock).
@@ -1930,7 +1999,22 @@ func (s *Service) deleteBacklogMessageForRecipient(recipient string, messageID p
 	return removed
 }
 
-func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID protocol.MessageID, status string) int {
+// deleteBacklogReceiptForRecipient drops the acked receipt, and ONLY it.
+//
+// The identity is the whole point: an ack names one receipt, and the
+// backlog can hold two with the same recipient, message and status when
+// somebody forged one — that is precisely the case where deleting "all
+// that look alike" destroys the genuine receipt and its retry entry, and
+// the sender's message sits at `sent` until the message itself is
+// re-sent. The forgery is rejected at the end node, but the ack for it
+// is still legitimate traffic, and this is what it must not sweep up.
+//
+// An ack from a peer older than ProtocolVersionReceiptSenderAck cannot
+// name the author. Then the rule is "delete only if unambiguous": one
+// candidate is deleted, several are all KEPT. Keeping costs a duplicate
+// push the peer discards; deleting the wrong one costs the delivery.
+func (s *Service) deleteBacklogReceiptForRecipient(target receiptIdentity) int {
+	recipient, messageID := target.Recipient, target.MessageID
 	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_wait").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_held").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
@@ -1940,10 +2024,24 @@ func (s *Service) deleteBacklogReceiptForRecipient(recipient string, messageID p
 		log.Trace().Str("site", "deleteBacklogReceiptForRecipient").Str("phase", "lock_released_empty").Str("recipient", recipient).Str("msg_id", string(messageID)).Msg("delivery_mu_writer")
 		return 0
 	}
+	if !target.senderKnown() {
+		candidates := 0
+		for _, receipt := range list {
+			if target.matches(receipt) {
+				candidates++
+			}
+		}
+		if candidates > 1 {
+			s.deliveryMu.Unlock()
+			log.Warn().Str("recipient", recipient).Str("msg_id", string(messageID)).Str("status", target.Status).Int("candidates", candidates).
+				Msg("ack_delete kept every receipt: the acking peer cannot name which one it holds and more than one matches")
+			return 0
+		}
+	}
 	filtered := list[:0]
 	removed := 0
 	for _, receipt := range list {
-		if receipt.MessageID == messageID && receipt.Recipient == recipient && receipt.Status == status {
+		if target.matches(receipt) {
 			delete(s.relayRetry, relayReceiptKey(receipt))
 			removed++
 			continue
@@ -2128,11 +2226,14 @@ func (s *Service) clearRelayRetryForOutbound(frame protocol.Frame) {
 		return
 	}
 
-	key := relayReceiptKey(protocol.DeliveryReceipt{
-		MessageID: protocol.MessageID(frame.ID),
-		Recipient: frame.Recipient,
-		Status:    frame.Status,
-	})
+	// frame.Address is the receipt's author (receiptFromFrame reads it
+	// into DeliveryReceipt.Sender), so the identity is complete here —
+	// this key used to omit it and cleared the retry of whichever
+	// same-looking receipt happened to own the entry.
+	if strings.TrimSpace(frame.Address) == "" {
+		return
+	}
+	key := identityFromRelayFrame(frame).retryKey()
 
 	log.Trace().Str("site", "clearRelayRetryForOutbound").Str("phase", "lock_wait").Str("key", key).Str("msg_id", frame.ID).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()

@@ -119,7 +119,12 @@ type Contact struct {
 // the decryption path. It differs from DirectMessage because the body is
 // still ciphertext at this stage.
 type MessageRecord struct {
-	ID              string
+	ID string
+	// Seq is the chatlog row's arrival order (its rowid). Zero when the
+	// record did not come from a stored row. Carried through decryption
+	// because ConversationCache.Load needs it to tell a message stored
+	// after a read from one deleted during it.
+	Seq             int64
 	Flag            string
 	Timestamp       time.Time
 	TTLSeconds      int
@@ -127,6 +132,27 @@ type MessageRecord struct {
 	Recipient       string
 	Body            string
 	PersistedStatus string // delivery_status from SQLite chatlog (may be empty for legacy data)
+	// AwaitingWire says the row is governed by the on-wire bit AND nothing
+	// has confirmed it, which is the one case the badge downgrades from
+	// "sent" to "queued". The chatlog keeps one status for both ("sent"),
+	// because on the wire they ARE the same state; the difference only
+	// matters to the person who wrote the message, and to them it is the
+	// whole difference between "they have it" and "nobody has seen this
+	// yet".
+	//
+	// Phrased as "awaiting" rather than "on wire" so the ZERO VALUE means
+	// "leave the status alone". A row that predates the bit says nothing
+	// about the wire, and reading that silence as "not sent" would turn
+	// every unreceipted message in a user's history into "queued" on the
+	// first launch after the upgrade.
+	//
+	// It is deliberately NOT the never-emitted claim, which answers a
+	// different question for a different reader (the deletion). That claim
+	// is withdrawn BEFORE the first frame goes out, so reading the badge
+	// off it showed "sent" the moment an attempt STARTED — and a writer
+	// that then refused left the sender looking at a message nothing had
+	// carried. See chatlog/emission.go for why the two are separate bits.
+	AwaitingWire bool
 }
 
 // DeliveryReceipt is the service-layer representation of a delivery-state
@@ -229,6 +255,16 @@ type DirectMessage struct {
 	Timestamp     time.Time
 	ReceiptStatus string
 	DeliveredAt   domain.OptionalTime
+	// DeliveredAtFromReceipt says the timestamp above came from the
+	// recipient's RECEIPT rather than being synthesised from this
+	// message's own creation time.
+	//
+	// The two cannot be told apart by comparing them: the synthetic one is
+	// the SENDER's clock and the real one is the RECIPIENT's, so a sender
+	// running fast produces a synthetic value that looks newer. Anything
+	// that has to choose between two DeliveredAt values — the cache
+	// reconcile after a reload — chooses by this flag, never by time.
+	DeliveredAtFromReceipt bool
 	// Seq is where this message landed in the local arrival order (the
 	// chatlog row's sequence). Timestamp cannot serve that purpose: it is the
 	// SENDER's clock, and two peers do not share one. Zero means the store

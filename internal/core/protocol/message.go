@@ -84,6 +84,23 @@ const (
 	ReceiptStatusSeenAck = "seen_ack"
 )
 
+// The two delivery states a node reports about the sender's OWN message,
+// before any peer has said anything about it.
+//
+// Neither is a receipt status and neither travels between nodes: no peer
+// has anything to say about a message that has not reached them. They
+// exist so the sender's own client can tell "waiting for them to come
+// back" from "gone out, waiting for the confirmation" — two states the
+// chatlog necessarily records as one, because on the wire they are the
+// same thing.
+const (
+	// MessageStatusQueued: stored locally, NOT on the wire — the recipient
+	// is unreachable and the reachability gate is holding it.
+	MessageStatusQueued = "queued"
+	// MessageStatusSent: it has left this machine.
+	MessageStatusSent = "sent"
+)
+
 func NewMessageID() (MessageID, error) {
 	var data [16]byte
 	if _, err := rand.Read(data[:]); err != nil {

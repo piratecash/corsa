@@ -579,7 +579,7 @@ func TestUndeliveredOutgoingExcludesSuperseded(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	undelivered, err := store.UndeliveredOutgoing(context.Background(), self, time.Time{})
+	undelivered, err := store.UndeliveredOutgoing(context.Background(), self, time.Time{}, time.Now().UTC())
 	if err != nil || len(undelivered) != 1 {
 		t.Fatalf("baseline: %d err=%v, want the sent row", len(undelivered), err)
 	}
@@ -593,7 +593,7 @@ func TestUndeliveredOutgoingExcludesSuperseded(t *testing.T) {
 	if err := store.MarkResendTerminal(context.Background(), rowID, replacementID, rowID); err != nil {
 		t.Fatalf("terminal: %v", err)
 	}
-	undelivered, err = store.UndeliveredOutgoing(context.Background(), self, time.Time{})
+	undelivered, err = store.UndeliveredOutgoing(context.Background(), self, time.Time{}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("undelivered: %v", err)
 	}
@@ -658,7 +658,7 @@ func TestUndeliveredOutgoingNullSupersededKept(t *testing.T) {
 			t.Fatalf("append %s: %v", id, err)
 		}
 	}
-	undelivered, err := store.UndeliveredOutgoing(context.Background(), self, time.Time{})
+	undelivered, err := store.UndeliveredOutgoing(context.Background(), self, time.Time{}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("undelivered: %v", err)
 	}

@@ -12,11 +12,13 @@ import (
 // TestTrackRelayMessage_SkipsOriginAuthored is the regression guard for the
 // indefinite-DM-gossip bug: a DM this node ORIGINATED (sender == self) must
 // not enter the relay-retry contour. Origin re-sends are owned by the
-// sender-owned delivery engine (delivery_retry.go), which retries finitely
-// (TTL / attempts cap) and terminalizes durably. The relay-retry contour is
-// for TRANSIT forwarding only (relay.md INV-1/INV-2); tracking our own
-// message here re-gossiped it forever because every mesh echo re-armed the
-// 3-minute window long past the sender-owned cap.
+// sender-owned delivery engine (delivery_retry.go), which emits only into
+// a route that exists and ends on the recipient's receipt, the author's
+// withdrawal, or the message's own TTL. The relay-retry contour is for
+// TRANSIT forwarding only (relay.md INV-1/INV-2); tracking our own message
+// here re-gossiped it forever, and BLINDLY — every mesh echo re-armed the
+// 3-minute window and flooded the mesh whether or not the recipient was
+// reachable.
 func TestTrackRelayMessage_SkipsOriginAuthored(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)

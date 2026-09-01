@@ -175,8 +175,15 @@ func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress doma
 
 	// Monotonic guard: only update if current status has a lower rank.
 	// Using IN (?) with explicit values since SQLite doesn't support array params.
-	query := `UPDATE messages SET delivery_status = ?, updated_at = ? WHERE id = ? AND delivery_status IN (`
-	args := []interface{}{status, now, messageID}
+	//
+	// Scoped to the CONVERSATION, not to the id alone. A receipt names a
+	// message and a peer, and the peer is half of the claim: matching on
+	// the id by itself let a receipt from anyone who knew the id rewrite
+	// the delivery status of a message sent to somebody else. peerAddress
+	// was already a parameter here and was simply not used.
+	query := `UPDATE messages SET delivery_status = ?, updated_at = ?
+		 WHERE id = ? AND topic = ? AND (sender = ? OR recipient = ?) AND delivery_status IN (`
+	args := []interface{}{status, now, messageID, topic, peerAddress.String(), peerAddress.String()}
 	for i, prev := range allowedPrev {
 		if i > 0 {
 			query += ","
@@ -206,8 +213,12 @@ func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress doma
 // four-message exchange inside one second came back grouped by direction
 // rather than as a conversation.
 func (s *Store) Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
+	// rowid comes back with the row, not only as the tie-break: it is the
+	// local arrival order, and a reader that has to tell "stored after my
+	// read" from "deleted while I read" has nothing else to go by. See
+	// service.ConversationCache.Load.
 	query, args := s.peerQuery(topic, peerAddress,
-		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
+		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata, rowid
 		 FROM messages WHERE `, ` ORDER BY created_at ASC, rowid ASC`)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -216,7 +227,7 @@ func (s *Store) Read(ctx context.Context, topic string, peerAddress domain.PeerI
 	}
 	defer func() { _ = rows.Close() }()
 
-	return scanEntries(rows)
+	return scanEntriesWithRowID(rows)
 }
 
 // UnconfirmedSeen returns the inbound DM entries this identity has marked
@@ -244,6 +255,49 @@ func (s *Store) UnconfirmedSeen(ctx context.Context, self domain.PeerIdentity, s
 
 // MarkDeliveryFailed durably records that automatic retries for the
 // locally-sent message were abandoned (TTL expiry / attempts cap), so
+// SentMessageIDs returns the newest ids of DMs this node AUTHORED,
+// whatever their delivery status.
+//
+// The retry engine reseeds only rows still at `sent`, because those are the
+// ones it still owes work. But the node also keeps a memory-only set of
+// "messages we sent", and that set answers a different question: whether an
+// arriving receipt is solicited. After a restart the set is empty for every
+// message that had already reached `delivered` — and the `seen` that comes
+// when the recipient finally opens the conversation is then rejected as
+// unsolicited, leaving the row at `delivered` and the reader's seen retry
+// unacked. This is what refills it.
+// Bounded by COUNT rather than by age: a receipt does not expire, so a
+// cutoff would reject a genuine one for an older conversation. The caller
+// keeps them in a bounded set and asks for as many as that set holds.
+func (s *Store) SentMessageIDs(ctx context.Context, self domain.PeerIdentity, limit int) ([]domain.MessageID, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM messages
+		 WHERE topic = 'dm' AND sender = ?
+		 ORDER BY created_at DESC
+		 LIMIT ?`,
+		self.String(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("chatlog: sent message ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []domain.MessageID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("chatlog: scan sent message id: %w", err)
+		}
+		ids = append(ids, domain.MessageID(id))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("chatlog: sent message ids: %w", err)
+	}
+	return ids, nil
+}
+
 // UndeliveredOutgoing stops reseeding it. Idempotent.
 func (s *Store) MarkDeliveryFailed(ctx context.Context, messageID string) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO delivery_failed (id) VALUES (?)`, messageID); err != nil {
@@ -264,12 +318,17 @@ func (s *Store) MarkSeenConfirmed(ctx context.Context, messageID string) error {
 // UndeliveredOutgoing returns the DM entries this identity SENT that are
 // still in the "sent" delivery status — the durable source for the
 // sender-side end-to-end delivery retry scheduler (node.DeliveryOutbox).
-// since bounds the scan to recently-created rows so a restart does not
-// reseed (and re-inject into the mesh) ancient undelivered DMs whose
-// recipient never returned: the scheduler caps a single message at ~3.5h of
-// attempts, so anything older than the horizon is already abandoned in
-// practice. Symmetric with UnconfirmedSeen's `since`.
-func (s *Store) UndeliveredOutgoing(ctx context.Context, self domain.PeerIdentity, since time.Time) ([]Entry, error) {
+//
+// since bounds the scan to rows created at or after it. A ZERO since means
+// no bound, which is what the desktop adapter passes: a delivery ends when
+// the recipient confirms it, when its author withdraws it, or when its own
+// TTL expires, and "the app was restarted" is none of those. See the
+// horizon comment in service/message_store_adapter.go for why the old
+// seven-day bound is no longer needed to keep ancient DMs out of the mesh.
+//
+// now is the instant TTL expiry is judged against — see the journal
+// predicate below, which needs it per row.
+func (s *Store) UndeliveredOutgoing(ctx context.Context, self domain.PeerIdentity, since, now time.Time) ([]Entry, error) {
 	// A recovery-superseded original must never re-enter the ordinary
 	// retry path: its replacement is already in flight under a new id, and
 	// re-sending the OLD ciphertext would race the replacement with the
@@ -278,16 +337,29 @@ func (s *Store) UndeliveredOutgoing(ctx context.Context, self domain.PeerIdentit
 	// null value, a non-object blob or the key nested inside some other
 	// value all count as NOT superseded — a LIKE substring test would
 	// wrongly drop those rows.
+	// The delivery_failed journal is honoured only where the row has
+	// ACTUALLY expired. Abandonment has exactly one cause now — a message
+	// outliving its own TTL — so a journalled row that is still within its
+	// TTL, or has none at all, was put there by a rule that no longer
+	// exists: the retry cap this engine used to have, which gave up after
+	// twenty attempts (~3.5 hours) regardless of how long the message was
+	// entitled to live. Testing for the mere PRESENCE of a TTL is not
+	// enough, because that cap could abandon a message with a day-long TTL
+	// three hours into it; the test has to be created_at + ttl_seconds.
+	// See node/delivery_retry.go.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
 		 FROM messages
 		 WHERE topic = 'dm' AND sender = ? AND delivery_status = ?
 		   AND created_at >= ?
-		   AND id NOT IN (SELECT id FROM delivery_failed)
+		   AND (id NOT IN (SELECT id FROM delivery_failed)
+		        OR COALESCE(ttl_seconds, 0) <= 0
+		        OR datetime(created_at, '+' || ttl_seconds || ' seconds') > datetime(?))
 		   AND (metadata IS NULL OR NOT json_valid(metadata)
 		        OR COALESCE(json_extract(metadata, '$.superseded_by'), '') = '')
 		 ORDER BY created_at ASC`,
-		self.String(), StatusSent, since.UTC().Format(time.RFC3339Nano))
+		self.String(), StatusSent,
+		since.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("chatlog: undelivered outgoing: %w", err)
 	}
@@ -1143,6 +1215,22 @@ func scanEntries(rows *sql.Rows) ([]Entry, error) {
 	for rows.Next() {
 		var e Entry
 		if err := rows.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// scanEntriesWithRowID is scanEntries for the one query that also selects
+// the rowid. Separate rather than a flag: the two differ by the column
+// list of the SELECT above them, and a scanner that guesses which shape it
+// was handed is a runtime error waiting for the next caller.
+func scanEntriesWithRowID(rows *sql.Rows) ([]Entry, error) {
+	var entries []Entry
+	for rows.Next() {
+		var e Entry
+		if err := rows.Scan(&e.ID, &e.Sender, &e.Recipient, &e.Body, &e.CreatedAt, &e.Flag, &e.DeliveryStatus, &e.TTLSeconds, &e.Metadata, &e.RowID); err != nil {
 			continue
 		}
 		entries = append(entries, e)

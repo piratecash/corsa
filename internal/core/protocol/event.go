@@ -51,6 +51,24 @@ const (
 	// DMCommand value (message_delete, message_delete_ack, ...). See
 	// docs/dm-commands.md for the wire and storage contracts.
 	LocalChangeNewControlMessage LocalChangeType = "new_control_message"
+
+	// LocalChangeMessageEmitted is emitted by node.Service the first time a
+	// sink confirms taking one of OUR outgoing messages. It is deliberately
+	// not a receipt update: no peer has said anything, and the only new
+	// fact is that the message stopped being queued on this machine.
+	//
+	// It fires for EVERY outgoing DM, not only the ones the reachability
+	// gate held back: the sender is shown "queued" from the moment the
+	// message is stored, because at that point the sinks are still working
+	// and nothing yet knows the frame went anywhere.
+	//
+	// Without it the sender's badge stays on "queued" until the recipient's
+	// delivered receipt arrives — normally milliseconds, but permanently
+	// if that receipt is lost, which would have the sender believing a
+	// message was never sent while their counterpart is reading it. Status
+	// carries MessageStatusSent; Body, Flag and the timestamps are empty,
+	// because the row they describe has not changed.
+	LocalChangeMessageEmitted LocalChangeType = "message_emitted"
 )
 
 // TopicControlDM is the dedicated wire topic for control DMs

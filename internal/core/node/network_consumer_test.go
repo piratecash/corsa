@@ -695,7 +695,7 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 			}
 
 			sub := &subscriber{id: subID, recipient: recipient, connID: connID}
-			svc.writePushFrame(sub, protocol.Frame{Type: "inbox_item", Recipient: recipient})
+			_, _ = svc.writePushFrame(sub, protocol.Frame{Type: "inbox_item", Recipient: recipient})
 
 			svc.peerMu.RLock()
 			_, stillPresent := svc.subs[recipient][subID]

@@ -317,7 +317,7 @@ func TestKickDeliveryRetriesForReachable(t *testing.T) {
 		Envelope:      protocol.Envelope{ID: "held-1", Topic: "dm", Sender: svc.identity.Address, Recipient: recipient.Address},
 		Attempts:      3,
 		NextAttemptAt: future,
-		Held:          true,
+		Hold:          holdUnreachable,
 	}
 	svc.deliveryMu.Unlock()
 
@@ -331,8 +331,14 @@ func TestKickDeliveryRetriesForReachable(t *testing.T) {
 	if entry.NextAttemptAt.After(time.Now().UTC()) {
 		t.Fatalf("kick must pull NextAttemptAt forward to now for a REACHABLE recipient, still future: %v", entry.NextAttemptAt)
 	}
-	if entry.Attempts != 3 {
-		t.Fatalf("kick must not spend an attempt, Attempts=%d want 3", entry.Attempts)
+	// A HELD entry finding its recipient reachable is the moment they came
+	// back, so the backoff goes to its first step: the message has been
+	// ready since before they left, and making them wait out an
+	// eleven-minute timer for it would be the engine's own doing. The kick
+	// still spends nothing — an emission is charged after the wire takes
+	// the frame, not here.
+	if entry.Attempts != 0 {
+		t.Fatalf("a returning recipient must reset the backoff, Attempts=%d want 0", entry.Attempts)
 	}
 }
 
@@ -351,7 +357,7 @@ func TestKickDeliveryRetriesForUnreachableIsNoop(t *testing.T) {
 		Envelope:      protocol.Envelope{ID: "held-2", Topic: "dm", Sender: svc.identity.Address, Recipient: recipient.Address},
 		Attempts:      3,
 		NextAttemptAt: future,
-		Held:          true,
+		Hold:          holdUnreachable,
 	}
 	svc.deliveryMu.Unlock()
 
@@ -396,7 +402,7 @@ func TestKickDeliveryRetriesSkipsAlreadyEmitted(t *testing.T) {
 		Envelope:      protocol.Envelope{ID: "emitted-1", Topic: "dm", Sender: svc.identity.Address, Recipient: recipient.Address},
 		Attempts:      2,
 		NextAttemptAt: future,
-		Held:          false, // already emitted, awaiting receipt
+		Hold:          holdNone, // already emitted, awaiting receipt
 	}
 	svc.deliveryMu.Unlock()
 

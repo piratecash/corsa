@@ -797,7 +797,13 @@ thing this design exists not to do.
   erased their copy: there is nothing left to replay from, which is why
   the refusal can end with the task.
 * **memory**, for the rest: `wipeTombstoneSet` holds what THIS process
-  deleted, for `wipeTombstoneTTL` (8 days, the sender's reseed horizon).
+  deleted, for `wipeTombstoneTTL` (8 days). The number used to be derived
+  from the sender: their outbox re-injected anything undelivered from the
+  last week, so past that nobody re-sent it. That horizon is gone — a
+  delivery now ends when the recipient confirms it, when its author
+  withdraws it, or when its own TTL expires — so the week is no longer a
+  bound on how long a sender might keep trying. It bounds only what this
+  process is willing to remember.
 
 **What this leaves open, and why it stays open.** A relay may hold a copy
 it never managed to deliver — so it never got our ack for it — of a message
@@ -813,6 +819,28 @@ which hands a third party the fact we refuse to record about ourselves:
 that this user deleted this message. Between a rare resurrection the user
 can delete again and a deletion notice broadcast to strangers, this takes
 the resurrection.
+
+The window is WIDER than when that trade was made. It used to be bounded on
+the other side too: a sender stopped re-sending after a week, so a copy
+older than the memory TTL had nobody left to push it. Senders no longer
+stop on a clock (`docs/protocol/message_delivery.md`), so a held copy can
+in principle be pushed at any later time and the memory TTL no longer meets
+it. The answer above still holds — the pushing hop is told DUPLICATE and
+drops the copy, and the sender's own retry ends on the delivery receipt it
+already has — but the fallback behind it is now shorter than the thing it
+falls back from.
+
+**The behaviour that follows, stated exactly.** A deleted message can be
+re-created if a relay is still holding an undelivered copy AND our delivery
+receipt for it never reached the sender AND either more than
+`wipeTombstoneTTL` has passed or this process has restarted since the
+deletion. The user deletes it again. It is visible rather than silent: the
+message reappears in the thread, and nothing leaks anywhere. Each way of
+preventing it costs more than it saves — a durable list of deleted ids is
+the one trace a wipe could not remove, a "stop sending this id" frame hands
+that fact to a third party and needs a protocol version, and re-bounding
+the sender's retry by a clock brings back the bug it was removed to fix:
+a recipient offline overnight losing messages nobody was told about.
 
 Migration `0007_conversation_delete` removed the records earlier builds
 kept (`message_delete_intents` rows with `owed = 0`, `reaction_refusals`,
@@ -1138,8 +1166,7 @@ the gap before the next sweep (5 s plus backoff). What it takes are messages in
 a conversation the user has just asked to erase, and the requester's own copy of
 that thread is empty on their screen.
 
-**If R3 is the priority, one of R1 or R2 has to go**, and the choice belongs to
-whoever owns the product decision:
+**If R3 is the priority, one of R1 or R2 has to go**, and neither is free:
 
 * drop R2 — the receiver remembers applied `request_id`s. Closes the case
   completely and durably, at the cost of a record that a deletion happened;
@@ -2327,8 +2354,13 @@ origin-отправки и retry-тика, которые сами учитыв�
   больше нечего и неоткуда, поэтому отказ и может закончиться вместе с
   заданием.
 * **память** — на всё остальное: `wipeTombstoneSet` держит то, что удалил
-  ЭТОТ процесс, в течение `wipeTombstoneTTL` (8 суток — горизонт
-  переотправки у отправителя).
+  ЭТОТ процесс, в течение `wipeTombstoneTTL` (8 суток). Раньше это число
+  выводилось из отправителя: его outbox переинжектировал всё недоставленное
+  за последнюю неделю, а дальше не переотправлял никто. Того горизонта
+  больше нет — доставка теперь заканчивается подтверждением получателя,
+  отзывом автора или собственным TTL сообщения, — поэтому неделя больше не
+  ограничивает, сколько отправитель может пытаться. Она ограничивает только
+  то, сколько готов помнить этот процесс.
 
 **Что остаётся незакрытым и почему остаётся.** Релей может держать копию,
 которую так и не смог нам доставить (а значит, и ack на неё не получал), —
@@ -2344,6 +2376,31 @@ origin-отправки и retry-тика, которые сами учитыв�
 отказываемся записывать даже про себя: что этот пользователь удалил это
 сообщение. Между редким воскрешением, которое пользователь может удалить
 ещё раз, и рассылкой уведомления об удалении посторонним выбрано первое.
+
+Окно ШИРЕ, чем в момент, когда этот размен принимался. Раньше оно было
+ограничено и с другой стороны: отправитель переставал переотправлять через
+неделю, поэтому копию старше TTL памяти было уже некому пропихнуть.
+Отправители больше не останавливаются по часам
+(`docs/protocol/message_delivery.md`), так что удержанная копия в принципе
+может быть отправлена в любой момент позже, и TTL памяти её уже не
+встречает. Ответ выше по-прежнему работает — приславшему хопу отдаётся
+ДУБЛИКАТ, и он выбрасывает копию, а цикл ретраев самого отправителя
+заканчивается на уже полученном receipt-е, — но подстраховка позади него
+теперь короче того, что она подстраховывает.
+
+**Как из этого следует поведение, точно.** Удалённое сообщение может быть
+создано заново, если релей всё ещё держит недоставленную копию И наш
+delivery receipt по ней так и не дошёл до отправителя И либо прошло больше
+`wipeTombstoneTTL`, либо процесс с момента удаления перезапускался.
+Пользователь удаляет его ещё раз. Это видимо, а не тихо: сообщение снова
+появляется в переписке, и никуда ничего не утекает. Каждый способ этого не
+допустить стоит дороже, чем экономит: долговременный список удалённых id —
+ровно тот след, который wipe не сможет убрать; кадр «не шли больше этот id»
+отдаёт этот факт третьей стороне и требует версии протокола; а возврат
+временной границы ретраям отправителя возвращает баг, ради которого её и
+убрали, — получатель, ушедший в оффлайн на ночь, теряет сообщения, о
+которых никому не сказали.
+
 Миграция `0007_conversation_delete` убрала записи, которые вели прежние
 билды (строки `message_delete_intents` с `owed = 0`, `reaction_refusals` и
 висящие реакции `pending = 1`); тот же размен

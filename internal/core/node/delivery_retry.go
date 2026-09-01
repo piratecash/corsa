@@ -47,6 +47,7 @@ package node
 // ---------------------------------------------------------------------------
 
 import (
+	"sort"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -64,41 +65,72 @@ type DeliveryOutbox interface {
 	// UndeliveredOutgoing returns the sealed envelopes of locally-sent DMs
 	// whose delivery status is still "sent".
 	UndeliveredOutgoing() ([]OutboxEntry, error)
+	// SentMessageIDs returns the ids of DMs this node authored, whatever
+	// their status, so the solicited-receipt gate survives a restart. A
+	// message that reached `delivered` before the restart is not reseeded
+	// for retry — correctly — but its `seen` still has to be accepted when
+	// the recipient finally opens the conversation, and that can be at any
+	// remove: there is no age at which a genuine receipt stops being
+	// genuine, so this query has no time horizon.
+	//
+	// NEWEST FIRST, at most limit of them. The set they refill is a
+	// bounded LRU, so the caller decides how many it can hold and gets
+	// the ones most likely to still earn a receipt.
+	SentMessageIDs(limit int) ([]protocol.MessageID, error)
 }
 
 // OutboxEntry is one reseeded row: the envelope, plus the durable answer
 // to the only thing about its past the scheduler cannot re-derive.
 type OutboxEntry struct {
 	Envelope protocol.Envelope
-	// Emitted carries deliveryRetryEntry.Emitted across the restart. The
-	// outbox reports FALSE only when it can prove the envelope never
-	// reached the wire; anything it does not know is true, because the
-	// claim a deletion makes with false is "the peer cannot have this",
-	// and an unprovable one there leaves a delivered message with them.
+	// Emitted carries deliveryRetryEntry.Emitted across the restart: "may
+	// a writer have taken this frame?". The outbox reports FALSE only when
+	// it can prove the envelope never reached the wire; anything it does
+	// not know is true, because the claim a deletion makes with false is
+	// "the peer cannot have this", and an unprovable one there leaves a
+	// delivered message with them.
 	Emitted bool
+	// OnWire carries the OTHER question across the restart: "did a sink
+	// confirm it?". It reads FALSE unless the row says otherwise, because
+	// its reader is the sender's badge and the honest answer there when
+	// unsure is "queued".
+	//
+	// The two are separate because their safe answers point in opposite
+	// directions. Deriving one from the other is what made the flag
+	// non-monotone; see chatlog/emission.go.
+	OnWire bool
 }
 
-// DeliveryEmissionJournal is the optional durable record behind
-// deliveryRetryEntry.Emitted. Implemented by the desktop chatlog adapter;
-// without it the flag is memory-only and every restart answers "emitted".
+// DeliveryEmissionJournal is the durable record behind the two questions
+// this node asks about its own outgoing messages. Implemented by the
+// desktop chatlog adapter; without it both answers are memory-only.
 //
-// The two calls are not symmetric in urgency. A lost mark costs the peer
-// one control DM naming an id they cannot resolve; a stale mark costs the
-// user a deletion that is never asked for. So ClearNeverEmitted has to be
-// durable BEFORE the frame goes out, while MarkNeverEmitted may land after
-// the hold it describes.
+// Each call moves ONE bit in ONE direction, and that is the whole design —
+// see chatlog/emission.go for why a single non-monotone flag needed a
+// queue, a per-attempt stamp and a correction, and still had a race left.
+//
+//   - ClearNeverEmitted must be durable BEFORE the frame goes out: a crash
+//     in between has to read as "the peer may have it", or a deletion would
+//     skip a peer who is holding the message.
+//   - MarkOnWire may land whenever: a crash before it reads as "not yet
+//     sent", so the badge says queued and the engine sends again.
 type DeliveryEmissionJournal interface {
-	// MarkNeverEmitted records that the messages have not reached the wire.
-	MarkNeverEmitted(ids []protocol.MessageID) error
-	// ClearNeverEmitted withdraws that claim.
+	// ClearNeverEmitted records that a writer may have taken the frame.
+	// Written once; nothing ever puts the claim back.
 	ClearNeverEmitted(ids []protocol.MessageID) error
+	// MarkOnWire records that a sink confirmed the frame on the wire.
+	// Written once; nothing ever clears it.
+	MarkOnWire(ids []protocol.MessageID) error
 }
 
 // DeliveryFailureJournal is the optional durable journal for messages the
-// retry engine gave up on (TTL expiry / attempts cap). A journaled id is
-// excluded from UndeliveredOutgoing, so RegisterDeliveryOutbox does not
-// reseed it after a restart — the attempts cap stays durable. Implemented
-// by the desktop chatlog adapter.
+// retry engine gave up on, which now has exactly one cause: the message
+// outlived its own TTL. A journaled id is excluded from
+// UndeliveredOutgoing, so RegisterDeliveryOutbox does not resurrect an
+// expired message after a restart. Implemented by the desktop chatlog
+// adapter, whose query honours the journal only for rows that HAVE
+// expired — anything else in that table was put there by the attempt cap
+// this engine used to have.
 type DeliveryFailureJournal interface {
 	// MarkDeliveryFailed durably records that automatic retries for the
 	// message have been abandoned.
@@ -130,14 +162,84 @@ var deliveryRetrySchedule = []time.Duration{
 	11 * time.Minute,
 }
 
-// defaultDeliveryRetryMaxAttempts bounds how long a sender keeps retrying a
-// single message/receipt: 20 attempts ≈ 3.5 hours on the capped schedule.
-// Overridable via config.Node.DeliveryRetryMaxAttempts
-// (CORSA_DELIVERY_RETRY_MAX_ATTEMPTS).
+// defaultDeliveryRetryMaxAttempts bounds how many times a locally-sent
+// SEEN RECEIPT is re-sent before the node stops asking for its seen_ack:
+// 20 attempts ≈ 3.5 hours on the capped schedule. Overridable via
+// config.Node.DeliveryRetryMaxAttempts (CORSA_DELIVERY_RETRY_MAX_ATTEMPTS),
+// whose name still says "delivery" for compatibility although the only
+// thing it now bounds is that receipt retry.
+//
+// It does NOT bound a message. A message ends in exactly three ways —
+// the recipient confirms it, its author withdraws it, or its own TTL
+// expires — and running out of patience is not one of them. Any cap here
+// would be a silent "we gave up" the sender is never shown and cannot
+// undo, which is the failure this engine was built out of: a night of the
+// recipient being offline used to exhaust a budget without a single byte
+// going out, after which the id was journalled and the message could never
+// leave the machine, not even when they came back.
+//
+// What paces the re-sends instead is the backoff, capped at eleven
+// minutes, and deliveryRetryEntry.Attempts is now only its index — reset
+// whenever the recipient returns, so a message waiting for someone who
+// just came back is tried in thirty seconds rather than eleven minutes.
+// A receipt keeps its cap because the other side re-triggers it: every
+// arrival of the seen receipt makes the original sender answer again.
 const defaultDeliveryRetryMaxAttempts = 20
 
+// deliveryHoldPollInterval is how often a HELD message re-checks whether
+// its recipient became reachable. It is a safety net, not the mechanism:
+// delivery normally resumes the instant kickDeliveryRetriesForReachable
+// fires from the announce/connect drain. The check itself is a local
+// routing-table lookup, so the interval only has to be short enough that a
+// missed event costs a minute rather than an hour.
+//
+// It is deliberately NOT the exponential schedule: that schedule paces
+// re-emissions of a message the peer may already hold, and stretching a
+// hold to eleven minutes would make a returning recipient wait for a
+// timer that was measuring something else entirely.
+const deliveryHoldPollInterval = 60 * time.Second
+
+// deliveryQueueWindow is how long an emitted message keeps the queue slot
+// of its recipient — see planDueDeliveries for what the slot is for. Once
+// it passes, the next message goes out even though the first one is still
+// unconfirmed: a receipt that never arrives must cost that one message its
+// place in line, not freeze the whole conversation behind it.
+//
+// It has to stay BELOW deliveryRetrySchedule[0], and that is not a matter
+// of taste. A message that is due again re-takes the slot it just gave up,
+// so if the window were as long as the shortest retry interval the head of
+// a queue whose receipts are being lost would win every turn and nothing
+// behind it would ever leave. A test pins the inequality.
+//
+// The window is not what paces an ordinary drain: a recipient who is
+// actually there answers in milliseconds, and storeDeliveryReceipt pulls
+// the next message forward the moment they do, so the backlog leaves at
+// one message per tick. The window is the answer to silence.
+const deliveryQueueWindow = 20 * time.Second
+
+// A message whose recipient never comes back has NO age limit, and that
+// is a decision rather than an omission. The alternative was a horizon
+// after which the node quietly stopped trying — and quietly is the whole
+// problem with it: the sender is not told, cannot undo it, and a person
+// who returns from three weeks away would find the messages waiting for
+// them silently dead. Waiting costs nothing on the wire, because the
+// reachability gate emits nothing while they are unreachable.
+//
+// The three ways a delivery ends are therefore: the recipient confirms
+// it, the author withdraws it (CancelOutgoingDelivery), or its own TTL
+// expires — and ordinary DMs carry TTLSeconds=0, so the last one applies
+// only to messages explicitly sent to auto-delete.
+//
+// The cost is real and accepted: awaitingDelivered holds one entry per
+// undelivered message for as long as the process runs, and the startup
+// reseed scans the chatlog with no horizon (message_store_adapter.go).
+
 // deliveryRetryBackoff returns the wait before the attempt with the given
-// zero-based number.
+// ZERO-BASED number: backoff(0) is the wait before the first retry.
+//
+// Use deliveryRetryBackoffAfter when scheduling from a COUNT of attempts
+// already made — the two differ by one, and reading a count into this
+// function is what silently dropped the first step of the schedule.
 func deliveryRetryBackoff(attempt int) time.Duration {
 	if attempt >= len(deliveryRetrySchedule) {
 		return deliveryRetrySchedule[len(deliveryRetrySchedule)-1]
@@ -145,30 +247,111 @@ func deliveryRetryBackoff(attempt int) time.Duration {
 	return deliveryRetrySchedule[attempt]
 }
 
+// deliveryRetryBackoffAfter returns the wait that follows the given NUMBER
+// of attempts already made. After one attempt the wait is the first step of
+// the schedule, not the second.
+//
+// It exists because the obvious spelling was wrong for two years' worth of
+// reading: `backoff(entry.Attempts)` looks right and is off by one, so the
+// 30-second step never ran and the first retry of a lost message — or of a
+// lost receipt from a recipient who is right there — waited a minute.
+func deliveryRetryBackoffAfter(attempts int) time.Duration {
+	if attempts < 1 {
+		return deliveryRetryBackoff(0)
+	}
+	return deliveryRetryBackoff(attempts - 1)
+}
+
+// deliveryHoldReason says why an envelope is not known to be on the wire.
+//
+// The distinction that matters is between "we did not try" and "we tried
+// and nobody has said they took it". Both leave the message ours to
+// deliver; only the first is evidence about the recipient.
+type deliveryHoldReason uint8
+
+const (
+	// holdNone: a sink confirmed it accepted the frame. This is as far as
+	// certainty goes — an accepted frame can still be lost on the wire,
+	// which is what the delivery receipt is for.
+	holdNone deliveryHoldReason = iota
+	// holdUnreachable: no route and no connected subscriber, so nothing
+	// was attempted. This is the reachability gate, and it is the only
+	// reason that says anything about the recipient.
+	holdUnreachable
+	// holdUnconfirmed: the envelope was handed to sinks and none of them
+	// has reported accepting it. Some sinks answer immediately (a relay
+	// enqueue) and some answer from a background goroutine (a subscriber
+	// push), so this is the state between the attempt and its answer —
+	// and the state it stays in forever if the answer is "no".
+	holdUnconfirmed
+)
+
 // deliveryRetryEntry tracks one locally-sent DM awaiting its delivered/seen
 // receipt. Owned by s.deliveryMu.
 type deliveryRetryEntry struct {
 	Envelope      protocol.Envelope
 	Attempts      int
 	NextAttemptAt time.Time
-	// Held is true when the last send decision did NOT emit because the
-	// recipient was unreachable (reachability gate, CORSA_HOLD_DM_UNTIL_REACHABLE).
-	// Only Held entries are eligible for kickDeliveryRetriesForReachable —
-	// a message that was already emitted and is merely awaiting its receipt
-	// on the exponential schedule must NOT be pulled forward by an unrelated
-	// route refresh (that would burn attempts and produce early duplicates).
-	Held bool
-	// Emitted is monotone: it turns true the first time an attempt actually
-	// puts the envelope on the wire and never goes back. Held cannot answer
-	// "did the recipient ever have a chance to see this?" — it flips back to
-	// true whenever a later tick finds the peer unreachable, long after the
-	// message went out.
+	// Hold says why the last pass did not put this envelope on the wire,
+	// or holdNone when a sink confirmed that it did.
 	//
-	// A cancellation reads it to tell "this never left the node" (the peer
-	// has nothing, so asking them to delete it would announce a message
-	// they never received) from "we cannot know" (the default, which keeps
-	// the peer-side deletion scheduled).
+	// The two hold reasons are not interchangeable, which is why this is
+	// not a bool. "Nobody to send to" and "sent, nobody has confirmed
+	// taking it" both mean the message is still ours to deliver — so both
+	// are woken by kickDeliveryRetriesForReachable — but only the first is
+	// a recipient being away, and only a recipient coming BACK from being
+	// away may reset the backoff (resetBackoffOnReturn). Conflating them
+	// made every unconfirmed dispatch look like a returning peer.
+	Hold deliveryHoldReason
+	// Emitted is the CONSERVATIVE answer to "might the peer have this?".
+	// It turns true when the durable never-emitted claim is withdrawn —
+	// BEFORE the frame is written, because a crash in that gap has to read
+	// as "maybe they got it". A cancellation reads it, and an
+	// over-cautious yes there costs one control DM the peer answers
+	// not_found, while a wrong no leaves their copy in place with nothing
+	// to recall it.
 	Emitted bool
+	// LastEmittedAt is when a sink CONFIRMED taking this envelope. It is
+	// monotone — only confirmEnvelopeOnWire writes it, and only forward.
+	// It is a different question from Emitted, and the two must not be
+	// conflated in either direction:
+	//
+	//   - zero means no sink has ever taken it, which is what makes the
+	//     sender's badge say queued;
+	//   - non-zero and recent holds the recipient's queue slot while the
+	//     delivered receipt has had no time to come back yet.
+	//
+	// The durable never-emitted mark is keyed on this one AND on Emitted
+	// together — see syncEmissionMarks. Keying it on the current hold
+	// instead wrote the mark for messages that had gone out and whose
+	// recipient later left, which tells a deletion to skip a peer who is
+	// holding the message.
+	LastEmittedAt time.Time
+	// Stamped memoises that the DURABLE on-wire bit has landed for this
+	// message. Separate from Announced because the two debts are settled
+	// by different means and fail for different reasons: the stamp is one
+	// journal write that never has to be redone once it succeeds, while
+	// the announcement can be shed by a full subscriber inbox again and
+	// again. Keying the repair pass on Announced alone re-ran SQLite for
+	// every shed event, forever.
+	Stamped bool
+	// AnnounceAfter paces the RE-announcement of an event the bus shed.
+	// Without it a repair pass under sustained backpressure republished
+	// the same ids every two seconds into an inbox that was still full.
+	AnnounceAfter time.Time
+	// Announced records that the sender's own client has been told this
+	// message stopped being queued.
+	//
+	// It is not the same fact as LastEmittedAt, and the difference is the
+	// whole reason it exists: several sinks can carry one envelope, each
+	// confirming when it succeeds, and the sender is owed exactly one
+	// event. Announced is claimed under the delivery mutex so only one of
+	// them publishes — and given back when the bus sheds the event.
+	//
+	// Memory-only. After a restart the chatlog's never-emitted mark is the
+	// authority and the conversation is read fresh, so there is nothing an
+	// announcement could add.
+	Announced bool
 }
 
 // seenAckRetryEntry tracks one locally-sent seen receipt awaiting the
@@ -205,12 +388,20 @@ type seenAckRetryEntry struct {
 // withdrawn while this ran, or the durable claim that it never went out
 // could not be withdrawn. Both make the caller drop the frame; the retry
 // engine still owns the message and tries again.
-func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.MessageID) bool {
+// now is the instant the emission is being recorded at. Callers that are
+// already working from a scheduling clock (the retry tick) pass theirs, so
+// one emission is not stamped twice from two different sources of time.
+//
+// Returns whether the caller may write the frame. The queued → sent
+// announcement is NOT reported here: it belongs to whoever writes the
+// frame, AFTER writing it, and publishMessagesEmitted is idempotent so
+// that caller needs no permission slip from this one.
+func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.MessageID, now time.Time) bool {
 	if s.identity == nil || sender != s.identity.Address {
 		return true
 	}
-	withheld := s.noteOwnEnvelopesEmitted([]protocol.MessageID{messageID})
-	_, blocked := withheld[messageID]
+	outcome := s.noteOwnEnvelopesEmitted([]protocol.MessageID{messageID}, now)
+	_, blocked := outcome.Withheld[messageID]
 	return !blocked
 }
 
@@ -223,24 +414,43 @@ func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.Messa
 // The ids must be ours; the batch caller filters by sender before
 // calling, since it already walks the list.
 //
-// Returns the ids the caller must NOT write: withdrawn while this ran, or
-// still carrying a durable never-emitted claim the journal refused to
-// withdraw.
-func (s *Service) noteOwnEnvelopesEmitted(ids []protocol.MessageID) map[protocol.MessageID]struct{} {
+// The outcome names the ids the caller must NOT write. What it must
+// ANNOUNCE is not reported here — see emissionOutcome.
+func (s *Service) noteOwnEnvelopesEmitted(ids []protocol.MessageID, now time.Time) emissionOutcome {
 	if len(ids) == 0 {
-		return nil
+		return emissionOutcome{}
 	}
-	blocked, unproven := s.claimEmissionLocked(ids)
-	if len(unproven) == 0 {
-		return blocked
+	claim := s.claimEmissionLocked(ids, now)
+	if len(claim.Unproven) > 0 {
+		// Outside the delivery mutex (SQLite) and BEFORE the caller writes
+		// a frame: an id whose claim is still on disk has not been cleared
+		// to go out. Ids the clear could not reach join the withheld set —
+		// the caller drops them, their entry keeps its schedule, and the
+		// next retry tick tries the whole thing again.
+		claim = s.confirmEmission(claim, s.clearEmissionMarks(claim.Unproven), now)
 	}
-	// Outside the delivery mutex (SQLite) and BEFORE the caller writes a
-	// frame: an id whose claim is still on disk has not been cleared to go
-	// out. Ids the clear could not reach join the withheld set — the caller
-	// drops them, their entry keeps its schedule, and the next retry tick
-	// tries the whole thing again.
-	stranded := s.clearEmissionMarks(unproven)
-	return s.confirmEmission(unproven, stranded, blocked)
+	return claim
+}
+
+// emissionOutcome is what one pass of noteOwnEnvelopesEmitted worked out.
+//
+// It deliberately does NOT carry the queued → sent announcement, although
+// this is where the transition is detected. The two facts move in opposite
+// directions in time: the MARK has to land before the frame is written — a
+// crash in between must read as "the peer may have it", or a deletion
+// would skip them — while the ANNOUNCEMENT must follow it, because saying
+// "sent" for a frame that then failed to go out leaves the badge ahead of
+// the wire. So the announcement is left to whoever writes the frame, and
+// publishMessagesEmitted is idempotent so several sinks carrying the same
+// envelope produce one event.
+type emissionOutcome struct {
+	// Withheld are the ids the caller must NOT write: withdrawn while this
+	// ran, frozen by a wipe, or still carrying a durable never-emitted
+	// claim the journal refused to withdraw.
+	Withheld map[protocol.MessageID]struct{}
+	// Unproven are the ids whose durable never-emitted claim still has to
+	// come off the disk before their frame may go out.
+	Unproven []protocol.MessageID
 }
 
 // claimEmissionLocked is the first half of noteOwnEnvelopesEmitted: it
@@ -248,50 +458,53 @@ func (s *Service) noteOwnEnvelopesEmitted(ids []protocol.MessageID) map[protocol
 // shadowed, and separates the ids that still carry a durable never-emitted
 // claim from the ones already accounted for.
 //
-// The ordinary send has nothing unproven — the entry was born emitted — so
-// it takes this one lock hold and no disk write at all, which is what the
-// two-phase form exists to preserve.
-func (s *Service) claimEmissionLocked(ids []protocol.MessageID) (map[protocol.MessageID]struct{}, []protocol.MessageID) {
-	var blocked map[protocol.MessageID]struct{}
-	var unproven []protocol.MessageID
+// An id with no standing claim — transit traffic, or a message whose claim
+// was withdrawn by an earlier attempt — takes this one lock hold and no
+// disk write at all, which is what the two-phase form exists to preserve.
+// An outgoing message's FIRST emission does pay the withdrawal, because
+// its row was born carrying the claim.
+func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time) emissionOutcome {
+	var claim emissionOutcome
 	s.deliveryMu.Lock()
 	for _, id := range ids {
 		if _, withdrawn := s.cancelledDeliveries[id]; withdrawn {
-			blocked = withhold(blocked, id)
+			claim.Withheld = withhold(claim.Withheld, id)
 			continue
 		}
 		if s.deliveryFrozenLocked(id) {
 			// A wipe is deciding whether the peer may ever hold this
 			// message. Emitting now would answer the question behind its
 			// back — and it is deciding from a row it is about to delete.
-			blocked = withhold(blocked, id)
+			claim.Withheld = withhold(claim.Withheld, id)
 			continue
 		}
 		entry, awaiting := s.awaitingDelivered[id]
 		if !awaiting {
 			// No entry does NOT mean nothing to withdraw. The backlog
 			// replay reaches past the retry engine entirely, so it can
-			// emit a message whose entry was dropped when its attempts
-			// ran out — while the durable claim that it never went out
+			// emit a message whose entry was dropped when it was
+			// withdrawn — while the durable claim that it never went out
 			// still stands on the row. s.markedNeverEmitted remembers
 			// exactly those ids, so the ordinary case still costs no
 			// lookup and no write.
 			if _, marked := s.markedNeverEmitted[id]; marked {
-				unproven = append(unproven, id)
+				claim.Unproven = append(claim.Unproven, id)
 			}
 			continue
 		}
-		if entry.Emitted || s.emissionJournal == nil {
-			// Nothing on disk to withdraw: either this message has gone
-			// out before, or the flag has no durable half on this node.
-			entry.Emitted = true
-			entry.Held = false
+		if _, standing := s.markedNeverEmitted[id]; !standing || s.emissionJournal == nil {
+			// Nothing on disk to withdraw: this id carries no standing
+			// claim, or the flag has no durable half on this node. Asking
+			// the claim set rather than a per-entry flag is what keeps an
+			// ordinary send off the disk entirely — and keeps one id's
+			// write failure from stranding every other id in the batch.
+			markEntryEmitted(entry, now)
 			continue
 		}
-		unproven = append(unproven, id)
+		claim.Unproven = append(claim.Unproven, id)
 	}
 	s.deliveryMu.Unlock()
-	return blocked, unproven
+	return claim
 }
 
 // confirmEmission is the second half: the ids whose claim is now off the
@@ -300,29 +513,62 @@ func (s *Service) claimEmissionLocked(ids []protocol.MessageID) (map[protocol.Me
 // The withdrawal shadow is re-read here, not carried over from the first
 // hold: the durable write happened between the two, and a cancellation
 // landing in that gap has already told the user the message was recalled.
-func (s *Service) confirmEmission(unproven []protocol.MessageID, stranded, blocked map[protocol.MessageID]struct{}) map[protocol.MessageID]struct{} {
+func (s *Service) confirmEmission(claim emissionOutcome, stranded map[protocol.MessageID]struct{}, now time.Time) emissionOutcome {
 	s.deliveryMu.Lock()
-	for _, id := range unproven {
+	for _, id := range claim.Unproven {
 		if _, failed := stranded[id]; failed {
-			blocked = withhold(blocked, id)
+			claim.Withheld = withhold(claim.Withheld, id)
 			continue
 		}
 		if _, withdrawn := s.cancelledDeliveries[id]; withdrawn {
-			blocked = withhold(blocked, id)
+			claim.Withheld = withhold(claim.Withheld, id)
 			continue
 		}
 		if s.deliveryFrozenLocked(id) {
-			blocked = withhold(blocked, id)
+			claim.Withheld = withhold(claim.Withheld, id)
 			continue
 		}
 		if entry, awaiting := s.awaitingDelivered[id]; awaiting {
-			entry.Emitted = true
-			entry.Held = false
+			markEntryEmitted(entry, now)
 		}
 	}
 	s.deliveryMu.Unlock()
-	return blocked
+	return claim
 }
+
+// markEntryEmitted records that the envelope has reached the wire: it is no
+// longer held, its recipient may have it from now on, and it holds their
+// queue slot until the receipt arrives or deliveryQueueWindow passes.
+// Caller MUST hold s.deliveryMu.Lock.
+//
+// LastEmittedAt only ever moves FORWARD. Emissions are recorded from paths
+// that do not share a clock — the retry tick works from the instant its
+// pass began, the live push at store time and the auth-time backlog replay
+// from wall time when they get there — so the guard is what keeps a stamp
+// that was taken earlier from landing second and handing the queue slot
+// back while a frame is still on its way out.
+//
+// It says nothing about the queued → sent announcement: that is
+// deliberately NOT derived from Emitted, which turns true before the frame
+// is written and never goes back. See deliveryRetryEntry.Announced.
+//
+// Nor does it clear the hold. Emitted answers "might the peer have this?",
+// where an over-cautious yes is harmless; the hold answers "is this still
+// ours to deliver?", where an over-cautious no would strand the message.
+// Only confirmEnvelopeOnWire clears it.
+// It also leaves LastEmittedAt alone. That stamp is the CONFIRMATION —
+// the instant a sink said it took the frame — and it is what holds the
+// recipient's queue slot; writing it here, before the wire, would make
+// confirmEnvelopeOnWire see its own attempt as already confirmed and skip
+// it, so a message that really did go out would never be charged, never
+// leave the hold and never be announced.
+func markEntryEmitted(entry *deliveryRetryEntry, _ time.Time) {
+	entry.Emitted = true
+}
+
+// confirmed reports whether any sink has ever taken this envelope. Caller
+// MUST hold s.deliveryMu.
+func (e *deliveryRetryEntry) confirmed() bool { return !e.LastEmittedAt.IsZero() }
 
 func withhold(set map[protocol.MessageID]struct{}, id protocol.MessageID) map[protocol.MessageID]struct{} {
 	if set == nil {
@@ -332,66 +578,71 @@ func withhold(set map[protocol.MessageID]struct{}, id protocol.MessageID) map[pr
 	return set
 }
 
-// syncEmissionMarks records the durable claim for whichever of the ids the
-// delivery domain still says has never reached the wire. It writes in ONE
-// direction only — the claim is never withdrawn here, that belongs to
-// clearEmissionMarks, which reports its failures instead of swallowing
-// them.
+// markDeliveryOnWire stamps the durable "a sink confirmed this" bit.
 //
-// The ordering that keeps a mark from landing on top of a clear is the
-// re-read: s.emissionMu is held across decide-and-write, and the decision
-// reads the delivery domain, so an id another goroutine has just emitted
-// is seen as emitted here and skipped rather than re-marked.
+// Monotone and one-directional: nothing ever clears it, so this needs no
+// ordering against anything, no queue and no correction. A crash before it
+// lands reads as "not yet sent" — the badge says queued and the engine
+// sends again, which the recipient dedupes silently.
 //
-// s.emissionMu is NOT one of the seven domain mutexes: it is taken OUTSIDE
-// all of them, never while one is held, and is the only lock held across
-// the journal's disk I/O. See docs/locking.md.
+// It BLOCKS on the journal, and its callers are the ones that decide where
+// to run it. confirmEnvelopeOnWire hands it to a background goroutine —
+// one of its own callers is the session's writer loop, immediately after
+// NetCore accepted a frame, and the journal writes through SQLite, where
+// contention can park a statement for the whole busy timeout. Holding that
+// loop would stop the peer's other outbound frames for seconds, to land a
+// fact that needs no ordering with anything. The sole reason a write ever
+// had to be synchronous on this path was the flag that could be reversed,
+// and that flag is gone.
 //
-// An id with no entry left counts as emitted: the entry is deleted when
-// the receipt arrives, and a row that has been delivered is never reseeded.
-func (s *Service) syncEmissionMarks(ids []protocol.MessageID) {
-	if len(ids) == 0 || s.emissionJournal == nil {
-		return
+// It stays synchronous HERE so a caller can sequence something after it —
+// the queued → sent event does exactly that, because an event that
+// overtakes the disk lets a reload put the badge back.
+//
+// It goes through the emission lane as BOOKKEEPING, which means two things
+// a caller has to respect. It never runs ahead of a pre-wire withdrawal,
+// because the withdrawal is what a message the user is waiting on needs and
+// this is a record of one already gone. And the lane may turn it away when
+// enough stamps are already waiting — a reconnect confirming a whole
+// conversation is when that happens — in which case NOTHING is written and
+// the answer is the same false as a failed write.
+//
+// Returns whether the row now says so. A caller that is about to TELL the
+// sender "sent" must not do it on a false: the badge would move while the
+// disk still reads queued, and the next reload would put it back with no
+// further event coming, because the announcement is claimed once. Every
+// false here is owed to repairLocalDeliveryRecord, which re-derives the
+// debt from state and needs no hand-off.
+func (s *Service) markDeliveryOnWire(ids ...protocol.MessageID) bool {
+	if len(ids) == 0 {
+		return false
 	}
-	s.emissionMu.Lock()
-	defer s.emissionMu.Unlock()
-
-	never := make([]protocol.MessageID, 0, len(ids))
-	s.deliveryMu.RLock()
-	for _, id := range ids {
-		if entry, awaiting := s.awaitingDelivered[id]; awaiting && !entry.Emitted {
-			never = append(never, id)
-		}
+	if s.emissionJournal == nil {
+		// No durable half on this node: memory is the whole truth, so
+		// there is nothing that could disagree with the badge later.
+		return true
 	}
-	s.deliveryMu.RUnlock()
-	if len(never) == 0 {
-		return
+	admitted, err := s.emissionLane.runBookkeeping(ids, func(chunk []protocol.MessageID) error {
+		return s.emissionJournal.MarkOnWire(chunk)
+	})
+	if !admitted {
+		// Not a failure and not a loss: the lane is full of stamps and
+		// this one is still owed by state, which the repair pass reads.
+		log.Debug().Int("count", len(ids)).
+			Msg("emission_journal_stamp_deferred_lane_full")
+		return false
 	}
-	if err := s.emissionJournal.MarkNeverEmitted(never); err != nil {
-		// The harmless direction: without the mark the message reads as
-		// possibly-sent, so a later deletion asks the peer rather than
-		// skipping them.
-		log.Warn().Err(err).Int("count", len(never)).
-			Msg("emission_journal_mark_failed")
-		return
+	if err != nil {
+		// The row keeps reading as not-yet-sent, so the badge stays on
+		// queued until the next confirmation or the recipient's receipt
+		// moves it past sent anyway. Staying at queued is the honest
+		// answer here — the alternative is saying "sent" and taking it
+		// back on the next reload.
+		log.Warn().Err(err).Int("count", len(ids)).
+			Msg("emission_journal_mark_on_wire_failed")
+		return false
 	}
-	s.rememberMarkedNeverEmitted(never)
-}
-
-// rememberMarkedNeverEmitted / forgetMarkedNeverEmitted track which ids
-// this process has a durable claim standing for, so an emission can
-// withdraw it even after the retry entry is gone. Memory-only and bounded
-// by the number of withheld messages: after a restart the reseed rebuilds
-// the entries themselves from the same marks.
-func (s *Service) rememberMarkedNeverEmitted(ids []protocol.MessageID) {
-	s.deliveryMu.Lock()
-	if s.markedNeverEmitted == nil {
-		s.markedNeverEmitted = make(map[protocol.MessageID]struct{}, len(ids))
-	}
-	for _, id := range ids {
-		s.markedNeverEmitted[id] = struct{}{}
-	}
-	s.deliveryMu.Unlock()
+	return true
 }
 
 func (s *Service) forgetMarkedNeverEmitted(ids []protocol.MessageID) {
@@ -400,6 +651,16 @@ func (s *Service) forgetMarkedNeverEmitted(ids []protocol.MessageID) {
 		delete(s.markedNeverEmitted, id)
 	}
 	s.deliveryMu.Unlock()
+}
+
+// clearClaimsLocked drops the standing claims for ids whose ROW is being
+// destroyed, so nothing is left in the set that no later emission could
+// ever consume. Memory only — the mark goes with the row.
+// Caller MUST hold s.deliveryMu.Lock.
+func (s *Service) clearClaimsLocked(ids map[protocol.MessageID]struct{}) {
+	for id := range ids {
+		delete(s.markedNeverEmitted, id)
+	}
 }
 
 // clearEmissionMarks withdraws the durable claim for the ids and reports
@@ -415,10 +676,15 @@ func (s *Service) clearEmissionMarks(ids []protocol.MessageID) map[protocol.Mess
 	if len(ids) == 0 || s.emissionJournal == nil {
 		return nil
 	}
-	s.emissionMu.Lock()
-	defer s.emissionMu.Unlock()
-
-	if err := s.emissionJournal.ClearNeverEmitted(ids); err == nil {
+	// PRE-WIRE, so it is on the critical path of a message the user is
+	// waiting to send — including the first one to a recipient who has
+	// just come back after a night offline, which is also when the lane
+	// is busiest with stamps for the conversation being replayed. It goes
+	// in as URGENT: it waits for at most the statement already running
+	// and never for the bookkeeping queued behind it. See emission_lane.go.
+	if err := s.emissionLane.runPreWire(ids, func(batched []protocol.MessageID) error {
+		return s.emissionJournal.ClearNeverEmitted(batched)
+	}); err == nil {
 		s.forgetMarkedNeverEmitted(ids)
 		return nil
 	} else {
@@ -476,19 +742,94 @@ func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, no
 	if _, exists := s.awaitingDelivered[envelope.ID]; exists {
 		return
 	}
-	s.awaitingDelivered[envelope.ID] = &deliveryRetryEntry{
-		Envelope:      envelope,
-		NextAttemptAt: now.Add(deliveryRetryBackoff(0)),
-		Held:          held,
-		// A send that was not withheld went out on the caller's own
-		// gossip/relay pass. Anything else counts as emitted too: the
-		// conservative answer to "might the peer have it?" is yes, and
-		// only an explicit hold proves otherwise. A held entry can still
-		// be marked later by noteOwnEnvelopeEmitted — the backlog replay
-		// reaches past this scheduler entirely. The startup reseed, which
-		// has a durable answer, overwrites this one right after the call.
-		Emitted: !held,
+	// A HELD entry is due IMMEDIATELY. The backoff schedule times a wait
+	// for a RECEIPT, and a message that never reached the wire has no
+	// receipt coming — starting it at thirty seconds only meant that a
+	// reachability kick landing between the caller's route check and this
+	// registration found nothing to wake, and the message then sat out a
+	// timer that was measuring the wrong thing.
+	nextAttempt := now
+	if !held {
+		nextAttempt = now.Add(deliveryRetryBackoff(0))
 	}
+	entry := &deliveryRetryEntry{
+		Envelope:      envelope,
+		NextAttemptAt: nextAttempt,
+		Hold:          holdReasonFor(held),
+		// The registration itself never means "on the wire": a send that
+		// was not withheld has been HANDED to the sinks, and they confirm
+		// for themselves.
+		// EVERY message this node authors is shown to its author as
+		// queued until a sink confirms it — the reply, the message.new
+		// event and the row's own durable mark all say so — so every one
+		// of them is owed the transition.
+		Announced: false,
+	}
+	// The row this entry describes is BORN carrying the durable
+	// never-emitted claim (message_store_adapter writes it in the same
+	// insert), so this process has a standing claim to withdraw the first
+	// time a sink takes the frame. Recording it here is what lets
+	// claimEmissionLocked find it: without this the withdrawal was skipped
+	// for every ordinary message, and a delivered message kept reading as
+	// queued for good.
+	//
+	// The one caller for which "born marked" is NOT true is the startup
+	// reseed, whose rows may have been emitted before the restart. It reads
+	// the answer off the outbox and removes the id again — this function
+	// cannot know, and guessing conservatively here is what keeps the
+	// ordinary path honest.
+	if s.emissionJournal != nil {
+		if s.markedNeverEmitted == nil {
+			s.markedNeverEmitted = make(map[protocol.MessageID]struct{}, 1)
+		}
+		s.markedNeverEmitted[envelope.ID] = struct{}{}
+	}
+	// LastEmittedAt is deliberately left ZERO even for a send that is
+	// going out right now. It is the CONFIRMATION stamp — the instant a
+	// sink said it took the frame — and the caller has only just handed
+	// the envelope over. Stamping it here would claim the recipient's
+	// queue slot for a frame no writer may ever accept, and would make
+	// confirmEnvelopeOnWire mistake this attempt for one already answered.
+	s.awaitingDelivered[envelope.ID] = entry
+}
+
+// holdReasonFor turns the caller's "was this send withheld?" into the
+// reason a new entry starts with. A withheld send is the reachability
+// gate; anything else has just been handed to the sinks and is waiting to
+// hear from them.
+func holdReasonFor(withheld bool) deliveryHoldReason {
+	if withheld {
+		return holdUnreachable
+	}
+	return holdUnconfirmed
+}
+
+// emissionStampNotInTheFuture repairs an emission stamp this node cannot
+// have made yet.
+//
+// It clamps to one whole window BEFORE now, not to now. Clamping to now
+// would say "emitted this instant", which holds the recipient's queue slot
+// for the next twenty seconds — turning a clock correction into a stall on
+// every restart and breaking the invariant that a reseed claims no slot it
+// did not have. The truthful reading is the opposite: the send happened at
+// some unknown moment in the past, and any moment far enough back is
+// right for every reader of this field.
+func emissionStampNotInTheFuture(stamp, now time.Time) time.Time {
+	if stamp.After(now) {
+		return now.Add(-deliveryQueueWindow)
+	}
+	return stamp
+}
+
+// deliveryQueueOrder reports whether a sorts before b in a recipient's
+// delivery queue. Messages leave in the order they were written; the id
+// breaks ties, because two messages of the same second must still have ONE
+// order and Go map iteration does not provide one.
+func deliveryQueueOrder(a, b *deliveryRetryEntry) bool {
+	if !a.Envelope.CreatedAt.Equal(b.Envelope.CreatedAt) {
+		return a.Envelope.CreatedAt.Before(b.Envelope.CreatedAt)
+	}
+	return a.Envelope.ID < b.Envelope.ID
 }
 
 // registerAwaitingSeenAckLocked schedules the locally-sent seen receipt for
@@ -499,7 +840,20 @@ func (s *Service) registerAwaitingSeenAckLocked(receipt protocol.DeliveryReceipt
 		return
 	}
 	s.awaitingSeenAck[receipt.MessageID] = &seenAckRetryEntry{
-		Receipt:       receipt,
+		Receipt: receipt,
+		// Attempts counts RE-SENDS, and starts at zero: the send this
+		// registration accompanies has not happened yet — distributeReceipt
+		// runs after the lock stack unwinds — and the budget in
+		// CORSA_DELIVERY_RETRY_MAX_ATTEMPTS is a number of re-sends, so
+		// charging the original would spend one of them on a send that
+		// may not have reached any transport at all.
+		//
+		// This is why the two retry machines schedule differently, and
+		// why the message path's deliveryRetryBackoffAfter does NOT
+		// belong here. A message is SENT at registration, so its first
+		// wait follows an attempt already made. A seen receipt is
+		// registered with its first wait ahead of it: the wait set here
+		// IS the first step, and each retry then takes the next.
 		NextAttemptAt: now.Add(deliveryRetryBackoff(0)),
 	}
 }
@@ -530,20 +884,47 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 		s.seenAckJournal = seenJournal
 	}
 
-	// The HEAVY startup scan/reseed (UndeliveredOutgoing + UnconfirmedSeen) is
-	// skipped for DM opt-out (relay-only) node mode: it holds no reseedable DM
-	// backlog, so spinning up the wake/reseed machinery is pure waste. Reached
-	// via the common DesktopClient/SDK composition, not only the standalone
-	// corsa-node that never registers an outbox. Ongoing in-session sends, if
-	// any, still populate awaitingDelivered directly via storeIncomingMessage
-	// and terminalize through the durable journals registered above.
-	if s.cfg.DisableDirectMessages {
-		log.Debug().Msg("delivery_retry_outbox_scan_skipped_dm_optout")
-		return
-	}
-
+	// The startup scan/reseed (UndeliveredOutgoing + UnconfirmedSeen) runs
+	// for every node that registers an outbox, DM opt-out included. Opting
+	// out refuses INCOMING direct messages; it says nothing about the
+	// node's own outgoing ones, and the rows waiting in the outbox after a
+	// restart are exactly those. Skipping the scan there stranded them:
+	// nothing else re-arms a retry for a message whose process died.
 	now := time.Now().UTC()
 
+	// The solicited-receipt gate first: a `delivered` message is NOT
+	// reseeded for retry, and after a restart nothing else remembers that
+	// we sent it — so its `seen`, which arrives whenever the recipient
+	// opens the conversation, would be dropped as unsolicited and their
+	// seen retry would never be acked.
+	if ids, err := outbox.SentMessageIDs(maxSentDMIDs); err != nil {
+		log.Error().Err(err).Msg("delivery_retry_sent_ids_reseed_failed")
+	} else {
+		// OLDEST FIRST into the LRU, from a list that arrives newest
+		// first. Asking for exactly the LRU's capacity already means the
+		// reseed alone cannot overflow it, so this is defence for the
+		// case where the set is not empty: inserting in arrival order
+		// would then make the NEWEST ids the first evicted, leaving
+		// exactly the messages whose receipts are still coming outside
+		// the gate. There is no test for it — through the real interface
+		// the limit makes the overflow unreachable, and a test that
+		// cannot fail is worse than none.
+		for i := len(ids) - 1; i >= 0; i-- {
+			s.sentDMIDs.Add(string(ids[i]))
+		}
+		if len(ids) > 0 {
+			log.Debug().Int("count", len(ids)).Msg("delivery_retry_sent_ids_reseeded")
+		}
+	}
+
+	// No opt-out shortcut here, and that is deliberate. DM opt-out refuses
+	// INCOMING messages; the node still authors its own, and those are
+	// exactly what this scan restores. Skipping it left such a node
+	// retrying an outgoing DM until the process stopped and then losing
+	// the retry entirely at the next start — the message stayed in the
+	// chatlog as `sent` and nothing would ever put it on the wire again,
+	// online trigger included. A node that really has no outgoing backlog
+	// pays one query that returns no rows.
 	entries, err := outbox.UndeliveredOutgoing()
 	if err != nil {
 		log.Error().Err(err).Msg("delivery_retry_outbox_reseed_failed")
@@ -561,17 +942,60 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 				continue
 			}
 			e.NextAttemptAt = now
-			// Emitted comes from the OUTBOX, not from held: held answers
-			// "should the reachability kick wake this", which after a
-			// restart is no, while Emitted answers "can the peer possibly
-			// have it", which the outbox is the only surviving witness of.
-			// Deriving one from the other is what made every restart
-			// announce ids for messages that never left the machine.
 			e.Emitted = row.Emitted
+			// The two bits are read SEPARATELY, because they answer
+			// different questions with opposite safe defaults.
+			//
+			// Emitted ("may a writer have taken this?") comes from the
+			// never-emitted claim and decides what a deletion may skip.
+			// OnWire ("did a sink confirm it?") comes from its own stamp
+			// and decides what the sender sees. Deriving the second from
+			// the first is what used to make the whole flag non-monotone.
+			if row.OnWire {
+				// A confirmed row is stamped with the message's own
+				// creation time: the real instant is unknowable after a
+				// restart, and any past one is right for every reader —
+				// far outside the queue window, so it claims no slot.
+				//
+				// PAST is the load-bearing word. CreatedAt is a wall
+				// clock reading kept across restarts, and a clock moved
+				// backwards leaves rows stamped in the future; the queue
+				// window then reads a negative age as "emitted moments
+				// ago" and holds the recipient's slot until that date
+				// arrives — hours or days, not twenty seconds.
+				e.LastEmittedAt = emissionStampNotInTheFuture(row.Envelope.CreatedAt, now)
+			} else {
+				e.LastEmittedAt = time.Time{}
+			}
+			if row.Emitted {
+				// Registration assumes the row was BORN carrying the
+				// claim, which is true of every message this node
+				// authors — but this row's claim has since been
+				// withdrawn, and the outbox is the witness for that.
+				// Leaving the id in the set would send the first retry to
+				// SQLite to withdraw a claim that is not there, and —
+				// worse — would let a database that is briefly
+				// unavailable withhold the frame, because a failed
+				// withdrawal withholds the send by contract. A returning
+				// recipient would then wait on a write with nothing to
+				// write.
+				delete(s.markedNeverEmitted, row.Envelope.ID)
+			}
+			// The conversation is read fresh after a restart, so what the
+			// sender is looking at comes from the row — and from the bit
+			// that answers THEIR question. A row with no on-wire stamp
+			// reads as queued and is still owed the transition; a stamped
+			// one already reads as sent.
+			e.Announced = row.OnWire
+			// The row already carries the stamp, so the repair pass has
+			// no durable debt for it — only, at most, an announcement.
+			e.Stamped = row.OnWire
 		}
 		count := len(s.awaitingDelivered)
+		standing := len(s.markedNeverEmitted)
 		s.deliveryMu.Unlock()
-		log.Info().Int("reseeded", len(entries)).Int("awaiting_delivered", count).Msg("delivery_retry_outbox_reseeded")
+		log.Info().Int("reseeded", len(entries)).Int("awaiting_delivered", count).
+			Int("standing_claims", standing).Msg("delivery_retry_outbox_reseeded")
 	}
 
 	if !hasSeenJournal {
@@ -594,93 +1018,46 @@ func (s *Service) RegisterDeliveryOutbox(outbox DeliveryOutbox) {
 	log.Info().Int("reseeded", len(receipts)).Int("awaiting_seen_ack", seenCount).Msg("seen_ack_journal_reseeded")
 }
 
-// retryDueDeliveries re-sends every awaiting entry whose NextAttemptAt has
-// passed. Called from bootstrapLoop on its 2s tick; the schedule inside the
-// entries provides the real pacing. The due snapshot (and the schedule
-// bump) happens under s.deliveryMu; the sends run after release.
+// abandonedDelivery is a message the tick gave up on, carried out of the
+// mutex so failDelivery can run with every domain lock released.
+type abandonedDelivery struct {
+	envelope protocol.Envelope
+	status   string
+	reason   string
+}
+
+// dueCandidate is the one message of a recipient's queue that this tick may
+// act on. The Held decision is taken after the lock-free reachability check
+// and written atomically with the schedule, so no kick observes a
+// half-updated entry.
+type dueCandidate struct {
+	id  protocol.MessageID
+	env protocol.Envelope
+}
+
+// dueDispatch is one envelope the tick may put on the wire, plus the
+// schedule it had before the pass parked it. Arming moves the schedule to
+// the poll interval so an unanswered dispatch does not re-fire every two
+// seconds — but a message a WIPE froze in the meantime never reached any
+// sink, and must come back from the thaw due exactly when it was, not a
+// poll interval later for a decision its recipient had no part in.
+type dueDispatch struct {
+	env      protocol.Envelope
+	parkedAt time.Time
+}
+
+// retryDueDeliveries advances the sender-owned delivery queues by one step.
+// Called from bootstrapLoop on its 2s tick; the schedule inside the entries
+// provides the real pacing. Snapshots and schedule writes happen under
+// s.deliveryMu; the sends run after release.
 func (s *Service) retryDueDeliveries(now time.Time) {
-	maxAttempts := s.deliveryRetryMaxAttempts()
+	abandoned, candidates := s.planDueDeliveries(now)
+	dueReceipts := s.planDueSeenAcks(now)
 
-	// dueDispatch is one envelope the tick may put on the wire. Whether it
-	// actually goes out is decided at the last boundary, not here: see the
-	// claim in the dispatch loop — which is why the schedule this pass
-	// SPENT travels with it, so an attempt the wire never saw can be
-	// given back.
-	type dueDispatch struct {
-		env   protocol.Envelope
-		spent deliveryAttemptCharge
-	}
-	var dueMessages []dueDispatch
-	var dueReceipts []protocol.DeliveryReceipt
-	type abandonedDelivery struct {
-		envelope protocol.Envelope
-		status   string
-		reason   string
-	}
-	var abandoned []abandonedDelivery
-	// dueCandidate is a message whose NextAttemptAt has passed and which is
-	// neither expired nor over the cap. The attempt bump and the Held
-	// decision are deferred to Phase 3 (after the lock-free reachability
-	// check) so Held is written atomically with the schedule — no kick can
-	// observe a half-updated entry.
-	type dueCandidate struct {
-		id  protocol.MessageID
-		env protocol.Envelope
-	}
-	var candidates []dueCandidate
-
-	log.Trace().Str("site", "retryDueDeliveries").Str("phase", "lock_wait").Msg("delivery_mu_writer")
-	s.deliveryMu.Lock()
-	log.Trace().Str("site", "retryDueDeliveries").Str("phase", "lock_held").Msg("delivery_mu_writer")
-	for id, entry := range s.awaitingDelivered {
-		if entry.NextAttemptAt.After(now) {
-			continue
-		}
-		if s.deliveryFrozenLocked(id) {
-			// Held by a wipe. Not even the attempt counter moves: the
-			// freeze is a pause, and charging it would abandon the
-			// delivery for a reason that has nothing to do with the peer.
-			continue
-		}
-		// TTL bounds the delivery lifetime (docs/protocol/messaging.md) —
-		// the retry engine honours it the same way the relay retry loop
-		// does, instead of re-emitting an envelope receivers would reject
-		// as expired.
-		if s.messageDeliveryExpired(entry.Envelope.CreatedAt, entry.Envelope.TTLSeconds) {
-			delete(s.awaitingDelivered, id)
-			abandoned = append(abandoned, abandonedDelivery{entry.Envelope, "expired", "message delivery expired"})
-			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).Msg("delivery_retry_expired_ttl")
-			continue
-		}
-		if entry.Attempts >= maxAttempts {
-			delete(s.awaitingDelivered, id)
-			abandoned = append(abandoned, abandonedDelivery{entry.Envelope, "failed", "delivery retries exhausted"})
-			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).Int("attempts", entry.Attempts).Msg("delivery_retry_exhausted")
-			continue
-		}
-		// Defer the bump + Held decision to Phase 3 (after reachability).
-		candidates = append(candidates, dueCandidate{id, entry.Envelope})
-	}
-	for id, entry := range s.awaitingSeenAck {
-		if entry.NextAttemptAt.After(now) {
-			continue
-		}
-		if entry.Attempts >= maxAttempts {
-			delete(s.awaitingSeenAck, id)
-			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Receipt.Recipient).Int("attempts", entry.Attempts).Msg("seen_ack_retry_exhausted")
-			continue
-		}
-		entry.Attempts++
-		entry.NextAttemptAt = now.Add(deliveryRetryBackoff(entry.Attempts))
-		dueReceipts = append(dueReceipts, entry.Receipt)
-	}
-	s.deliveryMu.Unlock()
-	log.Trace().Str("site", "retryDueDeliveries").Str("phase", "lock_released").Msg("delivery_mu_writer")
-
-	// Phase 2 (lock-free): reachability per candidate. router.Route reads
-	// routing/peer state under its own locks, so it must NOT run under
-	// deliveryMu (canonical peerMu → deliveryMu order). With the gate off
-	// every candidate is "reachable" — the legacy unconditional send.
+	// Reachability runs LOCK-FREE: router.Route reads routing/peer state
+	// under its own locks, and taking those under deliveryMu would invert
+	// the canonical peerMu → deliveryMu order. With the gate off every
+	// candidate is "reachable" — the legacy unconditional send.
 	reachable := make(map[protocol.MessageID]bool, len(candidates))
 	for _, c := range candidates {
 		if !s.cfg.HoldDMUntilReachable {
@@ -691,31 +1068,7 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 		reachable[c.id] = d.RelayNextHop != nil || len(d.PushSubscribers) > 0
 	}
 
-	// Phase 3 (deliveryMu): apply the attempt bump, reschedule, and set Held
-	// ATOMICALLY with the schedule. Reachable → emit on this tick (collected
-	// into dueMessages); unreachable → Held=true (re-armed later by
-	// kickDeliveryRetriesForReachable the moment a route/connection appears).
-	// Writing Held under the same lock that bumps the schedule closes the
-	// false→true lost-wakeup window a post-dispatch write left open.
-	if len(candidates) > 0 {
-		s.deliveryMu.Lock()
-		for _, c := range candidates {
-			entry, ok := s.awaitingDelivered[c.id]
-			if !ok {
-				continue // delivered/removed in the unlocked gap
-			}
-			spent := deliveryAttemptCharge{Attempts: entry.Attempts, NextAttemptAt: entry.NextAttemptAt}
-			entry.Attempts++
-			entry.NextAttemptAt = now.Add(deliveryRetryBackoff(entry.Attempts))
-			if reachable[c.id] {
-				entry.Held = false
-				dueMessages = append(dueMessages, dueDispatch{env: entry.Envelope, spent: spent})
-			} else {
-				entry.Held = true
-			}
-		}
-		s.deliveryMu.Unlock()
-	}
+	dueMessages := s.armDueDeliveries(candidates, reachable, now)
 
 	for _, entry := range abandoned {
 		s.failDelivery(entry.envelope, entry.status, entry.reason)
@@ -728,77 +1081,799 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 	// sleep would pin the scheduler instead. No mutex is held here.
 	s.runRetryDispatchBarrier()
 	for _, due := range dueMessages {
-		envelope := due.env
-		// The candidate was chosen three phases ago, and a deletion can
-		// have frozen it since — the wipe classifies against the delivery
-		// domain and then destroys the row, so an envelope that goes out
-		// after that classification stays with the peer with nothing left
-		// to recall it.
-		//
-		// So the claim is taken HERE, immediately before the wire, in the
-		// same lock hold that reads the freeze and the withdrawal shadow.
-		// It also withdraws the durable never-emitted claim, and refuses
-		// the attempt when that write fails: sending anyway would leave
-		// the disk saying the message never left while the peer holds it.
-		//
-		// Claiming BEFORE the attempt rather than after costs one thing,
-		// deliberately: a dispatch that then fails to emit (its route
-		// vanished in the microsecond gap) leaves the entry counted as
-		// possibly-out, so a later deletion asks the peer about an id
-		// they may not have. That is the harmless direction, and it is
-		// the price of the freeze meaning anything at all.
-		log.Info().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).Msg("delivery_retry_resend")
-		if !s.noteOwnEnvelopeEmitted(envelope.Sender, envelope.ID) {
-			// Frozen by a deletion, withdrawn, or its durable claim could
-			// not be withdrawn. Nothing reached the wire, so the attempt
-			// this tick charged is GIVEN BACK: a freeze is this node
-			// pausing itself, and a message that comes back from a thaw
-			// carrying a spent attempt and an 11-minute backoff can be
-			// abandoned by the very next tick without the network having
-			// been used once.
-			//
-			// A dispatch that runs and finds no route is the opposite
-			// case and keeps its charge: an unreachable recipient is
-			// exactly what the attempt budget measures, which is why
-			// Phase 3 charges the unreachable candidates too.
-			s.refundDeliveryAttempt(envelope.ID, due.spent)
-			continue
-		}
-		if s.dispatchEnvelopeRetry(envelope) {
-			continue
-		}
-		// The attempt did not go out after all. Held so a reachability
-		// kick can wake it; Emitted stays true, per the trade above.
-		s.holdDeliveryRetry(envelope.ID)
+		s.emitDueDelivery(due, now)
 	}
+	// Local bookkeeping the wire already earned: a stamp the journal
+	// refused, an announcement or a receipt update the bus shed. Redone
+	// as BOOKKEEPING rather than by re-sending the frame.
+	//
+	// AFTER the dispatch above, not before. The emission lane already
+	// keeps this pass from getting ahead of a pre-wire clear, so this is
+	// no longer the mechanism — but starting it second still costs
+	// nothing and states the intent where a reader meets it.
+	s.startDeliveryRecordRepair(now)
 	for _, receipt := range dueReceipts {
 		log.Info().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("seen_receipt_retry_resend")
 		s.distributeReceipt(receipt)
 	}
 }
 
-// deliveryAttemptCharge is what one retry pass spent on an entry before
-// the wire had its say.
-type deliveryAttemptCharge struct {
-	Attempts      int
-	NextAttemptAt time.Time
+// planDueDeliveries sweeps the awaiting set under s.deliveryMu and returns
+// what this tick may act on: the deliveries to abandon, and AT MOST ONE
+// candidate per recipient.
+//
+// One per recipient is the queue discipline the whole file exists to serve.
+// A recipient who was away holds a backlog, and that backlog is a
+// conversation: it has to arrive in the order it was written. Emitting the
+// whole set at once cannot do that — the sends are handed to background
+// goroutines, so the order they reach the wire is the scheduler's, not
+// ours — and neither can iterating a Go map, whose order is randomised per
+// process. So the queue advances by one message, oldest first, and the next
+// one leaves when the recipient confirms the current one (storeDeliveryReceipt
+// promotes it) or when deliveryQueueWindow says the confirmation is not
+// coming.
+func (s *Service) planDueDeliveries(now time.Time) ([]abandonedDelivery, []dueCandidate) {
+	var abandoned []abandonedDelivery
+	queues := make(map[string][]*deliveryRetryEntry)
+
+	log.Trace().Str("site", "planDueDeliveries").Str("phase", "lock_wait").Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "planDueDeliveries").Str("phase", "lock_held").Msg("delivery_mu_writer")
+	for id, entry := range s.awaitingDelivered {
+		if terminal, ok := s.classifyAbandonedLocked(id, entry, now); ok {
+			delete(s.awaitingDelivered, id)
+			abandoned = append(abandoned, terminal)
+			continue
+		}
+		queues[entry.Envelope.Recipient] = append(queues[entry.Envelope.Recipient], entry)
+	}
+	candidates := s.selectQueueHeadsLocked(queues, now)
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "planDueDeliveries").Str("phase", "lock_released").Msg("delivery_mu_writer")
+	return abandoned, candidates
 }
 
-// refundDeliveryAttempt gives back a charge whose frame never went out and
-// holds the entry so a reachability kick can wake it.
+// classifyAbandonedLocked reports the terminal verdict for one awaiting
+// entry, if it has one. There is exactly one — its own TTL. Caller MUST
+// hold s.deliveryMu.Lock.
+func (s *Service) classifyAbandonedLocked(id protocol.MessageID, entry *deliveryRetryEntry, now time.Time) (abandonedDelivery, bool) {
+	if s.deliveryFrozenLocked(id) {
+		// A wipe is deciding about this message. Nothing about its
+		// delivery moves while that lasts — terminalizing it here would
+		// answer, behind the wipe's back, a question the wipe is in the
+		// middle of asking, and would journal an abandonment for a row
+		// that may be about to be deleted anyway.
+		return abandonedDelivery{}, false
+	}
+	// TTL bounds the delivery lifetime (docs/protocol/messaging.md) — the
+	// retry engine honours it the same way the relay retry loop does,
+	// instead of re-emitting an envelope receivers would reject as expired.
+	// Ordinary DMs carry TTLSeconds=0, so this is the auto-delete case and
+	// nothing else: the message was sent to expire, and it has.
+	if s.messageDeliveryExpiredAt(now, entry.Envelope.CreatedAt, entry.Envelope.TTLSeconds) {
+		log.Warn().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).Msg("delivery_retry_expired_ttl")
+		return abandonedDelivery{entry.Envelope, "expired", "message delivery expired"}, true
+	}
+	return abandonedDelivery{}, false
+}
+
+// selectQueueHeadsLocked picks the one message per recipient this tick may
+// send. Caller MUST hold s.deliveryMu.Lock (it reads the freeze set).
 //
-// The refund is conditional on the entry still carrying exactly what this
-// pass charged: anything else means another path has moved the schedule
-// since, and restoring a stale snapshot over it would undo a decision this
-// pass knows nothing about.
-func (s *Service) refundDeliveryAttempt(id protocol.MessageID, spent deliveryAttemptCharge) {
+// Recipients are walked in sorted order so a tick is reproducible; within
+// a recipient the queue is oldest-first (deliveryQueueOrder).
+func (s *Service) selectQueueHeadsLocked(queues map[string][]*deliveryRetryEntry, now time.Time) []dueCandidate {
+	recipients := make([]string, 0, len(queues))
+	for recipient := range queues {
+		recipients = append(recipients, recipient)
+	}
+	sort.Strings(recipients)
+
+	var candidates []dueCandidate
+	for _, recipient := range recipients {
+		queue := queues[recipient]
+		sort.Slice(queue, func(i, j int) bool { return deliveryQueueOrder(queue[i], queue[j]) })
+		if head, ok := s.pickQueueHeadLocked(queue, now); ok {
+			candidates = append(candidates, head)
+		}
+	}
+	return candidates
+}
+
+// pickQueueHeadLocked walks one recipient's queue oldest-first and returns
+// the message that may go out now, if any. Caller MUST hold
+// s.deliveryMu.Lock.
+//
+// The rule it implements, stated as the guarantee it buys: A MESSAGE THAT
+// HAS NEVER BEEN EMITTED IS NEVER OVERTAKEN BY A NEWER ONE. That is the
+// ordering the reader actually perceives — once a message has gone out,
+// the recipient either has it or it is in transit, and a newer one passing
+// it on the sender's side reorders nothing they will see.
+//
+// Which is why the three cases below are not symmetric:
+//   - a message still in its queue window owns the slot outright;
+//   - a NEVER-EMITTED message that is not due yet still holds its place,
+//     because letting the next one past would be a real reordering;
+//   - an already-emitted message that is merely waiting out its backoff
+//     steps aside, because otherwise one lost receipt would stall the
+//     whole conversation behind it for up to eleven minutes.
+func (s *Service) pickQueueHeadLocked(queue []*deliveryRetryEntry, now time.Time) (dueCandidate, bool) {
+	for _, entry := range queue {
+		id := entry.Envelope.ID
+		if s.deliveryFrozenLocked(id) {
+			// A wipe is deciding whether the peer may ever hold this
+			// message, and a freeze has no expiry of its own — it ends
+			// when the deletion commits or aborts. So it is the one thing
+			// allowed past the rule above: a stuck freeze must cost its
+			// own message, never the whole conversation.
+			continue
+		}
+		if !entry.LastEmittedAt.IsZero() {
+			// Repaired here as well as at the reseed that invents these,
+			// because the window is a DURATION and this is the place a
+			// bad stamp does its damage: left alone it reads as "sent a
+			// moment ago" for as long as the clock takes to catch up, and
+			// the whole conversation waits behind it.
+			entry.LastEmittedAt = emissionStampNotInTheFuture(entry.LastEmittedAt, now)
+			if now.Sub(entry.LastEmittedAt) < deliveryQueueWindow {
+				return dueCandidate{}, false
+			}
+		}
+		if entry.NextAttemptAt.After(now) {
+			if entry.Hold == holdNone {
+				// Confirmed on the wire: the recipient has it or it is in
+				// transit, so a newer message passing it here reorders
+				// nothing they will see, and letting it pass is what keeps
+				// one lost receipt from stalling the conversation.
+				continue
+			}
+			// Never confirmed — the sinks may have refused it, and the
+			// place to find that out is here. It keeps its slot, because
+			// letting the next message overtake would be a real
+			// reordering. Emitted must NOT be consulted: it is the
+			// conservative "might the peer have it" flag and is already
+			// true for an attempt no writer took.
+			return dueCandidate{}, false
+		}
+		return dueCandidate{id, entry.Envelope}, true
+	}
+	return dueCandidate{}, false
+}
+
+// planDueSeenAcks bumps and snapshots the seen receipts due for a re-send.
+// Unlike messages these are not queued per recipient: a seen receipt names
+// one message and carries no order relative to the others.
+func (s *Service) planDueSeenAcks(now time.Time) []protocol.DeliveryReceipt {
+	maxAttempts := s.deliveryRetryMaxAttempts()
+	var due []protocol.DeliveryReceipt
+	s.deliveryMu.Lock()
+	for id, entry := range s.awaitingSeenAck {
+		if entry.NextAttemptAt.After(now) {
+			continue
+		}
+		if entry.Attempts >= maxAttempts {
+			delete(s.awaitingSeenAck, id)
+			log.Warn().Str("message_id", string(id)).Str("recipient", entry.Receipt.Recipient).Int("attempts", entry.Attempts).Msg("seen_ack_retry_exhausted")
+			continue
+		}
+		// backoff, not backoffAfter: Attempts counts re-sends and the
+		// schedule is indexed by the wait ahead, so after the first
+		// re-send (Attempts == 1) the next wait is the schedule's second
+		// step — the first step was served between registration and
+		// this re-send. See registerAwaitingSeenAckLocked.
+		entry.Attempts++
+		entry.NextAttemptAt = now.Add(deliveryRetryBackoff(entry.Attempts))
+		due = append(due, entry.Receipt)
+	}
+	s.deliveryMu.Unlock()
+	return due
+}
+
+// armDueDeliveries writes the Held decision atomically with the schedule
+// and returns the envelopes the dispatch loop may try. An unreachable
+// candidate is HELD — re-armed by kickDeliveryRetriesForReachable the
+// moment a route or connection appears, and re-checked locally every
+// deliveryHoldPollInterval until then. Writing Held under the same lock
+// that moves the schedule closes the false→true lost-wakeup window a
+// post-dispatch write left open.
+//
+// Nothing is charged here. The attempt is spent by emitDueDelivery, after
+// the wire has actually taken the frame.
+func (s *Service) armDueDeliveries(candidates []dueCandidate, reachable map[protocol.MessageID]bool, now time.Time) []dueDispatch {
+	if len(candidates) == 0 {
+		return nil
+	}
+	var due []dueDispatch
+	s.deliveryMu.Lock()
+	for _, c := range candidates {
+		entry, ok := s.awaitingDelivered[c.id]
+		if !ok {
+			continue // delivered/removed in the unlocked gap
+		}
+		if reachable[c.id] {
+			s.resetBackoffOnReturn(entry, c.id)
+			// Attempted, not confirmed. The hold is only cleared by a sink
+			// reporting that it took the frame (confirmEnvelopeOnWire), so
+			// a dispatch nobody accepts leaves the entry exactly where a
+			// reachability kick can find it. The schedule is parked on the
+			// poll interval meanwhile; a confirmation overwrites it with
+			// the real backoff, and a freeze restores what it displaced.
+			parkedAt := entry.NextAttemptAt
+			entry.Hold = holdUnconfirmed
+			entry.NextAttemptAt = now.Add(deliveryHoldPollInterval)
+			due = append(due, dueDispatch{env: entry.Envelope, parkedAt: parkedAt})
+			continue
+		}
+		entry.Hold = holdUnreachable
+		entry.NextAttemptAt = now.Add(deliveryHoldPollInterval)
+		if !s.lastReachabilityKickAt.Before(now) {
+			// A reachability kick landed while this pass was deciding, so
+			// the "unreachable" answer it is acting on may already be out
+			// of date — and the entry was not yet held when the kick
+			// looked, so the kick could not wake it either. Leaving it due
+			// costs one local routing lookup on the next tick; parking it
+			// would cost the recipient a poll interval of silence right
+			// after they came back.
+			entry.NextAttemptAt = now
+		}
+	}
+	s.deliveryMu.Unlock()
+	return due
+}
+
+// resetBackoffOnReturn puts an entry back on the fast end of the schedule
+// because its recipient has just become reachable again.
+//
+// Held is the transition marker and the only one needed: it says the last
+// decision about this message was "they are not there". So Held plus
+// reachable is exactly the moment they came back, and it cannot fire for
+// a peer that never left — those entries are not Held, and every caller
+// filters on it.
+//
+// The reset matters because Attempts indexes the backoff. Without it, a
+// message that spent an evening climbing to the eleven-minute step would
+// keep that step after its recipient walks back in, and the person who
+// just came online would wait a quarter of an hour for a message that has
+// been ready since yesterday. Caller MUST hold s.deliveryMu.Lock.
+func (s *Service) resetBackoffOnReturn(entry *deliveryRetryEntry, id protocol.MessageID) {
+	// With the reachability gate off nothing is ever genuinely held, so
+	// there is no such thing as a return to observe — and leaving the
+	// schedule alone keeps flag-off behaviour identical to the legacy
+	// baseline, the same contract kickDeliveryRetriesForReachable keeps.
+	if !s.cfg.HoldDMUntilReachable {
+		return
+	}
+	if entry.Hold != holdUnreachable || entry.Attempts == 0 {
+		return
+	}
+	log.Debug().Str("message_id", string(id)).Str("recipient", entry.Envelope.Recipient).
+		Int("attempts", entry.Attempts).Msg("delivery_retry_backoff_reset_on_return")
+	entry.Attempts = 0
+}
+
+// emitDueDelivery puts one envelope on the wire and records what that cost.
+//
+// The candidate was chosen phases ago, and a deletion can have frozen it
+// since — the wipe classifies against the delivery domain and then destroys
+// the row, so an envelope that goes out after that classification stays
+// with the peer with nothing left to recall it.
+//
+// So the claim is taken HERE, immediately before the wire, in the same lock
+// hold that reads the freeze and the withdrawal shadow. It also withdraws
+// the durable never-emitted claim, and refuses the attempt when that write
+// fails: sending anyway would leave the disk saying the message never left
+// while the peer holds it.
+//
+// Claiming BEFORE the attempt rather than after costs one thing,
+// deliberately: a dispatch that then fails to emit (its route vanished in
+// the microsecond gap) leaves the entry counted as possibly-out, so a later
+// deletion asks the peer about an id they may not have. That is the
+// harmless direction, and it is the price of the freeze meaning anything
+// at all.
+func (s *Service) emitDueDelivery(due dueDispatch, now time.Time) {
+	envelope := due.env
+	log.Info().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).Msg("delivery_retry_resend")
+	if !s.noteOwnEnvelopeEmitted(envelope.Sender, envelope.ID, now) {
+		// Frozen by a deletion, withdrawn, or its durable claim could not
+		// be withdrawn. Nothing reached the wire, so nothing is charged —
+		// and this is not the recipient's doing, so it is not a statement
+		// about their reachability. A freeze also gives the schedule back:
+		// this node paused itself, and a thawed message must go out when
+		// it was due rather than pay for the pause.
+		s.holdDeliveryRetry(envelope.ID, due.parkedAt, holdUnconfirmed)
+		return
+	}
+	if !s.dispatchEnvelopeRetry(envelope, now) {
+		// The route vanished between the reachability check and the wire:
+		// that IS a statement about the recipient, so it holds as
+		// unreachable and a returning peer resets the backoff.
+		s.holdDeliveryRetry(envelope.ID, now, holdUnreachable)
+		return
+	}
+	// Nothing is charged, cleared or announced here. The sinks answer on
+	// their own schedules and each confirms for itself; the entry stays
+	// holdUnconfirmed until one of them does.
+}
+
+// confirmEnvelopeOnWire is the ONE place a delivery becomes "sent", and it
+// is called by the sink that accepted the frame — never by the code that
+// merely decided to try.
+//
+// That inversion is the point. A dispatch hands the envelope to sinks that
+// answer on different schedules: a relay enqueue answers immediately, a
+// subscriber push answers from a background goroutine. Charging the
+// attempt and clearing the hold at dispatch time meant a message that no
+// writer ever took was recorded as sent, shown as sent, and left with
+// Hold cleared so no reconnect could wake it. Now nothing moves until a
+// sink says it took the frame; if none ever does, the entry simply stays
+// holdUnconfirmed and the next pass tries again.
+//
+// dispatchedAt identifies the attempt, so several sinks confirming the
+// same dispatch charge it once. A later dispatch carries a later stamp and
+// is charged separately.
+//
+// A message with no entry — transit traffic, or one whose receipt already
+// arrived — is not ours to account for, and this is a no-op for it.
+func (s *Service) confirmEnvelopeOnWire(envelope protocol.Envelope, dispatchedAt time.Time) {
+	if !s.confirmEnvelopeInMemory(envelope, dispatchedAt) {
+		return
+	}
+	// The durable stamp FIRST, the announcement only if it lands, both on
+	// one background goroutine — off the writer loop, because the journal
+	// writes through SQLite where contention can park a statement for the
+	// whole busy timeout.
+	//
+	// The order and the condition are the same rule twice. The event moves
+	// the conversation cache to "sent" while a full reload reads the row,
+	// so an event that runs before the write — or without it — lets the
+	// next reload put the badge back to "queued", and no further event
+	// comes because the announcement is claimed once. Staying at queued
+	// until the disk agrees is the direction that cannot go backwards.
+	s.goBackground(func() {
+		s.confirmEnvelopesDurably([]protocol.Envelope{envelope}, s.owesAnnouncement(envelope.ID))
+	})
+}
+
+// confirmEnvelopeInMemory is the delivery-domain half, split out so a
+// caller with a WHOLE BATCH to confirm — the reconnect backlog — can move
+// every entry first and pay for the durable half once.
+//
+// Reports whether this call is the one that confirmed the dispatch.
+func (s *Service) confirmEnvelopeInMemory(envelope protocol.Envelope, dispatchedAt time.Time) bool {
+	var confirmedNow bool
+	s.deliveryMu.Lock()
+	entry, awaiting := s.awaitingDelivered[envelope.ID]
+	if awaiting && entry.LastEmittedAt.Before(dispatchedAt) {
+		entry.Attempts++
+		entry.NextAttemptAt = dispatchedAt.Add(deliveryRetryBackoffAfter(entry.Attempts))
+		entry.Hold = holdNone
+		// A frame NetCore has taken is a frame the peer may hold, so the
+		// conservative deletion flag is true from here whatever path got
+		// it there. Setting it only in the pre-write claim left the paths
+		// that reach a writer without one — the origin send's directed
+		// relay, the pending ring's flush — reporting a delivered message
+		// as never emitted, which tells a deletion to skip a peer holding
+		// it.
+		entry.Emitted = true
+		entry.LastEmittedAt = dispatchedAt
+		// The durable half is stamped outside this mutex, by the caller.
+		// There is no handshake with anything: the bit is monotone, so a
+		// refusal racing this confirmation cannot unset it, and nothing
+		// has to be corrected afterwards.
+		confirmedNow = true
+	}
+	s.deliveryMu.Unlock()
+
+	return confirmedNow
+}
+
+// owesAnnouncement reports whether the sender still has to be told this
+// message left the machine. Read separately from the confirmation because
+// the two are answered at different moments: the entry moves under the
+// delivery mutex, the announcement waits for the disk.
+func (s *Service) owesAnnouncement(id protocol.MessageID) bool {
+	s.deliveryMu.RLock()
+	defer s.deliveryMu.RUnlock()
+	entry, awaiting := s.awaitingDelivered[id]
+	return awaiting && !entry.Announced
+}
+
+// repairLocalDeliveryRecord finishes the local bookkeeping for deliveries
+// the WIRE has already accepted.
+//
+// Three local failures leave a confirmed message half-recorded, and none
+// is the network's fault: the journal can refuse the on-wire stamp
+// ("database is locked"), and the event bus can shed either the queued →
+// sent announcement or the receipt update that supersedes it — which a
+// reconnect replaying a whole conversation makes likely, because they
+// arrive as a burst. Retrying any of them by SENDING THE FRAME AGAIN is
+// the wrong repair for a local problem: it puts a message the peer already
+// took back on the wire.
+//
+// This pass is a PURE FUNCTION OF STATE, and that shape is the whole
+// design rather than an implementation detail. Its first version was a
+// second retry machine standing beside the delivery tick — a dirty-hint
+// flag, a take-and-delete queue, an early return, a priority counter —
+// and every one of those grew its own defect: a hint cleared while work
+// was still owed, an event deleted before it was published and lost when
+// the pass returned early, a priority check that was not atomic with the
+// acquisition it was meant to order.
+//
+// So it holds NOTHING of its own. It reads what is owed, tries, and
+// removes each debt only when the write that settles it has landed. A
+// pass that is skipped, that returns early, or that dies loses nothing:
+// the next one reads the same state and tries again. There is no flag to
+// get stale and no queue to drop an item on the floor.
+//
+// Two rules stay because they are about pacing, not correctness. The
+// halves are taken OLDEST FIRST so a backlog drains in the order the user
+// wrote it rather than re-rolling a random sample of the map; and a shed
+// announcement waits out deliveryAnnounceRetry, because an inbox that is
+// already full sheds every new event whatever the batch size — the cap
+// bounds one pass, the backoff is what makes the passes converge.
+func (s *Service) repairLocalDeliveryRecord(now time.Time) {
+	for _, pending := range s.dueShedEvents(now) {
+		// Removed by the publish itself, on success, and only if the map
+		// still holds THIS snapshot — a newer status may have arrived
+		// while the copy was in flight.
+		s.publishRetryableSnapshot(pending.topic, pending.event, pending.seq)
+	}
+	unstamped, unannounced := s.localDeliveryDebt(now)
+	if len(unstamped) > 0 {
+		log.Debug().Int("count", len(unstamped)).Msg("delivery_repairing_durable_stamp")
+		if ids := idsOf(unstamped); s.markDeliveryOnWire(ids...) {
+			s.noteStamped(ids)
+			// Announced in the SAME pass, and only now: the stamp had to
+			// land first, and making these wait for the next tick would
+			// add two seconds to a badge for no reason.
+			s.publishMessagesEmitted(unstamped)
+		}
+	}
+	if len(unannounced) > 0 {
+		log.Debug().Int("count", len(unannounced)).Msg("delivery_repairing_announcement")
+		s.publishMessagesEmitted(unannounced)
+	}
+}
+
+// startDeliveryRecordRepair runs one repair pass off the tick, and only
+// one at a time: the pass can block on the journal, and a contended
+// database would otherwise accumulate a goroutine every two seconds.
+//
+// Called AFTER the tick has put its due messages on the wire. What keeps
+// the pass out of their way is the emission lane, which admits a pre-wire
+// clear ahead of any bookkeeping queued behind it; going second is the
+// same intent stated where a reader meets it first.
+func (s *Service) startDeliveryRecordRepair(now time.Time) {
+	select {
+	case s.repairSlot <- struct{}{}:
+	default:
+		// A pass is still working. The next tick offers again.
+		return
+	}
+	// goRunLoop, not goBackground: this pass touches the journal, so a
+	// shutdown has to WAIT for it rather than merely ask — Run returning
+	// underneath an in-flight SQLite statement is exactly what the
+	// lifecycle group exists to prevent.
+	s.goRunLoop(func() {
+		defer func() { <-s.repairSlot }()
+		s.repairLocalDeliveryRecord(now)
+	})
+}
+
+// localDeliveryDebt reads what still owes local work, oldest first and
+// capped. It REMOVES nothing: the debts live on the entries, and each is
+// settled by the write that clears it. Caller must hold no domain mutex.
+func (s *Service) localDeliveryDebt(now time.Time) (unstamped, unannounced []protocol.Envelope) {
+	var stampDue, announceDue []*deliveryRetryEntry
+	s.deliveryMu.RLock()
+	for _, entry := range s.awaitingDelivered {
+		if !entry.confirmed() {
+			continue
+		}
+		switch {
+		case !entry.Stamped:
+			stampDue = append(stampDue, entry)
+		case !entry.Announced && !entry.AnnounceAfter.After(now):
+			announceDue = append(announceDue, entry)
+		}
+	}
+	s.deliveryMu.RUnlock()
+	return envelopesOldestFirst(stampDue), envelopesOldestFirst(announceDue)
+}
+
+// envelopesOldestFirst sorts by the same rule the delivery queue uses and
+// takes the head, so repeated passes make progress on the same messages
+// instead of sampling the map afresh.
+func envelopesOldestFirst(entries []*deliveryRetryEntry) []protocol.Envelope {
+	if len(entries) == 0 {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return deliveryQueueOrder(entries[i], entries[j]) })
+	if len(entries) > deliveryRepairBatch {
+		entries = entries[:deliveryRepairBatch]
+	}
+	out := make([]protocol.Envelope, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.Envelope)
+	}
+	return out
+}
+
+func idsOf(envelopes []protocol.Envelope) []protocol.MessageID {
+	ids := make([]protocol.MessageID, 0, len(envelopes))
+	for _, envelope := range envelopes {
+		ids = append(ids, envelope.ID)
+	}
+	return ids
+}
+
+// deliveryRepairBatch bounds one repair pass, so a backlog is redone in
+// steady slices rather than all at once.
+const deliveryRepairBatch = 16
+
+// deliveryAnnounceRetry is how long a shed announcement waits before the
+// repair pass offers it again. It has to outlast the burst that filled the
+// inbox; a subscriber that drains at all clears 64 slots well inside it.
+const deliveryAnnounceRetry = 10 * time.Second
+
+// pendingUIEvent is one local-change event the bus shed, and when it may
+// be offered again.
+type pendingUIEvent struct {
+	topic string
+	event protocol.LocalChangeEvent
+	after time.Time
+	// seq identifies THIS snapshot of the debt.
+	//
+	// The pass publishes a copy while the map can move on: a `seen` for
+	// the same message can arrive while an older `delivered` is in flight.
+	// Without it the successful publish of the stale copy deleted the
+	// newer one, and a re-shed of the stale copy overwrote it — either way
+	// the badge settled on a status the peer had already moved past.
+	seq uint64
+}
+
+// localChangeRank orders the delivery statuses these events carry. A kept
+// event is only ever replaced by a LATER one; the client applies statuses
+// monotonically, so re-offering an older one would be noise at best and a
+// regression at worst.
+func localChangeRank(status string) int {
+	switch status {
+	case protocol.MessageStatusSent:
+		return 1
+	case protocol.ReceiptStatusDelivered:
+		return 2
+	case protocol.ReceiptStatusSeen:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// publishRetryableLocalChange offers an event to the local client and, if
+// the bus sheds it, keeps it for the repair pass.
+//
+// The bus is deliberately lossy — a publisher never blocks on a wedged
+// subscriber — which is right for a stream of notifications and wrong for
+// the LAST event that can correct a badge. This is the narrow bridge: the
+// event is kept, not the whole stream, and only until it lands.
+func (s *Service) publishRetryableLocalChange(topic string, event protocol.LocalChangeEvent) {
+	s.publishRetryableSnapshot(topic, event, 0)
+}
+
+// publishRetryableSnapshot is the form the repair pass uses: seq names the
+// kept snapshot it is republishing, so a success removes THAT one and not
+// whatever the map holds by then. A fresh publish passes 0, which matches
+// nothing and therefore removes nothing it did not put there.
+func (s *Service) publishRetryableSnapshot(topic string, event protocol.LocalChangeEvent, seq uint64) {
+	s.emitLocalChange(event)
+	if _, dropped := s.eventBus.PublishReporting(topic, event); dropped == 0 {
+		// Settled — and this is the ONLY place a kept event is removed.
+		// Taking it out before the publish let a pass that then returned
+		// early drop it for good; removing it unconditionally let a stale
+		// copy's success delete a newer status that had arrived since.
+		s.forgetShedEvent(protocol.MessageID(event.MessageID), seq, event.Status)
+		return
+	}
+	s.keepShedEvent(topic, event)
+}
+
+// receiptUpdateEvent is the one shape of the receipt-update event, so the
+// handler and the repair pass cannot describe the same receipt differently.
+func receiptUpdateEvent(receipt protocol.DeliveryReceipt) protocol.LocalChangeEvent {
+	return protocol.LocalChangeEvent{
+		Type:        protocol.LocalChangeReceiptUpdate,
+		Topic:       "dm",
+		MessageID:   string(receipt.MessageID),
+		Sender:      receipt.Sender,
+		Recipient:   receipt.Recipient,
+		Status:      receipt.Status,
+		DeliveredAt: receipt.DeliveredAt,
+	}
+}
+
+// keepShedEvent stores a shed event for a later pass. Keyed by message id,
+// so a newer status for the same message replaces an older one rather than
+// queueing behind it — the client applies statuses monotonically, and the
+// latest is the only one worth repeating.
+func (s *Service) keepShedEvent(topic string, event protocol.LocalChangeEvent) {
+	next := time.Now().UTC().Add(deliveryAnnounceRetry)
+	s.deliveryMu.Lock()
+	if s.pendingUIEvents == nil {
+		s.pendingUIEvents = make(map[protocol.MessageID]pendingUIEvent, 1)
+	}
+	id := protocol.MessageID(event.MessageID)
+	existing, known := s.pendingUIEvents[id]
+	switch {
+	case known && localChangeRank(event.Status) < localChangeRank(existing.event.Status):
+		// A re-shed of a stale in-flight copy. Keeping it would move the
+		// badge backwards from a status that has already arrived.
+	case known || len(s.pendingUIEvents) < maxPendingUIEvents:
+		// An id already in the set is UPDATED whatever the capacity: the
+		// cap bounds how many distinct MESSAGES are kept, and refusing a
+		// newer status for one already there would pin the badge to the
+		// older one — the opposite of what keying by id is for.
+		s.pendingEventSeq++
+		s.pendingUIEvents[id] = pendingUIEvent{topic, event, next, s.pendingEventSeq}
+	}
+	s.deliveryMu.Unlock()
+}
+
+// forgetShedEvent removes a settled debt, but only if the map still holds
+// the snapshot that was published — or one this publish supersedes.
+func (s *Service) forgetShedEvent(id protocol.MessageID, seq uint64, status string) {
+	s.deliveryMu.Lock()
+	if existing, known := s.pendingUIEvents[id]; known {
+		superseded := existing.seq == seq ||
+			localChangeRank(existing.event.Status) <= localChangeRank(status)
+		if superseded {
+			delete(s.pendingUIEvents, id)
+		}
+	}
+	s.deliveryMu.Unlock()
+}
+
+// dueShedEvents READS the events whose backoff has expired, capped like
+// every other half of the pass.
+//
+// It does not remove them. The first version did, and a pass that then
+// returned early — or died — dropped the event for good, which for the
+// receipt update is the last thing that could correct the badge. Removal
+// belongs to the publish that succeeds.
+func (s *Service) dueShedEvents(now time.Time) []pendingUIEvent {
+	var due []pendingUIEvent
+	s.deliveryMu.RLock()
+	for _, pending := range s.pendingUIEvents {
+		if len(due) >= deliveryRepairBatch {
+			break
+		}
+		if pending.after.After(now) {
+			continue
+		}
+		due = append(due, pending)
+	}
+	s.deliveryMu.RUnlock()
+	return due
+}
+
+// maxPendingUIEvents bounds the kept set. A client wedged past this many
+// distinct messages is not one more event away from being correct, and the
+// chatlog row is the durable authority a reload reads.
+const maxPendingUIEvents = 512
+
+// deferAnnouncement pushes a shed event's next attempt out, so the repair
+// pass does not republish into an inbox that is still full.
+func (s *Service) deferAnnouncement(id protocol.MessageID) {
+	next := time.Now().UTC().Add(deliveryAnnounceRetry)
 	s.deliveryMu.Lock()
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
-		if entry.Attempts == spent.Attempts+1 {
-			entry.Attempts = spent.Attempts
-			entry.NextAttemptAt = spent.NextAttemptAt
+		entry.AnnounceAfter = next
+	}
+	s.deliveryMu.Unlock()
+}
+
+// confirmEnvelopesDurably stamps the rows and, only if that lands, tells
+// the sender.
+//
+// ONE journal write for the whole batch. The reconnect backlog replays a
+// whole conversation at once, and confirming per message took a goroutine
+// and a separate UPDATE for each of them, all contending for the same
+// database as the pre-wire withdrawals of freshly-typed messages.
+func (s *Service) confirmEnvelopesDurably(envelopes []protocol.Envelope, announce bool) {
+	if len(envelopes) == 0 {
+		return
+	}
+	ids := make([]protocol.MessageID, 0, len(envelopes))
+	for _, envelope := range envelopes {
+		ids = append(ids, envelope.ID)
+	}
+	if !s.markDeliveryOnWire(ids...) {
+		return
+	}
+	s.noteStamped(ids)
+	if announce {
+		s.publishMessagesEmitted(envelopes)
+	}
+}
+
+// noteStamped memoises a landed journal write, so the repair pass stops
+// asking for it. The durable bit is monotone, so this flag only ever moves
+// one way too.
+func (s *Service) noteStamped(ids []protocol.MessageID) {
+	s.deliveryMu.Lock()
+	for _, id := range ids {
+		if entry, awaiting := s.awaitingDelivered[id]; awaiting {
+			entry.Stamped = true
 		}
-		entry.Held = true
+	}
+	s.deliveryMu.Unlock()
+}
+
+// publishMessagesEmitted tells the local client that messages it was
+// showing as queued have left the machine.
+//
+// A held message shows as "queued", and the moment it goes out that stops
+// being true — but nothing else would ever say so, because the next thing
+// to happen is the recipient's receipt, and a lost receipt would leave the
+// sender believing a message was never sent while their counterpart is
+// reading it.
+//
+// It is IDEMPOTENT and it is the only place Announced is set: several
+// sinks can carry the same envelope on one dispatch, and each announces
+// when it succeeds, so the flag is claimed under the delivery mutex and
+// only the claimant publishes. An id whose entry is already gone is
+// skipped — a receipt beat us to it, and the badge is past "sent" anyway.
+//
+// Callers must hold NO domain mutex: publishing runs subscriber callbacks
+// that may come back into the Service.
+func (s *Service) publishMessagesEmitted(envelopes []protocol.Envelope) {
+	if len(envelopes) == 0 {
+		return
+	}
+	claimed := make([]protocol.Envelope, 0, len(envelopes))
+	s.deliveryMu.Lock()
+	for _, envelope := range envelopes {
+		entry, awaiting := s.awaitingDelivered[envelope.ID]
+		if !awaiting || entry.Announced {
+			continue
+		}
+		entry.Announced = true
+		claimed = append(claimed, envelope)
+	}
+	s.deliveryMu.Unlock()
+
+	for _, envelope := range claimed {
+		log.Info().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).
+			Msg("delivery_queued_message_emitted")
+		_, dropped := s.eventBus.PublishReporting(ebus.TopicMessageEmitted, protocol.LocalChangeEvent{
+			Type:      protocol.LocalChangeMessageEmitted,
+			Topic:     envelope.Topic,
+			MessageID: string(envelope.ID),
+			Sender:    envelope.Sender,
+			Recipient: envelope.Recipient,
+			Status:    protocol.MessageStatusSent,
+		})
+		if dropped > 0 {
+			// The bus sheds events when a subscriber's inbox is full, and
+			// this is the one fact nothing else would ever restate: the
+			// receipt is the next thing to happen, and a lost receipt
+			// would leave the badge on "queued" for good. So the claim is
+			// GIVEN BACK and the next confirmed emission says it again.
+			// The cost of the other direction — announcing twice — is
+			// nothing, because the subscriber applies it monotonically.
+			s.returnEmissionAnnouncement(envelope.ID)
+			s.deferAnnouncement(envelope.ID)
+		}
+	}
+}
+
+// returnEmissionAnnouncement un-claims an announcement the bus could not
+// deliver, so a later emission of the same message re-announces it.
+func (s *Service) returnEmissionAnnouncement(id protocol.MessageID) {
+	log.Warn().Str("message_id", string(id)).
+		Msg("delivery_queued_message_emitted_event_dropped_will_retry")
+	s.deliveryMu.Lock()
+	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
+		entry.Announced = false
 	}
 	s.deliveryMu.Unlock()
 }
@@ -811,16 +1886,155 @@ func (s *Service) runRetryDispatchBarrier() {
 	}
 }
 
-// holdDeliveryRetry marks the entry held so a later reachability kick can
-// wake it, instead of leaving it Held=false (which the kick filters out) to
-// wait out the full backoff. The entry may already be gone — a receipt that
-// landed in the gap — in which case there is nothing to hold.
-func (s *Service) holdDeliveryRetry(id protocol.MessageID) {
+// holdDeliveryRetry records why the entry did not go out, so a later
+// reachability kick can wake it instead of leaving it to wait out the full
+// backoff. The entry may already be gone — a receipt that landed in the
+// gap — in which case there is nothing to hold.
+//
+// The schedule moves to a hold poll past `from`, EXCEPT for a message a
+// wipe has frozen: that is this node pausing itself, and a thawed message
+// must go out when it was due rather than pay a poll interval for a
+// decision its recipient had no part in. The freeze caller passes the
+// schedule the pass displaced, so the restore is exact.
+func (s *Service) holdDeliveryRetry(id protocol.MessageID, from time.Time, reason deliveryHoldReason) {
 	s.deliveryMu.Lock()
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
-		entry.Held = true
+		entry.Hold = reason
+		if s.deliveryFrozenLocked(id) {
+			entry.NextAttemptAt = from
+		} else {
+			entry.NextAttemptAt = from.Add(deliveryHoldPollInterval)
+		}
 	}
 	s.deliveryMu.Unlock()
+}
+
+// promoteQueueHeadLocked pulls the recipient's next queued message forward
+// so it leaves as soon as the tick comes round, instead of idling out a
+// backoff that was measuring the message just confirmed. Called when a
+// delivered/seen receipt frees the recipient's queue slot. Caller MUST hold
+// s.deliveryMu.Lock.
+// It promotes the oldest message that has NOT been on the wire, which is
+// not the same as the oldest message left. An already-emitted one is not
+// waiting on the freed slot: its schedule measures its OWN dispatch, and
+// pickQueueHeadLocked lets it step aside for the tail precisely so a lost
+// receipt cannot stall the conversation. Promoting it anyway re-sent it
+// early — a duplicate the recipient already had — and, because it then
+// owned the slot again for a queue window, delayed the message that had
+// never gone out at all. The rule promotion must not break is the same one
+// the pick implements: a message that has never been emitted is never
+// overtaken by a newer one.
+func (s *Service) promoteQueueHeadLocked(recipient string, now time.Time) {
+	var head *deliveryRetryEntry
+	for id, entry := range s.awaitingDelivered {
+		if entry.Envelope.Recipient != recipient || !entry.LastEmittedAt.IsZero() {
+			continue
+		}
+		if s.deliveryFrozenLocked(id) {
+			// A wipe is deciding about this one; its schedule is not
+			// ours to move while that lasts.
+			continue
+		}
+		if head == nil || deliveryQueueOrder(entry, head) {
+			head = entry
+		}
+	}
+	if head == nil || head.NextAttemptAt.Before(now) {
+		return
+	}
+	head.NextAttemptAt = now
+}
+
+// noteRecipientWentOffline puts this recipient's unconfirmed deliveries back
+// into holdUnreachable, so the kick that fires when they return re-arms them
+// and resets their backoff.
+//
+// Without it a message confirmed onto the wire sits at holdNone waiting for
+// a receipt, and the kick filters holdNone out — deliberately, so an
+// unrelated route refresh cannot pull an in-flight message forward. But a
+// peer that actually went away and came back is not a route refresh: their
+// receipt is not coming, and the message can sit out the rest of an
+// eleven-minute backoff while they are sitting there online. Observing the
+// departure is what tells the two apart, and this is where it is observed.
+//
+// It reopens holdUnconfirmed too, and that is the second half of the same
+// argument. An unconfirmed entry was dispatched while the recipient LOOKED
+// reachable and no writer took the frame; it is parked on the poll
+// interval, and the kick — which now only moves holdUnreachable, so a route
+// merely being re-confirmed cannot overrule the pacing — would leave it
+// there. But the peer actually leaving and coming back is the one event
+// that says the earlier answer is stale, so it belongs in the state the
+// kick acts on. Without this the returning recipient waited out the rest of
+// a minute for a message that had been ready the whole time.
+//
+// A message the recipient already confirmed is gone from the set, so this
+// only ever touches deliveries still owed. Caller must hold no domain mutex.
+//
+// The presence check is re-made HERE, and peerMu is held across the park.
+// The close path counts the session down under peerMu and calls this after
+// releasing it, so between those two the peer can already have come back:
+// their registration completes, their online kick runs, finds the entry in
+// holdNone or holdUnconfirmed and correctly leaves it alone — and then this
+// stale departure parks it on holdUnreachable with the old backoff intact.
+// Nothing fires a second kick, so a message ready to go waits out up to
+// eleven minutes with the recipient sitting there online: the original
+// symptom of this whole task, re-entered through the back door.
+//
+// The presence check does NOT hold peerMu across the park, and must not.
+// The canonical order permits it, but this runs on the session-close path
+// while other goroutines hold deliveryMu and reach for peerMu: with a
+// peerMu writer queued behind us, Go's RWMutex stops handing out read
+// locks, and the three of us wait on each other. It showed up as an
+// integration test timing out rather than as anything reading like a
+// deadlock, which is the usual way this class arrives.
+//
+// Not holding it costs nothing, because the check is an optimisation and
+// not the guarantee. A recipient is also reachable through a TRANSIT
+// ROUTE, which no session count shows, so the answer can be stale whatever
+// we hold. The park is made HARMLESS instead of made atomic: reopening
+// also pulls the entry DUE. If the departure was real the next tick finds them
+// still unreachable and parks it on the poll interval, which costs
+// nothing — no attempt is charged for a message that is held. If the
+// departure was already stale, the tick sends within two seconds instead
+// of after the rest of an eleven-minute backoff. The backoff being
+// meaningless is the whole claim this function makes: it was measuring a
+// peer who is no longer there.
+func (s *Service) noteRecipientWentOffline(identity domain.PeerIdentity) {
+	if identity.IsZero() {
+		return
+	}
+	wire := identity.String()
+	now := time.Now().UTC()
+	var reopened int
+	s.peerMu.RLock()
+	present := s.identitySessions[identity] > 0
+	s.peerMu.RUnlock()
+	if present {
+		log.Debug().Str("recipient", wire).
+			Msg("stale offline ignored: the recipient is connected again")
+		return
+	}
+	s.deliveryMu.Lock()
+	for id, entry := range s.awaitingDelivered {
+		if entry.Hold == holdUnreachable || entry.Envelope.Recipient != wire {
+			continue
+		}
+		if s.deliveryFrozenLocked(id) {
+			// A wipe is deciding about this one; its hold is not ours to
+			// move while that lasts.
+			continue
+		}
+		entry.Hold = holdUnreachable
+		if entry.NextAttemptAt.After(now) {
+			entry.NextAttemptAt = now
+		}
+		reopened++
+	}
+	s.deliveryMu.Unlock()
+	if reopened > 0 {
+		log.Debug().Str("recipient", wire).Int("deliveries", reopened).
+			Msg("delivery_reopened_on_recipient_offline")
+	}
 }
 
 // kickDeliveryRetriesForReachable re-arms held sender-owned delivery retries
@@ -829,9 +2043,10 @@ func (s *Service) holdDeliveryRetry(id protocol.MessageID) {
 // returned early because the recipient was unreachable) sit in awaitingDelivered
 // with NextAttemptAt on the exponential backoff schedule; pulling NextAttemptAt
 // forward to now lets the next 2s retry tick deliver immediately instead of
-// waiting out the backoff. Only advances the schedule — never touches the
-// attempt counter — so it cannot, by itself, exhaust the cap. Takes deliveryMu
-// alone; callers must hold no other domain mutex.
+// waiting out the backoff, and resetBackoffOnReturn puts the schedule back on
+// its fast end — a message that has been waiting since yesterday must not make
+// the person who just came online wait another eleven minutes for it. Takes
+// deliveryMu alone; callers must hold no other domain mutex.
 func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIdentity]struct{}) {
 	// Only meaningful when sends are held on reachability; with the flag off
 	// nothing is held, so leaving the retry schedule untouched keeps flag-off
@@ -848,11 +2063,32 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 	}
 	var held []heldEnvelope
 	s.deliveryMu.Lock()
+	// Stamped BEFORE the scan and regardless of what it finds, because the
+	// case this exists for is the one where it finds NOTHING: a tick that
+	// sampled reachability a moment ago is about to mark its entries held
+	// from an answer this kick has just made stale, and those entries are
+	// not held yet, so they are invisible here. armDueDeliveries reads the
+	// stamp and keeps such an entry due instead of parking it for a poll
+	// interval. See docs/locking.md.
+	s.lastReachabilityKickAt = time.Now().UTC()
 	for id, entry := range s.awaitingDelivered {
-		// Only entries whose last send decision was a HOLD (unreachable) are
-		// eligible. An already-emitted send awaiting its receipt must not be
-		// pulled forward by an unrelated route refresh/reconfirm.
-		if !entry.Held {
+		// Only entries whose last send decision was "they are not there" are
+		// eligible. Both other states have already been handed to the sinks
+		// on the current reachability, and pulling them forward would let a
+		// routing event overrule the pacing rather than the reachability:
+		//
+		//   - holdNone is confirmed and waiting for a receipt on its backoff;
+		//   - holdUnconfirmed was dispatched and nothing took the frame, so
+		//     it is parked on the poll interval — and a route that keeps
+		//     being RE-CONFIRMED (routing.RouteUnchanged, which announce
+		//     ingest and route-query answers both feed into this kick) would
+		//     otherwise reset that park on every announcement. On a route
+		//     that resolves but is dead in practice that is a re-send, and a
+		//     journal write, at announcement frequency.
+		//
+		// This is the state the kick is named after: it re-arms a message
+		// whose recipient was ABSENT, the moment they are not.
+		if entry.Hold != holdUnreachable {
 			continue
 		}
 		if _, ok := identities[domain.PeerIdentityFromWire(entry.Envelope.Recipient)]; ok {
@@ -877,9 +2113,17 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 		reachable[h.id] = d.RelayNextHop != nil || len(d.PushSubscribers) > 0
 	}
 
-	// Phase 3 (deliveryMu): pull NextAttemptAt forward only for genuinely
-	// reachable held entries that still exist. Only advances the schedule —
-	// never spends an attempt.
+	// Phase 3 (deliveryMu): re-arm only the genuinely reachable held
+	// entries that still exist AND are still held on reachability.
+	// Nothing is spent here — an emission is charged by emitDueDelivery,
+	// after the wire has taken the frame.
+	//
+	// The hold is re-read rather than remembered from phase 1, because
+	// phase 2 runs with the lock RELEASED: a tick can dispatch the entry
+	// meanwhile (holdUnconfirmed), or a sink can confirm it (holdNone),
+	// and re-arming either of those is exactly what the selection above
+	// exists to prevent — the same route re-confirmation that must not
+	// overrule pacing would do it through this window instead.
 	now := time.Now().UTC()
 	s.deliveryMu.Lock()
 	for _, h := range held {
@@ -887,9 +2131,10 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 			continue
 		}
 		entry, ok := s.awaitingDelivered[h.id]
-		if !ok {
+		if !ok || entry.Hold != holdUnreachable {
 			continue
 		}
+		s.resetBackoffOnReturn(entry, h.id)
 		if entry.NextAttemptAt.After(now) {
 			entry.NextAttemptAt = now
 		}
@@ -926,9 +2171,9 @@ func (s *Service) connSupportsProtocol(connID domain.ConnID, min int) bool {
 	return core != nil && int(core.ProtocolVersion()) >= min
 }
 
-// failDelivery finalises a locally-sent DM the retry engine gave up on
-// (TTL expiry or attempts cap): outbound goes terminal — the same
-// "expired"/"failed" statuses the pending-ring paths use, visible through
+// failDelivery finalises a locally-sent DM that outlived its own TTL —
+// the only way the engine gives up on one: outbound goes terminal — the
+// same "expired"/"failed" statuses the pending-ring paths use, visible through
 // fetch_pending_messages — the pending rings drop every queued frame of the
 // message (the send_message AND any relay_message queued by the relay
 // fallback), relayRetry drops its entry, the aggregate pending count
@@ -1030,11 +2275,15 @@ func (s *Service) sendSeenAck(seen protocol.DeliveryReceipt) {
 // gossip. The re-emission reuses the stored hop budget (a retry is the same
 // hop, not a new one) and is deduped by receivers via the duplicate paths
 // that also re-send the delivered receipt.
-// dispatchEnvelopeRetry returns whether the envelope was actually EMITTED.
-// false means it was HELD (recipient unreachable under the reachability gate),
-// which the caller records as deliveryRetryEntry.Held so only genuinely-held
-// messages are woken by kickDeliveryRetriesForReachable.
-func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope) (emitted bool) {
+// dispatchEnvelopeRetry returns whether the envelope was ATTEMPTED — not
+// whether it went out. false means the reachability gate refused to try at
+// all; true means the sinks were called, and each of them confirms for
+// itself through confirmEnvelopeOnWire if it accepted the frame. Until one
+// does, the entry stays holdUnconfirmed.
+//
+// dispatchedAt identifies this attempt to the confirmations, which arrive
+// on their own schedules.
+func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope, dispatchedAt time.Time) (attempted bool) {
 	decision := s.router.Route(envelope)
 
 	// Sender-owned delivery emits ONLY when the recipient is reachable: a
@@ -1045,15 +2294,11 @@ func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope) (emitted boo
 	// blind-gossip fan-out on every retry tick. Delivery resumes when a
 	// route or connection appears — kickDeliveryRetriesForReachable (fired
 	// from the announce/connect drain) re-arms held entries immediately;
-	// until then the message waits in awaitingDelivered, bounded by TTL and
-	// the attempts cap. See docs/protocol/relay.md INV-3.
+	// until then the message waits in awaitingDelivered, bounded by its own
+	// TTL and nothing else. See docs/protocol/relay.md INV-3.
 	if s.cfg.HoldDMUntilReachable && decision.RelayNextHop == nil && len(decision.PushSubscribers) == 0 {
 		log.Debug().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).Msg("delivery_retry_held_unreachable")
 		return false
-	}
-
-	if len(decision.PushSubscribers) > 0 {
-		s.goBackground(func() { s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers) })
 	}
 
 	// gossipTargetsForRelay drops the table next-hop from the fan-out (it gets
@@ -1061,12 +2306,83 @@ func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope) (emitted boo
 	// sender-owned retry tick does not duplicate push_message+relay_message to
 	// the same peer.
 	gossipTargets := s.gossipTargetsForRelay(envelope, decision)
-	s.executeGossipTargets(envelope, gossipTargets)
 
+	// Every sink below confirms for itself, and none of them is trusted to
+	// have worked just because it was called.
+	if len(decision.PushSubscribers) > 0 {
+		s.goBackground(func() { s.pushOwnEnvelopeToSubscribers(envelope, decision.PushSubscribers, dispatchedAt) })
+	}
+
+	// Gossip carries this dispatch too. It is not the sink the queued → sent
+	// transition waits on — it hands jobs to a bounded pool that sheds under
+	// load — but it is a real path to the wire, and a path to the wire that
+	// skips the pre-wire gate is how a message the author has just recalled
+	// still reaches the recipient, with the deletion recording it as never
+	// emitted and scheduling nothing.
+	s.executeGossipTargets(envelope, gossipTargets, deliveryDispatchRef{Envelope: envelope, DispatchedAt: dispatchedAt})
+
+	relayed := relaySendRefused
 	if decision.RelayNextHop != nil {
-		s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+		relayed = s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops, dispatchedAt)
 	} else {
-		s.tryRelayToCapableFullNodes(envelope, gossipTargets)
+		relayed = s.tryRelayToCapableFullNodes(envelope, gossipTargets, dispatchedAt)
+	}
+	switch {
+	case relayed.leftTheNode():
+		s.confirmEnvelopeOnWire(envelope, dispatchedAt)
+	case len(decision.PushSubscribers) > 0:
+		// The push answers for this dispatch later.
+	default:
+		// Nobody took it. NOTHING is written down, and that is the whole
+		// point of the two-bit model: the row already reads as not-on-wire
+		// (no on_wire stamp) and as may-have-been-handed-to-a-writer (its
+		// never-emitted claim came off before the attempt). Both answers
+		// are already correct for their reader, so a refusal has nothing
+		// to record — and cannot get it wrong.
+		log.Debug().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).
+			Str("outcome", "unconfirmed").Msg("delivery_dispatch_unconfirmed")
 	}
 	return true
+}
+
+// pushOwnEnvelopeToSubscribers is the retry tick's push, wrapped so the
+// outcome is not thrown away. It runs on a background goroutine: the tick
+// must not block on a subscriber's writer.
+//
+// A push that no subscriber accepted confirms nothing, and confirming
+// nothing is the whole mechanism — the entry stays holdUnconfirmed, so a
+// reachability kick can wake it and the next pass tries again.
+//
+// "Nobody accepted" and "nobody can say" are different answers, though, and
+// only the first is worth writing down. A subscriber whose writer refused
+// ambiguously may be holding the message, and recording "never emitted" for
+// it would tell a later deletion to skip them.
+func (s *Service) pushOwnEnvelopeToSubscribers(envelope protocol.Envelope, subs []*subscriber, dispatchedAt time.Time) {
+	accepted, unresolved := s.pushToSubscriberSnapshot(envelope, subs)
+	if accepted > 0 {
+		s.confirmEnvelopeOnWire(envelope, dispatchedAt)
+		return
+	}
+	log.Warn().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).
+		Int("unresolved", unresolved).Msg("delivery_push_refused_by_every_subscriber")
+}
+
+// clearedToWrite is the PRE-WIRE gate every path that hands a frame to a
+// writer has to pass, and the one the confirmation cannot stand in for.
+//
+// It answers two questions that are only answerable BEFORE the write. Has
+// the message been frozen by a wipe or withdrawn since the frame was
+// queued? A frame sitting in a session's queue can outlive the moment its
+// author recalls it, and the recall classifies it as never-emitted — so
+// writing it afterwards puts a message the sender was told was recalled
+// in front of the recipient. And has the durable never-emitted claim been
+// withdrawn? That write has to land first, or the disk says the message
+// never left while the peer holds it.
+//
+// A frame that carries no delivery of ours passes untouched.
+func (s *Service) clearedToWrite(ref deliveryDispatchRef, now time.Time) bool {
+	if ref.Envelope.ID == "" {
+		return true
+	}
+	return s.noteOwnEnvelopeEmitted(ref.Envelope.Sender, ref.Envelope.ID, now)
 }

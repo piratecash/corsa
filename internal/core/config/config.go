@@ -95,10 +95,15 @@ type Node struct {
 	// internal/core/node — so this knob only trades RAM for how far back a
 	// reconnecting peer can still receive missed frames within the uptime.
 	PendingRingSize int
-	// DeliveryRetryMaxAttempts caps how many times the sender-side delivery
-	// retry scheduler re-sends a single message (or seen receipt) that has
-	// not been confirmed end-to-end. 0 selects the node-package default.
-	// Env: CORSA_DELIVERY_RETRY_MAX_ATTEMPTS.
+	// DeliveryRetryMaxAttempts caps how many times an outgoing SEEN
+	// RECEIPT is re-sent before the node stops asking for its seen_ack. 0
+	// selects the node-package default. Env:
+	// CORSA_DELIVERY_RETRY_MAX_ATTEMPTS.
+	//
+	// It does NOT bound a message. A message ends when the recipient
+	// confirms it, when its author withdraws it, or when its own TTL
+	// expires (internal/core/node/delivery_retry.go); the name is kept for
+	// compatibility with the environment variable.
 	DeliveryRetryMaxAttempts int
 
 	// HoldDMUntilReachable gates sender-owned DM emission on recipient
@@ -472,7 +477,7 @@ const (
 	// builder does not copy the fields) and the receiver falls back to
 	// the legacy sync path. No emission gate is needed — unlike
 	// seen_ack, unknown JSON fields are silently ignored, not rejected.
-	ProtocolVersion        = 28
+	ProtocolVersion        = 29
 	MinimumProtocolVersion = 26
 	// ProtocolVersionSeenAck is the version that introduced
 	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
@@ -492,8 +497,20 @@ const (
 	// this value, the fallback sync in deliverRelayedMessage /
 	// handleInboundPushMessage becomes dead code for DM topics.
 	ProtocolVersionDMSenderKeys = 27
-	DefaultOutgoingPeers        = 8
-	DefaultPeerPort             = "64646"
+	// ProtocolVersionReceiptSenderAck is the version that added
+	// Frame.ReceiptSender to ack_delete, making an ack name WHICH receipt
+	// it holds rather than a recipient+id+status triple that two receipts
+	// can share. The field is inside the signed payload, so emission is
+	// gated on the peer advertising >= this version: an older verifier
+	// rebuilds the v1 payload, and a signature it cannot reproduce is
+	// scored as forgery, not as an unknown field.
+	// TODO(receipt-sender-ack-gate-removal): delete this constant and the
+	// gates in internal/core/node (buildAckDeleteFrame call sites) once
+	// MinimumProtocolVersion reaches it; the legacy ambiguity rule in
+	// deleteBacklogReceiptForRecipient goes with them.
+	ProtocolVersionReceiptSenderAck = 29
+	DefaultOutgoingPeers            = 8
+	DefaultPeerPort                 = "64646"
 )
 
 // CorsaVersion is the canonical release version string ("MAJOR.MINOR.BUILD").
@@ -1258,15 +1275,17 @@ func pendingRingSizeFromEnv() int {
 
 // MaxDeliveryRetryAttempts is the ceiling on CORSA_DELIVERY_RETRY_MAX_ATTEMPTS.
 //
-// It is not a resource limit but a correctness one. A deleted message is
-// refused for a fixed window on the receiving side, and that window has to
-// outlast the sending. The retry schedule caps at 11 minutes per attempt,
-// so 120 attempts is a little under a day — well inside the refusal, which
-// is sized to the reseed horizon (a week) rather than to this number,
-// because a restart resets the counter anyway.
+// The value now bounds the SEEN-RECEIPT retry only, and a receipt is
+// cheap: 120 attempts on a schedule that caps at 11 minutes is a little
+// under a day of asking for one seen_ack, which is as long as it is worth
+// asking. The clamp exists so a mistyped environment variable cannot turn
+// that into a permanent one.
 //
-// The clamp is what keeps a single uninterrupted run from outlasting the
-// refusal on its own.
+// It used to be a correctness limit — it kept a run of message retries
+// inside the window a deleted id stays refused on the receiving side. That
+// coupling is gone with the message attempt cap; what keeps a withdrawn
+// message from coming back is the receipt the refusing node re-sends. See
+// service/wipe_tombstone_set.go.
 const MaxDeliveryRetryAttempts = 120
 
 // deliveryRetryMaxAttemptsFromEnv reads CORSA_DELIVERY_RETRY_MAX_ATTEMPTS —

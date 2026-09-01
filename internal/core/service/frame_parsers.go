@@ -96,16 +96,29 @@ func receiptRecordsFromFrames(receipts []protocol.ReceiptFrame) []DeliveryReceip
 	return out
 }
 
+// Delivery statuses as the UI reads them. The three the chatlog persists
+// plus MessageStatusQueued, which it does not: queued is the ABSENCE of
+// the on-wire stamp (see decryptDirectMessagesReporting) and lives only in
+// the view.
+const (
+	MessageStatusQueued    = "queued"
+	MessageStatusSent      = "sent"
+	MessageStatusDelivered = "delivered"
+	MessageStatusSeen      = "seen"
+)
+
 // receiptStatusRank returns the monotonic rank of a delivery status. Higher
 // rank = further along the lifecycle. Unknown/empty values map to 0 so they
-// never overwrite a known status.
+// never overwrite a known status; MessageStatusQueued is deliberately one
+// of them, because a queued message has not reached the wire and every
+// other status is news.
 func receiptStatusRank(status string) int {
 	switch status {
-	case "sent":
+	case MessageStatusSent:
 		return 1
-	case "delivered":
+	case MessageStatusDelivered:
 		return 2
-	case "seen":
+	case MessageStatusSeen:
 		return 3
 	default:
 		return 0
@@ -530,8 +543,10 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 		receiptStatus := item.PersistedStatus
 
 		// Layer in-memory receipt on top — but only if it advances the status.
+		fromReceipt := false
 		if receipt, ok := receiptsByMessageID[item.ID]; ok {
 			deliveredAt = domain.TimeOf(receipt.DeliveredAt)
+			fromReceipt = true
 			if receiptStatusRank(receipt.Status) > receiptStatusRank(receiptStatus) {
 				receiptStatus = receipt.Status
 			}
@@ -551,8 +566,31 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 			if pendingItem, ok := pending[item.ID]; ok {
 				receiptStatus = pendingItem.Status
 			} else {
-				receiptStatus = "sent"
+				receiptStatus = MessageStatusSent
 			}
+		}
+
+		// A message no sink has confirmed reads as QUEUED, not sent. The
+		// chatlog cannot make this distinction — "sent" is the only status
+		// it has below delivered, and it is the truthful one for the wire
+		// — so the answer comes from the on-wire stamp instead. Applied
+		// last and only over "sent": any receipt at all outranks it,
+		// because a message the recipient has answered for plainly went
+		// out.
+		//
+		// Read off THIS bit and not off the never-emitted claim. That
+		// claim is withdrawn before the first frame is handed to a writer,
+		// so it says "sent" from the moment an attempt begins — and an
+		// attempt every writer then refused left the sender looking at a
+		// message nothing had carried, which is the original bug.
+		//
+		// The sender check is EXPLICIT. The old claim was only ever true
+		// for a row this node authored, so the domain guard came free with
+		// the data; an incoming row is governed by the bit too (it simply
+		// never gets a stamp), so without this check every message the
+		// user received would read as queued.
+		if receiptStatus == MessageStatusSent && item.AwaitingWire && item.Sender == id.Address {
+			receiptStatus = MessageStatusQueued
 		}
 
 		replyTo := domain.MessageID(message.ReplyTo)
@@ -572,6 +610,9 @@ func decryptDirectMessagesReporting(id *identity.Identity, contacts map[string]C
 			Timestamp:     item.Timestamp,
 			ReceiptStatus: receiptStatus,
 			DeliveredAt:   deliveredAt,
+
+			DeliveredAtFromReceipt: fromReceipt,
+			Seq:                    item.Seq,
 		})
 		noteSuccess(&out[len(out)-1])
 	}

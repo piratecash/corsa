@@ -322,11 +322,25 @@ func (s *Service) rebuildRoutingSnapshot() {
 	// evidence for every routed identity. A direct peer whose final session
 	// ended with a confirmed remote EOF is recorded at that lifecycle
 	// boundary.
+	// The delivery hold is updated even so, and from the FULL transition
+	// set. Suppressing the durable presence record is about not writing
+	// down "your contact went offline" when the truth may be "we lost the
+	// network" — a claim about someone else. Re-holding our own
+	// unconfirmed deliveries claims nothing about anybody: either reading
+	// makes them ours to send again, and a message that stayed
+	// holdNone here would be filtered out by the reachability kick and
+	// left to sit out the rest of its backoff after the recipient came
+	// back. Collected before the suppression and applied after the
+	// mutexes are released.
+	lostReachability := presenceTransitions
 	if len(reachable) == 0 {
 		presenceTransitions = nil
 	}
 	s.routingSnap.Store(&routingSnapshot{snap: snap, reachable: reachableIDs})
 	s.presenceProjection.mu.Unlock()
+	for _, identity := range lostReachability {
+		s.noteRecipientWentOffline(identity)
+	}
 	publishedAt := time.Now().UTC()
 	s.lastRoutingSnapAtNanos.Store(publishedAt.UnixNano())
 	if wasFull {
@@ -374,6 +388,17 @@ func (s *Service) publishIdentityPresenceChanged(change ebus.IdentityPresenceCha
 	// consumed from a potentially shared best-effort Bus. Queue it exactly once
 	// for both bus-backed and headless services, then notify UI consumers.
 	s.persistIdentityPresenceChange(change)
+	// Deliveries still owed to these identities go back to being held.
+	// This covers the callers that publish a presence loss directly (the
+	// withdrawal grace path); the snapshot comparison re-holds from its
+	// own FULL transition set, because it suppresses the durable record
+	// when every route vanishes and the hold must not be suppressed with
+	// it. noteRecipientWentOffline is idempotent, so the overlap is free.
+	// Takes deliveryMu alone; every caller publishes with the domain
+	// mutexes released.
+	for _, identity := range change.Identities {
+		s.noteRecipientWentOffline(identity)
+	}
 	ebus.PublishIdentityPresenceChanged(s.eventBus, change)
 }
 

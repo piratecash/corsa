@@ -582,7 +582,7 @@ func (s *Service) drainSendMessage(ctx context.Context, frame protocol.Frame, or
 	// enqueued in a session or persistent peer queue, with relayForwardState
 	// stored. No silent gossip fallback — if this fails, the frame goes
 	// back to pending for the normal retry loop.
-	if !s.sendRelayToAddress(ctx, address, envelope, decision.RelayRouteOrigin) {
+	if !s.sendRelayToAddress(ctx, address, envelope, decision.RelayRouteOrigin, time.Now().UTC()).handled() {
 		// Real send attempt failed — this is a genuine delivery failure.
 		return false, true
 	}

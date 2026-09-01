@@ -340,6 +340,20 @@ type Service struct {
 	lastOutboundTerminalSweep time.Time
 	relayRetry                map[string]relayAttempt
 	awaitingDelivered         map[protocol.MessageID]*deliveryRetryEntry
+	// lastReachabilityKickAt is when a recipient was last reported to have
+	// become reachable (kickDeliveryRetriesForReachable). Delivery domain,
+	// guarded by deliveryMu.
+	//
+	// It exists for one race and only that one: the retry tick samples
+	// reachability without a mutex, and a kick landing in that window
+	// finds the entry not yet Held — invisible to it — while the tick goes
+	// on to park the entry on an answer the kick has just invalidated.
+	// armDueDeliveries compares this stamp against the start of its pass
+	// and keeps the entry due instead. One timestamp rather than a
+	// per-identity map on purpose: a false positive costs one local
+	// routing-table lookup on the next tick, and the alternative costs a
+	// returning recipient a minute of silence.
+	lastReachabilityKickAt time.Time
 	// cancelledDeliveries remembers ids whose delivery the sender
 	// withdrew, so a backlog push that took its snapshot a moment earlier
 	// does not hand the envelope over anyway. Guarded by deliveryMu, like
@@ -364,10 +378,13 @@ type Service struct {
 	// markedNeverEmitted are the ids this process has a durable
 	// never-emitted claim standing for. It exists because the backlog
 	// replay reaches past the retry engine: it can emit a message whose
-	// awaitingDelivered entry was dropped when the attempts ran out, and
-	// without this the claim would stay on the row while the peer holds
-	// the message. Rebuilt implicitly after a restart — the reseed makes
-	// entries out of the same marks. See delivery_retry.go.
+	// awaitingDelivered entry is already gone — a receipt arrived, or the
+	// message's own TTL expired — and without this the claim would stay
+	// on the row while the peer holds the message. Entries leave when the
+	// claim is withdrawn, when a receipt disproves it, and when the row
+	// itself is destroyed by a withdrawal. Rebuilt implicitly after a
+	// restart — the reseed makes entries out of the same marks. See
+	// delivery_retry.go.
 	markedNeverEmitted map[protocol.MessageID]struct{}
 	awaitingSeenAck    map[protocol.MessageID]*seenAckRetryEntry
 	// sentDMIDs is a bounded LRU of message IDs this node has originated as
@@ -395,13 +412,32 @@ type Service struct {
 	// Set once by RegisterDeliveryOutbox before Run, like the two above,
 	// so reads need no mutex.
 	emissionJournal DeliveryEmissionJournal
-	// emissionMu serializes decide-then-write on emissionJournal so two
-	// goroutines cannot land a mark and a clear for the same message in
-	// the wrong order. It is NOT one of the seven domain mutexes: it is
-	// acquired OUTSIDE all of them and never while one is held, and it is
-	// the only lock held across the journal's SQLite I/O. docs/locking.md
-	// carries the contract.
-	emissionMu sync.Mutex
+	// emissionLane orders this node's own journal writes so a pre-wire
+	// withdrawal is never queued behind bookkeeping. Immutable after New.
+	// Not a domain mutex and not in the canonical order — it guards no
+	// Service state. See emission_lane.go and docs/locking.md.
+	emissionLane *emissionLane
+	// repairSlot admits ONE local-record repair pass at a time. The pass
+	// blocks on the journal, and the tick offers it every two seconds, so
+	// a contended database would otherwise accumulate a goroutine per
+	// tick. Buffered to one; a tick that finds it taken simply skips and
+	// offers again. Not a domain mutex — it guards no state, only
+	// concurrency. See repairLocalDeliveryRecord.
+	repairSlot chan struct{}
+	// pendingUIEvents are local-change events the bus SHED, kept so the
+	// repair pass can offer them again.
+	//
+	// It exists because the retry entry is not a place a debt can live to
+	// the end: a receipt DELETES it, and if the receipt's own event was
+	// shed in the same burst the conversation is left showing queued for
+	// a message the peer has read, with nothing but a full reload to
+	// repair it. Delivery-domain state, keyed by message id so a newer
+	// event for the same message replaces an older one.
+	pendingUIEvents map[protocol.MessageID]pendingUIEvent
+	// pendingEventSeq stamps each kept snapshot, so a republish that
+	// succeeds removes the snapshot it sent rather than whatever the map
+	// holds by then. Delivery-domain state, written under deliveryMu.
+	pendingEventSeq uint64
 	// relayRetryScratch is a reusable buffer for the topics["dm"] snapshot
 	// taken on each 2s relay-retry cycle (retryableRelayMessages). Copying the
 	// whole topics["dm"] slice into a fresh allocation every cycle was a steady
@@ -1059,6 +1095,12 @@ type peerSession struct {
 	sendCh     chan peerSendItem
 	sendMu     sync.Mutex
 	sendClosed bool
+	// onStranded answers for the deliveries the queue dies holding. A
+	// discarded frame provably never reached NetCore while its durable
+	// never-emitted claim was already withdrawn, so without this the row
+	// says the message left this machine. Set by attachOutboundNetCore;
+	// nil only for a session a test built by hand.
+	onStranded func([]deliveryDispatchRef)
 
 	inboxCh chan protocol.Frame
 	errCh   chan error
@@ -1176,7 +1218,7 @@ func (ps *peerSession) Close() error {
 		// handshake, CM generation mismatch) have no serve-loop exit to
 		// hang the drain on, and frames enqueued during initPeerSession
 		// would otherwise vanish without a terminal.
-		ps.closeSendQueue()
+		ps.discardSendQueue()
 		if ps.netCore != nil {
 			ps.netCore.Close()
 			if ps.onClose != nil {
@@ -1606,23 +1648,26 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// unit tests that drive the Service without calling Run, and
 		// matches the moment the in-memory state machine first became
 		// live.
-		startedAt:                time.Now().UTC(),
-		datagramMetrics:          datagram.NewMetrics(),
-		cfg:                      cfg,
-		eventBus:                 eventBus,
-		selfBoxKey:               selfBoxKey,
-		selfBoxSig:               selfBoxSig,
-		trust:                    trust,
-		peers:                    peers,
-		peersStatePath:           peersStatePath,
-		persistedMeta:            persistedByAddr,
-		known:                    known,
-		boxKeys:                  boxKeys,
-		pubKeys:                  pubKeys,
-		boxSigs:                  boxSigs,
-		topics:                   topics,
-		receipts:                 receipts,
-		notices:                  make(map[string]gazeta.Notice),
+		startedAt:       time.Now().UTC(),
+		datagramMetrics: datagram.NewMetrics(),
+		cfg:             cfg,
+		eventBus:        eventBus,
+		selfBoxKey:      selfBoxKey,
+		selfBoxSig:      selfBoxSig,
+		trust:           trust,
+		peers:           peers,
+		peersStatePath:  peersStatePath,
+		persistedMeta:   persistedByAddr,
+		known:           known,
+		boxKeys:         boxKeys,
+		pubKeys:         pubKeys,
+		boxSigs:         boxSigs,
+		topics:          topics,
+		receipts:        receipts,
+		notices:         make(map[string]gazeta.Notice),
+		emissionLane:    newEmissionLane(),
+		// Buffered to ONE: the local-record repair pass is single-flight.
+		repairSlot:               make(chan struct{}, 1),
 		seen:                     seen,
 		seenReceipts:             seenReceipts,
 		subs:                     make(map[string]map[string]*subscriber),
@@ -3259,6 +3304,18 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		if backlogSub != nil {
 			s.goBackground(func() { s.pushBacklogToSubscriber(backlogSub) })
 		}
+		// The held-delivery kick belongs HERE and not in trackInboundConnect,
+		// where the direct route was actually added: that runs before auth_ok
+		// is written, and a retry tick woken there could put a push_message on
+		// the connection ahead of the handshake reply the peer is still
+		// waiting for. Same boundary, same reason, as the backlog above.
+		// Self-checked inside the kick, so an inbound peer that is not a
+		// usable delivery target is a no-op.
+		if kickPeer := s.provenInboundPeerIdentity(connID); !kickPeer.IsZero() {
+			s.goBackground(func() {
+				s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{kickPeer: {}})
+			})
+		}
 		// The connect-time route table, ordered behind auth_ok for the same
 		// reason and by the same rule: the dialler counts a capability as
 		// negotiated only once auth_ok has landed, so a full sync that
@@ -4560,6 +4617,19 @@ func ackDeletePayload(address, ackType, id, status string) []byte {
 	return []byte("corsa-ack-delete-v1|" + address + "|" + ackType + "|" + id + "|" + status)
 }
 
+// ackDeletePayloadForFrame is what an ack_delete frame signs, and the two
+// shapes are told apart by the frame itself: a frame that names the
+// receipt's author signs v2 over it, one that does not signs exactly the
+// v1 bytes older peers have always produced. Signer and verifier both go
+// through here, so neither can pick the shape by its own assumption
+// about the other's version.
+func ackDeletePayloadForFrame(frame protocol.Frame) []byte {
+	if frame.ReceiptSender == "" {
+		return ackDeletePayload(frame.Address, frame.AckType, frame.ID, frame.Status)
+	}
+	return []byte("corsa-ack-delete-v2|" + frame.Address + "|" + frame.AckType + "|" + frame.ID + "|" + frame.Status + "|" + frame.ReceiptSender)
+}
+
 // handleAuthSession verifies the auth_session frame's Ed25519 signature via
 // connauth.VerifyAuthSession, then applies post-auth side effects (peer
 // learning, route registration, peer announcement, health tracking).
@@ -4928,14 +4998,12 @@ func (s *Service) trackInboundConnect(
 	log.Trace().Uint64("conn_id", uint64(id)).Str("peer_identity", peerIdentity.String()).Msg("track_inbound_connect_before_on_peer_session")
 	s.onPeerSessionEstablished(peerIdentity, s.connCapabilitiesForID(id))
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("track_inbound_connect_after_on_peer_session")
-	// The inbound peer's identity may now be directly reachable (a direct
-	// route was added above if it is relay-capable): re-arm any held
-	// sender-owned DM for it. Self-checked inside the kick, so a non-relay
-	// inbound peer (no usable route) is a no-op. The outbound path does the
-	// same in servePeerSession.
-	s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{
-		peerIdentity: {},
-	})
+	// NOTE: the held-delivery kick for this peer is NOT fired here. This
+	// runs inside handleAuthSession, BEFORE auth_ok has been written, and a
+	// retry tick woken here could put a push_message on the connection
+	// ahead of the handshake reply the peer is still waiting for. It fires
+	// where the backlog replay does — after sendHandshakeReplyViaNetwork
+	// returns — for exactly the reason that path is ordered there.
 
 	// Send full table sync to the inbound peer (Phase 1.2: full sync on
 	// connect, symmetric with the outbound path).
@@ -5999,9 +6067,47 @@ func (s *Service) storeMessageFrame(frame protocol.Frame) protocol.Frame {
 		return protocol.Frame{Type: "error", Code: errCode}
 	}
 	if !stored {
-		return protocol.Frame{Type: "message_known", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
+		// A re-send of an id the node already holds answers with the SAME
+		// status as the first one would. The client treats message_known
+		// as success and reads the status off it, so leaving the field
+		// empty here told an idempotent retry that a message still being
+		// held for an unreachable recipient had gone out.
+		return protocol.Frame{Type: "message_known", Topic: msg.Topic, Count: count, ID: string(msg.ID), Status: s.storedMessageStatus(msg.ID)}
 	}
-	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID)}
+	// Status tells the caller whether the message actually went anywhere.
+	// The row is written either way, so without this the sender is told
+	// "sent" for a message the node is holding because the recipient is
+	// unreachable — and keeps believing it until something else makes them
+	// reload the conversation.
+	return protocol.Frame{Type: "message_stored", Topic: msg.Topic, Count: count, ID: string(msg.ID), Status: s.storedMessageStatus(msg.ID)}
+}
+
+// storedMessageStatus reports how a just-stored outgoing DM left the node:
+// "queued" until the sender has been told otherwise, empty once they have
+// or when there is nothing of ours to retry (an inbound message, or a node
+// running without the delivery scheduler).
+//
+// The question is answered by ANNOUNCED, and that is the only field that
+// answers it correctly. Not by Emitted, the conservative "might the peer
+// have this?" flag, which is set before the frame is written — reading it
+// here reported "sent" for a message whose every writer then refused. And
+// not by the hold either: a directed relay confirms synchronously, so the
+// hold is already clear while the durable stamp is still being written on
+// a background goroutine, and the reply would say sent over a row that
+// still reads queued. Announced is claimed only AFTER that write lands,
+// which is exactly the moment the two agree.
+//
+// Answering "queued" for the ordinary case is deliberate: at reply time
+// the sinks are still working, and the honest word for that is queued.
+// TopicMessageEmitted moves it to sent a moment later, which is the same
+// event the held case waits for — one path, not two.
+func (s *Service) storedMessageStatus(id protocol.MessageID) string {
+	s.deliveryMu.RLock()
+	defer s.deliveryMu.RUnlock()
+	if entry, awaiting := s.awaitingDelivered[id]; awaiting && !entry.Announced {
+		return protocol.MessageStatusQueued
+	}
+	return ""
 }
 
 func (s *Service) importMessageFrame(frame protocol.Frame) protocol.Frame {
@@ -6034,11 +6140,18 @@ func (s *Service) storeDeliveryReceiptFrame(frame protocol.Frame) protocol.Frame
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidSendDeliveryReceipt}
 	}
 
-	stored, count := s.storeDeliveryReceipt(receipt)
-	if !stored {
-		return protocol.Frame{Type: "receipt_known", Recipient: receipt.Recipient, Count: count, ID: string(receipt.MessageID)}
+	outcome := s.storeDeliveryReceipt(receipt)
+	if !outcome.ackable {
+		// The chatlog refused the status. Reporting success here would
+		// have the client clear the unread mark over a row that still
+		// reads unread, and nothing else writes it: the network re-send
+		// of this receipt goes to the PEER, not to our own chatlog.
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeStoreFailed}
 	}
-	return protocol.Frame{Type: "receipt_stored", Recipient: receipt.Recipient, Count: count, ID: string(receipt.MessageID)}
+	if !outcome.stored {
+		return protocol.Frame{Type: "receipt_known", Recipient: receipt.Recipient, Count: outcome.count, ID: string(receipt.MessageID)}
+	}
+	return protocol.Frame{Type: "receipt_stored", Recipient: receipt.Recipient, Count: outcome.count, ID: string(receipt.MessageID)}
 }
 
 // handleAckDeleteFrame validates an ack_delete frame against the authenticated
@@ -6058,7 +6171,7 @@ func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (
 		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "invalid ack identity or id"}, false
 	}
-	if err := identity.VerifyPayload(hello.Address, hello.PubKey, ackDeletePayload(frame.Address, frame.AckType, frame.ID, frame.Status), frame.Signature); err != nil {
+	if err := identity.VerifyPayload(hello.Address, hello.PubKey, ackDeletePayloadForFrame(frame), frame.Signature); err != nil {
 		s.addBanScore(id, banIncrementInvalidSig)
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAuthSignature, Error: err.Error()}, false
 	}
@@ -6081,7 +6194,7 @@ func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (
 			s.recordRelayDeliveredTo(protocol.MessageID(frame.ID), domain.PeerIdentityFromWire(frame.Address))
 		}
 	case "receipt":
-		count = s.deleteBacklogReceiptForRecipient(frame.Address, protocol.MessageID(frame.ID), frame.Status)
+		count = s.deleteBacklogReceiptForRecipient(identityFromAck(frame))
 	default:
 		return protocol.Frame{Type: "error", Code: protocol.ErrCodeInvalidAckDelete, Error: "unknown ack type"}, false
 	}
@@ -6336,8 +6449,11 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	//                     the event-path and the DMHeaders header-path
 	//                     that could otherwise re-trigger unread counts
 	//                     via repairUnreadFromHeaders after a restart.
-	//   StoreFailed    → add to s.topics (don't lose the message from
-	//                     the network), skip event (stale data).
+	//   StoreFailed    → for a message from SOMEONE ELSE: add to s.topics
+	//                     (don't lose the message from the network), skip
+	//                     event (stale data). For a message WE authored:
+	//                     return immediately, exactly like StoreDeferred —
+	//                     see the branch below.
 	//   StoreDeferred  → return immediately, before any routing: no dedup
 	//                     mark, no s.topics, no push/gossip/relay, no
 	//                     sender-side retry, no event, no receipt, and the
@@ -6347,17 +6463,20 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// When no store is registered (relay-only node) or for transit messages,
 	// the message always enters s.topics.
 	storeResult := StoreInserted
+	// Whether the message being stored is one this node AUTHORED. Decided
+	// before the store call because the store needs it, and read again
+	// afterwards because the answer to a write failure depends on it.
+	ownAuthored := isLocal && s.identity != nil && msg.Sender == s.identity.Address
 	// Control DMs (TopicControlDM) bypass chatlog persistence by contract
 	// — see docs/dm-commands.md "Storage rules for control DMs". They
 	// reach the application via LocalChangeNewControlMessage on the
 	// dedicated ebus.TopicMessageControl below; the chat thread never
 	// learns of them.
 	if isLocal && s.messageStore != nil && msg.Topic != protocol.TopicControlDM {
-		isOutgoing := msg.Sender == s.identity.Address
 		// Unlock before calling into the store — it may do SQLite I/O.
 		s.gossipMu.Unlock()
 		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_mid").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
-		storeResult = s.messageStore.StoreMessage(envelope, isOutgoing)
+		storeResult = s.messageStore.StoreMessage(envelope, ownAuthored)
 		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait_reacquire").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
 		s.gossipMu.Lock()
 		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held_reacquire").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
@@ -6398,6 +6517,33 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// previous hop re-attempts and the original sender keeps the
 		// message until this node can answer for it.
 		return false, count, protocol.ErrCodeStoreDeferred
+	}
+	if storeResult == StoreFailed && ownAuthored {
+		// The local database comes FIRST for a message this node authors.
+		// Routing it anyway put the message on the wire while its own
+		// author had no record of it: the local RPC answered
+		// message_stored, the UI drew a bubble that no reload would bring
+		// back, and after a restart nothing reseeded it — the recipient
+		// could end up holding a message the sender cannot see, quote,
+		// resend or recall.
+		//
+		// So this leaves by the same door as StoreDeferred: nothing marked
+		// seen, nothing in s.topics, no push, no gossip, no relay, no
+		// delivery entry, no event. The difference is only who is told —
+		// the author, through the error reply, instead of a hop.
+		//
+		// A message from SOMEONE ELSE keeps the old answer (fall through,
+		// enter s.topics): there the write failure costs us a local copy,
+		// and dropping the message as well would lose it from the network
+		// too, for a peer who has already done everything right.
+		count := len(s.topics[msg.Topic])
+		s.gossipMu.Unlock()
+		log.Error().
+			Str("id", string(msg.ID)).
+			Str("topic", msg.Topic).
+			Str("recipient", msg.Recipient).
+			Msg("store_own_outgoing_message_failed_send_abandoned")
+		return false, count, protocol.ErrCodeStoreFailed
 	}
 	s.seen.Add(string(msg.ID))
 
@@ -6457,6 +6603,55 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		log.Debug().Str("node", s.identity.Address).Int("evicted", len(evictedIDs)).Str("recipient", msg.Recipient).Msg("transit_backlog_cap_eviction")
 	}
 
+	// The routing decision is taken BEFORE the UI event, not after, because
+	// the event has to carry it. A locally-authored DM is announced to this
+	// node's own client here, and that announcement races the synchronous
+	// reply to send_message: whichever reaches the conversation cache first
+	// decides the badge, and the other is dropped as a duplicate. Deciding
+	// reachability afterwards meant the event could only ever say "sent",
+	// so a message held for an unreachable recipient was shown as sent
+	// exactly as often as the event won that race.
+	//
+	// Nothing else moves: the decision is a pure read of routing and peer
+	// state, and the push/gossip that consume it stay where they were.
+	decision := s.router.Route(envelope)
+
+	// An origin-authored message that ARRIVED from the network (Via != "")
+	// is an echo of our own DM coming back through the mesh. Re-propagating
+	// it would re-inject it with a FRESH hop budget and revive a message the
+	// sender-owned engine may already have abandoned — the months-long
+	// zombie-DM storm (traffic showed our own months-old DMs re-emitted by
+	// THIS path with hops reset to the default). Re-propagation of our own
+	// messages is owned EXCLUSIVELY by the sender-owned retry engine
+	// (delivery_retry.go). The message is still stored for the local DM view
+	// above, and the inbound-push handler still ack-deletes the pushing hop
+	// (which actively helps the mesh copies die); we simply never re-gossip
+	// or relay it.
+	originEcho := msg.Via != "" && s.identity != nil && msg.Sender == s.identity.Address
+	// Reachability gate for our OWN first send (sender == self, local origin,
+	// Via == ""): emit only when the recipient is reachable — a directed
+	// route or a directly connected subscriber. An unreachable recipient is
+	// HELD (registered in awaitingDelivered below) instead of blind-gossiped
+	// into the void; the sender-owned retry engine delivers it when a route
+	// appears. This is the origin-send half of the INV-3 reachability gate
+	// (the retry half is dispatchEnvelopeRetry). TRANSIT forwarding
+	// (sender != self) is NOT gated — blind gossip is how relays propagate
+	// other people's messages (INV-3 unchanged for transit).
+	originFirstSend := msg.Via == "" && s.identity != nil && msg.Sender == s.identity.Address
+	originUnreachableHold := s.cfg.HoldDMUntilReachable && originFirstSend && decision.RelayNextHop == nil && len(decision.PushSubscribers) == 0
+	if originUnreachableHold {
+		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("origin_send_held_unreachable")
+	}
+
+	// Whether this is a DM this node itself authored. Decided BEFORE the
+	// UI event, because the event has to say so: a locally-authored
+	// message is announced to our own client as queued until a sink
+	// confirms it.
+	ownOutgoingDM := ownAuthored && msg.Topic == "dm" &&
+		msg.Recipient != "" && msg.Recipient != "*" && msg.Recipient != s.identity.Address &&
+		storeResult != StoreDuplicate
+	dispatchedAt := time.Now().UTC()
+
 	// Only notify the desktop UI for messages this node participates in.
 	// Transit relay traffic must not wake up the UI.
 	// Emit event only for genuinely new messages (StoreInserted).
@@ -6470,6 +6665,15 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			Flag:       string(msg.Flag),
 			CreatedAt:  msg.CreatedAt.Format(time.RFC3339Nano),
 			TTLSeconds: msg.TTLSeconds,
+		}
+		if ownOutgoingDM {
+			// On disk, not yet known to be on the wire — which is true of
+			// EVERY message this node has just authored, not only the ones
+			// the gate held back: the sinks are still working when this is
+			// published. TopicMessageEmitted moves it to sent when one of
+			// them confirms, and until then "queued" is the only thing
+			// that cannot turn out to have been a lie.
+			event.Status = protocol.MessageStatusQueued
 		}
 		if msg.Topic == protocol.TopicControlDM {
 			// Control DMs publish onto the dedicated ebus topic only
@@ -6529,42 +6733,33 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// would strand the message on this relay if the subscriber
 	// reconnects to a different node.  Gossip without push would add
 	// up to relayRetryTTL latency for a locally connected recipient.
-	decision := s.router.Route(envelope)
+	//
+	// `decision` was taken above, before the UI event that has to carry it.
+
+	// The retry entry is registered BEFORE anything is sent, and that
+	// ordering is load-bearing twice over. The sinks below confirm what
+	// they accepted (confirmEnvelopeOnWire), and a confirmation arriving
+	// before the entry exists would be lost — leaving a message that DID
+	// go out recorded as never confirmed. And a reachability kick landing
+	// in the same window would find nothing to wake. Registering first
+	// makes both harmless: an entry always exists to receive the answer.
+	//
+	// It starts holdUnconfirmed (or holdUnreachable when the gate refused
+	// to try), so nothing counts as sent until a sink says so.
+	if ownOutgoingDM {
+		s.deliveryMu.Lock()
+		s.registerAwaitingDeliveredLocked(envelope, dispatchedAt, originUnreachableHold)
+		s.deliveryMu.Unlock()
+	}
 
 	if len(decision.PushSubscribers) > 0 {
 		// Tracked: writePushFrame itself is network-only, but the
 		// spawned fan-out must complete before TempDir cleanup so
 		// subscriber state is fully torn down before tests assert
 		// on side effects.
-		s.goBackground(func() { s.pushToSubscriberSnapshot(envelope, decision.PushSubscribers) })
+		s.goBackground(func() { s.pushOwnEnvelopeToSubscribers(envelope, decision.PushSubscribers, dispatchedAt) })
 	}
 
-	// An origin-authored message that ARRIVED from the network (Via != "")
-	// is an echo of our own DM coming back through the mesh. Re-propagating
-	// it would re-inject it with a FRESH hop budget and revive a message the
-	// sender-owned engine may already have abandoned — the months-long
-	// zombie-DM storm (traffic showed our own months-old DMs re-emitted by
-	// THIS path with hops reset to the default). Re-propagation of our own
-	// messages is owned EXCLUSIVELY by the sender-owned retry engine
-	// (delivery_retry.go), which is finite (TTL / attempts cap). The message
-	// is still stored for the local DM view above, and the inbound-push
-	// handler still ack-deletes the pushing hop (which actively helps the
-	// mesh copies die); we simply never re-gossip or relay it.
-	originEcho := msg.Via != "" && s.identity != nil && msg.Sender == s.identity.Address
-	// Reachability gate for our OWN first send (sender == self, local origin,
-	// Via == ""): emit only when the recipient is reachable — a directed
-	// route or a directly connected subscriber. An unreachable recipient is
-	// HELD (registered in awaitingDelivered below) instead of blind-gossiped
-	// into the void; the sender-owned retry engine delivers it when a route
-	// appears, bounded by TTL / attempts cap. This is the origin-send half of
-	// the INV-3 reachability gate (the retry half is dispatchEnvelopeRetry).
-	// TRANSIT forwarding (sender != self) is NOT gated — blind gossip is how
-	// relays propagate other people's messages (INV-3 unchanged for transit).
-	originFirstSend := msg.Via == "" && s.identity != nil && msg.Sender == s.identity.Address
-	originUnreachableHold := s.cfg.HoldDMUntilReachable && originFirstSend && decision.RelayNextHop == nil && len(decision.PushSubscribers) == 0
-	if originUnreachableHold {
-		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("recipient", msg.Recipient).Msg("origin_send_held_unreachable")
-	}
 	// Re-propagation age gate (envelope_retention.go): a broadcast or control
 	// DM past its class MaxAge must not be gossiped even once. Transit is
 	// already refused at admission; control DMs never enter s.topics so
@@ -6592,7 +6787,15 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// cap are applied. Runs inline: executeGossipTargets only enqueues
 		// jobs on the bounded gossip dispatch pool (gossip_dispatch.go).
 		gossipTargets := s.gossipTargetsForRelay(envelope, decision)
-		s.executeGossipTargets(envelope, gossipTargets)
+		// The fan-out carries OUR dispatch when the message is ours, so it
+		// takes the same pre-wire gate as every other sink; for transit
+		// the ref is zero and the path is unchanged. See
+		// executeGossipTargets.
+		gossipDelivery := deliveryDispatchRef{}
+		if ownOutgoingDM {
+			gossipDelivery = deliveryDispatchRef{Envelope: envelope, DispatchedAt: dispatchedAt}
+		}
+		s.executeGossipTargets(envelope, gossipTargets, gossipDelivery)
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
 		// next-hop for this recipient, send relay_message directly to that
@@ -6600,14 +6803,34 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// blind gossip relay for known routes. Gossip still runs above as
 		// fallback — receivers dedupe via seen[messageID].
 		if (msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM) && msg.Recipient != "" && msg.Recipient != "*" {
+			relayed := relaySendRefused
 			if decision.RelayNextHop != nil {
-				s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops)
+				relayed = s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops, dispatchedAt)
 			} else {
 				// No table route — fall back to blind gossip relay to
 				// capable full nodes (pre-Phase 1.2 behavior). Same
 				// hop/ingress gates as the gossip fan-out above: this
 				// path is blind propagation too.
-				s.tryRelayToCapableFullNodes(envelope, gossipTargets)
+				relayed = s.tryRelayToCapableFullNodes(envelope, gossipTargets, dispatchedAt)
+			}
+			switch {
+			case relayed.leftTheNode():
+				// A next hop's writer took the frame. For one of OUR
+				// messages that is the confirmation the retry engine
+				// waits on; for transit it is a no-op, since there is no
+				// entry of ours. A relay that only reached a peer SESSION
+				// confirms from that session's writer instead.
+				s.confirmEnvelopeOnWire(envelope, dispatchedAt)
+			case !ownOutgoingDM || len(decision.PushSubscribers) > 0:
+				// Not ours to account for, or the push answers later.
+			default:
+				// Nothing carries this message right now, and nothing has
+				// to be written down for that: the row already reads as
+				// not-on-wire, so the sender still sees queued after a
+				// restart, and its never-emitted claim already came off,
+				// so a deletion still asks the peer.
+				log.Debug().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).
+					Str("outcome", "unconfirmed").Msg("delivery_dispatch_unconfirmed")
 			}
 		}
 	}
@@ -6620,24 +6843,13 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// Sender-side e2e retry: our own outgoing DM stays scheduled until the
 	// recipient's delivered/seen receipt arrives (delivery_retry.go). No
 	// other domain mutex is held here, so taking deliveryMu is safe.
-	if msg.Topic == "dm" && msg.Sender == s.identity.Address &&
-		msg.Recipient != "" && msg.Recipient != "*" && msg.Recipient != s.identity.Address &&
-		storeResult != StoreDuplicate {
-		s.deliveryMu.Lock()
-		// held = the first send was withheld because the recipient was
-		// unreachable (reachability gate). Only held entries are woken by
-		// kickDeliveryRetriesForReachable when a route/connection appears.
-		s.registerAwaitingDeliveredLocked(envelope, time.Now().UTC(), originUnreachableHold)
-		s.deliveryMu.Unlock()
-		// A withheld send is the one case worth writing down: it is the
-		// only proof that survives a restart that the peer cannot have
-		// this message. Written AFTER the register and outside the
-		// mutex — losing it to a crash here reads as "may have gone out",
-		// which is the harmless direction.
-		if originUnreachableHold {
-			s.syncEmissionMarks([]protocol.MessageID{envelope.ID})
-		}
-	}
+	// A withheld send writes NOTHING here, and that is the two-bit model
+	// paying off. The row was born carrying its never-emitted claim and
+	// nothing has been handed to a writer, so the claim still stands —
+	// which is exactly what a deletion needs. And it carries no on_wire
+	// stamp, so the sender still reads it as queued after a restart. Both
+	// answers are already on the disk; there is nothing left to record,
+	// and therefore nothing that can be recorded wrongly.
 
 	// A chatlog duplicate (StoreDuplicate) is a sender retry whose original
 	// receipt most likely got lost — storeDeliveryReceipt would dedupe the
@@ -6850,8 +7062,167 @@ const maxReceiptBacklogPerRecipient = 4096
 // brief nested RLock inside the deliveryMu section (deliveryMu OUTER → gossipMu
 // INNER), released before the statusMu window; see the offline-recipient early
 // return.
-func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, int) {
-	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+// finishReceipt commits everything that means "this receipt is finished
+// with", and is called ONLY after its durable consequence is recorded.
+//
+// The three pieces belong together because each of them, alone, ends a
+// different retry: the entry is what makes the SENDER stop re-sending, the
+// dedup key is what makes this node ignore the PEER's next copy, and the
+// ackable answer it enables is what makes the peer stop keeping their own.
+// Committing any of them before the write is what made a failed write
+// unrecoverable, one exit at a time, for several rounds of review.
+//
+// The promote is part of it: the confirmed message was holding the
+// recipient's queue slot, so the next one is pulled forward instead of
+// idling out a backoff that was measuring the message just confirmed.
+// See planDueDeliveries.
+//
+// So is the backlog append. `fetch_delivery_receipts` serves that list to
+// the desktop, which raises the message's badge from it — appending before
+// the write showed `delivered` over a row still reading `sent`, which the
+// next reload took back, and a repeatedly failing write stacked duplicate
+// copies of the same receipt in the backlog.
+// commitResult is what the commit did, and only the first of the three
+// leaves anything for the caller to do.
+type commitResult int
+
+const (
+	// committedFirst: this call stored the receipt.
+	committedFirst commitResult = iota
+	// committedElsewhere: a concurrent copy stored it while this one was
+	// in its write. Everything downstream — the badge event, the relay
+	// tracking, the distribution — is that copy's to do, once.
+	committedElsewhere
+	// droppedAtCommit: the recipient's last subscriber went away during
+	// the write. Same clean drop as the door's offline gate: no backlog,
+	// no dedup key, no relayRetry entry, and nothing distributed. An
+	// entry created here would never be drained — retryableRelayReceipts
+	// only walks receipts that are in s.receipts — and would sit in the
+	// shared cap evicting live ones.
+	droppedAtCommit
+)
+
+func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, endsRetry bool) (
+	count int, deltas []ebus.PeerPendingDelta, aggregate domain.AggregateStatusSnapshot, result commitResult,
+) {
+	id := receipt.MessageID
+	now := time.Now().UTC()
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+
+	// The commit is the serialisation point, so the conditions it was
+	// decided on are re-checked HERE, under the lock that makes it
+	// atomic. Deciding at the door and committing later is what let two
+	// copies of one receipt both pass the dedup check while the first was
+	// inside its write, and then both append to the backlog.
+	if s.seenReceipts.Has(key) {
+		return len(s.receipts[receipt.Recipient]), nil, aggregate, committedElsewhere
+	}
+	// Same for the recipient: a subscriber that disconnects while the
+	// write runs takes its backlog with it, and a list created after that
+	// teardown is never drained by an ack_delete and never expires. The
+	// receipt is dropped cleanly instead — the sender's end-to-end retry
+	// re-delivers once they reconnect.
+	if receipt.Recipient != s.identity.Address &&
+		receipt.Sender != s.identity.Address &&
+		receipt.Status != protocol.ReceiptStatusSeenAck {
+		s.gossipMu.RLock()
+		offline := len(s.subs[receipt.Recipient]) == 0
+		s.gossipMu.RUnlock()
+		if offline {
+			log.Debug().Str("message_id", string(id)).Str("recipient", receipt.Recipient).
+				Msg("delivery receipt dropped at commit: recipient subscriber gone")
+			return len(s.receipts[receipt.Recipient]), nil, aggregate, droppedAtCommit
+		}
+	}
+
+	// Settling the delivery state belongs to the commit for the same
+	// reason the backlog does: the clean drop above promises to touch
+	// NOTHING, and a pending counter cleared at the door — published to
+	// the UI on the way out — cannot be put back when the drop happens.
+	delete(s.outbound, string(receipt.MessageID))
+	msgAffected := s.clearPendingMessageLocked(receipt.MessageID)
+	rcptAffected := s.clearPendingReceiptLocked(identityOf(receipt))
+	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
+	delete(s.relayRetry, relayReceiptKey(receipt))
+	deltas = mergePendingDeltas(msgAffected, rcptAffected)
+	// statusMu is INNERMOST per canonical deliveryMu → statusMu order —
+	// refreshAggregatePendingLocked writes s.aggregateStatus and the
+	// snapshot read must observe that write under the same lock.
+	s.statusMu.Lock()
+	if len(deltas) > 0 {
+		s.refreshAggregatePendingLocked()
+	}
+	aggregate = s.aggregateStatus
+	s.statusMu.Unlock()
+
+	s.seenReceipts.Add(key)
+	// seen_ack is scheduler plumbing, not a deliverable artefact: dedupe it
+	// via seenReceipts but never store it in s.receipts, so it cannot leak
+	// through fetch_delivery_receipts or the auth-time backlog replay
+	// (neither surface has a v23 gate).
+	if receipt.Status != protocol.ReceiptStatusSeenAck {
+		list := append(s.receipts[receipt.Recipient], receipt)
+		// Hard-cap every recipient's backlog. Own-identity receipts are never
+		// drained by ack_delete (that only fires for relay/forward recipients),
+		// and a transit/subscriber backlog can be kept growing by a peer that
+		// streams unique receipts while holding a subscriber active — both grow
+		// without bound otherwise. Keep the most recent; see
+		// maxReceiptBacklogPerRecipient for why eviction is safe for each kind.
+		if len(list) > maxReceiptBacklogPerRecipient {
+			// Evicting an entry must also drop its dedup + retry shadows.
+			// Otherwise (a) a later re-send of the evicted receipt hits the
+			// seenReceipts duplicate branch above and is silently suppressed
+			// instead of restoring the backlog, and (b) its relayRetry entry is
+			// orphaned — retryableRelayReceipts only walks the live s.receipts,
+			// so the entry never reaches TTL cleanup and accumulates toward
+			// maxRelayRetryEntries, eventually starving live receipt retries.
+			evicted := list[:len(list)-maxReceiptBacklogPerRecipient]
+			for i := range evicted {
+				ev := evicted[i]
+				s.seenReceipts.Delete(receiptKeyOf(ev))
+				delete(s.relayRetry, relayReceiptKey(ev))
+			}
+			trimmed := make([]protocol.DeliveryReceipt, maxReceiptBacklogPerRecipient)
+			copy(trimmed, list[len(list)-maxReceiptBacklogPerRecipient:])
+			list = trimmed
+		}
+		s.receipts[receipt.Recipient] = list
+	}
+
+	if entry, awaiting := s.awaitingDelivered[id]; awaiting && endsRetry {
+		recipient := entry.Envelope.Recipient
+		delete(s.awaitingDelivered, id)
+		s.promoteQueueHeadLocked(recipient, now)
+	}
+	return len(s.receipts[receipt.Recipient]), deltas, aggregate, committedFirst
+}
+
+// receiptAlreadySeen reports whether this exact receipt is in the dedup
+// set — that is, whether a re-send of it would be suppressed.
+func (s *Service) receiptAlreadySeen(receipt protocol.DeliveryReceipt) bool {
+	key := receiptKeyOf(receipt)
+	s.deliveryMu.RLock()
+	defer s.deliveryMu.RUnlock()
+	return s.seenReceipts.Has(key)
+}
+
+// receiptOutcome is what happened to one receipt.
+//
+// ackable is the load-bearing one: telling the peer to forget a receipt
+// whose durable consequence this node failed to record would destroy the
+// only remaining copy of that fact. Every path that acks must consult it.
+type receiptOutcome struct {
+	// stored is "accepted now", as opposed to a duplicate or a rejection.
+	stored bool
+	// count is the recipient's receipt backlog after this one.
+	count int
+	// ackable is "the peer may delete their copy".
+	ackable bool
+}
+
+func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receiptOutcome {
+	key := receiptKeyOf(receipt)
 
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -6860,6 +7231,9 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	if s.seenReceipts.Has(key) {
+		// The key is written by finishReceipt, so it is here only if a
+		// previous copy of this receipt was fully handled — durable write
+		// included. That makes it a safe answer to give the peer.
 		count := len(s.receipts[receipt.Recipient])
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_dup").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
@@ -6871,8 +7245,35 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 		if receipt.Status == protocol.ReceiptStatusSeen && receipt.Recipient == s.identity.Address {
 			s.goBackground(func() { s.sendSeenAck(receipt) })
 		}
-		return false, count
+		return receiptOutcome{count: count, ackable: true}
 	}
+	// Sender binding for delivered/seen addressed to us: a receipt says
+	// "I, the recipient, have it", so the only identity whose word counts
+	// is the one the message was ADDRESSED to. The id alone is not the
+	// claim — anybody who learns one could otherwise end its retry, mark
+	// it delivered and pull that recipient's queue forward while the real
+	// recipient has said nothing.
+	//
+	// Rejected HERE, before the dedup key is written, for the same reason
+	// the seen_ack binding below is: a receipt turned away later has
+	// already occupied the key, and the genuine one that follows is then
+	// swallowed as a duplicate. (A message with no live retry entry —
+	// already delivered, or reseeded after a restart — cannot be checked
+	// this way; the durable layer is the second line there, since it
+	// scopes the status update to the conversation.)
+	if receipt.Recipient == s.identity.Address &&
+		(receipt.Status == protocol.ReceiptStatusDelivered || receipt.Status == protocol.ReceiptStatusSeen) {
+		if entry, awaiting := s.awaitingDelivered[receipt.MessageID]; awaiting && entry.Envelope.Recipient != receipt.Sender {
+			count := len(s.receipts[receipt.Recipient])
+			s.deliveryMu.Unlock()
+			s.peerMu.Unlock()
+			log.Warn().Str("message_id", string(receipt.MessageID)).
+				Str("from", receipt.Sender).Str("addressed_to", entry.Envelope.Recipient).
+				Msg("delivery receipt rejected: it did not come from the message's recipient")
+			return receiptOutcome{count: count, ackable: true}
+		}
+	}
+
 	// Sender binding for seen_ack addressed to us: the only identity whose
 	// ack counts is the one our seen receipt was addressed to — recorded in
 	// awaitingSeenAck. Anything else (wrong sender, or no retry pending) is
@@ -6887,7 +7288,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_ack_rejected").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
 			log.Warn().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Bool("awaiting", awaiting).Msg("seen_ack rejected: sender does not match the awaited original sender")
-			return false, count
+			return receiptOutcome{count: count, ackable: true}
 		}
 	}
 	// Unsolicited-receipt gate: a delivered/seen receipt addressed to our own
@@ -6910,7 +7311,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_unsolicited").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
 		log.Warn().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("status", receipt.Status).Msg("delivery receipt dropped: no matching locally-sent message")
-		return false, count
+		return receiptOutcome{count: count, ackable: true}
 	}
 	// Admission: gate the buffer/dedup/track/distribute ONLY for the
 	// store-and-forward-for-a-subscriber case — a receipt that ARRIVED for some
@@ -6956,49 +7357,33 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released_offline_recipient").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
 			log.Debug().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("delivery receipt dropped: recipient subscriber gone")
-			return false, count
+			return receiptOutcome{count: count, ackable: true}
 		}
-	}
-	s.seenReceipts.Add(key)
-	// seen_ack is scheduler plumbing, not a deliverable artefact: dedupe it
-	// via seenReceipts but never store it in s.receipts, so it cannot leak
-	// through fetch_delivery_receipts or the auth-time backlog replay
-	// (neither surface has a v23 gate).
-	if receipt.Status != protocol.ReceiptStatusSeenAck {
-		list := append(s.receipts[receipt.Recipient], receipt)
-		// Hard-cap every recipient's backlog. Own-identity receipts are never
-		// drained by ack_delete (that only fires for relay/forward recipients),
-		// and a transit/subscriber backlog can be kept growing by a peer that
-		// streams unique receipts while holding a subscriber active — both grow
-		// without bound otherwise. Keep the most recent; see
-		// maxReceiptBacklogPerRecipient for why eviction is safe for each kind.
-		if len(list) > maxReceiptBacklogPerRecipient {
-			// Evicting an entry must also drop its dedup + retry shadows.
-			// Otherwise (a) a later re-send of the evicted receipt hits the
-			// seenReceipts duplicate branch above and is silently suppressed
-			// instead of restoring the backlog, and (b) its relayRetry entry is
-			// orphaned — retryableRelayReceipts only walks the live s.receipts,
-			// so the entry never reaches TTL cleanup and accumulates toward
-			// maxRelayRetryEntries, eventually starving live receipt retries.
-			evicted := list[:len(list)-maxReceiptBacklogPerRecipient]
-			for i := range evicted {
-				ev := evicted[i]
-				s.seenReceipts.Delete(ev.Recipient + ":" + string(ev.MessageID) + ":" + ev.Status)
-				delete(s.relayRetry, relayReceiptKey(ev))
-			}
-			trimmed := make([]protocol.DeliveryReceipt, maxReceiptBacklogPerRecipient)
-			copy(trimmed, list[len(list)-maxReceiptBacklogPerRecipient:])
-			list = trimmed
-		}
-		s.receipts[receipt.Recipient] = list
 	}
 	now := time.Now().UTC()
+	// Decided inside the lock stack, ACTED ON after the durable write —
+	// see the commit step below for why the order matters.
+	endsRetry := false
 	switch {
 	case receipt.Recipient == s.identity.Address &&
 		(receipt.Status == protocol.ReceiptStatusDelivered || receipt.Status == protocol.ReceiptStatusSeen):
 		// End-to-end confirmation for a message WE sent — the delivery
 		// retry scheduler can stop re-sending it.
-		delete(s.awaitingDelivered, receipt.MessageID)
+		//
+		// This is also what advances the recipient's delivery queue: the
+		// confirmed message was holding their slot, so the next one is
+		// pulled forward instead of idling out a backoff that was
+		// measuring the message just confirmed. See planDueDeliveries.
+		//
+		// NOT here, though. Stopping the retry is the single thing that
+		// makes this fact unrecoverable if the write below then fails:
+		// the sender would never send the message again, so the
+		// recipient would never receipt it again, and the row would read
+		// `sent` until this node restarts. It is committed in
+		// finishReceipt, after the write.
+		if _, awaiting := s.awaitingDelivered[receipt.MessageID]; awaiting {
+			endsRetry = true
+		}
 	case receipt.Recipient == s.identity.Address && receipt.Status == protocol.ReceiptStatusSeenAck:
 		// The original sender confirmed our seen receipt — stop retrying it.
 		delete(s.awaitingSeenAck, receipt.MessageID)
@@ -7007,35 +7392,11 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 		// sender's seen_ack arrives (etap 3.3 contract).
 		s.registerAwaitingSeenAckLocked(receipt, now)
 	}
-	delete(s.outbound, string(receipt.MessageID))
-	msgAffected := s.clearPendingMessageLocked(receipt.MessageID)
-	rcptAffected := s.clearPendingReceiptLocked(receipt.MessageID, receipt.Recipient, receipt.Status)
-	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
-	delete(s.relayRetry, relayReceiptKey(receipt))
 	count := len(s.receipts[receipt.Recipient])
-	pendingDeltas := mergePendingDeltas(msgAffected, rcptAffected)
-	// statusMu is INNERMOST per canonical peerMu → deliveryMu → statusMu
-	// order — refreshAggregatePendingLocked writes s.aggregateStatus and
-	// the subsequent snapshot read must observe that write under the
-	// same lock.
-	s.statusMu.Lock()
-	if len(pendingDeltas) > 0 {
-		s.refreshAggregatePendingLocked()
-	}
-	aggSnap := s.aggregateStatus
-	s.statusMu.Unlock()
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
-
-	// Emit pending count deltas for all peers whose queues were modified.
-	for _, d := range pendingDeltas {
-		s.emitPeerPendingChanged(d.Address, d.Count)
-	}
-	if len(pendingDeltas) > 0 {
-		s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggSnap)
-	}
 
 	// Update delivery status via the registered MessageStore BEFORE emitting
 	// local change so the desktop UI can safely read the new status from
@@ -7047,22 +7408,70 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	if s.messageStore != nil && receipt.Status != protocol.ReceiptStatusSeenAck {
 		receiptStoreOK = s.messageStore.UpdateDeliveryStatus(receipt)
 	}
+	// COMMIT. Everything that means "this receipt is finished with" waits
+	// for the write above and is applied here, together: the retry entry
+	// whose deletion stops the sender, the dedup key that suppresses the
+	// peer's next copy, and — through ackable — the four acks that end the
+	// peer's own copy.
+	//
+	// A refused write therefore commits NOTHING. The sender keeps
+	// retrying the message, the recipient's node answers the re-send with
+	// a fresh receipt, and this node gets another chance at the write. No
+	// second bounded map, no retry pass writing to the database that is
+	// already failing, and no reliance on the other node's receipt queue,
+	// which is capped, expires after three minutes and does not survive
+	// their restart. What it costs is one re-sent message, which the
+	// recipient discards as a duplicate.
+	// committed and receiptStoreOK are NOT the same question, and conflating
+	// them cost the seen_ack path an ack it was owed: a seen_ack writes no
+	// delivery status, so it is finished with on arrival, while
+	// receiptStoreOK goes on to mean "publish the badge update", which a
+	// seen_ack must not do.
+	committed := receiptStoreOK
+	result := committedFirst
+	if committed {
+		// count is re-read here: it is taken under the same lock as the
+		// append, so the reply cannot answer 0 for the receipt it just
+		// stored.
+		var deltas []ebus.PeerPendingDelta
+		var aggregate domain.AggregateStatusSnapshot
+		count, deltas, aggregate, result = s.finishReceipt(key, receipt, endsRetry)
+		// Announced only for a commit that happened, and only after it:
+		// these counters are what the UI draws, and a drop or a losing
+		// race must leave them exactly as they were.
+		for _, delta := range deltas {
+			s.emitPeerPendingChanged(delta.Address, delta.Count)
+		}
+		if len(deltas) > 0 {
+			s.eventBus.Publish(ebus.TopicAggregateStatusChanged, aggregate)
+		}
+	}
+	// The two non-first outcomes take the SAME early exit the door takes
+	// for a duplicate and for an offline recipient, and for the same
+	// reason: everything below — the badge event, the seen_ack, the relay
+	// tracking, the distribution — is the work of the copy that did
+	// commit, or is work that must not happen at all for a receipt that
+	// was dropped. Falling through was how a dropped receipt still
+	// created a relayRetry entry that nothing would ever clean up.
+	switch result {
+	case committedElsewhere:
+		return receiptOutcome{count: count, ackable: true}
+	case droppedAtCommit:
+		return receiptOutcome{count: count, ackable: true}
+	}
 	if receipt.Status == protocol.ReceiptStatusSeenAck {
 		receiptStoreOK = false
 	}
 
 	if receiptStoreOK {
-		event := protocol.LocalChangeEvent{
-			Type:        protocol.LocalChangeReceiptUpdate,
-			Topic:       "dm",
-			MessageID:   string(receipt.MessageID),
-			Sender:      receipt.Sender,
-			Recipient:   receipt.Recipient,
-			Status:      receipt.Status,
-			DeliveredAt: receipt.DeliveredAt,
-		}
-		s.emitLocalChange(event)
-		s.eventBus.Publish(ebus.TopicReceiptUpdated, event)
+		event := receiptUpdateEvent(receipt)
+		// Retried on a shed, because this is the LAST event that can
+		// correct the badge: the receipt has already removed the retry
+		// entry, so the emitted-event debt that lived there is gone, and
+		// a conversation whose emitted event was shed in the same burst
+		// would otherwise sit on "queued" for a message the peer has
+		// read until the user reopens it.
+		s.publishRetryableLocalChange(ebus.TopicReceiptUpdated, event)
 	}
 
 	log.Info().Str("message_id", string(receipt.MessageID)).Str("sender", receipt.Sender).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Time("delivered_at", receipt.DeliveredAt).Msg("stored delivery receipt")
@@ -7070,7 +7479,12 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	if receipt.Recipient == s.identity.Address {
 		// First arrival of a "seen" addressed to us — confirm it to the
 		// seen-sender so their retry loop stops (etap 3.3).
-		if receipt.Status == protocol.ReceiptStatusSeen {
+		//
+		// Only once our own status write has landed. The ack does not
+		// merely quieten a retry: the seen-sender journals it, so after
+		// their restart nothing re-sends this receipt. Acking a seen we
+		// failed to record leaves the message unread here for good.
+		if receipt.Status == protocol.ReceiptStatusSeen && receiptStoreOK {
 			s.goBackground(func() { s.sendSeenAck(receipt) })
 		}
 		// Persist the confirmation so the seen retry does not resurrect
@@ -7085,7 +7499,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 				}
 			})
 		}
-		return true, count
+		return receiptOutcome{stored: true, count: count, ackable: committed}
 	}
 
 	// Transit receipt bookkeeping: seen_ack is excluded — it is not stored
@@ -7094,7 +7508,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	// end-to-end retry.
 	if receipt.Status == protocol.ReceiptStatusSeenAck {
 		s.distributeReceipt(receipt)
-		return true, count
+		return receiptOutcome{stored: true, count: count, ackable: committed}
 	}
 
 	s.trackRelayReceipt(receipt)
@@ -7103,7 +7517,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 	// delivery retry scheduler.
 	s.distributeReceipt(receipt)
 
-	return true, count
+	return receiptOutcome{stored: true, count: count, ackable: committed}
 }
 
 // isTransitReceiptSeen returns true if the receipt was already recorded in
@@ -7111,7 +7525,7 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) (bool, 
 // at the handler level to avoid redundant relay-chain or gossip processing
 // for receipts that were already successfully delivered on a prior arrival.
 func (s *Service) isTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
-	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+	key := receiptKeyOf(receipt)
 
 	s.deliveryMu.RLock()
 	ok := s.seenReceipts.Has(key)
@@ -7133,7 +7547,7 @@ func (s *Service) isTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
 // to restore retry eligibility. For the relay chain path, callers mark
 // AFTER confirmed forwarding (no rollback needed — relay is synchronous).
 func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool {
-	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+	key := receiptKeyOf(receipt)
 
 	log.Trace().Str("site", "markTransitReceiptSeen").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
@@ -7155,7 +7569,7 @@ func (s *Service) markTransitReceiptSeen(receipt protocol.DeliveryReceipt) bool 
 // a duplicate receipt could slip through between the synchronous mark (in
 // the caller) and the deferred mark (inside the goroutine).
 func (s *Service) unmarkTransitReceiptSeen(receipt protocol.DeliveryReceipt) {
-	key := receipt.Recipient + ":" + string(receipt.MessageID) + ":" + receipt.Status
+	key := receiptKeyOf(receipt)
 
 	log.Trace().Str("site", "unmarkTransitReceiptSeen").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
@@ -7257,7 +7671,13 @@ func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) []ebus
 		origLen := len(items)
 		remaining := items[:0]
 		for _, item := range items {
-			if (item.Frame.Type == "send_message" || item.Frame.Type == "relay_message") && item.Frame.ID == string(messageID) {
+			// Matched through frameEnvelope, so a push_message — whose id
+			// lives in Item, not in the flat field — is removed like any
+			// other. The open-coded pair of type checks here missed it,
+			// and a withdrawn message therefore stayed in the ring: the
+			// in-memory withdrawal shadow expires after five minutes, and
+			// the next flush handed the recalled message over.
+			if frameMessageID(item.Frame) == messageID {
 				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
 				continue
 			}
@@ -7277,13 +7697,21 @@ func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) []ebus
 	return affected
 }
 
-// clearPendingReceiptLocked removes a specific relay_delivery_receipt from the
-// pending queue (matched by messageID+recipient+status). Returns affected
-// (address, newCount) pairs so the caller can emit TopicPeerPendingChanged
-// after releasing the lock.
+// clearPendingReceiptLocked removes the queued relay_delivery_receipt
+// frames of ONE receipt — the one the identity names, author included.
+// Returns affected (address, newCount) pairs so the caller can emit
+// TopicPeerPendingChanged after releasing the lock.
+//
+// The author is part of the match for the same reason it is part of every
+// other receipt key: a queued frame is a receipt in flight, and matching
+// on recipient+message+status dropped somebody else's receipt on the
+// strength of ours — the forged one and the genuine one now have separate
+// dedup keys and separate retry entries, and this was the last place
+// where committing one still discarded the other.
 // Caller MUST hold s.deliveryMu.Lock (mutates s.pending / s.pendingKeys).
-func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipient, status string) []ebus.PeerPendingDelta {
-	if strings.TrimSpace(string(messageID)) == "" || strings.TrimSpace(recipient) == "" || strings.TrimSpace(status) == "" {
+func (s *Service) clearPendingReceiptLocked(target receiptIdentity) []ebus.PeerPendingDelta {
+	if strings.TrimSpace(string(target.MessageID)) == "" || strings.TrimSpace(target.Recipient) == "" ||
+		strings.TrimSpace(target.Status) == "" || !target.senderKnown() {
 		return nil
 	}
 	var affected []ebus.PeerPendingDelta
@@ -7292,9 +7720,7 @@ func (s *Service) clearPendingReceiptLocked(messageID protocol.MessageID, recipi
 		remaining := items[:0]
 		for _, item := range items {
 			if item.Frame.Type == "relay_delivery_receipt" &&
-				item.Frame.ID == string(messageID) &&
-				item.Frame.Recipient == recipient &&
-				item.Frame.Status == status {
+				identityFromRelayFrame(item.Frame) == target {
 				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
 				continue
 			}
@@ -7517,6 +7943,12 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 	session.netCore = pc
 	conn := session.conn
 	connID := session.connID
+	// Wired HERE because both construction sites pass through this
+	// function, so no production session can be born without a way to
+	// answer for the frames its queue dies holding. A session built
+	// directly in a test has no sink and drops the residue, which is what
+	// the old behaviour was everywhere.
+	session.onStranded = s.recordStrandedDeliveries
 	session.onClose = func() {
 		// Capture lifecycle hook: stop capture before registry removal.
 		s.notifyCaptureConnClosed(connID)
@@ -7604,10 +8036,14 @@ func (s *Service) closeAllInboundConns() {
 // fan-out table. If a subscriber's connection has broken by the time we
 // write, the message is still safe in s.topics and will be delivered
 // via backlog replay on the peer's next authentication.
-func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscriber) {
+// Returns how many subscribers' writers ACCEPTED the frame. Zero is the
+// definite negative — the envelope reached nobody through this path — and
+// pushOwnEnvelopeToSubscribers uses it to put the message back to held
+// instead of leaving the sender with a badge the wire never earned.
+func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscriber) (accepted, unresolved int) {
 	defer crashlog.DeferRecover()
 	if s.messageDeliveryExpired(msg.CreatedAt, msg.TTLSeconds) {
-		return
+		return 0, 0
 	}
 	log.Info().Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("recipient", msg.Recipient).Int("subscribers", len(subs)).Msg("push_message")
 
@@ -7625,17 +8061,34 @@ func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscr
 	// triple to verify a first-contact DM (see attachKnownSenderKeys).
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
-	if len(subs) > 0 && !s.noteOwnEnvelopeEmitted(msg.Sender, msg.ID) {
+	if len(subs) > 0 && !s.noteOwnEnvelopeEmitted(msg.Sender, msg.ID, time.Now().UTC()) {
 		// Withdrawn while we were building the frame, or the durable
 		// "never emitted" claim could not be withdrawn — either way this
 		// push must not happen. The retry engine still owns the message.
 		log.Info().Str("id", string(msg.ID)).Str("recipient", msg.Recipient).
 			Msg("push_message_withheld")
-		return
+		return 0, 0
 	}
+	// Written INLINE rather than one goroutine per subscriber, because the
+	// answer is the point: a caller that spawns and forgets cannot tell
+	// "handed to every writer" from "refused by all of them". This already
+	// runs on a background goroutine of its own — the callers that must
+	// not block spawn it, not each write.
 	for _, sub := range subs {
-		s.goBackground(func() { s.writePushFrame(sub, frame) })
+		sent, proven := s.writePushFrame(sub, frame)
+		switch {
+		case sent:
+			accepted++
+		case !proven:
+			// The write may have happened. Reporting zero accepted would
+			// make the caller record "nothing went out" for a message the
+			// subscriber might be holding, and a later deletion would then
+			// skip them. Counted as unresolved instead: the caller records
+			// nothing either way, and the retry engine tries again.
+			unresolved++
+		}
 	}
+	return accepted, unresolved
 }
 
 func (s *Service) pushReceiptToSubscribers(receipt protocol.DeliveryReceipt) {
@@ -7698,10 +8151,16 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 	// handed it to the peer anyway. The same return also names the ids
 	// whose durable never-emitted claim could not be withdrawn: those are
 	// not ours to send yet either.
-	withheld := s.noteOwnEnvelopesEmitted(own)
+	replayedAt := time.Now().UTC()
+	emission := s.noteOwnEnvelopesEmitted(own, replayedAt)
+	// Announced AFTER the frames are written, not here: telling the sender
+	// their queued message is on its way and then failing to write it
+	// would leave the badge ahead of the wire. publishMessagesEmitted
+	// decides which of these the sender is actually still owed.
+	var written []protocol.Envelope
 
 	for _, item := range inbox.Messages {
-		if _, skip := withheld[protocol.MessageID(item.ID)]; skip {
+		if _, skip := emission.Withheld[protocol.MessageID(item.ID)]; skip {
 			log.Info().
 				Str("recipient", sub.recipient).
 				Str("message_id", item.ID).
@@ -7723,7 +8182,32 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 		// first-contact recipient needs the sender's self-certifying
 		// key triple here just as on the live push path.
 		s.attachKnownSenderKeys(&replay, "dm", msgFrame.Sender)
-		s.writePushFrame(sub, replay)
+		sent, _ := s.writePushFrame(sub, replay)
+		if !sent {
+			continue
+		}
+		written = append(written, protocol.Envelope{
+			ID: protocol.MessageID(item.ID), Topic: "dm",
+			Sender: item.Sender, Recipient: sub.recipient,
+		})
+	}
+	// The replay is a SINK like any other, so it confirms like one rather
+	// than only announcing: without this the entry kept its hold, its
+	// attempt and its schedule untouched, and a reachability kick landing
+	// a moment later would put the same id back on the wire at once.
+	// confirmEnvelopeOnWire announces too, so this covers both.
+	// In-memory first, for every one of them: the hold, the attempt and
+	// the schedule have to move or a reachability kick landing a moment
+	// later puts the same ids straight back on the wire. The durable half
+	// and the announcement then go as ONE batch — a reconnect replays a
+	// whole conversation, and a goroutine plus an UPDATE per message
+	// would queue a thousand of each on the emission lane, where they
+	// would be turned away rather than served.
+	for _, envelope := range written {
+		s.confirmEnvelopeInMemory(envelope, replayedAt)
+	}
+	if len(written) > 0 {
+		s.goBackground(func() { s.confirmEnvelopesDurably(written, true) })
 	}
 
 	receipts := s.fetchDeliveryReceiptsFrame(sub.recipient)
@@ -8493,9 +8977,9 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 		// outbound session exists — this is the fix for the case where the
 		// remote peer connected to us but we haven't dialed them back.
 		if session := s.peerSession(peerAddr); session != nil && session.authOK {
-			s.sendAckDeleteToPeer(peerAddr, "dm", msg.ID, "")
+			s.sendAckDeleteToPeer(peerAddr, ackDeleteForMessage(msg.ID))
 		} else {
-			s.sendAckDeleteByID(connID, "dm", msg.ID, "")
+			s.sendAckDeleteByID(connID, ackDeleteForMessage(msg.ID))
 		}
 		if !stored {
 			log.Debug().Str("node", s.identity.Address).Str("peer", string(peerAddr)).Str("id", string(msg.ID)).Msg("push_message_dedup_acked")
@@ -8541,11 +9025,16 @@ func (s *Service) handleInboundPushDeliveryReceipt(connID domain.ConnID, frame p
 		return
 	}
 
-	s.storeDeliveryReceipt(receipt)
-	if session := s.peerSession(peerAddr); session != nil && session.authOK {
-		s.sendAckDeleteToPeer(peerAddr, "receipt", receipt.MessageID, receipt.Status)
+	// Acking tells the peer to delete their copy, and their copy is the
+	// only place this fact survives if our own write failed. Same rule as
+	// the outbound session path — this is the second door into it.
+	if outcome := s.storeDeliveryReceipt(receipt); !outcome.ackable {
+		log.Warn().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).
+			Msg("receipt not acked: its delivery status could not be recorded, so the peer must keep it")
+	} else if session := s.peerSession(peerAddr); session != nil && session.authOK {
+		s.sendAckDeleteToPeer(peerAddr, ackDeleteForReceipt(receipt))
 	} else {
-		s.sendAckDeleteByID(connID, "receipt", receipt.MessageID, receipt.Status)
+		s.sendAckDeleteByID(connID, ackDeleteForReceipt(receipt))
 	}
 	log.Info().Str("peer", string(peerAddr)).Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Msg("received pushed delivery receipt (inbound)")
 }
@@ -8775,7 +9264,16 @@ func (s *Service) hasSubscriber(recipient string) bool {
 	return len(s.subs[recipient]) > 0
 }
 
-func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
+// Returns whether the frame was ACCEPTED by the connection's writer. That
+// is the furthest this node can see: an accepted frame can still be lost
+// on the wire, which is what the delivery receipt is for. A false is the
+// definite negative — nothing was handed over — and it is what lets the
+// retry engine tell "queued" from "sent" honestly.
+// Returns (sent, provenNotWritten). The second value is the same question
+// every other sink answers: a failure that cannot place the frame must not
+// be reported as proof that the bytes never left, or a later deletion skips
+// a peer who is holding the message. See refusalProvesNothingWasWritten.
+func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) (bool, bool) {
 	defer crashlog.DeferRecover()
 
 	// Resolve the owning connection through the ConnID registry. If the
@@ -8784,8 +9282,9 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	// delivered through backlog replay on the peer's next authentication.
 	core := s.netCoreForID(sub.connID)
 	if core == nil {
+		// No registered connection means no queue the frame could sit in.
 		s.removeSubscriberByID(sub.recipient, sub.id)
-		return
+		return false, true
 	}
 
 	log.Debug().
@@ -8804,7 +9303,7 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 		// transport drop, so it must NOT trigger removeSubscriberByID.
 		// The raw-bytes helper below has no marshal-fallback path
 		// precisely so this branch stays caller-local.
-		return
+		return false, true
 	}
 	// Network-routed push through the injected Network surface: full
 	// outcome tree surfaces through the return. Any non-nil —
@@ -8815,7 +9314,9 @@ func (s *Service) writePushFrame(sub *subscriber, frame protocol.Frame) {
 	// without enumerating each sentinel. ctx is Service lifecycle.
 	if err := s.sendFrameBytesViaNetwork(s.runCtx, sub.connID, []byte(line)); err != nil {
 		s.removeSubscriberByID(sub.recipient, sub.id)
+		return false, sendErrorProvesNothingWasWritten(err)
 	}
+	return true, false
 }
 
 // dropReceiptBacklogForOfflineRecipients reclaims the in-memory delivery-receipt
@@ -8867,7 +9368,7 @@ func (s *Service) dropReceiptBacklogForOfflineRecipients(recipients []string) {
 		}
 		for i := range list {
 			ev := list[i]
-			s.seenReceipts.Delete(ev.Recipient + ":" + string(ev.MessageID) + ":" + ev.Status)
+			s.seenReceipts.Delete(receiptKeyOf(ev))
 			delete(s.relayRetry, relayReceiptKey(ev))
 		}
 		delete(s.receipts, recipient)
@@ -9123,11 +9624,20 @@ func (s *Service) validateMessageTiming(msg incomingMessage) error {
 }
 
 func (s *Service) messageDeliveryExpired(createdAt time.Time, ttlSeconds int) bool {
+	return s.messageDeliveryExpiredAt(time.Now().UTC(), createdAt, ttlSeconds)
+}
+
+// messageDeliveryExpiredAt is the form for a caller that already has the
+// instant it is judging against. A pass that makes several age decisions
+// has to make them on ONE clock: two checks in the same function reading
+// time.Now() separately can disagree about which side of a deadline the
+// same message is on.
+func (s *Service) messageDeliveryExpiredAt(now, createdAt time.Time, ttlSeconds int) bool {
 	if ttlSeconds <= 0 {
 		return false
 	}
 	expiresAt := createdAt.Add(time.Duration(ttlSeconds) * time.Second)
-	return !expiresAt.After(time.Now().UTC())
+	return !expiresAt.After(now)
 }
 
 func (s *Service) pendingFrameExpired(frame protocol.Frame, queuedAt time.Time, now time.Time) bool {

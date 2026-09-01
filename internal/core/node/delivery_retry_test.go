@@ -135,12 +135,14 @@ func TestRetryDueDeliveriesResendsViaLiveRoute(t *testing.T) {
 	}
 }
 
-// TestRetryDueDeliveriesDropsAfterMaxAttempts verifies the attempts cap:
-// the entry leaves the retry set, outbound goes terminal ("failed", visible
-// through fetch_pending_messages), the pending rings and relayRetry drop
-// the envelope, and the abandonment is journaled durably so a restart does
-// not reseed the same chatlog row.
-func TestRetryDueDeliveriesDropsAfterMaxAttempts(t *testing.T) {
+// TestRetryDueDeliveriesDropsExpiredMessage verifies the ONE terminal
+// verdict a message can reach on its own: its own TTL. Nothing else ends a
+// delivery — no attempt cap, no age horizon — so this path carries the
+// whole cleanup contract: the entry leaves the retry set, outbound goes
+// terminal ("expired", visible through fetch_pending_messages), the
+// pending rings and relayRetry drop the envelope, and the abandonment is
+// journaled durably so a restart does not reseed the same chatlog row.
+func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 
@@ -148,15 +150,21 @@ func TestRetryDueDeliveriesDropsAfterMaxAttempts(t *testing.T) {
 	svc.deliveryFailureJournal = journal
 
 	now := time.Now().UTC()
-	frame := protocol.Frame{Type: "send_message", Topic: "dm", ID: "retry-cap-1", Recipient: "someone", Body: "x", CreatedAt: now.Format(time.RFC3339)}
+	// Sent an hour ago to auto-delete after a minute: the delivery window
+	// this message was given has closed.
+	createdAt := now.Add(-time.Hour)
+	frame := protocol.Frame{Type: "send_message", Topic: "dm", ID: "retry-cap-1", Recipient: "someone", Body: "x", CreatedAt: createdAt.Format(time.RFC3339)}
 	// The relay fallback (sendRelayMessage → queuePeerFrame) can queue a
 	// relay_message for the SAME id — abandonment must drop it too, or a
 	// later flush would re-emit a finished delivery.
-	relayFrame := protocol.Frame{Type: "relay_message", Topic: "dm", ID: "retry-cap-1", Recipient: "someone", Body: "x", CreatedAt: now.Format(time.RFC3339)}
+	relayFrame := protocol.Frame{Type: "relay_message", Topic: "dm", ID: "retry-cap-1", Recipient: "someone", Body: "x", CreatedAt: createdAt.Format(time.RFC3339)}
 	svc.deliveryMu.Lock()
 	svc.awaitingDelivered["retry-cap-1"] = &deliveryRetryEntry{
-		Envelope:      protocol.Envelope{ID: "retry-cap-1", Topic: "dm", Sender: svc.Address(), Recipient: "someone", CreatedAt: now},
-		Attempts:      svc.deliveryRetryMaxAttempts(),
+		Envelope: protocol.Envelope{
+			ID: "retry-cap-1", Topic: "dm", Sender: svc.Address(), Recipient: "someone",
+			CreatedAt: createdAt, TTLSeconds: 60,
+		},
+		Attempts:      3,
 		NextAttemptAt: now.Add(-time.Second),
 	}
 	svc.pending["peer-x:64646"] = []pendingFrame{{Frame: frame, QueuedAt: now}}
@@ -177,10 +185,10 @@ func TestRetryDueDeliveriesDropsAfterMaxAttempts(t *testing.T) {
 	_, relayLeft := svc.relayRetry[relayMessageKey("retry-cap-1")]
 	svc.deliveryMu.RUnlock()
 	if stillThere {
-		t.Fatal("entry past the attempts cap must be dropped")
+		t.Fatal("an expired message must leave the retry set")
 	}
-	if outboundState.Status != "failed" {
-		t.Fatalf("outbound must go terminal failed, got %q", outboundState.Status)
+	if outboundState.Status != "expired" {
+		t.Fatalf("outbound must go terminal expired, got %q", outboundState.Status)
 	}
 	if pendingLeft != 0 {
 		t.Fatalf("pending ring must drop the abandoned send_message, %d left", pendingLeft)
@@ -196,6 +204,34 @@ func TestRetryDueDeliveriesDropsAfterMaxAttempts(t *testing.T) {
 	journal.mu.Unlock()
 	if len(failed) != 1 || failed[0] != "retry-cap-1" {
 		t.Fatalf("abandonment must be journaled, got %v", failed)
+	}
+}
+
+// TestNoAttemptCapEndsAMessage is the guard on the decision itself: a
+// message that has been re-sent far past the old cap of twenty is still
+// being delivered. The cap that remains applies to seen receipts, which
+// the far side re-triggers; a message has nobody to re-trigger it.
+func TestNoAttemptCapEndsAMessage(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+
+	now := time.Now().UTC()
+	svc.deliveryMu.Lock()
+	svc.awaitingDelivered["uncapped-1"] = &deliveryRetryEntry{
+		Envelope:      protocol.Envelope{ID: "uncapped-1", Topic: "dm", Sender: svc.Address(), Recipient: "someone", CreatedAt: now},
+		Attempts:      svc.deliveryRetryMaxAttempts() * 10,
+		NextAttemptAt: now.Add(-time.Second),
+	}
+	svc.deliveryMu.Unlock()
+
+	svc.retryDueDeliveries(now)
+	svc.WaitBackground()
+
+	svc.deliveryMu.RLock()
+	_, stillThere := svc.awaitingDelivered["uncapped-1"]
+	svc.deliveryMu.RUnlock()
+	if !stillThere {
+		t.Fatal("the engine gave up on a message for no reason but the number of tries")
 	}
 }
 
@@ -317,45 +353,62 @@ func TestRegisterDeliveryOutboxReseedsUndelivered(t *testing.T) {
 		if !ok {
 			t.Fatalf("outbox envelope %s must be reseeded into awaitingDelivered", id)
 		}
-		// Reseeded entries must be DUE IMMEDIATELY (so the first retry tick
-		// after restart evaluates reachability / sends right away instead of
-		// idling a full backoff interval) and NOT pre-marked Held (the first
-		// tick decides held-ness).
+		// Reseeded entries must be DUE IMMEDIATELY, so the first retry tick
+		// after restart evaluates reachability and sends right away instead
+		// of idling a full backoff interval.
 		if entry.NextAttemptAt.After(afterReseed) {
 			t.Fatalf("reseeded %s must be due immediately; NextAttemptAt=%v > %v", id, entry.NextAttemptAt, afterReseed)
 		}
-		if entry.Held {
-			t.Fatalf("reseeded %s must not be pre-marked Held", id)
+		// And they must not claim anything about the RECIPIENT: a restart
+		// has looked at nobody. holdUnconfirmed is right — this process has
+		// put nothing on the wire — while holdUnreachable would be a
+		// verdict the reseed is in no position to reach, and would let a
+		// route refresh reset the backoff as if the peer had just returned.
+		if entry.Hold != holdUnconfirmed {
+			t.Fatalf("reseeded %s must start unconfirmed, got hold reason %d", id, entry.Hold)
 		}
 	}
 }
 
-// TestRegisterDeliveryOutboxSkippedOnDMOptOut verifies the relay-only guard:
-// a node that opted out of direct messages does not reseed the outbox, so the
-// wake/reseed machinery never spins up even when the common composition path
-// hands it an outbox.
-func TestRegisterDeliveryOutboxSkippedOnDMOptOut(t *testing.T) {
+// TestDMOptOutStillReseedsItsOwnOutgoing: opt-out refuses INCOMING
+// messages; it does not stop this node from sending.
+//
+// Skipping the outbox scan for such a node looked like saving work on a
+// relay that holds no DM backlog, and it was in fact dropping ITS OWN
+// backlog: an outgoing DM was retried until the process stopped and then
+// forgotten at the next start, with the row left at `sent` in the chatlog
+// and nothing — not even the recipient coming online — able to put it on
+// the wire again.
+func TestDMOptOutStillReseedsItsOwnOutgoing(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
 	svc.cfg.DisableDirectMessages = true
 
-	// The outbox panics if scanned — proving the guard short-circuits before
-	// any UndeliveredOutgoing call (no scan, no wake machinery).
-	svc.RegisterDeliveryOutbox(panicDeliveryOutbox{t: t})
+	const owed = protocol.MessageID("outgoing-from-an-optout-node")
+	outbox := newEmissionOutbox(OutboxEntry{Envelope: protocol.Envelope{
+		ID: owed, Topic: "dm", Sender: svc.Address(), Recipient: "peer-a",
+		Payload: []byte("x"), CreatedAt: time.Now().UTC(),
+	}})
+	svc.RegisterDeliveryOutbox(optOutOutbox{outbox})
 
 	svc.deliveryMu.RLock()
-	n := len(svc.awaitingDelivered)
+	_, reseeded := svc.awaitingDelivered[owed]
 	svc.deliveryMu.RUnlock()
-	if n != 0 {
-		t.Fatalf("DM opt-out node must not reseed the outbox; awaitingDelivered=%d, want 0", n)
+	if !reseeded {
+		t.Error("an opt-out node lost its own undelivered message across the restart; nothing will ever send it again")
 	}
-	// ...but the lightweight durable failure journal MUST still be wired up,
-	// so an abandoned outbound DM (opt-out gates inbound only) terminalizes
-	// durably instead of resurrecting on restart.
+	// The durable failure journal is still wired, so an abandoned outbound
+	// DM terminalizes instead of resurrecting.
 	if svc.deliveryFailureJournal == nil {
-		t.Fatal("DM opt-out node must still register the failure journal (lightweight ref) for its own outbound sends")
+		t.Error("the failure journal was not registered")
 	}
 }
+
+// optOutOutbox is an emissionOutbox that also carries the failure journal,
+// which an opt-out node needs for its own outbound sends.
+type optOutOutbox struct{ *emissionOutbox }
+
+func (optOutOutbox) MarkDeliveryFailed(protocol.MessageID) error { return nil }
 
 // TestSeenAckNotPushedToPreV23Subscriber pins the version gate: seen_ack is
 // additive in ProtocolVersion 23, so it must not be pushed to a subscriber
@@ -587,14 +640,14 @@ func TestSeenAckRejectedFromUnexpectedSender(t *testing.T) {
 	})
 
 	// Spoofed ack from a different identity: dropped entirely.
-	stored, _ := svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
+	stored := svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
 		MessageID:   "bind-1",
 		Sender:      "attacker-identity",
 		Recipient:   svc.Address(),
 		Status:      protocol.ReceiptStatusSeenAck,
 		DeliveredAt: time.Now().UTC(),
 	})
-	if stored {
+	if stored.stored {
 		t.Fatal("spoofed seen_ack must be rejected")
 	}
 	svc.WaitBackground()
@@ -613,14 +666,14 @@ func TestSeenAckRejectedFromUnexpectedSender(t *testing.T) {
 
 	// The genuine ack must still be accepted (the dedupe key was not
 	// poisoned by the rejected spoof).
-	stored, _ = svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
+	stored = svc.storeDeliveryReceipt(protocol.DeliveryReceipt{
 		MessageID:   "bind-1",
 		Sender:      originalSenderID.Address,
 		Recipient:   svc.Address(),
 		Status:      protocol.ReceiptStatusSeenAck,
 		DeliveredAt: time.Now().UTC(),
 	})
-	if !stored {
+	if !stored.stored {
 		t.Fatal("genuine seen_ack must be accepted after a rejected spoof")
 	}
 	svc.WaitBackground()
@@ -664,6 +717,8 @@ func TestLocalSendDeliveryReceiptRejectsSeenAck(t *testing.T) {
 // rows report themselves emitted, matching a store that carries no mark.
 type stubDeliveryOutbox struct{ envelopes []protocol.Envelope }
 
+func (s stubDeliveryOutbox) SentMessageIDs(int) ([]protocol.MessageID, error) { return nil, nil }
+
 func (s stubDeliveryOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
 	rows := make([]OutboxEntry, 0, len(s.envelopes))
 	for _, envelope := range s.envelopes {
@@ -671,19 +726,6 @@ func (s stubDeliveryOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
 	}
 	return rows, nil
 }
-
-// panicDeliveryOutbox fails the test if UndeliveredOutgoing is ever called —
-// used to prove the DM-opt-out guard short-circuits BEFORE the heavy scan.
-// It ALSO implements DeliveryFailureJournal so the test can assert the
-// lightweight journal ref is still wired up under opt-out.
-type panicDeliveryOutbox struct{ t *testing.T }
-
-func (p panicDeliveryOutbox) UndeliveredOutgoing() ([]OutboxEntry, error) {
-	p.t.Fatal("UndeliveredOutgoing must NOT be called when the node opted out of DMs (guard must skip the scan)")
-	return nil, nil
-}
-
-func (p panicDeliveryOutbox) MarkDeliveryFailed(protocol.MessageID) error { return nil }
 
 // TestFailDeliverySkipsWhenReceiptAlreadyArrived pins the late-receipt
 // re-check: between the abandon decision (one deliveryMu window) and
@@ -752,6 +794,8 @@ type stubSeenAckJournal struct {
 }
 
 func (s *stubSeenAckJournal) UndeliveredOutgoing() ([]OutboxEntry, error) { return nil, nil }
+
+func (s *stubSeenAckJournal) SentMessageIDs(int) ([]protocol.MessageID, error) { return nil, nil }
 
 func (s *stubSeenAckJournal) UnconfirmedSeen() ([]protocol.DeliveryReceipt, error) {
 	s.mu.Lock()

@@ -10,6 +10,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/node"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/storage"
 )
 
 // TestOutboxCarriesTheEmissionProofAcrossAReopen walks the whole durable
@@ -44,7 +45,11 @@ func TestOutboxCarriesTheEmissionProofAcrossAReopen(t *testing.T) {
 			t.Fatalf("append %s: %v", id, err)
 		}
 	}
-	if err := adapter.MarkNeverEmitted([]protocol.MessageID{withheld}); err != nil {
+	// In production the INSERT carries the claim; here the rows were
+	// appended plain, so the store's own setter stands in for it. The
+	// adapter deliberately has no such method: the delivery path must not
+	// be able to re-set this bit — see chatlog/emission.go.
+	if err := store.MarkNeverEmitted(ctx, []domain.MessageID{domain.MessageID(withheld)}); err != nil {
 		t.Fatalf("MarkNeverEmitted: %v", err)
 	}
 
@@ -157,4 +162,182 @@ func TestIncomingMessagesAreStoredUnderTheSharedDeletePolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRefusedAttemptStillReadsAsQueuedFromTheRow is the reported bug, taken
+// end to end through the DURABLE state rather than through the node's
+// memory.
+//
+// The gate withdraws the never-emitted claim before the first frame is
+// handed to a writer, so after a refused attempt the row no longer carries
+// it. If the badge were read off that claim, reopening the conversation
+// would show "sent" for a message nothing ever carried — which is exactly
+// the symptom this whole change started from, for a recipient who is
+// online but unreachable.
+//
+// What keeps it honest is the OTHER bit: no sink confirmed, so no on-wire
+// stamp, so the row reads as queued.
+func TestRefusedAttemptStillReadsAsQueuedFromTheRow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	self, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	owner := domain.PeerIdentityFromWire(self.Address)
+	database := newTestStateDB(t, owner)
+	store := testChatlogStore(database.Executor(), owner)
+	adapter := NewMessageStoreAdapter(NewChatlogGateway(store, owner), self, nil, nil)
+
+	const refused = protocol.MessageID("44444444-4444-4444-8444-444444444444")
+	if err := store.Append(ctx, "dm", owner, chatlog.Entry{
+		ID:        string(refused),
+		Sender:    self.Address,
+		Recipient: domain.PeerIdentityFromWire("5555555555555555555555555555555555555555").String(),
+		Body:      "sealed",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Metadata:  chatlog.NeverEmittedMetadata,
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	// The gate runs, the writer then refuses, and nothing else is written.
+	if err := adapter.ClearNeverEmitted([]protocol.MessageID{refused}); err != nil {
+		t.Fatalf("ClearNeverEmitted: %v", err)
+	}
+
+	rows, err := adapter.UndeliveredOutgoing()
+	if err != nil {
+		t.Fatalf("UndeliveredOutgoing: %v", err)
+	}
+	var found bool
+	for _, row := range rows {
+		if row.Envelope.ID != refused {
+			continue
+		}
+		found = true
+		if !row.Emitted {
+			t.Error("the deletion would skip a peer that may have been handed the frame")
+		}
+		if row.OnWire {
+			t.Error("a refused attempt reads as on the wire; the sender is shown a message nothing carried")
+		}
+	}
+	if !found {
+		t.Fatal("the refused message was dropped from the reseed")
+	}
+
+	// And once a sink does confirm it, the same row reads as sent.
+	if err := adapter.MarkOnWire([]protocol.MessageID{refused}); err != nil {
+		t.Fatalf("MarkOnWire: %v", err)
+	}
+	rows, err = adapter.UndeliveredOutgoing()
+	if err != nil {
+		t.Fatalf("UndeliveredOutgoing: %v", err)
+	}
+	for _, row := range rows {
+		if row.Envelope.ID == refused && !row.OnWire {
+			t.Fatal("the confirmation did not reach the row")
+		}
+	}
+}
+
+// TestUpgradeKeepsHeldLegacyMessagesQueued is the migration's own version
+// of the reported bug.
+//
+// The previous release had ONE flag and set it for exactly the messages
+// this node was holding for an unreachable recipient. Those rows carry
+// never_emitted and no on_wire, and reading the missing stamp as "this row
+// predates all of it, leave the status alone" would show them as sent —
+// a message nothing ever carried, which is where this whole change began.
+//
+// The three shapes have to be told apart, and a row from BEFORE the flag
+// existed must keep its persisted status: reading its silence as "not
+// sent" would re-badge a user's whole unreceipted history as queued.
+func TestUpgradeKeepsHeldLegacyMessagesQueued(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		metadata string
+		want     bool
+	}{
+		{"held by the previous release", `{"never_emitted":true}`, true},
+		{"born under the two-bit model, unconfirmed", chatlog.NeverEmittedMetadata, true},
+		{"confirmed", `{"never_emitted":false,"on_wire":true}`, false},
+		{"predates every flag", "", false},
+		{"predates every flag, other metadata", `{"decrypt_failed":true}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := awaitingWire(tc.metadata); got != tc.want {
+				t.Errorf("awaitingWire(%q) = %v, want %v", tc.metadata, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMarkOnWireSkipsRowsThatAlreadyCarryIt: the predicate has to actually
+// exclude them. json_extract returns SQLite's INTEGER 1 for a JSON boolean,
+// so comparing it against json('true') — TEXT — was true for every row, and
+// the guard silently did nothing while claiming a confirmed message pays no
+// write.
+func TestMarkOnWireSkipsRowsThatAlreadyCarryIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	self, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	owner := domain.PeerIdentityFromWire(self.Address)
+	database := newTestStateDB(t, owner)
+	store := testChatlogStore(database.Executor(), owner)
+
+	const target = domain.MessageID("66666666-6666-4666-8666-666666666666")
+	if err := store.Append(ctx, "dm", owner, chatlog.Entry{
+		ID:        string(target),
+		Sender:    self.Address,
+		Recipient: domain.PeerIdentityFromWire("7777777777777777777777777777777777777777").String(),
+		Body:      "sealed",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Metadata:  chatlog.NeverEmittedMetadata,
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	// First stamp lands.
+	if err := store.MarkOnWire(ctx, []domain.MessageID{target}); err != nil {
+		t.Fatalf("MarkOnWire: %v", err)
+	}
+	if onWire, known := chatlog.OnWire(readMetadata(t, database, target)); !known || !onWire {
+		t.Fatal("the first stamp did not land")
+	}
+
+	// Whether the SECOND one wrote cannot be seen in the value — json_set
+	// on an already-true key produces the same JSON. So the row is given
+	// an equivalent blob with deliberate whitespace: json_set would
+	// normalise it away, and its survival is the proof that the predicate
+	// excluded the row instead of rewriting it.
+	const spaced = `{"never_emitted": false,  "on_wire": true}`
+	if _, err := database.Executor().ExecContext(ctx,
+		"UPDATE messages SET metadata = ? WHERE id = ?", spaced, string(target)); err != nil {
+		t.Fatalf("seed spaced metadata: %v", err)
+	}
+	if err := store.MarkOnWire(ctx, []domain.MessageID{target}); err != nil {
+		t.Fatalf("MarkOnWire (repeat): %v", err)
+	}
+	if after := readMetadata(t, database, target); after != spaced {
+		t.Errorf("a repeat confirmation rewrote a row that already carried the stamp: %q → %q", spaced, after)
+	}
+}
+
+func readMetadata(t *testing.T, database *storage.Database, id domain.MessageID) string {
+	t.Helper()
+	var metadata string
+	row := database.Executor().QueryRowContext(context.Background(),
+		"SELECT COALESCE(metadata, '') FROM messages WHERE id = ?", string(id))
+	if err := row.Scan(&metadata); err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	return metadata
 }

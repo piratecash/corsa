@@ -439,7 +439,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 	// to NetCore again. Fence the queue and finalise the residue here
 	// rather than at each return site: there are eight of them and a new
 	// one would silently leak.
-	defer session.closeSendQueue()
+	defer session.discardSendQueue()
 
 	// Event-driven pending queue drain: a direct route was added by
 	// onPeerSessionEstablished before we entered the main loop. Now that
@@ -553,6 +553,18 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 				if session.netCore == nil {
 					return fmt.Errorf("fire_and_forget: outbound session missing NetCore")
 				}
+				// A frame can sit in this queue long enough for its author
+				// to recall it, and the recall classifies a message nobody
+				// has taken as never-emitted — so writing it afterwards
+				// hands the recipient a message the sender was told was
+				// withdrawn. The gate also withdraws the durable
+				// never-emitted claim, which has to land BEFORE the write.
+				if !s.clearedToWrite(item.delivery, time.Now().UTC()) {
+					log.Info().Str("peer", string(session.address)).
+						Str("message_id", string(item.delivery.Envelope.ID)).
+						Msg("fire_and_forget_withheld_by_delivery_gate")
+					continue
+				}
 				switch st := session.netCore.SendTracked(outbound, item.ticket); st {
 				case netcore.SendOK:
 					// Enqueued. Account the write only now: a frame
@@ -562,6 +574,19 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					// backpressured peer looking healthy and falsify
 					// protocol_trace under sustained drops.
 					s.markPeerWrite(session.address, outbound)
+					// This — not the session's own sendCh — is where a
+					// frame stops being ours. sendCh is an in-process
+					// queue whose remainder is discarded when the session
+					// closes, so confirming a delivery on entry to it
+					// called a message sent that a teardown could still
+					// throw away.
+					//
+					// WHICH delivery and WHICH attempt both travel on the
+					// item: reading the clock here instead made every sink
+					// of one dispatch look like a separate attempt.
+					if item.carriesDelivery() {
+						s.confirmEnvelopeOnWire(item.delivery.Envelope, item.delivery.DispatchedAt)
+					}
 				case netcore.SendBufferFull:
 					// Best-effort frame on a saturated write queue: drop
 					// the frame, keep the session. The previous slow-peer
@@ -582,13 +607,16 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 					// deliberately NOT cleared so the relay-retry
 					// subsystem can pick a different route.
 					session.logFireAndForgetDrop(outbound.Type)
+					s.recordDeliveryRefusedByWriter(item, st)
 					continue
 				case netcore.SendChanClosed, netcore.SendWriterDone:
 					writeErr := fmt.Errorf("fire_and_forget: connection closing (%s)", st.String())
+					s.recordDeliveryRefusedByWriter(item, st)
 					s.retirePeerSession(session, writeErr)
 					return writeErr
 				case netcore.SendMarshalError:
 					log.Warn().Str("peer", string(session.address)).Str("type", outbound.Type).Msg("fire_and_forget_marshal_error")
+					s.recordDeliveryRefusedByWriter(item, st)
 					continue
 				default:
 					writeErr := fmt.Errorf("fire_and_forget: unexpected send status %s", st.String())
@@ -863,7 +891,7 @@ func (s *Service) retirePeerSession(session *peerSession, err error) {
 	if session == nil {
 		return
 	}
-	session.closeSendQueue()
+	session.discardSendQueue()
 	s.runPeerTeardownBarrier()
 	s.markPeerDisconnected(session.address, err)
 }

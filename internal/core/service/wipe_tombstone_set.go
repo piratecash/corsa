@@ -61,24 +61,48 @@ import (
 // wipeTombstoneTTL bounds how long a deleted id is refused before a
 // re-delivery of it is allowed to re-create the row.
 //
-// It has to outlast the window in which that re-delivery can happen, and that
-// window belongs to the SENDER: their node keeps retrying a message until its
-// delivery receipt arrives — 20 attempts on a schedule that caps at 11 minutes,
-// about 3.5 hours by default, and configurable higher
-// (CORSA_DELIVERY_RETRY_MAX_ATTEMPTS). A refusal shorter than that expires
-// while copies of the message are still being sent, which is the resurrection
-// it exists to prevent.
+// WHAT STOPS THE SENDER is the answer, not this TTL — see part two of the
+// file header. A refused arrival is reported as StoreDuplicate, the
+// duplicate path re-sends the delivery receipt, and the sender's retry
+// ends on it. This map covers something narrower: an echo arriving at THIS
+// process minutes or days after the deletion, once the task has settled
+// and stopped covering the id.
 //
-// The bound is not the retry budget but the SENDER'S RESEED HORIZON. A restart
-// resets their attempt counter, and their outbox re-injects anything
-// undelivered from the last week, so a message can be sent again long after its
-// original 3.5-hour budget was spent. Past that horizon nobody re-sends it,
-// which makes the horizon — not the budget — the point at which a refusal has
-// nothing left to refuse.
+// A week and a little is what that costs, and the number is no longer
+// derived from the sender at all. It used to be: the sender's outbox
+// re-injected anything undelivered from the last week, so past that nobody
+// re-sent it. That horizon is gone — a delivery now ends only when the
+// recipient confirms it, when its author withdraws it, or when its own TTL
+// expires (node/delivery_retry.go) — so no finite TTL here can be derived
+// from how long a sender might keep trying.
 //
-// A little over the week, so the two do not expire in the same instant. The
-// cost is a map entry per deleted id for that long, and only while the process
-// lives.
+// That widens the window the file header declines to close, and the answer
+// to it is unchanged. This is a designed behaviour with a stated cost, not
+// an unexamined leftover, so the cost is written down here rather than
+// discovered later:
+//
+// A message deleted here can be re-created if a relay is still holding an
+// undelivered copy AND our delivery receipt for it never reached the
+// sender AND either more than wipeTombstoneTTL has passed or this process
+// has restarted since the deletion. The user deletes it again. Nothing
+// about it is silent — the message reappears in the thread rather than
+// leaking anywhere, and every step that could have prevented it costs
+// more than it saves:
+//
+//   - A durable list of deleted ids closes it completely, and that row
+//     would be the last thing on this disk that knows a message was
+//     deleted here, outliving the deletion by design — the one trace a
+//     wipe could not remove. This is the trade the whole deletion design
+//     exists to refuse; see part two of the file header.
+//   - A terminal "stop sending this id" on the wire closes it at the
+//     source and writes nothing down, but hands a third party the fact we
+//     refuse to record about ourselves, and needs a protocol version.
+//   - Re-bounding the sender's retry by a clock closes it symmetrically
+//     and reintroduces the reported bug: a recipient offline overnight
+//     losing messages nobody was ever told about.
+//
+// The cost is a map entry per deleted id for that long, and only while the
+// process lives; maxWipeTombstones is what actually bounds the size.
 const wipeTombstoneTTL = 8 * 24 * time.Hour
 
 // wipeTombstoneReapPeriod is how often the reaper goroutine prunes stale

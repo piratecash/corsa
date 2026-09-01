@@ -521,9 +521,40 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 // ctx is propagated to the inbound sync-write path so cancellation from
 // request-scoped contexts actually interrupts the send wait. Outbound
 // enqueue is non-blocking and does not wait on a transport flush.
+// Both branches take the delivery gate. The session branch gets it from
+// enqueueSessionSendItem, which fills the reference in; the inbound branch
+// has no queue to be gated at, so it goes through the choke point that
+// gates and confirms inline.
+//
+// This is the path hop-ack FAILOVER re-sends on (tryFailoverRelay), and
+// relayStates is not cleared when a message is withdrawn — so an ungated
+// write here re-sent a frame whose author had already recalled it, minutes
+// after the fact, with nothing left to recall it a second time.
 func (s *Service) sendFrameToAddress(ctx context.Context, address domain.PeerAddress, frame protocol.Frame) bool {
 	if strings.HasPrefix(string(address), "inbound:") {
-		return s.writeFrameToInbound(ctx, address, frame)
+		connID, remoteAddr, found := s.resolveInboundConn(address)
+		if !found {
+			return false
+		}
+		ref := s.deliveryRefForFrame(frame, time.Now().UTC())
+		if ref.Envelope.ID != "" {
+			if !s.clearedToWrite(ref, ref.DispatchedAt) {
+				log.Info().Str("message_id", string(ref.Envelope.ID)).Str("peer", string(address)).
+					Msg("inbound_write_withheld_by_delivery_gate")
+				return false
+			}
+		}
+		err := s.writeFrameToInboundConnErr(ctx, connID, remoteAddr, frame)
+		if ref.Envelope.ID == "" {
+			return err == nil
+		}
+		if err == nil {
+			s.confirmEnvelopeOnWire(ref.Envelope, ref.DispatchedAt)
+		} else {
+			log.Debug().Str("message_id", string(ref.Envelope.ID)).Err(err).
+				Msg("delivery_inbound_write_unconfirmed")
+		}
+		return err == nil
 	}
 	return s.enqueuePeerFrame(address, frame)
 }
@@ -553,7 +584,11 @@ func (s *Service) sendFrameToAddress(ctx context.Context, address domain.PeerAdd
 //
 // ctx is the caller's request/cycle context and is propagated to
 // sendRelayToAddress so the inbound sync-flush wait honours cancellation.
-func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, routeOrigin domain.PeerIdentity, nextHopHops int) {
+// Returns whether a next hop ACCEPTED the frame. The value is what lets a
+// sender-owned delivery tell "handed over" from "attempted": the function
+// already knew, and threw it away, so a route that had gone stale still
+// counted as a send.
+func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envelope, nextHopIdentity domain.PeerIdentity, validatedAddress domain.PeerAddress, routeOrigin domain.PeerIdentity, nextHopHops int, dispatchedAt time.Time) relaySendOutcome {
 	address := validatedAddress
 	if address == "" {
 		// Retry path or caller without cached address — re-resolve with
@@ -571,8 +606,7 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 			Str("next_hop", nextHopIdentity.String()).
 			Msg("table_relay_no_session_fallback_gossip")
 		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
-		s.tryRelayToCapableFullNodes(msg, targets)
-		return
+		return s.tryRelayToCapableFullNodes(msg, targets, dispatchedAt)
 	}
 
 	// Ingress suppression for the DIRECTED path: when the routing table
@@ -592,27 +626,43 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 			Str("address", string(address)).
 			Msg("table_relay_ingress_suppressed_fallback_gossip")
 		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
-		s.tryRelayToCapableFullNodes(msg, targets)
-		return
+		return s.tryRelayToCapableFullNodes(msg, targets, dispatchedAt)
 	}
 
-	if !s.sendRelayToAddress(ctx, address, msg, routeOrigin) {
-		// Send failed — gossip fallback (same gates as above).
+	relayed := s.sendRelayToAddress(ctx, address, msg, routeOrigin, dispatchedAt)
+	if !relayed.handled() {
+		// Send failed — gossip fallback (same gates as above). An
+		// unresolved directed send is carried INTO the fallback's result:
+		// if the fallback also finds nobody, the attempt as a whole is
+		// still unresolved, and reporting it as "reached nobody" would put
+		// never-emitted on a message the next hop may already have.
 		log.Debug().
 			Str("recipient", msg.Recipient).
 			Str("next_hop", nextHopIdentity.String()).
 			Str("address", string(address)).
 			Msg("table_relay_send_failed_fallback_gossip")
 		targets := s.filterGossipTargetsForEnvelope(msg, s.routingTargetsForMessage(msg))
-		s.tryRelayToCapableFullNodes(msg, targets)
-		return
+		fallback := s.tryRelayToCapableFullNodes(msg, targets, dispatchedAt)
+		if fallback == relaySendRefused && relayed == relaySendFateUnknown {
+			return relaySendFateUnknown
+		}
+		return fallback
 	}
 
 	log.Info().
 		Str("recipient", msg.Recipient).
 		Str("next_hop", nextHopIdentity.String()).
 		Str("address", string(address)).
+		Bool("left_the_node", relayed.leftTheNode()).
 		Msg("table_relay_sent")
+	// Only a frame a live peer took counts as gone. A stale route whose
+	// send fell back to OUR OWN pending ring is still here, and reporting
+	// it as sent is how such a route used to produce a delivered-looking
+	// message that never moved.
+	if relayed.leftTheNode() {
+		return relaySendHandedToPeer
+	}
+	return relayed
 }
 
 // sendRelayToAddress sends a relay_message to the given address, handling
@@ -631,7 +681,7 @@ func (s *Service) sendTableDirectedRelay(ctx context.Context, msg protocol.Envel
 // writeFrameToInbound so the inbound sync-flush wait honours cancellation.
 // Outbound enqueue is non-blocking and does not observe ctx beyond the
 // pre-entry check inside the network bridge.
-func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity) bool {
+func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAddress, msg protocol.Envelope, routeOrigin domain.PeerIdentity, dispatchedAt time.Time) relaySendOutcome {
 	if strings.HasPrefix(string(address), "inbound:") {
 		frame := protocol.Frame{
 			Type:        "relay_message",
@@ -650,8 +700,32 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 		// v27 sender-key attachment — symmetric with the outbound
 		// sendRelayMessage{,WithOrigin} builders.
 		s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
-		if !s.writeFrameToInbound(ctx, address, frame) {
-			return false
+		// Same pre-wire gate the session writer takes: freeze/withdrawal
+		// first, then the durable claim, then the frame.
+		ref := deliveryDispatchRef{Envelope: msg, DispatchedAt: dispatchedAt}
+		if !s.clearedToWrite(ref, dispatchedAt) {
+			return relaySendRefused
+		}
+		connID, remoteAddr, found := s.resolveInboundConn(address)
+		if !found {
+			return relaySendRefused
+		}
+		// The ERROR, not a bool. A sync flush that ended on a timeout, a
+		// cancelled context or a closing writer leaves the frame in the
+		// queue behind a live writer — the bytes may have left — and
+		// reporting that as "nothing went out" tells a later deletion to
+		// skip a peer who is holding the message.
+		if err := s.writeFrameToInboundConnErr(ctx, connID, remoteAddr, frame); err != nil {
+			if sendErrorProvesNothingWasWritten(err) {
+				return relaySendRefused
+			}
+			// Nobody can say. Reported up the stack rather than recorded
+			// here, because the caller is the one that decides what this
+			// whole ATTEMPT amounted to — and an unresolved sink must not
+			// let it conclude "reached nobody".
+			log.Warn().Str("message_id", string(ref.Envelope.ID)).Err(err).
+				Msg("delivery_frame_fate_unknown_claim_left_withdrawn")
+			return relaySendFateUnknown
 		}
 		// Phase 3 PR 12.2 / PR 12.3 (review fix) — symmetric with
 		// sendRelayMessage{,WithOrigin} on the outbound side: arm
@@ -688,16 +762,26 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 			FrameLine:            originLine,
 		})
 		if !stored {
+			// The frame is GONE — the write above succeeded, and no
+			// bookkeeping failure afterwards can call that back. What is
+			// lost is the hop-ack budget and the stashed wire bytes, so
+			// this one forward gets no Phase 3 timeout and no failover
+			// re-emission; the sender's own end-to-end retry still
+			// covers it. Reporting "refused" instead ran a gossip
+			// fallback for a frame already on the wire, left the message
+			// at queued because confirmEnvelopeOnWire was never reached,
+			// and invited an immediate duplicate.
 			log.Warn().
 				Str("id", string(msg.ID)).
 				Str("recipient", msg.Recipient).
 				Str("address", string(address)).
-				Msg("relay_state_store_failed_inbound")
-			return false
+				Msg("relay_state_store_failed_inbound_hop_ack_disabled")
 		}
-		return true
+		// An inbound-directed write goes straight to that connection's
+		// writer, so reaching here means the frame left this node.
+		return relaySendHandedToPeer
 	}
-	return s.sendRelayMessageWithOrigin(address, msg, routeOrigin)
+	return s.sendRelayMessageWithOrigin(address, msg, routeOrigin, dispatchedAt)
 }
 
 // resolveRouteNextHopAddress finds a transport address for a route's
@@ -717,7 +801,18 @@ func (s *Service) resolveRouteNextHopAddress(peerIdentity domain.PeerIdentity, h
 // executeGossipTargets sends a message to pre-computed gossip targets from a
 // RoutingDecision. The target list is provided by the Router — targets are not
 // recomputed here.
-func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.PeerAddress) {
+// delivery names the sender-owned dispatch these frames belong to, and is
+// the ZERO ref for transit: gossip carries other people's messages too, and
+// only the ones this node authored have a delivery to answer for. For ours
+// it is what makes the fan-out a real sink rather than an untracked side
+// channel — it withdraws the durable never-emitted claim before the write,
+// re-checks the freeze and the withdrawal, and confirms afterwards.
+//
+// Without it a gossip job queued a moment before the user deleted the
+// message still handed it to the recipient, while the deletion — reading a
+// message nothing had emitted — scheduled no peer-side delete. The copy
+// stayed with them for good.
+func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.PeerAddress, delivery deliveryDispatchRef) {
 	defer crashlog.DeferRecover()
 	if len(targets) == 0 {
 		// Hop budget exhausted / all targets ingress-suppressed
@@ -742,7 +837,7 @@ func (s *Service) executeGossipTargets(msg protocol.Envelope, targets []domain.P
 		if address == "" || s.isSelfAddress(address) {
 			continue
 		}
-		s.dispatchGossipSend(func() { s.sendGossipFrameToPeer(address, frame, msgID, recipient) })
+		s.dispatchGossipSend(func() { s.sendGossipFrameToPeer(address, frame, msgID, recipient, delivery) })
 	}
 }
 
@@ -990,12 +1085,15 @@ func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, 
 // inbound connection, then the pending ring. The frame is shared read-only
 // with the other per-target send goroutines (see executeGossipTargets);
 // msgID/recipient are passed separately only for the log lines so the shared
-// frame's Item need not be re-read. push_message is fire-and-forget gossip
-// relay — no outbound delivery tracking (that lives on the local send_message
-// path via markOutboundTerminal/clearOutboundQueued).
-func (s *Service) sendGossipFrameToPeer(address domain.PeerAddress, frame protocol.Frame, msgID, recipient string) {
+// frame's Item need not be re-read.
+//
+// delivery is the zero ref for transit gossip, which stays pure
+// fire-and-forget. For a message this node AUTHORED it travels with the
+// frame so each of the three sinks below answers for it — see
+// executeGossipTargets.
+func (s *Service) sendGossipFrameToPeer(address domain.PeerAddress, frame protocol.Frame, msgID, recipient string, delivery deliveryDispatchRef) {
 	defer crashlog.DeferRecover()
-	if s.enqueuePeerFrame(address, frame) {
+	if s.enqueuePeerSendItem(address, peerSendItem{Frame: frame, delivery: delivery}) {
 		log.Info().Str("node", s.identity.Address).Str("id", msgID).Str("recipient", recipient).Str("peer", string(address)).Str("mode", "session").Msg("gossip_message_attempt")
 		return
 	}
@@ -1013,8 +1111,10 @@ func (s *Service) sendGossipFrameToPeer(address domain.PeerAddress, frame protoc
 	s.peerMu.RUnlock()
 	if haveInbound {
 		// Fire-and-forget gossip inbound-direct fallback — Network-routed
-		// so a test backend can intercept it; ctx is Service lifecycle.
-		_ = s.sendFrameViaNetwork(s.runCtx, inboundID, frame)
+		// so a test backend can intercept it. This writer has no queue to
+		// gate the frame at, so the gate, the write and the confirmation
+		// are one step: writeDeliveryFrameToInbound.
+		_ = s.writeDeliveryFrameToInbound(inboundID, frame, delivery)
 		log.Info().Str("node", s.identity.Address).Str("id", msgID).Str("recipient", recipient).Str("peer", string(address)).Str("mode", "inbound_direct").Msg("gossip_message_attempt")
 		return
 	}
