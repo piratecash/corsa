@@ -303,6 +303,87 @@ type deliveryRetryEntry struct {
 	// away may reset the backoff (resetBackoffOnReturn). Conflating them
 	// made every unconfirmed dispatch look like a returning peer.
 	Hold deliveryHoldReason
+	// Seq is this delivery's registration order, minted under deliveryMu.
+	// It is compared against the high-water mark a reading carries, so a
+	// pass can tell the messages it actually measured from those written
+	// while it was working.
+	Seq uint64
+	// AcceleratedInVisit is the recipient's visit (recipientPassRecord)
+	// this message's accelerated attempt was spent in. A return grants one
+	// only when it differs from the recipient's current visit, so an
+	// absence — which bumps that counter — is what earns the next one.
+	//
+	// Per MESSAGE and not per recipient, because the sends that answer a
+	// reconnect do not always cover everything: the backlog replay writes
+	// what its in-memory topic snapshot holds and what the writer accepts,
+	// which can be some of a recipient's unconfirmed messages and not the
+	// rest. Spending one mark for the whole conversation left exactly
+	// those others waiting out the tail — the case this feature exists
+	// for.
+	//
+	// Zero means "never accelerated", which is what a fresh registration
+	// gets: visits are 1-based and minted on first use. What keeps a message
+	// written mid-pass from inheriting a return taken before it existed is
+	// Seq against the reading's high-water mark, not a seed here — seeding
+	// this field would also deny that message the session-event
+	// acceleration it is entitled to.
+	AcceleratedInVisit uint64
+	// ClaimedAt is when a sender last took this message through the last
+	// boundary before the wire (markEntryEmitted) — claimed, not
+	// confirmed. It answers the only question a second sender has: is
+	// somebody sending this RIGHT NOW.
+	//
+	// The confirmation cannot answer it. The backlog replay claims its
+	// WHOLE batch up front, writes the frames one by one and confirms
+	// afterwards, so a large backlog spends seconds in a state where
+	// nothing has been confirmed and every message in it is already on its
+	// way. A retry consulting Attempts or LastEmittedAt saw an untouched
+	// entry and sent a second copy of each.
+	//
+	// A stamp rather than a reservation, deliberately: a reservation has to
+	// be released, and the paths that claim without ever confirming — a
+	// writer that refuses the frame, a sink that never answers — would leak
+	// one and silence that message for good, which is a far worse failure
+	// than the duplicate this prevents. A stamp needs no release: it stops
+	// mattering one queue window later, the same window the engine already
+	// uses to decide whether an answer could still be coming.
+	ClaimedAt time.Time
+	// AcceleratedAtPresence is the recipient's presence count when that
+	// spend was made (see recipientPassRecord.presence). It says WHEN in
+	// the sequence of observations the spend happened, which the visit
+	// number alone cannot: a send made after a pass measured an absence,
+	// but before that pass committed it, is stamped with the visit the
+	// commit is about to close. Zero for a spend granted by a pass's own
+	// reading, which is what "not after it" means.
+	AcceleratedAtPresence uint64
+	// WokenSinceLastDispatch says that an OBSERVATION — a measured return,
+	// or a session with the recipient becoming usable — pulled this
+	// entry's next attempt forward AFTER the last dispatch was handed to
+	// the sinks, and that dispatch's confirmation has therefore nothing to
+	// say about it.
+	//
+	// It exists because confirmations arrive late and rebuild the backoff
+	// from their own dispatch. A confirmation for an attempt that started
+	// BEFORE the wake-up would write the long tail back over the shortened
+	// schedule, and nothing would shorten it a second time: the
+	// acceleration is spent and the recipient already reads as reachable.
+	//
+	// It is an ORDER and not a timestamp on purpose. The wall clock cannot
+	// answer this: on Windows it ticks in 0.5-15.6 ms steps, so a
+	// dispatch, a reconnect and a late confirmation can carry the same
+	// instant — and the two cases that instant would have to tell apart
+	// (a confirmation from before the wake-up, and the confirmation of the
+	// accelerated attempt the same tick then makes) legitimately share it.
+	// Set by the wake-up, cleared by the dispatch that follows it, which
+	// is exactly the order that matters and needs no clock at all.
+	//
+	// "The dispatch" is whoever puts the message on the wire, not the
+	// retry engine alone: the reconnect backlog replay sends the same
+	// message down the connection the peer has just opened, without going
+	// through the engine's arm, and that copy answers the wake-up exactly
+	// as an armed retry would. Both clear the mark through
+	// noteDeliveryDispatched.
+	WokenSinceLastDispatch bool
 	// Emitted is the CONSERVATIVE answer to "might the peer have this?".
 	// It turns true when the durable never-emitted claim is withdrawn —
 	// BEFORE the frame is written, because a crash in that gap has to read
@@ -400,9 +481,94 @@ func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.Messa
 	if s.identity == nil || sender != s.identity.Address {
 		return true
 	}
-	outcome := s.noteOwnEnvelopesEmitted([]protocol.MessageID{messageID}, now)
+	outcome := s.noteOwnEnvelopesEmitted([]protocol.MessageID{messageID}, now, nil)
 	_, blocked := outcome.Withheld[messageID]
 	return !blocked
+}
+
+// emissionSender marks a caller that is DECIDING to send, as opposed to one
+// carrying out a decision already made. Only the first kind is refused a
+// message another sender has in flight, and that distinction is the whole
+// of the two-senders rule.
+//
+// It has to be the call site that says which it is, because the same send
+// crosses the pre-wire boundary more than once: the sender claims, and then
+// every writer it hands the frame to claims again through clearedToWrite —
+// the session queue when it dequeues, the relay before it writes, the
+// gossip fan-out. A rule that refused all of them refused a sender its own
+// frame, and eight tests said so. A rule that refuses only the deciders is
+// exact: two senders cannot both pass this boundary while the other's claim
+// stands, and everything downstream of a decision that DID pass is the same
+// send finishing what it started.
+//
+// There are three deciders — the retry tick, the reconnect backlog replay,
+// and the live push of a newly stored message — and all three are started
+// by events outside each other's control.
+//
+// The retry tick alone can also say what the claim looked like when it
+// decided (it plans, arms and writes in three steps), so a claim taken
+// since is another sender's however its stamp reads. A sender with no such
+// baseline asks only whether something is in flight now.
+type emissionSender struct {
+	id        protocol.MessageID
+	claimedAt time.Time
+}
+
+// wouldCollide reports whether this sender must stand down for one id.
+// Caller MUST hold s.deliveryMu.
+func (e *emissionSender) wouldCollide(entry *deliveryRetryEntry, id protocol.MessageID, now time.Time) bool {
+	if e == nil {
+		return false // a writer finishing a send that already passed here
+	}
+	if e.id == id {
+		return emissionTakenElsewhere(entry, e.claimedAt, now)
+	}
+	return emissionInFlight(entry, now)
+}
+
+// emissionClaimRollback is a claim this dispatch took and did not use. It
+// undoes it by COMPARE-AND-SET on the stamp: only the claim this dispatch
+// wrote is taken back, so a sender that claimed the message in the meantime
+// keeps its own — the same rule the rest of this file follows, that a writer
+// may only replace what it wrote.
+//
+// A zero value undoes nothing, for the paths that never claimed.
+type emissionClaimRollback struct {
+	wrote   time.Time
+	restore time.Time
+}
+
+func (r emissionClaimRollback) undo(entry *deliveryRetryEntry) {
+	if r.wrote.IsZero() || !entry.ClaimedAt.Equal(r.wrote) {
+		return
+	}
+	entry.ClaimedAt = r.restore
+}
+
+// claimEnvelopeForDispatch is the retry tick's last boundary. It is the
+// ordinary emission claim plus the guard above, both answered in ONE lock
+// hold, because the two questions it separates are answered differently:
+//
+//   - withheld: a wipe froze the message, a withdrawal recalled it, or its
+//     durable claim would not come off the disk. Nothing was sent and
+//     nothing else has sent it, so the schedule this pass displaced is
+//     given back.
+//   - superseded: another sender emitted it while this dispatch was in
+//     flight. That entry now belongs to the confirmation — a rebuilt
+//     backoff, a cleared hold — and this pass must leave it exactly as it
+//     found it, or it would park a message that has just gone out and, in
+//     the version before this check, send a second copy of it.
+func (s *Service) claimEnvelopeForDispatch(envelope protocol.Envelope, claimedAt, now time.Time) (cleared, superseded bool, wrote time.Time) {
+	if s.identity == nil || envelope.Sender != s.identity.Address {
+		return true, false, time.Time{}
+	}
+	sender := &emissionSender{id: envelope.ID, claimedAt: claimedAt}
+	outcome := s.noteOwnEnvelopesEmitted([]protocol.MessageID{envelope.ID}, now, sender)
+	if _, beaten := outcome.Superseded[envelope.ID]; beaten {
+		return false, true, time.Time{}
+	}
+	_, blocked := outcome.Withheld[envelope.ID]
+	return !blocked, false, outcome.Claimed[envelope.ID]
 }
 
 // noteOwnEnvelopesEmitted is the batch form, for a caller that is about
@@ -416,11 +582,11 @@ func (s *Service) noteOwnEnvelopeEmitted(sender string, messageID protocol.Messa
 //
 // The outcome names the ids the caller must NOT write. What it must
 // ANNOUNCE is not reported here — see emissionOutcome.
-func (s *Service) noteOwnEnvelopesEmitted(ids []protocol.MessageID, now time.Time) emissionOutcome {
+func (s *Service) noteOwnEnvelopesEmitted(ids []protocol.MessageID, now time.Time, sender *emissionSender) emissionOutcome {
 	if len(ids) == 0 {
 		return emissionOutcome{}
 	}
-	claim := s.claimEmissionLocked(ids, now)
+	claim := s.claimEmissionLocked(ids, now, sender)
 	if len(claim.Unproven) > 0 {
 		// Outside the delivery mutex (SQLite) and BEFORE the caller writes
 		// a frame: an id whose claim is still on disk has not been cleared
@@ -451,6 +617,15 @@ type emissionOutcome struct {
 	// Unproven are the ids whose durable never-emitted claim still has to
 	// come off the disk before their frame may go out.
 	Unproven []protocol.MessageID
+	// Claimed names, for each id this call took through the boundary, the
+	// instant the claim was stamped with. A sender that ends up not writing
+	// the frame gives exactly that claim back — see emissionClaimRollback.
+	Claimed map[protocol.MessageID]time.Time
+	// Superseded names the guarded id when another sender emitted it after
+	// the caller decided to. It is a Withheld id with a REASON attached,
+	// because the two reasons are undone differently — see
+	// claimEnvelopeForDispatch. Only a call from a sender can produce it.
+	Superseded map[protocol.MessageID]struct{}
 }
 
 // claimEmissionLocked is the first half of noteOwnEnvelopesEmitted: it
@@ -463,9 +638,15 @@ type emissionOutcome struct {
 // disk write at all, which is what the two-phase form exists to preserve.
 // An outgoing message's FIRST emission does pay the withdrawal, because
 // its row was born carrying the claim.
-func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time) emissionOutcome {
+func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time, sender *emissionSender) emissionOutcome {
 	var claim emissionOutcome
 	s.deliveryMu.Lock()
+	// Read INSIDE the section, and not merely at the boundary: waiting for
+	// this mutex is itself time, and on a busy node the wait can outlast the
+	// queue window. A stamp read before the wait would be stale the moment
+	// it is written, which is the same defect as taking it from the pass's
+	// now, only harder to see. See deliveryNow.
+	claimedAt := s.deliveryNow()
 	for _, id := range ids {
 		if _, withdrawn := s.cancelledDeliveries[id]; withdrawn {
 			claim.Withheld = withhold(claim.Withheld, id)
@@ -479,6 +660,22 @@ func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time) e
 			continue
 		}
 		entry, awaiting := s.awaitingDelivered[id]
+		if awaiting && sender.wouldCollide(entry, id, claimedAt) {
+			// Another sender is putting this message on the wire, and this
+			// caller is one that gets to stand down — see emissionSender.
+			//
+			// The CLAIM and not the confirmation, because the replay claims
+			// its whole batch before writing any of it and confirms
+			// afterwards: a big backlog spends seconds in that state, and a
+			// test that waited for the confirmation would let a duplicate
+			// past for every message still being written. Read HERE, in the
+			// same hold as the freeze and the withdrawal shadow, because
+			// the whole point of this section is that it is the last state
+			// anybody sees before the wire.
+			claim.Withheld = withhold(claim.Withheld, id)
+			claim.Superseded = withhold(claim.Superseded, id)
+			continue
+		}
 		if !awaiting {
 			// No entry does NOT mean nothing to withdraw. The backlog
 			// replay reaches past the retry engine entirely, so it can
@@ -498,7 +695,8 @@ func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time) e
 			// the claim set rather than a per-entry flag is what keeps an
 			// ordinary send off the disk entirely — and keeps one id's
 			// write failure from stranding every other id in the batch.
-			markEntryEmitted(entry, now)
+			markEntryEmitted(entry, claimedAt)
+			claim.Claimed = stampClaim(claim.Claimed, id, claimedAt)
 			continue
 		}
 		claim.Unproven = append(claim.Unproven, id)
@@ -515,6 +713,7 @@ func (s *Service) claimEmissionLocked(ids []protocol.MessageID, now time.Time) e
 // landing in that gap has already told the user the message was recalled.
 func (s *Service) confirmEmission(claim emissionOutcome, stranded map[protocol.MessageID]struct{}, now time.Time) emissionOutcome {
 	s.deliveryMu.Lock()
+	claimedAt := s.deliveryNow() // inside the section — see claimEmissionLocked
 	for _, id := range claim.Unproven {
 		if _, failed := stranded[id]; failed {
 			claim.Withheld = withhold(claim.Withheld, id)
@@ -529,7 +728,8 @@ func (s *Service) confirmEmission(claim emissionOutcome, stranded map[protocol.M
 			continue
 		}
 		if entry, awaiting := s.awaitingDelivered[id]; awaiting {
-			markEntryEmitted(entry, now)
+			markEntryEmitted(entry, claimedAt)
+			claim.Claimed = stampClaim(claim.Claimed, id, claimedAt)
 		}
 	}
 	s.deliveryMu.Unlock()
@@ -562,13 +762,80 @@ func (s *Service) confirmEmission(claim emissionOutcome, stranded map[protocol.M
 // confirmEnvelopeOnWire see its own attempt as already confirmed and skip
 // it, so a message that really did go out would never be charged, never
 // leave the hold and never be announced.
-func markEntryEmitted(entry *deliveryRetryEntry, _ time.Time) {
+func markEntryEmitted(entry *deliveryRetryEntry, now time.Time) {
 	entry.Emitted = true
+	// Stamped as well as flagged: the flag is monotone and says only
+	// "might the peer have this ever", while a second sender needs to know
+	// that a send is happening RIGHT NOW. See deliveryRetryEntry.ClaimedAt.
+	entry.ClaimedAt = now
+}
+
+// deliveryNow is the moment an emission claim is taken or read at.
+//
+// It is deliberately NOT the `now` a pass carries, and it is read INSIDE the
+// delivery section rather than on the way into it. That value is when the
+// pass STARTED, and a pass can take a long time — many recipients, a slow
+// journal — so stamping a claim with it dates the claim before it exists,
+// and one that outlives the queue window is born already expired: the next
+// sender reads "nothing in flight" and duplicates a frame being written at
+// that moment. The claim is a statement about the wall clock at the
+// boundary, so it is read at the boundary; a pass's `now` stays what it is
+// for, the schedule.
+// It is read through a provider so a test can drive it; nil means the wall
+// clock, for the Services built without going through New.
+func (s *Service) deliveryNow() time.Time {
+	if s.deliveryClock == nil {
+		return time.Now().UTC()
+	}
+	return s.deliveryClock().UTC()
+}
+
+// emissionInFlight reports whether a sender has this message on the wire
+// right now: a claim stands, and it is recent enough that its frame may
+// still be going out.
+//
+// It is asked in the same lock hold as the freeze and the withdrawal, by
+// the retry tick, which is the sender that can be told to stand down: it
+// has a schedule to fall back on. Asking it of EVERY sender is what would
+// make the rule symmetric, and it cannot be done with this stamp alone —
+// the same send crosses this boundary again through clearedToWrite, so a
+// rule with no notion of WHO claimed refuses a sender its own frame.
+//
+// The window is deliberately the queue window: the question is the one it
+// always answers, "could this still be in the air". A stamp further ahead
+// than that window is one this node cannot have made — a clock correction —
+// and is not evidence of anything. Caller MUST hold s.deliveryMu.
+func emissionInFlight(entry *deliveryRetryEntry, now time.Time) bool {
+	if entry.ClaimedAt.IsZero() {
+		return false
+	}
+	ahead := entry.ClaimedAt.Sub(now)
+	return ahead <= deliveryQueueWindow && ahead > -deliveryQueueWindow
+}
+
+// emissionTakenElsewhere is the same question for a sender that DECIDED to
+// send at an earlier moment and can say what the claim looked like then —
+// the retry tick, which plans, arms and writes in three steps.
+//
+// It adds the order half: a claim taken after that moment is another
+// sender's, however old its stamp reads. The window half alone cannot see
+// that, and the order half alone cannot see a claim taken before the pass
+// began and still being written. Caller MUST hold s.deliveryMu.
+func emissionTakenElsewhere(entry *deliveryRetryEntry, claimedAtPlan, now time.Time) bool {
+	return !entry.ClaimedAt.Equal(claimedAtPlan) || emissionInFlight(entry, now)
 }
 
 // confirmed reports whether any sink has ever taken this envelope. Caller
 // MUST hold s.deliveryMu.
 func (e *deliveryRetryEntry) confirmed() bool { return !e.LastEmittedAt.IsZero() }
+
+func stampClaim(set map[protocol.MessageID]time.Time, id protocol.MessageID, at time.Time) map[protocol.MessageID]time.Time {
+	if set == nil {
+		set = make(map[protocol.MessageID]time.Time, 1)
+	}
+	set[id] = at
+	return set
+}
 
 func withhold(set map[protocol.MessageID]struct{}, id protocol.MessageID) map[protocol.MessageID]struct{} {
 	if set == nil {
@@ -764,6 +1031,11 @@ func (s *Service) registerAwaitingDeliveredLocked(envelope protocol.Envelope, no
 		// event and the row's own durable mark all say so — so every one
 		// of them is owed the transition.
 		Announced: false,
+		// The order this delivery was registered in. A pass may only
+		// apply its reading to messages that existed when it took it —
+		// the reading is per RECIPIENT, so without this a message written
+		// mid-pass would inherit a transition observed before it existed.
+		Seq: s.nextDeliverySeqLocked(),
 	}
 	// The row this entry describes is BORN carrying the durable
 	// never-emitted claim (message_store_adapter writes it in the same
@@ -1033,6 +1305,11 @@ type abandonedDelivery struct {
 type dueCandidate struct {
 	id  protocol.MessageID
 	env protocol.Envelope
+	// claimedAt is the entry's standing emission claim when the plan chose
+	// it. The arm asks again: anything else claiming this message for the
+	// wire — the reconnect backlog replay, mid batch or finished — makes
+	// this candidate a duplicate. See emissionInFlight.
+	claimedAt time.Time
 }
 
 // dueDispatch is one envelope the tick may put on the wire, plus the
@@ -1044,6 +1321,16 @@ type dueCandidate struct {
 type dueDispatch struct {
 	env      protocol.Envelope
 	parkedAt time.Time
+	// wokenBefore is the wake-up mark the arm displaced, carried for the
+	// same reason as parkedAt: a dispatch that never reaches the wire has
+	// to give back everything the arm spent on it, and the mark is part of
+	// that. See holdDeliveryRetry.
+	wokenBefore bool
+	// claimedAt is the entry's standing emission claim as the arm left it.
+	// The last boundary before the wire asks again: another sender claiming
+	// this message in between makes this dispatch a duplicate. See
+	// claimEnvelopeForDispatch.
+	claimedAt time.Time
 }
 
 // retryDueDeliveries advances the sender-owned delivery queues by one step.
@@ -1051,22 +1338,29 @@ type dueDispatch struct {
 // provides the real pacing. Snapshots and schedule writes happen under
 // s.deliveryMu; the sends run after release.
 func (s *Service) retryDueDeliveries(now time.Time) {
-	abandoned, candidates := s.planDueDeliveries(now)
+	// The tick MEASURES first and plans second, and that order is the whole
+	// design. "Can this recipient be reached right now" is not derived from
+	// events observed elsewhere — it is asked of router.Route, the same
+	// authority the send itself obeys, so the answer is what a send would
+	// find rather than a model of what routing and the peer domain were
+	// thought to be doing.
+	//
+	// The measurement is per RECIPIENT, not per message: one lookup serves
+	// a whole backlog, and it is what both halves of the pass then use —
+	// the wake-up rule in planDueDeliveries and the arm/hold decision in
+	// armDueDeliveries. One answer per tick also means the two cannot
+	// disagree with each other.
+	reachable := s.measureRecipientReachability()
+
+	abandoned, candidates := s.planDueDeliveries(now, reachable)
 	dueReceipts := s.planDueSeenAcks(now)
 
-	// Reachability runs LOCK-FREE: router.Route reads routing/peer state
-	// under its own locks, and taking those under deliveryMu would invert
-	// the canonical peerMu → deliveryMu order. With the gate off every
-	// candidate is "reachable" — the legacy unconditional send.
-	reachable := make(map[protocol.MessageID]bool, len(candidates))
-	for _, c := range candidates {
-		if !s.cfg.HoldDMUntilReachable {
-			reachable[c.id] = true
-			continue
-		}
-		d := s.router.Route(c.env)
-		reachable[c.id] = d.RelayNextHop != nil || len(d.PushSubscribers) > 0
-	}
+	// The reading is completed and stored HERE, after the plan and before
+	// anything is armed: a delivery registered between the snapshot and
+	// the plan has not been measured yet, and no hold decision may be made
+	// on an answer nobody asked for. See finishRecipientReading for why
+	// the commit is not inside the plan.
+	s.finishRecipientReading(reachable, candidates)
 
 	dueMessages := s.armDueDeliveries(candidates, reachable, now)
 
@@ -1098,6 +1392,609 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 	}
 }
 
+// measureRecipientReachability answers, once per tick and once per
+// RECIPIENT, the only question the retry engine actually has: is there a
+// way to reach them right now.
+//
+// It ASKS rather than infers (recipientHasPath), so a recipient reachable
+// here is a recipient a send would reach, including through causes no
+// handler announces — an announce that clears a Dead health label while
+// reporting RouteUnchanged, a next hop returning inside the withdrawal
+// grace window, a route that resolved through a backup claim. None of
+// those has to be enumerated, because none of them is being modelled.
+//
+// The walk runs with NO delivery mutex held: the probe reads routing and
+// peer state under their own locks, and taking those under deliveryMu
+// would invert the canonical peerMu → deliveryMu order. The snapshot of
+// WHOM to measure is taken under a short read lock; one answer per
+// recipient serves that recipient's whole backlog, because routing decides
+// by recipient.
+//
+// With the reachability gate off nothing is measured at all and every
+// recipient answers "reachable": nothing is ever held, which is the legacy
+// unconditional behaviour byte for byte.
+func (s *Service) measureRecipientReachability() recipientReachability {
+	if !s.cfg.HoldDMUntilReachable {
+		return recipientReachability{gateOff: true}
+	}
+	probes := make(map[string]struct{})
+	s.deliveryMu.RLock()
+	for _, entry := range s.awaitingDelivered {
+		probes[entry.Envelope.Recipient] = struct{}{}
+	}
+	// Everything registered up to here is what this reading is about.
+	// Deliveries written after it may share a recipient with one of these
+	// and must not inherit its answer.
+	seenUpTo := s.deliverySeq
+	// And this is what the other writers had said about them by now: an
+	// observation made after this line is newer than anything measured
+	// below it, however long the probe takes.
+	presence := make(map[string]uint64, len(probes))
+	for recipient := range probes {
+		presence[recipient] = s.recipientPassState[recipient].presence
+	}
+	s.deliveryMu.RUnlock()
+	measured := make(map[string]bool, len(probes))
+	for recipient := range probes {
+		measured[recipient] = s.recipientHasPath(recipient)
+	}
+	return recipientReachability{measured: measured, seenUpTo: seenUpTo, presence: presence}
+}
+
+// recipientHasPath is the reachability question asked WITHOUT sending
+// anything and without changing anything: is there a live push subscriber
+// for this recipient, or a route whose next hop resolves to a session that
+// may carry it.
+//
+// It is deliberately NOT router.Route, even though Route answers the same
+// question, because Route also DOES things: it builds the gossip fan-out
+// list by walking the peer domain, and on a recipient with no route it
+// fires an on-demand route query. Running that for every conversation with
+// an unanswered message, every two seconds, would turn an offline backlog
+// into a standing CPU and query load — the storm this engine exists to
+// avoid, arriving through the measurement instead of through re-sends.
+//
+// The two predicates below are the ones Route's own answer is built from
+// (subscribersForRecipient, the quarantine filter, resolveRouteNextHopAddress),
+// called through the same helpers rather than reimplemented, so the probe
+// cannot drift from the decision the send will make. It reads the table
+// with plain Lookup rather than LookupForRelay: the shaping hint is a
+// rotation counter the SEND is entitled to consume, and a measurement must
+// not spend it.
+//
+// Takes gossipMu and the routing table's own lock, and therefore MUST NOT
+// be called with deliveryMu held: peerMu → deliveryMu is the canonical
+// order and resolveRouteNextHopAddress takes peerMu.
+func (s *Service) recipientHasPath(recipient string) bool {
+	if recipient == "" || recipient == "*" {
+		return false
+	}
+	if len(s.subscribersForRecipient(recipient)) > 0 {
+		return true
+	}
+	for _, route := range s.routingTable.Lookup(domain.PeerIdentityFromWire(recipient)) {
+		if s.routeIsBlockedByQuarantine(route.NextHop, route.Hops) {
+			continue
+		}
+		if s.resolveRouteNextHopAddress(route.NextHop, route.Hops) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// recipientPassRecord is what one pass leaves behind about one recipient:
+// the reading it took, and which VISIT that reading belongs to.
+//
+// A visit is the stretch between two absences. The counter is bumped when a
+// pass measures a recipient it could previously reach as unreachable — the
+// only observation that means "they went away" — and it is what an
+// accelerated attempt is counted against.
+//
+// A counter rather than the flags this used to be, because the writers do
+// not take turns: a pass measures, a session event arrives, a backlog is
+// replayed, and each of them used to have to interpret the others'
+// half-written state (was this reading stale? had somebody already spent
+// the acceleration? which of the two observations is newer?). Every one of
+// those questions produced a bug of its own. A monotone bump and a
+// compare-and-set COMMUTE: whatever order the writers run in, an absence
+// grants exactly one accelerated attempt per message and no interleaving
+// can lose it or double it.
+type recipientPassRecord struct {
+	reachable bool
+	visit     uint64
+	// presence counts the times this recipient was observed BEING HERE by
+	// something other than a pass — a session becoming usable, a backlog
+	// replayed down it. A pass captures it together with its reading and
+	// may only conclude "they went away" if it has not moved since.
+	//
+	// The bump commutes with other bumps, but its CONDITION reads
+	// `reachable`, and that field belongs to every writer. A pass measures
+	// at one moment and commits several steps later, so an absence measured
+	// BEFORE a return observed afterwards is not news — it is a stale
+	// reading, and acting on it un-spends the acceleration that observation
+	// had just paid for: the visit moves on, the entry's stamp is left
+	// behind, and the next return sends a second copy of a message the
+	// replay had already put on the wire. This is the "a writer may only
+	// replace what it read" rule, as an order rather than a timestamp: the
+	// clock cannot answer it on Windows, where 0.5-15.6 ms steps let the
+	// reading and the return share an instant.
+	presence uint64
+}
+
+// recipientReachability is one tick's answer to "can this node reach them
+// right now", per recipient. It is a type rather than a bare map so that
+// "the gate is off" cannot be confused with "measured unreachable" — a
+// missing key in a bare map reads as false, which would hold every message
+// on a node that has the gate turned off.
+type recipientReachability struct {
+	measured map[string]bool
+	// seenUpTo is the last registration order in the awaiting set when
+	// this reading was taken. A delivery above it did not exist yet, so
+	// this reading says nothing about it — its recipient's answer belongs
+	// to the messages that were already there.
+	seenUpTo uint64
+	// presence is each measured recipient's presence counter as it stood
+	// when they were measured. The commit compares it against the live one
+	// to tell an absence it actually observed from one another writer has
+	// already answered. See recipientPassRecord.presence.
+	presence map[string]uint64
+	gateOff  bool
+}
+
+// canReach answers for one recipient, and says whether it was asked at
+// all. With the gate off the answer is always a known yes, which is what
+// makes the whole hold-and-wake machinery stand down together.
+//
+// The known flag exists because the measurement is taken from a snapshot of
+// the awaiting set: a delivery registered after that snapshot has not been
+// measured, and treating a missing key as "no path" would record a loss for
+// a message whose path was never looked at — an extra re-send once the
+// queue window passes, with no peer having gone anywhere.
+func (r recipientReachability) canReach(recipient string) (reachable, known bool) {
+	if r.gateOff {
+		return true, true
+	}
+	reachable, known = r.measured[recipient]
+	return reachable, known
+}
+
+// measureMissing tops the answer up for candidates that were registered
+// after the snapshot was taken, so the arm decision is never made on a
+// recipient nobody asked about. Runs LOCK-FREE, before armDueDeliveries
+// takes deliveryMu, for the reason recipientHasPath states. Usually a
+// no-op: the gap is between two statements of the same tick.
+func (r recipientReachability) measureMissing(s *Service, candidates []dueCandidate) {
+	if r.gateOff {
+		return
+	}
+	missing := make(map[string]struct{})
+	for _, c := range candidates {
+		if _, known := r.measured[c.env.Recipient]; !known {
+			missing[c.env.Recipient] = struct{}{}
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	// Their baseline is read BEFORE they are probed, for the reason the
+	// first reading reads its own: an observation that lands after this
+	// point is newer than the answer below it. A read lock only, and
+	// released before the probe, which must hold no delivery mutex.
+	if r.presence != nil {
+		s.deliveryMu.RLock()
+		for recipient := range missing {
+			r.presence[recipient] = s.recipientPassState[recipient].presence
+		}
+		s.deliveryMu.RUnlock()
+	}
+	for recipient := range missing {
+		r.measured[recipient] = s.recipientHasPath(recipient)
+	}
+}
+
+// wakeOverdueForReturningPeer bounds how long an unanswered message waits
+// after a session with its recipient becomes usable: no longer than the
+// first step of the retry schedule.
+//
+// It CLAMPS rather than fires. The tick already re-sends at once when it
+// measures a recipient that was unreachable and is reachable again — the
+// offline-then-online case the bug report was about. What the tick cannot
+// see is a peer whose connection changes without them ever measuring
+// unreachable: a client that drops and returns inside one two-second tick,
+// or one that opens a new session before this node has finished tearing
+// the old one down, so no count ever reaches zero. From here such a peer
+// was reachable throughout, and the only honest statement left is "their
+// connection is not the one it was, and this message has no receipt" —
+// which is a reason to try soon, not a reason to try instantly.
+//
+// A clamp is what makes that safe to do on EVERY session event, and it is
+// why nothing here counts sessions. Counting could not answer the question
+// anyway (an overlapping reconnect never reaches zero, and a peer without
+// relay capability is still a perfectly good recipient over its own push
+// connection), and a rule that fired on every event would let a backup
+// session flapping beside a healthy primary step over the backoff every
+// twenty seconds. The clamp cannot: it only ever moves a schedule EARLIER,
+// never past the floor, so however often a transport flaps, one recipient
+// gets at most one extra attempt per schedule step — the same rate the
+// ordinary first retry runs at.
+//
+// It leaves the backoff index alone, touches only messages addressed TO
+// the peer whose session arrived (nothing behind it), and asks
+// receiptOverdue first, so a message emitted moments ago — whose receipt
+// may still be in flight — is not disturbed.
+//
+// Takes deliveryMu alone, from the same call sites as
+// kickDeliveryRetriesForReachable and after them: the kick answers for the
+// messages that never left, this answers for the ones that did.
+func (s *Service) wakeOverdueForReturningPeer(peer domain.PeerIdentity, now time.Time) {
+	if !s.cfg.HoldDMUntilReachable || peer.IsZero() {
+		return
+	}
+	wire := peer.String()
+	// The floor is the schedule's own first step, so this introduces no
+	// new timing constant and can never beat an ordinary retry.
+	floor := now.Add(deliveryRetryBackoff(0))
+	clamped := 0
+	s.deliveryMu.Lock()
+	// Recorded before the clamps and whether or not anything is clamped: the
+	// peer IS here, so the next pass must not read a transition that has
+	// already been acted on, and the spends below are stamped with this
+	// observation — a pass that measured them away before it must not leave
+	// those spends behind in the visit it is about to close.
+	s.noteRecipientHereLocked(wire)
+	for _, entry := range s.awaitingDelivered {
+		if entry.Envelope.Recipient != wire {
+			continue
+		}
+		// A message emitted moments ago needs no special case: the floor
+		// is a whole schedule step away, which outlasts the queue window,
+		// so a receipt that could still be in flight has run out of time
+		// before this attempt is made.
+		if s.accelerateLocked(entry, wire, floor) {
+			clamped++
+		}
+	}
+	s.deliveryMu.Unlock()
+	if clamped > 0 {
+		log.Debug().Str("recipient", wire).Int("deliveries", clamped).
+			Msg("delivery_schedule_clamped_by_returning_peer")
+	}
+}
+
+// commitRecipientReading stores what this pass measured, as the answer the
+// NEXT pass will compare against. It runs at the END of the pass, and it
+// MERGES rather than replaces. Both of those are corrections to the same
+// mistake, and it is worth naming because it is the mistake this whole file
+// has made in every shape: keeping a copy of a fact that is still changing.
+//
+//   - At the end, because the reading is not finished until measureMissing
+//     has topped it up for deliveries registered after the snapshot.
+//     Committing mid-pass stored a reading that was still being written,
+//     and those recipients silently never made it into the state.
+//   - A merge, because this pass is not the only writer:
+//     wakeOverdueForReturningPeer records a spent acceleration from a
+//     session event, at a moment nobody controls. A wholesale replace
+//     overwrote it with a snapshot taken before it happened, which handed
+//     the same recipient another acceleration and re-opened the re-send
+//     loop it exists to prevent.
+//
+// The merge is keyed by the deliveries that still exist, so it cannot grow:
+// a conversation that ends takes its entry with it. A recipient this pass
+// did not measure keeps whatever the last pass knew — "not asked" is not an
+// answer, here as everywhere else in this file.
+//
+// The accelerated mark survives while the recipient stays reachable and is
+// GIVEN BACK the moment a reading says they cannot be reached: an
+// acceleration is for a return, so it is earned again by an absence.
+func (s *Service) finishRecipientReading(reachable recipientReachability, candidates []dueCandidate) {
+	if reachable.gateOff {
+		return
+	}
+	// The top-up lives HERE, in the same call as the commit, so no future
+	// edit can store a reading that is still being written — the exact
+	// mistake this function documents. It runs first and with no delivery
+	// mutex held (recipientHasPath takes peerMu; see its contract).
+	reachable.measureMissing(s, candidates)
+	s.deliveryMu.Lock()
+	next := make(map[string]recipientPassRecord, len(s.awaitingDelivered))
+	ended := make(map[string]visitEnded)
+	for _, entry := range s.awaitingDelivered {
+		recipient := entry.Envelope.Recipient
+		if _, done := next[recipient]; done {
+			continue
+		}
+		record, known := s.recipientPassState[recipient]
+		canReach, measured := reachable.canReach(recipient)
+		switch {
+		case !measured && !known:
+			// Nothing measured and nothing known: this recipient's first
+			// delivery was registered after the reading was taken and is
+			// not due yet, so nobody has asked about them at all. NO
+			// record is the honest state — storing the zero value would
+			// write down "unreachable", which nobody observed, and the
+			// next pass would read it as a return and re-send a message
+			// whose recipient never went anywhere.
+			continue
+		case !measured:
+			// Nobody asked this time; the last answer stands.
+		default:
+			if record.reachable && !canReach {
+				// They were reachable and are not: a visit has ended.
+				// Bumping is monotone, so it needs no agreement with the
+				// other writers — whatever order they run in, the next
+				// return grants one accelerated attempt per message.
+				ended[recipient] = visitEnded{was: record.visit, presence: reachable.presence[recipient]}
+				record.visit++
+			}
+			if record.visit == 0 {
+				record.visit = 1
+			}
+			record.reachable = canReach
+		}
+		next[recipient] = record
+	}
+	s.carryAccelerationsIntoNewVisitLocked(ended, next)
+	s.recipientPassState = next
+	s.deliveryMu.Unlock()
+}
+
+// visitEnded is one recipient's closed visit: its number, and the presence
+// count the reading that closed it was taken at.
+type visitEnded struct {
+	was      uint64
+	presence uint64
+}
+
+// carryAccelerationsIntoNewVisitLocked moves a spent acceleration into the
+// visit a pass has just opened, when the send that spent it was made AFTER
+// that pass took its reading.
+//
+// This is the one place where a monotone counter is not enough on its own.
+// A pass measures at one moment and commits several steps later, and a
+// reconnect can land in between: the backlog replay puts the message on the
+// wire and counts that as this return's accelerated attempt — necessarily
+// against the visit it can see, the one the commit is about to close. Left
+// there, the stamp falls behind the counter, the message reads as never
+// accelerated, and the next observation of the SAME return sends a second
+// copy a queue window after the first.
+//
+// Dropping the reading instead is wrong, and a test says so
+// (TestAbsenceAndReturnCommute): the absence was real, and a message the
+// replay did NOT cover has earned its acceleration by it. So the visit ends
+// as it should, and only the sends that answered the newer return move
+// forward with it — identified by ORDER, not by time: the entry carries the
+// presence count its spend was stamped with, the reading carries the count
+// it was taken at, and greater means "after". Caller MUST hold
+// s.deliveryMu.Lock.
+func (s *Service) carryAccelerationsIntoNewVisitLocked(ended map[string]visitEnded, next map[string]recipientPassRecord) {
+	if len(ended) == 0 {
+		return
+	}
+	for _, entry := range s.awaitingDelivered {
+		recipient := entry.Envelope.Recipient
+		closed, bumped := ended[recipient]
+		if !bumped || entry.AcceleratedInVisit != closed.was {
+			continue
+		}
+		if entry.AcceleratedAtPresence <= closed.presence {
+			continue // spent before the reading: the absence earns a new one
+		}
+		entry.AcceleratedInVisit = next[recipient].visit
+	}
+}
+
+// earliestRetry is the soonest a re-send of this entry may be made: now,
+// unless a receipt for its last emission could still plausibly be in
+// flight, in which case it is the moment that stops being true.
+//
+// It exists because "not yet" is not the same as "never". Both wake-up
+// paths used to SKIP an entry whose receipt was still young — and the
+// transition they were acting on is not stored anywhere, so once the queue
+// window passed there was nothing left to act on and the message went back
+// to waiting out its backoff, which for the tail is eleven minutes after
+// the person came back. Scheduling it at the end of the window keeps the
+// restraint (no copy while an answer may be coming) without throwing the
+// observation away.
+func earliestRetry(entry *deliveryRetryEntry, now time.Time) time.Time {
+	if receiptOverdue(entry, now) {
+		return now
+	}
+	return emissionStampNotInTheFuture(entry.LastEmittedAt, now).Add(deliveryQueueWindow)
+}
+
+// noteRecipientHereLocked records that this recipient can be reached,
+// observed at this moment by something other than a pass — a session
+// becoming usable, or a backlog replayed down it. It is the "newer
+// observation wins" half of the reading: without it the next pass would
+// compare against a stale "unreachable" and see a transition that had
+// already been acted on. Caller MUST hold s.deliveryMu.Lock.
+func (s *Service) noteRecipientHereLocked(recipient string) {
+	if s.recipientPassState == nil {
+		// A session can become usable, or a backlog be replayed, before
+		// the first retry pass on a node that has just started.
+		s.recipientPassState = make(map[string]recipientPassRecord, 1)
+	}
+	record := s.recipientPassState[recipient]
+	record.reachable = true
+	// Counted, not just set: a pass that measured this recipient BEFORE
+	// this moment has to be able to tell that its answer has been overtaken,
+	// and the flag alone cannot say so — it is idempotent, and the pass
+	// would read back exactly what it expected.
+	record.presence++
+	s.recipientPassState[recipient] = record
+}
+
+// noteReconnectDispatch records that a RECONNECT has just put these
+// messages on the wire — the backlog replay, which sends down the
+// connection the peer has only now opened, outside the retry engine
+// entirely.
+//
+// It says both halves of what such a send means, and both matter because
+// the replay and the wake-up are separate goroutines off the same event
+// and run in either order:
+//
+//   - An outstanding wake-up has been acted on for these messages, so the
+//     confirmation that follows is about an attempt made AFTER it and may
+//     rebuild the backoff. (wake → replay)
+//   - The accelerated attempt each of these messages was owed has been
+//     made — by the replay — so a wake-up that arrives next leaves them
+//     alone. (replay → wake)
+//
+// Both are recorded PER MESSAGE, for the messages the replay actually
+// sent. A replay covers what its topic snapshot holds and what the writer
+// accepts, which can be some of a recipient's unconfirmed messages and not
+// the rest; marking the whole conversation left those others waiting out
+// the tail, and marking none of them sent the ones it did send twice.
+func (s *Service) noteReconnectDispatch(recipient string, sent []protocol.Envelope) {
+	if !s.cfg.HoldDMUntilReachable || len(sent) == 0 {
+		return
+	}
+	s.deliveryMu.Lock()
+	// The peer is recorded here FIRST so the spends below are stamped with
+	// the observation that paid for them. A pass whose reading predates this
+	// send has to be able to tell that its absence, once committed, ends a
+	// visit these messages have already answered.
+	s.noteRecipientHereLocked(recipient)
+	for _, envelope := range sent {
+		entry, ok := s.awaitingDelivered[envelope.ID]
+		if !ok {
+			continue
+		}
+		// The copy has already gone out, so there is nothing to bring
+		// forward: this only spends the visit's accelerated attempt, and
+		// answers a wake-up that came before it.
+		entry.AcceleratedInVisit = s.currentVisitLocked(recipient)
+		entry.AcceleratedAtPresence = s.recipientPassState[recipient].presence
+		entry.WokenSinceLastDispatch = false
+	}
+	s.deliveryMu.Unlock()
+}
+
+// nextDeliverySeqLocked mints the next registration order. Monotone, so a
+// reading taken earlier can always tell which deliveries it saw. Caller
+// MUST hold s.deliveryMu.
+func (s *Service) nextDeliverySeqLocked() uint64 {
+	s.deliverySeq++
+	return s.deliverySeq
+}
+
+// accelerateLocked grants this message the one accelerated attempt its
+// recipient's current visit is worth, and reports whether it did.
+//
+// It is a COMPARE-AND-SET on the visit counter, and that is the whole of
+// the bookkeeping: a message can be accelerated once per visit, by
+// whichever observation of the return gets there first — the pass that
+// measures it, the session event, or a backlog replay that has already
+// sent the message and only records the spend. Repeats within the visit
+// find the stamps equal and do nothing, so a flapping session cannot pull
+// the same message off its backoff again and again; an absence bumps the
+// counter and the next return is granted afresh.
+//
+// at is the earliest moment the attempt may be made; the schedule is only
+// ever pulled EARLIER, never pushed out. Caller MUST hold s.deliveryMu.
+func (s *Service) accelerateLocked(entry *deliveryRetryEntry, recipient string, at time.Time) bool {
+	visit := s.currentVisitLocked(recipient)
+	if entry.AcceleratedInVisit == visit {
+		return false // already spent in this visit
+	}
+	// SPENT even when the schedule needs no change. A message already due,
+	// or already scheduled sooner than this return would ask for, is going
+	// out at least as soon as the return wanted — the return has been
+	// served, and counting it keeps a second observation of the SAME
+	// reconnect from asking again after that send has rebuilt the backoff.
+	entry.AcceleratedInVisit = visit
+	entry.AcceleratedAtPresence = s.recipientPassState[recipient].presence
+	// And the message is now OWED a send that no dispatch has made yet,
+	// which is true whether or not the schedule had to move. The mark is
+	// what stops a confirmation of an earlier dispatch from writing the
+	// long backoff over that near-term attempt: with the visit already
+	// spent, nothing would shorten it a second time, and the return would
+	// be lost after having been counted.
+	entry.WokenSinceLastDispatch = true
+	if !entry.NextAttemptAt.After(at) {
+		return false
+	}
+	entry.NextAttemptAt = at
+	return true
+}
+
+// currentVisitLocked is the recipient's visit number, minted on first use.
+// Visits are 1-based so that the zero value of
+// deliveryRetryEntry.AcceleratedInVisit means "never accelerated" and needs
+// no seeding at registration. Caller MUST hold s.deliveryMu.
+func (s *Service) currentVisitLocked(recipient string) uint64 {
+	record, known := s.recipientPassState[recipient]
+	if known && record.visit > 0 {
+		return record.visit
+	}
+	if s.recipientPassState == nil {
+		s.recipientPassState = make(map[string]recipientPassRecord, 1)
+	}
+	record.visit = 1
+	s.recipientPassState[recipient] = record
+	return record.visit
+}
+
+// applyReachabilityReturnLocked is the wake-up rule, and it is one
+// sentence: a recipient this node could NOT reach on an earlier pass, and
+// can reach now, gets its overdue messages at once instead of the rest of
+// their backoff.
+//
+// The transition is kept per RECIPIENT, not per message, and both halves
+// of it are produced by the same pass: the tick measures, compares against
+// what the previous tick measured, and replaces it. One writer, one
+// reader, one mutex, nothing to keep in sync with anybody else.
+//
+// That scope is the whole lesson of this file's history. Every earlier
+// design tried to know which PATH a given message was riding — an uplink
+// counter, a connection recorded by the sink, the queue that died holding
+// the frame — and each needed a fact that lives in another component and
+// has to be copied there and back. What the person actually reported is
+// simpler than all of it: their peer was away, came back, and the message
+// still sat. That is a fact about the recipient, and this is it.
+//
+// A MULTI-HOP next hop that flaps entirely between two passes is
+// deliberately NOT covered: the recipient measures reachable at both ends
+// of it, so nothing changed as far as this node can tell, and through
+// transit a faster re-send is absorbed by the relays' own dedup (exact TTL
+// 3 min, bloom 5-10 min) — see the package comment. Buying that case cost
+// four rounds of bugs and bought nothing. A DIRECT peer reconnecting in
+// the same window IS covered, by wakeOverdueForReturningPeer, because
+// there the event belongs to this node.
+//
+// Caller MUST hold s.deliveryMu.Lock.
+func (s *Service) applyReachabilityReturnLocked(entry *deliveryRetryEntry, reachable recipientReachability, now time.Time) {
+	canReach, known := reachable.canReach(entry.Envelope.Recipient)
+	if !known || !canReach {
+		return // nobody asked, or there is still no way to reach them
+	}
+	if entry.Seq > reachable.seenUpTo {
+		// Written while this pass was working: the return it is about
+		// happened before this message existed, and a message sent to a
+		// peer that is already back needs no acceleration — its ordinary
+		// first step is measured against a live peer.
+		return
+	}
+	previous, measured := s.recipientPassState[entry.Envelope.Recipient]
+	if !measured || previous.reachable {
+		// No transition. The pass grants only what it can SEE — a
+		// recipient it could not reach and now can — which is why a
+		// message whose recipient never went away is left alone. The
+		// session-event path is the one that grants without a reading,
+		// and the visit counter is what keeps the two from granting
+		// twice for the same return.
+		return
+	}
+	// An entry that is already due is NOT skipped: the tick is about to
+	// send it, which is what this return would have asked for, and
+	// accelerateLocked counts that as the visit's attempt. Skipping left
+	// the visit unspent, so the session event of the same reconnect
+	// shortened the schedule again once that send had rebuilt the backoff
+	// — two accelerated sends for one return.
+	s.accelerateLocked(entry, entry.Envelope.Recipient, earliestRetry(entry, now))
+}
+
 // planDueDeliveries sweeps the awaiting set under s.deliveryMu and returns
 // what this tick may act on: the deliveries to abandon, and AT MOST ONE
 // candidate per recipient.
@@ -1112,7 +2009,7 @@ func (s *Service) retryDueDeliveries(now time.Time) {
 // one leaves when the recipient confirms the current one (storeDeliveryReceipt
 // promotes it) or when deliveryQueueWindow says the confirmation is not
 // coming.
-func (s *Service) planDueDeliveries(now time.Time) ([]abandonedDelivery, []dueCandidate) {
+func (s *Service) planDueDeliveries(now time.Time, reachable recipientReachability) ([]abandonedDelivery, []dueCandidate) {
 	var abandoned []abandonedDelivery
 	queues := make(map[string][]*deliveryRetryEntry)
 
@@ -1120,6 +2017,7 @@ func (s *Service) planDueDeliveries(now time.Time) ([]abandonedDelivery, []dueCa
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "planDueDeliveries").Str("phase", "lock_held").Msg("delivery_mu_writer")
 	for id, entry := range s.awaitingDelivered {
+		s.applyReachabilityReturnLocked(entry, reachable, now)
 		if terminal, ok := s.classifyAbandonedLocked(id, entry, now); ok {
 			delete(s.awaitingDelivered, id)
 			abandoned = append(abandoned, terminal)
@@ -1128,6 +2026,11 @@ func (s *Service) planDueDeliveries(now time.Time) ([]abandonedDelivery, []dueCa
 		queues[entry.Envelope.Recipient] = append(queues[entry.Envelope.Recipient], entry)
 	}
 	candidates := s.selectQueueHeadsLocked(queues, now)
+	// The reading this pass took is NOT stored here. It is committed at the
+	// end of the pass (commitRecipientReading), because it is still being
+	// completed — measureMissing tops it up for deliveries registered after
+	// the snapshot — and because a session event may write to the same
+	// state while this pass runs. Storing it here overwrote both.
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "planDueDeliveries").Str("phase", "lock_released").Msg("delivery_mu_writer")
 	return abandoned, candidates
@@ -1215,7 +2118,7 @@ func (s *Service) pickQueueHeadLocked(queue []*deliveryRetryEntry, now time.Time
 			// moment ago" for as long as the clock takes to catch up, and
 			// the whole conversation waits behind it.
 			entry.LastEmittedAt = emissionStampNotInTheFuture(entry.LastEmittedAt, now)
-			if now.Sub(entry.LastEmittedAt) < deliveryQueueWindow {
+			if !receiptOverdue(entry, now) {
 				return dueCandidate{}, false
 			}
 		}
@@ -1235,7 +2138,7 @@ func (s *Service) pickQueueHeadLocked(queue []*deliveryRetryEntry, now time.Time
 			// true for an attempt no writer took.
 			return dueCandidate{}, false
 		}
-		return dueCandidate{id, entry.Envelope}, true
+		return dueCandidate{id: id, env: entry.Envelope, claimedAt: entry.ClaimedAt}, true
 	}
 	return dueCandidate{}, false
 }
@@ -1279,18 +2182,43 @@ func (s *Service) planDueSeenAcks(now time.Time) []protocol.DeliveryReceipt {
 //
 // Nothing is charged here. The attempt is spent by emitDueDelivery, after
 // the wire has actually taken the frame.
-func (s *Service) armDueDeliveries(candidates []dueCandidate, reachable map[protocol.MessageID]bool, now time.Time) []dueDispatch {
+func (s *Service) armDueDeliveries(candidates []dueCandidate, reachable recipientReachability, now time.Time) []dueDispatch {
 	if len(candidates) == 0 {
 		return nil
 	}
 	var due []dueDispatch
 	s.deliveryMu.Lock()
+	// Inside the section, for the reason claimEmissionLocked gives: the wait
+	// for this mutex is time too, and a claim read before it can be older
+	// than the window it is about to be measured against.
+	claimRead := s.deliveryNow()
 	for _, c := range candidates {
 		entry, ok := s.awaitingDelivered[c.id]
 		if !ok {
 			continue // delivered/removed in the unlocked gap
 		}
-		if reachable[c.id] {
+		if emissionTakenElsewhere(entry, c.claimedAt, claimRead) {
+			// Another sender claimed this message for the wire between the
+			// plan and here. The reconnect backlog replay is the one that does
+			// this: it sends outside the engine, down the connection the
+			// peer has only now opened, and confirms as it goes. The plan
+			// refuses a message emitted this recently, but it cannot refuse
+			// a send that had not happened when it looked. Arming anyway
+			// overwrote the confirmation's hold and schedule and put a
+			// second copy of that very message on the wire — one reconnect,
+			// two copies. The entry is left exactly as the confirmation
+			// wrote it; the next tick decides afresh.
+			//
+			// Asked as an ORDER and not against the clock: the confirming
+			// send happens AFTER this tick's `now`, so its stamp is in this
+			// tick's future, and a stamp this node cannot have made yet
+			// reads as long ago by design (emissionStampNotInTheFuture) —
+			// the queue-window test would pass and send the duplicate.
+			// The claim stamp answers for a replay still writing its batch
+			// as well as for one that has finished — see emissionInFlight.
+			continue
+		}
+		if canSend, _ := reachable.canReach(c.env.Recipient); canSend {
 			s.resetBackoffOnReturn(entry, c.id)
 			// Attempted, not confirmed. The hold is only cleared by a sink
 			// reporting that it took the frame (confirmEnvelopeOnWire), so
@@ -1299,9 +2227,21 @@ func (s *Service) armDueDeliveries(candidates []dueCandidate, reachable map[prot
 			// poll interval meanwhile; a confirmation overwrites it with
 			// the real backoff, and a freeze restores what it displaced.
 			parkedAt := entry.NextAttemptAt
+			wokenBefore := entry.WokenSinceLastDispatch
 			entry.Hold = holdUnconfirmed
 			entry.NextAttemptAt = now.Add(deliveryHoldPollInterval)
-			due = append(due, dueDispatch{env: entry.Envelope, parkedAt: parkedAt})
+			// This dispatch answers the wake-up that asked for it, so the
+			// next confirmation is about an attempt made AFTER it and may
+			// rebuild the backoff normally. Same statement as
+			// noteDeliveryDispatched, written inline because this pass
+			// already holds the mutex.
+			//
+			// It is a claim about a send that has not happened yet: the
+			// dispatch runs after this lock is released and can still be
+			// refused. The displaced value travels with the dispatch so
+			// the cancel paths can take the claim back.
+			entry.WokenSinceLastDispatch = false
+			due = append(due, dueDispatch{env: entry.Envelope, parkedAt: parkedAt, wokenBefore: wokenBefore, claimedAt: entry.ClaimedAt})
 			continue
 		}
 		entry.Hold = holdUnreachable
@@ -1373,21 +2313,37 @@ func (s *Service) resetBackoffOnReturn(entry *deliveryRetryEntry, id protocol.Me
 func (s *Service) emitDueDelivery(due dueDispatch, now time.Time) {
 	envelope := due.env
 	log.Info().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).Msg("delivery_retry_resend")
-	if !s.noteOwnEnvelopeEmitted(envelope.Sender, envelope.ID, now) {
+	cleared, superseded, wroteClaim := s.claimEnvelopeForDispatch(envelope, due.claimedAt, now)
+	if superseded {
+		// Another sender put this message on the wire while this dispatch
+		// was in flight — the reconnect backlog replay, sending down the
+		// connection the peer has only now opened. Its confirmation owns
+		// the entry: a rebuilt backoff, a cleared hold, the wake-up
+		// answered. Nothing is written back, or this pass would park a
+		// message that has just gone out; the copy it was going to send is
+		// simply not sent.
+		log.Debug().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).
+			Msg("delivery_retry_superseded_before_wire")
+		return
+	}
+	if !cleared {
 		// Frozen by a deletion, withdrawn, or its durable claim could not
 		// be withdrawn. Nothing reached the wire, so nothing is charged —
 		// and this is not the recipient's doing, so it is not a statement
 		// about their reachability. A freeze also gives the schedule back:
 		// this node paused itself, and a thawed message must go out when
 		// it was due rather than pay for the pause.
-		s.holdDeliveryRetry(envelope.ID, due.parkedAt, holdUnconfirmed)
+		s.holdDeliveryRetry(envelope.ID, due.parkedAt, holdUnconfirmed, due.wokenBefore, emissionClaimRollback{})
 		return
 	}
 	if !s.dispatchEnvelopeRetry(envelope, now) {
 		// The route vanished between the reachability check and the wire:
 		// that IS a statement about the recipient, so it holds as
 		// unreachable and a returning peer resets the backoff.
-		s.holdDeliveryRetry(envelope.ID, now, holdUnreachable)
+		// The claim this dispatch took goes back with the schedule: no
+		// frame was written, so nothing is in flight.
+		s.holdDeliveryRetry(envelope.ID, now, holdUnreachable, due.wokenBefore,
+			emissionClaimRollback{wrote: wroteClaim, restore: due.claimedAt})
 		return
 	}
 	// Nothing is charged, cleared or announced here. The sinks answer on
@@ -1445,7 +2401,18 @@ func (s *Service) confirmEnvelopeInMemory(envelope protocol.Envelope, dispatched
 	entry, awaiting := s.awaitingDelivered[envelope.ID]
 	if awaiting && entry.LastEmittedAt.Before(dispatchedAt) {
 		entry.Attempts++
-		entry.NextAttemptAt = dispatchedAt.Add(deliveryRetryBackoffAfter(entry.Attempts))
+		rebuilt := dispatchedAt.Add(deliveryRetryBackoffAfter(entry.Attempts))
+		// A confirmation rebuilds the backoff from the attempt it is
+		// about — unless an OBSERVATION shortened the schedule after that
+		// attempt started. Then this answer is about the older attempt and
+		// says nothing about the recipient having come back, so it must
+		// not push the wake-up's schedule out again: the acceleration is
+		// already spent and the recipient already reads as reachable, so
+		// nothing would shorten it a second time.
+		staleForTheWakeUp := entry.WokenSinceLastDispatch && entry.NextAttemptAt.Before(rebuilt)
+		if !staleForTheWakeUp {
+			entry.NextAttemptAt = rebuilt
+		}
 		entry.Hold = holdNone
 		// A frame NetCore has taken is a frame the peer may hold, so the
 		// conservative deletion flag is true from here whatever path got
@@ -1896,10 +2863,30 @@ func (s *Service) runRetryDispatchBarrier() {
 // must go out when it was due rather than pay a poll interval for a
 // decision its recipient had no part in. The freeze caller passes the
 // schedule the pass displaced, so the restore is exact.
-func (s *Service) holdDeliveryRetry(id protocol.MessageID, from time.Time, reason deliveryHoldReason) {
+//
+// The emission claim is given back the same way, and for the same reason:
+// a claim is the statement "a frame for this message is going out", and no
+// frame did. Left standing it would tell the next pass that somebody is
+// sending this right now (emissionInFlight) and stand that pass down —
+// for up to a queue window, on a message this node has just failed to send.
+//
+// wokenBefore restores the other thing the arm displaced. The arm cleared
+// the wake-up mark on the promise of a send that then did not happen, so
+// without this a confirmation of an OLDER attempt — one dispatched before
+// the recipient came back — would land afterwards and rebuild the full
+// backoff over the schedule the return had shortened, with the visit
+// already spent and no second session event to shorten it again. Restoring
+// only what was displaced, never a bare true, keeps an entry that nobody
+// woke unmarked; and because the mark is only ever raised here, a wake-up
+// that arrived in the unlocked gap survives too.
+func (s *Service) holdDeliveryRetry(id protocol.MessageID, from time.Time, reason deliveryHoldReason, wokenBefore bool, claim emissionClaimRollback) {
 	s.deliveryMu.Lock()
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting {
 		entry.Hold = reason
+		claim.undo(entry)
+		if wokenBefore {
+			entry.WokenSinceLastDispatch = true
+		}
 		if s.deliveryFrozenLocked(id) {
 			entry.NextAttemptAt = from
 		} else {
@@ -2037,6 +3024,24 @@ func (s *Service) noteRecipientWentOffline(identity domain.PeerIdentity) {
 	}
 }
 
+// receiptOverdue reports whether an entry has been waiting for its receipt
+// long enough that the last emission has stopped being evidence of
+// anything. An entry no sink ever confirmed carries no stamp at all and is
+// overdue by definition: nothing is in flight.
+//
+// The threshold is the queue window and not something larger, because the
+// question here is only "could this still be in flight". A recipient who is
+// there answers in milliseconds; past the window the queue itself has
+// already given the slot away. Nothing worse than one extra emission can
+// come of being wrong, and the queue discipline caps that at one message
+// per recipient per tick however often a flapping transport reconnects.
+func receiptOverdue(entry *deliveryRetryEntry, now time.Time) bool {
+	if entry.LastEmittedAt.IsZero() {
+		return true
+	}
+	return now.Sub(emissionStampNotInTheFuture(entry.LastEmittedAt, now)) >= deliveryQueueWindow
+}
+
 // kickDeliveryRetriesForReachable re-arms held sender-owned delivery retries
 // whose recipient just became reachable — a route appeared (announce drain) or
 // the peer connected (session-established drain). Held messages (dispatchEnvelopeRetry
@@ -2062,6 +3067,7 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 		env protocol.Envelope
 	}
 	var held []heldEnvelope
+	kickAt := time.Now().UTC()
 	s.deliveryMu.Lock()
 	// Stamped BEFORE the scan and regardless of what it finds, because the
 	// case this exists for is the one where it finds NOTHING: a tick that
@@ -2070,24 +3076,12 @@ func (s *Service) kickDeliveryRetriesForReachable(identities map[domain.PeerIden
 	// not held yet, so they are invisible here. armDueDeliveries reads the
 	// stamp and keeps such an entry due instead of parking it for a poll
 	// interval. See docs/locking.md.
-	s.lastReachabilityKickAt = time.Now().UTC()
+	s.lastReachabilityKickAt = kickAt
 	for id, entry := range s.awaitingDelivered {
-		// Only entries whose last send decision was "they are not there" are
-		// eligible. Both other states have already been handed to the sinks
-		// on the current reachability, and pulling them forward would let a
-		// routing event overrule the pacing rather than the reachability:
-		//
-		//   - holdNone is confirmed and waiting for a receipt on its backoff;
-		//   - holdUnconfirmed was dispatched and nothing took the frame, so
-		//     it is parked on the poll interval — and a route that keeps
-		//     being RE-CONFIRMED (routing.RouteUnchanged, which announce
-		//     ingest and route-query answers both feed into this kick) would
-		//     otherwise reset that park on every announcement. On a route
-		//     that resolves but is dead in practice that is a re-send, and a
-		//     journal write, at announcement frequency.
-		//
-		// This is the state the kick is named after: it re-arms a message
-		// whose recipient was ABSENT, the moment they are not.
+		// Only entries that never left. Everything already dispatched is
+		// woken by the measurement in planDueDeliveries instead — it asks
+		// the same question of the same authority, without this call site
+		// having to know what changed. See applyPathReturnLocked.
 		if entry.Hold != holdUnreachable {
 			continue
 		}
@@ -2284,6 +3278,14 @@ func (s *Service) sendSeenAck(seen protocol.DeliveryReceipt) {
 // dispatchedAt identifies this attempt to the confirmations, which arrive
 // on their own schedules.
 func (s *Service) dispatchEnvelopeRetry(envelope protocol.Envelope, dispatchedAt time.Time) (attempted bool) {
+	// TODO(transit-age-restamp-removal): the legacy-ceiling date, decided
+	// ONCE for this dispatch so every copy it produces — the push, the
+	// directed relay, the gossip fan-out — carries the same one. See
+	// legacy_transit_restamp.go for why per-copy decisions kept failing.
+	// The caller's envelope is untouched: awaitingDelivered and the chatlog
+	// row keep the real date.
+	envelope = legacyTransitRestamp(envelope, dispatchedAt)
+
 	decision := s.router.Route(envelope)
 
 	// Sender-owned delivery emits ONLY when the recipient is reachable: a
@@ -2384,5 +3386,8 @@ func (s *Service) clearedToWrite(ref deliveryDispatchRef, now time.Time) bool {
 	if ref.Envelope.ID == "" {
 		return true
 	}
+	// A writer finishing a send that already passed the two-senders rule at
+	// its decision point, not a new decision: it asks the freeze and the
+	// durable claim, and nothing about other senders.
 	return s.noteOwnEnvelopeEmitted(ref.Envelope.Sender, ref.Envelope.ID, now)
 }

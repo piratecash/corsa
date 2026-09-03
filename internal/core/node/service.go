@@ -340,6 +340,26 @@ type Service struct {
 	lastOutboundTerminalSweep time.Time
 	relayRetry                map[string]relayAttempt
 	awaitingDelivered         map[protocol.MessageID]*deliveryRetryEntry
+	// deliverySeq mints deliveryRetryEntry.Seq: the order deliveries were
+	// registered in, so a reading taken at one moment can tell the
+	// messages it measured from those written while it was working.
+	// Guarded by deliveryMu like the set it numbers.
+	deliverySeq uint64
+	// recipientPassState is what the previous retry tick MEASURED for each
+	// recipient with a delivery awaiting its receipt, plus whether that
+	// recipient has already been given an accelerated attempt since the
+	// last time this node could not reach them.
+	//
+	// It exists because "they were away and are back" is the whole of the
+	// reported bug, and it is a fact about the RECIPIENT. Every attempt to
+	// know something finer — which uplink, which connection, which frame a
+	// dying queue still held — needed a fact owned by another component,
+	// copied into the delivery entry by whichever sink got there first,
+	// and every one of those copies went stale in its own way.
+	//
+	// Written and read by the retry pass (planDueDeliveries) and by
+	// wakeOverdueForReturningPeer, both under deliveryMu.
+	recipientPassState map[string]recipientPassRecord
 	// lastReachabilityKickAt is when a recipient was last reported to have
 	// become reachable (kickDeliveryRetriesForReachable). Delivery domain,
 	// guarded by deliveryMu.
@@ -417,6 +437,7 @@ type Service struct {
 	// Not a domain mutex and not in the canonical order — it guards no
 	// Service state. See emission_lane.go and docs/locking.md.
 	emissionLane *emissionLane
+
 	// repairSlot admits ONE local-record repair pass at a time. The pass
 	// blocks on the journal, and the tick offers it every two seconds, so
 	// a contended database would otherwise accumulate a goroutine per
@@ -709,6 +730,7 @@ type Service struct {
 	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
 	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
 	presenceClock                  func() time.Time                             // source for identity presence transition timestamps; immutable after construction, overridden only by tests
+	deliveryClock                  func() time.Time                             // source for the instant an emission claim is taken and read at; immutable after construction, overridden only by tests
 	peerQuarantine                 map[domain.PeerIdentity]routeQuarantineEntry // per-peer route quarantine: peer in quarantine has inbound routing announcements dropped and is skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
 	peerDisconnectHistory          map[domain.PeerIdentity][]time.Time          // sliding window of disconnect timestamps per peer, drives quarantine trigger detection. Guarded by peerMu.
 	peerAnnounceHistory            map[domain.PeerIdentity][]time.Time          // sliding window of inbound DELTA announce-frame arrival timestamps per peer (routes_update / v3 kind="delta" only; baselines and request_resync excluded), drives chatty_routes quarantine trigger. Guarded by peerMu. See recordInboundAnnounceAndMaybeArm.
@@ -1703,6 +1725,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		identityRelaySessions:    make(map[domain.PeerIdentity]int),
 		pendingWithdrawals:       make(map[domain.PeerIdentity]*pendingWithdrawal),
 		presenceClock:            time.Now,
+		deliveryClock:            time.Now,
 		peerQuarantine:           make(map[domain.PeerIdentity]routeQuarantineEntry),
 		peerDisconnectHistory:    make(map[domain.PeerIdentity][]time.Time),
 		peerAnnounceHistory:      make(map[domain.PeerIdentity][]time.Time),
@@ -3314,6 +3337,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		if kickPeer := s.provenInboundPeerIdentity(connID); !kickPeer.IsZero() {
 			s.goBackground(func() {
 				s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{kickPeer: {}})
+				s.wakeOverdueForReturningPeer(kickPeer, time.Now().UTC())
 			})
 		}
 		// The connect-time route table, ordered behind auth_ok for the same
@@ -6224,18 +6248,38 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		return false, 0, ""
 	}
 
-	// Absolute age ceiling on TRANSIT DMs (envelope_retention.go). A transit
-	// envelope older than the transit MaxAge — anchored on the IMMUTABLE
-	// sender CreatedAt, so a re-injection that would reset the local StoredAt
-	// cannot revive it — is neither stored nor propagated: relays are
-	// forwarding-only, not a mailbox. Returning the duplicate-style outcome
-	// (false, 0, "") acks the previous hop so its retries stop, exactly like
-	// dropsInboundDM. Only transit is refused here; local/broadcast envelopes
-	// are retained for local history/subscribers and aged out by cleanup.
+	// Frame-shape refusals for TRANSIT DMs (envelope_retention.go). The age
+	// CEILING this gate used to apply is gone — a relay does not refuse a DM
+	// for being old — and what remains are two statements about an anomalous
+	// frame: no created_at at all, or one dated further into the future than
+	// clock skew allows. The relay path skips timestamp validation and the
+	// outer field is unsigned, so neither can be reasoned about. Returning
+	// the duplicate-style outcome (false, 0, "") acks the previous hop so its
+	// retries stop, exactly like dropsInboundDM.
 	if s.transitAgedOnAdmission(msg, time.Now().UTC()) {
 		log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Str("sender", msg.Sender).Str("recipient", msg.Recipient).Time("created_at", msg.CreatedAt).Msg("transit_dm_dropped_age_ceiling")
 		return false, 0, ""
 	}
+
+	// TODO(transit-age-restamp-removal): the legacy-ceiling date, normalised
+	// ONCE at ADMISSION — the single door every foreign message comes through
+	// (both push_message handlers, the relay fallback, the inbox fetch). From
+	// here on this node handles one envelope with one date, and every onward
+	// emission — gossip, directed relay, the relay-retry contour, the stored
+	// copy in s.topics — carries it without deciding anything.
+	//
+	// Putting it at the door is the fourth and last shape of this fix, and the
+	// only one that holds: the earlier ones sat on the frame builders, on the
+	// transport exits, and then on "the start of the outgoing path" — but a
+	// message has several ways IN and each one grew its own outgoing path.
+	// Doors are enumerable and few; exits are not. See
+	// legacy_transit_restamp.go.
+	//
+	// Only TRANSIT is normalised: a message addressed to US — or authored by
+	// us — is stored and shown, and its date is the author's to state. The
+	// TTL moves with the date, so the absolute DEADLINE the author set is
+	// preserved rather than extended at every hop.
+	msg.CreatedAt, msg.TTLSeconds = s.legacyTransitAdmissionStamp(msg, time.Now().UTC())
 
 	if validateTimestamp {
 		if err := s.validateMessageTiming(msg); err != nil {
@@ -6696,15 +6740,14 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			// fanout mechanism for chatlog updates that we are
 			// deliberately bypassing.
 			//
-			// Execution is intentionally NOT age-gated. The retention
-			// ceiling (envelope_retention.go) is PROPAGATION-only — it
-			// bounds re-gossip/forwarding of zombies, mirroring bitchat /
-			// SimpleX where TTL bounds the queue, not delivered-command
-			// execution. The command here is signature-verified
-			// (VerifyEnvelope above), so honouring it regardless of the
-			// (unsigned, tamperable) outer CreatedAt is required for correct
-			// offline delivery: a recipient who was offline longer than the
-			// ceiling must still apply an authentic delete/edit on reconnect.
+			// Execution is intentionally NOT age-gated, and there is no
+			// longer an age ceiling on the DM classes to gate it with — the
+			// retention layer bounds BROADCAST only (envelope_retention.go).
+			// The command here is signature-verified (VerifyEnvelope above),
+			// so honouring it regardless of the (unsigned, tamperable) outer
+			// CreatedAt is required for correct offline delivery: a
+			// recipient who was away for weeks must still apply an authentic
+			// delete/edit on reconnect.
 			if msg.Recipient == s.identity.Address {
 				event.Type = protocol.LocalChangeNewControlMessage
 				s.eventBus.Publish(ebus.TopicMessageControl, event)
@@ -6752,19 +6795,36 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		s.deliveryMu.Unlock()
 	}
 
+	// TODO(transit-age-restamp-removal): the legacy-ceiling date for the
+	// FIRST send of a message this node authored. The retry path normalises
+	// its own copy, but the first attempt goes out from here — and a message
+	// can be old the moment it is sent (an import, a restored history, a
+	// clock that was wrong). Leaving that first copy with the original date
+	// meant a pre-v30 relay dropped it silently and charged the route a
+	// failure, and the message only got a usable date half a minute later.
+	//
+	// A separate value, not a rewrite: `envelope` is what the retry entry,
+	// the relay-retry contour and the chatlog row hold, and their date is
+	// the one the user wrote. See legacy_transit_restamp.go.
+	wireEnvelope := envelope
+	if ownOutgoingDM {
+		wireEnvelope = legacyTransitRestamp(envelope, time.Now().UTC())
+	}
+
 	if len(decision.PushSubscribers) > 0 {
 		// Tracked: writePushFrame itself is network-only, but the
 		// spawned fan-out must complete before TempDir cleanup so
 		// subscriber state is fully torn down before tests assert
 		// on side effects.
-		s.goBackground(func() { s.pushOwnEnvelopeToSubscribers(envelope, decision.PushSubscribers, dispatchedAt) })
+		s.goBackground(func() { s.pushOwnEnvelopeToSubscribers(wireEnvelope, decision.PushSubscribers, dispatchedAt) })
 	}
 
-	// Re-propagation age gate (envelope_retention.go): a broadcast or control
-	// DM past its class MaxAge must not be gossiped even once. Transit is
-	// already refused at admission; control DMs never enter s.topics so
-	// cleanup cannot age them — this emit gate is their only bound. Anchored
-	// on the immutable CreatedAt; MaxAge=0 classes (local) are never gated.
+	// Re-propagation gate (envelope_retention.go). For BROADCAST this is an
+	// age ceiling — the only class that still has one. For the DM classes it
+	// no longer gates on age at all: what it still refuses is a frame that
+	// cannot be reasoned about, one with no created_at or a date beyond
+	// clock skew into the future. MaxAge=0 classes (local, transit, control)
+	// are never aged out here.
 	propagationAged := s.envelopePropagationAged(msg.Topic, msg.Sender, msg.Recipient, msg.CreatedAt, time.Now().UTC())
 	if s.shouldRouteStoredMessage(msg) && !originEcho && !originUnreachableHold && !propagationAged {
 		// Forward-once: do NOT register a relay-retry entry for transit — the
@@ -6795,7 +6855,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		if ownOutgoingDM {
 			gossipDelivery = deliveryDispatchRef{Envelope: envelope, DispatchedAt: dispatchedAt}
 		}
-		s.executeGossipTargets(envelope, gossipTargets, gossipDelivery)
+		s.executeGossipTargets(wireEnvelope, gossipTargets, gossipDelivery)
 
 		// Table-directed relay (Phase 1.2): when the routing table knows a
 		// next-hop for this recipient, send relay_message directly to that
@@ -6805,13 +6865,13 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		if (msg.Topic == "dm" || msg.Topic == protocol.TopicControlDM) && msg.Recipient != "" && msg.Recipient != "*" {
 			relayed := relaySendRefused
 			if decision.RelayNextHop != nil {
-				relayed = s.sendTableDirectedRelay(s.runCtx, envelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops, dispatchedAt)
+				relayed = s.sendTableDirectedRelay(s.runCtx, wireEnvelope, *decision.RelayNextHop, decision.RelayNextHopAddress, decision.RelayRouteOrigin, decision.RelayNextHopHops, dispatchedAt)
 			} else {
 				// No table route — fall back to blind gossip relay to
 				// capable full nodes (pre-Phase 1.2 behavior). Same
 				// hop/ingress gates as the gossip fan-out above: this
 				// path is blind propagation too.
-				relayed = s.tryRelayToCapableFullNodes(envelope, gossipTargets, dispatchedAt)
+				relayed = s.tryRelayToCapableFullNodes(wireEnvelope, gossipTargets, dispatchedAt)
 			}
 			switch {
 			case relayed.leftTheNode():
@@ -8061,6 +8121,10 @@ func (s *Service) pushToSubscriberSnapshot(msg protocol.Envelope, subs []*subscr
 	// triple to verify a first-contact DM (see attachKnownSenderKeys).
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
+	// A writer, not a decider: this is the push half of a dispatch that
+	// already passed the two-senders rule (pushOwnEnvelopeToSubscribers is
+	// its only caller), so it asks the freeze and the durable claim and
+	// nothing about other senders. See emissionSender.
 	if len(subs) > 0 && !s.noteOwnEnvelopeEmitted(msg.Sender, msg.ID, time.Now().UTC()) {
 		// Withdrawn while we were building the frame, or the durable
 		// "never emitted" claim could not be withdrawn — either way this
@@ -8152,7 +8216,11 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 	// whose durable never-emitted claim could not be withdrawn: those are
 	// not ours to send yet either.
 	replayedAt := time.Now().UTC()
-	emission := s.noteOwnEnvelopesEmitted(own, replayedAt)
+	// A DECIDER, not a writer: this replay is one of the three places a send
+	// begins, so it stands down for any message another sender already has
+	// in flight — the retry tick, started by the same reconnect, most of
+	// all. Those ids come back withheld and are skipped below.
+	emission := s.noteOwnEnvelopesEmitted(own, replayedAt, &emissionSender{})
 	// Announced AFTER the frames are written, not here: telling the sender
 	// their queued message is on its way and then failing to write it
 	// would leave the badge ahead of the wire. publishMessagesEmitted
@@ -8203,6 +8271,12 @@ func (s *Service) pushBacklogToSubscriber(sub *subscriber) {
 	// whole conversation, and a goroutine plus an UPDATE per message
 	// would queue a thousand of each on the emission lane, where they
 	// would be turned away rather than served.
+	// This replay IS the reconnect's dispatch, made on the connection the
+	// peer has only now opened: it answers a wake-up that came before it,
+	// and it spends the accelerated attempt so a wake-up that comes after
+	// it does not send the same message a second time. Recorded BEFORE the
+	// confirmations, which read what it writes. See noteReconnectDispatch.
+	s.noteReconnectDispatch(sub.recipient, written)
 	for _, envelope := range written {
 		s.confirmEnvelopeInMemory(envelope, replayedAt)
 	}
@@ -9510,14 +9584,14 @@ func (s *Service) cleanupExpiredMessagesForce() {
 					continue
 				}
 			}
-			// Absolute age ceiling (envelope_retention.go): drop any
-			// envelope past its class MaxAge, anchored on the IMMUTABLE
-			// sender CreatedAt. This is what re-injection cannot reset —
-			// unlike the StoredAt-anchored transit window below — so a
-			// re-circulated months-old transit DM finally dies, and
-			// broadcast/global topics (which had NO age bound at all)
-			// are bounded too. Local classes carry MaxAge=0 (lifetime
-			// owned by chatlog / the sender engine) and are unaffected.
+			// Class age ceiling (envelope_retention.go), anchored on the
+			// IMMUTABLE sender CreatedAt so a re-injection cannot reset
+			// it — unlike the StoredAt-anchored transit window below.
+			// Since protocol v30 only BROADCAST has such a ceiling: the
+			// transit one was removed, so an old transit DM is NOT
+			// dropped here and is bounded by the forwarding window
+			// instead. Local classes carry MaxAge=0 (lifetime owned by
+			// chatlog / the sender engine) and are unaffected.
 			pol := s.envelopeRetentionPolicy(topic, message.Sender, message.Recipient)
 			if envelopeAgeExceeded(message.CreatedAt, now, pol.MaxAge, drift) {
 				expired = append(expired, expiredEntry{topic, string(message.ID)})

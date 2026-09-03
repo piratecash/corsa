@@ -713,14 +713,13 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		return ""
 	}
 
-	// Age ceiling on the FAST path (envelope_retention.go): the
-	// direct/table/gossip forwards below run BEFORE storeIncomingMessage, so a
-	// frame with a live next hop would otherwise bypass the admission ceiling
-	// — exactly the aged-transit-with-a-route case the refactor targets (and
-	// the control-DM backstop, whose only other bound is the emit gate that a
-	// live next hop also skips). Drop it here; relays are forwarding-only, not
-	// a mailbox. No hop-ack (same as the max-hops drop): the previous hop's own
-	// ceiling reaps its copy.
+	// Frame-shape refusals on the FAST path (envelope_retention.go): the
+	// direct/table/gossip forwards below run BEFORE storeIncomingMessage, so
+	// a frame with a live next hop would otherwise bypass the admission
+	// checks entirely. The AGE ceiling this gate used to apply is gone — a
+	// relay does not refuse a DM for being old — and what is left refuses a
+	// transit frame with no created_at, or one dated beyond clock skew into
+	// the future. No hop-ack (same as the max-hops drop).
 	if s.relayFrameAged(frame, originSender, recipient) {
 		s.relayStates.release(messageID)
 		log.Debug().
@@ -745,16 +744,24 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// cap — and have every hop amplify them across the mesh; oversized
 	// fields can never validate on the recipient anyway, so they are
 	// dropped here (the recipient falls back to the legacy sync path).
+	forwardCreatedAt, forwardTTL := legacyTransitWireStamp(frame.Topic, recipient, frame.CreatedAt, frame.TTLSeconds, time.Now().UTC())
 	forwardFrame := protocol.Frame{
-		Type:        "relay_message",
-		ID:          messageID,
-		Address:     originSender,
-		Recipient:   recipient,
-		Topic:       frame.Topic,
-		Body:        frame.Body,
-		Flag:        frame.Flag,
-		CreatedAt:   frame.CreatedAt,
-		TTLSeconds:  frame.TTLSeconds,
+		Type:      "relay_message",
+		ID:        messageID,
+		Address:   originSender,
+		Recipient: recipient,
+		Topic:     frame.Topic,
+		Body:      frame.Body,
+		Flag:      frame.Flag,
+		// TODO(transit-age-restamp-removal): forwarding somebody else's old
+		// message needs the same treatment as sending our own — a pre-v30
+		// node further along the route drops it otherwise, silently. Decided
+		// HERE, once, so every onward copy (direct peer, table route, gossip,
+		// the stashed failover line) carries the same date. The TTL is
+		// re-derived with it so the author's deadline does not move. See
+		// legacy_transit_restamp.go.
+		CreatedAt:   forwardCreatedAt,
+		TTLSeconds:  forwardTTL,
 		HopCount:    newHopCount,
 		MaxHops:     maxHops,
 		PreviousHop: string(s.identity.Address),
@@ -1925,14 +1932,18 @@ func relayMessageKey(id protocol.MessageID) string {
 	return "msg|" + string(id)
 }
 
-// relayFrameAged reports whether an incoming relay_message is past its class
-// age ceiling. handleRelayMessage forwards on the FAST path (direct / table /
-// gossip) BEFORE any call into storeIncomingMessage, so the admission-time
-// ceiling there is bypassed for any frame that has a live next hop — this gate
-// re-applies it. It parses the wire CreatedAt (an unparseable value is treated
-// as zero) and defers to the shared envelopePropagationAged gate, so transit
-// AND the control-DM backstop are covered with identical semantics to the
-// store-path emit.
+// relayFrameAged reports whether an incoming relay_message must not be
+// forwarded on account of its timestamp. For the DM classes that is no
+// longer about AGE — the ceiling is gone — but about the frame being
+// unusable: no created_at at all, or one dated beyond clock skew into the
+// future. Broadcast, which keeps a real ceiling, is still age-checked here.
+//
+// handleRelayMessage forwards on the FAST path (direct / table / gossip)
+// BEFORE any call into storeIncomingMessage, so the admission checks are
+// bypassed for any frame with a live next hop — this gate re-applies them.
+// It parses the wire CreatedAt (an unparseable value is treated as zero) and
+// defers to the shared envelopePropagationAged gate, so the semantics match
+// the store-path emit exactly.
 func (s *Service) relayFrameAged(frame protocol.Frame, sender, recipient string) bool {
 	created, err := time.Parse(time.RFC3339, strings.TrimSpace(frame.CreatedAt))
 	if err != nil {

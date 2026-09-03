@@ -393,6 +393,15 @@ func TestUnconfirmedHeadIsNotOvertaken(t *testing.T) {
 	svc.deliveryMu.Unlock()
 
 	stream := newPushMessageStream(t, attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7422)))
+	// Attaching the observer changed the mesh, which is a reason to re-try
+	// overdue entries. Let the tick see that, then restate the schedule this
+	// test is about: the subject here is the QUEUE ORDER, not the wake-up.
+	svc.retryDueDeliveries(start)
+	svc.deliveryMu.Lock()
+	svc.awaitingDelivered["unconfirmed-head"].NextAttemptAt = start.Add(2 * time.Minute)
+	svc.awaitingDelivered["younger-behind-it"].NextAttemptAt = start
+	svc.deliveryMu.Unlock()
+
 	svc.retryDueDeliveries(start.Add(time.Minute))
 	stream.expectQuiet(t, 150*time.Millisecond)
 
@@ -1412,6 +1421,15 @@ func TestUnsentMessageIsNotOvertaken(t *testing.T) {
 	svc.deliveryMu.Unlock()
 
 	stream := newPushMessageStream(t, attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7415)))
+	// Attaching the observer changed the mesh, which is a reason to re-try
+	// overdue entries. Let the tick see that, then restate the skew this
+	// test is about — its subject is the queue order, not the wake-up.
+	svc.retryDueDeliveries(start)
+	svc.deliveryMu.Lock()
+	svc.awaitingDelivered["older-unsent"].NextAttemptAt = start.Add(2 * time.Minute)
+	svc.awaitingDelivered["newer-due-first"].NextAttemptAt = start
+	svc.deliveryMu.Unlock()
+
 	svc.retryDueDeliveries(start.Add(time.Minute))
 	stream.expectQuiet(t, 150*time.Millisecond)
 
@@ -1624,7 +1642,10 @@ func (r routeThenChange) Route(msg protocol.Envelope) RoutingDecision {
 }
 
 // TestKickDoesNotRearmAnEntryDispatchedWhileItLookedUpTheRoute is the
-// window version of TestRouteReconfirmationDoesNotOverrulePacing.
+// window version of TestRouteReconfirmationDoesNotOverrulePacing, and it is
+// about a ROUTE event for the same reason that one is: a reconnect
+// deliberately DOES wake a dispatched-but-unconfirmed entry, so the window
+// only matters for the cause whose selection is narrow.
 //
 // The kick decides who is eligible under the lock, then RELEASES it to ask
 // the router — Route reads routing and peer state under its own locks, so

@@ -119,19 +119,15 @@ type Node struct {
 	HoldDMUntilReachable bool
 
 	// EnvelopeRetentionEnabled turns on the unified message-lifetime layer
-	// (internal/core/node/envelope_retention.go): an absolute age ceiling on
-	// transit/broadcast envelopes anchored on the immutable sender CreatedAt.
-	// ENABLED by default — this is the cure for the transit gossip storm
-	// (months-old DMs re-circulating forever). The env var CORSA_ENVELOPE_RETENTION
-	// is a kill-switch (set falsey to restore the legacy no-ceiling behaviour).
+	// (internal/core/node/envelope_retention.go). Since protocol v30 the age
+	// ceiling it applies is BROADCAST-only, anchored on the immutable sender
+	// CreatedAt: the transit ceiling was removed because it could not tell an
+	// envelope circulating on its own from a live sender re-sending an old
+	// message, and refused both. ENABLED by default; CORSA_ENVELOPE_RETENTION
+	// falsey is the kill-switch for what remains.
 	// NOTE: a literal config.Node (tests) gets the zero value (false), so the
 	// legacy path stays covered while the gated path is exercised explicitly.
 	EnvelopeRetentionEnabled bool
-
-	// TransitMaxAge is the absolute lifetime ceiling for transit DMs (neither
-	// party is this node) and the control-DM backstop. Zero selects the
-	// node-package default (24h). Env: CORSA_TRANSIT_MAX_AGE_HOURS.
-	TransitMaxAge time.Duration
 
 	// BroadcastMaxAge is the absolute lifetime ceiling for broadcast/global
 	// topics. Zero selects the node-package default (24h).
@@ -477,8 +473,26 @@ const (
 	// builder does not copy the fields) and the receiver falls back to
 	// the legacy sync path. No emission gate is needed — unlike
 	// seen_ack, unknown JSON fields are silently ignored, not rejected.
-	ProtocolVersion        = 29
+	// v30: a relay no longer refuses a transit DM for being old. The 24-hour
+	// ceiling could not distinguish an envelope circulating on its own from
+	// a live sender re-sending an old message, and it refused both — with no
+	// hop-ack, so the sender read the refusal as a dead uplink. Advertising
+	// 30 is what tells the network this node carries an old DM like any
+	// other, which is what lets the sender-side re-stamp below be retired.
+	ProtocolVersion        = 30
 	MinimumProtocolVersion = 26
+	// ProtocolVersionNoTransitAgeCeiling is the version from which a relay
+	// forwards a transit DM regardless of the date inside it. Nodes below it
+	// still drop anything older than their own ceiling, and a sender cannot
+	// see how old the nodes further along a route are — so until the FLOOR
+	// reaches this value, an old DM is re-stamped with a fresh created_at
+	// before it is handed to transit (legacyTransitRestamp in
+	// internal/core/node/legacy_transit_restamp.go).
+	// TODO(transit-age-restamp-removal): delete this constant, the re-stamp
+	// and its tests once MinimumProtocolVersion reaches 30 — from then on
+	// every node on the network understands old dates and the envelope can
+	// travel with the date its author actually wrote it at.
+	ProtocolVersionNoTransitAgeCeiling = 30
 	// ProtocolVersionSeenAck is the version that introduced
 	// ReceiptStatusSeenAck. Receipt senders gate seen_ack emission on the
 	// peer advertising >= this version (a pre-v23 binary only rejects the
@@ -550,7 +564,6 @@ func Default() Config {
 	deliveryRetryMaxAttempts := deliveryRetryMaxAttemptsFromEnv()
 	holdDMUntilReachable := holdDMUntilReachableFromEnv()
 	envelopeRetentionEnabled := envelopeRetentionEnabledFromEnv()
-	transitMaxAge := transitMaxAgeFromEnv()
 	broadcastMaxAge := broadcastMaxAgeFromEnv()
 	gossipFanoutLimit := gossipFanoutLimitFromEnv()
 	transitForwardOnce := transitForwardOnceFromEnv()
@@ -590,7 +603,6 @@ func Default() Config {
 			DeliveryRetryMaxAttempts:   deliveryRetryMaxAttempts,
 			HoldDMUntilReachable:       holdDMUntilReachable,
 			EnvelopeRetentionEnabled:   envelopeRetentionEnabled,
-			TransitMaxAge:              transitMaxAge,
 			BroadcastMaxAge:            broadcastMaxAge,
 			GossipFanoutLimit:          gossipFanoutLimit,
 			TransitForwardOnce:         transitForwardOnce,
@@ -1065,9 +1077,9 @@ func holdDMUntilReachableFromEnv() bool {
 }
 
 // envelopeRetentionEnabledFromEnv reads CORSA_ENVELOPE_RETENTION. Defaults to
-// ENABLED (absolute age ceiling on transit/broadcast envelopes) — the cure for
-// the transit gossip storm. The variable is a kill-switch: an explicit falsey
-// value restores the legacy no-ceiling behaviour.
+// ENABLED, which since protocol v30 means the BROADCAST age ceiling only —
+// the transit one was removed. The variable is a kill-switch: an explicit
+// falsey value turns off what remains.
 func envelopeRetentionEnabledFromEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORSA_ENVELOPE_RETENTION"))) {
 	case "0", "false", "no", "off":
@@ -1132,15 +1144,18 @@ func gossipFanoutLimitFromEnv() int {
 	return limit
 }
 
-// transitMaxAgeFromEnv reads CORSA_TRANSIT_MAX_AGE_HOURS (positive integer
-// hours). Unset/invalid/non-positive selects the node-package default (24h),
-// signalled here as 0 so the node layer applies its own constant.
-func transitMaxAgeFromEnv() time.Duration {
-	return positiveHoursFromEnv("CORSA_TRANSIT_MAX_AGE_HOURS")
-}
-
-// broadcastMaxAgeFromEnv reads CORSA_BROADCAST_MAX_AGE_HOURS. See
-// transitMaxAgeFromEnv for the unset/invalid → 0 (node default) contract.
+// broadcastMaxAgeFromEnv reads CORSA_BROADCAST_MAX_AGE_HOURS (positive
+// integer hours). Unset/invalid/non-positive selects the node-package
+// default (24h), signalled here as 0 so the node layer applies its own
+// constant.
+//
+// There is deliberately no transit counterpart. CORSA_TRANSIT_MAX_AGE_HOURS
+// and the ceiling it configured were REMOVED with protocol v30: a relay does
+// not refuse a DM for being old, and leaving the knob would let a node
+// advertise v30 while behaving like a pre-v30 one — a silent black hole for
+// old messages once the network floor rises and the sender-side re-stamp is
+// deleted. Broadcast keeps its ceiling because nothing else bounds a global
+// topic's history.
 func broadcastMaxAgeFromEnv() time.Duration {
 	return positiveHoursFromEnv("CORSA_BROADCAST_MAX_AGE_HOURS")
 }

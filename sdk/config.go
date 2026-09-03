@@ -81,11 +81,15 @@ type NodeConfig struct {
 	// the legacy blind-gossip baseline for an embedded/SDK runtime.
 	HoldDMUntilReachable *bool
 	// EnvelopeRetentionEnabled turns on the message-lifetime ceiling that
-	// drops aged transit/broadcast envelopes (the transit gossip-storm cure).
-	// nil means "use the default", which is ENABLED — matching the operator
-	// default and CORSA_ENVELOPE_RETENTION. Set to a pointer to false to
-	// restore the legacy no-ceiling behaviour. The per-class MaxAge values use
-	// their built-in defaults (24h) for SDK runtimes.
+	// drops aged BROADCAST envelopes. nil means "use the default", which is
+	// ENABLED — matching the operator default and CORSA_ENVELOPE_RETENTION.
+	// Set to a pointer to false to restore the legacy no-ceiling behaviour.
+	// Broadcast uses its built-in 24h default for SDK runtimes.
+	//
+	// Since protocol v30 there is NO transit ceiling: a relay no longer drops
+	// somebody else's addressed message for being old, because doing so was
+	// silent (no hop-ack) and the sender read the silence as a black hole.
+	// Transit envelopes are bounded by the forwarding window instead.
 	EnvelopeRetentionEnabled *bool
 	// PoisonBatchEnabled batches poison-reverse fan-out (route_poison_v2)
 	// toward v2-capable peers instead of one frame per identity. nil means
@@ -291,9 +295,11 @@ func (c Config) internal() coreconfig.Config {
 			EnvelopeRetentionEnabled: cfg.Node.EnvelopeRetentionEnabled == nil || *cfg.Node.EnvelopeRetentionEnabled,
 			PoisonBatchEnabled:       cfg.Node.PoisonBatchEnabled == nil || *cfg.Node.PoisonBatchEnabled,
 			ProbeBackoffEnabled:      cfg.Node.ProbeBackoffEnabled == nil || *cfg.Node.ProbeBackoffEnabled,
-			// TransitMaxAge / BroadcastMaxAge left zero → node-package defaults
-			// (24h) apply when retention is enabled; GossipFanoutLimit /
-			// TransitForwardOnce left at their opt-in OFF defaults.
+			// BroadcastMaxAge left zero → the node-package default (24h)
+			// applies when retention is enabled. There is no transit
+			// counterpart: the transit age ceiling was removed with protocol
+			// v30 (see node/envelope_retention.go). GossipFanoutLimit /
+			// TransitForwardOnce stay at their opt-in OFF defaults.
 		},
 		RPC: coreconfig.RPC{
 			Host:     cfg.RPC.Host,

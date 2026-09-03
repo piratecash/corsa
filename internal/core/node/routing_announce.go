@@ -2953,6 +2953,12 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 		// must not skip them. This keeps the "route appeared → deliver now"
 		// promise for reachability-gated sends instead of waiting out the
 		// retry backoff.
+		// Routable identities wake what never left this node. Whether anyone
+		// BECAME reachable is not decided here at all: the delivery engine
+		// MEASURES that for itself (measureRecipientReachability), because
+		// the transition often happens where no announce is being
+		// processed — a next hop reconnecting inside a withdrawal grace
+		// window updates no route.
 		s.kickDeliveryRetriesForReachable(drainIdentities)
 		s.deliveryMu.RLock()
 		hasPending := len(s.pending) > 0

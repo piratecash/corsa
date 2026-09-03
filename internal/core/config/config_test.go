@@ -178,15 +178,17 @@ func TestEnvelopeRetentionFromEnv(t *testing.T) {
 	}
 
 	// Hours parsing: unset/invalid/non-positive → 0 (node default), valid → hours.
+	//
+	// CORSA_TRANSIT_MAX_AGE_HOURS is deliberately absent: the transit age
+	// ceiling was REMOVED with protocol v30, knob and all. A node that could
+	// still be configured to refuse old DMs would advertise v30 while
+	// behaving like a pre-v30 one — a silent black hole once the network
+	// floor rises and the sender-side re-stamp is deleted.
 	for _, v := range []string{"", "  ", "0", "-3", "abc"} {
-		t.Setenv("CORSA_TRANSIT_MAX_AGE_HOURS", v)
-		if got := transitMaxAgeFromEnv(); got != 0 {
-			t.Fatalf("CORSA_TRANSIT_MAX_AGE_HOURS=%q: got %s, want 0", v, got)
+		t.Setenv("CORSA_BROADCAST_MAX_AGE_HOURS", v)
+		if got := broadcastMaxAgeFromEnv(); got != 0 {
+			t.Fatalf("CORSA_BROADCAST_MAX_AGE_HOURS=%q: got %s, want 0", v, got)
 		}
-	}
-	t.Setenv("CORSA_TRANSIT_MAX_AGE_HOURS", "12")
-	if got := transitMaxAgeFromEnv(); got != 12*time.Hour {
-		t.Fatalf("CORSA_TRANSIT_MAX_AGE_HOURS=12: got %s, want 12h", got)
 	}
 	t.Setenv("CORSA_BROADCAST_MAX_AGE_HOURS", "48")
 	if got := broadcastMaxAgeFromEnv(); got != 48*time.Hour {

@@ -452,6 +452,10 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 		// sender-owned delivery retry for it (unconditional — held retries
 		// live in awaitingDelivered, not s.pending).
 		s.kickDeliveryRetriesForReachable(reachable)
+		// The kick answers for messages that never left; this answers for
+		// the ones that did and are still unacknowledged. See
+		// wakeOverdueForReturningPeer.
+		s.wakeOverdueForReturningPeer(peerID, time.Now().UTC())
 		// Pure-delivery probe: s.pending lives under deliveryMu.
 		s.deliveryMu.RLock()
 		hasPending := len(s.pending) > 0

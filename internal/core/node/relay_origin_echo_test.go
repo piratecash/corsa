@@ -374,11 +374,15 @@ func TestKickDeliveryRetriesForUnreachableIsNoop(t *testing.T) {
 	}
 }
 
-// TestKickDeliveryRetriesSkipsAlreadyEmitted pins the Held gate: an entry that
-// was already EMITTED and is merely awaiting its receipt (Held=false) must NOT
-// be pulled forward by a kick, even when the recipient is reachable — a route
-// refresh/reconfirm (RouteUnchanged) for a live conversation must not burn
-// attempts or trigger early duplicate sends.
+// TestKickDeliveryRetriesSkipsAlreadyEmitted pins the ROUTE half of the kick
+// rule: an entry that was already EMITTED and is merely awaiting its receipt
+// (holdNone) must NOT be pulled forward by a route event, even when the
+// recipient is reachable — a route refresh/reconfirm (RouteUnchanged) for a
+// live conversation must not burn attempts or trigger early duplicate sends.
+//
+// The peer RECONNECTING is the other cause and is deliberately different: see
+// TestReturningPeerWakesMessageStuckWithoutReceipt, where the same state is
+// woken once its receipt is overdue.
 func TestKickDeliveryRetriesSkipsAlreadyEmitted(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)

@@ -875,7 +875,7 @@ func TestBacklogReplayWithholdsEveryStrandedId(t *testing.T) {
 	markOnDisk(t, outbox, held, plain)
 	outbox.failClears(errors.New("database is locked"))
 
-	outcome := svc.noteOwnEnvelopesEmitted([]protocol.MessageID{held, plain}, time.Now().UTC())
+	outcome := svc.noteOwnEnvelopesEmitted([]protocol.MessageID{held, plain}, time.Now().UTC(), nil)
 	for _, id := range []protocol.MessageID{held, plain} {
 		if _, blocked := outcome.Withheld[id]; !blocked {
 			t.Errorf("%s was cleared to go out while the disk still claims it never left", id)
