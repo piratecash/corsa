@@ -299,6 +299,10 @@ type selectionOpts struct {
 	// the direct branch, so a retry cannot land on the same first hop
 	// through the direct session.
 	avoid AvoidedNextHop
+	// firstHop is the local guard preference: listed neighbours are hoisted
+	// to the front of the ranked list, in the caller's order. Never a filter
+	// — see PreferredFirstHops.
+	firstHop PreferredFirstHops
 	// rotate enables the explore rotation and its counter increment. The
 	// read-only plan leaves it false: it shows the comparator order, and
 	// it must not move a counter.

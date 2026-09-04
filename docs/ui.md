@@ -1040,13 +1040,43 @@ snapRecipients()
 
 ### Contact presence
 
-Each contact in the sidebar displays a person avatar with three states:
+Each contact in the sidebar displays a person avatar. It shows what the node
+BELIEVES about that contact's liveness, and — this is the part that changed —
+how much that belief is worth:
 
-- **Green filled** — at least one route exists (identity is reachable through the mesh)
-- **Gray filled** — no route is available (identity is unreachable)
-- **Gray outline** — reachability data is unavailable (probe failed or node not connected)
+- **Green filled** — the contact proved they are there. Either they signed a
+  liveness challenge for us, or a frame carrying their verified signature
+  arrived OVER THEIR OWN SESSION. A relayed copy does not count: a signature
+  proves who wrote something, not that they are awake, and a relay can deliver
+  or replay it long after they left. This is the only state that rests on
+  evidence from the contact.
+- **Striped green** — believed present, INFERRED from the routing table. Used
+  for a contact who cannot answer a liveness probe at all (an older build, a
+  node with the datagram layer disabled, a contact whose identity record was
+  never resolved). Still green, because the belief is "present"; striped,
+  because nothing they did supports it — a route outlives its owner by up to
+  ten minutes, so this is a guess and it is drawn as one. The stripes cover the
+  whole face rather than decorating the rim, so the difference survives the
+  38dp the contact list actually uses. It disappears with the route fallback.
+- **Slate filled** — a path exists and the contact has not answered yet. A short
+  window, one round trip wide.
+- **Gray filled** — believed absent, on an observation ABOUT them: their session
+  closed, their last route vanished while our own connectivity was healthy, or
+  they missed three consecutive probes.
+- **Gray outline** — no answer. Either our own network is down or reconnecting
+  (in which case every contact is outlined — our outage is not evidence about
+  fifty other people), or the only path to them was removed by a suppression of
+  ours (quarantine, flap hold-down, K-cap), or nobody has looked recently.
+
+The distinction that matters: **a missing route is not the same as a missing
+person.** A route we removed ourselves says nothing about the contact and is
+never drawn as absence.
 
 The sidebar starts directly with “My identity”; there is intentionally no extra “Clients” heading above it. This keeps the hierarchy aligned with the compact design and avoids repeating what the panel already communicates.
+
+Presence is the SINGLE source for every presence-flavoured decision in the sidebar: the avatar, the online/offline sort tier, and whether a "last online" line is shown. They used to be decided separately — the sort and the timestamp consulted `ReachableIDs` on their own — which let a stale route put a departed contact into the online group under a grey avatar with no explanation beneath it. One question, one answer. Both online states (proven and inferred) count as online for sorting: the stripes say how much the claim is worth, which is a question about the contact and not about where they belong in a list. The normative contract is `docs/protocol/presence.md`.
+
+Presence and reachability are two different answers and both are kept. `NodeStatus.Presence` is the per-contact belief described above, fetched with `fetch_presence` (or read directly in embedded mode); `NodeStatus.ReachableIDs` remains the routing answer and is what delivery-flavoured surfaces use. The interface reads presence and never derives it: deciding liveness from a routing projection is what produced up to ten minutes of false green. A contact absent from the presence set is UNKNOWN, never offline — that lookup goes through `PresenceSet.Get`, which is why the map is not indexed directly anywhere. When the node is older than the interface and does not answer `fetch_presence`, the reachability set is used instead and reported as the inferred (striped) state, because that is exactly what it is.
 
 Reachability is computed once alongside every immutable routing snapshot and stored as a cached identity set. In embedded mode, `NodeProber.BuildReachableIDs()` clones that set directly (no RPC round-trip); remote TCP mode (`localNode == nil`) receives the same cached set through `fetch_reachable_ids`. It covers all identities in the routing table — not just those from `fetch_identities` — so sidebar peers that entered through chatlog or DM headers also get the correct status. Snapshot-published events keep `NodeStatus.ReachableIDs` current between full `ProbeNode` cycles.
 
@@ -2279,13 +2309,42 @@ snapRecipients()
 
 ### Статус присутствия контакта
 
-Каждый контакт в sidebar отображает аватар пользователя с тремя состояниями:
+Каждый контакт в sidebar отображает аватар пользователя. Он показывает, что нода
+ДУМАЕТ о живости контакта, и — это и есть изменение — сколько это мнение стоит:
 
-- **Зелёный заполненный** — маршрут есть (identity достижим через mesh-сеть)
-- **Серый заполненный** — маршрутов нет (identity недоступен)
-- **Серый контурный** — данные о достижимости недоступны (probe не удался или нода не подключена)
+- **Зелёный заполненный** — контакт доказал, что он здесь. Либо подписал нашу
+  liveness-пробу, либо от него пришёл кадр с проверенной подписью ПО ЕГО
+  СОБСТВЕННОЙ СЕССИИ. Транзитная копия не считается: подпись доказывает
+  авторство, а не то, что автор не спит, и релей может доставить или повторить
+  её сильно позже его ухода. Единственное состояние, опирающееся на
+  свидетельство самого контакта.
+- **Полосатый зелёный** — считаем, что он здесь, ВЫВЕДЕНО из таблицы маршрутов.
+  Для контакта, который в принципе не умеет отвечать на пробу (старая сборка,
+  узел с выключенным слоем датаграмм, контакт, чью identity-запись мы не
+  резолвили). Зелёный — потому что считаем его присутствующим; полосатый —
+  потому что за этим не стоит ничего, что сделал он сам: маршрут переживает уход
+  владельца до десяти минут, значит это догадка, и нарисована она как догадка.
+  Полосы покрывают весь аватар, а не украшают ободок, поэтому различие выживает
+  на тех 38dp, которые реально использует список. Исчезнет вместе с фаллбеком.
+- **Сине-серый заполненный** — путь есть, ответа ещё нет. Короткое окно шириной в
+  один round-trip.
+- **Серый заполненный** — считаем, что его нет, и это наблюдение О НЁМ: закрылась
+  его сессия, исчез последний маршрут при живой нашей связности, либо он пропустил
+  три пробы подряд.
+- **Серый контурный** — ответа нет. Либо упала наша собственная сеть (тогда
+  контурные все контакты: наша авария — не свидетельство о полусотне других
+  людей), либо единственный путь к нему сняли мы сами (карантин, flap hold-down,
+  K-cap), либо давно никто не смотрел.
+
+Существенное различие: **отсутствие маршрута — не то же самое, что отсутствие
+человека.** Маршрут, снятый нами самими, не говорит о контакте ничего и никогда
+не рисуется как отсутствие.
 
 Sidebar сразу начинается с карточки «Мой identity»: отдельного заголовка «Клиенты» над ней намеренно нет. Так иерархия соответствует компактному дизайну и не повторяет уже очевидное назначение панели.
+
+Присутствие — ЕДИНСТВЕННЫЙ источник для всех решений сайдбара, связанных с присутствием: аватар, тир сортировки online/offline и показ подписи «последний раз онлайн». Раньше они решались порознь — сортировка и подпись смотрели в `ReachableIDs` самостоятельно, — из-за чего устаревший маршрут помещал ушедший контакт в «онлайн»-группу с серым аватаром и без объяснения под ним. Один вопрос — один ответ. Для сортировки оба online-состояния (доказанное и выведенное) считаются онлайном: полосы говорят, сколько стоит утверждение, а это вопрос о контакте, а не о его месте в списке. Нормативный контракт — `docs/protocol/presence.md`.
+
+Присутствие и достижимость — два разных ответа, и оба сохранены. `NodeStatus.Presence` — это описанное выше мнение о каждом контакте, забирается командой `fetch_presence` (в embedded-режиме читается напрямую); `NodeStatus.ReachableIDs` остаётся маршрутным ответом и используется поверхностями, связанными с доставкой. UI присутствие ЧИТАЕТ, а не выводит: вывод живости из маршрутной проекции и давал до десяти минут ложной зелёной точки. Контакт, отсутствующий в наборе присутствия, — НЕИЗВЕСТЕН, а не офлайн; за это отвечает `PresenceSet.Get`, поэтому карта нигде не индексируется напрямую. Если нода старше интерфейса и `fetch_presence` не понимает, используется набор достижимости и показывается как выведенное (полосатое) состояние — потому что ровно этим он и является.
 
 Достижимость вычисляется один раз вместе с каждым immutable routing snapshot и хранится как кэшированный набор identity. В embedded-режиме `NodeProber.BuildReachableIDs()` напрямую клонирует этот набор (без RPC round-trip), а remote TCP-режим (`localNode == nil`) получает тот же кэш через `fetch_reachable_ids`. Набор строится по всей routing table — не только из `fetch_identities` — поэтому sidebar peers, попавшие через chatlog или DM headers, тоже получают корректный статус. События публикации снапшота поддерживают `NodeStatus.ReachableIDs` актуальным между полными циклами `ProbeNode`.
 

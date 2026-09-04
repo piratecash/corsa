@@ -65,6 +65,16 @@ func PublishIdentityPresenceObserved(bus *Bus, change IdentityPresenceChange) {
 	bus.Publish(TopicIdentityPresenceObserved, change)
 }
 
+// PublishContactPresenceUpdated emits TopicContactPresenceUpdated. It is
+// payload-free on purpose: subscribers re-read the projection from the node so
+// there is exactly one version of it.
+func PublishContactPresenceUpdated(bus *Bus) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(TopicContactPresenceUpdated, struct{}{})
+}
+
 // PublishPeerConnected emits TopicPeerConnected with a typed
 // (address, identity) pair. Use this instead of bus.Publish at every new
 // call site so the compiler enforces the (PeerAddress, PeerIdentity)

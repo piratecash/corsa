@@ -29,7 +29,7 @@ type candidateSend struct {
 	calls   int
 }
 
-func (c *candidateSend) send(_ datagramSendTarget, _ protocol.Frame, ticket *netcore.WriteTicket) bool {
+func (c *candidateSend) send(_ datagramSendTarget, _ protocol.Frame, ticket *netcore.WriteTicket, _ chan struct{}) bool {
 	index := c.calls
 	c.calls++
 	c.tickets = append(c.tickets, ticket)
@@ -59,6 +59,7 @@ func TestEmitToStopsAtTheConnectionThatTookTheFrame(t *testing.T) {
 		protocol.Frame{Type: protocol.DatagramFrameType},
 		netcore.OutboundWrite{WriteGrace: time.Second},
 		sender.send,
+		writeWitness{},
 	) {
 		t.Fatal("the third candidate accepted the frame, EmitTo must report true")
 	}
@@ -77,6 +78,7 @@ func TestEmitToReportsFalseWhenEveryCandidateRefuses(t *testing.T) {
 		protocol.Frame{Type: protocol.DatagramFrameType},
 		netcore.OutboundWrite{WriteGrace: time.Second},
 		sender.send,
+		writeWitness{},
 	) {
 		t.Fatal("no candidate accepted, EmitTo must report false")
 	}
@@ -100,6 +102,7 @@ func TestEmitToCarriesOneContractToEveryCandidate(t *testing.T) {
 		protocol.Frame{Type: protocol.DatagramFrameType},
 		netcore.OutboundWrite{WriteGrace: time.Second},
 		sender.send,
+		writeWitness{},
 	)
 
 	if len(sender.tickets) == 0 {
@@ -125,6 +128,7 @@ func TestEmitToWithAnEmptyContractStaysTicketless(t *testing.T) {
 		protocol.Frame{Type: protocol.DatagramFrameType},
 		netcore.OutboundWrite{},
 		sender.send,
+		writeWitness{},
 	) {
 		t.Fatal("the second candidate accepted the frame")
 	}

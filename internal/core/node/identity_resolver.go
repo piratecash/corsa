@@ -854,6 +854,11 @@ func (r *identityResolver) HandleAnswer(label datagram.Label, payload []byte) bo
 			log.Debug().Err(err).Str("target", entry.dst.String()).Msg("identity_lookup_answer_proof_invalid")
 			return false
 		}
+		// A verified proof is a verified proof, whoever asked for it: the
+		// target signed this attempt's label a moment ago. A resolution of a
+		// contact therefore feeds presence for free, and the prober's demand
+		// mode skips the probe it would otherwise have sent.
+		r.svc.notePresenceProof(entry.dst)
 	}
 	if body.Seq < entry.minSeq {
 		// requirement-unsatisfied: the resolution stays active and keeps

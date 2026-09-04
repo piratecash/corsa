@@ -569,7 +569,7 @@ func (s *Service) servePeerSession(ctx context.Context, session *peerSession) er
 						Msg("fire_and_forget_withheld_by_delivery_gate")
 					continue
 				}
-				switch st := session.netCore.SendTracked(outbound, item.ticket); st {
+				switch st := session.netCore.SendTrackedObserved(outbound, item.ticket, item.writeAck); st {
 				case netcore.SendOK:
 					// Enqueued. Account the write only now: a frame
 					// rejected by the queue never reaches the wire, so

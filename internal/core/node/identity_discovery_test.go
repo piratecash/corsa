@@ -153,11 +153,7 @@ func TestGetIdentityHandlerAnswersWithProof(t *testing.T) {
 	t.Parallel()
 
 	svc := newDatagramLayerService(t, true)
-	handler := &getIdentityHandler{
-		svc: svc, network: testRecordStoreNetwork,
-		clock:                 func() time.Time { return time.Now().UTC() },
-		seenRequesterAttempts: map[domain.PeerIdentity]time.Time{},
-	}
+	handler := newGetIdentityHandler(svc, testRecordStoreNetwork, func() time.Time { return time.Now().UTC() })
 	label := randomAttemptLabel(t)
 	neighbour := domaintest.ID("n1")
 	delivery := newGetIdentityDelivery(t, svc, label, neighbour)
@@ -200,11 +196,7 @@ func TestGetIdentityHandlerSilentDrops(t *testing.T) {
 	t.Parallel()
 
 	svc := newDatagramLayerService(t, true)
-	handler := &getIdentityHandler{
-		svc: svc, network: testRecordStoreNetwork,
-		clock:                 func() time.Time { return time.Now().UTC() },
-		seenRequesterAttempts: map[domain.PeerIdentity]time.Time{},
-	}
+	handler := newGetIdentityHandler(svc, testRecordStoreNetwork, func() time.Time { return time.Now().UTC() })
 	delivery := newGetIdentityDelivery(t, svc, randomAttemptLabel(t), domaintest.ID("n1"))
 
 	cases := map[string][]byte{

@@ -4962,6 +4962,12 @@ func deepCopyNodeStatus(src NodeStatus) NodeStatus {
 			dst.ReachableIDs[k] = v
 		}
 	}
+	// Presence values are plain structs, so the per-entry copy is fully
+	// independent of monitor-owned memory — the same contract the map above
+	// satisfies. Nil stays nil: an absent presence set means the node has not
+	// answered yet, and materialising an empty map here would turn that into
+	// "every contact is unknown", which is a different claim.
+	dst.Presence = src.Presence.Clone()
 	if src.CaptureSessions != nil {
 		dst.CaptureSessions = make(map[domain.ConnID]CaptureSession, len(src.CaptureSessions))
 		for k, v := range src.CaptureSessions {
@@ -5080,8 +5086,22 @@ func (r *DMRouter) NotifyStatusDomainChanged(d NodeStatusDomain) {
 		r.cachedNS.PeerHealth = r.statusMonitor.PeerHealthSnapshot()
 	case NodeStatusDomainReachableIDs:
 		r.cachedNS.ReachableIDs = r.statusMonitor.ReachableIDsSnapshot()
+		// Presence is NOT copied here any more. The two used to be refreshed
+		// from one routing generation, so patching one without the other was a
+		// real inconsistency — but they were deliberately split: presence now
+		// has its own event (NodeStatusDomainContactPresence), because most of
+		// what moves it is not a routing event at all. Copying it on this event
+		// would reintroduce the coupling the split removed, and would do it
+		// while holding a generation this event knows nothing about.
 	case NodeStatusDomainPresence:
 		r.cachedNS.Contacts = r.statusMonitor.Contacts()
+	case NodeStatusDomainContactPresence:
+		// Both halves, from one read. Nothing here orders anything — this
+		// cache is not the monitor's state and no update to it is ever
+		// refused — but the snapshot composed from it below is handed to every
+		// reader, and a set patched in without its generation makes that
+		// snapshot label one projection with another's number.
+		r.cachedNS.Presence, r.cachedNS.PresenceGeneration = r.statusMonitor.PresenceSnapshot()
 	case NodeStatusDomainKnownIDs:
 		r.cachedNS.KnownIDs = r.statusMonitor.KnownIDsSnapshot()
 	case NodeStatusDomainAggregate:

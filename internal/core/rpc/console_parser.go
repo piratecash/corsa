@@ -68,6 +68,8 @@ var canonicalNames = map[string]string{
 	"add_peer":                 "addPeer",
 	"connect_only":             "connectOnly",
 	"fetch_reachable_ids":      "fetchReachableIds",
+	"fetch_presence":           "fetchPresence",
+	"fetch_first_hop_guards":   "fetchFirstHopGuards",
 	"resolve_identity":         "resolveIdentity",
 	"resolve_identity_status":  "resolveIdentityStatus",
 	"identity_backup":          "identityBackup",
@@ -382,7 +384,9 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		"fetch_dm_headers": true, "fetch_relay_status": true,
 		"fetch_route_table": true, "fetch_route_summary": true, "fetch_datagram_summary": true,
 		"fetch_traffic_history": true, "fetch_reachable_ids": true,
-		"node_status": true, "get_node_status": true,
+		"fetch_presence":         true,
+		"fetch_first_hop_guards": true,
+		"node_status":            true, "get_node_status": true,
 		// recordAllPeerTraffic with no args uses default format.
 		"recordallpeertraffic": true, "record_all_peer_traffic": true,
 	}

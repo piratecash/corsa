@@ -179,6 +179,7 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 	status.AggregateStatus = resolvedStatus
 	status.ResourceUsage = resourceUsage
 	status.ReachableIDs = p.BuildReachableIDs()
+	status.Presence, status.PresenceGeneration = p.BuildPresence()
 	status.DMHeaders = dmHeaders
 	status.DeliveryReceipts = deliveryReceipts
 	status.CheckedAt = time.Now()
@@ -288,6 +289,44 @@ func (p *NodeProber) DeleteContact(identity domain.PeerIdentity) error {
 // "fetch_reachable_ids", which reads the same cached projection.
 // Returns nil if the node is unreachable — callers must treat nil as
 // "unknown" rather than "no reachable peers".
+// BuildPresence asks the node what it believes about each contact's liveness.
+//
+// Embedded mode reads the projection directly; remote-RPC mode fetches the same
+// projection over the local RPC hop. Nil means "the node did not answer" and
+// must be treated as unknown — a node too old to know the command returns an
+// error frame, and reading that as "nobody is online" would be the same
+// mistake this whole field exists to remove.
+func (p *NodeProber) BuildPresence() (domain.PresenceSet, uint64) {
+	if node := p.rpc.LocalNode(); node != nil {
+		return node.PresenceSnapshotAt()
+	}
+	reply, err := p.rpc.LocalRequestFrame(protocol.Frame{Type: "fetch_presence"})
+	if err != nil || reply.Type == "error" {
+		return nil, 0
+	}
+	// A projection with no generation is one this node cannot order against
+	// anything, so it is reported as "nothing known" rather than as a set whose
+	// place in the sequence is guessed.
+	if reply.PresenceGeneration == 0 {
+		return nil, 0
+	}
+	presence := make(domain.PresenceSet, len(reply.Presence))
+	for _, entry := range reply.Presence {
+		identity, err := domain.ParsePeerIdentity(entry.Identity)
+		if err != nil || identity.IsZero() {
+			// Same strictness as the reachability parse: a malformed row
+			// must not enter the map as the zero identity.
+			continue
+		}
+		presence[identity] = domain.Presence{
+			State:  domain.ParsePresenceState(entry.State),
+			Source: domain.ParsePresenceSource(entry.Source),
+			Reason: domain.ParsePresenceUnknownReason(entry.Reason),
+		}
+	}
+	return presence, reply.PresenceGeneration
+}
+
 func (p *NodeProber) BuildReachableIDs() map[domain.PeerIdentity]bool {
 	if node := p.rpc.LocalNode(); node != nil {
 		return node.ReachableIDsSnapshot()

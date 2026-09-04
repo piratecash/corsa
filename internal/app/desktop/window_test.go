@@ -115,6 +115,14 @@ func TestLoadUIIconReturnsAnErrorForInvalidData(t *testing.T) {
 	}
 }
 
+// TestContactPresenceStates pins what the interface shows for each presence the
+// node reports.
+//
+// The "reachable" case CHANGED deliberately: a contact known only through the
+// routing table used to be drawn exactly like one who had answered, and that
+// equivalence is the bug the presence work removes. Reachability is now the
+// inferred state, drawn as a dotted ring; solid green requires the contact's
+// own signature.
 func TestContactPresenceStates(t *testing.T) {
 	peer := domaintest.ID("presence-peer")
 	tests := []struct {
@@ -122,9 +130,66 @@ func TestContactPresenceStates(t *testing.T) {
 		status service.NodeStatus
 		want   contactPresenceState
 	}{
-		{name: "probe unavailable", status: service.NodeStatus{}, want: contactPresenceUnknown},
-		{name: "reachable", status: service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{peer: true}}, want: contactPresenceOnline},
-		{name: "known unreachable", status: service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{}}, want: contactPresenceOffline},
+		{name: "node has not answered", status: service.NodeStatus{}, want: contactPresenceUnknown},
+		{
+			name: "proven by their signature",
+			status: service.NodeStatus{Presence: domain.PresenceSet{
+				peer: domain.OnlinePresence(domain.PresenceSourceProof),
+			}},
+			want: contactPresenceOnline,
+		},
+		{
+			name: "proven by a frame they sent",
+			status: service.NodeStatus{Presence: domain.PresenceSet{
+				peer: domain.OnlinePresence(domain.PresenceSourcePassive),
+			}},
+			want: contactPresenceOnline,
+		},
+		{
+			name: "inferred from the routing table",
+			status: service.NodeStatus{Presence: domain.PresenceSet{
+				peer: domain.OnlinePresence(domain.PresenceSourceRouteFallback),
+			}},
+			want: contactPresenceOnlineInferred,
+		},
+		{
+			name: "route exists, nothing proven yet",
+			status: service.NodeStatus{Presence: domain.PresenceSet{
+				peer: domain.ProbingPresence(),
+			}},
+			want: contactPresenceProbing,
+		},
+		{
+			name: "their session closed",
+			status: service.NodeStatus{Presence: domain.PresenceSet{
+				peer: domain.OfflinePresence(domain.PresenceSourceSessionClosed),
+			}},
+			want: contactPresenceOffline,
+		},
+		{
+			name: "we suppressed the route ourselves",
+			status: service.NodeStatus{Presence: domain.PresenceSet{
+				peer: domain.UnknownPresence(domain.PresenceUnknownRouteSuppressedLocally),
+			}},
+			want: contactPresenceUnknown,
+		},
+		{
+			name: "contact absent from a populated set",
+			status: service.NodeStatus{Presence: domain.PresenceSet{
+				domaintest.ID("someone-else"): domain.OnlinePresence(domain.PresenceSourceProof),
+			}},
+			want: contactPresenceUnknown,
+		},
+		{
+			name:   "older node: reachability only, which is an inference",
+			status: service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{peer: true}},
+			want:   contactPresenceOnlineInferred,
+		},
+		{
+			name:   "older node: known unreachable",
+			status: service.NodeStatus{ReachableIDs: map[domain.PeerIdentity]bool{}},
+			want:   contactPresenceOffline,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -132,6 +197,99 @@ func TestContactPresenceStates(t *testing.T) {
 				t.Fatalf("contactPresence() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPresenceStatesLookDifferent is the guard on the whole point of the source
+// distinction: a difference the interface does not draw does not exist for the
+// person looking at it.
+//
+// It caught a real regression. The first version drew an inferred presence as
+// the SAME solid green disc as a witnessed one, with small dots on the rim —
+// at 38dp that reads as "online", and the fallback was invisible in the only
+// place it mattered. An inferred presence is now a STRIPED green disc: still
+// green, because the belief is "present", and unmistakably not the plain one.
+func TestPresenceStatesLookDifferent(t *testing.T) {
+	states := []contactPresenceState{
+		contactPresenceOnline,
+		contactPresenceOnlineInferred,
+		contactPresenceProbing,
+		contactPresenceOffline,
+		contactPresenceUnknown,
+	}
+
+	seen := make(map[presenceAvatarStyle]contactPresenceState, len(states))
+	for _, state := range states {
+		style := contactPresenceAvatarStyle(state)
+		if other, clash := seen[style]; clash {
+			t.Fatalf("presence states %v and %v are drawn identically (%+v): "+
+				"the user cannot tell them apart", other, state, style)
+		}
+		seen[style] = state
+	}
+
+	// The specific pair the review was about: witnessed and inferred must
+	// differ in SHAPE, not merely in some colour a viewer has to remember.
+	witnessed := contactPresenceAvatarStyle(contactPresenceOnline)
+	inferred := contactPresenceAvatarStyle(contactPresenceOnlineInferred)
+	if witnessed.shape == inferred.shape {
+		t.Fatalf("a proven presence and an inferred one share the shape %v: "+
+			"the fallback must be striped, not a plain disc", witnessed.shape)
+	}
+	if inferred.shape != avatarShapeStriped {
+		t.Fatalf("inferred presence shape = %v, want striped", inferred.shape)
+	}
+	if inferred.edge != witnessed.edge {
+		t.Fatal("the inferred avatar must stay GREEN: the belief is that the " +
+			"contact is present, and only the confidence differs")
+	}
+	if witnessed.shape != avatarShapeFilled {
+		t.Fatalf("proven presence shape = %v, want filled", witnessed.shape)
+	}
+}
+
+// TestInferredAvatarActuallyDrawsStripes checks the DRAWING, not the style
+// struct.
+//
+// TestPresenceStatesLookDifferent proves the two states describe themselves
+// differently; it would still pass if the striped branch drew nothing at all,
+// and an avatar that claims to be striped while rendering as a plain green disc
+// is exactly the failure the distinction exists to prevent — the user is shown
+// a witnessed presence when we only inferred one.
+//
+// Checked at several pixel densities because the stripe geometry is computed in
+// device pixels: a rounding that collapses width or pitch to zero would silently
+// disable the stripes on one class of display and nowhere else.
+func TestInferredAvatarActuallyDrawsStripes(t *testing.T) {
+	const avatarDp = 38
+
+	for _, density := range []float32{1, 1.5, 2, 3} {
+		gtx := layout.Context{
+			Ops:    new(op.Ops),
+			Metric: unit.Metric{PxPerDp: density, PxPerSp: density},
+		}
+		side := gtx.Dp(unit.Dp(avatarDp))
+		drawn := layoutStripedDisc(gtx, image.Pt(side, side), presenceGreen)
+		if drawn < 3 {
+			t.Fatalf("at %.1f px/dp the inferred avatar drew %d stripes: "+
+				"it renders as a plain green disc and is indistinguishable "+
+				"from a witnessed presence", density, drawn)
+		}
+	}
+}
+
+// TestPresenceNeverReadsAnAbsentKeyAsOffline guards the rule at the boundary
+// the interface actually uses. A populated presence set with no row for this
+// contact means "nothing to say about them", and drawing that as a known
+// absence is how one node's own outage used to empty a whole contact list.
+func TestPresenceNeverReadsAnAbsentKeyAsOffline(t *testing.T) {
+	peer := domaintest.ID("absent-peer")
+	status := service.NodeStatus{Presence: domain.PresenceSet{
+		domaintest.ID("other-peer"): domain.OfflinePresence(domain.PresenceSourceProbeTimeout),
+	}}
+
+	if got := contactPresence(status, peer); got != contactPresenceUnknown {
+		t.Fatalf("absent contact = %v, want unknown", got)
 	}
 }
 
@@ -436,8 +594,12 @@ func TestOnlineContactRowHasOnePresenceDescription(t *testing.T) {
 		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
 		Constraints: layout.Constraints{Max: image.Pt(320, 100)},
 	}
+	// A PROVEN presence: the point of this test is that the row emits one
+	// authoritative description, and after the accessibility fix the
+	// description follows the state — a route-derived presence now says
+	// "probably online", which is a different (and correct) sentence.
 	w.layoutRecipientButton(gtx, service.NodeStatus{
-		ReachableIDs: map[domain.PeerIdentity]bool{peer: true},
+		Presence: domain.PresenceSet{peer: domain.OnlinePresence(domain.PresenceSourceProof)},
 	}, peer, true)
 	router.Frame(gtx.Ops)
 

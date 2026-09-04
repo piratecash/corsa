@@ -34,6 +34,12 @@ const (
 	// identityIntentReasonPendingSend — an outbound artifact waits for the
 	// keys.
 	identityIntentReasonPendingSend identityIntentReasonType = "pending_send"
+	// identityIntentReasonPresence — a contact cannot be probed for liveness
+	// until their record (and with it their box key) is known. Without the
+	// key no sealed reciprocity claim can be built, and a probe without one
+	// would be answered on the public path — so presence asks for the record
+	// rather than sending a probe that bypasses its own gate.
+	identityIntentReasonPresence identityIntentReasonType = "presence"
 )
 
 // identityIntentReason is one row's reason half; the pair (type, id) is

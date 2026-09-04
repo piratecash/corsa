@@ -406,6 +406,25 @@ func (s *trustStore) rememberRecord(network domain.NetworkID, record protocol.Si
 // isTrustedContact answers the membership question without copying the whole
 // address book, which trustedContacts does and which the per-message paths
 // would otherwise pay for on every arrival.
+// contactBoxKey returns the X25519 public box key stored for a contact.
+//
+// The contact's OWN record is the authority for this, not the general
+// knowledge cache: the cache holds keys for every identity this node has heard
+// of, and the reciprocity gate is a question about contacts specifically. A
+// contact with no stored box key answers false — nothing to verify against.
+func (s *trustStore) contactBoxKey(identity domain.PeerIdentity) (string, bool) {
+	if identity.IsZero() {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	contact, ok := s.contacts[identity.String()]
+	if !ok || contact.BoxKey == "" {
+		return "", false
+	}
+	return contact.BoxKey, true
+}
+
 func (s *trustStore) isTrustedContact(identity domain.PeerIdentity) bool {
 	if identity.IsZero() {
 		return false

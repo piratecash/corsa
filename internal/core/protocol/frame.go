@@ -50,29 +50,46 @@ type Frame struct {
 	// gate it on the peer advertising that version, because the field is
 	// covered by the signature and an older verifier computes the
 	// payload without it.
-	ReceiptSender   string                `json:"receipt_sender,omitempty"`
-	PubKey          string                `json:"pubkey,omitempty"`
-	BoxKey          string                `json:"boxkey,omitempty"`
-	BoxSig          string                `json:"boxsig,omitempty"`
-	Peers           []string              `json:"peers,omitempty"`
-	Identities      []string              `json:"identities,omitempty"`
-	Contacts        []ContactFrame        `json:"contacts,omitempty"`
-	Topic           string                `json:"topic,omitempty"`
-	ID              string                `json:"id,omitempty"`
-	IDs             []string              `json:"ids,omitempty"`
-	PendingIDs      []string              `json:"pending_ids,omitempty"`
-	PendingMessages []PendingMessageFrame `json:"pending_messages,omitempty"`
-	Item            *MessageFrame         `json:"item,omitempty"`
-	Receipt         *ReceiptFrame         `json:"receipt,omitempty"`
-	Messages        []MessageFrame        `json:"messages,omitempty"`
-	Receipts        []ReceiptFrame        `json:"receipts,omitempty"`
-	Notices         []NoticeFrame         `json:"notices,omitempty"`
-	PeerHealth      []PeerHealthFrame     `json:"peer_health,omitempty"`
-	Subscriber      string                `json:"subscriber,omitempty"`
-	Flag            string                `json:"flag,omitempty"`
-	CreatedAt       string                `json:"created_at,omitempty"`
-	DeliveredAt     string                `json:"delivered_at,omitempty"`
-	TTLSeconds      int                   `json:"ttl_seconds,omitempty"`
+	ReceiptSender string          `json:"receipt_sender,omitempty"`
+	PubKey        string          `json:"pubkey,omitempty"`
+	BoxKey        string          `json:"boxkey,omitempty"`
+	BoxSig        string          `json:"boxsig,omitempty"`
+	Peers         []string        `json:"peers,omitempty"`
+	Identities    []string        `json:"identities,omitempty"`
+	Presence      []PresenceFrame `json:"presence,omitempty"`
+	// PresenceGeneration numbers the projection above within the answering
+	// node's process, starting at 1. It exists so two readers of the same
+	// projection can tell which of them holds the later picture — see
+	// Service.PresenceSnapshotAt.
+	//
+	// A COUNTER and not a timestamp: a wall clock ties (Windows advances it in
+	// steps longer than a projection takes) and can step backwards, and either
+	// makes a genuinely newer projection look stale.
+	//
+	// Zero means no projection has run yet, which is NOT the same as an empty
+	// projection. The number describes the WHOLE set, never a single row.
+	PresenceGeneration uint64 `json:"presence_generation,omitempty"`
+	// FirstHopGuards and FirstHopGuardStats answer fetch_first_hop_guards.
+	// Local frame only — see first_hop_guard_frame.go.
+	FirstHopGuards     []FirstHopGuardFrame     `json:"first_hop_guards,omitempty"`
+	FirstHopGuardStats *FirstHopGuardStatsFrame `json:"first_hop_guard_stats,omitempty"`
+	Contacts           []ContactFrame           `json:"contacts,omitempty"`
+	Topic              string                   `json:"topic,omitempty"`
+	ID                 string                   `json:"id,omitempty"`
+	IDs                []string                 `json:"ids,omitempty"`
+	PendingIDs         []string                 `json:"pending_ids,omitempty"`
+	PendingMessages    []PendingMessageFrame    `json:"pending_messages,omitempty"`
+	Item               *MessageFrame            `json:"item,omitempty"`
+	Receipt            *ReceiptFrame            `json:"receipt,omitempty"`
+	Messages           []MessageFrame           `json:"messages,omitempty"`
+	Receipts           []ReceiptFrame           `json:"receipts,omitempty"`
+	Notices            []NoticeFrame            `json:"notices,omitempty"`
+	PeerHealth         []PeerHealthFrame        `json:"peer_health,omitempty"`
+	Subscriber         string                   `json:"subscriber,omitempty"`
+	Flag               string                   `json:"flag,omitempty"`
+	CreatedAt          string                   `json:"created_at,omitempty"`
+	DeliveredAt        string                   `json:"delivered_at,omitempty"`
+	TTLSeconds         int                      `json:"ttl_seconds,omitempty"`
 	// Hops is the remaining hop budget for blind-gossip propagation
 	// of DM traffic. Read on send_message (an origin MAY stamp a
 	// budget; absent means the node assigns the default). NOT read on

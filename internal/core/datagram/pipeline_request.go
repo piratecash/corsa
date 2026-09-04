@@ -278,6 +278,7 @@ func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) Sen
 		frame:    frame,
 		incoming: LocalIngress(),
 		avoid:    opts.Avoid,
+		firstHop: opts.FirstHop,
 	}
 	selection := p.selectFor(ctx, job)
 	if !selection.publishable() {

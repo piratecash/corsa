@@ -728,6 +728,7 @@ type Service struct {
 	relayShapingHint               atomic.Uint64                                // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
 	identitySessions               map[domain.PeerIdentity]int                  // peer identity → active session count (multi-session awareness)
 	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
+	sessionTransitionSeq           uint64                                       // monotonic number of every 0→1 / 1→0 session transition, minted under peerMu at the transition itself; presence orders a close against a reconnect by THIS and never by a clock (see nextSessionTransitionLocked)
 	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
 	presenceClock                  func() time.Time                             // source for identity presence transition timestamps; immutable after construction, overridden only by tests
 	deliveryClock                  func() time.Time                             // source for the instant an emission claim is taken and read at; immutable after construction, overridden only by tests
@@ -909,6 +910,59 @@ type Service struct {
 	// publication, persistence or I/O occurs while it is held. See
 	// routing_snapshot.go and docs/locking.md.
 	presenceProjection presenceProjectionState
+	// presenceProjector answers the HUMAN question — is this contact there —
+	// which the routing projection above answers only by accident. It owns
+	// the per-contact evidence (probe answers, signed frames, session
+	// closes) and is keyed on the address book, so its state is bounded by
+	// the number of contacts rather than by the size of the network. Its
+	// mutex is a leaf: no domain mutex, I/O or publication happens under it.
+	// See presence_projector.go and docs/locking.md.
+	presenceProjector *presenceProjector
+	// presenceProber asks contacts for a signature on a schedule of its own.
+	// Separate from identityResolver on purpose: a resolution ENDS when it
+	// succeeds, and "are you still there" never does. Immutable after
+	// construction.
+	presenceProber *presenceProber
+	// firstHopGuards pins WHICH neighbours carry this node's own
+	// privacy-sensitive datagrams, and keeps pinning the same ones. Its own
+	// leaf mutex and its own durable file; no domain mutex is involved, and
+	// the candidate list it reasons over is gathered under s.peerMu BEFORE
+	// it is called. Immutable after construction.
+	firstHopGuards *firstHopGuards
+	// presenceSnap publishes the projection to hot readers. The contact list
+	// repaints every frame, so this follows the routingSnap rule — an
+	// atomic.Pointer read, never a domain mutex.
+	presenceSnap presenceSnapPtr
+	// lastPresenceSnapAtNanos timestamps the last presence projection, for
+	// diagnostics. It is NOT a throttle: it used to be one, and that is
+	// exactly how a proof or a third missed probe could stay unpublished
+	// until an unrelated route changed.
+	lastPresenceSnapAtNanos atomic.Int64
+	// lastPresenceHeartbeatAt is when the projection was last announced.
+	//
+	// A time.Time and NOT a Unix count, because the difference is the whole
+	// point: a value round-tripped through UnixNano loses Go's monotonic
+	// reading, so the elapsed check becomes a wall-clock subtraction. A clock
+	// stepped backwards then makes "time since the last heartbeat" negative,
+	// the reconcile never fires, and — with no periodic full probe after
+	// startup — a dropped presence event leaves the interface stale until the
+	// clock catches up. Which may be hours.
+	//
+	// Guarded by presencePublishMu, which already makes the whole projection
+	// pass exclusive; no atomic is needed and none would restore monotonicity.
+	lastPresenceHeartbeatAt presenceInstant
+	// presenceResolutionAskedAt rate-limits presence-driven identity
+	// resolutions, and presenceResolutionMu guards it. Both are leaf state:
+	// the projection runs every two seconds and must not turn that into a
+	// resolution request per pass.
+	presenceResolutionAskedAt map[domain.PeerIdentity]presenceInstant
+	presenceResolutionMu      sync.Mutex
+	// presencePublishMu serializes projection with publication. Several
+	// goroutines refresh presence — the presence loop, the routing refresher
+	// and each liveness event — and the previous-generation comparison that
+	// decides whether to emit an event is only meaningful under one lock.
+	// Leaf: no domain mutex is taken under it.
+	presencePublishMu sync.Mutex
 	// lastRoutingSnapAtNanos coalesces routingSnap rebuilds: under a steady
 	// route-announce stream the table is dirty on nearly every 500ms tick, so
 	// the dirty gate alone still rebuilt the full deep-copy snapshot 2x/s
@@ -1725,6 +1779,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		identityRelaySessions:    make(map[domain.PeerIdentity]int),
 		pendingWithdrawals:       make(map[domain.PeerIdentity]*pendingWithdrawal),
 		presenceClock:            time.Now,
+		presenceProjector:        newPresenceProjector(),
 		deliveryClock:            time.Now,
 		peerQuarantine:           make(map[domain.PeerIdentity]routeQuarantineEntry),
 		peerDisconnectHistory:    make(map[domain.PeerIdentity][]time.Time),
@@ -2052,6 +2107,19 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// Identity lookup engine: constructed after the self-record so the
 	// datagram handlers registered above observe a fully identified node.
 	svc.identityResolver = newIdentityResolver(svc, loadIdentityIntentStore(cfg.IdentityIntentsPath), selfRecordNetwork)
+	// Built here, next to the resolver, because both consume post_identity
+	// and the ingest has to be able to ask each of them whose answer it is
+	// holding — see postIdentityHandler.
+	svc.presenceProber = newPresenceProber(svc)
+	// Seeded from the peer state loaded above rather than started empty: a set
+	// re-sampled on every launch would rotate first hops once per restart,
+	// which is the failure first_hop_guards.go exists to prevent. It persists
+	// through that same file's single writer — see first_hop_guard_store.go.
+	svc.firstHopGuards = newFirstHopGuards(
+		func() time.Time { return time.Now().UTC() },
+		peerStateGuardPersister{svc: svc},
+		firstHopGuardsFromRows(peerState.FirstHopGuards, peerState.FirstHopGuardsOwner, domain.PeerIdentityFromWire(id.Address)),
+	)
 
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter()
@@ -2334,6 +2402,20 @@ func (s *Service) Run(ctx context.Context) error {
 	// its fan-out, otherwise those sends take the per-goroutine
 	// fallback path.
 	s.startGossipDispatch(ctx)
+
+	// Liveness probing. Started after the connection manager is up, because a
+	// probe before this node has a single peer can only fail, and a failure
+	// this node caused must not be charged to a contact as silence.
+	if s.presenceProber != nil {
+		s.goRunLoop(func() { s.presenceProber.Run(ctx) })
+	}
+	// Presence has a cadence of its own because most of what changes it is
+	// not a routing event: a proof arriving, a probe timing out, a validity
+	// window expiring. Publishing only from the routing refresher left those
+	// invisible on a node whose table was not churning.
+	if s.presenceProjector != nil {
+		s.goRunLoop(func() { s.presenceLoop(ctx) })
+	}
 
 	s.goRunLoop(func() { s.bootstrapLoop(ctx) })
 
@@ -3989,6 +4071,10 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		return s.relayStatusFrame()
 	case "fetch_reachable_ids":
 		return s.reachableIDsFrame()
+	case "fetch_presence":
+		return s.presenceFrame()
+	case "fetch_first_hop_guards":
+		return s.firstHopGuardFrame()
 	case "resolve_identity":
 		return s.resolveIdentityFrame(frame)
 	case "resolve_identity_status":
@@ -5702,6 +5788,12 @@ func (s *Service) deleteTrustedContactFrame(identity domain.PeerIdentity) protoc
 	// should not be delivered.
 	s.dropPendingForRecipient(identity.String())
 
+	// Presence stops caring about a deleted contact, and so must the identity
+	// resolution presence started on their behalf. The intent is DURABLE, so
+	// without this a background lookup for somebody who is no longer in the
+	// address book would survive a restart.
+	s.forgetPresenceResolution(identity)
+
 	ebus.PublishContactRemoved(s.eventBus, identity)
 
 	if err != nil {
@@ -6358,10 +6450,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// recipient could otherwise read but never reply, and the
 		// fallback sync no longer triggers once the pubkey exists).
 		s.importVerifiedSenderKeys(msg)
-		// The envelope signature has just proven who wrote this message.
-		// If they also handed it to us themselves, their node was up a
-		// moment ago — evidence this node observed with its own clock,
-		// which is what the durable presence field is allowed to hold.
+		// Presence, and the DURABLE last-online write, both from the same
+		// arrival — see recordDirectArrivalPresence for why liveness
+		// evidence requires the sender to have handed us the frame over
+		// their OWN session.
 		s.recordDirectArrivalPresence(msg)
 	}
 
@@ -6992,6 +7084,23 @@ func (s *Service) recordDirectArrivalPresence(msg incomingMessage) {
 	if sender.IsZero() || msg.ViaIdentity != sender {
 		return
 	}
+
+	// The sender handed us this frame over their OWN authenticated session,
+	// which is what makes it evidence that their node was up a moment ago —
+	// and it is the reason a relayed copy does NOT qualify.
+	//
+	// A previous revision extended liveness evidence to any frame with a
+	// verified signature, transit included. The signature proves AUTHORSHIP,
+	// not that the author is awake: a relay stores and forwards, and a
+	// re-gossiped copy can arrive hours after the person went away — and can
+	// arrive repeatedly, refreshing the liveness window each time. That is a
+	// contact who is green for as long as the relays keep replaying them.
+	//
+	// So: passive liveness needs the author to have been ON THE OTHER END of
+	// the delivery, not merely at the start of it. A contact reachable only
+	// through transit is served by the probe, which is round-trip and cannot
+	// be replayed, and by the route fallback until they can answer one.
+	s.notePresenceSignedFrame(sender)
 
 	observedAt := s.presenceClock().UTC()
 	local, hasSource := s.identityPresenceSource()

@@ -592,7 +592,43 @@ func (e datagramFrameEmitter) EmitTo(_ context.Context, out datagram.OutboundFra
 	e.runSelectionBarrier()
 
 	frame := protocol.Frame{Type: protocol.DatagramFrameType, RawLine: string(out.Line)}
-	return emitOverCandidates(targets, frame, write, e.send)
+	// The witness is minted here and nowhere else, because this is the last
+	// place that still knows WHICH datagram these bytes are: below it the
+	// frame is an opaque line. It is nil for all but the handful of frames
+	// somebody upstream is waiting to hear about — see watchDatagramWrite.
+	return emitOverCandidates(targets, frame, write, e.send, e.service.watchDatagramWrite(out.Frame))
+}
+
+// watchDatagramWrite mints a write witness for the frames whose sender keeps a
+// per-send record, and nil for every other frame.
+//
+// Today that is exactly one sender: the liveness prober. The gate is its own
+// bookkeeping — "is this label a probe of mine in flight" — rather than a
+// property of the frame, because the SAME dtype and mode are used by identity
+// resolution, which has no such record and needs no witness. Asking the owner
+// is also what keeps this off the hot path: a transit frame, a message, an
+// announce all get nil without touching a lock beyond the prober's own leaf
+// mutex.
+//
+// The channel is handed to the prober BEFORE it goes to the transport, so an
+// answer that overtakes the write still finds an attempt that knows about it.
+func (s *Service) watchDatagramWrite(frame protocol.DatagramFrame) writeWitness {
+	prober := s.presenceProber
+	if prober == nil || !prober.ownsAttempt(frame.Src) {
+		return writeWitness{}
+	}
+	label := frame.Src
+	return writeWitness{mintOne: func() chan struct{} {
+		onWire := make(chan struct{})
+		if !prober.noteProbeOnWire(label, onWire) {
+			// The attempt is already resolved, or has collected as many
+			// witnesses as one send can honestly produce. Handing the writer a
+			// channel nobody reads would still be correct, but returning nil
+			// keeps the walk allocation-free once there is nothing to learn.
+			return nil
+		}
+		return onWire
+	}}
 }
 
 // runSelectionBarrier fires the test-only synchronisation point described on
@@ -605,7 +641,7 @@ func (e datagramFrameEmitter) runSelectionBarrier() {
 
 // candidateSender is the seam emitOverCandidates is tested through: the two
 // tracked senders behind one signature.
-type candidateSender func(datagramSendTarget, protocol.Frame, *netcore.WriteTicket) bool
+type candidateSender func(datagramSendTarget, protocol.Frame, *netcore.WriteTicket, chan struct{}) bool
 
 // emitOverCandidates offers the frame to the connections of ONE peer until one
 // takes it.
@@ -627,14 +663,72 @@ func emitOverCandidates(
 	frame protocol.Frame,
 	write netcore.OutboundWrite,
 	send candidateSender,
+	witness writeWitness,
 ) bool {
 	ticket := netcore.NewWriteTicket(write)
 	for _, target := range targets {
-		if send(target, frame, ticket) {
+		// ONE CHANNEL PER OFFER, never one for the walk.
+		//
+		// The ack is closed by whichever writer accepted the item, and an
+		// accepted item is not the end of the walk: a queue can take the frame
+		// and then answer a refusal, because the gate it reads is checked
+		// AFTER the offer (settleEnqueuedFrame) — the socket was shut in
+		// between. Its writer nevertheless keeps draining what it holds and
+		// closes the ack. The walk meanwhile moves on and a second writer
+		// accepts the same frame; with a shared channel the second close
+		// panics and takes the process down.
+		//
+		// Per-offer channels make the double-write harmless: two closes land on
+		// two channels, and "the frame reached the wire" is the OR of them.
+		ack, observable := witness.mint()
+		if !observable {
+			// A WITNESSED frame that can no longer be witnessed is not offered
+			// any further. The walk is over one peer's connections and the
+			// per-attempt witness slice is bounded, so a peer holding an
+			// unusual number of them could exhaust it — and continuing past
+			// that point would put a frame on the wire that nothing is
+			// watching. Its silence would then never become a strike, so a
+			// contact who is genuinely gone would stay `probing` forever.
+			//
+			// Stopping instead makes the send report "not queued", which the
+			// prober reads as "we never managed to ask" and answers by
+			// dropping the attempt — the same treatment a refused send gets,
+			// and the honest one.
+			// No identifying field: at this depth the frame is an opaque line
+			// and the only honest thing to name is the decision itself.
+			log.Debug().Msg("datagram: witnessed frame not offered further, witness budget spent")
+			return false
+		}
+		if send(target, frame, ticket, ack) {
 			return true
 		}
 	}
 	return false
+}
+
+// writeWitness mints one write-observation channel per offer and hands each to
+// whoever is collecting them. The zero value mints nothing, which is what every
+// frame except a liveness probe gets.
+type writeWitness struct {
+	// mintOne is nil when nobody is watching this frame.
+	mintOne func() chan struct{}
+}
+
+// mint returns this offer's channel and whether the walk may continue.
+//
+// The second value is the part that matters, and it is not the same question as
+// the first. An UNWATCHED frame gets a nil channel and a free walk: nobody is
+// waiting to hear about it. A WATCHED frame whose collector has no room left
+// gets nil and a stop, because offering it anyway would send bytes nothing is
+// observing — and for the one caller that watches, an unobserved send is worse
+// than no send at all: its silence can never be attributed, so a contact who
+// really left would never turn grey.
+func (w writeWitness) mint() (chan struct{}, bool) {
+	if w.mintOne == nil {
+		return nil, true
+	}
+	ack := w.mintOne()
+	return ack, ack != nil
 }
 
 // send hands the frame to the one queue this connection has.
@@ -652,11 +746,12 @@ func (e datagramFrameEmitter) send(
 	target datagramSendTarget,
 	frame protocol.Frame,
 	ticket *netcore.WriteTicket,
+	writeAck chan struct{},
 ) bool {
 	if target.session != nil {
-		return e.service.sendTrackedFrameToSession(target.session, frame, ticket)
+		return e.service.sendTrackedFrameToSession(target.session, frame, ticket, writeAck)
 	}
-	return e.service.sendTrackedFrameToConn(target.connID, frame, ticket)
+	return e.service.sendTrackedFrameToConn(target.connID, frame, ticket, writeAck)
 }
 
 // outboundWrite builds the per-item outbound contract of one frame.
@@ -668,11 +763,18 @@ func (e datagramFrameEmitter) send(
 // 30 s default would let a legitimate frame reach the next hop long after the
 // record that gives it meaning has died.
 //
-// The contract travels ONE WAY: nothing above the writer is told how the write
-// ended, because the layer keeps no per-send record for such a report to reach.
-// That is what makes the candidate walk above a plain loop over a single
-// read-only ticket — with nobody owed an answer, there is no per-offer state
-// left for a ticket to hold.
+// The contract travels ONE WAY: the TICKET is read-only and tells nobody how
+// the write ended, which is what makes the candidate walk above a plain loop
+// over a single shared ticket rather than one ticket per offer.
+//
+// A separate, narrow witness does travel back for the frames whose sender has
+// a per-send record to put it in — today only the liveness probe, which must
+// tell "they did not answer" from "we never managed to ask". It rides beside
+// the ticket rather than inside it (netcore.SendTrackedObserved), and unlike
+// the ticket it is minted PER OFFER: an accepted item can still be refused
+// afterwards while its writer goes on to close the ack, so a channel shared
+// across the walk would be closed twice and panic. The sender therefore
+// collects one witness per offer and reads them as an OR.
 func (e datagramFrameEmitter) outboundWrite(out datagram.OutboundFrame) (netcore.OutboundWrite, error) {
 	grace, err := domain.WriteGrace(out.Class)
 	if err != nil {

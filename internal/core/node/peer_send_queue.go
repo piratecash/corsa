@@ -41,6 +41,21 @@ type peerSendItem struct {
 	// dispatch look like a separate attempt, so a single send charged the
 	// backoff several times over.
 	delivery deliveryDispatchRef
+	// writeAck, when non-nil, is closed by the netcore writer once this
+	// frame's bytes have left the process. It travels with the element for
+	// the same reason the ticket does: the write happens at the far end of
+	// two queues, and a side table keyed by queue element would have to be
+	// kept in sync with both.
+	//
+	// Nil for everything except a liveness probe. Only that caller has to
+	// tell "they did not answer" from "we never managed to ask", because only
+	// it turns silence into a claim about another person. See
+	// netcore.SendTrackedObserved.
+	//
+	// If this queue discards the item — the session closed, the ring
+	// overflowed — the channel is simply never closed, which is the correct
+	// answer: the frame did not reach a socket.
+	writeAck chan struct{}
 }
 
 // deliveryDispatchRef identifies one attempt at one of our own messages.

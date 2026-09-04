@@ -117,7 +117,7 @@ func TestPendingWithdrawalPresenceEvidenceCanBeUpgraded(t *testing.T) {
 	peer := domaintest.ID("presence-evidence-upgrade")
 	svc.maybeScheduleDeferredWithdrawalWithAttribution(peer, nil, nil)
 	t.Cleanup(svc.cancelAllPendingWithdrawalsForShutdown)
-	evidence := &peerOfflineEvidence{observedAt: time.Now().UTC()}
+	evidence := &peerOfflineEvidence{observedAt: presenceInstantAt(time.Now())}
 	svc.maybeScheduleDeferredWithdrawalWithAttribution(peer, nil, evidence)
 
 	svc.peerMu.Lock()

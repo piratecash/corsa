@@ -116,6 +116,14 @@ func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdenti
 }
 
 func (s *Service) maybeScheduleDeferredWithdrawalWithAttribution(peerIdentity domain.PeerIdentity, caps []domain.Capability, presenceEvidence *peerOfflineEvidence) {
+	// Presence is NOT recorded here, and an earlier revision recorded it here.
+	// This function is reached only on the last RELAY session, which is the
+	// right condition for withdrawing routes and the wrong one for a statement
+	// about the person: a contact whose build has no mesh_relay_v1 never gets
+	// here at all and stayed green until their evidence window ran out, while a
+	// contact who closed their relay session but kept another one was written
+	// down as gone. The close is recorded by onPeerSessionClosedWithAttribution
+	// on the last TOTAL session instead.
 	grace := s.effectiveWithdrawalGracePeriod()
 	if grace <= 0 {
 		// Legacy synchronous path — call the body inline.
@@ -352,7 +360,9 @@ func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, ca
 		presenceChange = &ebus.IdentityPresenceChange{
 			Source:     source,
 			Identities: []domain.PeerIdentity{peerIdentity},
-			ChangedAt:  presenceEvidence.observedAt,
+			// Wall(): the change is published on the event bus, where it is a
+			// calendar time for whoever reads it.
+			ChangedAt: presenceEvidence.observedAt.Wall(),
 		}
 	}
 	if err == nil {
@@ -366,6 +376,13 @@ func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, ca
 		return
 	}
 
+	// Presence is NOT recorded here. It was recorded when the close was
+	// observed (maybeScheduleDeferredWithdrawalWithAttribution), because this
+	// body runs one grace period later and waiting for it is the delay the
+	// feature removes. What this path still owns is the DURABLE last-online
+	// record below, which is a different question: that one is a fact written
+	// to disk about a peer that turned out to be unreachable afterwards, so it
+	// legitimately waits until afterwards is known.
 	if presenceChange != nil {
 		s.publishIdentityPresenceChanged(*presenceChange)
 	}

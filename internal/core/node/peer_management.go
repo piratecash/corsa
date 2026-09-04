@@ -238,11 +238,17 @@ func (s *Service) flushPeerState() {
 	sortPeerEntries(entries)
 	entries = trimPeerEntries(entries)
 
+	// The guard set is read here rather than pushed in by its owner: this is
+	// the single writer of the file, and a second writer would be how two
+	// halves of it start clobbering each other. Reading OUTSIDE the peer
+	// mutex, because the set takes its own leaf lock.
 	state := peerStateFile{
-		Version:         peerStateVersion,
-		Peers:           entries,
-		BannedIPs:       bannedIPs,
-		RemoteBannedIPs: remoteBannedIPs,
+		Version:             peerStateVersion,
+		Peers:               entries,
+		BannedIPs:           bannedIPs,
+		RemoteBannedIPs:     remoteBannedIPs,
+		FirstHopGuards:      firstHopGuardRows(s.firstHopGuardEntries()),
+		FirstHopGuardsOwner: s.firstHopGuardOwner(),
 	}
 	if err := savePeerState(path, state); err != nil {
 		log.Error().Str("path", path).Err(err).Msg("peer state save failed")
@@ -5387,8 +5393,9 @@ func (s *Service) sendTrackedFrameToSession(
 	session *peerSession,
 	frame protocol.Frame,
 	ticket *netcore.WriteTicket,
+	writeAck chan struct{},
 ) bool {
-	return s.enqueueSessionSendItem(session, peerSendItem{Frame: frame, ticket: ticket})
+	return s.enqueueSessionSendItem(session, peerSendItem{Frame: frame, ticket: ticket, writeAck: writeAck})
 }
 
 // sendTrackedFrameToConn is the accepted-connection twin of
@@ -5430,6 +5437,7 @@ func (s *Service) sendTrackedFrameToConn(
 	id domain.ConnID,
 	frame protocol.Frame,
 	ticket *netcore.WriteTicket,
+	writeAck chan struct{},
 ) bool {
 	core := s.netCoreForID(id)
 	if core == nil {
@@ -5439,7 +5447,7 @@ func (s *Service) sendTrackedFrameToConn(
 		return false
 	}
 	s.runSendAdmissionBarrier()
-	return core.SendTracked(frame, ticket) == netcore.SendOK
+	return core.SendTrackedObserved(frame, ticket, writeAck) == netcore.SendOK
 }
 
 // pendingRingSize resolves the per-peer pending ring capacity: the operator

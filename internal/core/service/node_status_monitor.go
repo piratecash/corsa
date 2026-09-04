@@ -37,6 +37,23 @@ type NodeStatusProvider interface {
 	// changes, which only rebuild reachability.
 	ReachableIDsSnapshot() map[domain.PeerIdentity]bool
 
+	// PresenceSnapshot returns an independent copy of the per-contact presence
+	// AND the generation it came from — both or neither.
+	//
+	// It has its own event (NodeStatusDomainContactPresence) rather than riding
+	// the route snapshot: most of what moves presence is not a routing event at
+	// all, and the two answer different questions of which only one belongs in
+	// front of a person.
+	//
+	// The pair is returned together because the generation is the SET'S OWN
+	// label, not a clock: a caller that copies one half publishes a projection
+	// under the number of a different one. What that costs depends on who the
+	// caller is — inside the monitor it decides ordering, and in a cache like
+	// DMRouter.cachedNS it simply makes the composed snapshot describe itself
+	// incorrectly to everyone who reads it. Returning both from one read
+	// removes the choice rather than documenting it.
+	PresenceSnapshot() (domain.PresenceSet, uint64)
+
 	// KnownIDsSnapshot returns an independent copy of just the KnownIDs
 	// slice. Cheap counterpart to NodeStatus() for identity-added events.
 	KnownIDsSnapshot() []string
@@ -77,6 +94,12 @@ const (
 	// NodeStatusDomainPresence — a trusted contact's durable LastOnlineAt.
 	// ReachableIDs belongs exclusively to NodeStatusDomainReachableIDs.
 	NodeStatusDomainPresence
+	// NodeStatusDomainContactPresence — the live four-state per-contact
+	// belief (NodeStatus.Presence). Distinct from NodeStatusDomainPresence
+	// above, which is the durable timestamp: one is "when were they last
+	// seen", the other is "are they here now", and they change on different
+	// events.
+	NodeStatusDomainContactPresence
 	// NodeStatusDomainKnownIDs — discovered identity list (identity added).
 	NodeStatusDomainKnownIDs
 	// NodeStatusDomainAggregate — AggregateStatus + CheckedAt (aggregate
@@ -305,6 +328,27 @@ func (m *NodeStatusMonitor) PeerHealthSnapshot() []PeerHealth {
 // KnownIDs / contacts / messages the route change never touched. The values
 // are bools, so the per-entry copy is fully independent of monitor-owned
 // memory, matching the deepCopyNodeStatus contract.
+// PresenceSnapshot returns an independent copy of the per-contact presence.
+//
+// Nil is preserved rather than turned into an empty map: nil means the node has
+// not answered, and an empty map would say "every contact is accounted for and
+// none of them are here" — a claim nobody made.
+// PresenceSnapshot returns the projection and the generation it came from,
+// together, under one lock.
+//
+// Both values or neither: they are two halves of one answer, and a caller that
+// copies only the set leaves the number describing a projection that is no
+// longer there. The interface then holds a new set with an old — or zero —
+// generation, and the next real update is refused as stale.
+//
+// That is exactly why there is no set-only accessor: it existed, two callers
+// used it to patch a cached status, and the pair silently came apart.
+func (m *NodeStatusMonitor) PresenceSnapshot() (domain.PresenceSet, uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.status.Presence.Clone(), m.status.PresenceGeneration
+}
+
 func (m *NodeStatusMonitor) ReachableIDsSnapshot() map[domain.PeerIdentity]bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -489,6 +533,41 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 	// route lost, or a DM handed to us by its own sender — and not at all in
 	// what the UI does with it, which is why they share this handler instead
 	// of having the same monotone apply written twice.
+	// Per-contact presence changed on the node.
+	//
+	// This is the ONLY writer of m.status.Presence outside the full-probe
+	// merge, and that is deliberate. The first version also refreshed
+	// presence from the route handler above, to keep both fields from one
+	// routing generation — but the two handlers run on independent
+	// subscriber goroutines and each fetched outside the lock, so an older
+	// fetch could land after a newer one and stick until the next event. One
+	// field, one writer is worth more here than two fields from one instant:
+	// each field is internally consistent, and presence is what the contact
+	// list actually reads.
+	//
+	// Nothing is lost by dropping the other fetch: the node publishes this
+	// event whenever the projection changes, INCLUDING from its routing
+	// refresher, so a route-driven presence change still arrives — it simply
+	// arrives on its own event.
+	//
+	// The subscription is separate from the route one because most of what
+	// moves presence is not a routing event at all: a proof arriving, a probe
+	// timing out, a validity window expiring. On a node whose table is not
+	// churning, none of those would otherwise reach the interface.
+	m.eventBus.Subscribe(ebus.TopicContactPresenceUpdated, func(struct{}) {
+		fresh, generation := m.client.BuildPresence()
+		m.mu.Lock()
+		applied := m.applyPresenceLocked(fresh, generation)
+		m.mu.Unlock()
+		if !applied {
+			// Somebody else already applied this projection or a later one.
+			// Repainting on it would be a no-op at best; announcing it would
+			// tell subscribers something changed when nothing did.
+			return
+		}
+		m.notifyPartial(NodeStatusDomainContactPresence)
+	})
+
 	m.eventBus.Subscribe(ebus.TopicIdentityPresenceChanged, func(change ebus.IdentityPresenceChange) {
 		m.applyIdentityPresence(change, presenceFromRouting)
 	})
@@ -1343,7 +1422,49 @@ func (m *NodeStatusMonitor) mergeNodeStatusLocked(s NodeStatus) {
 		m.ebusAggregateCountersSeeded, m.ebusVersionPolicySeeded,
 	)
 	m.status.ReachableIDs = mergeReachableIDs(m.status.ReachableIDs, s.ReachableIDs)
+	// Presence does NOT merge per key, and that is the correction of a real
+	// bug rather than a simplification.
+	//
+	// The projection is a WHOLE-SET answer: every pass of the node covers every
+	// contact. So the event handler and this probe never hold complementary
+	// halves — they hold the same picture read at two moments, and the only
+	// question is which moment is later. The previous rule ("events win per
+	// key, they are newer by construction") assumed an ordering that does not
+	// exist: both readers fetch the snapshot pointer independently, and a probe
+	// that read it a moment later could be overwritten by an event that read it
+	// earlier. On a node starting up that showed a stale status, and if the
+	// next best-effort event was dropped it stayed stale until the one-minute
+	// heartbeat.
+	//
+	// Applying the LATER of the two also keeps what the per-key merge was
+	// protecting: attaching to an already-running node still gets the probe's
+	// full projection, because a monitor that has seen no event has generation
+	// zero and anything beats it.
+	m.applyPresenceLocked(s.Presence, s.PresenceGeneration)
 	m.status.CaptureSessions = mergeCaptureSessions(m.status.CaptureSessions, s.CaptureSessions)
+}
+
+// applyPresenceLocked stores a projection only if it is later than the one
+// already held, and reports whether it did.
+//
+// A zero generation is refused outright: it means the node has not projected
+// yet, which is "nothing is known" and not "an empty projection". Overwriting a
+// real set with it would turn silence into a claim that nobody is present.
+//
+// Equal generations are refused too — the two readers fetched the same
+// projection, so there is nothing to apply and nothing to announce.
+//
+// Caller must hold m.mu.
+func (m *NodeStatusMonitor) applyPresenceLocked(set domain.PresenceSet, generation uint64) bool {
+	if generation == 0 || generation <= m.status.PresenceGeneration {
+		return false
+	}
+	// Both halves move together, and there is only ONE copy of the generation.
+	// A private field beside the published one is two places to forget, and
+	// NodeStatus would then hand out a set carrying somebody else's number.
+	m.status.Presence = set
+	m.status.PresenceGeneration = generation
+	return true
 }
 
 // ── Package-level merge helpers ──

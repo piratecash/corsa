@@ -312,6 +312,8 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"add_peer":                       "addPeer",
 		"connect_only":                   "connectOnly",
 		"fetch_reachable_ids":            "fetchReachableIds",
+		"fetch_presence":                 "fetchPresence",
+		"fetch_first_hop_guards":         "fetchFirstHopGuards",
 		"resolve_identity":               "resolveIdentity",
 		"resolve_identity_status":        "resolveIdentityStatus",
 		"identity_backup":                "identityBackup",
@@ -744,6 +746,44 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 				return r
 			}
 			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_reachable_ids"}))
+		},
+	)
+
+	t.Register(
+		CommandInfo{
+			Name: "fetchPresence",
+			// Deliberately spells out that this is NOT the routing answer:
+			// the two were the same value for a long time, and the whole
+			// point of the command is to show WHY a contact looks the way
+			// it does — proven by their signature, or merely inferred from
+			// a route that may outlive them.
+			Description: "Per-contact presence with its source (proof / passive / route_fallback / …). Not the same as fetchReachableIds, which answers the routing question",
+			Category:    "identity",
+		},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_presence"}))
+		},
+	)
+
+	t.Register(
+		CommandInfo{
+			Name: "fetchFirstHopGuards",
+			// The counters are the point, not the list. The guard policy's
+			// promises are about rates — how often the leading hop changed,
+			// how far the set grew, how much traffic left through a
+			// neighbour outside it — and each of those failures leaves an
+			// ordinary looking set behind.
+			Description: "The first-hop guard set and its counters: which neighbours carry this node's own probes, and whether the policy is actually holding",
+			Category:    "identity",
+		},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "fetch_first_hop_guards"}))
 		},
 	)
 

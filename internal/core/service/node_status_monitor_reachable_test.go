@@ -136,3 +136,133 @@ reachabilityVerified:
 		t.Fatalf("presence event rewrote ReachableIDs: %v", reachable)
 	}
 }
+
+func presenceOnlineProof() domain.Presence {
+	return domain.OnlinePresence(domain.PresenceSourceProof)
+}
+
+func presenceOfflineProbeTimeout() domain.Presence {
+	return domain.OfflinePresence(domain.PresenceSourceProbeTimeout)
+}
+
+func domainPresenceFixture(wire string, presence domain.Presence) domain.PresenceSet {
+	return domain.PresenceSet{domain.PeerIdentityFromWire(wire): presence}
+}
+
+func onlyPresenceKey(t *testing.T, set domain.PresenceSet) domain.PeerIdentity {
+	t.Helper()
+	for identity := range set {
+		return identity
+	}
+	t.Fatal("presence fixture is empty")
+	return domain.PeerIdentity{}
+}
+
+// TestTheLaterProjectionWins covers what happens when two readers of the same
+// projection race, and it replaces a test that pinned the opposite.
+//
+// Presence is a WHOLE-SET answer: every pass of the node covers every contact.
+// So the presence event and a full probe never hold complementary halves — they
+// hold one picture read at two moments. The old rule said "events win per key,
+// they are newer by construction", and that construction does not exist: both
+// readers fetch the snapshot pointer independently, so a probe that read it
+// LATER could be overwritten by an event that read it earlier. On a starting
+// node that showed a stale status, and a dropped best-effort event left it
+// stale until the one-minute heartbeat.
+func TestTheLaterProjectionWins(t *testing.T) {
+	key := "1111111111111111111111111111111111111111"
+	early := domainPresenceFixture(key, presenceOfflineProbeTimeout())
+	late := domainPresenceFixture(key, presenceOnlineProof())
+	identity := onlyPresenceKey(t, late)
+
+	m := &NodeStatusMonitor{}
+
+	// The probe read generation 2; the event read generation 1 and applies
+	// second. It must not undo the newer picture.
+	if !m.applyPresenceLocked(late, 2) {
+		t.Fatal("the first projection was refused")
+	}
+	if m.applyPresenceLocked(early, 1) {
+		t.Fatal("an OLDER projection was applied over a newer one: whichever reader " +
+			"happens to finish last would decide the status")
+	}
+	if got := m.status.Presence.Get(identity); got != late.Get(identity) {
+		t.Fatalf("presence rolled back to %s", got)
+	}
+
+	// The later one still wins when it arrives second, which is the ordinary case.
+	if !m.applyPresenceLocked(early, 3) {
+		t.Fatal("a newer projection was refused")
+	}
+	if got := m.status.Presence.Get(identity); got != early.Get(identity) {
+		t.Fatalf("the newer projection did not land: got %s", got)
+	}
+}
+
+// TestTheSameGenerationIsNotReapplied: two readers that fetched the SAME
+// projection have nothing to tell each other. Applying it twice would announce
+// a change that did not happen.
+func TestTheSameGenerationIsNotReapplied(t *testing.T) {
+	set := domainPresenceFixture("4444444444444444444444444444444444444444", presenceOnlineProof())
+	m := &NodeStatusMonitor{}
+	if !m.applyPresenceLocked(set, 7) {
+		t.Fatal("the first projection was refused")
+	}
+	if m.applyPresenceLocked(set, 7) {
+		t.Fatal("the same generation was applied twice")
+	}
+}
+
+// TestTheGenerationAlwaysMatchesTheSet: NodeStatus hands both out together, and
+// a reader comparing them against another node's answer needs them to describe
+// each other. A private counter beside the published one is two places to
+// forget.
+func TestTheGenerationAlwaysMatchesTheSet(t *testing.T) {
+	set := domainPresenceFixture("5555555555555555555555555555555555555555", presenceOnlineProof())
+	m := &NodeStatusMonitor{}
+	if !m.applyPresenceLocked(set, 11) {
+		t.Fatal("projection refused")
+	}
+	if m.status.PresenceGeneration != 11 {
+		t.Fatalf("published generation is %d while the set came from 11: NodeStatus "+
+			"would hand out a set with somebody else's number", m.status.PresenceGeneration)
+	}
+}
+
+// TestAnUngeneratedProjectionIsNotAnEmptyOne: a node that has not projected yet
+// answers with generation zero. Treating that as a real (empty) projection would
+// replace "nothing is known" with "nobody is present" — and every contact would
+// drop to the routing fallback for as long as it stuck.
+func TestAnUngeneratedProjectionIsNotAnEmptyOne(t *testing.T) {
+	key := "2222222222222222222222222222222222222222"
+	known := domainPresenceFixture(key, presenceOnlineProof())
+	identity := onlyPresenceKey(t, known)
+
+	m := &NodeStatusMonitor{}
+	if !m.applyPresenceLocked(known, 1) {
+		t.Fatal("a numbered projection was refused")
+	}
+	if m.applyPresenceLocked(nil, 0) {
+		t.Fatal("an unnumbered answer was applied: 'the node has not projected yet' " +
+			"was turned into 'nobody is present'")
+	}
+	if got := m.status.Presence.Get(identity); got != known.Get(identity) {
+		t.Fatalf("a known projection was wiped by an unnumbered one: got %s", got)
+	}
+}
+
+// TestProbePresenceStillSeedsAnAttachedMonitor keeps the property the removed
+// per-key merge was protecting: attaching to an already-running node must get
+// the probe's full projection, because a quiet node emits no events at all and
+// the contact list would otherwise sit on the reachability fallback forever.
+func TestProbePresenceStillSeedsAnAttachedMonitor(t *testing.T) {
+	fromProbe := domainPresenceFixture("3333333333333333333333333333333333333333", presenceOnlineProof())
+	m := &NodeStatusMonitor{}
+	if !m.applyPresenceLocked(fromProbe, 1) {
+		t.Fatal("a monitor that has seen no event refused the probe's projection: " +
+			"attaching to a running node would show no presence at all")
+	}
+	if len(m.status.Presence) != 1 {
+		t.Fatalf("probe presence: got %d entries, want 1", len(m.status.Presence))
+	}
+}

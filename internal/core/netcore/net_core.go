@@ -841,6 +841,36 @@ func (pc *NetCore) SendRawTracked(data []byte, ticket *WriteTicket) SendStatus {
 	return pc.queueFrame(sendItem{data: data, ticket: ticket})
 }
 
+// SendTrackedObserved is SendTracked with a WITNESS: the caller supplies a
+// channel the writer closes once this frame's bytes have left the process.
+//
+// It exists for one caller and one question. The liveness probe turns silence
+// into evidence about another person, and its specification is explicit that a
+// probe which never reached the network is not evidence at all — so it has to
+// tell "they did not answer" from "we never managed to ask". Every step below
+// can swallow a frame silently: a class queue drops it on its send deadline, a
+// session queue is discarded when the session closes, writeItem skips an
+// expired ticket, and drainQueued throws away everything behind a broken link.
+// NONE of those closes the ack, which is what makes an unclosed ack the honest
+// answer to the question.
+//
+// This is NOT the terminal machinery write_ticket.go describes as removed. That
+// was an observer attached to the TICKET, which is shared across a candidate
+// walk and therefore needed a once-guard and a burn-on-refusal rule; this is
+// the ack channel the sync entry points have always used, handed over instead
+// of waited on. The ticket still carries nothing back.
+//
+// The caller must never close the channel itself: closing it is the writer's
+// statement that the bytes left, and a caller closing it would be asserting a
+// write that did not happen. A nil ack makes this identical to SendTracked.
+func (pc *NetCore) SendTrackedObserved(frame protocol.Frame, ticket *WriteTicket, ack chan struct{}) SendStatus {
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		return SendMarshalError
+	}
+	return pc.queueFrame(sendItem{data: []byte(line), ack: ack, ticket: ticket})
+}
+
 // SendSync enqueues a frame and blocks until the writer goroutine flushes
 // it to the socket.
 func (pc *NetCore) SendSync(frame protocol.Frame) SendStatus {

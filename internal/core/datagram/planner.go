@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -66,6 +67,101 @@ func (a AvoidedNextHop) Peer() (domain.PeerIdentity, bool) {
 	return a.peer, true
 }
 
+// PreferredFirstHops is an ordered list of neighbours a local send would like
+// to hand the frame to, tried before every other candidate.
+//
+// It is a PREFERENCE and never a filter. The layer's job is to place the frame;
+// refusing to send because a named neighbour has no route to the destination
+// would turn a privacy policy into a delivery failure, which is not a trade the
+// transport gets to make on the caller's behalf. What the caller gets is the
+// guarantee that a listed hop, when it is a usable candidate at all, goes
+// first — and that the order among listed hops is theirs, not the ranking's.
+//
+// Why the layer takes this at all instead of the caller re-ordering afterwards:
+// the candidate walk is where a hop is actually chosen (the first one whose
+// queue accepts takes the frame), and that walk is not reachable from outside.
+//
+// The zero value is "no preference", and it is not a zero-value business
+// signal: an empty list means the ordinary ranking decides, and there is no
+// identity a caller could name to mean the same thing.
+type PreferredFirstHops struct {
+	peers []domain.PeerIdentity
+}
+
+// NoFirstHopPreference is the explicit "let the ranking decide" value.
+func NoFirstHopPreference() PreferredFirstHops { return PreferredFirstHops{} }
+
+// PreferFirstHops names the neighbours to try first, most preferred first.
+// Zero identities are dropped: a caller with nothing to say says it by passing
+// nothing, not by passing a zero.
+func PreferFirstHops(peers ...domain.PeerIdentity) PreferredFirstHops {
+	kept := make([]domain.PeerIdentity, 0, len(peers))
+	for _, peer := range peers {
+		if !peer.IsZero() {
+			kept = append(kept, peer)
+		}
+	}
+	if len(kept) == 0 {
+		return PreferredFirstHops{}
+	}
+	return PreferredFirstHops{peers: kept}
+}
+
+// Empty reports whether nothing is preferred.
+func (p PreferredFirstHops) Empty() bool { return len(p.peers) == 0 }
+
+// Peers returns the preference in order. The slice is a copy: the caller reads
+// it to attribute an outcome, and a shared backing array would let that reading
+// change the preference a concurrent send is walking.
+func (p PreferredFirstHops) Peers() []domain.PeerIdentity {
+	return append([]domain.PeerIdentity(nil), p.peers...)
+}
+
+// rank returns the position of peer in the preference, and whether it is
+// listed at all. Linear because the list is three entries by construction
+// (Tor's PRIMARY size); a map here would cost more than it saves.
+func (p PreferredFirstHops) rank(peer domain.PeerIdentity) (int, bool) {
+	for i, want := range p.peers {
+		if want == peer {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// hoist re-orders candidates so that preferred next hops come first, in
+// preference order, and everything else keeps its ranking order behind them.
+//
+// STABLE on both sides, deliberately. The tail must stay in ranking order
+// because that order is the deliverability judgement (protocol version, hops,
+// connection age), and the head must stay in preference order because that
+// order is the caller's guard policy — a set of first hops that silently
+// re-sorted itself by hop count would be a rotation, which is the thing the
+// policy exists to prevent.
+func (p PreferredFirstHops) hoist(candidates []RouteCandidate) []RouteCandidate {
+	if p.Empty() || len(candidates) < 2 {
+		return candidates
+	}
+	preferred := make([]RouteCandidate, 0, len(p.peers))
+	rest := make([]RouteCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, listed := p.rank(candidate.nextHop); listed {
+			preferred = append(preferred, candidate)
+			continue
+		}
+		rest = append(rest, candidate)
+	}
+	if len(preferred) == 0 {
+		return candidates
+	}
+	sort.SliceStable(preferred, func(i, j int) bool {
+		left, _ := p.rank(preferred[i].nextHop)
+		right, _ := p.rank(preferred[j].nextHop)
+		return left < right
+	})
+	return append(preferred, rest...)
+}
+
 // ---------------------------------------------------------------------------
 // Request
 // ---------------------------------------------------------------------------
@@ -90,6 +186,11 @@ type sendJob struct {
 	// SELECTION, not a post-filter: §4.3 applies it before direct-first and
 	// therefore before the explore rotation counts its modulus.
 	avoid AvoidedNextHop
+	// firstHop is the caller's guard policy: neighbours to try before the
+	// ranking's own order. Local sends only — a transited frame's first hop
+	// was chosen by whoever originated it, and re-aiming it here would leak
+	// this node's guard set into somebody else's path.
+	firstHop PreferredFirstHops
 	// readOnly marks a selection that will NOT publish: the early
 	// deliverability sieve of §4.1 step 7. §4.3 is explicit that the explore
 	// counter mutates on a SEND, so a read-only look must leave it alone —
@@ -179,16 +280,46 @@ func (k SendOutcomeKind) String() string { return enumName(sendOutcomeKindNames,
 // after an enqueue would send the same ciphertext a second time in a legacy
 // envelope — a duplicate attempt that the contract says does not exist.
 type SendOutcome struct {
-	err     error
-	nextHop domain.PeerIdentity
-	missing domain.CapabilityName
-	kind    SendOutcomeKind
-	reason  RejectionReason
-	local   bool
+	err error
+	// attempted is who the walk actually offered the frame to, in order,
+	// ending with the hop that took it. Empty for every outcome produced
+	// before a walk happened. See Attempted.
+	attempted []domain.PeerIdentity
+	nextHop   domain.PeerIdentity
+	missing   domain.CapabilityName
+	kind      SendOutcomeKind
+	reason    RejectionReason
+	local     bool
 }
 
-func queuedOutcome(local bool, nextHop domain.PeerIdentity) SendOutcome {
-	return SendOutcome{kind: SendQueued, nextHop: nextHop, local: local}
+// Attempted returns the next hops this send really offered the frame to, in
+// the order it offered them; the last entry is the one that took it when the
+// outcome is `queued`.
+//
+// It exists for a caller that keeps a first-hop policy and has to attribute
+// the result. Reconstructing this from the candidate list is wrong twice over:
+// the walk stops at the first acceptance, so later candidates were never
+// asked, and a neighbour outside the policy can be the one that carried the
+// frame. Both errors are silent — the first invents failures for working
+// neighbours, the second under-counts who has seen our traffic.
+//
+// The slice is a copy: the caller reads it to update durable policy state, and
+// sharing the walk's backing array would let that update reach into an outcome
+// another goroutine is still holding.
+func (o SendOutcome) Attempted() []domain.PeerIdentity {
+	return append([]domain.PeerIdentity(nil), o.attempted...)
+}
+
+// withAttempted attaches the walk's record to an outcome built by a helper
+// that does not know it. Value receiver: outcomes are values everywhere else
+// in this file and a pointer here would be the only exception.
+func (o SendOutcome) withAttempted(attempted []domain.PeerIdentity) SendOutcome {
+	o.attempted = attempted
+	return o
+}
+
+func queuedOutcome(local bool, nextHop domain.PeerIdentity, attempted []domain.PeerIdentity) SendOutcome {
+	return SendOutcome{kind: SendQueued, nextHop: nextHop, local: local, attempted: attempted}
 }
 
 func noRouteOutcome(local bool) SendOutcome {
@@ -392,6 +523,7 @@ func (s *Scheduler) selectFor(ctx context.Context, job sendJob) candidateSelecti
 	opts := selectionOpts{
 		incomingPeer: job.incoming,
 		avoid:        job.avoid,
+		firstHop:     job.firstHop,
 		rotate:       !job.readOnly && job.frame.RoutePolicy == domain.RoutePolicyExplore,
 	}
 	return s.ordinaryCandidates(ctx, job.frame, opts)
@@ -430,6 +562,13 @@ func (s *Scheduler) ordinaryCandidates(
 	if opts.rotate {
 		ranked = s.rotator.rotate(ranked, newExploreKey(frame.Dst, frame.DType))
 	}
+	// The guard preference is applied AFTER the rotation and never instead of
+	// it. The two are opposite policies — one pins a first hop, the other
+	// spreads across them — and a caller that sets both has asked for a
+	// contradiction; resolving it in favour of the pin is the safe direction,
+	// because the harm the pin prevents (a new coin flip per attempt) is
+	// cumulative and the harm the rotation prevents is not.
+	ranked = opts.firstHop.hoist(ranked)
 
 	if direct.present && direct.admission.admitted {
 		selection.candidates = append(make([]RouteCandidate, 0, len(ranked)+1), direct.candidate)
@@ -542,10 +681,21 @@ func (s *Scheduler) dispatch(
 	}
 
 	var failure error
+	// attempted is the walk's own record of who was actually OFFERED the
+	// frame. The candidate list is not that record: it is what the ranking
+	// produced before the walk, and the walk stops at the first acceptance, so
+	// everything after that point was never asked.
+	//
+	// It exists because a caller with a first-hop policy has to attribute the
+	// outcome, and attributing it from the candidate list is wrong in both
+	// directions — it blames neighbours that were never offered the frame, and
+	// it misses that a neighbour outside the policy carried it.
+	attempted := make([]domain.PeerIdentity, 0, len(selection.candidates))
 	for _, candidate := range selection.candidates {
+		attempted = append(attempted, candidate.nextHop)
 		outcome := publish(ctx, candidate)
 		if outcome.Enqueued() {
-			return queuedOutcome(local, candidate.nextHop)
+			return queuedOutcome(local, candidate.nextHop, attempted)
 		}
 		if failure == nil {
 			failure = outcome.Err()
@@ -558,7 +708,7 @@ func (s *Scheduler) dispatch(
 			Msg("datagram: next hop refused the frame, trying next candidate")
 	}
 
-	return failedOutcome(local, enqueueFailure(failure, len(selection.candidates)))
+	return failedOutcome(local, enqueueFailure(failure, len(selection.candidates))).withAttempted(attempted)
 }
 
 // enqueueFailure names the walk that found candidates and placed nothing. A

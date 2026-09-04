@@ -902,6 +902,153 @@ func lastReadingFor(svc *Service, recipient string) (reachable, measured bool) {
 	return record.reachable, measured
 }
 
+// TestPresenceObservedAbsenceEarnsTheAcceleration covers the recipient the
+// pass cannot count: one reachable through a transit hop throughout. No pass
+// ever measures them away, so their visit never ends, and their return earned
+// nothing — the message stayed on a backoff that reaches eleven minutes while
+// the person was demonstrably back.
+//
+// What ends the visit is presence OBSERVING THE ABSENCE, not presence
+// reporting the return. The distinction is the whole of the fix: see
+// TestOnePhysicalReturnIsOneAccelerationHoweverManySawIt for what the other
+// choice cost.
+func TestPresenceObservedAbsenceEarnsTheAcceleration(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+	svc.cfg.HoldDMUntilReachable = true
+
+	recipientID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	// Attached for the whole test: the pass can always reach them, which is
+	// exactly the case the visit counter is blind to.
+	attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7531))
+
+	createdAt := time.Now().UTC().Add(-72 * time.Hour)
+	envelope := protocol.Envelope{
+		ID: "presence-return-1", Topic: "dm",
+		Sender: svc.Address(), Recipient: recipientID.Address,
+		Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
+	}
+	stalledOnWireEntry(t, svc, envelope, 5*time.Minute)
+	peer := domain.PeerIdentityFromWire(recipientID.Address)
+
+	svc.wakeOverdueForReturningPeer(peer, time.Now().UTC())
+	parked := parkDeliveryOnTheTail(t, svc, envelope.ID)
+
+	// A second return with nothing in between is a repeat, and must do
+	// nothing.
+	svc.wakeOverdueForReturningPeer(peer, time.Now().UTC())
+	if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+		t.Fatalf("a repeated return must not step over the backoff: %v → %v", parked, got)
+	}
+
+	// Presence sees them go: a probe went unanswered while the path stayed
+	// visible. That is the absence, and it earns the next acceleration.
+	svc.presenceProjector.noteProbeUnanswered(peer, svc.presenceNow())
+	now := time.Now().UTC()
+	svc.wakeOverdueForReturningPeer(peer, now)
+	if want, got := now.Add(deliveryRetryBackoff(0)), scheduleOf(t, svc, envelope.ID); !got.Equal(want) {
+		t.Fatalf("the return after a presence-observed absence earned nothing: parked %v, want %v, got %v", parked, want, got)
+	}
+}
+
+// TestOnePhysicalReturnIsOneAccelerationHoweverManySawIt pins the contract
+// that a second occasion counter broke: one departure and one return earn ONE
+// accelerated attempt, however many observers report that return.
+//
+// The counter lives on the ABSENCE side for this reason and no other. Counting
+// returns instead — a separate presenceReturn counter beside visit — meant the
+// pass measuring "reachable again" and the proof arriving moments later were
+// each fresh to the other's spend, so one physical return pulled the message
+// off its backoff twice: once, then again after the backoff had been rebuilt.
+// Extra bumps for one absence are harmless (a return spends against the current
+// value, once); extra bumps for one return are the duplicate.
+func TestOnePhysicalReturnIsOneAccelerationHoweverManySawIt(t *testing.T) {
+	t.Parallel()
+
+	// Each case is the SAME physical return seen twice, in both orders. The
+	// second observer must find the occasion already spent.
+	for _, order := range []struct {
+		name   string
+		first  func(*Service, domain.PeerIdentity, time.Time)
+		second func(*Service, domain.PeerIdentity, time.Time)
+	}{
+		{
+			name:   "the pass sees it, then the proof arrives",
+			first:  func(s *Service, p domain.PeerIdentity, at time.Time) { s.retryDueDeliveries(at) },
+			second: (*Service).wakeOverdueForReturningPeer,
+		},
+		{
+			name:   "the session event lands, then the proof arrives",
+			first:  (*Service).wakeOverdueForReturningPeer,
+			second: (*Service).wakeOverdueForReturningPeer,
+		},
+		{
+			name:   "the proof arrives, then the pass sees it",
+			first:  (*Service).wakeOverdueForReturningPeer,
+			second: func(s *Service, p domain.PeerIdentity, at time.Time) { s.retryDueDeliveries(at) },
+		},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
+			svc := newTestService(t, config.NodeTypeFull)
+			svc.cfg.HoldDMUntilReachable = true
+
+			recipientID, err := identity.Generate()
+			if err != nil {
+				t.Fatalf("identity.Generate: %v", err)
+			}
+			attachPushObserver(t, svc, recipientID.Address, netcore.ConnID(7532))
+
+			createdAt := time.Now().UTC().Add(-72 * time.Hour)
+			envelope := protocol.Envelope{
+				ID: "one-return-1", Topic: "dm",
+				Sender: svc.Address(), Recipient: recipientID.Address,
+				Payload: []byte("sealed"), CreatedAt: createdAt, StoredAt: createdAt,
+			}
+			stalledOnWireEntry(t, svc, envelope, 5*time.Minute)
+			peer := domain.PeerIdentityFromWire(recipientID.Address)
+
+			// One departure, measured by the pass — the ordinary case, and the
+			// one that earns exactly one accelerated attempt.
+			gone := detachPushObserver(t, svc, recipientID.Address)
+			svc.retryDueDeliveries(time.Now().UTC())
+			if reachable, measured := lastReadingFor(svc, recipientID.Address); !measured || reachable {
+				t.Fatal("the pass must have measured them unreachable, or this is not the case under test")
+			}
+			reattachPushObserver(t, svc, recipientID.Address, gone)
+			parkDeliveryOnTheTail(t, svc, envelope.ID)
+
+			// The return, seen by the first observer: it spends the occasion.
+			order.first(svc, peer, time.Now().UTC())
+			svc.WaitBackground()
+			parked := parkDeliveryOnTheTail(t, svc, envelope.ID)
+
+			// And by the second, which is the SAME return: nothing more is
+			// owed, so the schedule must not move.
+			order.second(svc, peer, time.Now().UTC())
+			svc.WaitBackground()
+			if got := scheduleOf(t, svc, envelope.ID); !got.Equal(parked) {
+				t.Fatalf("one return earned two accelerations: %v → %v", parked, got)
+			}
+		})
+	}
+}
+
+// parkDeliveryOnTheTail puts one delivery back on the far end of its backoff
+// with its receipt window long expired, so the next acceleration — or its
+// absence — is unambiguous.
+func parkDeliveryOnTheTail(t *testing.T, svc *Service, id protocol.MessageID) time.Time {
+	t.Helper()
+	svc.deliveryMu.Lock()
+	defer svc.deliveryMu.Unlock()
+	svc.awaitingDelivered[id].NextAttemptAt = time.Now().UTC().Add(11 * time.Minute)
+	svc.awaitingDelivered[id].LastEmittedAt = time.Now().UTC().Add(-5 * time.Minute)
+	return svc.awaitingDelivered[id].NextAttemptAt
+}
+
 // TestAccelerationIsEarnedAgainByAnAbsence is the other half of the same
 // rule. Spending the accelerated attempt must not disarm the feature for
 // good: a recipient this node genuinely cannot reach, and then can, is the

@@ -17,6 +17,7 @@ Related documentation:
 
 - [encryption.md](../encryption.md) — cryptographic primitives
 - [mesh.md](../mesh.md) — mesh network topology, peer scoring, gossip
+- [presence.md](presence.md) — per-contact presence: the four states, what each rests on, the liveness probe, the first-hop guard set, and the `fetch_presence` / `fetch_first_hop_guards` commands
 - [debug.md](../debug.md) — log levels and protocol tracing
 
 ### Command index
@@ -88,6 +89,8 @@ Not every command is available on every connection type. Commands are split acro
 | `publish_notice` | yes | — | — |
 | `fetch_notices` | yes | — | — |
 | `fetch_reachable_ids` | yes | — | — |
+| `fetch_presence` | yes | — | — |
+| `fetch_first_hop_guards` | yes | — | — |
 | `delete_trusted_contact` | yes | — | — |
 
 ### Network config
@@ -178,6 +181,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 
 - [encryption.md](../encryption.md) — криптографические примитивы
 - [mesh.md](../mesh.md) — топология mesh-сети, scoring пиров, gossip
+- [presence.md](presence.md) — присутствие контакта: четыре состояния, на чём каждое стоит, liveness-проба, набор guard-ов первого хопа и команды `fetch_presence` / `fetch_first_hop_guards`
 - [debug.md](../debug.md) — уровни логирования и трассировка протокола
 
 ### Индекс команд
@@ -249,6 +253,8 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 | `publish_notice` | да | — | — |
 | `fetch_notices` | да | — | — |
 | `fetch_reachable_ids` | да | — | — |
+| `fetch_presence` | да | — | — |
+| `fetch_first_hop_guards` | да | — | — |
 | `delete_trusted_contact` | да | — | — |
 
 ### Сетевой конфиг

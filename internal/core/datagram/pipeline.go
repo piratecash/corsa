@@ -1196,6 +1196,10 @@ type LocalSendOpts struct {
 	// Avoid is the optional avoid_next_hop exclusion (§4.3). It never
 	// reaches the wire.
 	Avoid AvoidedNextHop
+	// FirstHop is the caller's first-hop preference — the guard set of
+	// docs/protocol/presence.md §4.2. It never reaches the wire, and it never
+	// removes a candidate: see PreferredFirstHops.
+	FirstHop PreferredFirstHops
 }
 
 // SendLocal places a frame this node created.
@@ -1263,6 +1267,7 @@ func (p *Pipeline) sendLocalRouted(ctx context.Context, opts LocalSendOpts) Send
 		incoming:  LocalIngress(),
 		deadlines: deadlines,
 		avoid:     opts.Avoid,
+		firstHop:  opts.FirstHop,
 	})
 }
 

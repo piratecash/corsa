@@ -15,10 +15,22 @@ import (
 //	2 — offline + unread messages
 //	3 — offline, no unread
 //
-// When ReachableIDs is nil (probe not yet completed), all peers are treated
-// as offline (tiers 2/3), so the sort degrades to a 2-tier unread/read order.
+// "Online" here is the SAME answer the avatar draws, and it has to be: a
+// contact sorted into the online group while their avatar is grey is a
+// contradiction the user has no way to resolve. It therefore reads the presence
+// projection through contactPresence rather than consulting ReachableIDs on its
+// own — a stale route used to put a departed contact at the top of the list
+// under a grey dot.
+//
+// Both online states count as online, the proven one and the inferred one: the
+// dotted ring says how much the claim is worth, and that is a question about
+// this contact, not about where they belong in a list.
+//
+// When the node has answered nothing yet, every peer is treated as offline
+// (tiers 2/3), so the sort degrades to a 2-tier unread/read order.
 func sidebarPeerTier(peer domain.PeerIdentity, snap service.RouterSnapshot) int {
-	online := snap.NodeStatus.ReachableIDs != nil && snap.NodeStatus.ReachableIDs[peer]
+	presence := contactPresence(snap.NodeStatus, peer)
+	online := presence == contactPresenceOnline || presence == contactPresenceOnlineInferred
 	hasUnread := false
 	if ps, ok := snap.Peers[peer]; ok {
 		hasUnread = ps.Unread > 0

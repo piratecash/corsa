@@ -60,10 +60,7 @@ const (
 func registerIdentityDiscoveryTypes(types *datagram.TypeRegistry, svc *Service, network domain.NetworkID) error {
 	clock := func() time.Time { return time.Now().UTC() }
 
-	getHandler := &getIdentityHandler{
-		svc: svc, network: network, clock: clock,
-		seenRequesterAttempts: map[domain.PeerIdentity]time.Time{},
-	}
+	getHandler := newGetIdentityHandler(svc, network, clock)
 	if err := types.Register(datagram.TypeRegistration{
 		DType:   domain.DTypeGetIdentity,
 		Modes:   []domain.DatagramMode{domain.DatagramModeRequest},
@@ -128,6 +125,48 @@ type getIdentityHandler struct {
 	// seenRequesterAttempts dedups the "you were looked up" notification by
 	// attempt label within the freshness window.
 	seenRequesterAttempts map[domain.PeerIdentity]time.Time
+
+	// livenessReplay is the one-question-one-answer set for probes: an
+	// attempt label that has already been answered on the sealed path is
+	// never answered again. Its own mutex, so it is not on h.mu.
+	livenessReplay *rotatingHashDedup
+}
+
+// livenessReplayWindow is how long an answered attempt label is remembered.
+//
+// It is derived from the token rule rather than picked: a claim built inside
+// epoch E verifies while the target's current epoch is one of {E-1, E, E+1},
+// so the last moment it can still be presented is the end of E+1 — at most
+// three epoch lengths after the start of E. rotatingHashDedup keeps an entry
+// for at least one rotation, so one rotation of that width covers every claim
+// that is still live. A shorter window would let a captured request come back
+// while its token is still good, which is exactly the hole being closed.
+const livenessReplayWindow = 3 * protocol.LivenessTokenEpoch
+
+// maxLivenessReplayEntries caps the set. Entries are only ever created by a
+// claim that ALREADY passed the token check, so filling it needs a contact's
+// private box key — a stranger's flood never reaches this map. A contact who
+// does flood it evicts their own older entries first (early rotation), which
+// re-opens replay for the party who could simply have asked again anyway.
+const maxLivenessReplayEntries = 8192
+
+// newGetIdentityHandler builds the handler with every piece of state it needs.
+//
+// A constructor rather than a struct literal at each call site: the handler now
+// has three pieces of internal state, two of them maps that a literal is free
+// to leave nil, and a nil replay set would turn the anti-replay rule into a
+// silent no-op at exactly the call sites that forgot it.
+func newGetIdentityHandler(svc *Service, network domain.NetworkID, clock func() time.Time) *getIdentityHandler {
+	if clock == nil {
+		clock = func() time.Time { return time.Now().UTC() }
+	}
+	return &getIdentityHandler{
+		svc:                   svc,
+		network:               network,
+		clock:                 clock,
+		seenRequesterAttempts: map[domain.PeerIdentity]time.Time{},
+		livenessReplay:        newRotatingHashDedup(livenessReplayWindow, maxLivenessReplayEntries, clock),
+	}
 }
 
 func (h *getIdentityHandler) Handle(_ context.Context, delivery datagram.DeliveryContext, payload []byte) datagram.HandlerResult {
@@ -156,6 +195,32 @@ func (h *getIdentityHandler) Handle(_ context.Context, delivery datagram.Deliver
 		}
 	}
 
+	// A sealed claim means this is a LIVENESS PROBE rather than a lookup, and
+	// the two are answered by different rules.
+	//
+	//   - no `sealed` at all → the public lookup, unchanged: the record and,
+	//     if asked for, the proof. First contact by 40-hex address and by
+	//     corsa:-link keeps working exactly as it did, and the identity
+	//     resolver — which always asks for a proof and refuses an answer
+	//     without one — is untouched.
+	//   - `sealed` present and the reciprocity token verifies → the same
+	//     answer, now known to be going to a contact.
+	//   - `sealed` present and it does NOT verify → silence. Not a refusal
+	//     frame, not a record: somebody who cannot produce the token learns
+	//     nothing at all, including whether the name they guessed exists.
+	//
+	// This is the split the owner chose (2026-09-04): the public path keeps
+	// its reach, and the probe path — the one presence depends on — is the
+	// one that gets the gate. It does not by itself close the timing oracle
+	// on the public path; that would need the public path to stop answering
+	// strangers, which is a separate decision with its own cost.
+	if len(request.Sealed) > 0 {
+		label, ok := delivery.Header().Label()
+		if !ok || !h.acceptLivenessClaim(request.Sealed, label.Raw()) {
+			return datagram.RejectDelivery(errors.New("identity lookup: liveness claim rejected"))
+		}
+	}
+
 	answer := protocol.PostIdentityPayload{V: domain.IdentityLookupSchemaVersion, Record: record}
 	if request.RequiresTargetProof() {
 		label, ok := delivery.Header().Label()
@@ -169,6 +234,101 @@ func (h *getIdentityHandler) Handle(_ context.Context, delivery datagram.Deliver
 		return datagram.FailDelivery(fmt.Errorf("identity lookup: build answer: %w", err))
 	}
 	return datagram.AcceptWithAnswer(domain.DTypePostIdentity, raw)
+}
+
+// acceptLivenessClaim opens a sealed probe claim and checks its reciprocity
+// token against this node's contacts.
+//
+// The claim names its asker, but the name is worth nothing on its own — the
+// token is what proves the sender holds that identity's box key. So the lookup
+// is: find the contact by name, take THEIR box key, recompute the token, and
+// compare. A stranger who guesses a contact's fingerprint cannot produce the
+// MAC, and a contact cannot borrow another contact's name because the token is
+// derived from the asker's own private key.
+//
+// Every failure is the same answer to the sender: nothing. The reasons are
+// separated only in the log, and even there without the claimed name, so a log
+// reader is not handed a list of who is probing whom.
+func (h *getIdentityHandler) acceptLivenessClaim(sealed []byte, attemptLabel domain.PeerIdentity) bool {
+	svc := h.svc
+	if svc == nil || svc.identity == nil || svc.trust == nil {
+		return false
+	}
+	local := domain.PeerIdentityFromWire(svc.identity.Address)
+	if local.IsZero() {
+		return false
+	}
+
+	claim, err := protocol.OpenLivenessProbe(svc.identity, local, sealed)
+	if err != nil {
+		// Sealed to somebody else, or not a claim at all. Either way this
+		// node has nothing to say about it.
+		log.Debug().Err(err).Msg("liveness_claim_unopenable")
+		return false
+	}
+
+	// The contact's OWN stored box key, not the general knowledge cache: the
+	// question here is "is this one of my contacts", and a key from the cache
+	// would answer a wider question than the one being asked.
+	askerBoxKey, known := svc.trust.contactBoxKey(claim.Asker)
+	if !known {
+		// Not a contact of ours. The gate exists for exactly this case, and
+		// the answer is silence rather than "no": a refusal would confirm
+		// the target exists.
+		log.Debug().Msg("liveness_claim_not_a_contact")
+		return false
+	}
+
+	// The token is accepted for the current epoch and its neighbours: both
+	// sides read an unsynchronised wall clock, and an honest token built a
+	// moment before a boundary arrives inside the next window.
+	for _, epoch := range protocol.LivenessTokenEpochsAccepted(svc.presenceNow().Wall()) {
+		if epoch != claim.Epoch {
+			continue
+		}
+		if protocol.VerifyLivenessToken(
+			svc.identity.BoxPrivateKey, h.network, askerBoxKey,
+			claim.Asker, local, attemptLabel, claim.Epoch, claim.Token,
+		) {
+			return h.claimAttemptIsNew(attemptLabel)
+		}
+		break
+	}
+	log.Debug().Msg("liveness_claim_token_rejected")
+	return false
+}
+
+// claimAttemptIsNew enforces one question, one answer.
+//
+// Binding the token to the attempt label stopped the sealed blob from being
+// moved into a DIFFERENT question, but it did not stop the same question from
+// being asked twice: a hop on the path holds the whole request, and this plane
+// has no anti-replay of its own — a request addressed to us is answered
+// terminally, without reverse state, and nothing upstream remembers a label
+// (datagram/pipeline_request.go, step 4). So a relay could re-send the captured
+// frame verbatim and keep collecting proofs for as long as the token's epoch
+// window allowed, which is up to three epochs.
+//
+// An honest asker never trips this: the prober mints fresh entropy per attempt,
+// and the transport's own retry takes a new label too, precisely so a repeated
+// request cannot land in an occupied reverse slot.
+//
+// A duplicate is met with the same silence as a bad token. Answering "you
+// already asked" would confirm both the identity and the earlier probe.
+func (h *getIdentityHandler) claimAttemptIsNew(attemptLabel domain.PeerIdentity) bool {
+	if h.livenessReplay == nil {
+		// Only reachable from a hand-built handler. Refusing is the safe
+		// direction: a probe goes unanswered, which the prober reads as one
+		// missed attempt, rather than the anti-replay rule silently not
+		// existing.
+		log.Debug().Msg("liveness_claim_replay_set_missing")
+		return false
+	}
+	if h.livenessReplay.MarkIfAbsent(attemptLabel.String()) {
+		log.Debug().Msg("liveness_claim_replayed")
+		return false
+	}
+	return true
 }
 
 // acceptRequesterTriple validates the opt-in "who is asking" triple:
@@ -253,6 +413,14 @@ func (h *postIdentityHandler) Handle(_ context.Context, delivery datagram.Delive
 	label, ok := delivery.Header().Label()
 	if !ok {
 		return datagram.RejectDelivery(errors.New("identity lookup: answer without a label"))
+	}
+	// Two initiators share this dtype, and the label says whose answer this
+	// is: the presence prober keeps its own attempts precisely so that a
+	// liveness question and a resolution do not consume each other's replies.
+	// It is asked first because its attempt set is the smaller and strictly
+	// private one — an answer it claims can never have been a resolution's.
+	if prober := h.svc.presenceProber; prober != nil && prober.HandleAnswer(label, payload) {
+		return datagram.AcceptDelivery()
 	}
 	resolver := h.svc.identityResolver
 	if resolver == nil {
@@ -369,6 +537,15 @@ func (h *pushIdentityHandler) Handle(ctx context.Context, delivery datagram.Deli
 		}
 		return datagram.RejectDelivery(errors.New("push_identity: rate limit"))
 	}
+
+	// Liveness: this frame is signed by the contact, its record verified
+	// against that same identity, and the layer proved the SIGNED source
+	// before the handler ran — a push arrives on the pusher's own
+	// authenticated session, which is exactly the arrival the presence
+	// contract calls evidence. Recording it here saves a probe the prober
+	// would otherwise schedule, and it lifts the contact out of `probing`
+	// a round trip earlier than the probe could.
+	h.svc.notePresenceSignedFrame(signedSrc)
 
 	outcome, err := h.svc.importVerifiedIdentityRecord(h.network, push.Record, body)
 	if err != nil {

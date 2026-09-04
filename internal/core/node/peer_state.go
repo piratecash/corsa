@@ -126,6 +126,30 @@ type peerStateFile struct {
 	Peers           []peerEntry                `json:"peers"`
 	BannedIPs       []bannedIPStateEntry       `json:"banned_ips,omitempty"`
 	RemoteBannedIPs []remoteBannedIPStateEntry `json:"remote_banned_ips,omitempty"`
+	// FirstHopGuards is the durable first-hop guard set
+	// (docs/protocol/presence.md §4.2). It rides this file rather than one of
+	// its own because it is durable per-NEIGHBOUR state, which is what this
+	// file is for, and because a separate JSON store would be a sixth entry in
+	// the list of files the SQLite migration is working through — see
+	// first_hop_guard_store.go.
+	//
+	// A reader of an older version simply finds it absent, which is the
+	// correct starting state: an empty set is re-sampled from live neighbours.
+	FirstHopGuards []firstHopGuardRow `json:"first_hop_guards,omitempty"`
+	// FirstHopGuardsOwner is the identity the guard set above belongs to.
+	//
+	// The file is scoped by LISTEN PORT, which is right for peers — they are
+	// addresses this node has learned, and they stay useful whoever runs here.
+	// The guard set is not that: it is a record of which neighbours have
+	// carried THIS identity's private traffic. `identity_restore` replaces the
+	// key and restarts on the same port, so without an owner the new identity
+	// would inherit the old set and keep talking to exactly the neighbours the
+	// old one used — handing them the correlation the guard model is supposed
+	// to be bounding.
+	//
+	// A mismatch drops the rows and keeps the peers: the two answer different
+	// questions and only one of them is about us.
+	FirstHopGuardsOwner string `json:"first_hop_guards_owner,omitempty"`
 }
 
 // announceState is the closed enum for peerEntry.AnnounceState and for
@@ -135,7 +159,7 @@ type peerStateFile struct {
 type announceState string
 
 const (
-	peerStateVersion             = 3              // v3: persisted the address-to-identity binding
+	peerStateVersion             = 4              // v4: added the first-hop guard set
 	peerScoreConnect             = 10             // awarded on successful TCP handshake
 	peerScoreDisconnect          = -2             // applied on clean disconnect
 	peerScoreFailure             = -5             // applied on dial/protocol failure

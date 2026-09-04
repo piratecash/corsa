@@ -188,6 +188,7 @@ func TestSendTrackedFrameToSessionRefusesEveryClosedDoor(t *testing.T) {
 			nil,
 			protocol.Frame{Type: "push_message", ID: "no-session"},
 			trackedTicket(),
+			nil,
 		)
 		if accepted {
 			t.Fatal("sendTrackedFrameToSession accepted a frame without a session")
@@ -213,6 +214,7 @@ func TestSendTrackedFrameToSessionRefusesEveryClosedDoor(t *testing.T) {
 			session,
 			protocol.Frame{Type: "push_message", ID: "stalled"},
 			trackedTicket(),
+			nil,
 		)
 		if accepted {
 			t.Fatal("sendTrackedFrameToSession accepted a frame for a stalled peer")
@@ -241,6 +243,7 @@ func TestSendTrackedFrameToSessionRefusesEveryClosedDoor(t *testing.T) {
 			session,
 			protocol.Frame{Type: "push_message", ID: "fenced"},
 			trackedTicket(),
+			nil,
 		) {
 			t.Fatal("sendTrackedFrameToSession accepted a frame on a fenced queue")
 		}
@@ -354,7 +357,7 @@ func TestSendTrackedFrameToConnUsesTheSingleWriterQueue(t *testing.T) {
 		}
 	}()
 
-	if !svc.sendTrackedFrameToConn(core.ConnID(), protocol.Frame{Type: "ping"}, trackedTicket()) {
+	if !svc.sendTrackedFrameToConn(core.ConnID(), protocol.Frame{Type: "ping"}, trackedTicket(), nil) {
 		t.Fatal("sendTrackedFrameToConn refused a live inbound conn")
 	}
 	select {
@@ -367,6 +370,7 @@ func TestSendTrackedFrameToConnUsesTheSingleWriterQueue(t *testing.T) {
 		domain.ConnID(4242),
 		protocol.Frame{Type: "ping"},
 		trackedTicket(),
+		nil,
 	) {
 		t.Fatal("sendTrackedFrameToConn accepted an unknown connection")
 	}
@@ -374,7 +378,7 @@ func TestSendTrackedFrameToConnUsesTheSingleWriterQueue(t *testing.T) {
 	// The socket is still writable — only the peer state moved. The refusal
 	// must come from the admission, exactly as it does on the session tier.
 	svc.markPeerDisconnected(address, errors.New("peer closed the socket"))
-	if svc.sendTrackedFrameToConn(core.ConnID(), protocol.Frame{Type: "ping"}, trackedTicket()) {
+	if svc.sendTrackedFrameToConn(core.ConnID(), protocol.Frame{Type: "ping"}, trackedTicket(), nil) {
 		t.Fatal("sendTrackedFrameToConn accepted a frame for a disconnected peer, so the " +
 			"candidate walk stops on a connection nothing will read")
 	}

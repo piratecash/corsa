@@ -229,7 +229,7 @@ behind a new mandatory protocol floor.
 peer of the target that holds the target's record from an initial push must
 forward a `get_identity` addressed past it, never answer.
 
-**`get_identity` payload** (`{v, required?, min_seq?, target_proof?,
+**`get_identity` payload** (`{v, required?, min_seq?, target_proof?, sealed?,
 requester?, requester_issued_at?, requester_sig?}`): `v` is mandatory and
 strictly 1; an addressee that does not understand `v` or any name in
 `required` stays SILENT — there is no refusal frame, silence is cured by the
@@ -242,6 +242,41 @@ and dedups attempt labels for the window's length.
 `requester_sig = ed25519(sk, "corsa-lookup-requester-v1" || 0x00 ||
 uint16be(len(net)) || net || attempt_id(20) || issued_at(u64be) ||
 requester(20) || dst(20))` — addresses signed as raw bytes.
+
+**`sealed` — the liveness-probe claim.** Optional, opaque to transit, and it is
+what separates a presence probe from a public lookup. A request WITHOUT it is
+answered exactly as described above; a request WITH it is answered only if the
+claim verifies, and met with silence otherwise — not a refusal, which would
+confirm the identity exists. Its absence therefore changes nothing for any
+existing initiator, and the identity resolver does not send one.
+
+The field is the byte concatenation `ephemeral_pub(32) || nonce(12) ||
+ciphertext`, an X25519+AES-GCM box to the target's box key under the label
+`"corsa-liveness-probe-v1|" || dst`. The plaintext is
+`{asker, epoch, token}` — the asker's 40-hex fingerprint, the epoch number, and
+the 16-byte reciprocity token. The asker is INSIDE the ciphertext rather than
+in the `requester` triple on purpose: a plaintext requester would publish the
+pair (asker, target) to every hop, which is a stronger leak than the `routed`
+mode this plane avoids for exactly that reason.
+
+`token = HMAC-SHA256(K, epoch_u64be || attempt_id(20))[0:16]` where
+`K = HKDF-SHA256(ikm = X25519(sk_asker, pk_target), salt = net,
+info = "corsa-liveness-token-v1|" || net || asker || target)[0:32]`, addresses
+in 40-hex form. Both sides derive the same `K` from the mirror key pair.
+`epoch = floor(unix_seconds / 600)`; the verifier accepts the current epoch and
+both neighbours, because neither clock is negotiated. The direction is in
+`info`, so an A→B token does not verify as B→A; `net` is in both salt and
+`info`, so a claim captured on one network does not verify on another; and the
+**`attempt_id` is inside the MAC**, so a claim is good for exactly one request —
+without that binding a transit could copy the ciphertext into a `get_identity`
+of its own, with a fresh label, and harvest proofs for the rest of the epoch
+window.
+
+The target verifies by looking the claimed asker up in its OWN contacts, taking
+that contact's stored box key and recomputing the token. A stranger cannot
+produce it, and one contact cannot borrow another's name — the MAC is keyed by
+the asker's private key, which they do not hold. Byte vector:
+`internal/core/protocol/liveness_token_test.go`. Full contract: `presence.md`.
 
 **`post_identity` payload** (`{v, record, target_proof?}`): the record is
 mandatory and embeds as a plain JSON object.
@@ -302,6 +337,42 @@ surface and its sync legs are marked deprecated
 (`TODO(fetch-contacts-floor)`) and retire only when nothing is left to
 bridge, per recipient or behind a new mandatory floor — never on a
 telemetric share.
+
+#### 6.1 Why the request type is visible, and what padding cannot do
+
+A liveness probe carries a sealed reciprocity claim (§6, `sealed`) and a plain
+lookup does not. It is tempting to hide the difference by padding both payloads
+to one length. **That does not work here, and the reason is worth writing down
+so it is not attempted again.**
+
+The datagram layer does not encrypt — "confidentiality of the content is the
+type's job" (docs/protocol/datagram.md §3.6) — and the link below it carries
+JSON lines over a plain socket. So a transit hop does not have to infer anything
+from a length: it parses the payload and reads whether `sealed` is there. A
+passive observer on the same link reads it too. Equalising sizes leaves both
+exactly as informed as before, while adding hundreds of bytes to every lookup.
+
+Two things WOULD close it, and both are larger than a padding change:
+
+- **An always-present, indistinguishable field.** Every request carries a
+  `sealed` blob — a real claim for a contact, an opaque dummy of the same length
+  for a public lookup — so a hop sees one shape either way. This needs a
+  protocol floor bump: a target that predates it answers an unopenable claim
+  with SILENCE (§6, the gate), so a new node's public lookup to an old one would
+  simply vanish.
+- **An opaque payload.** If the payload is sealed to the destination, the hop
+  has nothing to read. This is the "collapse the application dtypes into opaque
+  ones" decision, which touches every protocol on the layer and not just
+  discovery.
+
+Padding becomes meaningful only once one of those lands, because only then is
+there a hidden variable for a length to leak. Until then the honest statement is
+the one in §7 of docs/protocol/presence.md: a transit that can see `dtype`
+already knows this is discovery traffic, and it can also see which kind.
+
+What is NOT leaked, and needs no padding: the answer's size does not report the
+contact gate's verdict, because the gate does not answer at all when it refuses.
+Its two outcomes are "an answer" and "silence", not two lengths.
 
 ### 7. RPC and UI
 
@@ -785,6 +856,40 @@ requester?, requester_issued_at?, requester_sig?}`): `v` обязателен и
 uint16be(len(net)) || net || attempt_id(20) || issued_at(u64be) ||
 requester(20) || dst(20))` — адреса подписываются сырыми байтами.
 
+**`sealed` — заявка liveness-пробы.** Опциональна, непрозрачна для транзита, и
+именно она отделяет пробу присутствия от публичного lookup. Запрос БЕЗ неё
+отвечается ровно так, как описано выше; запрос С ней отвечается, только если
+заявка проверилась, иначе — молчание, а не отказ: отказ подтвердил бы, что
+идентичность существует. Поэтому её отсутствие ничего не меняет ни для одного
+существующего инициатора, и резолвер identity её не отправляет.
+
+Поле — байтовая конкатенация `ephemeral_pub(32) || nonce(12) || ciphertext`,
+X25519+AES-GCM бокс на box-ключ цели под меткой
+`"corsa-liveness-probe-v1|" || dst`. Открытый текст — `{asker, epoch, token}`:
+40-hex отпечаток спрашивающего, номер эпохи и 16-байтовый токен взаимности.
+Спрашивающий назван ВНУТРИ шифротекста, а не в тройке `requester`, намеренно:
+открытый requester опубликовал бы пару (спрашивающий, цель) каждому хопу —
+утечка сильнее, чем у режима `routed`, которого эта плоскость избегает ровно
+поэтому.
+
+`token = HMAC-SHA256(K, epoch_u64be || attempt_id(20))[0:16]`, где
+`K = HKDF-SHA256(ikm = X25519(sk_asker, pk_target), salt = net,
+info = "corsa-liveness-token-v1|" || net || asker || target)[0:32]`, адреса в
+40-hex форме. Обе стороны выводят один и тот же `K` из зеркальной пары ключей.
+`epoch = floor(unix_seconds / 600)`; проверяющий принимает текущую эпоху и обе
+соседние, потому что часы сторон не согласуются. Направление входит в `info`,
+поэтому токен A→B не проверяется как B→A; `net` входит и в salt, и в `info`,
+поэтому заявка, перехваченная в одной сети, не проверится в другой; **`attempt_id`
+входит в MAC**, поэтому заявка годится ровно для одного запроса — без этого
+транзит скопировал бы шифротекст в собственный `get_identity` со своим label и
+собирал бы proof до конца окна эпох.
+
+Цель проверяет так: ищет названного спрашивающего в СВОИХ контактах, берёт
+сохранённый box-ключ этого контакта и пересчитывает токен. Чужой изготовить его
+не может, и один контакт не может воспользоваться именем другого — MAC ключуется
+приватным ключом спрашивающего, которого у него нет. Байт-вектор:
+`internal/core/protocol/liveness_token_test.go`. Полный контракт: `presence.md`.
+
 **Payload `post_identity`** (`{v, record, target_proof?}`): запись
 обязательна и вкладывается обычным JSON-объектом.
 `target_proof = ed25519(sk_target, "corsa-target-proof-v1" || 0x00 ||
@@ -841,6 +946,41 @@ replaced / duplicate; stale, conflict и запись ниже `min_seq` ост�
 sync-ноги помечены deprecated (`TODO(fetch-contacts-floor)`) и выпиливаются
 только когда мостить станет некого — per-recipient либо за новым
 обязательным floor, никогда по телеметрической доле.
+
+#### 6.1 Почему тип запроса виден и чего паддинг не может
+
+Liveness-проба несёт запечатанную заявку взаимности (§6, `sealed`), обычный
+lookup — нет. Соблазнительно спрятать разницу, дополнив обе нагрузки до одной
+длины. **Здесь это не работает, и причину стоит записать, чтобы не попробовали
+снова.**
+
+Слой датаграмм не шифрует — «конфиденциальность содержимого — задача типа»
+(docs/protocol/datagram.md §3.6), — а канал под ним везёт JSON-строки по
+обычному сокету. Поэтому транзитному хопу ничего не нужно выводить из длины: он
+разбирает нагрузку и видит, есть ли там `sealed`. Пассивный наблюдатель на том
+же канале видит то же самое. Выравнивание размеров оставляет обоих ровно так же
+осведомлёнными, добавляя при этом сотни байт к каждому lookup.
+
+Закрыли бы это две вещи, и обе крупнее, чем правка паддинга:
+
+- **Всегда присутствующее неразличимое поле.** Каждый запрос несёт блок
+  `sealed` — настоящую заявку для контакта, непрозрачную пустышку той же длины
+  для публичного lookup, — и хоп видит одну и ту же форму в обоих случаях. Это
+  требует поднятия порога протокола: цель, которая старше этого правила,
+  отвечает на нераскрываемую заявку МОЛЧАНИЕМ (§6, гейт), поэтому публичный
+  lookup нового узла к старому просто исчезал бы.
+- **Непрозрачная нагрузка.** Если нагрузка запечатана на адресата, хопу нечего
+  читать. Это решение «схлопнуть прикладные dtype в непрозрачные», затрагивающее
+  все протоколы слоя, а не только discovery.
+
+Паддинг обретает смысл только после одного из этих шагов: лишь тогда появляется
+скрытая переменная, которую длина могла бы выдать. До тех пор честная
+формулировка — та, что в §7 docs/protocol/presence.md: транзит, видящий `dtype`,
+и так знает, что это трафик discovery, а заодно видит и какого он рода.
+
+Что НЕ утекает и паддинга не требует: размер ответа не сообщает вердикт
+контакт-гейта, потому что при отказе гейт не отвечает вовсе. Его два исхода —
+«ответ» и «молчание», а не две длины.
 
 ### 7. RPC и UI
 

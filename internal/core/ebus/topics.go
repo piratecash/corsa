@@ -286,6 +286,26 @@ const (
 	//   func(change ebus.IdentityPresenceChange)
 	TopicIdentityPresenceObserved = "identity.presence.observed"
 
+	// TopicContactPresenceUpdated says the node's per-contact PRESENCE
+	// projection changed — a contact was proven alive, went quiet, closed a
+	// session, or a proof expired.
+	//
+	// It is a third presence topic and the name difference is one word, so:
+	// the two above are about `last_online_at`, a durable timestamp; this one
+	// is about the live four-state belief a person is shown. They are not
+	// interchangeable and neither of the others can carry this, because both
+	// fire only on the routing paths — and the whole point of the projection
+	// is that a contact's state changes when the CONTACT does something, not
+	// when the routing table does.
+	//
+	// Carries no payload: the projection is read from the node, and shipping
+	// a copy through the bus would create a second version of it that can
+	// disagree with the one readers fetch.
+	//
+	// Handler signature:
+	//   func(struct{})
+	TopicContactPresenceUpdated = "contact.presence.updated"
+
 	// TopicPeerPendingChanged is emitted when the per-peer pending frame
 	// queue mutates (frame queued, flushed, or expired). Carries the peer
 	// address and the new queue length so subscribers can update the

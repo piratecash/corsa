@@ -5194,6 +5194,12 @@ func (p *testStatusProvider) ReachableIDsSnapshot() map[domain.PeerIdentity]bool
 	return clone
 }
 
+func (p *testStatusProvider) PresenceSnapshot() (domain.PresenceSet, uint64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Status.Presence.Clone(), p.Status.PresenceGeneration
+}
+
 func (p *testStatusProvider) KnownIDsSnapshot() []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

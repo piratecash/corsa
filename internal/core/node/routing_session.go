@@ -83,8 +83,38 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 		s.identityRelaySessions[peerIdentity]++
 	}
 	firstRelay := s.identityRelaySessions[peerIdentity] == 1
+	firstTotal := s.identitySessions[peerIdentity] == 1
+	// Minted HERE, under the lock that decided the transition, and only for the
+	// transition itself. See nextSessionTransitionLocked.
+	var establishedSeq uint64
+	if firstTotal {
+		establishedSeq = s.nextSessionTransitionLocked()
+	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_released").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
+
+	// A session with this contact is up again, and presence has to be TOLD:
+	// the thing it would otherwise notice — the route disappearing and coming
+	// back — may not have moved at all.
+	//
+	// Bound to the 0 → 1 transition of the contact's TOTAL session count, the
+	// mirror of the close on the last total session, and ordered against that
+	// close by the transition number rather than by a clock reading. An earlier revision put it
+	// inside the relay-withdrawal cancellation below, which is a narrower
+	// condition three ways over: a contact whose build has no mesh_relay_v1
+	// never reaches it, a reconnect that beats the pending withdrawal into the
+	// map finds no timer to cancel, and a second relay session is not a return
+	// at all. Under any of them the close recorded when the old session ended
+	// was never spent, and a contact that cannot be probed stayed
+	// `offline`/`session_closed` for the whole life of a perfectly good
+	// session, having done nothing but reconnect.
+	//
+	// This is the session being re-established, not a signature: it clears the
+	// close and does not make the contact green by itself. Green still needs
+	// the target's own proof.
+	if firstTotal {
+		s.notePresenceSessionReturned(peerIdentity, establishedSeq)
+	}
 
 	if !hasRelayCap {
 		log.Debug().
@@ -129,6 +159,10 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	// docs/refactoring/route-withdrawal-grace-period.md for the
 	// design rationale.
 	if s.tryCancelPendingWithdrawal(peerIdentity) {
+		// Presence was told above, on the total 0 → 1 transition. It is not
+		// told again here: this branch is about the ROUTING timer, and the
+		// grace period it cancels is the reason presence must not wait for it.
+		//
 		// The route never left the table, but hop-ack failures
 		// accumulated against the dead session during the grace
 		// window may have armed the black-hole cooldown for the
@@ -276,19 +310,76 @@ func (s *Service) onPeerSessionClosedWithError(peerIdentity domain.PeerIdentity,
 }
 
 type peerOfflineEvidence struct {
-	observedAt time.Time
+	observedAt presenceInstant
 }
 
 func (s *Service) observePeerOffline() *peerOfflineEvidence {
 	return &peerOfflineEvidence{observedAt: s.presenceNow()}
 }
 
-func (s *Service) presenceNow() time.Time {
+// nextSessionTransitionLocked mints the number of the next session transition.
+//
+// It exists because a wall clock cannot order these events, and two rounds of
+// trying proved it three separate ways:
+//
+//   - the reading has to be taken before peerMu, while the transition is
+//     decided under it, so two overlapping sessions can take their readings and
+//     then reach the lock in the other order — the reconnect ends up stamped
+//     EARLIER than the close it followed;
+//   - the two events can share an instant. On Windows the clock advances in
+//     steps of up to 15.6 ms, which is longer than "a session came up and
+//     immediately got an EOF" takes, and a tie has to be resolved by guessing;
+//   - a clock stepped backwards inverts them outright.
+//
+// A counter minted under the SAME lock that decides the transition has none of
+// those problems: the number is the transition. It is service-wide rather than
+// per-peer deliberately — one uint64 instead of a map that would have to
+// outlive every peer that ever connected (this codebase has paid twice for maps
+// that only grew), and cross-peer values never meet, because each contact's
+// record only ever compares against its own.
+//
+// Zero is reserved for "no transition": a fresh record has seen none, so the
+// first real transition, numbered 1, is always newer. Caller MUST hold
+// s.peerMu.Lock.
+func (s *Service) nextSessionTransitionLocked() uint64 {
+	s.sessionTransitionSeq++
+	return s.sessionTransitionSeq
+}
+
+// presenceNow is the ONE clock every presence instant comes from, and it
+// deliberately does NOT call UTC().
+//
+// `Time.UTC()` strips Go's monotonic reading (time.Time docs), and every
+// presence value is used for one of two things — measuring an interval, or
+// ordering two observations — both of which then run on the wall clock. A
+// system clock stepped backwards therefore used to:
+//
+//   - hold a contact `online` past presenceAliveValidity, because the evidence
+//     window sat in a wall-clock future the clock had to climb back to;
+//   - stop probe timeouts and the probe cadence from ever arriving, for the
+//     same reason;
+//   - make a genuinely LATER close carry an EARLIER stamp than the proof it
+//     followed, so the close was dropped whole — the departure occasion for
+//     delivery with it.
+//
+// Keeping the reading is HALF the answer: it is what presenceElapsed needs to
+// survive a clock step. The other half is that presenceElapsed also reads the
+// wall delta, because a monotonic reading alone stops while the machine sleeps.
+// See presenceElapsed for the whole rule.
+//
+// The reading only survives while the value stays inside the process, so a
+// presence instant is converted to UTC exactly where it leaves — persistence,
+// serialisation — and nowhere else.
+//
+// A test clock that returns a bare wall time (most fixtures) has no monotonic
+// reading to keep; comparisons then fall back to wall clock, which is what
+// those fixtures intend.
+func (s *Service) presenceNow() presenceInstant {
 	clock := s.presenceClock
 	if clock == nil {
 		clock = time.Now
 	}
-	return clock().UTC()
+	return presenceInstantAt(clock())
 }
 
 func (s *Service) onPeerSessionClosedWithAttribution(
@@ -316,6 +407,13 @@ func (s *Service) onPeerSessionClosedWithAttribution(
 	isLastTotal := s.identitySessions[peerIdentity] == 0
 	if isLastTotal {
 		delete(s.identitySessions, peerIdentity)
+	}
+
+	// Minted under the same lock and from the same counter as the establish
+	// side, so the two are ordered by the transitions themselves.
+	var closedSeq uint64
+	if isLastTotal {
+		closedSeq = s.nextSessionTransitionLocked()
 	}
 
 	lastRelay := false
@@ -373,6 +471,30 @@ func (s *Service) onPeerSessionClosedWithAttribution(
 	//
 	// Outside every domain mutex, like the other close-path side effects.
 	if isLastTotal {
+		// Presence learns about the close HERE: on the last session of ANY
+		// kind, at the moment it was observed, and outside every domain mutex.
+		//
+		// Not on the last RELAY session, where this used to live because the
+		// routing withdrawal it rode along with is gated that way. Routing and
+		// presence ask different questions and the answers diverge in both
+		// directions: a peer with no mesh_relay_v1 never reached that branch
+		// and kept a clean EOF from ever being recorded, and a peer that closed
+		// its relay session while another session stayed up was recorded as
+		// gone while we were still talking to them.
+		//
+		// Not inside the deferred withdrawal body either. The withdrawal is
+		// deferred so a reconnect does not produce a withdrawal storm, and that
+		// delay is right for ROUTING; applying it to presence put the belief
+		// about the person a whole grace period behind, which is the false
+		// green this feature exists to remove.
+		//
+		// Recording it before the withdrawal executes is safe because the
+		// record is not by itself a verdict — the projection still asks whether
+		// any path remains, and a contact reachable another way reads as
+		// `probing` (asked at once) rather than as absent.
+		if presenceEvidence != nil {
+			s.notePresenceSessionClosed(peerIdentity, presenceEvidence.observedAt, closedSeq)
+		}
 		s.forgetDatagramPeer(peerIdentity)
 		// The moment a recipient goes away is the only evidence that
 		// separates "their receipt is late" from "their receipt is not

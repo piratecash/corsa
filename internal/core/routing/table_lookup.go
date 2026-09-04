@@ -486,16 +486,33 @@ func (t *Table) AnnounceTargetFor(target, requester PeerIdentity) (AnnounceEntry
 // base score). The self-route injection lives here rather than in
 // routeStore because it is a routing-domain invariant, not storage
 // state.
+// LookupWithSuppressed answers Lookup's question and, additionally, whether
+// anything was dropped on the way out.
+//
+// The second return is the difference between "the network has no live claim
+// about this identity" and "it has claims and THIS NODE is refusing all of
+// them" — dead uplinks, black-hole cooldown, and the rest of the local filter
+// pass below. Lookup collapses both into an empty slice, which is right for a
+// forwarding decision (either way there is nowhere to send) and wrong for
+// presence: the first is an observation about the peer, the second is a
+// statement about us, and reporting the second as "they are gone" is a lie
+// that lasts as long as the suppression does — up to two minutes for a
+// black-hole arm, half an hour for a quarantine.
+//
+// Callers that only need somewhere to send a frame want Lookup.
+func (t *Table) LookupWithSuppressed(identity PeerIdentity) (active []RouteEntry, suppressed bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	candidates := t.lookupCandidatesLocked(identity)
+	active = t.filterLookupCandidatesLocked(identity, candidates)
+	return active, len(active) == 0 && len(candidates) > 0
+}
+
 func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	now := t.clock()
-	var candidates []RouteEntry
-	if !t.localOrigin.IsZero() && identity == t.localOrigin {
-		candidates = append(candidates, t.localRouteEntry())
-	}
-	candidates = append(candidates, t.store.LookupActive(identity, now)...)
+	candidates := t.lookupCandidatesLocked(identity)
 
 	// Empty candidate set returns nil (not an empty slice) to keep the
 	// pre-Phase-2 callers that probe `routes == nil` working. The
@@ -540,6 +557,44 @@ func (t *Table) Lookup(identity PeerIdentity) []RouteEntry {
 	// The filter pass is O(N) where N is at most
 	// MaxOutgoingPeers + MaxIncomingPeers (≤24 in densely connected
 	// production meshes) plus the optional self-route.
+	return t.filterLookupCandidatesLocked(identity, candidates)
+}
+
+// lookupCandidatesLocked collects the live claims about identity, before the
+// local filter pass. Caller must hold t.mu.
+//
+// The route plane is asserted HERE, on the real path, rather than only in the
+// guard that reads it. This function IS the full-table answer — "give me every
+// live claim about an arbitrary identity" — and it is exactly what a bounded
+// overlay stops being able to provide. Whoever makes the overlay primary has to
+// come through this line, because the plane constant they set changes what this
+// function is allowed to promise.
+func (t *Table) lookupCandidatesLocked(identity PeerIdentity) []RouteEntry {
+	if ActiveRoutePlane != RoutePlaneMesh {
+		// Unreachable while the mesh is primary. It exists so that flipping
+		// the plane makes every full-table assumption in the tree fail loudly
+		// here, at the one place that can still say what the assumption was,
+		// rather than quietly returning a partial answer that callers read as
+		// complete.
+		panic("routing: full-table lookup on a bounded route plane — " +
+			"every caller assuming a complete answer must be revisited " +
+			"(TODO(presence-route-fallback-removal) and the overlay rollout)")
+	}
+	now := t.clock()
+	var candidates []RouteEntry
+	if !t.localOrigin.IsZero() && identity == t.localOrigin {
+		candidates = append(candidates, t.localRouteEntry())
+	}
+	return append(candidates, t.store.LookupActive(identity, now)...)
+}
+
+// filterLookupCandidatesLocked applies this node's own exclusions and ranks
+// what survives. Caller must hold t.mu.
+func (t *Table) filterLookupCandidatesLocked(identity PeerIdentity, candidates []RouteEntry) []RouteEntry {
+	if len(candidates) == 0 {
+		return nil
+	}
+	now := t.clock()
 	var result []RouteEntry
 	for _, entry := range candidates {
 		health := t.lookupHealthLocked(identity, entry)

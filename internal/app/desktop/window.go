@@ -5850,15 +5850,55 @@ type contactPresenceState uint8
 const (
 	contactPresenceUnknown contactPresenceState = iota
 	contactPresenceOffline
+	// contactPresenceProbing — a path exists and the contact has not
+	// answered yet. Deliberately not green: it is a claim we have not
+	// earned.
+	contactPresenceProbing
+	// contactPresenceOnline — the contact signed something for us. This is
+	// the only state drawn as a solid green avatar.
 	contactPresenceOnline
+	// contactPresenceOnlineInferred — believed present because a route to
+	// them exists, for a contact that cannot answer a liveness probe at all.
+	// Drawn as a DOTTED ring so the difference between "they answered" and
+	// "we assume so" is visible rather than merely recorded.
+	//
+	// It disappears with the route fallback itself — see
+	// node/presence_route_fallback.go, TODO(presence-route-fallback-removal).
+	contactPresenceOnlineInferred
 )
 
+// contactPresence reads what the node believes. It no longer COMPUTES
+// anything: deciding presence from a routing projection is what produced up to
+// ten minutes of false green, and that decision now lives in the node with the
+// evidence it needs to make it properly.
 func contactPresence(status service.NodeStatus, fingerprint domain.PeerIdentity) contactPresenceState {
+	if status.Presence != nil {
+		presence := status.Presence.Get(fingerprint)
+		switch presence.State {
+		case domain.PresenceOnline:
+			if presence.IsProven() {
+				return contactPresenceOnline
+			}
+			return contactPresenceOnlineInferred
+		case domain.PresenceOffline:
+			return contactPresenceOffline
+		case domain.PresenceProbing:
+			return contactPresenceProbing
+		default:
+			return contactPresenceUnknown
+		}
+	}
+
+	// The node did not answer fetch_presence. That happens against a node
+	// older than this interface (remote-RPC mode can pair them), and the
+	// honest reading of the reachability set is exactly what it always was —
+	// an inference from routing, so it is reported as the inferred state and
+	// not as a proven one.
 	if status.ReachableIDs == nil {
 		return contactPresenceUnknown
 	}
 	if status.ReachableIDs[fingerprint] {
-		return contactPresenceOnline
+		return contactPresenceOnlineInferred
 	}
 	return contactPresenceOffline
 }
@@ -5870,16 +5910,9 @@ func (w *Window) layoutContactPresenceAvatar(gtx layout.Context, status service.
 	const avatarSize = unit.Dp(38)
 	const avatarIconSize = unit.Dp(23)
 
-	state := contactPresence(status, fingerprint)
-	background := color.NRGBA{R: 83, G: 101, B: 124, A: 255}
-	iconColor := color.NRGBA{R: 246, G: 249, B: 252, A: 255}
+	style := contactPresenceAvatarStyle(contactPresence(status, fingerprint))
 	icon := w.personIcon
-
-	switch state {
-	case contactPresenceOnline:
-		background = color.NRGBA{R: 25, G: 137, B: 65, A: 255}
-	case contactPresenceUnknown:
-		iconColor = color.NRGBA{R: 174, G: 193, B: 216, A: 255}
+	if style.outlineIcon {
 		icon = w.personOutlineIcon
 	}
 
@@ -5891,28 +5924,168 @@ func (w *Window) layoutContactPresenceAvatar(gtx layout.Context, status service.
 	// Stack's north-west zero-value alignment inside the avatar circle.
 	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-			if state == contactPresenceUnknown {
+			switch style.shape {
+			case avatarShapeFilled:
+				defer clip.Ellipse{Max: bounds}.Push(gtx.Ops).Pop()
+				paint.ColorOp{Color: style.edge}.Add(gtx.Ops)
+				paint.PaintOp{}.Add(gtx.Ops)
+			case avatarShapeOutline:
 				stroke := clip.Stroke{
 					Path:  clip.Ellipse{Max: bounds}.Path(gtx.Ops),
 					Width: float32(gtx.Dp(unit.Dp(1.5))),
 				}.Op().Push(gtx.Ops)
-				paint.ColorOp{Color: iconColor}.Add(gtx.Ops)
+				paint.ColorOp{Color: style.edge}.Add(gtx.Ops)
 				paint.PaintOp{}.Add(gtx.Ops)
 				stroke.Pop()
-				return layout.Dimensions{Size: bounds}
+			case avatarShapeStriped:
+				// A STRIPED green disc: still green, still a whole avatar,
+				// but visibly not the solid one.
+				//
+				// The first version put small white dots on the rim of the
+				// solid disc, and at 38dp that reads as "online" with a
+				// smudge — the distinction the source exists to show was
+				// invisible in the only place it matters. Stripes cover the
+				// whole face, so the difference survives the size the
+				// contact list actually uses: green says "we believe they
+				// are here", the breaks say "we did not hear it from them".
+				_ = layoutStripedDisc(gtx, bounds, style.edge)
 			}
-			defer clip.Ellipse{Max: bounds}.Push(gtx.Ops).Pop()
-			paint.ColorOp{Color: background}.Add(gtx.Ops)
-			paint.PaintOp{}.Add(gtx.Ops)
 			return layout.Dimensions{Size: bounds}
 		}),
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 			if icon == nil {
 				return layout.Dimensions{}
 			}
-			return ui.Icon(gtx, icon, avatarIconSize, iconColor)
+			return ui.Icon(gtx, icon, avatarIconSize, style.icon)
 		}),
 	)
+}
+
+// avatarShape is how the presence ring around a contact is drawn.
+type avatarShape uint8
+
+const (
+	avatarShapeFilled avatarShape = iota
+	avatarShapeOutline
+	// avatarShapeStriped is the striped disc used for a presence this node
+	// inferred rather than witnessed.
+	avatarShapeStriped
+)
+
+// presenceAvatarStyle is the whole visual decision for one presence state,
+// separated from the drawing so that "these two states look different" is a
+// property a test can assert rather than something a reader has to trace
+// through paint operations.
+type presenceAvatarStyle struct {
+	shape avatarShape
+	// edge is the colour of the disc, the outline or the dots.
+	edge        color.NRGBA
+	icon        color.NRGBA
+	outlineIcon bool
+}
+
+var (
+	presenceGreen = color.NRGBA{R: 25, G: 137, B: 65, A: 255}
+	presenceSlate = color.NRGBA{R: 96, G: 118, B: 146, A: 255}
+	presenceGrey  = color.NRGBA{R: 83, G: 101, B: 124, A: 255}
+	presenceMuted = color.NRGBA{R: 174, G: 193, B: 216, A: 255}
+	presenceLight = color.NRGBA{R: 246, G: 249, B: 252, A: 255}
+)
+
+// contactPresenceAvatarStyle maps a presence state to its appearance. Every
+// state must look different from every other one — TestPresenceStatesLookDifferent
+// holds that, because a distinction the interface does not draw is a
+// distinction that does not exist for the person using it.
+func contactPresenceAvatarStyle(state contactPresenceState) presenceAvatarStyle {
+	switch state {
+	case contactPresenceOnline:
+		// Witnessed: a solid green disc. The only state that earns it.
+		return presenceAvatarStyle{shape: avatarShapeFilled, edge: presenceGreen, icon: presenceLight}
+	case contactPresenceOnlineInferred:
+		// Inferred from the routing table: green, because the belief is
+		// "they are here"; striped, because nothing they did supports it.
+		// The outline icon carries the same message a second time, so the
+		// difference survives a viewer who cannot separate the two greens.
+		return presenceAvatarStyle{shape: avatarShapeStriped, edge: presenceGreen, icon: presenceLight, outlineIcon: true}
+	case contactPresenceProbing:
+		// Asked, not yet answered.
+		return presenceAvatarStyle{shape: avatarShapeFilled, edge: presenceSlate, icon: presenceLight}
+	case contactPresenceUnknown:
+		return presenceAvatarStyle{shape: avatarShapeOutline, edge: presenceMuted, icon: presenceMuted, outlineIcon: true}
+	default:
+		// Offline.
+		return presenceAvatarStyle{shape: avatarShapeFilled, edge: presenceGrey, icon: presenceLight}
+	}
+}
+
+// Stripe geometry for the inferred-presence avatar: 45° diagonals of equal
+// width and gap. Wide enough to survive a 38dp circle — a finer pitch turns
+// into a texture at this size and stops reading as "not the plain one".
+const (
+	avatarStripeWidth = unit.Dp(4)
+	avatarStripePitch = unit.Dp(8)
+)
+
+// avatarStripeShade darkens the base colour for the stripe.
+//
+// Low contrast on purpose: the avatar must still read as green at a glance —
+// the state IS "present" — while being unmistakably not the plain disc. A
+// high-contrast stripe would read as a different state rather than as the same
+// state held with less confidence.
+func avatarStripeShade(base color.NRGBA) color.NRGBA {
+	const factor = 0.72
+	return color.NRGBA{
+		R: uint8(float32(base.R) * factor),
+		G: uint8(float32(base.G) * factor),
+		B: uint8(float32(base.B) * factor),
+		A: base.A,
+	}
+}
+
+// layoutStripedDisc fills the avatar circle and lays 45° stripes across it.
+// It returns how many stripes it actually drew.
+//
+// Both the fill and the stripes are clipped to the same circle, so the stripes
+// end exactly at its edge instead of squaring off the avatar.
+//
+// The count is returned so a test can assert the stripes are really there. The
+// style struct alone cannot: it would still say "striped" if the loop below
+// drew nothing, and an avatar that claims to be striped while rendering as a
+// plain green disc is the exact failure this whole distinction exists to
+// prevent — the user is shown a witnessed presence when we only inferred one.
+func layoutStripedDisc(gtx layout.Context, bounds image.Point, base color.NRGBA) int {
+	defer clip.Ellipse{Max: bounds}.Push(gtx.Ops).Pop()
+	paint.ColorOp{Color: base}.Add(gtx.Ops)
+	paint.PaintOp{}.Add(gtx.Ops)
+
+	width := float32(gtx.Dp(avatarStripeWidth))
+	pitch := float32(gtx.Dp(avatarStripePitch))
+	if width <= 0 || pitch <= width {
+		return 0
+	}
+	stripe := avatarStripeShade(base)
+	side := float32(max(bounds.X, bounds.Y))
+
+	// Each stripe is a parallelogram whose top and bottom edges are offset by
+	// the height, which is what makes the edge run at 45°. Starting one full
+	// side to the left covers the corner the slant would otherwise miss.
+	drawn := 0
+	for offset := -side; offset <= 2*side; offset += pitch {
+		var path clip.Path
+		path.Begin(gtx.Ops)
+		path.MoveTo(f32.Pt(offset, 0))
+		path.LineTo(f32.Pt(offset+width, 0))
+		path.LineTo(f32.Pt(offset+width-side, side))
+		path.LineTo(f32.Pt(offset-side, side))
+		path.Close()
+
+		band := clip.Outline{Path: path.End()}.Op().Push(gtx.Ops)
+		paint.ColorOp{Color: stripe}.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		band.Pop()
+		drawn++
+	}
+	return drawn
 }
 
 func shouldShowContactLastOnlineLabel(gtx layout.Context, contactRow bool) bool {
@@ -5949,8 +6122,18 @@ func shouldShowContactLastOnlineLabel(gtx layout.Context, contactRow bool) bool 
 // which is our own message in every conversation we answered last — the
 // ordinary case — and reading presence from it silently loses the contact's
 // own message behind our reply.
+// contactLastOnlineAt is the "last seen" stamp shown under a contact who is not
+// here now. It returns zero for a contact who IS here — there is nothing to say
+// about when they were last around while they are around.
+//
+// "Here" is decided by the same presence projection the avatar uses. It used to
+// be decided by ReachableIDs independently, and the two could disagree: a stale
+// route made this function hide the timestamp while presence had already turned
+// the avatar grey, leaving a grey contact with no explanation under it. One
+// question, one answer.
 func contactLastOnlineAt(status service.NodeStatus, state *service.RouterPeerState, fingerprint domain.PeerIdentity, peerHealthLastOnline time.Time) time.Time {
-	if status.ReachableIDs != nil && status.ReachableIDs[fingerprint] {
+	switch contactPresence(status, fingerprint) {
+	case contactPresenceOnline, contactPresenceOnlineInferred:
 		return time.Time{}
 	}
 	observed := peerHealthLastOnline
@@ -6029,8 +6212,20 @@ func calendarDayDistance(later, earlier time.Time) int {
 
 func (w *Window) contactPresenceDescription(now time.Time, status service.NodeStatus, fingerprint domain.PeerIdentity, includeLastOnline bool) string {
 	presence := contactPresence(status, fingerprint)
-	if presence == contactPresenceOnline {
+	// Every state a sighted user can tell apart must be speakable, or the
+	// distinction the source exists to draw is sighted-only.
+	//
+	// An earlier version said "Online" for both online states and folded
+	// `probing` into `unknown`. The stripes are not available to a screen
+	// reader, so that made a normative difference — proven versus inferred —
+	// invisible to exactly the users who cannot see it.
+	switch presence {
+	case contactPresenceOnline:
 		return w.t("clients.presence.online")
+	case contactPresenceOnlineInferred:
+		return w.t("clients.presence.online_inferred")
+	case contactPresenceProbing:
+		return w.t("clients.presence.probing")
 	}
 	if !includeLastOnline {
 		if presence == contactPresenceUnknown {

@@ -78,6 +78,15 @@ type GetIdentityPayload struct {
 	// obliges the builder to also list LookupRequirementTargetProof in
 	// Required, so an old build cannot silently answer without the proof.
 	TargetProof bool
+	// Sealed is the encrypted liveness claim (liveness_probe.go): who is
+	// asking, in which epoch, and the reciprocity token that proves it.
+	// Present ONLY on a presence probe; a public lookup leaves it empty and
+	// is answered exactly as before.
+	//
+	// Its contents are opaque here on purpose. This layer moves the bytes;
+	// only the target's box key opens them, and only the target's contact
+	// list can judge what is inside.
+	Sealed []byte
 }
 
 // getIdentityPayloadWire is the emit-side JSON shape.
@@ -89,6 +98,7 @@ type getIdentityPayloadWire struct {
 	RequesterIssuedAt uint64   `json:"requester_issued_at,omitempty"`
 	V                 int      `json:"v"`
 	TargetProof       bool     `json:"target_proof,omitempty"`
+	Sealed            []byte   `json:"sealed,omitempty"`
 }
 
 // BuildGetIdentityPayload marshals and validates a request payload,
@@ -106,6 +116,7 @@ func BuildGetIdentityPayload(payload GetIdentityPayload) ([]byte, error) {
 		MinSeq:            uint64(payload.MinSeq),
 		TargetProof:       payload.TargetProof,
 		RequesterIssuedAt: payload.RequesterIssuedAt,
+		Sealed:            payload.Sealed,
 	}
 	if !payload.Requester.IsZero() {
 		wire.Requester = payload.Requester.String()
@@ -169,7 +180,35 @@ func ParseGetIdentityPayload(raw []byte) (GetIdentityPayload, error) {
 	if err := parseRequesterTriple(fields, &payload); err != nil {
 		return GetIdentityPayload{}, err
 	}
+	// A sealed claim is optional and never a reason to refuse the PARSE: an
+	// old build ignores the field entirely, and refusing it here would turn a
+	// privacy feature into a compatibility break.
+	//
+	// What happens to a claim that cannot be opened or does not verify is NOT
+	// decided here, and it is the opposite of lenient: the handler answers
+	// with SILENCE (node/identity_discovery.go, acceptLivenessClaim). The
+	// contract is fail-CLOSED, deliberately — a refusal frame would confirm
+	// the identity exists, which is the oracle the gate is there to shut.
+	// An earlier version of this comment described a fall-through to the
+	// public lookup; that behaviour does not exist and must not be
+	// reintroduced from here.
+	if payload.Sealed, err = lookupOptionalBytes(fields, "sealed"); err != nil {
+		return GetIdentityPayload{}, err
+	}
 	return payload, nil
+}
+
+// lookupOptionalBytes reads a base64 JSON string field into raw bytes.
+func lookupOptionalBytes(fields map[string]json.RawMessage, name string) ([]byte, error) {
+	raw, present := fields[name]
+	if !present {
+		return nil, nil
+	}
+	var out []byte
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrLookupPayloadMalformed, name, err)
+	}
+	return out, nil
 }
 
 // parseRequesterTriple reads the optional authenticated "who is asking"

@@ -346,6 +346,23 @@ func (s *Service) rebuildRoutingSnapshot() {
 	if wasFull {
 		s.lastRoutingFullSnapAtNanos.Store(publishedAt.UnixNano())
 	}
+	// Presence is projected BEFORE the event below, and the order is the
+	// point — although not for the reason an earlier revision gave. The two
+	// domains are now carried by two INDEPENDENT events: TopicRouteTableChanged
+	// refreshes reachability alone, and presence travels on
+	// TopicContactPresenceUpdated, which this projection publishes if anything
+	// changed. Projecting first is what keeps the pair consistent for a reader
+	// that acts on both: a subscriber woken by the routing change and asking
+	// about presence in the same breath must not be handed a generation older
+	// than the routing change that woke it. Same reasoning as the Store above,
+	// one layer up.
+	//
+	// It asks routing per contact rather than reading the reachability set
+	// built here, because that set cannot tell "the contact left" from "we
+	// quarantined the only path to them" — identical in the set, opposite
+	// facts. Every mutex above is already released.
+	s.refreshPresenceSnapshot()
+
 	// Published AFTER the Store above, which is the whole point of the
 	// snapshot reason: the mutation-time TopicRouteTableChanged events fire
 	// while the cached snapshot is still the old generation, so a
@@ -366,7 +383,7 @@ func (s *Service) rebuildRoutingSnapshot() {
 		s.publishIdentityPresenceChanged(ebus.IdentityPresenceChange{
 			Source:     source,
 			Identities: presenceTransitions,
-			ChangedAt:  s.presenceNow(),
+			ChangedAt:  s.presenceNow().Wall(),
 		})
 	}
 	log.Trace().

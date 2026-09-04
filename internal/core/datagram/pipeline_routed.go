@@ -300,6 +300,9 @@ type forwardPlan struct {
 	incoming  IngressPeer
 	key       domain.ReplayKey
 	avoid     AvoidedNextHop
+	// firstHop is the origin's guard preference. A transited plan leaves it
+	// empty: the first hop of somebody else's frame is not ours to aim.
+	firstHop PreferredFirstHops
 }
 
 // forwardRouted places a routed frame, running the cycle of §4.1 step 11 in the
@@ -324,7 +327,7 @@ func (p *Pipeline) forwardRouted(ctx context.Context, plan forwardPlan) SendOutc
 	// and this path passes it straight through instead of flattening every
 	// negative answer into `no_route`, which would tell a sender to wait for a
 	// route when the destination has told us it cannot handle the type at all.
-	job := sendJob{frame: plan.frame, incoming: plan.incoming, avoid: plan.avoid}
+	job := sendJob{frame: plan.frame, incoming: plan.incoming, avoid: plan.avoid, firstHop: plan.firstHop}
 	selection := p.selectFor(ctx, job)
 	if !selection.publishable() {
 		return selection.outcomeWithoutCandidates(local)

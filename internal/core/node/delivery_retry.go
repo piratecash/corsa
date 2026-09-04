@@ -356,6 +356,19 @@ type deliveryRetryEntry struct {
 	// commit is about to close. Zero for a spend granted by a pass's own
 	// reading, which is what "not after it" means.
 	AcceleratedAtPresence uint64
+	// AcceleratedAtDeparture is the recipient's presence-departure count
+	// (presenceRecord.departures) when that spend was made. It is the second
+	// half of the compare-and-set in accelerateLocked, and it exists because
+	// the visit number alone cannot count the departures this node only learns
+	// about from presence: a contact reachable through a transit hop shows the
+	// pass no absence at all, so their visit never ends and their return earned
+	// nothing.
+	//
+	// Both halves count ABSENCES, which is what keeps them from double-granting.
+	// Two observers of one return read the same pair and one of them spends it;
+	// two observations of one departure may move both counters, and a return
+	// still spends the current pair exactly once.
+	AcceleratedAtDeparture uint64
 	// WokenSinceLastDispatch says that an OBSERVATION — a measured return,
 	// or a session with the recipient becoming usable — pulled this
 	// entry's next attempt forward AFTER the last dispatch was handed to
@@ -1435,10 +1448,12 @@ func (s *Service) measureRecipientReachability() recipientReachability {
 	}
 	s.deliveryMu.RUnlock()
 	measured := make(map[string]bool, len(probes))
+	departures := make(map[string]uint64, len(probes))
 	for recipient := range probes {
 		measured[recipient] = s.recipientHasPath(recipient)
+		departures[recipient] = s.presenceDeparturesFor(domain.PeerIdentityFromWire(recipient))
 	}
-	return recipientReachability{measured: measured, seenUpTo: seenUpTo, presence: presence}
+	return recipientReachability{measured: measured, seenUpTo: seenUpTo, presence: presence, departures: departures}
 }
 
 // recipientHasPath is the reachability question asked WITHOUT sending
@@ -1539,7 +1554,12 @@ type recipientReachability struct {
 	// to tell an absence it actually observed from one another writer has
 	// already answered. See recipientPassRecord.presence.
 	presence map[string]uint64
-	gateOff  bool
+	// departures is each measured recipient's presence-departure count as it
+	// stood when they were measured, gathered here for the same reason the
+	// reading itself is: accelerateLocked must not reach into the presence
+	// projector while holding deliveryMu.
+	departures map[string]uint64
+	gateOff    bool
 }
 
 // canReach answers for one recipient, and says whether it was asked at
@@ -1590,6 +1610,9 @@ func (r recipientReachability) measureMissing(s *Service, candidates []dueCandid
 	}
 	for recipient := range missing {
 		r.measured[recipient] = s.recipientHasPath(recipient)
+		if r.departures != nil {
+			r.departures[recipient] = s.presenceDeparturesFor(domain.PeerIdentityFromWire(recipient))
+		}
 	}
 }
 
@@ -1635,6 +1658,8 @@ func (s *Service) wakeOverdueForReturningPeer(peer domain.PeerIdentity, now time
 	// The floor is the schedule's own first step, so this introduces no
 	// new timing constant and can never beat an ordinary retry.
 	floor := now.Add(deliveryRetryBackoff(0))
+	// Read with no delivery lock held, for the reason accelerateLocked states.
+	departures := s.presenceDeparturesFor(peer)
 	clamped := 0
 	s.deliveryMu.Lock()
 	// Recorded before the clamps and whether or not anything is clamped: the
@@ -1651,7 +1676,7 @@ func (s *Service) wakeOverdueForReturningPeer(peer domain.PeerIdentity, now time
 		// is a whole schedule step away, which outlasts the queue window,
 		// so a receipt that could still be in flight has run out of time
 		// before this attempt is made.
-		if s.accelerateLocked(entry, wire, floor) {
+		if s.accelerateLocked(entry, wire, departures, floor) {
 			clamped++
 		}
 	}
@@ -1850,6 +1875,7 @@ func (s *Service) noteReconnectDispatch(recipient string, sent []protocol.Envelo
 	if !s.cfg.HoldDMUntilReachable || len(sent) == 0 {
 		return
 	}
+	departures := s.presenceDeparturesFor(domain.PeerIdentityFromWire(recipient))
 	s.deliveryMu.Lock()
 	// The peer is recorded here FIRST so the spends below are stamped with
 	// the observation that paid for them. A pass whose reading predates this
@@ -1865,6 +1891,7 @@ func (s *Service) noteReconnectDispatch(recipient string, sent []protocol.Envelo
 		// forward: this only spends the visit's accelerated attempt, and
 		// answers a wake-up that came before it.
 		entry.AcceleratedInVisit = s.currentVisitLocked(recipient)
+		entry.AcceleratedAtDeparture = departures
 		entry.AcceleratedAtPresence = s.recipientPassState[recipient].presence
 		entry.WokenSinceLastDispatch = false
 	}
@@ -1892,11 +1919,18 @@ func (s *Service) nextDeliverySeqLocked() uint64 {
 // counter and the next return is granted afresh.
 //
 // at is the earliest moment the attempt may be made; the schedule is only
-// ever pulled EARLIER, never pushed out. Caller MUST hold s.deliveryMu.
-func (s *Service) accelerateLocked(entry *deliveryRetryEntry, recipient string, at time.Time) bool {
+// ever pulled EARLIER, never pushed out.
+//
+// departures is the recipient's presence-departure count, READ BEFORE
+// deliveryMu was taken. It is a parameter and not a lookup so that this lock
+// never reaches into the presence projector, and reading it early is the safe
+// direction: a departure recorded after the read leaves a fresh occasion
+// unspent, which costs nothing, while the reverse would spend an occasion
+// twice. Caller MUST hold s.deliveryMu.
+func (s *Service) accelerateLocked(entry *deliveryRetryEntry, recipient string, departures uint64, at time.Time) bool {
 	visit := s.currentVisitLocked(recipient)
-	if entry.AcceleratedInVisit == visit {
-		return false // already spent in this visit
+	if entry.AcceleratedInVisit == visit && entry.AcceleratedAtDeparture == departures {
+		return false // already spent on this occasion
 	}
 	// SPENT even when the schedule needs no change. A message already due,
 	// or already scheduled sooner than this return would ask for, is going
@@ -1904,6 +1938,7 @@ func (s *Service) accelerateLocked(entry *deliveryRetryEntry, recipient string, 
 	// served, and counting it keeps a second observation of the SAME
 	// reconnect from asking again after that send has rebuilt the backoff.
 	entry.AcceleratedInVisit = visit
+	entry.AcceleratedAtDeparture = departures
 	entry.AcceleratedAtPresence = s.recipientPassState[recipient].presence
 	// And the message is now OWED a send that no dispatch has made yet,
 	// which is true whether or not the schedule had to move. The mark is
@@ -1992,7 +2027,8 @@ func (s *Service) applyReachabilityReturnLocked(entry *deliveryRetryEntry, reach
 	// the visit unspent, so the session event of the same reconnect
 	// shortened the schedule again once that send had rebuilt the backoff
 	// — two accelerated sends for one return.
-	s.accelerateLocked(entry, entry.Envelope.Recipient, earliestRetry(entry, now))
+	s.accelerateLocked(entry, entry.Envelope.Recipient,
+		reachable.departures[entry.Envelope.Recipient], earliestRetry(entry, now))
 }
 
 // planDueDeliveries sweeps the awaiting set under s.deliveryMu and returns

@@ -328,28 +328,44 @@ type NodeStatus struct {
 	// the local node emits in hello/welcome (see config.ProtocolVersion).
 	// Surfaced here so the desktop console info tab can render it without
 	// reaching into the core config package directly.
-	ProtocolVersion  int
-	Services         []string
-	Capabilities     []string
-	KnownIDs         []string
-	Contacts         map[string]Contact
-	Peers            []string
-	PeerHealth       []PeerHealth
-	CaptureSessions  map[domain.ConnID]CaptureSession // active + recently-stopped capture sessions keyed by ConnID
-	AggregateStatus  *AggregateStatus                 // node-computed aggregate network health; nil when node does not support the command yet
-	ResourceUsage    *ResourceUsage                   // node process memory + uptime; nil until first sample / when node does not support the command
-	ReachableIDs     map[domain.PeerIdentity]bool     // identity reachable via routing table (at least one live route exists)
-	Stored           string
-	Messages         []string
-	MessageIDs       []string
-	DirectMessages   []DirectMessage
-	DirectMessageIDs []string
-	DMHeaders        []DMHeader
-	PendingMessages  []PendingMessage
-	DeliveryReceipts []DeliveryReceipt
-	Gazeta           []string
-	Error            string
-	CheckedAt        time.Time
+	ProtocolVersion int
+	Services        []string
+	Capabilities    []string
+	KnownIDs        []string
+	Contacts        map[string]Contact
+	Peers           []string
+	PeerHealth      []PeerHealth
+	CaptureSessions map[domain.ConnID]CaptureSession // active + recently-stopped capture sessions keyed by ConnID
+	AggregateStatus *AggregateStatus                 // node-computed aggregate network health; nil when node does not support the command yet
+	ResourceUsage   *ResourceUsage                   // node process memory + uptime; nil until first sample / when node does not support the command
+	ReachableIDs    map[domain.PeerIdentity]bool     // identity reachable via routing table (at least one live route exists)
+	// Presence is what the node BELIEVES about each contact's liveness, which
+	// is a different question from ReachableIDs above and must not be derived
+	// from it: a route outlives its owner by up to ten minutes, and that gap
+	// is what this field exists to stop showing. Nil until the first fetch —
+	// and nil means "no answer yet", never "everyone is offline", which is why
+	// readers go through PresenceSet.Get rather than indexing it.
+	Presence domain.PresenceSet
+	// PresenceGeneration numbers the projection in Presence within the node's
+	// process. It is what lets two independent readers of that projection — the
+	// presence EVENT and a full probe — tell which of them holds the later
+	// picture, and it is a counter rather than a timestamp because a wall clock
+	// both ties and steps backwards. Zero means no projection has run yet.
+	//
+	// It always describes the set in Presence beside it: the two are written
+	// together, from one load, and never separately.
+	PresenceGeneration uint64
+	Stored             string
+	Messages           []string
+	MessageIDs         []string
+	DirectMessages     []DirectMessage
+	DirectMessageIDs   []string
+	DMHeaders          []DMHeader
+	PendingMessages    []PendingMessage
+	DeliveryReceipts   []DeliveryReceipt
+	Gazeta             []string
+	Error              string
+	CheckedAt          time.Time
 }
 
 // AggregateStatus holds the node-computed aggregate network health
@@ -788,6 +804,10 @@ func (c *DesktopClient) ImportContactLink(ctx context.Context, raw string) (doma
 
 // BuildReachableIDs returns identities that have at least one live route
 // in the routing table.
+func (c *DesktopClient) BuildPresence() (domain.PresenceSet, uint64) {
+	return c.prober.BuildPresence()
+}
+
 func (c *DesktopClient) BuildReachableIDs() map[domain.PeerIdentity]bool {
 	return c.prober.BuildReachableIDs()
 }

@@ -76,6 +76,12 @@ func vectorRecord(t *testing.T, owner *identity.Identity) SignedIdentityRecord {
 // TestIdentityLookupVectors pins the byte-exact transcripts and signatures
 // of requester_sig and target_proof. These are WIRE-normative: two builds
 // disagreeing here reject each other's proofs.
+//
+// These vectors moved once, when a fixed payload padding was added, and moved
+// straight back when it was removed: padding lengths hides nothing while the
+// payload itself travels as readable JSON, so a transit reads `sealed` directly
+// rather than inferring it from a size. See docs/protocol/identity-lookup.md
+// §6.1 for the measurement.
 func TestIdentityLookupVectors(t *testing.T) {
 	owner := vectorOwner(t)
 	attemptID := vectorAttemptID()
