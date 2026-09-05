@@ -78,6 +78,7 @@ func (n versionNormalizer) normalize(peer domain.PeerIdentity, reported domain.P
 // with the send.
 type RouteCandidate struct {
 	connectedAt        time.Time
+	attribution        domain.RouteAttribution
 	nextHop            domain.PeerIdentity
 	channel            ChannelID
 	hops               int
@@ -125,6 +126,13 @@ func (c RouteCandidate) ConnectedAt() time.Time { return c.connectedAt }
 // IsDirect reports whether this is the direct session to the destination
 // promoted by step 1 of §4.3 rather than a routing-table entry.
 func (c RouteCandidate) IsDirect() bool { return c.direct }
+
+// Attribution is the two-axis record of who says this route exists and which
+// plane found it. It is carried, logged and rendered — and it is deliberately
+// absent from routeCandidateLess: which plane answered decides the order in
+// which sources are ASKED (CompositeRouteResolver), never how the answers are
+// ranked against each other.
+func (c RouteCandidate) Attribution() domain.RouteAttribution { return c.attribution }
 
 // routeCandidateLess is the single total order behind BOTH the dedup branch
 // and the final sort. Keeping the keys in one function is what makes the
@@ -451,7 +459,7 @@ func (s candidateSelector) rank(
 			refused.record(admission)
 			continue
 		}
-		candidate := s.newCandidate(hint.NextHop, hint.Hops, result.conn, false)
+		candidate := s.newRoutedCandidate(hint, result.conn)
 		if idx, exists := byNextHop[hint.NextHop]; exists {
 			if routeCandidateLess(candidate, candidates[idx]) {
 				candidates[idx] = candidate
@@ -495,6 +503,45 @@ func splitHorizonExclusion(incoming IngressPeer) (domain.PeerIdentity, bool) {
 	return via, true
 }
 
+// newRoutedCandidate builds the candidate of one routing hint. The
+// attribution is the resolver's — the layer neither invents nor overrides it.
+func (s candidateSelector) newRoutedCandidate(hint RouteHint, conn PeerConnection) RouteCandidate {
+	return s.newCandidate(hint.NextHop, hint.Hops, conn, false, hint.Attribution)
+}
+
+// newDirectCandidate builds the synthetic candidate of step 1 — the
+// destination itself, reached over a live session.
+//
+// It reports 1 hop: a direct send is one network hop away, which puts it on
+// the same scale as relay entries. Its attribution comes from
+// directRouteAttribution rather than from a hint, because this branch never
+// consults the routing table.
+func (s candidateSelector) newDirectCandidate(dst domain.PeerIdentity, conn PeerConnection) RouteCandidate {
+	return s.newCandidate(dst, 1, conn, true, directRouteAttribution(conn))
+}
+
+// directRouteAttribution states both axes of a live direct session.
+//
+// The trust axis is fixed by construction — a session we hold IS
+// RouteSourceDirect — while the discovery axis is whatever the node said about
+// how this connection came to exist. The two are set together here and nowhere
+// else, so "the overlay found it and it is nevertheless a direct session"
+// survives as ONE value instead of collapsing into either half.
+//
+// A connection that names no plane produces no attribution at all. Defaulting
+// it to mesh would be a claim nobody made, and the unattributed value is the
+// one the diagnostics can render as absence.
+func directRouteAttribution(conn PeerConnection) domain.RouteAttribution {
+	switch conn.Discovery {
+	case domain.DiscoveryPlaneMesh:
+		return domain.MeshRouteAttribution(domain.RouteSourceDirect)
+	case domain.DiscoveryPlaneOverlay:
+		return domain.OverlayRouteAttribution(domain.RouteSourceDirect)
+	default:
+		return domain.UnattributedRoute()
+	}
+}
+
 // newCandidate builds a candidate from a connection, applying the version
 // normalization on the way in so no path can forget it.
 func (s candidateSelector) newCandidate(
@@ -502,6 +549,7 @@ func (s candidateSelector) newCandidate(
 	hops int,
 	conn PeerConnection,
 	direct bool,
+	attribution domain.RouteAttribution,
 ) RouteCandidate {
 	return RouteCandidate{
 		nextHop:            nextHop,
@@ -511,5 +559,6 @@ func (s candidateSelector) newCandidate(
 		rawProtocolVersion: conn.ReportedProtocolVersion,
 		connectedAt:        conn.ConnectedAt,
 		direct:             direct,
+		attribution:        attribution,
 	}
 }

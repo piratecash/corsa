@@ -208,10 +208,20 @@ func (s *Service) DatagramReachable(
 //	      "protocol_version": 27,                 // NORMALIZED ranking key: min(reported, local)
 //	      "connected_at": "2025-01-01T12:34:56Z", // omitted when unknown
 //	      "uptime_seconds": 3600.5,               // 0 when connected_at omitted
+//	      "route_source": "direct",               // TRUST axis; omitted when unattributed
+//	      "discovery_plane": "mesh",              // PLANE axis; omitted when unattributed
 //	      "best": true                            // true only for index 0
 //	    }
 //	  ]
 //	}
+//
+// The two attribution fields are ORTHOGONAL and both are rendered: a hop found
+// through the overlay that turned out to be a direct session reads
+// "route_source": "direct" together with "discovery_plane": "overlay", and
+// neither fact is derivable from the other. They are omitted together when the
+// resolver attributed nothing, because an absent field is the honest rendering
+// of "nobody said" — filling in "mesh" there would put a claim in the console
+// that no plane made.
 func (s *Service) ExplainDatagramRoute(
 	ctx context.Context,
 	dst domain.PeerIdentity,
@@ -247,6 +257,8 @@ func (s *Service) ExplainDatagramRoute(
 		ProtocolVersion int     `json:"protocol_version"`
 		ConnectedAt     string  `json:"connected_at,omitempty"`
 		UptimeSeconds   float64 `json:"uptime_seconds"`
+		RouteSource     string  `json:"route_source,omitempty"`
+		DiscoveryPlane  string  `json:"discovery_plane,omitempty"`
 		Best            bool    `json:"best"`
 	}
 
@@ -259,6 +271,14 @@ func (s *Service) ExplainDatagramRoute(
 			Hops:            entry.Hops,
 			ProtocolVersion: int(entry.ProtocolVersion),
 			Best:            i == 0,
+		}
+		// Both axes or neither: they are filled by one constructor, and a
+		// half-rendered attribution would suggest one of them was answered
+		// and the other refused.
+		if source, attributed := entry.Attribution.Source(); attributed {
+			plane, _ := entry.Attribution.Plane()
+			candidate.RouteSource = source.String()
+			candidate.DiscoveryPlane = plane.String()
 		}
 		if !entry.ConnectedAt.IsZero() {
 			candidate.ConnectedAt = entry.ConnectedAt.UTC().Format(time.RFC3339)

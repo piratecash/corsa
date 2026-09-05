@@ -438,20 +438,29 @@ func declaredDTypesOf(names []string) DeclaredDTypes {
 // the given declared dtypes.
 func (f *schedFixture) datagramPeer(peer domain.PeerIdentity, age time.Duration, dtypes ...string) PeerConnection {
 	conn := PeerConnection{
-		ConnectedAt:             f.clock().Add(-age),
-		Advertised:              advertising(CapabilityDatagramV1, CapabilityDatagramTransitV1),
-		DTypes:                  declaredDTypesOf(dtypes),
+		ConnectedAt: f.clock().Add(-age),
+		Advertised:  advertising(CapabilityDatagramV1, CapabilityDatagramTransitV1),
+		DTypes:      declaredDTypesOf(dtypes),
+		// Mesh, because that is what the node reports for every connection it
+		// holds (datagramConnectionPlane). A fixture that left the plane unset
+		// would exercise a shape production never produces and would hide any
+		// path that quietly needs an attributed connection.
+		Discovery:               domain.DiscoveryPlaneMesh,
 		ReportedProtocolVersion: schedLocalVersion,
 	}
 	f.peers.set(peer, conn)
 	return conn
 }
 
+// route is the ordinary mesh hint: attributed exactly as the node's resolver
+// attributes what it reads out of the routing table, so the default fixture
+// route has the shape production produces rather than a bare one.
 func (f *schedFixture) route(nextHop domain.PeerIdentity, hops int) RouteHint {
 	return RouteHint{
-		NextHop:   nextHop,
-		Hops:      hops,
-		ExpiresAt: f.clock().Add(time.Hour),
+		NextHop:     nextHop,
+		Hops:        hops,
+		ExpiresAt:   f.clock().Add(time.Hour),
+		Attribution: domain.MeshRouteAttribution(domain.RouteSourceAnnouncement),
 	}
 }
 

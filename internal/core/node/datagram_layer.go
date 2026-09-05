@@ -173,8 +173,18 @@ func newDatagramPlaneParts(svc *Service, metrics *datagram.Metrics) (datagramPla
 		return datagramPlaneParts{}, err
 	}
 
+	// The poll order of the route planes is fixed HERE, by this literal, and
+	// nowhere else — not by configuration (dht-dualstack-migration.md §4.2).
+	// Today the mesh is the only plane, so the composite forwards its answer
+	// unchanged; step 09 appends the overlay to this list and every caller
+	// below stays as it is.
+	routes, err := datagram.NewCompositeRouteResolver(datagramRouteResolver{service: svc})
+	if err != nil {
+		return datagramPlaneParts{}, err
+	}
+
 	scheduler, err := datagram.NewScheduler(datagram.SchedulerConfig{
-		Routes:               datagramRouteResolver{service: svc},
+		Routes:               routes,
 		Peers:                datagramPeerMetadata{service: svc},
 		Direct:               datagramDirectSession{service: svc},
 		Secret:               newDatagramNodeSecret(svc.identity.PrivateKey),

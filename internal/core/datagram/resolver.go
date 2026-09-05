@@ -27,7 +27,8 @@ import (
 // RouteHint is one route to a destination as the resolver knows it. It is
 // deliberately a layer-local shape rather than routing.RouteEntry: the
 // scheduler must keep working when the control plane behind the resolver is
-// replaced, and it needs exactly four facts to rank a hop.
+// replaced, and it needs exactly four facts to rank a hop — plus one it does
+// not rank by at all, see Attribution.
 //
 // ExpiresAt is an ABSOLUTE deadline, not a remaining TTL, because §4.3
 // requires expiry to be judged against the clock AT SELECTION TIME: a
@@ -38,6 +39,20 @@ type RouteHint struct {
 	// ExpiresAt is the absolute expiry of the route. The zero value means
 	// the route does not expire on its own.
 	ExpiresAt time.Time
+	// Attribution is who says so and which plane found it — a pair of facts
+	// that travels with the route and takes part in NO ranking key (see
+	// routeCandidateLess). It is carried because an operator, a metric and
+	// step 09's cross-plane comparison all have to tell "arrived over the
+	// mesh" from "arrived over the overlay", and because a route learned
+	// through the overlay can still be a direct session: one field would
+	// keep one of those facts and lose the other.
+	//
+	// A resolver that fills nothing leaves it UnattributedRoute, which the
+	// diagnostics render as absence rather than as a plane. It is not
+	// defaulted to mesh here: the layer does not know which plane its
+	// resolver is, and guessing would put a claim in an operator's console
+	// that nobody made.
+	Attribution domain.RouteAttribution
 	// NextHop is the neighbour this route goes through.
 	NextHop domain.PeerIdentity
 	// Hops is the distance to the destination; 1 is directly connected.
@@ -128,6 +143,20 @@ type PeerConnection struct {
 	// peer's name, which is the closed direction — the name is precisely what may
 	// not decide where an answer comes back from.
 	Channel ChannelID
+	// Discovery is the plane this CONNECTION was found through — not the
+	// plane of any route that happens to travel over it.
+	//
+	// It exists for the direct branch of §4.3, where the next hop IS the
+	// destination and no RouteHint is involved at all: without it, a session
+	// opened because the overlay answered a lookup would be reported as a
+	// plain direct neighbour and the overlay's contribution would be
+	// invisible exactly where it mattered. The trust axis needs no field
+	// here — a live session is RouteSourceDirect by construction.
+	//
+	// The zero value is DiscoveryPlaneUnset and stays that way for a
+	// resolver that names no plane; nothing downstream substitutes mesh for
+	// it.
+	Discovery domain.DiscoveryPlane
 	// ReportedProtocolVersion is what the peer claimed on THIS connection.
 	ReportedProtocolVersion domain.ProtocolVersion
 }

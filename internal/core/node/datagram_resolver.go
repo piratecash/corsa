@@ -71,11 +71,19 @@ func (r datagramRouteResolver) CachedRoutes(_ context.Context, dst domain.PeerId
 
 // datagramRouteHints projects routing entries onto the layer's hint shape.
 //
-// Two translations happen here and nowhere else, which is the point of the
+// Three translations happen here and nowhere else, which is the point of the
 // interface: the layer must not learn that this control plane encodes a
-// withdrawal as Hops >= HopsInfinity, and it must receive an ABSOLUTE expiry
-// so it can judge staleness against the clock at SELECTION time rather than
-// against the moment a snapshot was published (§4.3).
+// withdrawal as Hops >= HopsInfinity; it must receive an ABSOLUTE expiry so it
+// can judge staleness against the clock at SELECTION time rather than against
+// the moment a snapshot was published (§4.3); and it must be told WHICH plane
+// answered, which this resolver is the only one able to say about itself.
+//
+// The attribution keeps both axes and invents neither. RouteEntry.Source is
+// carried across unchanged — the trust hierarchy stays the routing table's
+// property, and nothing here re-ranks by it — while the plane is mesh because
+// this resolver IS the distance-vector plane. That is a statement about the
+// resolver, not a default for a missing value: a hint that reached the layer
+// through this function was produced by the mesh.
 func datagramRouteHints(routes []routing.RouteEntry) []datagram.RouteHint {
 	if len(routes) == 0 {
 		return nil
@@ -83,10 +91,11 @@ func datagramRouteHints(routes []routing.RouteEntry) []datagram.RouteHint {
 	hints := make([]datagram.RouteHint, 0, len(routes))
 	for _, route := range routes {
 		hints = append(hints, datagram.RouteHint{
-			ExpiresAt: route.ExpiresAt,
-			NextHop:   route.NextHop,
-			Hops:      route.Hops,
-			Withdrawn: route.Hops >= routing.HopsInfinity,
+			ExpiresAt:   route.ExpiresAt,
+			Attribution: domain.MeshRouteAttribution(route.Source),
+			NextHop:     route.NextHop,
+			Hops:        route.Hops,
+			Withdrawn:   route.Hops >= routing.HopsInfinity,
 		})
 	}
 	return hints
@@ -373,9 +382,23 @@ func datagramPeerConnection(
 		Advertised:              datagramAdvertisedCapabilities(declarations),
 		DTypes:                  datagramDeclaredDTypes(declarations),
 		Channel:                 datagram.NetworkChannel(connID),
+		Discovery:               datagramConnectionPlane(),
 		ReportedProtocolVersion: reported,
 	}
 }
+
+// datagramConnectionPlane names the plane every connection of this build was
+// found through.
+//
+// It answers mesh for all of them, and that is a fact rather than a
+// placeholder: every path that produces a session here — configured peers, the
+// peer provider's candidates, gossip-learned addresses, an accepted inbound
+// dial — belongs to the distance-vector plane, and no structured overlay
+// exists in the tree to produce any other. The constant lives behind a named
+// function so the claim has exactly one place to be revisited when a second
+// plane starts opening sessions, instead of being spelled inline at whichever
+// call sites happen to build connection metadata by then.
+func datagramConnectionPlane() domain.DiscoveryPlane { return domain.DiscoveryPlaneMesh }
 
 // datagramPeerMetadata answers §4.3's "resolve a peer to the ONE connection a
 // send would use".

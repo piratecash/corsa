@@ -150,13 +150,21 @@ func (q RoutePlanQuery) Reachability() ReachabilityQuery { return q.reach }
 // RoutePolicy returns the policy the plan is asked for.
 func (q RoutePlanQuery) RoutePolicy() domain.RoutePolicy { return q.policy }
 
-// RoutePlanEntry is the public projection of one candidate. The fields
-// mirror the comparator keys exactly, so a reader can rebuild the ranking
-// decision from the output. ConnectedAt is left zero when the underlying
-// metadata had no known timestamp — render that as "unknown" rather than
-// inventing an uptime of now-minus-zero.
+// RoutePlanEntry is the public projection of one candidate. The comparator
+// keys are mirrored exactly, so a reader can rebuild the ranking decision from
+// the output. ConnectedAt is left zero when the underlying metadata had no
+// known timestamp — render that as "unknown" rather than inventing an uptime
+// of now-minus-zero.
+//
+// Attribution is the one field that is NOT a comparator key, and it is here
+// for the question the keys cannot answer: which plane produced this hop, and
+// on what evidence. An operator comparing two planes, and step 09's
+// cross-plane diff, both read the plan; a plan that ranked correctly and said
+// nothing about where the route came from would leave them with two identical
+// lists and no way to tell them apart.
 type RoutePlanEntry struct {
 	ConnectedAt     time.Time
+	Attribution     domain.RouteAttribution
 	NextHop         domain.PeerIdentity
 	Hops            int
 	ProtocolVersion domain.ProtocolVersion
@@ -365,6 +373,7 @@ func (s *Scheduler) ExplainRoute(ctx context.Context, query RoutePlanQuery) (Rou
 			Hops:            candidate.hops,
 			ProtocolVersion: candidate.protocolVersion,
 			ConnectedAt:     candidate.connectedAt,
+			Attribution:     candidate.attribution,
 		})
 	}
 	return plan, nil

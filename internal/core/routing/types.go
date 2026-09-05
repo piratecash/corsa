@@ -320,51 +320,25 @@ type peerFlapState struct {
 	lastFlapAt time.Time
 }
 
-// RouteSource indicates how a route was learned. The trust hierarchy is:
-// direct > hop_ack > announcement. A route learned through a more trusted
-// source is preferred over one with the same (identity, origin, nextHop)
-// triple learned through a less trusted source.
-type RouteSource uint8
+// RouteSource indicates how a route was learned — see domain.RouteSource for
+// the type, the trust hierarchy (direct > hop_ack > announcement) and
+// TrustRank.
+//
+// It is an ALIAS of the domain type, not a copy: the datagram layer's
+// RouteResolver seam must be nameable by a control plane that is not this one
+// (docs/refactoring/dht/02-route-source.md §1), and two enumerations of one
+// fact is how the trust order acquires a second, divergent spelling. The
+// values below are re-exported so every call site in this package — and the
+// admission, eviction and scoring paths that read TrustRank — keeps reading
+// exactly what it read before.
+type RouteSource = domain.RouteSource
 
 const (
-	RouteSourceAnnouncement RouteSource = iota // learned via announce_routes frame
-	RouteSourceHopAck                          // confirmed by relay_hop_ack
-	RouteSourceDirect                          // directly connected peer
-	RouteSourceLocal                           // synthetic: the node itself (hops=0, never expires)
+	RouteSourceAnnouncement = domain.RouteSourceAnnouncement // learned via announce_routes frame
+	RouteSourceHopAck       = domain.RouteSourceHopAck       // confirmed by relay_hop_ack
+	RouteSourceDirect       = domain.RouteSourceDirect       // directly connected peer
+	RouteSourceLocal        = domain.RouteSourceLocal        // synthetic: the node itself (hops=0, never expires)
 )
-
-// String returns a human-readable representation for logging and debugging.
-func (s RouteSource) String() string {
-	switch s {
-	case RouteSourceLocal:
-		return "local"
-	case RouteSourceDirect:
-		return "direct"
-	case RouteSourceHopAck:
-		return "hop_ack"
-	case RouteSourceAnnouncement:
-		return "announcement"
-	default:
-		return fmt.Sprintf("unknown(%d)", s)
-	}
-}
-
-// TrustRank returns a numeric rank for comparison. Higher rank means
-// more trusted. This avoids relying on iota ordering.
-func (s RouteSource) TrustRank() int {
-	switch s {
-	case RouteSourceLocal:
-		return 3
-	case RouteSourceDirect:
-		return 2
-	case RouteSourceHopAck:
-		return 1
-	case RouteSourceAnnouncement:
-		return 0
-	default:
-		return -1
-	}
-}
 
 // RouteEntry is the boundary value of a single route in the
 // distance-vector table — the shape Table.UpdateRoute / AnnounceTo /

@@ -203,6 +203,8 @@ Response:
       "protocol_version": 27,
       "connected_at": "2026-04-01T12:00:00Z",
       "uptime_seconds": 3600.5,
+      "route_source": "direct",
+      "discovery_plane": "mesh",
       "best": true
     }
   ]
@@ -218,7 +220,17 @@ Response:
 | `candidates[].protocol_version` | int | The **normalized** ranking key: `min(reported, local)`. A peer claiming a higher version is capped rather than zeroed, so a staged rollout is not starved |
 | `candidates[].connected_at` | string | When the chosen connection was established; omitted when unknown |
 | `candidates[].uptime_seconds` | float | Derived from `connected_at`, clamped at zero so peer clock skew never renders as negative uptime |
+| `candidates[].route_source` | string | **Trust axis**: how the route is proven — `direct`, `hop_ack`, `announcement` or `local`. Omitted together with `discovery_plane` when the resolver attributed nothing |
+| `candidates[].discovery_plane` | string | **Plane axis**: which plane produced the route — `mesh` today, `overlay` once the structured overlay answers. It is not a trust rank and takes part in no ranking key |
 | `candidates[].best` | bool | `true` only for index 0 |
+
+The two attribution fields are **orthogonal and both rendered**. A hop found
+through the overlay that turned out to be a live session reads
+`"route_source": "direct"` together with `"discovery_plane": "overlay"`, and
+neither fact is derivable from the other — which is the whole reason there are
+two fields rather than one enum. They are omitted **together** when no resolver
+attributed the route: an absent field is the honest rendering of "nobody said",
+while filling in `mesh` would print a claim no plane ever made.
 
 The metadata of each candidate describes **one concrete connection** — the one
 the live send path would try first, outbound session preferred over inbound —
@@ -385,7 +397,17 @@ corsa-cli explainDatagramRoute <identity> <dtype> [route_policy]
 | `candidates[].protocol_version` | int | **Нормализованный** ключ ранжирования: `min(reported, local)`. Пир, заявивший версию выше локальной, клампится, а не обнуляется, — иначе staged rollout голодал бы |
 | `candidates[].connected_at` | string | Момент установления выбранного соединения; опускается, если неизвестен |
 | `candidates[].uptime_seconds` | float | Производное от `connected_at`, зажатое снизу нулём, чтобы перекос часов пира не давал отрицательный аптайм |
+| `candidates[].route_source` | string | **Ось доверия**: чем маршрут подтверждён — `direct`, `hop_ack`, `announcement` или `local`. Опускается вместе с `discovery_plane`, если резолвер не проставил атрибуцию |
+| `candidates[].discovery_plane` | string | **Ось плоскости**: какая плоскость дала маршрут — сегодня `mesh`, `overlay` после появления структурного оверлея. Рангом доверия НЕ является и ни в один ключ ранжирования не входит |
 | `candidates[].best` | bool | `true` только для индекса 0 |
+
+Две оси атрибуции **ортогональны и рендерятся обе**. Хоп, найденный через
+оверлей и оказавшийся живой сессией, отдаёт `"route_source": "direct"` вместе с
+`"discovery_plane": "overlay"`, и ни один из фактов не выводится из другого —
+ровно поэтому полей два, а не одно перечисление. Опускаются они **вместе**,
+если атрибуцию не проставил никто: отсутствие поля — честный рендер «никто не
+сказал», тогда как подставленный `mesh` был бы утверждением, которого ни одна
+плоскость не делала.
 
 Метаданные каждого кандидата описывают **одно конкретное соединение** — то,
 которое живой путь отправки попробует первым (outbound-сессия приоритетнее

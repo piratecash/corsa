@@ -611,7 +611,7 @@ func (s *Scheduler) directSessionCandidate(
 	admission := admitPeer(frame, frame.Dst, conn)
 	probe := directProbe{present: true, admission: admission}
 	if admission.admitted {
-		probe.candidate = s.selector.newCandidate(frame.Dst, 1, conn, true)
+		probe.candidate = s.selector.newDirectCandidate(frame.Dst, conn)
 	}
 	return probe
 }
@@ -704,6 +704,11 @@ func (s *Scheduler) dispatch(
 			Str("dst", job.frame.Dst.String()).
 			Str("next_hop", candidate.nextHop.String()).
 			Str("dtype", job.frame.DType.String()).
+			// Which plane offered the hop that refused, and on what evidence.
+			// Without it a journal of refusals cannot say whether one plane is
+			// producing hops the other would not have — the question §1 of the
+			// step exists to make answerable.
+			Str("route_attribution", candidate.attribution.String()).
 			Str("outcome", outcome.Kind().String()).
 			Msg("datagram: next hop refused the frame, trying next candidate")
 	}
