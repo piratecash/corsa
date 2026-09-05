@@ -195,8 +195,36 @@ func (r *rotatingHashDedup) Delete(key string) {
 	delete(r.previous, h)
 }
 
+// StoredLen reports how many entries the two generations HOLD, without
+// deduplicating them against each other and without rotating.
+//
+// It is the accounting counterpart of Len, and the difference between them is
+// not cosmetic:
+//
+//   - Len walks the whole previous generation — up to maxReceiptDedupEntries
+//     keys — to subtract the overlap. It does that under this mutex, and
+//     finishReceipt takes this mutex while HOLDING deliveryMu, so a caller
+//     asking for a diagnostic can stall the entire delivery domain behind a
+//     50 000-key scan. That is exactly the cost the resource breakdown refuses
+//     to impose on the node it measures;
+//   - Len also ROTATES if a rotation is due, which is a write. An instrument
+//     that mutates the thing it measures is answering about itself;
+//   - for a memory figure the overlap should not be subtracted anyway. A key
+//     present in both generations occupies a slot in each, and both slots are
+//     resident until the older generation is dropped. The deduplicated count
+//     answers "how many receipts are still recognised", which is a different
+//     question with a smaller answer.
+//
+// Cost is two len reads under a short lock.
+func (r *rotatingHashDedup) StoredLen() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.current) + len(r.previous)
+}
+
 // Len reports the number of distinct keys currently retained across both
-// generations. Diagnostic only; not on any hot path.
+// generations. Diagnostic only; not on any hot path — and NOT for the resource
+// breakdown, which uses StoredLen: this one scans a generation and may rotate.
 func (r *rotatingHashDedup) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

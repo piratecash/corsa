@@ -32,6 +32,17 @@ type NodeProvider interface {
 	// getResourceUsage RPC command; the desktop console Info tab renders
 	// the memory/uptime subset.
 	ResourceUsage() domain.ResourceUsage
+
+	// FetchResourceBreakdown returns a JSON-encoded per-subsystem view of the
+	// long-lived state this node holds — who is holding memory, rather than
+	// how much the process holds. Returned by the getResourceBreakdown RPC
+	// command.
+	//
+	// It is separate from ResourceUsage because the desktop client samples
+	// that one every second to draw the Info tab; a breakdown folded into it
+	// would make every node with a UI attached pay for a dozen domain-lock
+	// acquisitions per second to produce numbers nothing renders.
+	FetchResourceBreakdown() (json.RawMessage, error)
 	// FetchFileTransfers returns a JSON-encoded list of active and pending
 	// sender/receiver file transfers. Terminal states are excluded.
 	FetchFileTransfers() (json.RawMessage, error)

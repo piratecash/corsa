@@ -188,6 +188,94 @@ rows from this command.
 
 ---
 
+### POST /rpc/v1/exec — `getResourceBreakdown`
+
+**Who** is holding the long-lived state, as opposed to how much the
+process holds. Snake_case aliases `resource_breakdown` and
+`get_resource_breakdown` resolve to the same handler.
+
+It is a separate command from `getResourceUsage` rather than an
+extension of it, because the desktop client samples that one **once per
+second** to draw the Info tab: folding a per-subsystem breakdown into it
+would make every node with a UI attached pay for a dozen domain-lock
+acquisitions per second to produce numbers nothing renders. Call this
+one when investigating growth, not on a timer.
+
+Response:
+```json
+{
+  "sampled_at": "2026-09-05T12:00:00.123456789Z",
+  "floor_bytes": 47458816,
+  "floor_human": "45.26 MB",
+  "dominant": "route_plane",
+  "subsystems": [
+    {
+      "subsystem": "route_plane",
+      "floor_bytes": 41000000,
+      "floor_human": "39.10 MB",
+      "gauges": [
+        {
+          "name": "outbound_peer_seq",
+          "kind": "memory",
+          "count": 644032,
+          "entry_bytes": 56,
+          "floor_bytes": 36065792,
+          "floor_human": "34.40 MB"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Field notes:
+
+- `subsystems[].subsystem` — one of `route_plane`, `announce`,
+  `datagram`, `delivery`, `sessions`, `knowledge`, `bans`. Every one is
+  always present; a subsystem this build did not wire (the datagram
+  plane on a node without it) reports an empty gauge list rather than
+  disappearing, so "nothing is holding it there" stays distinguishable
+  from "this build cannot answer".
+- `subsystems[].gauges[].count` — **exact**: the live cardinality of one
+  container, read as a `len` under the lock its owner already holds. No
+  container is walked, because an accounting pass that scanned the
+  routing table under its mutex would stall the announce loop it shares
+  that mutex with.
+- `subsystems[].gauges[].entry_bytes` — what one entry of that container
+  costs: its key plus its value, and **nothing they point at**.
+- `subsystems[].gauges[].kind` — `memory` or `saturation`. A **saturation**
+  gauge reports how full a quota is and contributes **no bytes** to any
+  total: the entries behind it are a subset of ones a memory gauge has
+  already counted, so adding them would report the same records twice
+  and leave the "floor" above the truth. Its `floor_bytes` is therefore
+  `0` beside a non-zero `count`, which is deliberate rather than a bug.
+- `*_floor_bytes` / `*_floor_human` — `count × entry_bytes`, summed
+  upwards. **A floor, never a measurement.** It excludes Go's own
+  per-bucket map overhead and every byte a stored value merely
+  references (a signature, an opaque `Extra` blob, a nested slice).
+  Measured retention runs roughly 2.0–2.65× the floor depending on the
+  container — see `docs/refactoring/dht/13-measurements.md` §8.2 for the
+  measured ratios. Do not expect these figures to add up to
+  `getResourceUsage`'s process numbers.
+- `dominant` — the subsystem with the largest floor. **Omitted** when
+  the node holds nothing at all: on a freshly started node every
+  subsystem is equally the largest, and naming one would be an answer
+  with no content behind it.
+- `sampled_at` — RFC3339Nano UTC instant the pass began. Subsystems are
+  **not** sampled under one lock: each is read where its own owner holds
+  its own, so the picture is consistent only to within the pass. A
+  global lock across every domain would make one timestamp tidier at the
+  cost of stalling the node being measured.
+
+One gauge is not a memory figure at all and is documented here because
+it is easy to misread as one: `datagram/reverse_local_slots` is a
+**saturation** figure — how many of the shared local-request slots are
+occupied. Read it against `limits.reverse.per_upstream_cap` from
+`fetchDatagramSummary`, whose `reverse.LocalRefusals` says which dtype
+that quota has been turning away.
+
+---
+
 ## Русский
 
 ### POST /rpc/v1/system/help
@@ -377,3 +465,88 @@ challenge-и.
 
 В десктоп-консоли на вкладке **Инфо** показываются заголовочные строки
 `Память` / `Аптайм` из этой команды.
+
+---
+
+### POST /rpc/v1/exec — `getResourceBreakdown`
+
+**Кто** держит долгоживущее состояние — в отличие от того, сколько держит
+процесс целиком. Snake_case алиасы `resource_breakdown` и
+`get_resource_breakdown` ведут к тому же обработчику.
+
+Это отдельная команда, а не расширение `getResourceUsage`, по одной
+причине: ту сэмплит desktop-клиент **раз в секунду** ради Info-таба, и
+вложенная в неё разбивка заставила бы каждый узел с UI платить десятком
+захватов доменных мьютексов в секунду за числа, которых никто не рисует.
+Эту команду зовут при разборе роста, а не по таймеру.
+
+Ответ:
+```json
+{
+  "sampled_at": "2026-09-05T12:00:00.123456789Z",
+  "floor_bytes": 47458816,
+  "floor_human": "45.26 MB",
+  "dominant": "route_plane",
+  "subsystems": [
+    {
+      "subsystem": "route_plane",
+      "floor_bytes": 41000000,
+      "floor_human": "39.10 MB",
+      "gauges": [
+        {
+          "name": "outbound_peer_seq",
+          "kind": "memory",
+          "count": 644032,
+          "entry_bytes": 56,
+          "floor_bytes": 36065792,
+          "floor_human": "34.40 MB"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Описание полей:
+
+- `subsystems[].subsystem` — одно из `route_plane`, `announce`,
+  `datagram`, `delivery`, `sessions`, `knowledge`, `bans`. Присутствуют
+  всегда все; подсистема, которой в этой сборке нет (плоскость датаграмм
+  на узле без неё), отдаёт пустой список gauge-ей, а не исчезает — чтобы
+  «там ничего не лежит» осталось отличимо от «эта сборка не умеет
+  отвечать».
+- `subsystems[].gauges[].count` — **точное** число: живая мощность одного
+  контейнера, снятая как `len` под уже удерживаемой владельцем
+  блокировкой. Ни один контейнер не обходится: проход, сканирующий
+  таблицу маршрутов под её мьютексом, застопорил бы announce-цикл, с
+  которым он этот мьютекс делит.
+- `subsystems[].gauges[].entry_bytes` — во что обходится одна запись:
+  ключ плюс значение и **ничего из того, на что они ссылаются**.
+- `subsystems[].gauges[].kind` — `memory` или `saturation`. Gauge вида
+  **saturation** показывает, насколько заполнена квота, и **не даёт байтов**
+  ни в одну сумму: записи за ним — подмножество тех, что уже посчитал
+  memory-gauge, и сложить их значило бы посчитать одни и те же записи дважды
+  и увести «пол» выше истины. Поэтому у него `floor_bytes` равен `0` при
+  ненулевом `count` — это намеренно, а не ошибка.
+- `*_floor_bytes` / `*_floor_human` — `count × entry_bytes`, суммируется
+  вверх. **Это ПОЛ, а не измерение.** Не учитывает накладные расходы
+  Go-шной map и все байты, на которые хранимое значение лишь ссылается
+  (подпись, непрозрачный `Extra`, вложенный слайс). Измеренное удержание
+  идёт примерно ×2.0–2.65 от пола в зависимости от контейнера — замеры в
+  `docs/refactoring/dht/13-measurements.md` §8.2. Не ждите, что эти числа
+  сойдутся с процессными числами `getResourceUsage`.
+- `dominant` — подсистема с наибольшим полом. **Опускается**, когда узел
+  не держит вообще ничего: на свежезапущенном узле все подсистемы
+  одинаково «наибольшие», и назвать одну значило бы дать ответ без
+  содержания.
+- `sampled_at` — момент начала прохода, RFC3339Nano UTC. Подсистемы
+  **не** снимаются под одной блокировкой: каждая читается там, где её
+  владелец держит свою, поэтому картина согласована лишь с точностью до
+  прохода. Глобальная блокировка по всем доменам сделала бы одну метку
+  времени опрятнее ценой остановки измеряемого узла.
+
+Один gauge вообще не про память и вынесен сюда, потому что его легко
+принять за память: `datagram/reverse_local_slots` — это **насыщение**,
+сколько общих слотов локальных запросов занято. Читать его надо против
+`limits.reverse.per_upstream_cap` из `fetchDatagramSummary`, где
+`reverse.LocalRefusals` говорит, какому dtype эта квота отказывала.

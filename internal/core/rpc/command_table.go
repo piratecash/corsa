@@ -405,6 +405,10 @@ func registerSnakeCaseAliases(t *CommandTable) {
 		"resourceusage":      "getResourceUsage",
 		"resource_usage":     "getResourceUsage",
 		"get_resource_usage": "getResourceUsage",
+
+		"resourcebreakdown":      "getResourceBreakdown",
+		"resource_breakdown":     "getResourceBreakdown",
+		"get_resource_breakdown": "getResourceBreakdown",
 	}
 	for old, canonical := range aliases {
 		t.RegisterAlias(old, canonical)
@@ -678,6 +682,28 @@ func RegisterSystemCommands(t *CommandTable, node NodeProvider) {
 				return r
 			}
 			return jsonResponse(node.ResourceUsage())
+		},
+	)
+
+	// The companion of getResourceUsage, and deliberately not part of it:
+	// that one answers "how much does this process hold" and is sampled once a
+	// second by the desktop Info tab, while this one answers "who holds it"
+	// and takes a lock in every state-owning domain to do so.
+	t.Register(
+		CommandInfo{
+			Name:        "getResourceBreakdown",
+			Description: "Get long-lived state broken down by subsystem (route plane, announce, datagram, delivery, sessions, knowledge, bans): exact container counts, per-entry cost, and the floor they imply, plus which subsystem dominates",
+			Category:    "system",
+		},
+		func(req CommandRequest) CommandResponse {
+			if r, done := ctxDone(req); done {
+				return r
+			}
+			breakdown, err := node.FetchResourceBreakdown()
+			if err != nil {
+				return internalError(err)
+			}
+			return CommandResponse{Data: breakdown}
 		},
 	)
 }

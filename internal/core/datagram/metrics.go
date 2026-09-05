@@ -302,6 +302,34 @@ type Diagnostics struct {
 	// and until this field existed the counters had no reader outside the
 	// tests — a rule with no way to see it fire.
 	Replay ReplayDiagnostics
+	// Reverse is the reverse-state table's occupancy and, above all, who its
+	// shared local quota refused.
+	//
+	// The table used to be absent from this snapshot entirely, which made it
+	// the one component of the plane whose pressure could not be seen — and
+	// the only one whose overflow REFUSES instead of evicting. A refusal there
+	// does not slow a subsystem down, it stops it from asking at all.
+	Reverse ReverseDiagnostics
+}
+
+// ReverseDiagnostics is what the reverse-state table reports.
+//
+// The three fields answer one question in three parts, and none of them
+// answers it alone: how many exchanges are open, how much of the shared local
+// quota is spoken for, and which of this node's own subsystems that quota has
+// turned away. Occupancy without refusals cannot tell a busy node from a
+// blocked one; refusals without occupancy cannot tell a tight quota from a
+// burst.
+type ReverseDiagnostics struct {
+	// LocalRefusals counts capped refusals of this node's own requests, by
+	// dtype. Keys are dtype names; an empty map means the shared quota has
+	// never turned away a local request.
+	LocalRefusals map[string]uint64
+	// Held is the number of reverse records at this instant.
+	Held int
+	// LocalSlots is how many of the shared local-request slots are occupied.
+	// Read it against Limits.Reverse.PerUpstreamCap.
+	LocalSlots int
 }
 
 // ReplayDiagnostics is what the base anti-replay cache reports: what its
@@ -329,6 +357,7 @@ func CollectDiagnostics(
 	admission *PeerAdmission,
 	queue *WeightedQueue,
 	replay *BaseReplayCache,
+	reverse *ReverseTable,
 ) Diagnostics {
 	diagnostics := Diagnostics{Limits: limits.Normalized(), Metrics: metrics.Snapshot()}
 	if admission != nil {
@@ -340,5 +369,23 @@ func CollectDiagnostics(
 	if replay != nil {
 		diagnostics.Replay = ReplayDiagnostics{Counters: replay.Metrics(), Held: replay.Len()}
 	}
+	if reverse != nil {
+		diagnostics.Reverse = ReverseDiagnostics{
+			Held:          reverse.Len(),
+			LocalSlots:    reverse.LocalSlots(),
+			LocalRefusals: reverseRefusalNames(reverse.LocalRefusals()),
+		}
+	}
 	return diagnostics
+}
+
+// reverseRefusalNames renders the refusal tally for a reader. Always a non-nil
+// map: "no local request has ever been refused" is a real and expected state,
+// and `null` would read as "this build does not know".
+func reverseRefusalNames(refusals map[domain.DType]uint64) map[string]uint64 {
+	named := make(map[string]uint64, len(refusals))
+	for dtype, count := range refusals {
+		named[dtype.String()] = count
+	}
+	return named
 }

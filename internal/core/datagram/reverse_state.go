@@ -695,6 +695,27 @@ type ReverseTable struct {
 	// quota a reconnect renews.
 	byUpstream map[upstreamKey]int
 
+	// localRefusals counts capped refusals of THIS NODE's own requests, keyed
+	// by the dtype that was turned away.
+	//
+	// It exists because "the shared quota is full" is not an answer anyone can
+	// act on. Every locally originated request exchange — identity resolution,
+	// the liveness probe, and whatever is added next — shares ONE bucket of
+	// PerUpstreamCap slots, and a full local bucket REFUSES rather than
+	// evicting. So one busy subsystem can stop another from ever starting a
+	// lookup without exceeding a single limit of its own, and the only trace
+	// of it was a counter that mixes local refusals with transit ones. The
+	// question worth measuring is not how much was taken but WHO WAS TURNED
+	// AWAY.
+	//
+	// Only the local bucket is attributed. A transit refusal already has its
+	// own drop reason, and its dtype arrives from the wire — keying a map on it
+	// would let a stranger grow this node's memory one invented type name at a
+	// time. Local dtypes come from this build's own senders, so the key space
+	// is ours; localRefusalDTypeCap is the backstop for the day that stops
+	// being true.
+	localRefusals map[domain.DType]uint64
+
 	probes     int
 	generation uint64
 
@@ -772,6 +793,7 @@ func (t *ReverseTable) Reserve(opts ReverseReserveOpts) ReverseReserveResult {
 	}
 	if !t.makeRoomLocked(opts.Upstream, now) {
 		t.observeLocked(ReverseEventCapped)
+		t.recordRefusalLocked(opts.Upstream, opts.DType)
 		return ReverseReserveResult{outcome: ReverseSlotCapped}
 	}
 

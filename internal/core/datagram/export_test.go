@@ -37,15 +37,6 @@ func (p IngressPeer) Authority() IngressAuthority { return p.authority }
 // hard-code DefaultReverseProbeBudget.
 func (t *ReverseTable) ProbeBudget() int { return t.probes }
 
-// Len returns the number of live reverse records. Production never asks: the
-// table's own limits are enforced inside it, and the counters reach the
-// diagnostic through ReverseEvent.
-func (t *ReverseTable) Len() int {
-	t.mu.Lock()
-	defer t.unlockAndPublish()
-	return len(t.entries)
-}
-
 // Len returns the total number of queued frames. Production reads Stats(),
 // which publishes the per-class depths the diagnostic renders; this is the
 // single total, which only a test asks for.

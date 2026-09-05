@@ -405,6 +405,61 @@ func (_c *MockNodeProvider_FetchFileTransfers_Call) RunAndReturn(run func() (jso
 	return _c
 }
 
+// FetchResourceBreakdown provides a mock function for the type MockNodeProvider
+func (_mock *MockNodeProvider) FetchResourceBreakdown() (json.RawMessage, error) {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for FetchResourceBreakdown")
+	}
+
+	var r0 json.RawMessage
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func() (json.RawMessage, error)); ok {
+		return returnFunc()
+	}
+	if returnFunc, ok := ret.Get(0).(func() json.RawMessage); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(json.RawMessage)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func() error); ok {
+		r1 = returnFunc()
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockNodeProvider_FetchResourceBreakdown_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FetchResourceBreakdown'
+type MockNodeProvider_FetchResourceBreakdown_Call struct {
+	*mock.Call
+}
+
+// FetchResourceBreakdown is a helper method to define mock.On call
+func (_e *MockNodeProvider_Expecter) FetchResourceBreakdown() *MockNodeProvider_FetchResourceBreakdown_Call {
+	return &MockNodeProvider_FetchResourceBreakdown_Call{Call: _e.mock.On("FetchResourceBreakdown")}
+}
+
+func (_c *MockNodeProvider_FetchResourceBreakdown_Call) Run(run func()) *MockNodeProvider_FetchResourceBreakdown_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockNodeProvider_FetchResourceBreakdown_Call) Return(rawMessage json.RawMessage, err error) *MockNodeProvider_FetchResourceBreakdown_Call {
+	_c.Call.Return(rawMessage, err)
+	return _c
+}
+
+func (_c *MockNodeProvider_FetchResourceBreakdown_Call) RunAndReturn(run func() (json.RawMessage, error)) *MockNodeProvider_FetchResourceBreakdown_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // HandleLocalFrame provides a mock function for the type MockNodeProvider
 func (_mock *MockNodeProvider) HandleLocalFrame(frame protocol.Frame) protocol.Frame {
 	ret := _mock.Called(frame)

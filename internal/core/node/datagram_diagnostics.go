@@ -62,8 +62,16 @@ func (e *datagramError) Error() string { return "datagram: " + e.msg }
 //	  "admission": { ... },               // per-neighbour budget counters
 //	  "queue":     { ... },               // weighted class queue depths
 //	  "replay":    { "Counters": {...}, "Held": 0 }, // anti-replay cache
+//	  "reverse":   { "Held": 0, "LocalSlots": 0, "LocalRefusals": {} }, // request quota
 //	  "limits":    { ... }                // the §5 numbers in force
 //	}
+//
+// Every key CollectDiagnostics fills must appear here. That is not a style
+// note: the reverse block was collected and then dropped on this line for a
+// release, so the documented `local_refusals` — the one number saying which of
+// this node's own subsystems the shared quota turned away — reached nobody
+// while the docs promised it. A field that is gathered and not rendered is
+// worse than an absent one, because it reads as measured.
 func (s *Service) FetchDatagramSummary() (json.RawMessage, error) {
 	layer := s.datagramLayer()
 	if layer == nil {
@@ -71,7 +79,7 @@ func (s *Service) FetchDatagramSummary() (json.RawMessage, error) {
 	}
 
 	diagnostics := datagram.CollectDiagnostics(
-		layer.limits, layer.metrics, layer.admission, layer.queue, layer.replayCache,
+		layer.limits, layer.metrics, layer.admission, layer.queue, layer.replayCache, layer.reverse,
 	)
 
 	summary := map[string]any{
@@ -87,6 +95,7 @@ func (s *Service) FetchDatagramSummary() (json.RawMessage, error) {
 		"admission":         diagnostics.Admission,
 		"queue":             diagnostics.Queue,
 		"replay":            diagnostics.Replay,
+		"reverse":           diagnostics.Reverse,
 		"limits":            diagnostics.Limits,
 	}
 	data, err := json.Marshal(summary)

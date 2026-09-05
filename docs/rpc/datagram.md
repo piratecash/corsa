@@ -50,11 +50,12 @@ Response:
     },
     "Held": 64
   },
+  "reverse": {"Held": 12, "LocalSlots": 3, "LocalRefusals": {"get_identity": 4}},
   "limits": {"Peer": {"BytesPerSecond": 1048576}, "Queue": {}, "Reverse": {}, "Replay": {}}
 }
 ```
 
-The response has **exactly these ten top-level keys**. Zero-valued entries of
+The response has **exactly these eleven top-level keys**. Zero-valued entries of
 `DropsByReason` and `ReverseEvents` are omitted, so a reason that has never fired
 is absent rather than `0`.
 
@@ -69,6 +70,7 @@ is absent rather than `0`.
 | `admission` | object | The per-neighbour §5 budget counters (admitted, refused for bytes, refused for frames, refused verifications) |
 | `queue` | object | Current depth of the weighted class queue, per lane |
 | `replay` | object | The base anti-replay cache: `Counters` (its lifetime counter set) and `Held` (records held right now, expired-but-retained included). This is the ONLY place the §5 fairness refusals surface — `RejectedNoisyPeer` and `EvictedNoisyPeer` say the cache refused or evicted the noisiest owner's record under pressure, `RejectedCapacity` that it was at its ceiling with nothing to reclaim, and `AbandonedReservations` that the watchdog reclaimed a pipeline branch which never reached commit or release (a non-zero value is a defect, not load). `Held` belongs beside them because a refusal reads differently against a full cache than against an empty one; the ceiling itself is `limits.Replay` |
+| `reverse` | object | The reverse-state table: `Held` (open request records), `LocalSlots` (how many of the shared local-request slots are occupied — read against `limits.Reverse.PerUpstreamCap`) and `LocalRefusals` (per dtype, how many of THIS node's own requests that quota turned away). The table was absent from this summary entirely until the resource-measurement work, which made it the one component of the plane whose pressure could not be seen — and the only one whose overflow REFUSES instead of evicting. That distinction is why `LocalRefusals` is keyed by dtype: every locally originated exchange shares one bucket, so a busy subsystem can stop another from ever asking without exceeding a limit of its own, and a bare refusal count cannot name the victim. Transit refusals are deliberately NOT attributed this way — their dtype arrives from the wire, and a map keyed on it would let a stranger grow this node's memory one invented type name at a time; those are counted by `metrics.DropsByReason["reverse_slot_capped"]` instead |
 | `limits` | object | The §5 numbers in force, so a reader never has to guess which build the counters came from |
 
 **Fields removed together with the durable half of the layer.** They are listed
@@ -264,7 +266,7 @@ corsa-cli fetchDatagramSummary
 ```
 
 Схема ответа — см. английскую секцию выше. Верхнеуровневых ключей ровно
-десять.
+одиннадцать.
 
 | Поле | Тип | Описание |
 |---|---|---|
@@ -277,6 +279,7 @@ corsa-cli fetchDatagramSummary
 | `admission` | object | Счётчики бюджета §5 по соседям (допущено, отказано по байтам, по кадрам, по проверкам подписи) |
 | `queue` | object | Текущая глубина взвешенной классовой очереди по полосам |
 | `replay` | object | Базовый кэш анти-реплея: `Counters` (счётчики за всё время жизни) и `Held` (сколько записей он держит прямо сейчас, включая истёкшие, но ещё удерживаемые). Это ЕДИНСТВЕННОЕ место, где видны отказы честности §5: `RejectedNoisyPeer` и `EvictedNoisyPeer` означают, что под давлением кэш отверг или вытеснил запись самого шумного владельца, `RejectedCapacity` — что он упёрся в потолок и освобождать было нечего, а `AbandonedReservations` — что сторож забрал ветку конвейера, не дошедшую ни до commit, ни до release (ненулевое значение здесь — дефект, а не нагрузка). `Held` стоит рядом потому, что отказ читается по-разному при полном и при пустом кэше; сам потолок — в `limits.Replay` |
+| `reverse` | object | Таблица reverse-состояния: `Held` (открытые записи запросов), `LocalSlots` (сколько общих слотов локальных запросов занято — читать против `limits.Reverse.PerUpstreamCap`) и `LocalRefusals` (по dtype: скольким СОБСТВЕННЫМ запросам этого узла квота отказала). До работ по измерению ресурсов таблицы в этой сводке не было вовсе — она была единственным компонентом плоскости, чьё давление не видно, и единственным, чьё переполнение ОТКАЗЫВАЕТ, а не вытесняет. Из-за этого `LocalRefusals` и разложена по dtype: все локальные обмены делят один бакет, поэтому активная подсистема способна лишить другую возможности спросить, не превысив ни одного собственного лимита, а голый счётчик отказов не назовёт жертву. Транзитные отказы намеренно НЕ атрибутируются так же: их dtype приходит с провода, и карта с таким ключом позволила бы постороннему растить память узла по одному выдуманному имени за раз — они считаются через `metrics.DropsByReason["reverse_slot_capped"]` |
 | `limits` | object | Действующие числа §5 — чтобы читателю не приходилось угадывать, из какой сборки счётчики |
 
 **Поля, снятые вместе с durable-половиной слоя.** Они перечислены потому, что
