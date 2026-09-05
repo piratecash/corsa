@@ -47,6 +47,12 @@ const (
 	// ErrUnavailable means the command exists but is not available in this
 	// operating mode (e.g. chatlog commands on a standalone node).
 	ErrUnavailable
+
+	// ErrForbidden means the command exists and works, but not from where
+	// the caller reached it (see TransportPolicy). Distinct from
+	// ErrUnavailable on purpose: 503 invites a retry, and retrying from the
+	// same host will never help.
+	ErrForbidden
 )
 
 // HTTPStatus returns the HTTP status code corresponding to this error kind.
@@ -59,6 +65,8 @@ func (k ErrorKind) HTTPStatus() int {
 		return http.StatusNotFound
 	case ErrUnavailable:
 		return http.StatusServiceUnavailable
+	case ErrForbidden:
+		return http.StatusForbidden
 	case ErrInternal:
 		return http.StatusInternalServerError
 	default:
@@ -225,6 +233,21 @@ func (t *CommandTable) Commands() []CommandInfo {
 		return cmds[i].Name < cmds[j].Name
 	})
 	return cmds
+}
+
+// TransportPolicyFor reports where a command may be called from, resolving
+// aliases and casing exactly as Execute does — a policy that could be dodged
+// by spelling the command differently would not be a policy. An unregistered
+// name reports false; the caller decides whether that is a 404 or a refusal,
+// and must NOT read the zero value as permission.
+func (t *CommandTable) TransportPolicyFor(name string) (TransportPolicy, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	_, canonical, exists := t.resolveHandler(name)
+	if !exists {
+		return TransportAnyAuthenticated, false
+	}
+	return t.metadata[canonical].Transport, true
 }
 
 // Has returns true if the command is registered (directly, via alias, or
@@ -808,31 +831,49 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 		},
 	)
 
+	// Both identity-backup commands move BOTH private keys across a local
+	// file boundary, so they are the two commands in this table that must
+	// not be reachable from another host: TransportLoopbackOnly requires a
+	// loopback socket AND a listener that demands credentials. The name (not
+	// a path) is what confines the write to the node's backup directory —
+	// see internal/core/node/identity_backup_store.go.
 	t.Register(
-		CommandInfo{Name: "identityBackup", Description: "Write a versioned full identity backup (both private keys and the record seq) to a file on the node's disk", Category: "identity", Usage: "<file>"},
+		CommandInfo{
+			Name:        "identityBackup",
+			Description: "Write a versioned full identity backup (both private keys and the record seq) into the node's backup directory under the given name",
+			Category:    "identity",
+			Usage:       "<name>",
+			Transport:   TransportLoopbackOnly,
+		},
 		func(req CommandRequest) CommandResponse {
 			if r, done := ctxDone(req); done {
 				return r
 			}
-			path, _ := req.Args["backup_path"].(string)
-			if strings.TrimSpace(path) == "" {
-				return validationError(fmt.Errorf("backup file path is required"))
+			name, _ := req.Args["backup_name"].(string)
+			if strings.TrimSpace(name) == "" {
+				return validationError(fmt.Errorf("backup name is required"))
 			}
-			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "identity_backup", BackupPath: strings.TrimSpace(path)}))
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "identity_backup", BackupName: strings.TrimSpace(name)}))
 		},
 	)
 
 	t.Register(
-		CommandInfo{Name: "identityRestore", Description: "Restore the identity file from a backup (versioned JSON or legacy Ed25519 key); requires an app restart to take effect", Category: "identity", Usage: "<file>"},
+		CommandInfo{
+			Name:        "identityRestore",
+			Description: "Restore the identity file from a named backup in the node's backup directory (versioned JSON or legacy Ed25519 key); requires an app restart to take effect",
+			Category:    "identity",
+			Usage:       "<name>",
+			Transport:   TransportLoopbackOnly,
+		},
 		func(req CommandRequest) CommandResponse {
 			if r, done := ctxDone(req); done {
 				return r
 			}
-			path, _ := req.Args["backup_path"].(string)
-			if strings.TrimSpace(path) == "" {
-				return validationError(fmt.Errorf("backup file path is required"))
+			name, _ := req.Args["backup_name"].(string)
+			if strings.TrimSpace(name) == "" {
+				return validationError(fmt.Errorf("backup name is required"))
 			}
-			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "identity_restore", BackupPath: strings.TrimSpace(path)}))
+			return frameResponse(node.HandleLocalFrame(protocol.Frame{Type: "identity_restore", BackupName: strings.TrimSpace(name)}))
 		},
 	)
 

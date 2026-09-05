@@ -423,17 +423,18 @@ func mapPositionalArgs(command string, args []string) (map[string]interface{}, e
 		}
 		return map[string]interface{}{"resolution_id": args[0]}, nil
 
+	// A NAME, not a path: the node maps it into its own backup directory.
 	case "identitybackup", "identity_backup":
 		if len(args) < 1 {
-			return nil, fmt.Errorf("identityBackup requires a file path argument")
+			return nil, fmt.Errorf("identityBackup requires a backup name argument")
 		}
-		return map[string]interface{}{"backup_path": args[0]}, nil
+		return map[string]interface{}{"backup_name": args[0]}, nil
 
 	case "identityrestore", "identity_restore":
 		if len(args) < 1 {
-			return nil, fmt.Errorf("identityRestore requires a file path argument")
+			return nil, fmt.Errorf("identityRestore requires a backup name argument")
 		}
-		return map[string]interface{}{"backup_path": args[0]}, nil
+		return map[string]interface{}{"backup_name": args[0]}, nil
 
 	case "connectonly", "connect_only":
 		// Optional single argument: an address pins egress to that peer; no

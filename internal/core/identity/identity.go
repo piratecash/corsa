@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/piratecash/corsa/internal/core/secretfile"
 )
 
 // AddressLength is the fixed length of an identity address in hex characters.
@@ -307,16 +309,18 @@ func save(path string, id *Identity) error {
 		return fmt.Errorf("marshal identity: %w", err)
 	}
 
-	// Write-temp-then-rename: a crash or a full disk mid-write must never
-	// leave a truncated key file — a torn identity file is an unrecoverable
-	// loss of the address, not a retryable error.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o600); err != nil {
+	// Write-temp-then-rename through the shared secret writer: a crash or a
+	// full disk mid-write must never leave a truncated key file — a torn
+	// identity file is an unrecoverable loss of the address, not a retryable
+	// error — and the temp must not be somewhere an attacker chose.
+	//
+	// The previous "<path>.tmp" here was the second half of a bug fixed in
+	// the backup path: os.WriteFile applies its mode only when it CREATES the
+	// file, so a pre-existing 0644 "identity.json.tmp" kept its own terms and
+	// handed them to the identity file through the rename — and a symlink
+	// under that name sent both private keys wherever it pointed.
+	if err := secretfile.WriteFile(path, payload); err != nil {
 		return fmt.Errorf("write identity: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("replace identity file: %w", err)
 	}
 
 	return nil

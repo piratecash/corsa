@@ -179,15 +179,63 @@ after a restore starts above it. An unknown backup version is a typed
 reject.
 
 The user surface is the LOCAL-ONLY RPC pair `identity_backup` /
-`identity_restore` (console commands `identityBackup <file>` /
-`identityRestore <file>`): both frames carry a file path on the node's own
-disk, and key material never crosses the RPC boundary in either direction
-— the reply names only the path, the address and the seq. The backup
-lands through a FRESH owner-only temp file (0600 via `O_EXCL`; on Windows
-additionally an owner-only protected DACL, since NTFS ignores mode bits)
-followed by an atomic rename: a pre-existing wider-mode target never sees
-a single secret byte, and the renamed file keeps the temp's restricted
-access whatever the old file's mode was. Restore replaces the identity FILE and answers
+`identity_restore` (console commands `identityBackup <name>` /
+`identityRestore <name>`). Three separate promises hold here, each
+enforced by code rather than by convention:
+
+**Key material never crosses the RPC boundary.** Both frames carry a
+`backup_name`; the reply carries the name, the address, the seq and the
+warnings.
+
+**The caller never picks a path.** The name selects a file inside the
+node's own backup directory — `<data dir>/identity-backups`, derived from
+`config.Node.EffectiveIdentityBackupDir` — and nothing else. A
+caller-supplied path would be a write-anywhere primitive on backup and a
+read-anywhere primitive on restore, which no amount of authentication
+makes safe to expose. Names are whitelisted (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`),
+so `/`, `\`, `..`, absolute paths, leading dots and leading dashes are
+rejected before anything is touched; DOS device names (`con`, `nul`,
+`com1`…) are rejected separately, because on Windows they resolve to the
+device regardless of directory or extension.
+
+Three escapes are closed, and none covers another. The NAME cannot leave
+the directory (whitelist). The DIRECTORY cannot be somewhere else: it is
+resolved through `EvalSymlinks` and compared against the resolved data dir
+**before** the mode is changed or any file is opened — resolving a path and
+then trusting the result is not a check, and doing it after the `chmod`
+means the `chmod` already relaxed someone else's directory. An ENTRY inside
+it cannot point out: every entry is `Lstat`-checked, so a planted link is
+refused rather than followed. The reply returns the name, never an absolute
+path — and neither do the errors: `os` reports `*fs.PathError` with the
+absolute file name in it, so a request for a missing backup used to answer
+with the node's data directory.
+
+The temp file a backup lands through is unique (`os.CreateTemp`) and
+prefixed `.corsa-secret-`, a shape the name whitelist rejects. Deriving it
+as `<name>.tmp` put a service name in the same space as a user's: writing a
+backup called `recovery` deleted an existing backup named `recovery.tmp` as
+a stale temp, with no concurrency involved. Orphans left by a crash are
+swept by that same prefix — safe to delete precisely because no valid
+backup can carry it.
+
+**"Local-only" is a policy, not a comment.** Both commands are registered
+with `rpc.TransportLoopbackOnly`, so an HTTP caller must arrive on a
+loopback socket AND the listener must require credentials. The check reads
+the REAL socket peer address, never a forwarding header — those are
+written by the client. The loopback test alone answers "is the caller on
+this machine?"; the credential requirement answers "is the caller this
+user", since every other local process is also on this machine. In-process
+callers (the desktop console) are unaffected: they never pass through the
+HTTP layer.
+
+The backup itself lands through a FRESH owner-only temp file (0600 via
+`O_EXCL`; on Windows additionally an owner-only protected DACL, since NTFS
+ignores mode bits) followed by an atomic rename: a pre-existing wider-mode
+target never sees a single secret byte, and the renamed file keeps the
+temp's restricted access whatever the old file's mode was. The backup
+directory is created 0700 and re-tightened on every call, because
+`MkdirAll` leaves an existing directory's mode alone and a readable
+directory hands out the file names. Restore replaces the identity FILE and answers
 `restart_required` — the running node keeps its in-memory identity until
 the app restarts. A restore input that is not a JSON object takes the
 legacy bare-Ed25519 branch, and the reply then carries `box_key_derived`
@@ -794,15 +842,62 @@ reject.
 
 Пользовательская поверхность — ТОЛЬКО-ЛОКАЛЬНАЯ RPC-пара
 `identity_backup` / `identity_restore` (консольные команды
-`identityBackup <file>` / `identityRestore <file>`): оба фрейма несут путь
-к файлу на диске самого узла, ключевой материал не пересекает границу RPC
-ни в одну сторону — ответ называет только путь, адрес и seq. Backup
-ложится через СВЕЖИЙ owner-only временный файл (0600 через `O_EXCL`; на
-Windows дополнительно защищённый owner-only DACL — NTFS игнорирует
-mode-биты) с последующим атомарным rename: существующий файл с более
-широкими правами не видит ни одного секретного байта, а переименованный
-файл сохраняет ограниченный доступ временного, каким бы ни был режим
-старого. Restore заменяет ФАЙЛ identity и отвечает
+`identityBackup <name>` / `identityRestore <name>`). Здесь держатся три
+отдельных обещания, и каждое закреплено кодом, а не договорённостью.
+
+**Ключевой материал не пересекает границу RPC.** Оба фрейма несут
+`backup_name`; ответ несёт имя, адрес, seq и предупреждения.
+
+**Путь выбирает не вызывающий.** Имя выбирает файл внутри собственного
+каталога бэкапов узла — `<data dir>/identity-backups`, выведенного из
+`config.Node.EffectiveIdentityBackupDir`, — и больше ничего. Путь из
+запроса был бы примитивом «записать куда угодно» при backup-е и «прочитать
+что угодно» при restore, и никакая аутентификация не делает такое
+безопасным. Имена проходят белый список
+(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), поэтому `/`, `\`, `..`, абсолютные
+пути, ведущая точка и ведущий дефис отвергаются до любого касания диска;
+DOS-имена устройств (`con`, `nul`, `com1`…) отвергаются отдельно — на
+Windows они разрешаются в устройство независимо от каталога и расширения.
+
+Закрыты три побега, и ни один не покрывает другой. ИМЯ не может выйти из
+каталога (белый список). КАТАЛОГ не может оказаться в другом месте: он
+резолвится через `EvalSymlinks` и сравнивается с разрешённым data dir
+**до** смены прав и до открытия любого файла — разрешить путь и затем
+довериться результату не является проверкой, а сделать это после `chmod`
+значит, что `chmod` уже поменял права чужому каталогу. ЗАПИСЬ внутри не
+может указывать наружу: каждая проверяется `Lstat`-ом, подложенная ссылка
+отвергается, а не разыменовывается. В ответе возвращается имя, а не
+абсолютный путь — и в ошибках тоже: `os` отдаёт `*fs.PathError` с
+абсолютным именем файла внутри, поэтому запрос несуществующего бэкапа
+раньше отвечал data-каталогом узла.
+
+Временный файл, через который ложится бэкап, уникален (`os.CreateTemp`) и
+имеет префикс `.corsa-secret-` — форму, которую белый список имён
+отвергает. Схема `<имя>.tmp` ставила служебное имя в то же пространство,
+что и пользовательское: запись бэкапа `recovery` удаляла существующий
+бэкап `recovery.tmp` как устаревший временный, и конкурентность для этого
+не требовалась. Осиротевшие после краха файлы подметаются по тому же
+префиксу — удалять по нему безопасно ровно потому, что валидный бэкап его
+иметь не может.
+
+**«Local-only» — это политика, а не комментарий.** Обе команды
+зарегистрированы с `rpc.TransportLoopbackOnly`: HTTP-вызов обязан прийти с
+loopback-сокета И слушатель обязан требовать учётные данные. Проверяется
+РЕАЛЬНЫЙ socket-адрес пира, а не заголовки проксирования — их пишет сам
+клиент. Проверка loopback отвечает только на вопрос «вызывающий на этой
+машине?»; требование аутентификации отвечает на «вызывающий — это тот
+пользователь», потому что любой другой локальный процесс тоже на этой
+машине. Внутрипроцессные вызовы (десктопная консоль) не затронуты: они не
+проходят через HTTP-слой.
+
+Сам backup ложится через СВЕЖИЙ owner-only временный файл (0600 через
+`O_EXCL`; на Windows дополнительно защищённый owner-only DACL — NTFS
+игнорирует mode-биты) с последующим атомарным rename: существующий файл с
+более широкими правами не видит ни одного секретного байта, а
+переименованный файл сохраняет ограниченный доступ временного, каким бы ни
+был режим старого. Каталог бэкапов создаётся с 0700 и ужимается при каждом
+вызове: `MkdirAll` не трогает права существующего каталога, а читаемый
+каталог раздаёт имена файлов. Restore заменяет ФАЙЛ identity и отвечает
 `restart_required` — работающий узел держит in-memory identity до
 перезапуска приложения. Вход restore, не являющийся JSON-объектом, идёт по
 легаси-ветке голого Ed25519-ключа, и ответ тогда несёт `box_key_derived` с

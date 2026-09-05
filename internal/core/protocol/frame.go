@@ -173,12 +173,15 @@ type Frame struct {
 	ResolutionReason string                   `json:"resolution_reason,omitempty"`
 	Resolution       *IdentityResolutionFrame `json:"resolution,omitempty"`
 
-	// BackupPath / IdentityBackup carry the identity_backup /
+	// BackupName / IdentityBackup carry the identity_backup /
 	// identity_restore local RPC pair (docs/protocol/identity-lookup.md
-	// §5): the request names a file on the node's own disk, the reply
-	// reports what was written — key material never crosses the RPC
-	// boundary. Local RPC surface only — never dispatched on the P2P wire.
-	BackupPath     string               `json:"backup_path,omitempty"`
+	// §5): the request names a backup INSIDE the node's own backup
+	// directory, the reply reports what was written — neither key material
+	// nor a filesystem path crosses the RPC boundary. A name, not a path:
+	// a caller-supplied path would let an RPC client write a file anywhere
+	// the node process can write, and read anything it can read. Local RPC
+	// surface only — never dispatched on the P2P wire.
+	BackupName     string               `json:"backup_name,omitempty"`
 	IdentityBackup *IdentityBackupFrame `json:"identity_backup,omitempty"`
 
 	// Relay fields (Iteration 1 — hop-by-hop relay)
@@ -414,11 +417,13 @@ type IdentityResolutionFrame struct {
 }
 
 // IdentityBackupFrame is the local-RPC result of identity_backup /
-// identity_restore (docs/protocol/identity-lookup.md §5): the file path
+// identity_restore (docs/protocol/identity-lookup.md §5): the backup NAME
 // involved, the identity it carries and the caveats the caller is obliged
-// to surface — never the key material itself.
+// to surface — never the key material itself, and never an absolute path.
+// The node's filesystem layout is information the caller does not need and
+// an attacker with RPC access would happily take.
 type IdentityBackupFrame struct {
-	Path      string `json:"path"`
+	Name      string `json:"name"`
 	Address   string `json:"address"`
 	RecordSeq uint64 `json:"record_seq,omitempty"`
 	// BoxKeyDerived marks the legacy Ed25519-only import branch: the

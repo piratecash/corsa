@@ -66,7 +66,7 @@ type MockDMRouterProvider_SendFileAnnounce_Call struct {
 //   - msg domain.OutgoingDM
 //   - meta domain.FileAnnouncePayload
 //   - onAsyncFailure func()
-func (_e *MockDMRouterProvider_Expecter) SendFileAnnounce(to interface{}, msg interface{}, meta interface{}, onAsyncFailure interface{}) *MockDMRouterProvider_SendFileAnnounce_Call {
+func (_e *MockDMRouterProvider_Expecter) SendFileAnnounce(to any, msg any, meta any, onAsyncFailure any) *MockDMRouterProvider_SendFileAnnounce_Call {
 	return &MockDMRouterProvider_SendFileAnnounce_Call{Call: _e.mock.On("SendFileAnnounce", to, msg, meta, onAsyncFailure)}
 }
 
@@ -133,7 +133,7 @@ type MockDMRouterProvider_SendMessage_Call struct {
 // SendMessage is a helper method to define mock.On call
 //   - to domain.PeerIdentity
 //   - msg domain.OutgoingDM
-func (_e *MockDMRouterProvider_Expecter) SendMessage(to interface{}, msg interface{}) *MockDMRouterProvider_SendMessage_Call {
+func (_e *MockDMRouterProvider_Expecter) SendMessage(to any, msg any) *MockDMRouterProvider_SendMessage_Call {
 	return &MockDMRouterProvider_SendMessage_Call{Call: _e.mock.On("SendMessage", to, msg)}
 }
 
@@ -200,7 +200,7 @@ type MockDMRouterProvider_SendMessageDelete_Call struct {
 //   - ctx context.Context
 //   - peer domain.PeerIdentity
 //   - target domain.MessageID
-func (_e *MockDMRouterProvider_Expecter) SendMessageDelete(ctx interface{}, peer interface{}, target interface{}) *MockDMRouterProvider_SendMessageDelete_Call {
+func (_e *MockDMRouterProvider_Expecter) SendMessageDelete(ctx any, peer any, target any) *MockDMRouterProvider_SendMessageDelete_Call {
 	return &MockDMRouterProvider_SendMessageDelete_Call{Call: _e.mock.On("SendMessageDelete", ctx, peer, target)}
 }
 

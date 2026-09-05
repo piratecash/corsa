@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +37,18 @@ const authLockoutDuration = 15 * time.Minute
 // It wraps a CommandTable and exposes it via Fiber HTTP endpoints.
 // Desktop UI should call CommandTable directly, not through Server.
 type Server struct {
-	app         *fiber.App
-	cfg         config.RPC
+	app *fiber.App
+	// cfg carries NO password: authMiddleware captures the credentials as
+	// locals when it is built, and nothing else here reads them. What is left
+	// is a struct that outlives the credential check and that someone may
+	// print — and a value copy of a Server (fmt.Sprintf("%+v", *server))
+	// reaches this field by reflection, where the redaction on config.RPC
+	// cannot help and a Formatter on *Server does not apply. The field simply
+	// does not hold the secret.
+	cfg config.RPC
+	// authEnabled is what cfg.AuthEnabled() answered while the password was
+	// still there.
+	authEnabled bool
 	table       *CommandTable
 	node        NodeProvider
 	authLimiter *authRateLimiter
@@ -69,6 +80,7 @@ func NewServer(cfg config.RPC, table *CommandTable, node ...NodeProvider) (*Serv
 	server := &Server{
 		app:          app,
 		cfg:          cfg,
+		authEnabled:  cfg.AuthEnabled(),
 		table:        table,
 		authLimiter:  newAuthRateLimiter(),
 		shutdownDone: make(chan struct{}),
@@ -77,9 +89,12 @@ func NewServer(cfg config.RPC, table *CommandTable, node ...NodeProvider) (*Serv
 		server.node = node[0]
 	}
 
-	if cfg.AuthEnabled() {
+	if server.authEnabled {
+		// Built BEFORE the password is dropped: the middleware closes over
+		// the credentials, so this is the last place they are needed.
 		app.Use(server.authMiddleware())
 	}
+	server.cfg.Password = ""
 
 	// Universal dispatch: all commands go through CommandTable.
 	// POST /rpc/v1/exec {"command": "ping", "args": {...}}
@@ -97,6 +112,42 @@ func NewServer(cfg config.RPC, table *CommandTable, node ...NodeProvider) (*Serv
 	server.registerLegacyRoutes(rpcGroup)
 
 	return server, nil
+}
+
+// Format renders the server for EVERY verb, redacted.
+//
+// This is the SECOND layer, and it is deliberately not the only one. Server
+// keeps a config.RPC in an UNEXPORTED field, and fmt reaches no method through
+// one of those: it walks such a field by reflection, calling nothing — so the
+// redaction on config.RPC does not apply here, and neither does this method
+// when the operand is a VALUE copy (fmt.Sprintf("%+v", *server)), because
+// Format is declared on the pointer. A pointer receiver is not a choice:
+// Server holds a sync.Once and a channel, so a value receiver would be a
+// copylocks violation in this very file.
+//
+// Which is why the first layer is that cfg holds no password at all. This
+// method exists for the fields that remain and for the ones somebody adds
+// next — Formatter rather than Stringer because %d and %x consult neither
+// String nor GoString.
+func (s *Server) Format(f fmt.State, verb rune) {
+	_, _ = io.WriteString(f, s.String())
+}
+
+// String is the single redacted rendering Format hands to every verb. It
+// takes no lock: a String that locked would deadlock the moment someone
+// logged the server from inside a section that holds one.
+func (s *Server) String() string {
+	if s == nil {
+		return "rpc.Server(nil)"
+	}
+	return fmt.Sprintf("rpc.Server{Listen: %s, Auth: %t, Commands: %d}",
+		s.cfg.ListenAddress(), s.authEnabled, len(s.table.AllNames()))
+}
+
+// GoString covers %#v for callers that reach it without going through Format
+// (fmt consults Formatter first, so this is belt-and-braces).
+func (s *Server) GoString() string {
+	return s.String()
 }
 
 // Start starts the RPC server listening on the configured address (blocking).
@@ -120,7 +171,7 @@ func (s *Server) StartAsync() error {
 	s.app.Hooks().OnListen(func(ld fiber.ListenData) error {
 		log.Info().
 			Str("listen", fmt.Sprintf("%s:%s", ld.Host, ld.Port)).
-			Bool("auth", s.cfg.AuthEnabled()).
+			Bool("auth", s.authEnabled).
 			Msg("rpc server started")
 		select {
 		case ready <- struct{}{}:
@@ -183,6 +234,31 @@ func (s *Server) ShutdownWithTimeout(timeout time.Duration) error {
 	}
 }
 
+// execute is the ONE place an HTTP request reaches the command table.
+// Every entry point — /exec, /frame and the legacy routes — goes through it,
+// because a transport gate that only some routes call is not a gate: the
+// route that skipped it becomes the way in.
+//
+// The remote address comes from the request's socket (RequestCtx), never from
+// a header: X-Forwarded-For and friends are written by the client.
+func (s *Server) execute(c fiber.Ctx, req CommandRequest) CommandResponse {
+	policy, known := s.table.TransportPolicyFor(req.Name)
+	if known {
+		if err := checkTransportPolicy(policy, c.RequestCtx().RemoteIP(), s.authEnabled); err != nil {
+			log.Warn().
+				Str("command", req.Name).
+				Str("policy", policy.String()).
+				Str("remote", c.RequestCtx().RemoteAddr().String()).
+				Msg("rpc transport policy refused command")
+			return CommandResponse{Error: err, ErrorKind: ErrForbidden}
+		}
+	}
+	// An unknown name falls through to Execute, which owns the 404. Refusing
+	// it here instead would answer "forbidden" for typos and turn the error
+	// codes into a probe for which commands exist.
+	return s.table.Execute(req)
+}
+
 // handleExec is the universal command dispatcher.
 // POST /rpc/v1/exec {"command": "ping", "args": {...}}
 func (s *Server) handleExec(c fiber.Ctx) error {
@@ -200,7 +276,7 @@ func (s *Server) handleExec(c fiber.Ctx) error {
 
 	// CommandTable.Execute resolves camelCase, snake_case, and case-insensitive
 	// input transparently — no need to lowercase here.
-	resp := s.table.Execute(CommandRequest{Name: req.Command, Args: req.Args, Ctx: c.RequestCtx()})
+	resp := s.execute(c, CommandRequest{Name: req.Command, Args: req.Args, Ctx: c.RequestCtx()})
 	if resp.Error != nil {
 		return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
 	}
@@ -239,7 +315,7 @@ func (s *Server) handleFrame(c fiber.Ctx) error {
 	}
 
 	req.Ctx = c.RequestCtx()
-	resp := s.table.Execute(req)
+	resp := s.execute(c, req)
 
 	if resp.ErrorKind == ErrNotFound {
 		// Unregistered frame type — reject. Previously, unknown frame types
@@ -340,7 +416,7 @@ func (s *Server) registerLegacyRoutes(rpc fiber.Router) {
 // Mode-gated commands return 503 via ErrUnavailable from CommandTable.Execute().
 func (s *Server) legacyHandler(command string) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		resp := s.table.Execute(CommandRequest{Name: command, Ctx: c.RequestCtx()})
+		resp := s.execute(c, CommandRequest{Name: command, Ctx: c.RequestCtx()})
 		if resp.Error != nil {
 			return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
 		}
@@ -360,7 +436,7 @@ func (s *Server) legacyArgHandler(command string) fiber.Handler {
 				return ErrorResponse(c, fiber.StatusBadRequest, "invalid request body")
 			}
 		}
-		resp := s.table.Execute(CommandRequest{Name: command, Args: args, Ctx: c.RequestCtx()})
+		resp := s.execute(c, CommandRequest{Name: command, Args: args, Ctx: c.RequestCtx()})
 		if resp.Error != nil {
 			return ErrorResponse(c, resp.ErrorKind.HTTPStatus(), resp.Error.Error())
 		}

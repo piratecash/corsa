@@ -61,7 +61,7 @@ type MockMessageStore_StoreMessage_Call struct {
 // StoreMessage is a helper method to define mock.On call
 //   - envelope protocol.Envelope
 //   - isOutgoing bool
-func (_e *MockMessageStore_Expecter) StoreMessage(envelope interface{}, isOutgoing interface{}) *MockMessageStore_StoreMessage_Call {
+func (_e *MockMessageStore_Expecter) StoreMessage(envelope any, isOutgoing any) *MockMessageStore_StoreMessage_Call {
 	return &MockMessageStore_StoreMessage_Call{Call: _e.mock.On("StoreMessage", envelope, isOutgoing)}
 }
 
@@ -117,7 +117,7 @@ type MockMessageStore_UpdateDeliveryStatus_Call struct {
 
 // UpdateDeliveryStatus is a helper method to define mock.On call
 //   - receipt protocol.DeliveryReceipt
-func (_e *MockMessageStore_Expecter) UpdateDeliveryStatus(receipt interface{}) *MockMessageStore_UpdateDeliveryStatus_Call {
+func (_e *MockMessageStore_Expecter) UpdateDeliveryStatus(receipt any) *MockMessageStore_UpdateDeliveryStatus_Call {
 	return &MockMessageStore_UpdateDeliveryStatus_Call{Call: _e.mock.On("UpdateDeliveryStatus", receipt)}
 }
 

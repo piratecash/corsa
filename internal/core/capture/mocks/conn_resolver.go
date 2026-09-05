@@ -118,7 +118,7 @@ type MockConnResolver_ConnInfoByID_Call struct {
 
 // ConnInfoByID is a helper method to define mock.On call
 //   - id domain.ConnID
-func (_e *MockConnResolver_Expecter) ConnInfoByID(id interface{}) *MockConnResolver_ConnInfoByID_Call {
+func (_e *MockConnResolver_Expecter) ConnInfoByID(id any) *MockConnResolver_ConnInfoByID_Call {
 	return &MockConnResolver_ConnInfoByID_Call{Call: _e.mock.On("ConnInfoByID", id)}
 }
 
@@ -171,7 +171,7 @@ type MockConnResolver_ConnInfoByIP_Call struct {
 
 // ConnInfoByIP is a helper method to define mock.On call
 //   - ip netip.Addr
-func (_e *MockConnResolver_Expecter) ConnInfoByIP(ip interface{}) *MockConnResolver_ConnInfoByIP_Call {
+func (_e *MockConnResolver_Expecter) ConnInfoByIP(ip any) *MockConnResolver_ConnInfoByIP_Call {
 	return &MockConnResolver_ConnInfoByIP_Call{Call: _e.mock.On("ConnInfoByIP", ip)}
 }
 

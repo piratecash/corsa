@@ -76,7 +76,7 @@ type MockDatagramProvider_DatagramReachable_Call struct {
 //   - ctx context.Context
 //   - dst domain.PeerIdentity
 //   - dtype domain.DType
-func (_e *MockDatagramProvider_Expecter) DatagramReachable(ctx interface{}, dst interface{}, dtype interface{}) *MockDatagramProvider_DatagramReachable_Call {
+func (_e *MockDatagramProvider_Expecter) DatagramReachable(ctx any, dst any, dtype any) *MockDatagramProvider_DatagramReachable_Call {
 	return &MockDatagramProvider_DatagramReachable_Call{Call: _e.mock.On("DatagramReachable", ctx, dst, dtype)}
 }
 
@@ -151,7 +151,7 @@ type MockDatagramProvider_ExplainDatagramRoute_Call struct {
 //   - dst domain.PeerIdentity
 //   - dtype domain.DType
 //   - policy domain.RoutePolicy
-func (_e *MockDatagramProvider_Expecter) ExplainDatagramRoute(ctx interface{}, dst interface{}, dtype interface{}, policy interface{}) *MockDatagramProvider_ExplainDatagramRoute_Call {
+func (_e *MockDatagramProvider_Expecter) ExplainDatagramRoute(ctx any, dst any, dtype any, policy any) *MockDatagramProvider_ExplainDatagramRoute_Call {
 	return &MockDatagramProvider_ExplainDatagramRoute_Call{Call: _e.mock.On("ExplainDatagramRoute", ctx, dst, dtype, policy)}
 }
 

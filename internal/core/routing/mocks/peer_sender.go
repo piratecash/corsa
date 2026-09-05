@@ -65,7 +65,7 @@ type MockPeerSender_SendAnnounceRoutes_Call struct {
 //   - ctx context.Context
 //   - peerAddress routing.PeerAddress
 //   - routes []routing.AnnounceEntry
-func (_e *MockPeerSender_Expecter) SendAnnounceRoutes(ctx interface{}, peerAddress interface{}, routes interface{}) *MockPeerSender_SendAnnounceRoutes_Call {
+func (_e *MockPeerSender_Expecter) SendAnnounceRoutes(ctx any, peerAddress any, routes any) *MockPeerSender_SendAnnounceRoutes_Call {
 	return &MockPeerSender_SendAnnounceRoutes_Call{Call: _e.mock.On("SendAnnounceRoutes", ctx, peerAddress, routes)}
 }
 
@@ -130,7 +130,7 @@ type MockPeerSender_SendRouteAnnounceV3_Call struct {
 //   - kind string
 //   - epoch uint64
 //   - entries []routing.AnnounceEntry
-func (_e *MockPeerSender_Expecter) SendRouteAnnounceV3(ctx interface{}, peerAddress interface{}, kind interface{}, epoch interface{}, entries interface{}) *MockPeerSender_SendRouteAnnounceV3_Call {
+func (_e *MockPeerSender_Expecter) SendRouteAnnounceV3(ctx any, peerAddress any, kind any, epoch any, entries any) *MockPeerSender_SendRouteAnnounceV3_Call {
 	return &MockPeerSender_SendRouteAnnounceV3_Call{Call: _e.mock.On("SendRouteAnnounceV3", ctx, peerAddress, kind, epoch, entries)}
 }
 
@@ -206,7 +206,7 @@ type MockPeerSender_SendRouteSyncDigest_Call struct {
 //   - entries []routing.DigestEntry
 //   - knownIdentities uint32
 //   - generatedAt time.Time
-func (_e *MockPeerSender_Expecter) SendRouteSyncDigest(ctx interface{}, peerAddress interface{}, digest interface{}, entries interface{}, knownIdentities interface{}, generatedAt interface{}) *MockPeerSender_SendRouteSyncDigest_Call {
+func (_e *MockPeerSender_Expecter) SendRouteSyncDigest(ctx any, peerAddress any, digest any, entries any, knownIdentities any, generatedAt any) *MockPeerSender_SendRouteSyncDigest_Call {
 	return &MockPeerSender_SendRouteSyncDigest_Call{Call: _e.mock.On("SendRouteSyncDigest", ctx, peerAddress, digest, entries, knownIdentities, generatedAt)}
 }
 
@@ -284,7 +284,7 @@ type MockPeerSender_SendRoutesUpdate_Call struct {
 //   - ctx context.Context
 //   - peerAddress routing.PeerAddress
 //   - delta []routing.AnnounceEntry
-func (_e *MockPeerSender_Expecter) SendRoutesUpdate(ctx interface{}, peerAddress interface{}, delta interface{}) *MockPeerSender_SendRoutesUpdate_Call {
+func (_e *MockPeerSender_Expecter) SendRoutesUpdate(ctx any, peerAddress any, delta any) *MockPeerSender_SendRoutesUpdate_Call {
 	return &MockPeerSender_SendRoutesUpdate_Call{Call: _e.mock.On("SendRoutesUpdate", ctx, peerAddress, delta)}
 }
 

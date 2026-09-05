@@ -72,7 +72,7 @@ type MockChatlogProvider_FetchChatlog_Call struct {
 //   - ctx context.Context
 //   - topic string
 //   - peerAddress string
-func (_e *MockChatlogProvider_Expecter) FetchChatlog(ctx interface{}, topic interface{}, peerAddress interface{}) *MockChatlogProvider_FetchChatlog_Call {
+func (_e *MockChatlogProvider_Expecter) FetchChatlog(ctx any, topic any, peerAddress any) *MockChatlogProvider_FetchChatlog_Call {
 	return &MockChatlogProvider_FetchChatlog_Call{Call: _e.mock.On("FetchChatlog", ctx, topic, peerAddress)}
 }
 
@@ -142,7 +142,7 @@ type MockChatlogProvider_FetchChatlogPreviews_Call struct {
 
 // FetchChatlogPreviews is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockChatlogProvider_Expecter) FetchChatlogPreviews(ctx interface{}) *MockChatlogProvider_FetchChatlogPreviews_Call {
+func (_e *MockChatlogProvider_Expecter) FetchChatlogPreviews(ctx any) *MockChatlogProvider_FetchChatlogPreviews_Call {
 	return &MockChatlogProvider_FetchChatlogPreviews_Call{Call: _e.mock.On("FetchChatlogPreviews", ctx)}
 }
 
@@ -202,7 +202,7 @@ type MockChatlogProvider_FetchConversations_Call struct {
 
 // FetchConversations is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockChatlogProvider_Expecter) FetchConversations(ctx interface{}) *MockChatlogProvider_FetchConversations_Call {
+func (_e *MockChatlogProvider_Expecter) FetchConversations(ctx any) *MockChatlogProvider_FetchConversations_Call {
 	return &MockChatlogProvider_FetchConversations_Call{Call: _e.mock.On("FetchConversations", ctx)}
 }
 
@@ -264,7 +264,7 @@ type MockChatlogProvider_LookupEntryInConversation_Call struct {
 //   - ctx context.Context
 //   - peerAddress string
 //   - messageID string
-func (_e *MockChatlogProvider_Expecter) LookupEntryInConversation(ctx interface{}, peerAddress interface{}, messageID interface{}) *MockChatlogProvider_LookupEntryInConversation_Call {
+func (_e *MockChatlogProvider_Expecter) LookupEntryInConversation(ctx any, peerAddress any, messageID any) *MockChatlogProvider_LookupEntryInConversation_Call {
 	return &MockChatlogProvider_LookupEntryInConversation_Call{Call: _e.mock.On("LookupEntryInConversation", ctx, peerAddress, messageID)}
 }
 

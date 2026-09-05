@@ -72,7 +72,7 @@ type MockCaptureProvider_StartCaptureAll_Call struct {
 
 // StartCaptureAll is a helper method to define mock.On call
 //   - format string
-func (_e *MockCaptureProvider_Expecter) StartCaptureAll(format interface{}) *MockCaptureProvider_StartCaptureAll_Call {
+func (_e *MockCaptureProvider_Expecter) StartCaptureAll(format any) *MockCaptureProvider_StartCaptureAll_Call {
 	return &MockCaptureProvider_StartCaptureAll_Call{Call: _e.mock.On("StartCaptureAll", format)}
 }
 
@@ -135,7 +135,7 @@ type MockCaptureProvider_StartCaptureByConnIDs_Call struct {
 // StartCaptureByConnIDs is a helper method to define mock.On call
 //   - connIDs []uint64
 //   - format string
-func (_e *MockCaptureProvider_Expecter) StartCaptureByConnIDs(connIDs interface{}, format interface{}) *MockCaptureProvider_StartCaptureByConnIDs_Call {
+func (_e *MockCaptureProvider_Expecter) StartCaptureByConnIDs(connIDs any, format any) *MockCaptureProvider_StartCaptureByConnIDs_Call {
 	return &MockCaptureProvider_StartCaptureByConnIDs_Call{Call: _e.mock.On("StartCaptureByConnIDs", connIDs, format)}
 }
 
@@ -203,7 +203,7 @@ type MockCaptureProvider_StartCaptureByIPs_Call struct {
 // StartCaptureByIPs is a helper method to define mock.On call
 //   - ips []string
 //   - format string
-func (_e *MockCaptureProvider_Expecter) StartCaptureByIPs(ips interface{}, format interface{}) *MockCaptureProvider_StartCaptureByIPs_Call {
+func (_e *MockCaptureProvider_Expecter) StartCaptureByIPs(ips any, format any) *MockCaptureProvider_StartCaptureByIPs_Call {
 	return &MockCaptureProvider_StartCaptureByIPs_Call{Call: _e.mock.On("StartCaptureByIPs", ips, format)}
 }
 
@@ -325,7 +325,7 @@ type MockCaptureProvider_StopCaptureByConnIDs_Call struct {
 
 // StopCaptureByConnIDs is a helper method to define mock.On call
 //   - connIDs []uint64
-func (_e *MockCaptureProvider_Expecter) StopCaptureByConnIDs(connIDs interface{}) *MockCaptureProvider_StopCaptureByConnIDs_Call {
+func (_e *MockCaptureProvider_Expecter) StopCaptureByConnIDs(connIDs any) *MockCaptureProvider_StopCaptureByConnIDs_Call {
 	return &MockCaptureProvider_StopCaptureByConnIDs_Call{Call: _e.mock.On("StopCaptureByConnIDs", connIDs)}
 }
 
@@ -387,7 +387,7 @@ type MockCaptureProvider_StopCaptureByIPs_Call struct {
 
 // StopCaptureByIPs is a helper method to define mock.On call
 //   - ips []string
-func (_e *MockCaptureProvider_Expecter) StopCaptureByIPs(ips interface{}) *MockCaptureProvider_StopCaptureByIPs_Call {
+func (_e *MockCaptureProvider_Expecter) StopCaptureByIPs(ips any) *MockCaptureProvider_StopCaptureByIPs_Call {
 	return &MockCaptureProvider_StopCaptureByIPs_Call{Call: _e.mock.On("StopCaptureByIPs", ips)}
 }
 

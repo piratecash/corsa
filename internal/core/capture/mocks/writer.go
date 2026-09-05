@@ -156,7 +156,7 @@ type MockWriter_Write_Call struct {
 
 // Write is a helper method to define mock.On call
 //   - p []byte
-func (_e *MockWriter_Expecter) Write(p interface{}) *MockWriter_Write_Call {
+func (_e *MockWriter_Expecter) Write(p any) *MockWriter_Write_Call {
 	return &MockWriter_Write_Call{Call: _e.mock.On("Write", p)}
 }
 

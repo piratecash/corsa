@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -417,12 +418,51 @@ type Node struct {
 	RecordTrafficFormat string
 }
 
+// RPC holds the HTTP RPC listener settings. Password is a secret: it never
+// leaves the process through a generic path — json:"-" keeps it out of any
+// marshalled config, and String/GoString keep it out of every fmt verb. Read
+// it only where authentication is actually performed.
 type RPC struct {
 	Host     string
 	Port     string
 	Username string
-	Password string
+	Password string `json:"-"`
 }
+
+// String redacts the password for %v, %s and %+v. Without it, a single
+// log.Debug().Msgf("%+v", cfg) publishes the RPC credentials.
+//
+// The redaction goes through a local alias type on purpose: the alias has no
+// String method, so fmt renders every field of the copy without recursing,
+// and a field added to RPC later shows up here automatically instead of
+// silently disappearing from the diagnostics.
+func (r RPC) String() string {
+	type rpcFields RPC
+	redacted := rpcFields(r)
+	if redacted.Password != "" {
+		redacted.Password = redactedSecret
+	}
+	return fmt.Sprintf("config.RPC%+v", redacted)
+}
+
+// GoString covers %#v, which ignores Stringer and would otherwise print the
+// password as a Go literal. It deliberately returns the same redacted text
+// rather than valid Go syntax: a representation that could be pasted back
+// into code is exactly what must not exist for a secret.
+func (r RPC) GoString() string {
+	return r.String()
+}
+
+// Format renders the config for EVERY verb. String and GoString cover %v, %s,
+// %+v and %#v and nothing else — a numeric verb (%d, %x) falls through to
+// fmt's reflective walk and prints the password. Formatter is asked first for
+// every verb, so no verb is left over.
+func (r RPC) Format(f fmt.State, verb rune) {
+	_, _ = io.WriteString(f, r.String())
+}
+
+// redactedSecret is what every formatting verb prints in place of a secret.
+const redactedSecret = "[redacted]"
 
 type Config struct {
 	App  App
@@ -717,6 +757,23 @@ func (n Node) EffectiveChatLogDir() string {
 // so that CORSA_CHATLOG_DIR moves everything together.
 func (n Node) EffectiveDataDir() string {
 	return n.EffectiveChatLogDir()
+}
+
+// IdentityBackupDirName is the single directory, relative to the data dir,
+// that identity backups live in. Exported so the RPC surface can name it in
+// an error message without re-deriving the layout.
+const IdentityBackupDirName = "identity-backups"
+
+// EffectiveIdentityBackupDir returns the ONLY directory the identity_backup /
+// identity_restore RPC pair may write to or read from.
+//
+// The path is derived here, from the node's own data dir, and never taken
+// from the request: a caller-supplied path would let any RPC client drop a
+// file anywhere the node process can write, and read any file it can read.
+// The name the caller supplies selects a file INSIDE this directory and
+// nothing else.
+func (n Node) EffectiveIdentityBackupDir() string {
+	return filepath.Join(n.EffectiveDataDir(), IdentityBackupDirName)
 }
 
 // EffectiveDownloadDir returns the directory where received files are saved.

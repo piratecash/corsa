@@ -138,8 +138,14 @@ hooks-status:
 	git config --get core.hooksPath
 
 .PHONY: mocks
+# v3.7.4 is the first release pinning golang.org/x/tools v0.49.0. Up to v3.7.2
+# mockery pinned x/tools v0.42.0, whose go/packages cannot read export data
+# produced by the Go 1.27 compiler — it dies with
+#   internal error: package "net/netip" without types was imported from "net"
+# The pin is therefore a floor tied to the toolchain in go.mod, not a
+# preference: raise it whenever the Go version moves ahead of x/tools again.
 mocks:
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/vektra/mockery/v3@v3.7.0
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) $(GO) run github.com/vektra/mockery/v3@v3.7.4
 
 .PHONY: lint
 lint:

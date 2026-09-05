@@ -60,7 +60,7 @@ type MockRouter_Route_Call struct {
 
 // Route is a helper method to define mock.On call
 //   - msg protocol.Envelope
-func (_e *MockRouter_Expecter) Route(msg interface{}) *MockRouter_Route_Call {
+func (_e *MockRouter_Expecter) Route(msg any) *MockRouter_Route_Call {
 	return &MockRouter_Route_Call{Call: _e.mock.On("Route", msg)}
 }
 

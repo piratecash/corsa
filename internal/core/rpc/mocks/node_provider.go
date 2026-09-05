@@ -107,7 +107,7 @@ type MockNodeProvider_CancelFileDownload_Call struct {
 
 // CancelFileDownload is a helper method to define mock.On call
 //   - fileID domain.FileID
-func (_e *MockNodeProvider_Expecter) CancelFileDownload(fileID interface{}) *MockNodeProvider_CancelFileDownload_Call {
+func (_e *MockNodeProvider_Expecter) CancelFileDownload(fileID any) *MockNodeProvider_CancelFileDownload_Call {
 	return &MockNodeProvider_CancelFileDownload_Call{Call: _e.mock.On("CancelFileDownload", fileID)}
 }
 
@@ -213,7 +213,7 @@ type MockNodeProvider_ExplainFileRoute_Call struct {
 
 // ExplainFileRoute is a helper method to define mock.On call
 //   - dst domain.PeerIdentity
-func (_e *MockNodeProvider_Expecter) ExplainFileRoute(dst interface{}) *MockNodeProvider_ExplainFileRoute_Call {
+func (_e *MockNodeProvider_Expecter) ExplainFileRoute(dst any) *MockNodeProvider_ExplainFileRoute_Call {
 	return &MockNodeProvider_ExplainFileRoute_Call{Call: _e.mock.On("ExplainFileRoute", dst)}
 }
 
@@ -429,7 +429,7 @@ type MockNodeProvider_HandleLocalFrame_Call struct {
 
 // HandleLocalFrame is a helper method to define mock.On call
 //   - frame protocol.Frame
-func (_e *MockNodeProvider_Expecter) HandleLocalFrame(frame interface{}) *MockNodeProvider_HandleLocalFrame_Call {
+func (_e *MockNodeProvider_Expecter) HandleLocalFrame(frame any) *MockNodeProvider_HandleLocalFrame_Call {
 	return &MockNodeProvider_HandleLocalFrame_Call{Call: _e.mock.On("HandleLocalFrame", frame)}
 }
 
@@ -568,7 +568,7 @@ type MockNodeProvider_RestartFileDownload_Call struct {
 
 // RestartFileDownload is a helper method to define mock.On call
 //   - fileID domain.FileID
-func (_e *MockNodeProvider_Expecter) RestartFileDownload(fileID interface{}) *MockNodeProvider_RestartFileDownload_Call {
+func (_e *MockNodeProvider_Expecter) RestartFileDownload(fileID any) *MockNodeProvider_RestartFileDownload_Call {
 	return &MockNodeProvider_RestartFileDownload_Call{Call: _e.mock.On("RestartFileDownload", fileID)}
 }
 
@@ -619,7 +619,7 @@ type MockNodeProvider_RetryFileChunk_Call struct {
 
 // RetryFileChunk is a helper method to define mock.On call
 //   - fileID domain.FileID
-func (_e *MockNodeProvider_Expecter) RetryFileChunk(fileID interface{}) *MockNodeProvider_RetryFileChunk_Call {
+func (_e *MockNodeProvider_Expecter) RetryFileChunk(fileID any) *MockNodeProvider_RetryFileChunk_Call {
 	return &MockNodeProvider_RetryFileChunk_Call{Call: _e.mock.On("RetryFileChunk", fileID)}
 }
 
@@ -670,7 +670,7 @@ type MockNodeProvider_StartFileDownload_Call struct {
 
 // StartFileDownload is a helper method to define mock.On call
 //   - fileID domain.FileID
-func (_e *MockNodeProvider_Expecter) StartFileDownload(fileID interface{}) *MockNodeProvider_StartFileDownload_Call {
+func (_e *MockNodeProvider_Expecter) StartFileDownload(fileID any) *MockNodeProvider_StartFileDownload_Call {
 	return &MockNodeProvider_StartFileDownload_Call{Call: _e.mock.On("StartFileDownload", fileID)}
 }
 

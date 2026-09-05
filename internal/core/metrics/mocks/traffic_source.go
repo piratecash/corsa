@@ -60,7 +60,7 @@ type MockTrafficSource_HandleLocalFrame_Call struct {
 
 // HandleLocalFrame is a helper method to define mock.On call
 //   - frame protocol.Frame
-func (_e *MockTrafficSource_Expecter) HandleLocalFrame(frame interface{}) *MockTrafficSource_HandleLocalFrame_Call {
+func (_e *MockTrafficSource_Expecter) HandleLocalFrame(frame any) *MockTrafficSource_HandleLocalFrame_Call {
 	return &MockTrafficSource_HandleLocalFrame_Call{Call: _e.mock.On("HandleLocalFrame", frame)}
 }
 

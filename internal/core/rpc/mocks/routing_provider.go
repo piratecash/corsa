@@ -250,7 +250,7 @@ type MockRoutingProvider_PeerTransport_Call struct {
 
 // PeerTransport is a helper method to define mock.On call
 //   - peerIdentity domain.PeerIdentity
-func (_e *MockRoutingProvider_Expecter) PeerTransport(peerIdentity interface{}) *MockRoutingProvider_PeerTransport_Call {
+func (_e *MockRoutingProvider_Expecter) PeerTransport(peerIdentity any) *MockRoutingProvider_PeerTransport_Call {
 	return &MockRoutingProvider_PeerTransport_Call{Call: _e.mock.On("PeerTransport", peerIdentity)}
 }
 

@@ -1,6 +1,8 @@
 package sdk
 
 import (
+	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"strings"
@@ -54,7 +56,13 @@ type NodeConfig struct {
 	// PeerPort.IsValid.
 	AdvertisePort  *uint16
 	BootstrapPeers []string
-	PrivateKey     string
+	// PrivateKey is the Base64 Ed25519 signing key — the single most
+	// sensitive value in the whole config. json:"-" keeps it out of any
+	// marshalled NodeConfig, and NodeConfig.String/GoString keep it out of
+	// every fmt verb; both are covered by tests, because an embedder that
+	// dumps its config for support is the likeliest way this key ever
+	// leaves the machine.
+	PrivateKey     string `json:"-"`
 	IdentityPath   string
 	TrustStorePath string
 	PeersStatePath string
@@ -106,13 +114,70 @@ type NodeConfig struct {
 	ProbeBackoffEnabled *bool
 }
 
-// RPCConfig configures the optional HTTP RPC server.
+// redactedSecret is what every formatting verb prints in place of a secret.
+const redactedSecret = "[redacted]"
+
+// String redacts PrivateKey for %v, %s and %+v — an embedder dumping its
+// config into a log or a support ticket is the likeliest way the signing key
+// ever leaves the machine.
+//
+// The redaction goes through a local alias type on purpose: the alias has no
+// String method, so fmt renders every other field of the copy without
+// recursing, and a field added to NodeConfig later shows up here
+// automatically instead of silently vanishing from the diagnostics.
+func (c NodeConfig) String() string {
+	type nodeConfigFields NodeConfig
+	redacted := nodeConfigFields(c)
+	if redacted.PrivateKey != "" {
+		redacted.PrivateKey = redactedSecret
+	}
+	return fmt.Sprintf("sdk.NodeConfig%+v", redacted)
+}
+
+// GoString covers %#v, which ignores Stringer. It returns the same redacted
+// text rather than valid Go syntax on purpose: a representation that could be
+// pasted back into code is exactly what must not exist for a secret.
+func (c NodeConfig) GoString() string {
+	return c.String()
+}
+
+// Format renders the config for EVERY verb. String and GoString cover %v, %s,
+// %+v and %#v and nothing else — a numeric verb (%d, %x) falls through to
+// fmt's reflective walk and prints the key. Formatter is asked first for every
+// verb, so no verb is left over.
+func (c NodeConfig) Format(f fmt.State, verb rune) {
+	_, _ = io.WriteString(f, c.String())
+}
+
+// RPCConfig configures the optional HTTP RPC server. Password is a secret and
+// is kept out of marshalling and formatting the same way NodeConfig.PrivateKey
+// is.
 type RPCConfig struct {
 	Enabled  bool
 	Host     string
 	Port     string
 	Username string
-	Password string
+	Password string `json:"-"`
+}
+
+// String redacts the password for %v, %s and %+v.
+func (c RPCConfig) String() string {
+	type rpcConfigFields RPCConfig
+	redacted := rpcConfigFields(c)
+	if redacted.Password != "" {
+		redacted.Password = redactedSecret
+	}
+	return fmt.Sprintf("sdk.RPCConfig%+v", redacted)
+}
+
+// GoString covers %#v — see NodeConfig.GoString.
+func (c RPCConfig) GoString() string {
+	return c.String()
+}
+
+// Format covers every verb — see NodeConfig.Format.
+func (c RPCConfig) Format(f fmt.State, verb rune) {
+	_, _ = io.WriteString(f, c.String())
 }
 
 // Config is the public SDK configuration.
@@ -120,6 +185,25 @@ type Config struct {
 	App  AppConfig
 	Node NodeConfig
 	RPC  RPCConfig
+}
+
+// withoutSecrets returns a copy with every secret cleared.
+//
+// This is what a long-lived struct is allowed to keep. Redaction through
+// String/GoString protects the value only where fmt can reach a method, and
+// fmt reaches none through an UNEXPORTED field: printing a struct that holds
+// a Config privately walks it by reflection and prints the key verbatim, and
+// numeric verbs bypass Stringer even on exported paths. Neither hole can be
+// closed by the config's own methods — so the secret does not stay in the
+// struct that outlives its use.
+//
+// The secrets are consumed once, during construction: the private key becomes
+// an identity.Identity (itself fail-closed against serialisation) and the RPC
+// password goes into the server's own config before this copy is stored.
+func (c Config) withoutSecrets() Config {
+	c.Node.PrivateKey = ""
+	c.RPC.Password = ""
+	return c
 }
 
 // DefaultConfig returns SDK defaults without reading environment variables.

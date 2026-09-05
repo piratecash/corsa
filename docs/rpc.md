@@ -10,6 +10,22 @@ The desktop UI calls `CommandTable` directly (no HTTP round-trip). External clie
 
 The HTTP RPC server listens on `127.0.0.1:46464` by default. The server is only started when authentication credentials are configured via `CORSA_RPC_USERNAME` and `CORSA_RPC_PASSWORD` environment variables. Without credentials, the RPC server is not created — this prevents port conflicts when running multiple instances and avoids exposing an unauthenticated control plane. When credentials are set, all requests require HTTP Basic authentication.
 
+### Transport policy
+
+Because one `CommandTable` serves both an in-process caller and a socket, each command declares in its `CommandInfo` where it may be called FROM. The declaration is a `rpc.TransportPolicy`:
+
+| Policy | Reach |
+|---|---|
+| `TransportAnyAuthenticated` (zero value, default) | Anywhere the listener accepts, subject to the listener's own authentication. Every command that says nothing keeps its historical reach. |
+| `TransportLoopbackOnly` | In-process callers, plus HTTP requests whose REAL socket peer is a loopback address **and** whose listener has credentials configured. |
+| `TransportInProcessOnly` | Callers inside the node process only. No HTTP request qualifies. |
+
+The gate lives in one place — `Server.execute`, which every HTTP entry point (`/exec`, `/frame`, the legacy routes) funnels through, because a gate some routes skip is not a gate. It reads the request's socket address, never `X-Forwarded-For` or any other header: those are written by the client. A refusal is `403 Forbidden` (not `503`, which invites a retry that can never succeed); an unknown command name still returns `404`, so status codes cannot be used to probe which commands exist.
+
+Non-default policies appear in `help` output as `"transport": "loopback_only"`, and the field decodes back through `TransportPolicy.UnmarshalJSON` — both names and, for older payloads, the numeric form. The pair matters more than it looks: `help` returns one array, so a policy that encodes but does not decode fails the WHOLE command list for every client that reads it into `[]CommandInfo`, `rpc.Client.FetchCommands` included.
+
+`identityBackup` and `identityRestore` are the two commands that carry `TransportLoopbackOnly` today: both move BOTH private keys across a file boundary on the node's machine. Their arguments are backup NAMES, not paths — see [identity-lookup.md §5](protocol/identity-lookup.md).
+
 ### Interaction Diagram
 
 #### Overall Architecture
@@ -490,6 +506,22 @@ RPC слой обеспечивает диспетчеризацию коман�
 Desktop UI вызывает `CommandTable` напрямую (без HTTP round-trip). Внешние клиенты (`corsa-cli`, сторонние инструменты) обращаются к командам через тонкую HTTP-обёртку на Fiber v3, которая делегирует в тот же `CommandTable`. Это гарантирует идентичное поведение для всех вызывающих.
 
 HTTP RPC сервер по умолчанию слушает `127.0.0.1:46464`. Сервер запускается только при наличии учётных данных аутентификации через переменные окружения `CORSA_RPC_USERNAME` и `CORSA_RPC_PASSWORD`. Без учётных данных RPC сервер не создаётся — это предотвращает конфликты портов при запуске нескольких экземпляров и исключает открытый неаутентифицированный control plane. Когда учётные данные заданы, все запросы требуют HTTP Basic аутентификации.
+
+### Транспортная политика
+
+Одна `CommandTable` обслуживает и внутрипроцессного вызывающего, и сокет, поэтому каждая команда объявляет в своём `CommandInfo`, ОТКУДА её можно вызвать. Объявление — это `rpc.TransportPolicy`:
+
+| Политика | Досягаемость |
+|---|---|
+| `TransportAnyAuthenticated` (нулевое значение, по умолчанию) | Отовсюду, куда принимает слушатель, с его собственной аутентификацией. Команда, которая ничего не говорит, сохраняет прежнюю досягаемость. |
+| `TransportLoopbackOnly` | Внутрипроцессные вызовы плюс HTTP-запросы, у которых РЕАЛЬНЫЙ socket-пир — loopback-адрес **и** у слушателя настроены учётные данные. |
+| `TransportInProcessOnly` | Только вызывающие внутри процесса ноды. Ни один HTTP-запрос не подходит. |
+
+Гейт живёт в одном месте — `Server.execute`, через который проходит каждая HTTP-точка входа (`/exec`, `/frame`, легаси-маршруты): гейт, который часть маршрутов обходит, — не гейт. Он читает socket-адрес запроса, а не `X-Forwarded-For` или любой другой заголовок: их пишет клиент. Отказ — `403 Forbidden` (не `503`, который приглашает к ретраю, который никогда не сработает); неизвестное имя команды по-прежнему даёт `404`, поэтому по кодам ответа нельзя выяснить, какие команды существуют.
+
+Ненулевые политики видны в выводе `help` как `"transport": "loopback_only"`, и поле декодируется обратно через `TransportPolicy.UnmarshalJSON` — по именам и, для старых payload-ов, в числовой форме. Пара важнее, чем кажется: `help` возвращает ОДИН массив, поэтому политика, которая кодируется, но не декодируется, роняет разбор ВСЕГО списка команд у любого клиента, читающего его в `[]CommandInfo`, включая `rpc.Client.FetchCommands`.
+
+Сегодня `TransportLoopbackOnly` несут две команды — `identityBackup` и `identityRestore`: обе переносят ОБА приватных ключа через файловую границу на машине узла. Их аргумент — ИМЯ бэкапа, а не путь; см. [identity-lookup.md §5](protocol/identity-lookup.md).
 
 ### Диаграмма взаимодействия
 

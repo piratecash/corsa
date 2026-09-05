@@ -23,6 +23,75 @@ Fingerprint address derivation:
 3. keep the first 20 bytes
 4. encode as hex
 
+#### Private keys never leave the process
+
+Both private keys live in `identity.Identity`, and the type refuses every
+generic way out of it — fail-closed, so the protection covers the call
+nobody has written yet:
+
+- `json.Marshal` of an `Identity` (or of any struct carrying one, by value
+  or by pointer) returns `identity.ErrSecretSerialization`. The method has a
+  VALUE receiver on purpose: a pointer receiver would leave
+  `json.Marshal(value)` wide open, and the value form is what a struct field
+  embeds by default. `json.Unmarshal` is closed the same way — a
+  half-populated identity that looks restored and cannot sign is worse than
+  a refusal.
+- `String` / `GoString` / `Format` redact both keys, so EVERY format verb
+  prints the address and nothing else. `Format` (a `fmt.Formatter`) is what
+  makes that "every": `%v`, `%s`, `%q` and `%x` consult `Stringer` and `%#v`
+  consults `GoStringer`, but `%d` consults neither — it falls through to
+  fmt's reflective walk and renders the key as the decimal byte list
+  `[85 86 162 …]`, which is exactly as usable as the Base64 form.
+- Long-lived structs do not KEEP a secret where they do not need one:
+  `sdk.Runtime` stores its config with the private key and RPC password
+  cleared, because fmt calls no method on the way down through an unexported
+  field and no redaction on the config could have helped there. Where a
+  container must hold one — `rpc.Server` needs the password to authenticate —
+  the container implements `Format` itself.
+- Key material reaches disk through exactly one writer,
+  `internal/core/secretfile`: a unique temp name, operations relative to a
+  pinned directory handle rather than a path, `fsync` before the rename, and
+  errors with the path stripped out. Opening a subdirectory additionally
+  proves the directory it opened IS the entry it named — "inside the root" is
+  not "where I meant", and a link `identity-backups` → `.` stays inside while
+  redirecting every write onto the data directory's own files.
+- The file is owner-only **at creation**, never by a step afterwards.
+  Restricting after the create leaves a window in which the file exists under
+  the parent directory's terms, and a handle another process obtained in that
+  window keeps its access — a later DACL change does not revoke access already
+  granted, and an unpredictable name does not help because file creation is an
+  observable event. POSIX gets this from `O_EXCL` with mode 0600; Windows needs
+  `NtCreateFile` with the security descriptor in `OBJECT_ATTRIBUTES`, applied
+  atomically with the create and relative to the pinned directory handle. That
+  code is isolated in `create_windows.go` and covered by DACL tests under a
+  `windows` build tag, because compiling it proves only that the types line up.
+- The signing key exists outside `identity.Identity` in exactly one place —
+  `datagram.RoutedFrameBuilder`, which is handed the raw `ed25519.PrivateKey`
+  so the signing path does not depend on the identity type. Identity's
+  fail-closed methods protect nothing there, so the builder and its config
+  redact themselves.
+- Exactly ONE named function serialises key material: `identity.ExportBackup`,
+  used by the local backup RPC (see
+  [identity-lookup.md §5](protocol/identity-lookup.md)). Code that needs an
+  identity on the wire builds the public projection it needs from
+  `PublicKeyBase64` / `BoxPublicKeyBase64` / `Address`, which are public data
+  by construction — an address IS the fingerprint of the signing key.
+
+Secrets that live in configuration rather than in `Identity` —
+`sdk.NodeConfig.PrivateKey`, `config.RPC.Password` — carry `json:"-"` and
+are redacted by the containing struct's `String` / `GoString`.
+
+Two kinds of test hold this up, because either alone is weak. The first
+asserts the refusal (`errors.Is(err, ErrSecretSerialization)`). The second
+renders the artifacts the node actually emits — the node-hello line, the
+welcome frame, the signed self record, the node status, every read-only
+local RPC reply — and scans them for both private keys in raw, Base64
+(std/raw-std/URL/raw-URL), hex AND decimal-byte-list form. The decimal entry
+is not padding: `%d` is the verb that skips `Stringer`, so it is the verb a
+leak survives, and none of the other encodings match what it prints. The
+scanner is proved non-inert by running the same scan against a real backup,
+where it must find the keys.
+
 ### Direct messages
 
 Direct messages are encrypted on the desktop before reaching the local node.
@@ -273,6 +342,75 @@ flowchart LR
 2. считается `sha256(pubkey)`
 3. берутся первые 20 байт
 4. кодируются в hex
+
+#### Приватные ключи не покидают процесс
+
+Оба приватных ключа лежат в `identity.Identity`, и тип закрывает все общие
+пути наружу — fail-closed, чтобы защита покрывала и тот вызов, который ещё
+не написан:
+
+- `json.Marshal` от `Identity` (и от любой структуры, которая её несёт, по
+  значению или по указателю) возвращает `identity.ErrSecretSerialization`.
+  Receiver у метода — ЗНАЧЕНИЕ намеренно: pointer receiver оставил бы
+  `json.Marshal(value)` открытым, а именно форма значения по умолчанию
+  вкладывается полем структуры. `json.Unmarshal` закрыт так же:
+  наполовину разобранная identity, которая выглядит восстановленной и не
+  умеет подписывать, хуже отказа.
+- `String` / `GoString` / `Format` редактируют оба ключа, поэтому КАЖДЫЙ
+  форматный глагол печатает адрес и больше ничего. Именно `Format`
+  (`fmt.Formatter`) делает это «каждый»: `%v`, `%s`, `%q` и `%x` спрашивают
+  `Stringer`, `%#v` — `GoStringer`, а `%d` не спрашивает никого: он уходит в
+  рефлексивный обход fmt и печатает ключ десятичным списком байт
+  `[85 86 162 …]`, ровно настолько же пригодным, как Base64.
+- Долгоживущие структуры не ХРАНЯТ секрет там, где он им не нужен:
+  `sdk.Runtime` держит конфиг с очищенными приватным ключом и RPC-паролем,
+  потому что через неэкспортируемое поле fmt не вызывает ни одного метода и
+  никакое редактирование конфига там бы не помогло. Где контейнер обязан его
+  держать — `rpc.Server` нужен пароль для аутентификации — контейнер сам
+  реализует `Format`.
+- Ключевой материал попадает на диск ровно одним писателем,
+  `internal/core/secretfile`: уникальное имя temp, операции относительно
+  закреплённого дескриптора каталога, а не по пути, `fsync` до rename и ошибки
+  без пути. Открытие подкаталога дополнительно доказывает, что открытый
+  каталог — это названная запись: «внутри root» не значит «там, где я хотел»,
+  и ссылка `identity-backups` → `.` остаётся внутри, перенаправляя все записи
+  на собственные файлы data-каталога.
+- Файл становится owner-only **в момент создания**, а не отдельным шагом
+  после. Ограничение после создания оставляет окно, в котором файл существует
+  на условиях родительского каталога, и дескриптор, полученный чужим процессом
+  в этом окне, сохраняет доступ: смена DACL уже выданный доступ не отзывает, а
+  непредсказуемое имя не спасает — появление файла наблюдаемо. На POSIX это
+  даёт `O_EXCL` с режимом 0600; на Windows нужен `NtCreateFile` с security
+  descriptor в `OBJECT_ATTRIBUTES`, применяемый атомарно с созданием и
+  относительно закреплённого дескриптора каталога. Этот код изолирован в
+  `create_windows.go` и покрыт тестами DACL под build-тегом `windows`, потому
+  что компиляция доказывает только совпадение типов.
+- Ключ подписи живёт вне `identity.Identity` ровно в одном месте —
+  `datagram.RoutedFrameBuilder`, которому передаётся сырой
+  `ed25519.PrivateKey`, чтобы путь подписи не зависел от типа identity.
+  Fail-closed методы Identity там не защищают ничего, поэтому билдер и его
+  конфиг редактируют себя сами.
+- Ключевой материал сериализует ровно ОДНА явно названная функция —
+  `identity.ExportBackup`, используемая локальным backup-RPC (см.
+  [identity-lookup.md §5](protocol/identity-lookup.md)). Код, которому нужна
+  identity на проводе, собирает нужную ему публичную проекцию из
+  `PublicKeyBase64` / `BoxPublicKeyBase64` / `Address` — это публичные
+  данные по построению: адрес И ЕСТЬ отпечаток ключа подписи.
+
+Секреты, живущие в конфигурации, а не в `Identity` —
+`sdk.NodeConfig.PrivateKey`, `config.RPC.Password`, — помечены `json:"-"` и
+редактируются `String` / `GoString` содержащей структуры.
+
+Держат это два вида тестов, потому что каждый по отдельности слаб. Первый
+проверяет отказ (`errors.Is(err, ErrSecretSerialization)`). Второй
+рендерит артефакты, которые узел действительно выпускает — строку
+node-hello, welcome-фрейм, подписанную self-запись, node status, каждый
+read-only ответ локального RPC — и сканирует их на оба приватных ключа в
+raw, Base64 (std/raw-std/URL/raw-URL), hex И десятичном списке байт.
+Десятичная форма здесь не для полноты: `%d` — тот самый глагол, который
+пропускает `Stringer`, то есть именно в нём утечка и выживает, а ни одна из
+остальных кодировок его вывод не поймает. Неинертность сканера
+доказывается тем же сканом по настоящему бэкапу, где он обязан ключи найти.
 
 ### Direct messages
 

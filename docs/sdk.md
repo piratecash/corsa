@@ -154,6 +154,25 @@ creates a new identity file if one does not exist yet.
 
 If neither `PrivateKey` nor a valid `IdentityPath` is provided, `sdk.New()` returns an error.
 
+`NodeConfig.PrivateKey` is tagged `json:"-"` and redacted by `NodeConfig.String` /
+`GoString`, so marshalling or printing a `Config` — into a support bundle, a crash
+report, a settings file — cannot publish the signing key. `RPCConfig.Password` is
+handled the same way. Reading the field back gives the real value; only the generic
+serialisation and formatting paths are closed. See [encryption.md](encryption.md).
+
+**The runtime keeps no secrets.** `Runtime.Config()` returns the normalized config
+with `Node.PrivateKey` and `RPC.Password` **empty**: both are consumed during
+construction — the private key becomes the node's identity, the password goes into
+the RPC server's own config — and the runtime deliberately does not retain them.
+That is not belt-and-braces on top of the redaction above; it is the only thing
+that works here. `fmt` calls `String` / `GoString` / `Format` on a value it can
+reach, and it can reach none of them through an **unexported** field: printing a
+struct that holds a `Config` privately walks it by reflection and prints the key
+verbatim, and numeric verbs (`%d`, `%x`) skip `Stringer` even on exported paths.
+`Runtime` additionally implements `fmt.Formatter`, so every verb renders one
+redacted line. Any type of your own that stores a `Config` in an unexported field
+must do the same, or hold a `Config` that carries no secrets.
+
 ### State database
 
 `sdk.New` opens the node's shared SQLite state database before it builds any
@@ -228,6 +247,26 @@ cfg.Node.IdentityPath = "/path/to/identity.json"
 создаёт новый файл identity, если его ещё нет.
 
 Если ни `PrivateKey`, ни валидный `IdentityPath` не указаны, `sdk.New()` возвращает ошибку.
+
+`NodeConfig.PrivateKey` помечен `json:"-"` и редактируется в `NodeConfig.String` /
+`GoString`, поэтому маршалинг или печать `Config` — в support-архив, в отчёт о
+падении, в файл настроек — не публикует ключ подписи. С `RPCConfig.Password` то же
+самое. Чтение поля даёт настоящее значение; закрыты только общие пути сериализации
+и форматирования. См. [encryption.md](encryption.md).
+
+**Runtime не хранит секретов.** `Runtime.Config()` возвращает нормализованную
+конфигурацию с ПУСТЫМИ `Node.PrivateKey` и `RPC.Password`: оба потребляются при
+конструировании — приватный ключ становится identity узла, пароль уходит в
+собственную конфигурацию RPC-сервера, — и runtime намеренно их не удерживает.
+Это не «на всякий случай» поверх редактирования выше, а единственное, что здесь
+работает. `fmt` вызывает `String` / `GoString` / `Format` только у значения, до
+которого может дотянуться, а через **неэкспортируемое** поле не дотягивается ни до
+одного: печать структуры, приватно хранящей `Config`, обходит её рефлексией и
+печатает ключ дословно, а числовые глаголы (`%d`, `%x`) пропускают `Stringer` даже
+на экспортированных путях. `Runtime` дополнительно реализует `fmt.Formatter`,
+поэтому любой глагол выдаёт одну редактированную строку. Ваш собственный тип,
+хранящий `Config` в неэкспортируемом поле, обязан сделать так же — или хранить
+`Config` без секретов.
 
 ### Quick Start
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -300,8 +302,14 @@ func NewWithContext(ctx context.Context, cfg Config) (*Runtime, error) {
 		}
 	}
 
+	// The stored config carries NO secrets. Everything that needs them has
+	// already consumed them above: resolveIdentity turned the private key
+	// into an identity.Identity, and rpc.NewServer took the password into the
+	// server's own config. What is left is a long-lived struct an embedder
+	// may print, and fmt cannot be stopped from walking an unexported field
+	// by reflection — so the field must not hold a secret to begin with.
 	return &Runtime{
-		cfg:                 normalizeConfig(cfg),
+		cfg:                 normalizeConfig(cfg).withoutSecrets(),
 		nodeService:         nodeService,
 		database:            database,
 		client:              client,
@@ -362,9 +370,44 @@ func (r *Runtime) endOperation() { r.operations.Done() }
 // errClosed is what a public operation returns once a shutdown has begun.
 var errClosed = errors.New("sdk: runtime is closed")
 
-// Config returns the normalized runtime configuration.
+// Config returns the normalized runtime configuration WITHOUT secrets:
+// Node.PrivateKey and RPC.Password come back empty. The runtime consumes both
+// during construction and deliberately does not keep them, so that printing a
+// Runtime — or anything holding one — cannot publish them. Callers that need
+// the values already have them: they supplied them.
 func (r *Runtime) Config() Config {
 	return r.cfg
+}
+
+// Format renders the runtime for EVERY verb, redacted.
+//
+// A Stringer would not be enough. fmt honours String only for %v, %s and
+// %+v; %d, %x and friends fall through to the reflective walk, which prints
+// the fields of an unexported struct without calling any method on it. A
+// Formatter is consulted first for every verb, so there is no verb left over
+// through which a future field could escape. Together with the secret-free
+// config above this is defence in depth: neither layer relies on the other.
+func (r *Runtime) Format(f fmt.State, verb rune) {
+	_, _ = io.WriteString(f, r.String())
+}
+
+// String is the single redacted rendering Format hands to every verb. It
+// reads only the stored config, which is already secret-free, and takes no
+// lock: a String that locked would deadlock the moment someone logged the
+// runtime from inside a section that holds one.
+func (r *Runtime) String() string {
+	if r == nil {
+		return "sdk.Runtime(nil)"
+	}
+	return fmt.Sprintf("sdk.Runtime{Network: %s, Listen: %s, Identity: %s, RPC: %s, Secrets: not retained}",
+		r.cfg.App.Network, r.cfg.Node.ListenAddress, r.cfg.Node.IdentityPath,
+		net.JoinHostPort(r.cfg.RPC.Host, r.cfg.RPC.Port))
+}
+
+// GoString covers %#v for callers that reach it without going through Format
+// (fmt consults Formatter first, so this is belt-and-braces).
+func (r *Runtime) GoString() string {
+	return r.String()
 }
 
 // Address returns the local identity address.
