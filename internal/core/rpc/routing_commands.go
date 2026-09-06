@@ -339,6 +339,69 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		// something new). Sample this to see which cause leads before tuning.
 		journalChurn := rp.JournalCauseStats()
 
+		// Capability-rollout telemetry (docs/refactoring/dht/05-rollout-metrics.md).
+		// Grouped into their own objects rather than sprinkled among the
+		// existing keys: they answer a different question (what the fleet
+		// around this node runs) and are read together or not at all.
+		//
+		// Three snapshots, and they are deliberately NOT presented as one
+		// atomic view: mode_selection and session_outcomes are cumulative
+		// counters read at slightly different instants, neighbours is a gauge
+		// refreshed on a background cadence with its own updated_at. Pretending
+		// otherwise would invite arithmetic across them that the timestamps do
+		// not support.
+		modeSelection := rp.ModeSelectionStats()
+		decisions := make([]map[string]interface{}, 0, len(modeSelection.Decisions))
+		for _, decision := range modeSelection.Decisions {
+			decisions = append(decisions, map[string]interface{}{
+				"operation": decision.Operation.String(),
+				"mode":      decision.Mode.String(),
+				"reason":    decision.Reason.String(),
+				"count":     decision.Count,
+			})
+		}
+		modeSelectionStats := map[string]interface{}{
+			// started_at anchors the cumulative counts: they are in-memory and
+			// reset on restart, so a bare total is unreadable without it.
+			"started_at": formatOptionalTime(modeSelection.StartedAt),
+			// read_at closes the period. It is NOT snapshot_at: that one belongs
+			// to the cached routing snapshot and does not move while the table
+			// is unchanged, so two answers can share it and carry different
+			// counts — and a rate computed from that pair is wrong by however
+			// long the table stood still.
+			"read_at":   formatOptionalTime(modeSelection.ReadAt),
+			"decisions": decisions,
+		}
+
+		outcomes := rp.SessionOutcomeStats()
+		sessionOutcomes := map[string]interface{}{
+			"started_at":     formatOptionalTime(outcomes.StartedAt),
+			"read_at":        formatOptionalTime(outcomes.ReadAt),
+			"attempts":       outcomes.Attempts,
+			"succeeded":      outcomes.Succeeded,
+			"errors_connect": outcomes.ErrorsConnect,
+			"errors_compat":  outcomes.ErrorsCompat,
+			"errors_other":   outcomes.ErrorsOther,
+		}
+
+		composition := rp.NeighbourComposition()
+		capabilityRows := make([]map[string]interface{}, 0, len(composition.Capabilities))
+		for _, usage := range composition.Capabilities {
+			capabilityRows = append(capabilityRows, capabilityUsageJSON(usage))
+		}
+		neighbours := map[string]interface{}{
+			// ready distinguishes "the census has not run yet" from "the
+			// census ran and found nobody". Both are all-zero rows.
+			"ready":              composition.Ready,
+			"updated_at":         formatOptionalTime(composition.UpdatedAt),
+			"connections":        composition.Connections,
+			"peers":              composition.Peers,
+			"identity_unproven":  composition.IdentityUnproven,
+			"identity_unknown":   composition.IdentityUnknown,
+			"capabilities":       capabilityRows,
+			"routing_v3_triplet": capabilityUsageJSON(composition.RoutingV3Triplet),
+		}
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -351,6 +414,9 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"overload":             overloadStats,
 			"digest":               digestStats,
 			"journal_churn":        journalChurn,
+			"mode_selection":       modeSelectionStats,
+			"session_outcomes":     sessionOutcomes,
+			"neighbours":           neighbours,
 		})
 	}
 }
@@ -758,4 +824,41 @@ func routeReputationHandler(rp RoutingProvider) CommandHandler {
 			"snapshot_at": time.Now().UTC().Format(time.RFC3339),
 		})
 	}
+}
+
+// capabilityUsageJSON renders one capability census row.
+//
+// BOTH counts, always. Two sockets to one neighbour are two connections and one
+// peer: publishing only connections would let a single reconnecting peer look
+// like a rollout wave, and publishing only peers would hide that half our
+// sockets still speak the old format.
+func capabilityUsageJSON(usage domain.CapabilityUsage) map[string]interface{} {
+	return map[string]interface{}{
+		"capability":  string(usage.Capability),
+		"connections": usage.Connections,
+		"peers":       usage.Peers,
+	}
+}
+
+// formatOptionalTime renders a rollout timestamp, or nil when it was never set.
+//
+// nil rather than the zero instant: "0001-01-01T00:00:00Z" is a real-looking
+// answer to "when did this start", and a dashboard subtracting it produces two
+// thousand years of uptime instead of an obvious gap.
+//
+// RFC3339**Nano**, and that is not a detail. These stamps exist so a reader can
+// compute Δcount / Δread_at, and second precision hands that formula a zero
+// denominator for every pair of reads inside one second — which is exactly when
+// somebody is watching a rollout closely. The whole point of adding read_at was
+// that snapshot_at could repeat; truncating it here would reintroduce the
+// defect one layer down.
+//
+// It is used ONLY by the rollout sections. The response's own snapshot_at keeps
+// its RFC3339 rendering: it is an existing published field, and dashboards
+// parse what they have always parsed.
+func formatOptionalTime(t time.Time) interface{} {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }

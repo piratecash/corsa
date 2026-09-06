@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/routing"
 )
 
 // localCapabilities returns the set of capability tokens this node advertises
@@ -339,29 +340,52 @@ func (s *Service) connCapabilitiesForID(id domain.ConnID) []domain.Capability {
 // keeps the caller on the legacy frame rather than silently dropping
 // the full-sync attempt.
 func (s *Service) peerSupportsRoutingV3(address domain.PeerAddress) bool {
+	caps, ok := s.peerRoutingCapabilities(address)
+	if !ok {
+		return false
+	}
+	return routing.PeerSupportsV3(caps)
+}
+
+// peerRoutingCapabilities returns the capability set advertised on the live
+// transport behind address, and whether such a transport exists at all.
+//
+// Split out of peerSupportsRoutingV3 so a caller that must also EXPLAIN the
+// decision reads the same capability set the decision was made from. The
+// alternative — a second lookup for the reason — is two lookups that can
+// disagree, and the one that disagrees is the one nobody notices.
+//
+// The false result is "no live transport", which is not the same as "advertises
+// nothing": the first cannot be explained by a missing capability, and callers
+// that report a reason must not invent one for it.
+//
+// The returned slice is a copy: it outlives the lock, and handing out the
+// session's own slice would let a reader observe it being replaced by the next
+// handshake.
+func (s *Service) peerRoutingCapabilities(address domain.PeerAddress) ([]domain.Capability, bool) {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
 	if strings.HasPrefix(string(address), "inbound:") {
 		remoteAddr := strings.TrimPrefix(string(address), "inbound:")
-		var supports bool
+		var (
+			caps  []domain.Capability
+			found bool
+		)
 		s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
 			if info.remoteAddr != remoteAddr {
 				return true
 			}
-			supports = capsContain(info.capabilities, domain.CapMeshRoutingV1) &&
-				capsContain(info.capabilities, domain.CapMeshRoutingV3) &&
-				capsContain(info.capabilities, domain.CapMeshRelayV1)
+			caps = append([]domain.Capability(nil), info.capabilities...)
+			found = true
 			return false // stop iteration
 		})
-		return supports
+		return caps, found
 	}
 	session := s.resolveSessionLocked(address)
 	if session == nil {
-		return false
+		return nil, false
 	}
-	return capsContain(session.capabilities, domain.CapMeshRoutingV1) &&
-		capsContain(session.capabilities, domain.CapMeshRoutingV3) &&
-		capsContain(session.capabilities, domain.CapMeshRelayV1)
+	return append([]domain.Capability(nil), session.capabilities...), true
 }
 
 // capsContain reports whether the cap slice contains target. Small

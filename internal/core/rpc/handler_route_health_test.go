@@ -29,6 +29,9 @@ type stubRoutingProvider struct {
 	health       []routing.RouteHealthState
 	overload     routing.OverloadStats
 	digest       routing.DigestHeartbeatStats
+	modes        routing.ModeSelectionStats
+	outcomes     domain.SessionOutcomeStats
+	neighbours   domain.NeighbourComposition
 	reputation   []routing.RouteReputationState
 	journalChurn map[string]uint64
 }
@@ -51,6 +54,18 @@ func (s *stubRoutingProvider) DigestHeartbeatStats() routing.DigestHeartbeatStat
 
 func (s *stubRoutingProvider) JournalCauseStats() map[string]uint64 {
 	return s.journalChurn
+}
+
+func (s *stubRoutingProvider) ModeSelectionStats() routing.ModeSelectionStats {
+	return s.modes
+}
+
+func (s *stubRoutingProvider) SessionOutcomeStats() domain.SessionOutcomeStats {
+	return s.outcomes
+}
+
+func (s *stubRoutingProvider) NeighbourComposition() domain.NeighbourComposition {
+	return s.neighbours
 }
 
 func (s *stubRoutingProvider) HealthSnapshot() []routing.RouteHealthState {

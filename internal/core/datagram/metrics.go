@@ -2,6 +2,7 @@ package datagram
 
 import (
 	"sync/atomic"
+	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 )
@@ -83,10 +84,63 @@ var refusedAnswerReasons = [...]DropReason{
 // Metrics is the layer's counter set. Safe for concurrent use from every
 // receive goroutine at once; readers never block writers.
 type Metrics struct {
+	// startedAt is when THIS counter set began accumulating — the life of the
+	// instance, not of the process.
+	//
+	// It is what makes a pair of readings comparable. Every counter here is
+	// cumulative and in-memory, so two readings taken across a restart differ
+	// by "120 minus 100 = 20" while describing two unrelated runs; comparing a
+	// counter to itself cannot detect that, because the second run may well
+	// have passed the first. The stamp changes when the instance does, so the
+	// pair is discarded instead of subtracted. Immutable after construction.
+	startedAt time.Time
+
 	outcomes [modeSlots][enumSlots]atomic.Uint64
 	drops    [enumSlots]atomic.Uint64
 	reverse  [enumSlots]atomic.Uint64
 	unknown  atomic.Uint64
+	// sendRefusals counts sends the POLICY GATES refused, split by which gate
+	// spoke. Until this existed the three verdicts of §4.3
+	// (RejectionMissingCapability with either advertised capability, and
+	// RejectionUnsupportedDType) were per-call values that reached a JSON
+	// field of one request and nothing cumulative — a capability rollout could
+	// not be watched from a running node, which is what
+	// docs/refactoring/dht/05-rollout-metrics.md is about.
+	sendRefusals [sendRefusalSlots]atomic.Uint64
+}
+
+// sendRefusalSlot names WHICH admission gate refused a send.
+//
+// A slot, not a map keyed by the capability name: the name is ours today, and
+// a counter map whose keys could ever come from a frame is the defect
+// ObserveUnknownDType refuses to have. Four fixed slots also make the totals
+// addable — every refusal lands in exactly one.
+type sendRefusalSlot uint8
+
+const (
+	// sendRefusalMissingEndpoint — the peer never advertised mesh_datagram_v1,
+	// so the datagram plane does not exist for it at all.
+	sendRefusalMissingEndpoint sendRefusalSlot = iota
+	// sendRefusalMissingTransit — the peer speaks datagrams but does not
+	// forward other nodes' frames, and this frame needed a transit.
+	sendRefusalMissingTransit
+	// sendRefusalUnsupportedDType — the destination itself does not implement
+	// this dtype. Not a rollout signal about the transport, and kept apart for
+	// that reason.
+	sendRefusalUnsupportedDType
+	// sendRefusalOther — a refusal this build cannot attribute. Present so the
+	// four slots sum to every refusal: a gate added later without a slot shows
+	// up here instead of vanishing.
+	sendRefusalOther
+
+	sendRefusalSlots
+)
+
+var sendRefusalNames = [sendRefusalSlots]string{
+	sendRefusalMissingEndpoint:  "missing_endpoint_capability",
+	sendRefusalMissingTransit:   "missing_transit_capability",
+	sendRefusalUnsupportedDType: "unsupported_dtype",
+	sendRefusalOther:            "other",
 }
 
 // Compile-time proof that one type serves both counting seams: the
@@ -100,7 +154,17 @@ var (
 
 // NewMetrics builds an empty counter set. There is nothing to configure: a
 // counter with a knob is a counter that means different things on two nodes.
-func NewMetrics() *Metrics { return &Metrics{} }
+func NewMetrics() *Metrics { return NewMetricsStartedAt(time.Now().UTC()) }
+
+// NewMetricsStartedAt returns a counter set whose accumulation period begins at
+// startedAt.
+//
+// Separate from NewMetrics so a caller that already knows when the node began —
+// and every reading of these counters is anchored to that instant — does not
+// have to accept a second, slightly different "now".
+func NewMetricsStartedAt(startedAt time.Time) *Metrics {
+	return &Metrics{startedAt: startedAt}
+}
 
 // ObserveInbound counts one processed inbound frame. reason is
 // DropReasonUnset for every non-drop outcome, and the outcome is counted
@@ -148,6 +212,43 @@ func (m *Metrics) ObserveUnknownDType(_ domain.DType) {
 }
 
 // ObserveReverseState counts one reverse-state transition (§4.2).
+// ObserveSendRefusal records that the admission gates refused a send.
+//
+// The UNIT is one refused SEND, not one rejected candidate. A send walks
+// several candidates and may reject most of them before handing the frame to
+// one that passes — counting per candidate would make refusals track the
+// length of the candidate list, and a healthy node with many neighbours would
+// look like a failing one. It is also not a failed delivery: a refusal means
+// the frame was never handed to anybody, which is a different fact from a
+// frame that went out and did not arrive.
+//
+// Called only where a real send ended in a refusal. The read-only route plan
+// and the reachability probe reach the same verdict by design — that is what
+// they are for — and counting them would inflate the metric with predictions
+// of sends that never happened.
+func (m *Metrics) ObserveSendRefusal(reason RejectionReason, missing domain.CapabilityName) {
+	if m == nil {
+		return
+	}
+	m.sendRefusals[sendRefusalSlotOf(reason, missing)].Add(1)
+}
+
+// sendRefusalSlotOf maps a verdict onto its slot.
+func sendRefusalSlotOf(reason RejectionReason, missing domain.CapabilityName) sendRefusalSlot {
+	switch reason {
+	case RejectionUnsupportedDType:
+		return sendRefusalUnsupportedDType
+	case RejectionMissingCapability:
+		switch missing {
+		case CapabilityDatagramV1:
+			return sendRefusalMissingEndpoint
+		case CapabilityDatagramTransitV1:
+			return sendRefusalMissingTransit
+		}
+	}
+	return sendRefusalOther
+}
+
 func (m *Metrics) ObserveReverseState(event ReverseEvent) {
 	if m == nil {
 		return
@@ -210,6 +311,22 @@ type MetricsSnapshot struct {
 	// ReverseEvents is the reverse-state breakdown, keyed by the metric
 	// label of ReverseEvent. Zero-valued events are omitted.
 	ReverseEvents map[string]uint64
+	// SendRefusals is the admission-gate breakdown of refused sends, keyed by
+	// which gate spoke. Zero-valued slots are omitted. One refused send, one
+	// increment — see ObserveSendRefusal for what the unit is and is not.
+	SendRefusals map[string]uint64
+	// StartedAt and ReadAt bound the period EVERY counter here describes.
+	//
+	// Pointers so an unknown instant is `null` rather than the year 1: a
+	// dashboard subtracting "0001-01-01" produces two thousand years of uptime
+	// instead of an obvious gap.
+	//
+	// Both are required to compare two readings. ReadAt gives the rate a
+	// denominator; StartedAt tells whether the two readings even belong to the
+	// same run — across a restart the counters reset, and a plain difference
+	// silently reports the second run's total as the growth since the first.
+	StartedAt *time.Time
+	ReadAt    *time.Time
 }
 
 // Snapshot publishes the counters. Lock-free: nothing here takes a mutex, so
@@ -219,6 +336,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		ByMode:        make(map[string]ModeCounts, modeSlots),
 		DropsByReason: make(map[string]uint64),
 		ReverseEvents: make(map[string]uint64),
+		SendRefusals:  make(map[string]uint64),
 	}
 	if m == nil {
 		return snapshot
@@ -256,7 +374,20 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	for _, reason := range refusedAnswerReasons {
 		snapshot.RefusedAnswers += m.drops[reason].Load()
 	}
+	for slot := sendRefusalSlot(0); slot < sendRefusalSlots; slot++ {
+		count := m.sendRefusals[slot].Load()
+		if count == 0 {
+			continue
+		}
+		snapshot.SendRefusals[sendRefusalNames[slot]] = count
+	}
 	snapshot.UnknownDType = m.unknown.Load()
+	if !m.startedAt.IsZero() {
+		startedAt := m.startedAt
+		snapshot.StartedAt = &startedAt
+	}
+	readAt := time.Now().UTC()
+	snapshot.ReadAt = &readAt
 	return snapshot
 }
 

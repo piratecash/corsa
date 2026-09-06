@@ -174,6 +174,27 @@ type RoutingProvider interface {
 	// actually changing. Value-safe for JSON; nil for a journal-less table.
 	JournalCauseStats() map[string]uint64
 
+	// ModeSelectionStats returns which announce wire format was chosen for each
+	// peer and why, cumulatively. It answers the question a capability rollout
+	// is made of — what fraction of neighbours still forces the legacy frame,
+	// and what they are missing — which until now existed only as a per-cycle
+	// atomic in a Debug log line. Lock-free.
+	// See docs/refactoring/dht/05-rollout-metrics.md.
+	ModeSelectionStats() routing.ModeSelectionStats
+
+	// SessionOutcomeStats returns how outbound session attempts ended, split
+	// into transport failure / compatibility refusal / other. "Could not reach
+	// them" and "reached them and could not agree" call for opposite actions;
+	// one failure counter hides exactly the signal a rollout needs. Lock-free.
+	SessionOutcomeStats() domain.SessionOutcomeStats
+
+	// NeighbourComposition returns the latest census of live neighbours by
+	// advertised capability. A GAUGE, refreshed in the background: it reports
+	// Ready=false before the first refresh so "not measured yet" is never read
+	// as "nobody is there". Lock-free — the census is published as an
+	// immutable value.
+	NeighbourComposition() domain.NeighbourComposition
+
 	// HealthSnapshot returns a deep copy of every tracked
 	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,
 	// since Snapshot.Health was narrowed to the Dead∪cooled subset, by

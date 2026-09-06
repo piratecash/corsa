@@ -118,6 +118,14 @@ func (p *Pipeline) forwardRequest(
 	if !selection.publishable() {
 		// A transit frame with nowhere to go is a silent drop: the layer is
 		// unguaranteed and recovery belongs to the originator.
+		//
+		// The gate verdict is counted before it is collapsed. The DROP reason
+		// stays DropNoCandidates — this branch answers the inbound vocabulary,
+		// where a transit frame has exactly one silent outcome — but the
+		// admission counter keeps WHY, which is the whole point of a rollout
+		// metric: a neighbourhood that cannot carry our requests looks
+		// identical to an empty routing table from the drop reason alone.
+		p.observeSendRefusal(selection.outcomeWithoutCandidates(false))
 		return dropped(DropNoCandidates, nil)
 	}
 
@@ -282,7 +290,9 @@ func (p *Pipeline) sendLocalRequest(ctx context.Context, opts LocalSendOpts) Sen
 	}
 	selection := p.selectFor(ctx, job)
 	if !selection.publishable() {
-		return selection.outcomeWithoutCandidates(true)
+		outcome := selection.outcomeWithoutCandidates(true)
+		p.observeSendRefusal(outcome)
+		return outcome
 	}
 
 	now := p.clock()

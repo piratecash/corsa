@@ -43,6 +43,12 @@ func newMockRoutingProvider(
 	// Change-journal churn attribution also surfaces through fetchRouteSummary;
 	// default to nil, override in churn-specific tests.
 	m.On("JournalCauseStats").Return(map[string]uint64(nil)).Maybe()
+	// Capability-rollout telemetry surfaces through fetchRouteSummary too
+	// (docs/refactoring/dht/05-rollout-metrics.md). Defaults are the empty
+	// period and the not-ready census — override in rollout-specific tests.
+	m.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Maybe()
+	m.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Maybe()
+	m.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Maybe()
 	// fetchRouteLookup reads HealthSnapshot (full per-pair tiers) for its
 	// Dead/cooldown filters + CompositeScore ranking, because the published
 	// Snapshot.Health now carries only the routing-relevant {Dead ∪ cooled}
@@ -411,6 +417,9 @@ func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
 	}).Once()
 	provider.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Once()
 	provider.On("JournalCauseStats").Return(map[string]uint64(nil)).Once()
+	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
+	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
+	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -469,6 +478,9 @@ func TestFetchRouteSummary_DigestStatsSurfaced(t *testing.T) {
 	provider.On("OverloadStats").Return(routing.OverloadStats{}).Once()
 	provider.On("DigestHeartbeatStats").Return(want).Once()
 	provider.On("JournalCauseStats").Return(map[string]uint64(nil)).Once()
+	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
+	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
+	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -523,6 +535,9 @@ func TestFetchRouteSummary_JournalChurnSurfaced(t *testing.T) {
 	provider.On("OverloadStats").Return(routing.OverloadStats{}).Once()
 	provider.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Once()
 	provider.On("JournalCauseStats").Return(want).Once()
+	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
+	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
+	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -1253,5 +1268,90 @@ func TestFetchRouteSummaryExcludesSelfRoute(t *testing.T) {
 	active, _ := result["active_entries"].(float64)
 	if int(active) != 1 {
 		t.Errorf("expected active_entries=1 (self-route not counted), got %v", active)
+	}
+}
+
+// TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps guards the
+// rollout stamps against the SERIALIZED response losing what they exist for.
+//
+// read_at was added because snapshot_at repeats while the routing table is
+// unchanged, which hands `Δcount / Δread_at` a zero denominator. Rendering
+// read_at with second precision reintroduces exactly that defect one layer
+// down: two reads inside one second — the case somebody watching a rollout
+// closely produces — would serialise to the identical string.
+//
+// The assertion is on the JSON, not on the time.Time: every existing test
+// checks the value BEFORE it is formatted, and formatting is where the
+// precision was lost.
+func TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps(t *testing.T) {
+	now := time.Date(2026, 9, 6, 9, 31, 44, 512837401, time.UTC)
+	started := now.Add(-time.Hour)
+
+	provider := rpcmocks.NewMockRoutingProvider(t)
+	provider.On("RoutingSnapshot").Return(routing.Snapshot{
+		TakenAt: now.Add(-time.Minute),
+		Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
+	}).Once()
+	provider.On("OverloadStats").Return(routing.OverloadStats{}).Once()
+	provider.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Once()
+	provider.On("JournalCauseStats").Return(map[string]uint64(nil)).Once()
+	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{
+		StartedAt: started,
+		ReadAt:    now,
+	}).Once()
+	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{
+		StartedAt: started,
+		ReadAt:    now,
+	}).Once()
+	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{
+		Ready:     true,
+		UpdatedAt: now,
+	}).Once()
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	want := now.Format(time.RFC3339Nano)
+	for _, probe := range []struct{ section, field string }{
+		{"mode_selection", "read_at"},
+		{"session_outcomes", "read_at"},
+		{"neighbours", "updated_at"},
+	} {
+		section, ok := result[probe.section].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%q is not a JSON object: %T", probe.section, result[probe.section])
+		}
+		got, ok := section[probe.field].(string)
+		if !ok {
+			t.Fatalf("%s.%s missing or not a string: %v", probe.section, probe.field, section[probe.field])
+		}
+		if got != want {
+			t.Fatalf("%s.%s = %q, want %q — sub-second precision is what makes a rate computable",
+				probe.section, probe.field, got, want)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, got)
+		if err != nil {
+			t.Fatalf("%s.%s does not parse as RFC3339Nano: %v", probe.section, probe.field, err)
+		}
+		if parsed.Nanosecond() == 0 {
+			t.Fatalf("%s.%s lost its sub-second part: %q", probe.section, probe.field, got)
+		}
+	}
+
+	// The existing snapshot_at keeps its own rendering and its own meaning:
+	// it belongs to the cached routing snapshot, and this test must not turn
+	// into a reason to change a field dashboards already parse.
+	if snapshotAt, ok := result["snapshot_at"].(string); !ok || snapshotAt == want {
+		t.Fatalf("snapshot_at = %v, want the routing snapshot's own time, not the counters' read time", result["snapshot_at"])
 	}
 }

@@ -183,6 +183,21 @@ type recordingMetrics struct {
 	unknown  []domain.DType
 	reverse  []ReverseEvent
 	drops    []DropReason
+	refusals []sendRefusalRecord
+}
+
+// sendRefusalRecord is one observed admission refusal, kept whole so a test can
+// assert WHICH gate spoke rather than only that something was refused.
+type sendRefusalRecord struct {
+	reason  RejectionReason
+	missing domain.CapabilityName
+}
+
+// ObserveSendRefusal records one refused send.
+func (m *recordingMetrics) ObserveSendRefusal(reason RejectionReason, missing domain.CapabilityName) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refusals = append(m.refusals, sendRefusalRecord{reason: reason, missing: missing})
 }
 
 // ObserveDrop counts the outbound refusals that never entered the conveyor —

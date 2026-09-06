@@ -6543,10 +6543,20 @@ func (s *Service) resolveSessionLocked(address domain.PeerAddress) *peerSession 
 // back to the single canonical entry. The legacy path (ensurePeerSessions)
 // does the same registration; without it markPeerConnected, peerHealthFrames
 // and ActiveSessionLost would all operate on the wrong key.
-func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress) (DialResult, error) {
+func (s *Service) dialForCM(ctx context.Context, addresses []domain.PeerAddress) (result DialResult, err error) {
 	if len(addresses) == 0 {
 		return DialResult{}, errors.New("no addresses to dial")
 	}
+
+	// Rollout telemetry: ONE attempt, ONE outcome, recorded where the attempt
+	// ends rather than at each address tried. A fallback ladder that finally
+	// connects on the third address is one successful attempt, not two
+	// failures and a success — counting per address would make failures track
+	// the length of the ladder instead of the health of the peer.
+	//
+	// The empty-address guard above returns before this, deliberately: it is a
+	// caller error, not an attempt that reached the network.
+	defer func() { s.sessionOutcomes.record(err) }()
 
 	primary := addresses[0]
 	var lastErr error

@@ -375,6 +375,33 @@ type AnnounceLoop struct {
 	// OverloadCycleCount() and `fetchRouteSummary.overload.engaged_cycles`.
 	overloadCycles atomic.Uint64
 
+	// localCapabilitiesFn answers what this node advertises in its handshake.
+	//
+	// Held only so mode-selection telemetry can say whose absence capped the
+	// ladder: the peer capability snapshots this loop reasons about are
+	// INTERSECTIONS with this set, so a locally disabled capability looks
+	// exactly like a neighbour that never had it. It takes no part in the
+	// choice itself — the intersection already encodes it.
+	//
+	// A FUNCTION rather than a snapshot taken at construction: part of the
+	// local set depends on runtime readiness (the datagram roles), and a value
+	// captured before the node finished starting would describe a node that
+	// never existed. Called once per cycle, not per peer.
+	//
+	// nil means "not supplied", and then no downgrade is attributed locally —
+	// which is the safe direction: a wrong local attribution tells an operator
+	// to stop looking.
+	localCapabilitiesFn func() []PeerCapability
+
+	// modeSelection accumulates which wire format each send chose and why
+	// (mode_selection.go). Optional: a nil pointer records nothing, so a loop
+	// built without telemetry behaves exactly as it did before the counter
+	// existed. Owned by node.Service rather than by this loop, because the
+	// connect-time full sync makes the same kind of decision from the node
+	// package and both must land in ONE accumulator — two accumulators for
+	// one question is how the halves of a rollout picture start disagreeing.
+	modeSelection *ModeSelectionCounters
+
 	// noopSuppressedTotal counts per-peer delta computations that
 	// reached the ComputeDelta call AND produced an empty delta — the
 	// "snapshot unchanged, nothing to send" branch. This is strictly
@@ -952,6 +979,33 @@ func WithTriggerMinSpacing(d time.Duration) AnnounceLoopOption {
 	}
 }
 
+// WithLocalCapabilities tells the loop what this node advertises, so
+// mode-selection telemetry can separate "we do not offer it" from "the
+// neighbour does not have it". It does not influence mode selection.
+func WithLocalCapabilities(fn func() []PeerCapability) AnnounceLoopOption {
+	return func(a *AnnounceLoop) {
+		a.localCapabilitiesFn = fn
+	}
+}
+
+// currentLocalCapabilities reads the local advertised set, or nil when no
+// source was supplied.
+func (a *AnnounceLoop) currentLocalCapabilities() []PeerCapability {
+	if a.localCapabilitiesFn == nil {
+		return nil
+	}
+	return a.localCapabilitiesFn()
+}
+
+// WithModeSelectionCounters injects the accumulator that records which wire
+// format each send chose and why. When not set, mode selections are not
+// counted and the loop behaves as it did before the counter existed.
+func WithModeSelectionCounters(c *ModeSelectionCounters) AnnounceLoopOption {
+	return func(a *AnnounceLoop) {
+		a.modeSelection = c
+	}
+}
+
 // NewAnnounceLoop creates a new loop. peersFn is called on every tick to
 // discover which peers should receive announcements.
 func NewAnnounceLoop(
@@ -1224,6 +1278,10 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 
 	now := a.stateRegistry.clock()
 	forcedFullSyncInterval := EffectiveForcedFullSyncInterval(a.interval)
+	// Read ONCE per cycle: every per-peer goroutine below attributes its
+	// downgrade against the same local set, so one cycle cannot report two
+	// different local configurations.
+	localCaps := a.currentLocalCapabilities()
 
 	// Determine if THIS wake corresponds to a delta-cycle boundary.
 	// The ticker may wake more often than a.interval when the operator
@@ -1526,7 +1584,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// understands. CapMeshRoutingV2 is opt-in on top of v1; a peer
 			// that advertises v2 without v1 is treated as v1-only because the
 			// first-sync invariant (legacy announce_routes) is gated on v1.
-			mode := classifyDeltaMode(view.CapabilitiesSnapshot, peer.Capabilities)
+			mode, modeReason := classifyDeltaMode(localCaps, view.CapabilitiesSnapshot, peer.Capabilities)
 			// Wire-baseline gates. Each delta generation needs the
 			// matching baseline already on the wire:
 			//   - v2 routes_update needs a prior legacy announce_routes
@@ -1561,6 +1619,11 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				// downgrade uses, which keeps the mixed-version code path
 				// minimal until the v3 baseline lands.
 				mode = deltaModeV1
+				// The peer is fully capable; OUR session state forced the
+				// older frame. Recording this as a missing capability would
+				// send an operator looking for old neighbours that do not
+				// exist, so the reason is replaced, not accumulated.
+				modeReason = ModeReasonNoWireBaselineV3
 			}
 			if mode == deltaModeV2 && !view.HasSentWireBaseline {
 				v2DowngradedNoBaseline.Add(1)
@@ -1570,7 +1633,14 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 					Str("peer_address", string(peer.Address)).
 					Msg("announce_v2_downgraded_no_wire_baseline")
 				mode = deltaModeV1
+				modeReason = ModeReasonNoWireBaselineV2
 			}
+			// ONE decision, ONE increment — recorded here, after every gate
+			// that can still change the outcome and before the dispatch that
+			// acts on it. Placing it inside the switch arms would be four
+			// call sites to keep in step; placing it before the gates would
+			// record a mode that never went on the wire.
+			a.modeSelection.Record(AnnounceOperationDelta, announceModeOf(mode), modeReason)
 			// onSuccess advances the cursor on a successful send; a failed send
 			// leaves the cursor put so the next cycle re-projects the same window.
 			switch mode {
@@ -1692,7 +1762,18 @@ const (
 // the deltaModeDivergence outcome are kept as a defensive net for any
 // future caller that bypasses the cycle-time sync — see the doc comment
 // on AnnounceLoop.announceToAllPeers for the reconciliation contract.
-func classifyDeltaMode(stateCaps []PeerCapability, targetCaps []PeerCapability) deltaMode {
+// The second result is the REASON for the outcome, and it is returned from
+// here rather than derived by a second look at the same capabilities: the
+// branch that decides is the only place that knows which comparison settled
+// it, and a reason computed anywhere else is a second implementation of this
+// function waiting to disagree with it (docs/refactoring/dht/05-rollout-metrics.md).
+//
+// localCaps is what THIS node advertises. It is a third input rather than a
+// package variable because the reason must say WHOSE absence capped the
+// ladder: the two capability snapshots are already intersections with the
+// local set, so without it a locally disabled capability is indistinguishable
+// from a fleet that never upgraded (attributeMissing).
+func classifyDeltaMode(localCaps, stateCaps, targetCaps []PeerCapability) (deltaMode, ModeReason) {
 	stateV3 := hasCapV3Triplet(stateCaps)
 	targetV3 := hasCapV3Triplet(targetCaps)
 	stateV2 := hasCapV2Triplet(stateCaps)
@@ -1704,15 +1785,35 @@ func classifyDeltaMode(stateCaps []PeerCapability, targetCaps []PeerCapability) 
 	// re-sync on the next cycle.
 	switch {
 	case stateV3 && targetV3:
-		return deltaModeV3
+		return deltaModeV3, ModeReasonNegotiated
 	case stateV3 != targetV3:
-		return deltaModeDivergence
+		return deltaModeDivergence, ModeReasonCapabilityDivergence
 	case stateV2 && targetV2:
-		return deltaModeV2
+		// Both agree on v2 and neither has v3: the peer's own advertisement is
+		// what capped the ladder, so the reason comes from ITS snapshot.
+		return deltaModeV2, missingFromTriplet(localCaps, targetCaps, domain.CapMeshRoutingV3)
 	case !stateV2 && !targetV2:
-		return deltaModeV1
+		return deltaModeV1, missingFromTriplet(localCaps, targetCaps, domain.CapMeshRoutingV2)
 	default:
-		return deltaModeDivergence
+		return deltaModeDivergence, ModeReasonCapabilityDivergence
+	}
+}
+
+// announceModeOf projects the internal wire-mode enum onto the exported
+// telemetry enum. Two enums rather than one because they answer to different
+// owners: deltaMode is the dispatch discriminator of this file and may gain
+// arms freely, while AnnounceMode is a published metric label and changing it
+// changes what dashboards read.
+func announceModeOf(mode deltaMode) AnnounceMode {
+	switch mode {
+	case deltaModeV3:
+		return AnnounceModeV3
+	case deltaModeV2:
+		return AnnounceModeV2
+	case deltaModeDivergence:
+		return AnnounceModeDivergence
+	default:
+		return AnnounceModeV1
 	}
 }
 
@@ -1865,7 +1966,14 @@ func (a *AnnounceLoop) sendFullAnnounce(
 		return true
 	}
 
-	if PeerSupportsV3(peer.Capabilities) {
+	// Mode selection for the full-sync ladder. Recorded BEFORE the send,
+	// because the counter means "which format was chosen", not "which format
+	// arrived": a send that fails still made a choice, and losing it would
+	// make degradation look rarer exactly on the peers where it is worst.
+	fullMode, fullReason := ClassifyFullSyncMode(a.currentLocalCapabilities(), peer.Capabilities)
+	a.modeSelection.Record(AnnounceOperationFullSync, fullMode, fullReason)
+
+	if fullMode == AnnounceModeV3 {
 		if !a.sendV3Full(ctx, peer, snapshot) {
 			log.Debug().
 				Uint64("announce_cycle_id", cycleID).

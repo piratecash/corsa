@@ -72,11 +72,11 @@ func capsV1V3NoRelay() []PeerCapability {
 }
 
 func TestClassifyDeltaMode_BothV3_ReturnsV3(t *testing.T) {
-	if got := classifyDeltaMode(capsV1V2V3(), capsV1V2V3()); got != deltaModeV3 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), capsV1V2V3(), capsV1V2V3()); got != deltaModeV3 {
 		t.Fatalf("both v3: got %d want deltaModeV3", got)
 	}
 	// v1+v3 without v2 still picks v3 (v3 doesn't require v2).
-	if got := classifyDeltaMode(capsV1V3(), capsV1V3()); got != deltaModeV3 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), capsV1V3(), capsV1V3()); got != deltaModeV3 {
 		t.Fatalf("v1+v3 (no v2): got %d want deltaModeV3", got)
 	}
 }
@@ -85,10 +85,10 @@ func TestClassifyDeltaMode_V3DisagreementYieldsDivergence(t *testing.T) {
 	// One side has v3, the other doesn't (but agrees on v2). The
 	// classifier treats this as a state inconsistency and returns
 	// divergence, matching the defensive contract for v2 disagreement.
-	if got := classifyDeltaMode(capsV1V2V3(), capsV1V2()); got != deltaModeDivergence {
+	if got, _ := classifyDeltaMode(allLocalCaps(), capsV1V2V3(), capsV1V2()); got != deltaModeDivergence {
 		t.Fatalf("v3 mismatch (state>target): got %d want deltaModeDivergence", got)
 	}
-	if got := classifyDeltaMode(capsV1V2(), capsV1V2V3()); got != deltaModeDivergence {
+	if got, _ := classifyDeltaMode(allLocalCaps(), capsV1V2(), capsV1V2V3()); got != deltaModeDivergence {
 		t.Fatalf("v3 mismatch (target>state): got %d want deltaModeDivergence", got)
 	}
 }
@@ -100,7 +100,7 @@ func TestClassifyDeltaMode_V3WithoutV1IsLegacy(t *testing.T) {
 	// path (which here means classifier picks v1 because both v2 and
 	// v3 are absent).
 	v3Only := []PeerCapability{domain.CapMeshRoutingV3}
-	if got := classifyDeltaMode(v3Only, v3Only); got != deltaModeV1 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), v3Only, v3Only); got != deltaModeV1 {
 		t.Fatalf("v3-only (no v1): got %d want deltaModeV1", got)
 	}
 }
@@ -109,11 +109,11 @@ func TestClassifyDeltaMode_NoV3PreservesLegacyLadder(t *testing.T) {
 	// Sanity guard: removing v3 from both inputs must leave the
 	// pre-Phase-4 v2/v1 ladder untouched. Regression net against an
 	// accidental shadowing of the legacy paths by the new v3 branch.
-	if got := classifyDeltaMode(capsV1V2(), capsV1V2()); got != deltaModeV2 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), capsV1V2(), capsV1V2()); got != deltaModeV2 {
 		t.Fatalf("v1+v2 both sides: got %d want deltaModeV2", got)
 	}
 	v1Only := []PeerCapability{domain.CapMeshRoutingV1}
-	if got := classifyDeltaMode(v1Only, v1Only); got != deltaModeV1 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), v1Only, v1Only); got != deltaModeV1 {
 		t.Fatalf("v1-only both sides: got %d want deltaModeV1", got)
 	}
 }
@@ -173,17 +173,17 @@ func TestClassifyDeltaMode_RelayMissingFallsAllTheWayToV1(t *testing.T) {
 		domain.CapMeshRoutingV2,
 		domain.CapMeshRoutingV3,
 	}
-	if got := classifyDeltaMode(relayless, relayless); got != deltaModeV1 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), relayless, relayless); got != deltaModeV1 {
 		t.Fatalf("v1+v2+v3 without relay: got %d want deltaModeV1 (Round-20 + Round-21 both gate on relay)", got)
 	}
 	// v1+v3 without relay (or v2) — same fallback.
 	relaylessV3 := capsV1V3NoRelay()
-	if got := classifyDeltaMode(relaylessV3, relaylessV3); got != deltaModeV1 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), relaylessV3, relaylessV3); got != deltaModeV1 {
 		t.Fatalf("v1+v3 without relay: got %d want deltaModeV1 (Round-20 fallback)", got)
 	}
 	// v1+v2 without relay — Round-21 fallback specifically.
 	relaylessV2 := capsV1V2NoRelay()
-	if got := classifyDeltaMode(relaylessV2, relaylessV2); got != deltaModeV1 {
+	if got, _ := classifyDeltaMode(allLocalCaps(), relaylessV2, relaylessV2); got != deltaModeV1 {
 		t.Fatalf("v1+v2 without relay: got %d want deltaModeV1 (Round-21 fallback)", got)
 	}
 }

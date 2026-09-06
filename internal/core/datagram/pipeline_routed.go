@@ -330,7 +330,12 @@ func (p *Pipeline) forwardRouted(ctx context.Context, plan forwardPlan) SendOutc
 	job := sendJob{frame: plan.frame, incoming: plan.incoming, avoid: plan.avoid, firstHop: plan.firstHop}
 	selection := p.selectFor(ctx, job)
 	if !selection.publishable() {
-		return selection.outcomeWithoutCandidates(local)
+		outcome := selection.outcomeWithoutCandidates(local)
+		// A REAL send ended in a policy refusal. The read-only plan and the
+		// reachability probe reach the same verdict on purpose and are not
+		// counted (Metrics.ObserveSendRefusal).
+		p.observeSendRefusal(outcome)
+		return outcome
 	}
 
 	reserve := p.replay.Reserve(ctx, plan.key, plan.incoming, plan.deadlines.ReplayUntil())

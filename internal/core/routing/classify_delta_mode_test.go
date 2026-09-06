@@ -25,8 +25,8 @@ import (
 // would route to a sender that refuses the frame with no legacy fallback.
 func TestClassifyDeltaMode_BothV1AndV2_ReturnsV2(t *testing.T) {
 	caps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1}
-	if got := classifyDeltaMode(caps, caps); got != deltaModeV2 {
-		t.Fatalf("classifyDeltaMode({v1,v2,relay}, {v1,v2,relay}) = %v, want deltaModeV2", got)
+	if got, _ := classifyDeltaMode(allLocalCaps(), caps, caps); got != deltaModeV2 {
+		t.Fatalf("classifyDeltaMode(allLocalCaps(), {v1,v2,relay}, {v1,v2,relay}) = %v, want deltaModeV2", got)
 	}
 }
 
@@ -45,8 +45,8 @@ func TestClassifyDeltaMode_BothLegacy_ReturnsV1(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyDeltaMode(tc.state, tc.tgt); got != deltaModeV1 {
-				t.Fatalf("classifyDeltaMode(%v, %v) = %v, want deltaModeV1", tc.state, tc.tgt, got)
+			if got, _ := classifyDeltaMode(allLocalCaps(), tc.state, tc.tgt); got != deltaModeV1 {
+				t.Fatalf("classifyDeltaMode(allLocalCaps(), %v, %v) = %v, want deltaModeV1", tc.state, tc.tgt, got)
 			}
 		})
 	}
@@ -59,8 +59,8 @@ func TestClassifyDeltaMode_BothLegacy_ReturnsV1(t *testing.T) {
 // frame, so v2-without-v1 is meaningless and must fall back to legacy.
 func TestClassifyDeltaMode_V2WithoutV1_TreatedAsV1(t *testing.T) {
 	caps := []PeerCapability{domain.CapMeshRoutingV2}
-	if got := classifyDeltaMode(caps, caps); got != deltaModeV1 {
-		t.Fatalf("classifyDeltaMode({v2}, {v2}) = %v, want deltaModeV1 (v2 without v1 is meaningless)", got)
+	if got, _ := classifyDeltaMode(allLocalCaps(), caps, caps); got != deltaModeV1 {
+		t.Fatalf("classifyDeltaMode(allLocalCaps(), {v2}, {v2}) = %v, want deltaModeV1 (v2 without v1 is meaningless)", got)
 	}
 }
 
@@ -75,8 +75,8 @@ func TestClassifyDeltaMode_V2WithoutV1_TreatedAsV1(t *testing.T) {
 func TestClassifyDeltaMode_StateV2_TargetV1_Divergence(t *testing.T) {
 	stateCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1}
 	targetCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1}
-	if got := classifyDeltaMode(stateCaps, targetCaps); got != deltaModeDivergence {
-		t.Fatalf("classifyDeltaMode({v1,v2,relay}, {v1,relay}) = %v, want deltaModeDivergence", got)
+	if got, _ := classifyDeltaMode(allLocalCaps(), stateCaps, targetCaps); got != deltaModeDivergence {
+		t.Fatalf("classifyDeltaMode(allLocalCaps(), {v1,v2,relay}, {v1,relay}) = %v, want deltaModeDivergence", got)
 	}
 }
 
@@ -87,7 +87,7 @@ func TestClassifyDeltaMode_StateV2_TargetV1_Divergence(t *testing.T) {
 func TestClassifyDeltaMode_StateV1_TargetV2_Divergence(t *testing.T) {
 	stateCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRelayV1}
 	targetCaps := []PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2, domain.CapMeshRelayV1}
-	if got := classifyDeltaMode(stateCaps, targetCaps); got != deltaModeDivergence {
-		t.Fatalf("classifyDeltaMode({v1,relay}, {v1,v2,relay}) = %v, want deltaModeDivergence", got)
+	if got, _ := classifyDeltaMode(allLocalCaps(), stateCaps, targetCaps); got != deltaModeDivergence {
+		t.Fatalf("classifyDeltaMode(allLocalCaps(), {v1,relay}, {v1,v2,relay}) = %v, want deltaModeDivergence", got)
 	}
 }

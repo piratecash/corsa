@@ -330,8 +330,12 @@ type schedFixture struct {
 	origin    ed25519.PrivateKey
 	originID  domain.PeerIdentity
 	local     domain.PeerIdentity
-	now       time.Time
-	nowMu     sync.Mutex
+	// metrics is a REAL counter set, not a recorder: the rollout counters are
+	// published through Metrics.Snapshot, and a fixture with a stand-in would
+	// pin the call rather than the number an operator reads.
+	metrics *Metrics
+	now     time.Time
+	nowMu   sync.Mutex
 }
 
 func newSchedFixture(t *testing.T, opts schedFixtureOpts) *schedFixture {
@@ -339,6 +343,7 @@ func newSchedFixture(t *testing.T, opts schedFixtureOpts) *schedFixture {
 	signer, local := newSigner(t)
 	origin, originID := newSigner(t)
 	fixture := &schedFixture{
+		metrics:  &Metrics{},
 		routes:   newSchedRouteResolver(),
 		peers:    newSchedPeerMetadata(),
 		direct:   newSchedDirectSession(),
@@ -389,6 +394,7 @@ func (f *schedFixture) newPipeline(t *testing.T, cache *BaseReplayCache) *Pipeli
 		Reverse:     f.reverse,
 		Scheduler:   f.scheduler,
 		Emitter:     f.sender,
+		Metrics:     f.metrics,
 		Advertised:  advertising(CapabilityDatagramV1, CapabilityDatagramTransitV1),
 		Network:     testNetwork,
 		LocalID:     f.local,

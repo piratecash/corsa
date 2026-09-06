@@ -75,6 +75,10 @@ type metricsSink interface {
 	// ObserveReverseState counts one reverse-state transition (§4.2). The
 	// same method satisfies reverseMetrics, so one M8 type serves both.
 	ObserveReverseState(event ReverseEvent)
+	// ObserveSendRefusal counts one SEND the admission gates refused — not
+	// one rejected candidate and not a failed delivery. See the method on
+	// Metrics for why the unit matters.
+	ObserveSendRefusal(reason RejectionReason, missing domain.CapabilityName)
 }
 
 // OutboundFrame is everything the writer needs about one frame the layer is
@@ -1077,6 +1081,22 @@ func (p *Pipeline) observeUnknownDType(dtype domain.DType) {
 	if p.metrics != nil {
 		p.metrics.ObserveUnknownDType(dtype)
 	}
+}
+
+// observeSendRefusal counts a send the admission gates refused, and does
+// nothing for every other outcome.
+//
+// A method rather than an inline check at each call site: the metrics seam is
+// INERT-optional (nilseam.go), so every use has to survive a nil sink, and two
+// spellings of that guard is one spelling away from a crash on the day a third
+// send path is added.
+func (p *Pipeline) observeSendRefusal(outcome SendOutcome) {
+	reason, refused := outcome.Rejection()
+	if !refused || p.metrics == nil {
+		return
+	}
+	missing, _ := outcome.MissingCapability()
+	p.metrics.ObserveSendRefusal(reason, missing)
 }
 
 // emit is the ONE place the layer hands a frame over, so the serialization, the

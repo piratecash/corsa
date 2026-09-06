@@ -173,6 +173,94 @@ func (_c *MockRoutingProvider_JournalCauseStats_Call) RunAndReturn(run func() ma
 	return _c
 }
 
+// ModeSelectionStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) ModeSelectionStats() routing.ModeSelectionStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for ModeSelectionStats")
+	}
+
+	var r0 routing.ModeSelectionStats
+	if returnFunc, ok := ret.Get(0).(func() routing.ModeSelectionStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(routing.ModeSelectionStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_ModeSelectionStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ModeSelectionStats'
+type MockRoutingProvider_ModeSelectionStats_Call struct {
+	*mock.Call
+}
+
+// ModeSelectionStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) ModeSelectionStats() *MockRoutingProvider_ModeSelectionStats_Call {
+	return &MockRoutingProvider_ModeSelectionStats_Call{Call: _e.mock.On("ModeSelectionStats")}
+}
+
+func (_c *MockRoutingProvider_ModeSelectionStats_Call) Run(run func()) *MockRoutingProvider_ModeSelectionStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_ModeSelectionStats_Call) Return(modeSelectionStats routing.ModeSelectionStats) *MockRoutingProvider_ModeSelectionStats_Call {
+	_c.Call.Return(modeSelectionStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_ModeSelectionStats_Call) RunAndReturn(run func() routing.ModeSelectionStats) *MockRoutingProvider_ModeSelectionStats_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// NeighbourComposition provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) NeighbourComposition() domain.NeighbourComposition {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for NeighbourComposition")
+	}
+
+	var r0 domain.NeighbourComposition
+	if returnFunc, ok := ret.Get(0).(func() domain.NeighbourComposition); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.NeighbourComposition)
+	}
+	return r0
+}
+
+// MockRoutingProvider_NeighbourComposition_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'NeighbourComposition'
+type MockRoutingProvider_NeighbourComposition_Call struct {
+	*mock.Call
+}
+
+// NeighbourComposition is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) NeighbourComposition() *MockRoutingProvider_NeighbourComposition_Call {
+	return &MockRoutingProvider_NeighbourComposition_Call{Call: _e.mock.On("NeighbourComposition")}
+}
+
+func (_c *MockRoutingProvider_NeighbourComposition_Call) Run(run func()) *MockRoutingProvider_NeighbourComposition_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_NeighbourComposition_Call) Return(neighbourComposition domain.NeighbourComposition) *MockRoutingProvider_NeighbourComposition_Call {
+	_c.Call.Return(neighbourComposition)
+	return _c
+}
+
+func (_c *MockRoutingProvider_NeighbourComposition_Call) RunAndReturn(run func() domain.NeighbourComposition) *MockRoutingProvider_NeighbourComposition_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // OverloadStats provides a mock function for the type MockRoutingProvider
 func (_mock *MockRoutingProvider) OverloadStats() routing.OverloadStats {
 	ret := _mock.Called()
@@ -363,6 +451,50 @@ func (_c *MockRoutingProvider_RoutingSnapshot_Call) Return(snapshot routing.Snap
 }
 
 func (_c *MockRoutingProvider_RoutingSnapshot_Call) RunAndReturn(run func() routing.Snapshot) *MockRoutingProvider_RoutingSnapshot_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SessionOutcomeStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) SessionOutcomeStats() domain.SessionOutcomeStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for SessionOutcomeStats")
+	}
+
+	var r0 domain.SessionOutcomeStats
+	if returnFunc, ok := ret.Get(0).(func() domain.SessionOutcomeStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.SessionOutcomeStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_SessionOutcomeStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SessionOutcomeStats'
+type MockRoutingProvider_SessionOutcomeStats_Call struct {
+	*mock.Call
+}
+
+// SessionOutcomeStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) SessionOutcomeStats() *MockRoutingProvider_SessionOutcomeStats_Call {
+	return &MockRoutingProvider_SessionOutcomeStats_Call{Call: _e.mock.On("SessionOutcomeStats")}
+}
+
+func (_c *MockRoutingProvider_SessionOutcomeStats_Call) Run(run func()) *MockRoutingProvider_SessionOutcomeStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_SessionOutcomeStats_Call) Return(sessionOutcomeStats domain.SessionOutcomeStats) *MockRoutingProvider_SessionOutcomeStats_Call {
+	_c.Call.Return(sessionOutcomeStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_SessionOutcomeStats_Call) RunAndReturn(run func() domain.SessionOutcomeStats) *MockRoutingProvider_SessionOutcomeStats_Call {
 	_c.Call.Return(run)
 	return _c
 }

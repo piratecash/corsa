@@ -92,9 +92,55 @@ Response:
     "seqno_flap_holdowns": 0,
     "fast_invalidations": 0,
     "bad_hops_holdowns": 0
+  },
+  "mode_selection": {
+    "started_at": "2026-09-06T09:00:00Z",
+    "read_at": "2026-09-06T09:31:44.512837401Z",
+    "decisions": [
+      {"operation": "delta", "mode": "v3", "reason": "negotiated", "count": 812},
+      {"operation": "delta", "mode": "v1", "reason": "missing_mesh_routing_v2", "count": 47},
+      {"operation": "full_sync", "mode": "v1", "reason": "missing_mesh_routing_v3", "count": 9}
+    ]
+  },
+  "session_outcomes": {
+    "started_at": "2026-09-06T09:00:00Z",
+    "read_at": "2026-09-06T09:31:44.512837401Z",
+    "attempts": 61,
+    "succeeded": 54,
+    "errors_connect": 5,
+    "errors_compat": 2,
+    "errors_other": 0
+  },
+  "neighbours": {
+    "ready": true,
+    "updated_at": "2026-09-06T09:31:12Z",
+    "connections": 9,
+    "peers": 8,
+    "identity_unproven": 6,
+    "identity_unknown": 0,
+    "capabilities": [
+      {"capability": "mesh_routing_v1", "connections": 9, "peers": 8},
+      {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
+    ],
+    "routing_v3_triplet": {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
   }
 }
 ```
+
+> **`snapshot_at` is NOT the time of the rollout counters.** It is the timestamp of the cached
+> routing snapshot and stands still while the routing table is unchanged. The rollout sections carry
+> their own `read_at` (counters) and `updated_at` (the census); a rate or a window computed against
+> `snapshot_at` is wrong by however long the table stood still.
+>
+> **Three snapshots in one response are NOT one atomic snapshot.** `mode_selection`
+> and `session_outcomes` are cumulative counters read at slightly different
+> instants; `neighbours` is a gauge with its own `updated_at`, refreshed in the
+> background. Arithmetic across them assumes a simultaneity these timestamps do
+> not support.
+>
+> **A field missing on an older node means "metric unavailable", not zero.** The
+> three sections arrived with step 05; a node from the previous release answers
+> without them.
 
 | Field | Type | Description |
 |---|---|---|
@@ -133,6 +179,68 @@ Response:
 | `journal_churn.holddown_release` | int | A SeqNo flap-cap hold-down expired and the suppressed route re-appeared. |
 | `journal_churn.cooldown_clear` | int | A black-hole cooldown was lifted or expired, un-filtering the pair. |
 | `journal_churn.peer_remove` / `.transit_invalidate` / `.direct_admit` / `.withdrawal` / `.poison` / `.bulk_reset` | int | Peer-lifecycle and explicit-mutation causes (disconnect withdrawals, transit tombstones, direct-peer admit, inbound wire withdrawal, route_poison, journal bulk reset). Rare in a settled network; a non-trivial share indicates peer or admission churn. |
+| `mode_selection` | object | **Capability-rollout telemetry.** Which announce wire format this node chose for each peer, and why. Cumulative; reset on process restart. See `docs/refactoring/dht/05-rollout-metrics.md`. |
+| `mode_selection.started_at` | string\|null | RFC 3339 start of the accumulation period (process start). `null` before anything was recorded. The counters are in-memory, so a bare total is unreadable without it. |
+| `mode_selection.read_at` | string\|null | RFC 3339 **Nano** moment the counters were LOADED — the closing edge of the period they describe. **Use this, not `snapshot_at`, for any rate.** `snapshot_at` belongs to the cached routing snapshot and does not move while the routing table is unchanged, so two answers can carry the same `snapshot_at` and different counts; a rate computed from that pair is wrong by however long the table stood still. |
+| `mode_selection.decisions` | array | One row per `(operation, mode, reason)` triple with a non-zero count, ordered deterministically. **One decision increments exactly one row**, so the counts sum to the number of send decisions — not to the number of facts that were true about them. |
+| `mode_selection.decisions[].operation` | string | `delta` or `full_sync`. Two ladders, not one: the full-sync ladder has no v2 rung (there is no v2 full frame on the wire), so a `full_sync` row never reports `v2`. |
+| `mode_selection.decisions[].mode` | string | `v1` / `v2` / `v3` / `divergence`. `divergence` is not a wire format: it records that the two capability views of one peer disagreed, which falls back to legacy AND marks the peer for re-sync. |
+| `mode_selection.decisions[].reason` | string | Why that mode and not a higher one. `negotiated` — no downgrade, the highest this build can emit. `missing_mesh_routing_v1` / `_v2` / `_v3` / `missing_mesh_relay_v1` — the NEIGHBOUR did not advertise it: **the rollout signal**. `local_mesh_routing_v1_disabled` / `_v2` / `_v3` / `local_mesh_relay_v1_disabled` — **THIS node does not advertise it**, so the neighbour was never asked: read your own configuration, not the network. `no_wire_baseline_v2` / `_v3` — the neighbour is capable and OUR session has not put the required baseline on the wire yet: local state, NOT an old peer. `capability_divergence` — our two views of one peer disagreed. `unknown` — no capability snapshot existed at decision time (no live transport); a real code, never treated as benign. A peer missing several capabilities is attributed to ONE deterministic primary reason, checked v1 → generation → relay. |
+
+**Fraction-degraded formula.** The denominator is EVERY decision of that operation in the period,
+never the `negotiated` row alone — 80 downgrades against 20 clean decisions is 80%, and with a
+total downgrade a `negotiated` denominator would divide by zero exactly when the metric is read:
+
+```
+total(O)         = Σ count over ALL rows with operation = O
+peer_share(O)    = Σ count where reason ∈ {missing_mesh_routing_v1, _v2, _v3, missing_mesh_relay_v1} / total(O)
+local_share(O)   = Σ count where reason ∈ {local_*_disabled, no_wire_baseline_v2, no_wire_baseline_v3} / total(O)
+diverg_share(O)  = Σ count where reason = capability_divergence / total(O)
+unknown_share(O) = Σ count where reason = unknown / total(O)
+negotiated(O)    = Σ count where reason = negotiated / total(O)
+```
+
+The five shares sum to exactly 1 — a consequence of "one decision, one increment". `total(O) = 0`
+means no such decision happened in the period: the share is **undefined**, and must not be shown as
+zero. Each class calls for a different action: `peer_share` is the only one that says "wait for the
+fleet"; `local_share` says "read your own configuration"; `diverg_share` is repaired by a re-sync;
+a rising `unknown_share` means the telemetry stopped explaining the behaviour and is itself the
+finding.
+
+**A rate needs a valid PAIR of reads, and a pair has two admissibility conditions:** the interval
+must be strictly positive (`read_at₂ > read_at₁` — the stamps are nanosecond-precise for exactly
+this reason; second precision would hand the formula a zero denominator for every pair inside one
+second), and both reads must carry the SAME `started_at`. A different `started_at` means the node
+restarted between them: the counters reset, so the difference is negative or meaninglessly small and
+the pair must be discarded rather than subtracted.
+
+⚠️ **`peer_share` is NOT the fraction of the network that has not upgraded.** It is a fraction of
+SEND DECISIONS, accumulated since process start: a neighbour we send to often outweighs a quiet one,
+reconnects add decisions, a long-running node has accumulated more, and once every neighbour has
+upgraded the old downgrades stay in the numerator forever. It also describes THIS node's neighbours,
+never the network — local telemetry cannot prove a network-wide claim. For gates use: **counter
+differences over a window** (`Δcount / Δread_at`) for "how much is happening now", the **fresh
+`neighbours` census** for "who currently supports what", and neither of them for "what state the
+whole network is in".
+| `mode_selection.decisions[].count` | int | Decisions with this triple. |
+| `session_outcomes` | object | **Capability-rollout telemetry.** How outbound session attempts ended. Cumulative; reset on process restart. One attempt = one outcome, recorded where the attempt ends, so a fallback ladder that connects on its third address is one success, not two failures and a success. |
+| `session_outcomes.started_at` | string\|null | RFC 3339 start of the accumulation period. |
+| `session_outcomes.read_at` | string\|null | RFC 3339 moment the counters were loaded. Same rule as `mode_selection.read_at`: the period is `started_at → read_at`, never `→ snapshot_at`. |
+| `session_outcomes.attempts` | int | Completed outbound attempts. The denominator: without it a rise in failures cannot be told from a rise in traffic. `succeeded + errors_connect + errors_compat + errors_other == attempts`, always. |
+| `session_outcomes.succeeded` | int | Attempts that produced a live session. |
+| `session_outcomes.errors_connect` | int | Attempts that never established transport (refused, timeout, SOCKS5 failure). |
+| `session_outcomes.errors_compat` | int | Attempts that reached the peer and were refused on protocol compatibility. **Split from `errors_connect` deliberately** — "could not reach them" and "reached them and could not agree" call for opposite actions, and one failure counter hides exactly the rollout signal. |
+| `session_outcomes.errors_other` | int | Every other failure. Named rather than left implicit, so the four numbers sum to `attempts` and a gap is visible instead of silently absorbed. |
+| `neighbours` | object | **Capability-rollout telemetry.** A GAUGE — a point-in-time census of LIVE neighbours by advertised capability, refreshed on the announce cadence. Not cumulative, and not an estimate of the network: a node sees its own neighbours and nothing else. |
+| `neighbours.ready` | bool | `false` until the first refresh has completed. **Read this before the counts:** "the census has not run yet" and "the census ran and found nobody" are both all-zero, and they mean opposite things. |
+| `neighbours.updated_at` | string\|null | RFC 3339 time the census was taken — the moment the numbers were true, which is not the moment the RPC answered. `null` while `ready=false`. |
+| `neighbours.connections` | int | Every live neighbour connection, both directions, BEFORE any capability filter. Neighbours advertising nothing we recognise are counted here: they are what a rollout is waiting for. |
+| `neighbours.peers` | int | Distinct identities behind those connections. **Both counts are published because they diverge exactly when it matters:** two sockets of one neighbour are two connections and one peer. |
+| `neighbours.identity_unproven` | int | Connections whose remote identity is claimed but not proven to us. The handshake proves the DIALLER to the LISTENER, so on a session this node dialled the welcome address is a name the remote picked. An advertised capability there is a hint, never authority. |
+| `neighbours.identity_unknown` | int | Live connections with no identity yet (handshake incomplete). Counted so the parts add up. |
+| `neighbours.capabilities` | array | One row per capability this build knows, INCLUDING zero rows — early in a rollout the zero row is the interesting one. Keys are release constants, never strings taken from the wire. |
+| `neighbours.capabilities[].capability` / `.connections` / `.peers` | string / int / int | Capability name, connections advertising it, distinct peers owning at least one such connection. |
+| `neighbours.routing_v3_triplet` | object | Connections advertising the COMPLETE v3 triplet on that ONE connection. **Not derivable from three `capabilities` rows:** intersecting them would claim a combination no single connection offered — a peer whose two sockets advertise different halves supports the triplet on neither. |
 
 ### fetchRouteLookup
 
@@ -443,9 +551,55 @@ corsa-cli fetchRouteSummary
     "seqno_flap_holdowns": 0,
     "fast_invalidations": 0,
     "bad_hops_holdowns": 0
+  },
+  "mode_selection": {
+    "started_at": "2026-09-06T09:00:00Z",
+    "read_at": "2026-09-06T09:31:44.512837401Z",
+    "decisions": [
+      {"operation": "delta", "mode": "v3", "reason": "negotiated", "count": 812},
+      {"operation": "delta", "mode": "v1", "reason": "missing_mesh_routing_v2", "count": 47},
+      {"operation": "full_sync", "mode": "v1", "reason": "missing_mesh_routing_v3", "count": 9}
+    ]
+  },
+  "session_outcomes": {
+    "started_at": "2026-09-06T09:00:00Z",
+    "read_at": "2026-09-06T09:31:44.512837401Z",
+    "attempts": 61,
+    "succeeded": 54,
+    "errors_connect": 5,
+    "errors_compat": 2,
+    "errors_other": 0
+  },
+  "neighbours": {
+    "ready": true,
+    "updated_at": "2026-09-06T09:31:12Z",
+    "connections": 9,
+    "peers": 8,
+    "identity_unproven": 6,
+    "identity_unknown": 0,
+    "capabilities": [
+      {"capability": "mesh_routing_v1", "connections": 9, "peers": 8},
+      {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
+    ],
+    "routing_v3_triplet": {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
   }
 }
 ```
+
+> **`snapshot_at` — НЕ время счётчиков раскатки.** Это отметка кэшированного routing-снимка, и она
+> стоит на месте, пока таблица маршрутов не менялась. У разделов раскатки свои отметки: `read_at`
+> (счётчики) и `updated_at` (перепись). Скорость или окно, посчитанные против `snapshot_at`, неверны
+> ровно на то время, что таблица простояла.
+>
+> **Три снимка в одном ответе — не один атомарный снимок.** `mode_selection` и
+> `session_outcomes` — накопительные счётчики, прочитанные в чуть разные моменты;
+> `neighbours` — гейдж с собственным `updated_at`, обновляемый фоново. Считать
+> арифметику между ними так, будто они сняты одновременно, эти отметки времени
+> не позволяют.
+>
+> **Отсутствие поля у старого узла означает «метрика недоступна», а не ноль.**
+> Три раздела появились вместе с шагом 05; узел предыдущего выпуска отвечает без
+> них.
 
 | Поле | Тип | Описание |
 |---|---|---|
@@ -484,6 +638,65 @@ corsa-cli fetchRouteSummary
 | `journal_churn.holddown_release` | int | SeqNo flap-cap hold-down истёк, подавленный маршрут вернулся. |
 | `journal_churn.cooldown_clear` | int | Black-hole cooldown снят или истёк, пара разфильтрована. |
 | `journal_churn.peer_remove` / `.transit_invalidate` / `.direct_admit` / `.withdrawal` / `.poison` / `.bulk_reset` | int | Причины peer-lifecycle и явных мутаций (withdrawal'ы при disconnect, транзитные tombstone'ы, admit прямого peer'а, входящий wire-withdrawal, route_poison, bulk reset журнала). В устаканившейся сети редки; нетривиальная доля = churn peer'ов или admission'а. |
+| `mode_selection` | object | **Телеметрия раскатки capability.** Какой формат анонса узел выбрал для каждого пира и почему. Накопительно; сбрасывается при рестарте. См. `docs/refactoring/dht/05-rollout-metrics.md`. |
+| `mode_selection.started_at` | string\|null | RFC 3339 начало периода накопления (старт процесса). `null`, пока ничего не записано. Счётчики живут в памяти, поэтому голая сумма без этой метки нечитаема. |
+| `mode_selection.read_at` | string\|null | RFC 3339 **Nano** момент, когда счётчики были ПРОЧИТАНЫ, — закрывающая граница периода. **Для любой скорости брать его, а не `snapshot_at`.** `snapshot_at` принадлежит кэшированному routing-снимку и не двигается, пока таблица не менялась: два ответа могут иметь один `snapshot_at` и разные счётчики, и скорость, посчитанная по такой паре, будет неверна ровно на то время, что таблица простояла. |
+| `mode_selection.decisions` | array | По строке на каждую тройку `(операция, режим, причина)` с ненулевым счётчиком, порядок детерминирован. **Одно решение увеличивает ровно одну строку**, поэтому сумма равна числу решений об отправке, а не числу фактов, верных про них. |
+| `mode_selection.decisions[].operation` | string | `delta` или `full_sync`. Лестницы РАЗНЫЕ: у full-sync нет ступени v2 (v2-full-кадра на проводе не существует), поэтому строка `full_sync` никогда не сообщает `v2`. |
+| `mode_selection.decisions[].mode` | string | `v1` / `v2` / `v3` / `divergence`. `divergence` — не формат: так помечается расхождение двух представлений о capability одного пира, которое уводит цикл на legacy И помечает пира на ре-синк. |
+| `mode_selection.decisions[].reason` | string | Почему выбран этот режим, а не старший. `negotiated` — отката нет, выбран максимум этой сборки. `missing_mesh_routing_v1` / `_v2` / `_v3` / `missing_mesh_relay_v1` — СОСЕД этого не объявил: **сигнал раскатки**. `local_mesh_routing_v1_disabled` / `_v2` / `_v3` / `local_mesh_relay_v1_disabled` — **ЭТОТ узел этого не объявляет**, соседа даже не спрашивали: читать свой конфиг, а не сеть. `no_wire_baseline_v2` / `_v3` — сосед способен, а НАША сессия ещё не выложила нужный baseline: локальное состояние, НЕ старый пир. `capability_divergence` — разошлись два наших представления об одном пире. `unknown` — на момент решения не было снимка capability (нет живого транспорта); полноценный код, а не «прочее, наверное безобидное». Если не хватает нескольких capability, атрибуция — ОДНА детерминированная основная причина в порядке v1 → поколение → relay. |
+
+**Формула доли деградаций.** Знаменатель — ВСЕ решения этой операции за период, а не строка
+`negotiated`: 80 откатов против 20 чистых решений — это 80 %, а при полном откате знаменатель
+`negotiated` дал бы деление на ноль ровно тогда, когда метрику читают:
+
+```
+total(O)         = Σ count по ВСЕМ строкам с operation = O
+peer_share(O)    = Σ count где reason ∈ {missing_mesh_routing_v1, _v2, _v3, missing_mesh_relay_v1} / total(O)
+local_share(O)   = Σ count где reason ∈ {local_*_disabled, no_wire_baseline_v2, no_wire_baseline_v3} / total(O)
+diverg_share(O)  = Σ count где reason = capability_divergence / total(O)
+unknown_share(O) = Σ count где reason = unknown / total(O)
+negotiated(O)    = Σ count где reason = negotiated / total(O)
+```
+
+Пять долей в сумме дают ровно 1 — следствие правила «одно решение — один инкремент». `total(O) = 0`
+означает, что таких решений за период не было: доля **не определена**, показывать её нулём нельзя.
+Классы требуют разных действий: `peer_share` — про откаты по вине соседей; `local_share` — «читать
+свой конфиг»; `diverg_share` чинится ре-синком; рост `unknown_share` означает, что телеметрия
+перестала объяснять поведение, и сам по себе является находкой.
+
+**Скорость требует допустимой ПАРЫ чтений, а у пары два условия:** интервал строго положителен
+(`read_at₂ > read_at₁` — отметки наносекундные ровно поэтому: при секундной точности любая пара
+внутри одной секунды дала бы нулевой знаменатель), и у обоих чтений ОДИНАКОВЫЙ `started_at`. Разный
+`started_at` означает перезапуск узла между чтениями: счётчики обнулились, разность отрицательна или
+бессмысленно мала, и такую пару надо отбрасывать, а не вычитать.
+
+⚠️ **`peer_share` — НЕ доля необновлённой сети.** Это доля РЕШЕНИЙ ОБ ОТПРАВКЕ, накопленная с
+запуска процесса: часто опрашиваемый сосед весит больше тихого, переподключения добавляют решений, у
+давно работающего узла их накоплено больше, а после обновления всех соседей старые откаты навсегда
+остаются в числителе. И она про соседей ЭТОГО узла, а не про сеть — локальная телеметрия сетевого
+утверждения не обосновывает. Для гейтов: **разность счётчиков за окно** (`Δcount / Δread_at`) —
+«сколько происходит сейчас»; **свежая перепись `neighbours`** — «кто сейчас что поддерживает»; и ни
+то, ни другое — «в каком состоянии вся сеть».
+| `mode_selection.decisions[].count` | int | Число решений с этой тройкой. |
+| `session_outcomes` | object | **Телеметрия раскатки.** Чем закончились исходящие попытки установить сессию. Накопительно; сбрасывается при рестарте. Одна попытка = один исход, записывается там, где попытка заканчивается: лестница фолбэков, соединившаяся с третьего адреса, — это один успех, а не два отказа и успех. |
+| `session_outcomes.started_at` | string\|null | RFC 3339 начало периода накопления. |
+| `session_outcomes.read_at` | string\|null | RFC 3339 момент чтения счётчиков. Правило то же: период — `started_at → read_at`, а не `→ snapshot_at`. |
+| `session_outcomes.attempts` | int | Завершённые исходящие попытки. Знаменатель: без него рост отказов неотличим от роста трафика. `succeeded + errors_connect + errors_compat + errors_other == attempts` всегда. |
+| `session_outcomes.succeeded` | int | Попытки, давшие живую сессию. |
+| `session_outcomes.errors_connect` | int | Попытки, не установившие транспорт (отказ, таймаут, ошибка SOCKS5). |
+| `session_outcomes.errors_compat` | int | Попытки, дошедшие до пира и отвергнутые по совместимости протокола. **Разведено с `errors_connect` намеренно** — «не смог соединиться» и «соединился, но не договорились» требуют противоположных действий, и один счётчик отказов прячет ровно сигнал раскатки. |
+| `session_outcomes.errors_other` | int | Все прочие отказы. Назван явно, чтобы четыре числа складывались в `attempts`, а пробел был виден, а не поглощён молча. |
+| `neighbours` | object | **Телеметрия раскатки.** ГЕЙДЖ — снимок ЖИВЫХ соседей по объявленным capability, обновляется на каденции анонсов. Не накопительный и не оценка всей сети: узел видит своих соседей и больше ничего. |
+| `neighbours.ready` | bool | `false`, пока первое обновление не завершилось. **Читать до чисел:** «перепись ещё не запускалась» и «перепись прошла, соседей нет» — оба нулевые и означают противоположное. |
+| `neighbours.updated_at` | string\|null | RFC 3339 момент снятия переписи — момент, когда числа были верны, а не когда ответил RPC. `null`, пока `ready=false`. |
+| `neighbours.connections` | int | Все живые соединения с соседями, в обе стороны, ДО любой фильтрации по capability. Соседи, не объявившие ничего знакомого, считаются здесь: именно их раскатка и ждёт. |
+| `neighbours.peers` | int | Различные identity за этими соединениями. **Публикуются оба числа, потому что расходятся они ровно тогда, когда это важно:** два сокета одного соседа — это два соединения и один сосед. |
+| `neighbours.identity_unproven` | int | Соединения, где identity удалённого заявлена, но нам не доказана. Рукопожатие доказывает ДИАЛЛЕРА СЛУШАТЕЛЮ, поэтому на сессии, которую набрали мы, адрес из welcome — имя, выбранное удалённым. Объявленная там capability — подсказка, но не полномочие. |
+| `neighbours.identity_unknown` | int | Живые соединения без identity (рукопожатие не завершено). Считаются, чтобы части складывались. |
+| `neighbours.capabilities` | array | По строке на каждую известную сборке capability, ВКЛЮЧАЯ нулевые — в начале раскатки нулевая строка и есть интересная. Ключи — константы выпуска, а не строки с провода. |
+| `neighbours.capabilities[].capability` / `.connections` / `.peers` | string / int / int | Имя capability, число соединений, её объявивших, и число различных соседей, владеющих хотя бы одним таким соединением. |
+| `neighbours.routing_v3_triplet` | object | Соединения, объявившие ПОЛНУЮ v3-тройку на ОДНОМ этом соединении. **Не выводится пересечением трёх строк `capabilities`:** пересечение утверждало бы комбинацию, которой не предлагало ни одно соединение, — сосед, чьи два сокета объявляют разные половины, не поддерживает тройку ни на одном. |
 
 ### fetchRouteLookup
 

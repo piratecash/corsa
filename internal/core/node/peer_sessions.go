@@ -270,7 +270,7 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddress) (bool, error) {
 	rawConn, err := s.dialPeer(ctx, address, dialTimeout)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("%w: %w", errPeerDialTransport, err)
 	}
 	conn := netcore.NewMeteredConn(rawConn)
 	var session *peerSession
@@ -998,7 +998,10 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerAddress) (*peerSession, error) {
 	rawConn, err := s.dialPeer(ctx, address, dialTimeout)
 	if err != nil {
-		return nil, err
+		// Wrapped, not replaced: the transport error keeps travelling for every
+		// caller that inspects it, and the sentinel lets rollout telemetry
+		// separate "never reached them" from a handshake refusal by type.
+		return nil, fmt.Errorf("%w: %w", errPeerDialTransport, err)
 	}
 	conn := netcore.NewMeteredConn(rawConn)
 

@@ -1972,7 +1972,19 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 	// announce_routes path stays unchanged per docs/routing.md
 	// §"First-sync wire-frame invariant": always SendAnnounceRoutes,
 	// never SendRoutesUpdate.
-	v3 := s.peerSupportsRoutingV3(address)
+	// Mode selection for the connect-time full sync. The capability set is
+	// read ONCE and both the decision and its reason come from it, so the
+	// telemetry cannot describe a choice the send did not make. No live
+	// transport is recorded as "unknown" rather than as a missing capability:
+	// there was no advertisement to be missing.
+	caps, haveTransport := s.peerRoutingCapabilities(address)
+	fullMode, fullReason := routing.ClassifyFullSyncMode(s.localRoutingCapabilities(), caps)
+	if !haveTransport {
+		fullMode, fullReason = routing.AnnounceModeV1, routing.ModeReasonUnknown
+	}
+	s.modeSelection.Record(routing.AnnounceOperationFullSync, fullMode, fullReason)
+
+	v3 := fullMode == routing.AnnounceModeV3
 	var sendOk bool
 	if v3 {
 		sendOk = s.SendRouteAnnounceV3(ctx, address, protocol.RouteAnnounceV3KindFull, s.routingTable.Epoch(), snapshot.Entries)

@@ -42,6 +42,17 @@ import (
 // failure and stops reconnection attempts — the peer must upgrade first.
 var errIncompatibleProtocol = errors.New("incompatible protocol version")
 
+// errPeerDialTransport marks an outbound attempt that never reached the
+// handshake: the dial itself failed (TCP refused, timeout, SOCKS5 error).
+//
+// It exists so rollout telemetry can tell "could not reach them" from "reached
+// them and could not agree" by TYPE rather than by error text — the two call
+// for opposite actions, and classifying them by message would tie a metric to
+// wording nobody treats as a contract (CLAUDE.md, "Ошибки"). It only wraps;
+// the underlying error keeps travelling, so every existing errors.Is / errors.As
+// on the dial result is unaffected.
+var errPeerDialTransport = errors.New("peer dial failed")
+
 // StoreResult describes the outcome of MessageStore.StoreMessage.
 // Three distinct states prevent conflating "already seen" with "write error",
 // allowing the caller to make the right decision for each case.
@@ -708,6 +719,23 @@ type Service struct {
 		digestsCompared atomic.Uint64 // inbound digests we compared as receiver
 		compareMatch    atomic.Uint64 // of those, how many matched our via-peer view (→ TTL refresh)
 	}
+	// modeSelection accumulates which announce wire format was chosen for each
+	// peer and why (routing/mode_selection.go). Owned here rather than by the
+	// AnnounceLoop because the connect-time full sync makes the same decision
+	// from this package: two accumulators for one question would let the two
+	// halves of the rollout picture disagree. Atomics inside — outside the
+	// seven-domain mutex scheme, like digestStats.
+	modeSelection *routing.ModeSelectionCounters
+	// sessionOutcomes splits outbound session attempts into succeeded /
+	// transport failure / compatibility refusal / other (rollout_metrics.go).
+	// Atomics — own synchronisation.
+	sessionOutcomes *sessionOutcomeCounters
+	// neighbourComposition is the latest census of live neighbours by
+	// advertised capability, refreshed on the announce cadence and published
+	// as an immutable value. atomic.Pointer keeps the fetchRouteSummary read
+	// lock-free; nil means "never refreshed", which the reader reports as
+	// not-ready rather than as an empty neighbourhood.
+	neighbourComposition           atomic.Pointer[domain.NeighbourComposition]
 	relayStates                    *relayStateStore                             // hop-by-hop relay forwarding state (Iteration 1)
 	relayLimiter                   *relayRateLimiter                            // per-peer token bucket for relay fan-out
 	announceLimiter                *announceRateLimiter                         // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
@@ -1724,24 +1752,23 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// unit tests that drive the Service without calling Run, and
 		// matches the moment the in-memory state machine first became
 		// live.
-		startedAt:       time.Now().UTC(),
-		datagramMetrics: datagram.NewMetrics(),
-		cfg:             cfg,
-		eventBus:        eventBus,
-		selfBoxKey:      selfBoxKey,
-		selfBoxSig:      selfBoxSig,
-		trust:           trust,
-		peers:           peers,
-		peersStatePath:  peersStatePath,
-		persistedMeta:   persistedByAddr,
-		known:           known,
-		boxKeys:         boxKeys,
-		pubKeys:         pubKeys,
-		boxSigs:         boxSigs,
-		topics:          topics,
-		receipts:        receipts,
-		notices:         make(map[string]gazeta.Notice),
-		emissionLane:    newEmissionLane(),
+		startedAt:      time.Now().UTC(),
+		cfg:            cfg,
+		eventBus:       eventBus,
+		selfBoxKey:     selfBoxKey,
+		selfBoxSig:     selfBoxSig,
+		trust:          trust,
+		peers:          peers,
+		peersStatePath: peersStatePath,
+		persistedMeta:  persistedByAddr,
+		known:          known,
+		boxKeys:        boxKeys,
+		pubKeys:        pubKeys,
+		boxSigs:        boxSigs,
+		topics:         topics,
+		receipts:       receipts,
+		notices:        make(map[string]gazeta.Notice),
+		emissionLane:   newEmissionLane(),
 		// Buffered to ONE: the local-record repair pass is single-flight.
 		repairSlot:               make(chan struct{}, 1),
 		seen:                     seen,
@@ -2029,10 +2056,26 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	if cfg.AnnounceInterval > 0 {
 		announceLoopOpts = append(announceLoopOpts, routing.WithAnnounceInterval(cfg.AnnounceInterval))
 	}
+	// Rollout telemetry (docs/refactoring/dht/05-rollout-metrics.md). Both
+	// accumulators start their period at the same instant the node did, so a
+	// cumulative number read later is anchored to something.
+	svc.modeSelection = routing.NewModeSelectionCounters(svc.startedAt)
+	svc.sessionOutcomes = &sessionOutcomeCounters{startedAt: svc.startedAt}
+	announceLoopOpts = append(announceLoopOpts,
+		routing.WithModeSelectionCounters(svc.modeSelection),
+		// The local advertised set, read live: it is what lets the telemetry say
+		// whether a downgrade came from the neighbour or from this node's own
+		// configuration. It does not influence the choice.
+		routing.WithLocalCapabilities(svc.localRoutingCapabilities),
+	)
+
 	svc.announceLoop = routing.NewAnnounceLoop(
 		svc.routingTable,
 		svc,
-		svc.routingCapablePeers,
+		// announceTargets is routingCapablePeers plus the neighbour-census
+		// refresh on the same tick — see its doc comment for why the census
+		// is NOT computed inside the filter.
+		svc.announceTargets,
 		announceLoopOpts...,
 	)
 
@@ -2071,6 +2114,13 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// them with would attract exactly the traffic it cannot serve. Clearing
 	// the flag is what keeps the advertisement and the reality in one place —
 	// localDatagramAdvertise reads cfg, and cfg now says no.
+	// Anchored to the node's own start rather than to a second time.Now(): the
+	// datagram counters are read next to the routing ones, and two periods that
+	// differ by however long construction took would be two answers to one
+	// question. A struct literal cannot reference its own field, so the
+	// assignment lives here.
+	svc.datagramMetrics = datagram.NewMetricsStartedAt(svc.startedAt)
+
 	if layer, err := newDatagramLayer(svc, svc.datagramMetrics); err != nil {
 		log.Error().Err(err).Msg("datagram_layer_disabled_construction_failed")
 		svc.cfg.EnableDatagramV1 = false
