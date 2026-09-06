@@ -267,12 +267,30 @@ Field notes:
   global lock across every domain would make one timestamp tidier at the
   cost of stalling the node being measured.
 
-One gauge is not a memory figure at all and is documented here because
-it is easy to misread as one: `datagram/reverse_local_slots` is a
-**saturation** figure — how many of the shared local-request slots are
-occupied. Read it against `limits.reverse.per_upstream_cap` from
-`fetchDatagramSummary`, whose `reverse.LocalRefusals` says which dtype
-that quota has been turning away.
+Two gauges are not memory figures at all and are documented here because
+they are easy to misread as ones. Both are `kind: "saturation"` and both
+contribute zero bytes:
+
+- `datagram/reverse_local_slots` — how many of the shared local-request
+  slots are occupied. Read it against `limits.reverse.per_upstream_cap`
+  from `fetchDatagramSummary`, whose `reverse.LocalRefusals` says which
+  dtype that quota has been turning away.
+- `announce/peers_with_baseline` — how many of the peers in
+  `announce_peers` have ever completed a full sync. Read it against
+  `announce_peers`: a value below it means some peer's first full sync
+  has not landed. It is a subset of records `announce_peers` has already
+  priced, so it must never be multiplied by anything.
+
+**Removed:** `announce/last_sent_entries` no longer exists. It reported
+the size of the projection retained for every peer, which was the
+dominant term of that plane; step 14 established that nothing ever read
+those entries back and removed the retention, so the gauge went with it.
+It was NOT changed to report zero — a zero would read as "nothing is
+held here" rather than "there is nothing to hold", and any client that
+was charting it should drop the series rather than see it flat-line. The
+historical figures behind it are kept in
+`docs/refactoring/dht/13-measurements.md` §8.3 with a note saying what
+changed.
 
 ---
 
@@ -545,8 +563,26 @@ challenge-и.
   прохода. Глобальная блокировка по всем доменам сделала бы одну метку
   времени опрятнее ценой остановки измеряемого узла.
 
-Один gauge вообще не про память и вынесен сюда, потому что его легко
-принять за память: `datagram/reverse_local_slots` — это **насыщение**,
-сколько общих слотов локальных запросов занято. Читать его надо против
-`limits.reverse.per_upstream_cap` из `fetchDatagramSummary`, где
-`reverse.LocalRefusals` говорит, какому dtype эта квота отказывала.
+Два gauge вообще не про память и вынесены сюда, потому что их легко
+принять за память. Оба — `kind: "saturation"`, оба дают ноль байт:
+
+- `datagram/reverse_local_slots` — сколько общих слотов локальных
+  запросов занято. Читать его надо против
+  `limits.reverse.per_upstream_cap` из `fetchDatagramSummary`, где
+  `reverse.LocalRefusals` говорит, какому dtype эта квота отказывала.
+- `announce/peers_with_baseline` — у скольких пиров из `announce_peers`
+  когда-либо состоялась полная синхронизация. Читать его надо против
+  `announce_peers`: значение ниже означает, что чей-то первый full sync
+  так и не долетел. Это подмножество записей, которые `announce_peers`
+  уже оценил, поэтому умножать его ни на что нельзя.
+
+**Удалено:** `announce/last_sent_entries` больше не существует. Он
+показывал размер проекции, удерживаемой на каждого пира, и был
+доминирующим членом этой плоскости; шаг 14 установил, что содержимое
+этих записей никто никогда не читал, и снял удержание — вместе с ним
+ушёл и датчик. Он НЕ переведён в ноль: ноль читался бы как «здесь ничего
+не лежит», а не «показателя больше нет», и клиенту, который строил по
+нему график, надо убрать серию, а не смотреть на выровнявшуюся линию.
+Исторические числа сохранены в
+`docs/refactoring/dht/13-measurements.md` §8.3 с пояснением, что
+изменилось.

@@ -33,7 +33,7 @@ full sync is the PRIMARY path this optimisation targets: a pair that
 reconnects and agrees on its mutual view skips re-sending the whole
 table. What keeps running unchanged is the delta cycle (real changes
 always propagate), the first-ever initial sync (a peer with no prior
-baseline, `LastSentSnapshot == nil`), and explicit `request_resync` /
+baseline, `HasFullSyncBaseline == false`), and explicit `request_resync` /
 consistency-loss resyncs (classified as a HARD resync — never
 suppressible).
 
@@ -319,8 +319,8 @@ of these conditions hold:
 
 - `needsFull == true` (the deadline branch, or a session-boundary
   resync, decided a forced full sync is due).
-- `view.LastSentSnapshot != nil` (the peer already has a baseline —
-  the first-ever initial sync is exempt).
+- `view.HasFullSyncBaseline` (the peer already has a baseline — the
+  first-ever initial sync is exempt).
 - `view.ResyncIsHard == false` — the resync is SOFT (a reconnect /
   session boundary), so the digest hint may suppress it. A HARD
   resync (explicit `request_resync` or a consistency-loss
@@ -394,7 +394,7 @@ Digest-обмен — это оптимизация поверх существ�
 которая реконнектится и согласна по взаимному view, пропускает
 повторную отправку всей таблицы. Без изменений продолжают работать:
 delta-цикл (реальные изменения всегда пропагируются), самый первый
-initial sync (peer без предыдущего baseline, `LastSentSnapshot == nil`)
+initial sync (peer без предыдущего baseline, `HasFullSyncBaseline == false`)
 и explicit `request_resync` / consistency-loss ресинки
 (классифицируются как HARD resync — никогда не подавляются).
 
@@ -683,7 +683,7 @@ wire-send'а. Gate срабатывает ТОЛЬКО когда ВСЕ усл�
 
 - `needsFull == true` (deadline branch — или session-boundary
   resync — решили, что forced full sync due).
-- `view.LastSentSnapshot != nil` (peer уже имеет baseline — самый
+- `view.HasFullSyncBaseline` (peer уже имеет baseline — самый
   первый initial sync exempt).
 - `view.ResyncIsHard == false` — resync SOFT (реконнект /
   session boundary), поэтому digest-hint может его подавить. HARD

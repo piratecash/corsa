@@ -339,7 +339,7 @@ func TestAnnounceLoop_OverloadGate_SuppressesDeltasButForcedFullStillFires(t *te
 	go loop.Run(ctx)
 
 	// Step 1 — wait for the initial forced full sync. The peer has no
-	// baseline (LastSentSnapshot=nil) at first tick, so per-peer
+	// baseline at first tick, so per-peer
 	// needsFull=true regardless of overload, and the loop fires
 	// sendFullAnnounce. This wire send proves the freshness invariant
 	// is intact under overload.
@@ -578,8 +578,8 @@ func TestAnnounceLoop_ForcedFullRateLimit_ClampedToForcedFullCap(t *testing.T) {
 	// the entire test. (At the default 30s interval the cadence is 300s,
 	// so the clamp is a no-op there.)
 	//
-	// We force needsFull=true on each cycle by NOT seeding
-	// LastSentSnapshot through any prior path, then verify TWO
+	// We force needsFull=true on each cycle by NOT establishing a
+	// baseline through any prior path, then verify TWO
 	// forced full sync wire calls happen within the test budget —
 	// proving the rate-limit window is at most forcedCap (200ms),
 	// not MinForcedFullSyncInterval (30s).
@@ -820,8 +820,8 @@ func TestAnnounceLoop_TriggerDoesNotDelayForcedFullDeadline(t *testing.T) {
 	defer cancel()
 	go loop.Run(ctx)
 
-	// Trigger the initial forced-full sync immediately; LastSentSnapshot
-	// is nil so needsFull=true and the cycle takes the forced-full
+	// Trigger the initial forced-full sync immediately; there is no
+	// baseline so needsFull=true and the cycle takes the forced-full
 	// branch. This is wire send #1 — its timestamp anchors the gap
 	// measurement.
 	loop.TriggerUpdate()

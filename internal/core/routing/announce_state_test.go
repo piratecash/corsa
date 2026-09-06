@@ -23,8 +23,8 @@ func TestAnnounceStateRegistry_GetOrCreate(t *testing.T) {
 	if !view.NeedsFullResync {
 		t.Fatal("expected NeedsFullResync=true for new peer")
 	}
-	if view.LastSentSnapshot != nil {
-		t.Fatal("expected nil LastSentSnapshot for new peer")
+	if view.HasFullSyncBaseline {
+		t.Fatal("expected HasFullSyncBaseline=false for new peer")
 	}
 
 	// Second call returns same object.
@@ -44,7 +44,7 @@ func TestRecordCursorAdvance_Monotonic(t *testing.T) {
 	now := time.Now()
 
 	// A forced full sync advanced the peer to cursor 10.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 10, now)
+	s.RecordFullSyncSuccess(10, now)
 	if got := s.AnnounceCursor(); got != 10 {
 		t.Fatalf("after full sync: cursor=%d, want 10", got)
 	}
@@ -63,7 +63,7 @@ func TestRecordCursorAdvance_Monotonic(t *testing.T) {
 
 	// A stale FULL sync (older head) must also not roll the cursor back — the
 	// forced-full commit goes through the same monotonic guard.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 7, now)
+	s.RecordFullSyncSuccess(7, now)
 	if got := s.AnnounceCursor(); got != 12 {
 		t.Fatalf("stale full sync rolled cursor back to %d, want 12 (monotonic)", got)
 	}
@@ -91,7 +91,7 @@ func TestAnnounceStateRegistry_MarkDisconnected(t *testing.T) {
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Set up initial state: resync done, baseline received.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, now.Add(-time.Minute))
+	s.RecordFullSyncSuccess(0, now.Add(-time.Minute))
 	s.MarkBaselineReceived()
 
 	r.MarkDisconnected(domaintest.ID("peer-A"))
@@ -124,7 +124,7 @@ func TestAnnounceStateRegistry_MarkReconnected(t *testing.T) {
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Set up: mark as synced, then record an attempt.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, clk)
+	s.RecordFullSyncSuccess(0, clk)
 	s.RecordFullSyncAttempt(clk)
 
 	// Advance the clock so the reconnect watermark refresh is observable.
@@ -404,7 +404,7 @@ func TestAnnounceStateRegistry_MarkInvalid(t *testing.T) {
 	s := r.GetOrCreate(domaintest.ID("peer-A"))
 
 	// Clear the initial NeedsFullResync via a successful full sync.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, time.Now())
+	s.RecordFullSyncSuccess(0, time.Now())
 
 	view := s.View()
 	if view.NeedsFullResync {
@@ -431,14 +431,14 @@ func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
 
 	// A fresh peer needs a full resync, but it is soft — the hardness
 	// only matters once a baseline exists, and a brand-new peer is
-	// non-suppressible via the LastSentSnapshot==nil gate anyway.
+	// non-suppressible via the no-baseline gate anyway.
 	if s.View().ResyncIsHard {
 		t.Fatal("fresh peer must not be classified as a hard resync")
 	}
 
-	// Establish a baseline so the suppression gate's LastSentSnapshot
-	// precondition is met and the classification becomes meaningful.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, time.Now())
+	// Establish a baseline so the suppression gate's baseline precondition
+	// is met and the classification becomes meaningful.
+	s.RecordFullSyncSuccess(0, time.Now())
 	if v := s.View(); v.NeedsFullResync || v.ResyncIsHard {
 		t.Fatalf("RecordFullSyncSuccess must clear both flags, got NeedsFullResync=%v ResyncIsHard=%v", v.NeedsFullResync, v.ResyncIsHard)
 	}
@@ -450,7 +450,7 @@ func TestAnnounceStateRegistry_ResyncIsHard_Classification(t *testing.T) {
 	}
 
 	// A successful full sync clears the hardness again.
-	s.RecordFullSyncSuccess(&AnnounceSnapshot{}, 0, time.Now())
+	s.RecordFullSyncSuccess(0, time.Now())
 	if s.View().ResyncIsHard {
 		t.Fatal("RecordFullSyncSuccess did not clear ResyncIsHard")
 	}

@@ -1928,8 +1928,8 @@ func (s *Service) sendOutboundFullTableSync(ctx context.Context, peerIdentity do
 func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity domain.PeerIdentity, address domain.PeerAddress) {
 	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Msg("connect_time_full_sync_begin")
 	// AnnounceToWithChangeHead captures the Phase 3 change-journal head atomic
-	// with the projection so the cursor commit below stays in lock-step with
-	// lastSentSnapshot (committed only on send success). routes is a pooled
+	// with the projection, so the cursor committed below belongs to the very
+	// table that was sent (committed only on send success). routes is a pooled
 	// projection buffer; return it after BuildAnnounceSnapshot consumes it
 	// (nothing below reads routes again).
 	routes, snapHead := s.routingTable.AnnounceToWithChangeHead(peerIdentity)
@@ -1950,8 +1950,8 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 		// docs/routing.md): empty-baseline emits neither the legacy
 		// announce_routes frame nor the v2 routes_update frame.
 		// Phase 3: an empty-baseline full sync reconciles the peer to the whole
-		// (empty) table; snapHead is committed atomically with lastSentSnapshot.
-		peerState.RecordFullSyncSuccess(snapshot, snapHead, now)
+		// (empty) table; snapHead is committed atomically with the baseline mark.
+		peerState.RecordFullSyncSuccess(snapHead, now)
 		log.Debug().
 			Str("peer", peerIdentity.String()).
 			Str("address", string(address)).
@@ -2016,10 +2016,10 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 		peerState.MarkWireBaselineSent()
 	}
 	// Phase 3: the peer is now reconciled to the whole table — snapHead is
-	// committed atomically with lastSentSnapshot inside RecordFullSyncSuccess
+	// committed atomically with the baseline mark inside RecordFullSyncSuccess
 	// (only on this success path; a failed send returned above without touching
 	// either).
-	peerState.RecordFullSyncSuccess(snapshot, snapHead, now)
+	peerState.RecordFullSyncSuccess(snapHead, now)
 	log.Trace().Str("peer_identity", peerIdentity.String()).Str("address", string(address)).Msg("connect_time_full_sync_end")
 }
 

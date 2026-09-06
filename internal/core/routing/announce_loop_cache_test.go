@@ -124,7 +124,7 @@ func TestAnnounceLoop_NoopSuppression(t *testing.T) {
 
 	// Step 1 — force the initial sync via TriggerUpdate. The trigger
 	// path runs announceToAllPeers synchronously inside Run's select;
-	// the peer has no baseline (LastSentSnapshot=nil) so needsFull
+	// the peer has no baseline so needsFull
 	// fires forced full sync. Wait for it to be recorded.
 	loop.TriggerUpdate()
 	deadline := time.Now().Add(300 * time.Millisecond)
@@ -341,7 +341,7 @@ func TestAnnounceLoop_RateLimitForcedFullSync(t *testing.T) {
 	// but now needs forced full resync (e.g. after reconnect).
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
 	// Establish a prior baseline so the rate limiter applies.
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now.Add(-1*time.Minute))
+	state.RecordFullSyncSuccess(0, now.Add(-1*time.Minute))
 	// Mark as needing full resync (simulating reconnect).
 	state.SetNeedsFullResyncForTest()
 	// Record a recent full sync attempt to trigger rate limiting.

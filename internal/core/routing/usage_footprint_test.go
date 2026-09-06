@@ -162,40 +162,58 @@ func TestRoutePlaneFootprintAtMeshSizes(t *testing.T) {
 	}
 }
 
-// TestAnnouncePlaneFootprintGrowsWithPeers measures the other half of the
-// product — what the announce loop retains PER PEER — and pins the shape of
-// that growth.
+// TestAnnouncePlaneFloorIsPerPeerNotPerTable measures the other half of the
+// product — what the announce loop CLAIMS to hold per peer — and pins the shape
+// of that claim.
 //
-// The assertion is not a byte figure but the relationship: doubling the peers
-// over one table must roughly double what the announce plane holds, because
-// each peer keeps its own full snapshot of the projection. That relationship
-// is the argument for the whole overlay roadmap, and if it ever stops holding,
-// the roadmap's premise has changed rather than the test.
-func TestAnnouncePlaneFootprintGrowsWithPeers(t *testing.T) {
+// This test used to be TestAnnouncePlaneFootprintGrowsWithPeers and asserted
+// the opposite relationship: that four times the peers held four times the
+// entries, because each peer kept its own copy of the projection. That was true
+// and was the argument for the overlay roadmap. Step 14 removed the copy — the
+// per-peer state keeps a mark that a baseline exists, not the table it sent —
+// so the relationship the test guarded no longer exists to guard. What is
+// guarded now is the property that replaced it: the plane's reported floor
+// scales with PEERS and is flat in the size of the table.
+//
+// The heap side of the same claim is measured separately in
+// announce_retention_footprint_test.go. This one reads Usage(), which is what
+// an operator sees; a floor that tracked the table again while the heap did not
+// would be a diagnostic that lies, and vice versa.
+func TestAnnouncePlaneFloorIsPerPeerNotPerTable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds two populated registries")
 	}
 
-	const identities = 5_000
-	few := announceFootprint(t, identities, 8)
-	many := announceFootprint(t, identities, 32)
+	const peers = 32
+	smallTable := announceFloor(t, 500, peers)
+	largeTable := announceFloor(t, 5_000, peers)
 
-	if few == 0 {
-		t.Fatal("the announce plane reported nothing for a populated registry")
+	if smallTable == 0 {
+		t.Fatal("the announce plane reported a zero floor for a populated registry")
 	}
-	// Four times the peers over the same table. Anything below three times the
-	// entries would mean the snapshots are being shared rather than held per
-	// peer, which is a different memory model than the one being budgeted.
-	if many < 3*few {
-		t.Fatalf("announce entries grew from %d to %d for 4× the peers: per-peer snapshots are no longer per peer",
-			few, many)
+	if smallTable != largeTable {
+		t.Fatalf("announce floor moved from %d B to %d B for 10× the table: the plane is reporting something proportional to the table again",
+			smallTable, largeTable)
 	}
-	t.Logf("announce plane entries: 8 peers = %d, 32 peers = %d", few, many)
+
+	// And it does still scale with peers, which is the cost that genuinely
+	// remains: one send-state record each.
+	fewPeers := announceFloor(t, 5_000, 8)
+	if largeTable <= fewPeers {
+		t.Fatalf("announce floor for 32 peers (%d B) is not above the floor for 8 (%d B): the per-peer record is no longer counted",
+			largeTable, fewPeers)
+	}
+	t.Logf("announce floor: 32 peers = %d B (independent of table), 8 peers = %d B", largeTable, fewPeers)
 }
 
-// announceFootprint reports how many announce entries are retained on peers'
-// behalf for one table shape.
-func announceFootprint(t *testing.T, identities, peers int) uint64 {
+// announceFloor reports the floor the announce plane claims for one table
+// shape, after every peer has been reconciled.
+//
+// It also asserts the saturation gauge agrees with the reconciliation it just
+// performed: peers_with_baseline is the only per-peer signal left on this
+// plane, and a count that does not follow the commits is a gauge measuring
+// nothing.
+func announceFloor(t *testing.T, identities, peers int) uint64 {
 	t.Helper()
 
 	registry := NewAnnounceStateRegistry()
@@ -204,17 +222,24 @@ func announceFootprint(t *testing.T, identities, peers int) uint64 {
 	for p := range peers {
 		peer := footprintIdentity('P', p)
 		state := registry.GetOrCreate(peer)
-		entries, cursor := table.AnnounceToWithChangeHead(peer)
-		state.RecordFullSyncSuccess(&AnnounceSnapshot{Entries: entries}, cursor, now)
+		_, cursor := table.AnnounceToWithChangeHead(peer)
+		state.RecordFullSyncSuccess(cursor, now)
 	}
 
 	usage := registry.Usage()
 	for _, gauge := range usage.Gauges() {
-		if gauge.Name() == "last_sent_entries" {
-			return gauge.Count()
+		if gauge.Name() != "peers_with_baseline" {
+			continue
+		}
+		if gauge.Count() != uint64(peers) {
+			t.Fatalf("peers_with_baseline = %d after reconciling %d peers", gauge.Count(), peers)
+		}
+		if gauge.FloorBytes() != 0 {
+			t.Fatalf("peers_with_baseline contributed %d B: it counts records announce_peers already priced",
+				gauge.FloorBytes())
 		}
 	}
-	return 0
+	return usage.FloorBytes()
 }
 
 // footprintReport renders one measurement for the log: what was measured, what

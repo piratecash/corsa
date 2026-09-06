@@ -5,8 +5,8 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/connbudget"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
 

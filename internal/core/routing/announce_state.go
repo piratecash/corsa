@@ -22,10 +22,28 @@ type AnnouncePeerState struct {
 
 	peerIdentity PeerIdentity
 
-	// lastSentSnapshot is the last successfully sent canonical snapshot.
-	// nil means no snapshot has been sent yet (empty state). Delta
-	// computation against nil is forbidden — forced full sync is required.
-	lastSentSnapshot *AnnounceSnapshot
+	// hasFullSyncBaseline records that a full sync to this peer has
+	// COMPLETED successfully at least once, so the peer is reconciled to
+	// the whole table as of the cursor committed with it. False means no
+	// baseline exists yet and the next send must be a full sync — a delta
+	// has nothing to be applied against.
+	//
+	// This is a mark, not a copy. It used to be the snapshot itself
+	// (lastSentSnapshot *AnnounceSnapshot), retained per peer on the
+	// theory that it was the forced-full baseline; step 14 read the code
+	// and found nothing ever read its CONTENT. The delta path projects the
+	// change journal from announceCursor, the forced full rebuilds from the
+	// live table, and the only reader of the retained entries was the
+	// diagnostic gauge that reported how large they were. What the field
+	// really expressed was one bit, and it cost 42.9 MB on a 5 000-identity
+	// table across 32 peers (docs/refactoring/dht/14-memory-cleanup.md §8′).
+	//
+	// The nil/empty distinction the pointer used to carry is preserved: a
+	// full sync of an EMPTY table establishes a baseline (true) and is not
+	// the same as never having synced (false). That branch deliberately
+	// emits no wire frame, which is why this flag and
+	// wireBaselineSentToPeer are separate answers to separate questions.
+	hasFullSyncBaseline bool
 
 	// needsFullResync indicates that the next send must be a forced full
 	// sync regardless of delta state.
@@ -47,7 +65,7 @@ type AnnouncePeerState struct {
 	//
 	// Only meaningful while needsFullResync is true; cleared together with
 	// needsFullResync on RecordFullSyncSuccess. A brand-new peer
-	// (lastSentSnapshot == nil) is non-suppressible regardless of this
+	// (hasFullSyncBaseline == false) is non-suppressible regardless of this
 	// flag because the suppression gate also requires a prior baseline.
 	resyncIsHard bool
 
@@ -67,7 +85,7 @@ type AnnouncePeerState struct {
 	// MarkDisconnected ever ran. This removes the old, implicit dependency
 	// where eviction needed a disconnectedAt stamp that only the
 	// session-close hook wrote — a skipped or asymmetric teardown could
-	// then retain per-peer state (including its lastSentSnapshot) forever.
+	// then retain per-peer state forever.
 	lastSeenLiveAt time.Time
 
 	// capabilities is the peer's negotiated capability set as a derived
@@ -167,17 +185,17 @@ type AnnouncePeerState struct {
 	// announceCursor is the change-journal cursor: the change-log head value this
 	// peer has been synced up to. It is the AUTHORITATIVE position for the
 	// cursor-mode delta path (AnnounceDeltaTo projects the journal window
-	// [cursor, head)); lastSentSnapshot is the separate forced-full baseline and
-	// the two are intentionally DECOUPLED:
+	// [cursor, head)); hasFullSyncBaseline says only WHETHER a full sync has
+	// landed, and the two are intentionally DECOUPLED:
 	//   - a delta send advances only the cursor (RecordCursorAdvance), and
 	//     monotonically — a stale in-flight delta must never roll it back below a
 	//     newer head a concurrent forced/connect-time full sync already committed,
 	//     which would replay a stale window or trip needFull + full-sync rate
 	//     limiting;
-	//   - a forced full sync advances the (lastSentSnapshot, cursor) pair together
-	//     (commitSentProgressLocked via RecordFullSyncSuccess); that pair is always
-	//     internally consistent (the snapshot and head are from the same
-	//     projection), so even a late-committing full sync self-heals.
+	//   - a forced full sync sets the baseline mark and advances the cursor
+	//     together (commitSentProgressLocked via RecordFullSyncSuccess); the head
+	//     it commits comes from the same projection it sent, so even a
+	//     late-committing full sync self-heals.
 	// Guarded by s.mu.
 	announceCursor uint64
 }
@@ -195,6 +213,18 @@ func (s *AnnouncePeerState) AnnounceCursor() uint64 {
 	return s.announceCursor
 }
 
+// HasFullSyncBaseline reports whether a full sync to this peer has ever
+// completed — see the hasFullSyncBaseline field for what that means.
+//
+// It exists rather than reusing View() because View copies the capability
+// slice on every call: the diagnostic pass in Usage() reads this once per peer
+// per sample and would otherwise allocate for fields it does not read.
+func (s *AnnouncePeerState) HasFullSyncBaseline() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hasFullSyncBaseline
+}
+
 // announcePeerStateView is a read-only snapshot of AnnouncePeerState fields
 // needed by the announce loop to make send decisions. Captured under a
 // single lock acquisition to prevent torn reads.
@@ -206,9 +236,13 @@ func (s *AnnouncePeerState) AnnounceCursor() uint64 {
 // (accept / request_resync) rely on the same atomic snapshot that
 // produced the other fields.
 type announcePeerStateView struct {
-	NeedsFullResync          bool
-	ResyncIsHard             bool
-	LastSentSnapshot         *AnnounceSnapshot
+	NeedsFullResync bool
+	ResyncIsHard    bool
+	// HasFullSyncBaseline reports whether a full sync to this peer has ever
+	// completed — see AnnouncePeerState.hasFullSyncBaseline. It answers the
+	// first-sync question the announce loop asks before it may pick a delta;
+	// it says nothing about WHAT was sent, because nothing needs to.
+	HasFullSyncBaseline      bool
 	LastSuccessfulFullSyncAt time.Time
 	LastFullSyncAttemptAt    time.Time
 	CapabilitiesSnapshot     []PeerCapability
@@ -224,8 +258,8 @@ type announcePeerStateView struct {
 	// cursor-mode delta path projects from (AnnounceDeltaTo reads the journal
 	// window [cursor, head)). Captured in the same lock acquisition as
 	// the rest of the view so the loop reads a consistent cursor; the delta is
-	// journal-projected from it, NOT diffed against LastSentSnapshot (which is the
-	// separate forced-full baseline / first-sync nil-check).
+	// journal-projected from it, never diffed against what was last sent —
+	// which is why the peer state does not keep it.
 	AnnounceCursor uint64
 }
 
@@ -237,7 +271,7 @@ func (s *AnnouncePeerState) View() announcePeerStateView {
 	return announcePeerStateView{
 		NeedsFullResync:          s.needsFullResync,
 		ResyncIsHard:             s.resyncIsHard,
-		LastSentSnapshot:         s.lastSentSnapshot,
+		HasFullSyncBaseline:      s.hasFullSyncBaseline,
 		LastSuccessfulFullSyncAt: s.lastSuccessfulFullSyncAt,
 		LastFullSyncAttemptAt:    s.lastFullSyncAttemptAt,
 		CapabilitiesSnapshot:     copyCapabilities(s.capabilities),
@@ -248,27 +282,32 @@ func (s *AnnouncePeerState) View() announcePeerStateView {
 	}
 }
 
-// commitSentProgressLocked advances the forced-full baseline (lastSentSnapshot)
-// and the cursor for the FORCED-FULL path (RecordFullSyncSuccess), in the same
-// s.mu critical section. The cursor is advanced MONOTONICALLY: a stale full sync
+// commitSentProgressLocked marks the baseline established and advances the
+// cursor for the FORCED-FULL path (RecordFullSyncSuccess), in the same s.mu
+// critical section. The cursor is advanced MONOTONICALLY: a stale full sync
 // that finishes after a newer delta/full must not roll the cursor back below the
 // head already committed (which would trip needFull + full-sync rate limiting in
-// cursor mode). lastSentSnapshot is set unconditionally — it is the forced-full
-// baseline and the first-sync nil-check, never a per-delta diff base, so a
-// slightly older baseline paired with a newer cursor is harmless (the next
-// forced-full rebuilds from scratch anyway). Caller must hold s.mu.
-func (s *AnnouncePeerState) commitSentProgressLocked(snapshot *AnnounceSnapshot, cursor uint64) {
-	s.lastSentSnapshot = snapshot
+// cursor mode). The baseline mark is set unconditionally and never cleared by a
+// commit — it answers "has a full sync ever landed", and a stale full sync
+// arriving after a newer one does not make that less true. Caller must hold
+// s.mu.
+func (s *AnnouncePeerState) commitSentProgressLocked(cursor uint64) {
+	s.hasFullSyncBaseline = true
 	s.advanceCursorMonotonicLocked(cursor)
 }
 
 // RecordFullSyncSuccess updates the state after a successful full sync,
-// atomically advancing the (lastSentSnapshot, cursor) pair (see
+// atomically marking the baseline and advancing the cursor (see
 // commitSentProgressLocked).
-func (s *AnnouncePeerState) RecordFullSyncSuccess(snapshot *AnnounceSnapshot, cursor uint64, now time.Time) {
+//
+// It deliberately takes no snapshot. The projection that was just sent is the
+// caller's to release back to the pool; handing it here would put pooled
+// backing storage into retained state (announce_builder.go, STRICT OWNERSHIP)
+// and would re-introduce the per-peer copy step 14 removed.
+func (s *AnnouncePeerState) RecordFullSyncSuccess(cursor uint64, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.commitSentProgressLocked(snapshot, cursor)
+	s.commitSentProgressLocked(cursor)
 	s.needsFullResync = false
 	s.resyncIsHard = false
 	s.lastSuccessfulFullSyncAt = now
@@ -283,13 +322,13 @@ func (s *AnnouncePeerState) RecordFullSyncAttempt(now time.Time) {
 }
 
 // RecordCursorAdvance advances ONLY the announceCursor — the cursor-authoritative
-// delta commit. lastSentSnapshot is deliberately NOT touched: the delta is
-// projected from the change journal (projectChangedFor), not diffed against
-// lastSentSnapshot, so lastSentSnapshot is refreshed only by the periodic
-// forced-full sync (which doubles as reconciliation / self-heal). The two are
-// intentionally decoupled — lastSentSnapshot serves only the first-sync nil-check
-// and the forced-full baseline. Caller passes the journal head returned by
-// AnnounceDeltaTo, committed (monotonically) only after the paired send succeeded.
+// delta commit. The baseline mark is deliberately NOT touched: a delta is
+// projected from the change journal (projectChangedFor) and can only be sent to
+// a peer that already has a baseline, so a delta neither establishes one nor
+// invalidates it. Reconciliation / self-heal stays with the periodic forced-full
+// sync, which rebuilds from the live table. Caller passes the journal head
+// returned by AnnounceDeltaTo, committed (monotonically) only after the paired
+// send succeeded.
 func (s *AnnouncePeerState) RecordCursorAdvance(cursor uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -706,8 +745,8 @@ func copyCapabilities(caps []PeerCapability) []PeerCapability {
 // cycle — never on a matching MarkDisconnected. A state created by any path
 // (the session-lifecycle MarkReconnected hook or a relay-gated receive-path
 // GetOrCreate) cannot outlive the peer's membership in the live set, so a
-// skipped or asymmetric teardown hook can no longer leak per-peer state
-// (including its lastSentSnapshot). The previous design keyed eviction on a
+// skipped or asymmetric teardown hook can no longer leak per-peer state. The
+// previous design keyed eviction on a
 // disconnectedAt stamp that only MarkDisconnected wrote, which silently
 // retained any state whose teardown hook never fired.
 //

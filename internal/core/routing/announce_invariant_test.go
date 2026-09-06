@@ -116,11 +116,11 @@ func TestAnnounceLoop_ForcedFull_UsesLegacySender_NonEmptySnapshot(t *testing.T)
 
 	// Prime per-peer state: establish a baseline and then explicitly mark
 	// NeedsFullResync so the cycle takes the forced-full branch inside
-	// announceToAllPeers (needsFull = NeedsFullResync || LastSentSnapshot == nil).
+	// announceToAllPeers (needsFull = NeedsFullResync || !HasFullSyncBaseline).
 	// The rate-limit timer must be zero so the cycle is not coalesced
 	// under "too soon since last forced full sync attempt".
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
-	state.RecordFullSyncSuccess(&routing.AnnounceSnapshot{}, 0, now.Add(-1*time.Minute))
+	state.RecordFullSyncSuccess(0, now.Add(-1*time.Minute))
 	state.SetNeedsFullResyncForTest()
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -93,9 +93,8 @@ func TestAnnounceLoop_DigestHeartbeat_NoFullOnIntermediateTick(t *testing.T) {
 	// Seed a baseline equal to the current projection + cursor at head, so the
 	// cursor delta is empty and only the freshness path can produce a send.
 	raw, head := table.AnnounceToWithChangeHead(peerC)
-	baseline := routing.BuildAnnounceSnapshot(raw)
 	table.ReleaseAnnounceEntries(raw)
-	registry.GetOrCreate(peerC).RecordFullSyncSuccess(baseline, head, clk.now())
+	registry.GetOrCreate(peerC).RecordFullSyncSuccess(head, clk.now())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -204,9 +203,8 @@ func TestAnnounceLoop_DigestHeartbeat_NoDigestForPeerWithoutRouteSyncCap(t *test
 	cadence := routing.EffectiveForcedFullSyncInterval(10 * time.Second)
 
 	raw, head := table.AnnounceToWithChangeHead(peerC)
-	baseline := routing.BuildAnnounceSnapshot(raw)
 	table.ReleaseAnnounceEntries(raw)
-	registry.GetOrCreate(peerC).RecordFullSyncSuccess(baseline, head, clk.now())
+	registry.GetOrCreate(peerC).RecordFullSyncSuccess(head, clk.now())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

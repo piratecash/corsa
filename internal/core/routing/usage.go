@@ -49,7 +49,6 @@ var (
 	seqVelocityBytes     = domain.SizeOfAll(PeerIdentity{}, seqVelocity{})
 	badHopsBytes         = domain.SizeOfAll(PeerIdentity{}, badHopsState{})
 	digestCacheBytes     = domain.SizeOfAll(PeerIdentity{}, sessionDigestEntry{})
-	announceEntryBytes   = domain.SizeOfAll(AnnounceEntry{})
 	announcePeerBytes    = domain.SizeOfAll(PeerIdentity{}, AnnouncePeerState{})
 )
 
@@ -108,10 +107,19 @@ func (t *Table) Usage() domain.SubsystemUsage {
 
 // Usage reports what the announce plane keeps per peer.
 //
-// Unlike the table's, this pass DOES iterate — over peers, of which there are
-// tens, never over identities, of which there are thousands. That is the whole
-// distinction: the number worth having is the total size of the snapshots held
-// on peers' behalf, and it is a sum of tens of already-known slice lengths.
+// This plane used to be dominated by one gauge, last_sent_entries: the size of
+// the projection retained for every peer. Step 14 removed the retention — the
+// per-peer state keeps a mark that a baseline was established, not the table it
+// sent — and the gauge went with it, because a number describing memory that no
+// longer exists is worse than no number: reported as zero it reads as "nothing
+// is held here" rather than "there is nothing to hold". The plane's cost is now
+// one record per peer and nothing proportional to the table.
+//
+// peers_with_baseline replaces it as a SATURATION gauge — a subset of
+// announce_peers, contributing no bytes. It is not a smaller version of the old
+// figure and must never be priced as one; it answers a different question
+// (which peers are actually reconciled), and a value below announce_peers means
+// some peer's first full sync has not landed.
 //
 // Two peer mutexes are taken in sequence, never together, and the registry
 // mutex is released first, so this adds no edge to the r.mu → s.mu order the
@@ -125,31 +133,15 @@ func (r *AnnounceStateRegistry) Usage() domain.SubsystemUsage {
 	peerCount := len(r.peers)
 	r.mu.Unlock()
 
-	entries := 0
+	withBaseline := 0
 	for _, state := range states {
-		entries += state.sentSnapshotLen()
+		if state.HasFullSyncBaseline() {
+			withBaseline++
+		}
 	}
 	return domain.NewSubsystemUsage(
 		domain.ResourceSubsystemAnnounce,
-		// The dominant term of this plane: one announce entry per identity
-		// per peer, refreshed only on a forced full sync, so it is held at
-		// full size for up to a full sync cadence after the table shrinks.
-		domain.NewResourceGauge("last_sent_entries", entries, announceEntryBytes),
 		domain.NewResourceGauge("announce_peers", peerCount, announcePeerBytes),
+		domain.NewSaturationGauge("peers_with_baseline", withBaseline),
 	)
-}
-
-// sentSnapshotLen reports how many entries this peer's retained snapshot
-// holds, and nothing else about it.
-//
-// It exists rather than reusing View() because View copies the capability
-// slice on every call: a diagnostic that allocated once per peer per sample
-// would be paying for a field it does not read.
-func (s *AnnouncePeerState) sentSnapshotLen() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lastSentSnapshot == nil {
-		return 0
-	}
-	return len(s.lastSentSnapshot.Entries)
 }

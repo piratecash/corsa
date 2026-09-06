@@ -146,14 +146,14 @@ func TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot(t *testing.T) {
 	}
 
 	// Peer-state side-effect: RecordFullSyncSuccess must have fired so
-	// subsequent cycles can compute deltas against this baseline.
+	// subsequent cycles are allowed to send deltas at all.
 	state := svc.announceLoop.StateRegistry().Get(idPeerB)
 	if state == nil {
 		t.Fatal("announce peer state not created for inbound peer")
 	}
 	view := state.View()
-	if view.LastSentSnapshot == nil {
-		t.Fatal("expected LastSentSnapshot to be recorded after successful connect-time sync")
+	if !view.HasFullSyncBaseline {
+		t.Fatal("expected the baseline to be marked after a successful connect-time sync")
 	}
 	if view.NeedsFullResync {
 		t.Fatal("NeedsFullResync should clear after RecordFullSyncSuccess")
@@ -267,8 +267,8 @@ func TestConnectTimeFullSync_UsesV3FullSender_NonEmptySnapshot(t *testing.T) {
 		t.Fatal("announce peer state not created for inbound peer")
 	}
 	view := state.View()
-	if view.LastSentSnapshot == nil {
-		t.Fatal("expected LastSentSnapshot to be recorded after successful v3 connect-time sync")
+	if !view.HasFullSyncBaseline {
+		t.Fatal("expected the baseline to be marked after a successful v3 connect-time sync")
 	}
 	if !view.HasSentWireBaselineV3 {
 		t.Fatal("HasSentWireBaselineV3 must flip after a successful v3 kind=full send so subsequent cycles can pick v3 delta")
@@ -345,8 +345,8 @@ func TestConnectTimeFullSync_EmptySnapshot_NoWireFrame(t *testing.T) {
 		t.Fatal("announce peer state not created on empty-baseline sync")
 	}
 	view := state.View()
-	if view.LastSentSnapshot == nil {
-		t.Fatal("empty-baseline must still record LastSentSnapshot so " +
+	if !view.HasFullSyncBaseline {
+		t.Fatal("empty-baseline must still mark the baseline so " +
 			"later cycles can diff against it")
 	}
 	if view.NeedsFullResync {

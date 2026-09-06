@@ -23,8 +23,8 @@ import (
 	"github.com/piratecash/corsa/internal/core/ebus"
 
 	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/connauth"
+	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/directmsg"
@@ -778,8 +778,8 @@ type Service struct {
 	runCtx context.Context
 
 	// Connection management subsystem (Stage 3 integration).
-	peerProvider *PeerProvider                   // single source of dial candidates — replaces peers[] + peerDialCandidates()
-	connManager  *ConnectionManager              // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
+	peerProvider *PeerProvider      // single source of dial candidates — replaces peers[] + peerDialCandidates()
+	connManager  *ConnectionManager // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
 
 	// connBudget is the SHARED admission ceiling over inbound plus outbound
 	// connections plus the attempts in flight — the one number neither
@@ -801,7 +801,7 @@ type Service struct {
 	// A ceiling that cannot be honoured stops the node instead of quietly
 	// leaving it unprotected.
 	connBudgetErr error
-	bannedIPSet  map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
+	bannedIPSet   map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
 
 	// connectOnly holds the single-peer egress pin (connectOnly command /
 	// CORSA_CONNECT_ONLY). nil means "no pin — normal candidate-driven

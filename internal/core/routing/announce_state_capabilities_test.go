@@ -115,7 +115,7 @@ func TestAnnounceStateRegistry_UpdateCapabilities_DoesNotResetBaselineFlags(t *t
 
 // TestAnnounceStateRegistry_UpdateCapabilities_DoesNotTouchSyncState
 // pins that UpdateCapabilities does not flip needsFullResync, does not
-// touch lastSentSnapshot, and does not move any timestamp. Treating caps
+// clear the baseline mark, and does not move any timestamp. Treating caps
 // refresh as a sync-state event would force an unnecessary forced-full
 // on every additional session — the routing table is unchanged, the
 // receiver's view is unchanged, only the metadata snapshot moved.
@@ -131,14 +131,13 @@ func TestAnnounceStateRegistry_UpdateCapabilities_DoesNotTouchSyncState(t *testi
 
 	// Establish a baseline send so NeedsFullResync clears and
 	// LastSuccessfulFullSyncAt is set to a known value.
-	snapshot := &routing.AnnounceSnapshot{}
-	state.RecordFullSyncSuccess(snapshot, 0, now)
+	state.RecordFullSyncSuccess(0, now)
 	view := state.View()
 	if view.NeedsFullResync {
 		t.Fatalf("precondition: NeedsFullResync must be false after RecordFullSyncSuccess")
 	}
-	if view.LastSentSnapshot != snapshot {
-		t.Fatalf("precondition: LastSentSnapshot must point at the recorded snapshot")
+	if !view.HasFullSyncBaseline {
+		t.Fatalf("precondition: the baseline must be marked after RecordFullSyncSuccess")
 	}
 	priorLastSucc := view.LastSuccessfulFullSyncAt
 
@@ -151,8 +150,8 @@ func TestAnnounceStateRegistry_UpdateCapabilities_DoesNotTouchSyncState(t *testi
 	if view.NeedsFullResync {
 		t.Fatalf("UpdateCapabilities must NOT flip NeedsFullResync")
 	}
-	if view.LastSentSnapshot != snapshot {
-		t.Fatalf("UpdateCapabilities must NOT replace LastSentSnapshot")
+	if !view.HasFullSyncBaseline {
+		t.Fatalf("UpdateCapabilities must NOT clear the baseline mark")
 	}
 	if !view.LastSuccessfulFullSyncAt.Equal(priorLastSucc) {
 		t.Fatalf("UpdateCapabilities must NOT move LastSuccessfulFullSyncAt: was %v, now %v", priorLastSucc, view.LastSuccessfulFullSyncAt)

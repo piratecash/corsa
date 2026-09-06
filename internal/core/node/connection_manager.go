@@ -328,11 +328,11 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	return &ConnectionManager{
 		slots:              make([]*slot, 0, maxSlots),
 		orphanReservations: make(map[uint64]*connbudget.Reservation),
-		config:      cfg,
-		slotEvents:  make(chan SlotEvent, slotEventBuffer(maxSlots)),
-		hintEvents:  make(chan HintEvent, hintEventBuffer),
-		bootstrapCh: make(chan struct{}),
-		readyCh:     make(chan struct{}),
+		config:             cfg,
+		slotEvents:         make(chan SlotEvent, slotEventBuffer(maxSlots)),
+		hintEvents:         make(chan HintEvent, hintEventBuffer),
+		bootstrapCh:        make(chan struct{}),
+		readyCh:            make(chan struct{}),
 		// newDialPacer returns nil when interval <= 0; nil pacer is
 		// treated as "disabled" by Acquire-site nil checks below, so
 		// disabled mode pays no overhead on the hot path.

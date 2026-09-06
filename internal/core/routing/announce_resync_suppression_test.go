@@ -60,10 +60,9 @@ func runReconnectSuppressionCycle(t *testing.T, hardResync bool) int {
 	// and the cursor path would re-emit it — the production forced-full commits
 	// snapHead exactly like this.
 	raw, head := table.AnnounceToWithChangeHead(domaintest.ID("peer-C"))
-	baseline := routing.BuildAnnounceSnapshot(raw)
 	table.ReleaseAnnounceEntries(raw)
 	state := registry.GetOrCreate(domaintest.ID("peer-C"))
-	state.RecordFullSyncSuccess(baseline, head, now)
+	state.RecordFullSyncSuccess(head, now)
 
 	if hardResync {
 		registry.MarkInvalid(domaintest.ID("peer-C")) // request_resync / consistency loss

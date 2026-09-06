@@ -196,11 +196,11 @@ func (s *Service) FetchResourceBreakdown() (json.RawMessage, error) {
 			// ceiling is off while the per-direction limits below still
 			// apply. The two facts are reported separately so "off" is
 			// never read as "unlimited admission".
-			"total":            budget.Total,
-			"outbound_reserve": budget.OutboundReserve,
+			"total":             budget.Total,
+			"outbound_reserve":  budget.OutboundReserve,
 			"non_slot_capacity": budget.NonSlotCapacity,
-			"max_outbound":     budget.MaxOutbound,
-			"max_inbound":      budget.MaxInbound,
+			"max_outbound":      budget.MaxOutbound,
+			"max_inbound":       budget.MaxInbound,
 			// Auxiliary dials are reported apart from peer slots because
 			// they are bounded apart: they never compete for the node's
 			// persistent neighbourhood, only for the shared ceiling.

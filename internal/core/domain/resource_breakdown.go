@@ -49,9 +49,11 @@ const (
 	// claims, per-identity buckets, health and the SeqNo bookkeeping that
 	// grows as identities × peers.
 	ResourceSubsystemRoutePlane
-	// ResourceSubsystemAnnounce is what the announce loop keeps PER PEER —
-	// above all the last snapshot sent to each of them, whose contents are
-	// proportional to the table.
+	// ResourceSubsystemAnnounce is what the announce loop keeps PER PEER: one
+	// send-state record each, holding cursors, flags and timestamps. It used
+	// to hold the last projection sent to every peer as well — a cost
+	// proportional to the table times the peers — until step 14 established
+	// that nothing read those entries back.
 	ResourceSubsystemAnnounce
 	// ResourceSubsystemDatagram is the datagram plane: class queues, the
 	// anti-replay cache, reverse-state records, per-neighbour budgets.

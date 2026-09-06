@@ -461,7 +461,7 @@ type AnnounceLoop struct {
 	//
 	// Suppression applies ONLY to soft (session-boundary) resyncs and
 	// the periodic full-sync deadline; the initial sync
-	// (LastSentSnapshot == nil) and HARD resyncs (request_resync /
+	// (no baseline yet) and HARD resyncs (request_resync /
 	// MarkInvalid, view.ResyncIsHard) bypass the gate so the peer always
 	// gets a baseline when it truly needs one.
 	digestSuppression map[PeerIdentity]digestSuppressionEntry
@@ -558,8 +558,8 @@ func (a *AnnounceLoop) NoopSuppressedTotal() uint64 {
 // The delta path keeps firing regardless, so any real state change still
 // propagates; only the byte-heavy periodic re-sync is elided. Suppression
 // is consulted only for soft (session-boundary) resyncs and the periodic
-// deadline branch — initial sync (LastSentSnapshot == nil) and HARD
-// resyncs (view.ResyncIsHard) bypass the gate, see announceToAllPeers.
+// deadline branch — initial sync (no baseline yet) and HARD resyncs
+// (view.ResyncIsHard) bypass the gate, see announceToAllPeers.
 //
 // `now` is injected so tests drive a deterministic clock; production
 // passes time.Now().UTC(). Safe to call from any goroutine.
@@ -689,10 +689,11 @@ func (a *AnnounceLoop) digestHeartbeatStatus(peer PeerIdentity, now time.Time) (
 // are no longer in the authoritative live set. Membership-driven, like the
 // per-peer announce state's ReconcileLiveSet: it bounds digestSuppression to
 // the live route_sync peer set so churn over unique identities cannot leak
-// per-peer windows. Unlike lastSentSnapshot, a wrongly-evicted entry is cheap
-// — the next deadline simply re-emits a digest — so this evicts immediately on
-// absence rather than carrying a flap grace. No-op on an empty map (idle nodes
-// pay nothing). Called once per announce cycle under the loop goroutine.
+// per-peer windows. Unlike the per-peer announce state, a wrongly-evicted entry
+// is cheap — the next deadline simply re-emits a digest — so this evicts
+// immediately on absence rather than carrying a flap grace. No-op on an empty
+// map (idle nodes pay nothing). Called once per announce cycle under the loop
+// goroutine.
 //
 // `liveSet` is the SAME map ReconcileLiveSet consumes — the caller builds it
 // once per cycle so this sweep adds no allocation to the stable hot path.
@@ -730,7 +731,7 @@ func (a *AnnounceLoop) ClearPeerDigestSuppression(peer PeerIdentity) {
 // does not grow unbounded as peers come and go).
 //
 // Production caller: announceToAllPeers — see the
-// `needsFull && view.LastSentSnapshot != nil && !view.ResyncIsHard`
+// `needsFull && view.HasFullSyncBaseline && !view.ResyncIsHard`
 // guard around the forced-full deadline branch.
 func (a *AnnounceLoop) isDigestSuppressionActive(peer PeerIdentity, now time.Time) bool {
 	a.digestSuppressionMu.Lock()
@@ -1233,11 +1234,10 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	// Reconcile per-peer announce state against the authoritative live set
 	// every cycle, BEFORE the empty-peers early return. Eviction is driven
 	// purely by membership in the live routing-capable set — not by a
-	// matching MarkDisconnected — so per-peer state (and its
-	// lastSentSnapshot) cannot leak if a teardown hook is ever skipped
-	// (full isolation, relay-gate drift, session-counter desync). Running
-	// before the early return guarantees an isolated node (zero live peers)
-	// still reclaims everything that has aged out.
+	// matching MarkDisconnected — so per-peer state cannot leak if a teardown
+	// hook is ever skipped (full isolation, relay-gate drift, session-counter
+	// desync). Running before the early return guarantees an isolated node
+	// (zero live peers) still reclaims everything that has aged out.
 	reconcileNow := a.stateRegistry.Clock()
 	// Build the cycle's live-set membership map ONCE and share it with both
 	// garbage collectors below — the per-peer announce state and the digest
@@ -1252,9 +1252,9 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 	// arms an entry for every live route_sync peer; those entries are otherwise
 	// only removed on a mismatch or a lazy expired read, neither of which fires
 	// once a peer leaves peersFn — so without this membership sweep the map
-	// would grow unbounded across churn over unique identities (same leak class
-	// as lastSentSnapshot). Runs before the empty-peers return so an isolated
-	// node reclaims everything.
+	// would grow unbounded across churn over unique identities (the same leak
+	// class the per-peer announce state is reconciled against). Runs before the
+	// empty-peers return so an isolated node reclaims everything.
 	a.reconcileDigestSuppression(liveSet)
 
 	if len(peers) == 0 {
@@ -1356,7 +1356,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// circuit the expensive scan when the cycle won't actually
 			// emit anything.
 			view := peerState.View()
-			needsFull := view.NeedsFullResync || view.LastSentSnapshot == nil
+			needsFull := view.NeedsFullResync || !view.HasFullSyncBaseline
 
 			// Phase 3 PR 12.5 — digest-match suppression for the SOFT
 			// (session-boundary) reconnect resync. On reconnect the session
@@ -1368,13 +1368,13 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			//
 			// Two conditions exempt the gate so a peer never misses a needed
 			// baseline:
-			//   - view.LastSentSnapshot == nil: no prior baseline (first-ever
+			//   - !view.HasFullSyncBaseline: no prior baseline (first-ever
 			//     sync, or a hard reset) — suppression would leave it with no
 			//     routing state.
 			//   - view.ResyncIsHard: an explicit request_resync or a
 			//     consistency-loss MarkInvalid demanded a fresh full table; a
 			//     digest hint must not suppress it.
-			if needsFull && view.LastSentSnapshot != nil && !view.ResyncIsHard && a.isDigestSuppressionActive(peer.Identity, now) {
+			if needsFull && view.HasFullSyncBaseline && !view.ResyncIsHard && a.isDigestSuppressionActive(peer.Identity, now) {
 				needsFull = false
 			}
 
@@ -1392,7 +1392,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// Inclusive (>=) deadline so the cycle landing exactly at the
 			// cadence acts — same boundary the old forced-full used to keep the
 			// refresh within DefaultTTL/2 (docs/routing.md).
-			if !needsFull && view.LastSentSnapshot != nil &&
+			if !needsFull && view.HasFullSyncBaseline &&
 				!view.LastSuccessfulFullSyncAt.IsZero() &&
 				now.Sub(view.LastSuccessfulFullSyncAt) >= forcedFullSyncInterval {
 
@@ -1454,7 +1454,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// updates converge. Anchored on LastSuccessfulFullSyncAt (frozen
 			// while fulls are suppressed), so it measures time since the last
 			// real full, not since the last heartbeat.
-			if !needsFull && view.LastSentSnapshot != nil &&
+			if !needsFull && view.HasFullSyncBaseline &&
 				!view.LastSuccessfulFullSyncAt.IsZero() &&
 				now.Sub(view.LastSuccessfulFullSyncAt) >= time.Duration(SafetyFullSyncMultiplier)*forcedFullSyncInterval {
 				needsFull = true
@@ -1488,7 +1488,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			// skipping the full projection + BuildAnnounceSnapshot + ComputeDelta —
 			// the bulk of the per-cycle churn. needFull (cursor behind a bulk reset
 			// or out of the ring) falls through to the full rebuild below, which
-			// owns lastSentSnapshot and reconciles any drift.
+			// rebuilds from the live table and reconciles any drift.
 			var (
 				delta     []AnnounceEntry
 				onSuccess func()
@@ -1518,9 +1518,10 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 			if needsFull {
 				// The only path that still does the full projection +
 				// BuildAnnounceSnapshot: forced-full, first-sync, or a cursor
-				// needFull fallback. It owns lastSentSnapshot and reconciles any
-				// accumulated delta drift. rawRoutes is a pooled projection buffer;
-				// release it at goroutine end so every early return still frees it.
+				// needFull fallback. It rebuilds from the live table and
+				// reconciles any accumulated delta drift. rawRoutes is a pooled
+				// projection buffer; release it at goroutine end so every early
+				// return still frees it.
 				rawRoutes, snapHead := a.table.AnnounceToWithChangeHead(peer.Identity)
 				defer a.table.ReleaseAnnounceEntries(rawRoutes)
 				totalRaw.Add(int32(len(rawRoutes)))
@@ -1530,8 +1531,8 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 
 				// Rate limit forced full sync attempts — but only when the
 				// peer already has a baseline. A peer that never received
-				// any data (LastSentSnapshot==nil, e.g. after a failed
-				// first attempt) must retry without delay.
+				// any data (no baseline yet — e.g. after a failed first
+				// attempt) must retry without delay.
 				//
 				// The rate-limit window is clamped to forcedFullSyncInterval
 				// so it never exceeds the documented forced-full cadence.
@@ -1554,7 +1555,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				if forcedFullSyncInterval < rateLimitWindow {
 					rateLimitWindow = forcedFullSyncInterval
 				}
-				if view.LastSentSnapshot != nil &&
+				if view.HasFullSyncBaseline &&
 					!view.LastFullSyncAttemptAt.IsZero() &&
 					now.Sub(view.LastFullSyncAttemptAt) < rateLimitWindow {
 					// Too soon — skip this cycle for this peer.
@@ -1563,7 +1564,7 @@ func (a *AnnounceLoop) announceToAllPeers(ctx context.Context) {
 				}
 
 				// snapHead (journal head atomic with this full snapshot) is
-				// committed with lastSentSnapshot inside RecordFullSyncSuccess on
+				// committed with the baseline mark inside RecordFullSyncSuccess on
 				// success; a failed full sync leaves both put.
 				a.sendFullAnnounce(ctx, cycleID, peer, peerState, snapshot, snapHead, now)
 				forcedFull.Add(1)
@@ -1962,7 +1963,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	// frame — the relevant baseline flag stays false on purpose so the
 	// next non-empty cycle re-emits a real full frame.
 	if len(snapshot.Entries) == 0 {
-		state.RecordFullSyncSuccess(snapshot, changeHead, now)
+		state.RecordFullSyncSuccess(changeHead, now)
 		return true
 	}
 
@@ -1988,7 +1989,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 		// in handleRouteAnnounceV3 is open and subsequent cycles may
 		// pick v3 kind="delta".
 		state.MarkWireBaselineV3Sent()
-		state.RecordFullSyncSuccess(snapshot, changeHead, now)
+		state.RecordFullSyncSuccess(changeHead, now)
 		return true
 	}
 
@@ -2006,7 +2007,7 @@ func (a *AnnounceLoop) sendFullAnnounce(
 	// observed a wire baseline in this session, so the v2 receive gate is
 	// open. Subsequent deltas may pick the v2 wire frame when caps agree.
 	state.MarkWireBaselineSent()
-	state.RecordFullSyncSuccess(snapshot, changeHead, now)
+	state.RecordFullSyncSuccess(changeHead, now)
 	return true
 }
 
@@ -2088,7 +2089,8 @@ func (a *AnnounceLoop) sendIncrementalAnnounce(
 	// the cursor commit), so it stays in the send helper.
 	state.MarkWireBaselineSent()
 	// Commit on success — the caller's onSuccess advances the cursor
-	// (RecordCursorAdvance); lastSentSnapshot is refreshed at the forced full.
+	// (RecordCursorAdvance); the baseline mark is already set and a delta
+	// never changes it.
 	onSuccess()
 	return true
 }
