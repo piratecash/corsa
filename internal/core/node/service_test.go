@@ -7653,7 +7653,7 @@ func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	// Register the pipe as an inbound connection — starts connWriter.
-	svc.registerInboundConn(server)
+	svc.registerInboundConn(server, nil)
 	connID, ok := svc.connIDFor(server)
 	if !ok {
 		t.Fatalf("registered conn has no ConnID")
@@ -7716,7 +7716,7 @@ func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	// Register the pipe — starts connWriter.
-	svc.registerInboundConn(server)
+	svc.registerInboundConn(server, nil)
 	connID, ok := svc.connIDFor(server)
 	if !ok {
 		t.Fatalf("registered conn has no ConnID")
@@ -8011,10 +8011,10 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	// helpers in conn_registry.go is preserved; tests must follow the
 	// same order or they will exercise a codepath that cannot happen in
 	// production.
-	if !svc.registerInboundConn(conn1a) {
+	if !svc.registerInboundConn(conn1a, nil) {
 		t.Fatalf("registerInboundConn conn1a failed")
 	}
-	if !svc.registerInboundConn(conn2a) {
+	if !svc.registerInboundConn(conn2a, nil) {
 		t.Fatalf("registerInboundConn conn2a failed")
 	}
 
@@ -8135,7 +8135,7 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	defer func() { _ = connA.Close() }()
 	defer func() { _ = connB.Close() }()
 
-	if !svc.registerInboundConn(connA) {
+	if !svc.registerInboundConn(connA, nil) {
 		t.Fatalf("registerInboundConn failed")
 	}
 
@@ -8190,7 +8190,7 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	defer func() { _ = connA.Close() }()
 	defer func() { _ = connB.Close() }()
 
-	if !svc.registerInboundConn(connA) {
+	if !svc.registerInboundConn(connA, nil) {
 		t.Fatalf("registerInboundConn failed")
 	}
 

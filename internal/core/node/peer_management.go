@@ -1331,7 +1331,11 @@ func readSyncReply(ctx context.Context, reader *bufio.Reader, wantType string, b
 // without the layer. TODO(fetch-contacts-floor): remove the leg when
 // nothing is left to bridge — see docs/protocol/identity-lookup.md.
 func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requestPeers bool) int {
-	conn, err := s.dialPeer(ctx, address, syncHandshakeTimeout)
+	// Budgeted: this is a real outbound socket and counts against the shared
+	// ceiling like any other. A refusal here means the sync does not happen —
+	// which is the point: recovering a sender key is worth a connection, but
+	// not worth exceeding the node's own limit (conn_budget_dial.go).
+	conn, err := s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_dial_failed")
 		return 0

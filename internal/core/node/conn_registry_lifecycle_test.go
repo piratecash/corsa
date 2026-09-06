@@ -130,7 +130,7 @@ func TestConnRegistry_RegisterSyncsSecondaryIndex(t *testing.T) {
 	})
 
 	svc.peerMu.Lock()
-	svc.registerInboundConnLocked(conn, pc, nil)
+	svc.registerInboundConnLocked(conn, pc, nil, nil)
 	svc.peerMu.Unlock()
 
 	svc.peerMu.RLock()

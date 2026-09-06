@@ -178,11 +178,44 @@ func (s *Service) FetchResourceBreakdown() (json.RawMessage, error) {
 		subsystems = append(subsystems, wire)
 	}
 
+	// The shared connection ceiling is reported beside the subsystems rather
+	// than as one of them: it is not memory this node is holding, it is the
+	// admission decision that bounds how much of it there can be. Usage here
+	// INCLUDES attempts in flight, which is the only figure that says whether
+	// a node is actually against the ceiling — a count of established
+	// sessions would leave out exactly what a ceiling is defeated by.
+	budget := s.connBudget.Snapshot()
 	answer := map[string]any{
 		"sampled_at":  breakdown.SampledAt().Format(time.RFC3339Nano),
 		"floor_bytes": breakdown.FloorBytes(),
 		"floor_human": formatBytes(breakdown.FloorBytes()),
 		"subsystems":  subsystems,
+		"connection_budget": map[string]any{
+			"enabled": budget.Enabled,
+			// Total 0 with enabled=false is the default: the shared
+			// ceiling is off while the per-direction limits below still
+			// apply. The two facts are reported separately so "off" is
+			// never read as "unlimited admission".
+			"total":            budget.Total,
+			"outbound_reserve": budget.OutboundReserve,
+			"non_slot_capacity": budget.NonSlotCapacity,
+			"max_outbound":     budget.MaxOutbound,
+			"max_inbound":      budget.MaxInbound,
+			// Auxiliary dials are reported apart from peer slots because
+			// they are bounded apart: they never compete for the node's
+			// persistent neighbourhood, only for the shared ceiling.
+			"max_auxiliary": budget.MaxAuxiliary,
+			"used":          budget.Used,
+			"outbound":      budget.Outbound,
+			"inbound":       budget.Inbound,
+			"auxiliary":     budget.Auxiliary,
+			"refused": map[string]any{
+				"total_exhausted":   budget.RefusedTotal,
+				"outbound_reserved": budget.RefusedReserved,
+				"direction_limit":   budget.RefusedDirection,
+				"unknown_direction": budget.RefusedUnknown,
+			},
+		},
 	}
 	// Omitted rather than reported as a guess: a node that has just started
 	// holds nothing, and naming an arbitrary subsystem its dominant consumer

@@ -85,6 +85,28 @@ type Node struct {
 	MaxOutgoingPeers int
 	MaxIncomingPeers int
 
+	// MaxTotalConnections is B — the SHARED ceiling over inbound plus
+	// outbound connections plus the attempts that have not finished
+	// becoming either (env: CORSA_MAX_TOTAL_CONNECTIONS).
+	//
+	// ZERO MEANS THE SHARED CEILING IS OFF, and that is the default: the
+	// value of B is approved from the load bench, not derived from a single
+	// memory figure, so shipping a number before that bench exists would be
+	// choosing a limit nobody measured
+	// (docs/refactoring/dht/15-overlay-parameters.md §0.1.1).
+	//
+	// Off does NOT mean unlimited admission — MaxOutgoingPeers and
+	// MaxIncomingPeers keep applying. What B adds is the one thing neither
+	// of them can express: that the SUM of independently bounded
+	// subsystems is bounded too.
+	MaxTotalConnections int
+
+	// MaxAuxiliaryConnections bounds short-lived outbound dials that are not
+	// peer slots (env: CORSA_MAX_AUXILIARY_CONNECTIONS). Meaningful only
+	// while the shared ceiling is enabled — see
+	// EffectiveMaxAuxiliaryConnections.
+	MaxAuxiliaryConnections int
+
 	// PendingRingSize bounds the per-peer in-memory ring of frames queued
 	// for a directly-connected peer that is momentarily offline (env:
 	// CORSA_PENDING_RING_SIZE). This is a HARD memory bound: at capacity the
@@ -592,6 +614,8 @@ func Default() Config {
 	maxClockDrift := maxClockDriftFromEnv()
 	maxOutgoingPeers := maxOutgoingPeersFromEnv()
 	maxIncomingPeers := maxIncomingPeersFromEnv()
+	maxTotalConnections := maxTotalConnectionsFromEnv()
+	maxAuxiliaryConnections := maxAuxiliaryConnectionsFromEnv()
 	maxNextHopsPerOrigin := maxNextHopsPerOriginFromEnv()
 	maxSeqAdvancePerWindow := maxSeqAdvancePerWindowFromEnv()
 	seqAdvanceWindow := seqAdvanceWindowFromEnv()
@@ -639,6 +663,8 @@ func Default() Config {
 			MaxClockDrift:              maxClockDrift,
 			MaxOutgoingPeers:           maxOutgoingPeers,
 			MaxIncomingPeers:           maxIncomingPeers,
+			MaxTotalConnections:        maxTotalConnections,
+			MaxAuxiliaryConnections:    maxAuxiliaryConnections,
 			PendingRingSize:            pendingRingSize,
 			DeliveryRetryMaxAttempts:   deliveryRetryMaxAttempts,
 			HoldDMUntilReachable:       holdDMUntilReachable,
@@ -736,6 +762,73 @@ func (n Node) EffectiveMaxIncomingPeers() int {
 		return n.MaxIncomingPeers
 	}
 	return 0
+}
+
+// EffectiveMaxTotalConnections is B. Zero means the shared ceiling is off; see
+// the field doc for why that is the default and what still applies.
+//
+// ⚠️ It returns the configured value AS IS, including a negative one, and that
+// is deliberate. Clamping a negative value to zero would turn "this setting is
+// wrong" into "the ceiling is off" — the operator asked for a limit and would
+// get a node running without one, with nothing in the logs to find later. A
+// negative value reaches connbudget.New, which refuses it, and the node
+// refuses to start.
+func (n Node) EffectiveMaxTotalConnections() int {
+	return n.MaxTotalConnections
+}
+
+// DefaultAuxiliaryConnections bounds the short-lived outbound dials that are
+// not peer slots — a sender-key sync, a notice to a peer with no live
+// connection — WHEN the shared ceiling is enabled.
+//
+// It is small on purpose: these dials are bursty and brief, so a handful in
+// flight is a working node and a large number is a node doing something else.
+// The value is provisional in the same sense as B itself — it is approved on
+// the load bench, not derived here.
+const DefaultAuxiliaryConnections = 4
+
+// EffectiveMaxAuxiliaryConnections bounds auxiliary outbound dials.
+//
+// ⚠️ It returns ZERO — no limit of their own — while the shared ceiling is
+// off, and that is the whole point of the method existing. Auxiliary dials
+// used to share the outbound peer limit, and in the steady state the
+// connection manager holds every one of those positions: a sender-key sync
+// was then refused permanently, and waiting could not help because the
+// manager keeps the slots full by design. A budget that is switched OFF must
+// not remove a capability the node had before it existed.
+func (n Node) EffectiveMaxAuxiliaryConnections() int {
+	// ⚠️ The invalid sentinel is returned FIRST, before either the
+	// disabled-ceiling shortcut or the default. Review found the previous
+	// order swallowed it: a negative value fell through to the default and
+	// the node started, which is exactly the "broken setting silently means
+	// something else" behaviour the shared ceiling refuses elsewhere. A
+	// typo in this variable stops the node, whether or not B is on.
+	if n.MaxAuxiliaryConnections < 0 {
+		return n.MaxAuxiliaryConnections
+	}
+	if n.EffectiveMaxTotalConnections() <= 0 {
+		return 0
+	}
+	if n.MaxAuxiliaryConnections > 0 {
+		return n.MaxAuxiliaryConnections
+	}
+	return DefaultAuxiliaryConnections
+}
+
+// EffectiveOutboundConnectionReserve is R_out — the capacity inbound
+// connections may never take, even while it sits idle.
+//
+// It is DERIVED from the outbound peer limit rather than configured
+// separately: the reserve exists so a node saturated by inbound connections
+// keeps the ability to dial out, and "how many outbound connections this node
+// wants" is already the answer to how much that takes. A second knob here
+// would be a second number to get wrong, with no question of its own to
+// answer.
+//
+// What the reserve does NOT do: it does not guarantee a dial succeeds, and it
+// creates no room when every outbound position is already occupied.
+func (n Node) EffectiveOutboundConnectionReserve() int {
+	return n.EffectiveMaxOutgoingPeers()
 }
 
 func (n Node) EffectivePeersStatePath() string {
@@ -1315,6 +1408,45 @@ func recordAllTrafficFromEnv() bool {
 	default:
 		return false
 	}
+}
+
+// invalidMaxTotalConnections is what an unusable CORSA_MAX_TOTAL_CONNECTIONS
+// becomes. It is a value no valid configuration can produce, so it survives
+// all the way to connbudget.New — which refuses it, and the node refuses to
+// start.
+//
+// This differs on purpose from the two peer limits beside it, which fall back
+// to their defaults on a bad value. Those defaults are a working policy; the
+// shared ceiling's "default" is OFF, so treating a typo as zero would silently
+// remove the protection the operator was trying to configure. An explicit 0
+// and a broken value must not mean the same thing.
+const invalidMaxTotalConnections = -1
+
+// maxTotalConnectionsFromEnv reads CORSA_MAX_TOTAL_CONNECTIONS — the shared
+// connection ceiling B. Unset means 0, the deliberate "ceiling off" default;
+// unparsable or negative means invalid, not off.
+func maxAuxiliaryConnectionsFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_AUXILIARY_CONNECTIONS"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return invalidMaxTotalConnections
+	}
+	return value
+}
+
+func maxTotalConnectionsFromEnv() int {
+	raw := strings.TrimSpace(os.Getenv("CORSA_MAX_TOTAL_CONNECTIONS"))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return invalidMaxTotalConnections
+	}
+	return value
 }
 
 func maxIncomingPeersFromEnv() int {

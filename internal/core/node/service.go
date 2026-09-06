@@ -23,6 +23,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/ebus"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/datagram"
@@ -779,6 +780,27 @@ type Service struct {
 	// Connection management subsystem (Stage 3 integration).
 	peerProvider *PeerProvider                   // single source of dial candidates — replaces peers[] + peerDialCandidates()
 	connManager  *ConnectionManager              // event-driven outbound connection lifecycle — replaces ensurePeerSessions()
+
+	// connBudget is the SHARED admission ceiling over inbound plus outbound
+	// connections plus the attempts in flight — the one number neither
+	// MaxOutgoingPeers nor MaxIncomingPeers can express, because the sum of
+	// two independently bounded subsystems is not bounded
+	// (docs/refactoring/dht/15-overlay-parameters.md §0.1.1).
+	//
+	// It is deliberately NOT guarded by peerMu and holds no reference to
+	// this Service: its own mutex is a leaf, which is what lets the
+	// connection manager consult the same budget without the forbidden
+	// cm.mu → peerMu edge appearing anywhere.
+	//
+	// Immutable after New; nil is impossible — a disabled budget is a real
+	// object whose shared ceiling is off.
+	connBudget *connbudget.Budget
+
+	// connBudgetErr carries a contradictory budget configuration from New
+	// (which cannot return an error) to Run, which refuses to start.
+	// A ceiling that cannot be honoured stops the node instead of quietly
+	// leaving it unprotected.
+	connBudgetErr error
 	bannedIPSet  map[string]domain.BannedIPEntry // IP-wide bans, persisted independently from top-500 trim
 
 	// connectOnly holds the single-peer egress pin (connectOnly command /
@@ -1959,8 +1981,30 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// PeerProvider and CM are operational, so no concurrent access yet.
 	svc.clearStaleVersionLockoutsLocked()
 
+	// The shared connection budget is built BEFORE the connection manager,
+	// because the manager takes a reservation before every dial it starts.
+	// A configuration that cannot be honoured is carried to Run rather than
+	// dropped: see connBudgetErr.
+	svc.connBudget, svc.connBudgetErr = connbudget.New(connbudget.Config{
+		Total:           cfg.EffectiveMaxTotalConnections(),
+		OutboundReserve: cfg.EffectiveOutboundConnectionReserve(),
+		MaxOutbound:     cfg.EffectiveMaxOutgoingPeers(),
+		MaxInbound:      cfg.EffectiveMaxIncomingPeers(),
+		MaxAuxiliary:    cfg.EffectiveMaxAuxiliaryConnections(),
+	})
+	if svc.connBudgetErr != nil {
+		log.Error().Err(svc.connBudgetErr).Msg("connection budget configuration is invalid; node will refuse to start")
+	} else if snap := svc.connBudget.Snapshot(); snap.Enabled {
+		log.Info().
+			Int("total", snap.Total).
+			Int("outbound_reserve", snap.OutboundReserve).
+			Int("non_slot_capacity", snap.NonSlotCapacity).
+			Msg("shared connection budget enabled")
+	}
+
 	// Initialize ConnectionManager (Stage 3: connection management integration).
 	svc.connManager = NewConnectionManager(ConnectionManagerConfig{
+		Budget:     svc.connBudget,
 		MaxSlotsFn: func() int { return svc.cfg.EffectiveMaxOutgoingPeers() },
 		Provider:   svc.peerProvider,
 		EventBus:   svc.eventBus,
@@ -2325,6 +2369,13 @@ func (s *Service) Run(ctx context.Context) error {
 	// The two defers below are the FIRST ones registered, so they run LAST and
 	// no return path, and no panic, can skip them: cancel, then join the work
 	// whose external effects must not outlive Run.
+	// A budget that cannot be honoured stops the node here. Starting with a
+	// silently disabled ceiling would be the worst of the two outcomes: the
+	// operator asked for a limit, and the node would run without one.
+	if s.connBudgetErr != nil {
+		return fmt.Errorf("connection budget: %w", s.connBudgetErr)
+	}
+
 	runCtx, runCancel := context.WithCancel(ctx)
 	// Store context so CM callbacks can start goroutines bound to the
 	// Service lifecycle (see onCMSessionEstablished).
@@ -2556,6 +2607,31 @@ func (s *Service) Run(ctx context.Context) error {
 			continue
 		}
 
+		// The shared ceiling is taken HERE, in the accept loop, before the
+		// handler goroutine exists.
+		//
+		// ⚠️ Review found reserving inside the handler was too late, and the
+		// gap is not theoretical: the handler blocks on peerMu, and while it
+		// waits this loop keeps accepting. Every socket in that queue is
+		// open, holds a descriptor, and is invisible to Budget.Used — so the
+		// node holds more connections than its ceiling while reporting that
+		// it does not. The per-IP caps do not close it either: they are
+		// per-IP, and the queue grows with the number of sources.
+		//
+		// Refusal closes the socket right here, which is also the cheapest
+		// possible point: no goroutine, no metered wrapper, no registry entry.
+		inboundReservation, budgetErr := s.connBudget.Reserve(connbudget.DirectionInbound)
+		if budgetErr != nil {
+			log.Warn().
+				Err(budgetErr).
+				Str("ip", ip).
+				Str("reason", "connection-budget").
+				Msg("reject connection")
+			_ = conn.Close()
+			s.decrementIPConn(ip)
+			continue
+		}
+
 		s.connWg.Add(1)
 		// lifecycle: joined by connWg, not runLoopsWg. A connection handler is
 		// per-CONNECTION rather than per-Run: it ends when its socket closes,
@@ -2563,12 +2639,18 @@ func (s *Service) Run(ctx context.Context) error {
 		// connWg.Wait defer above, which must run at its own point in the
 		// order. Tracking it in the lifecycle group as well would give one
 		// goroutine two owners.
-		go func(c net.Conn, cip string) {
+		go func(c net.Conn, cip string, reservation *connbudget.Reservation) {
 			defer s.connWg.Done()
 			defer crashlog.DeferRecover()
 			defer s.decrementIPConn(cip)
-			s.handleConn(c)
-		}(conn, ip)
+			// Release covers every early exit of the handler — blacklist,
+			// registration refusal, a socket that says nothing. Once the
+			// connection is registered the entry owns the unit and releases
+			// it on unregister; Release is idempotent, so the two cannot
+			// double-free between them.
+			defer reservation.Release()
+			s.handleConn(c, reservation)
+		}(conn, ip, inboundReservation)
 	}
 }
 
@@ -2679,7 +2761,7 @@ func (s *Service) SubscribeLocalChanges() (<-chan protocol.LocalChangeEvent, fun
 // dispatch, auth, subscriber and inbound bookkeeping paths run on ConnID
 // alone — RemoteAddr, SendFrame and Close are reached through the
 // netcore.Network registry rather than a captured *netcore.NetCore handle.
-func (s *Service) handleConn(conn net.Conn) {
+func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation) {
 	if !s.disableRateLimiting && s.isBlacklistedConn(conn) {
 		// The peer-banned notice was already delivered on the session
 		// that tripped the blacklist (see addBanScore), so a raw
@@ -2693,7 +2775,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		return
 	}
 	metered := netcore.NewMeteredConn(conn)
-	if !s.registerInboundConn(metered) {
+	if !s.registerInboundConn(metered, reservation) {
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections").Msg("reject connection")
 		_ = conn.Close()
 		return
@@ -8108,7 +8190,15 @@ func (s *Service) countInboundConnsLocked() int {
 // (net.Conn, ConnID) binding for an inbound socket. net.Conn-first by the
 // carve-out list in conn_registry.go: there is no ConnID before this
 // function runs.
-func (s *Service) registerInboundConn(conn net.Conn) bool {
+// The budget reservation is taken by the ACCEPT LOOP and handed in here, not
+// taken here: by the time this function runs the socket has already been open
+// for however long peerMu was contended, and a ceiling that starts counting
+// then is a ceiling with a queue in front of it (see the accept loop).
+//
+// Ownership transfers on success: the registry entry holds the unit and
+// releases it on unregister. On failure the caller's deferred Release covers
+// it — and since Release is idempotent, the two paths cannot double-free.
+func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Reservation) bool {
 	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_held").Msg("peer_mu_writer")
@@ -8132,7 +8222,7 @@ func (s *Service) registerInboundConn(conn net.Conn) bool {
 	if metered, ok := conn.(*netcore.MeteredConn); ok {
 		mc = metered
 	}
-	s.registerInboundConnLocked(conn, pc, mc)
+	s.registerInboundConnLocked(conn, pc, mc, reservation)
 	return true
 }
 

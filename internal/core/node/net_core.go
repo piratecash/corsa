@@ -1,6 +1,7 @@
 package node
 
 import (
+	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
@@ -29,4 +30,15 @@ type connEntry struct {
 	core    *netcore.NetCore
 	metered *netcore.MeteredConn
 	tracked bool
+
+	// budget is this connection's unit of the shared connection ceiling,
+	// taken at accept — before any expensive state exists and before the
+	// handshake runs, because an accepted socket already costs memory and a
+	// descriptor whether or not it ever says hello.
+	//
+	// Released exactly once, when the entry is unregistered. nil for
+	// outbound entries: their unit lives with the dial attempt that created
+	// them (see slot.reservation in connection_manager.go), and accounting
+	// it twice would halve the ceiling.
+	budget *connbudget.Reservation
 }

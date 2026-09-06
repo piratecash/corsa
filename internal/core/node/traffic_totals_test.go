@@ -245,7 +245,7 @@ func registerInboundMeteredConn(t *testing.T, svc *Service, id uint64, addr doma
 		core.SetAuth(auth)
 	}
 	svc.peerMu.Lock()
-	svc.registerInboundConnLocked(m, core, m)
+	svc.registerInboundConnLocked(m, core, m, nil)
 	svc.peerMu.Unlock()
 	t.Cleanup(func() {
 		core.Close()

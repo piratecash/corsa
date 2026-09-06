@@ -268,7 +268,10 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 }
 
 func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddress) (bool, error) {
-	rawConn, err := s.dialPeer(ctx, address, dialTimeout)
+	// Budgeted. This is the legacy session path (ensurePeerSessions), inert
+	// while the connection manager is wired — but a dial path that is dead
+	// today and unbudgeted tomorrow is how a ceiling quietly stops holding.
+	rawConn, err := s.dialPeerWithBudget(ctx, address, dialTimeout)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", errPeerDialTransport, err)
 	}

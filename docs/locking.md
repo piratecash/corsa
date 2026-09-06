@@ -48,6 +48,22 @@ Fields that remain outside this scheme:
 - `presenceProber` — immutable after `NewService`; its schedule and open attempts live behind its own leaf mutex (`presence_prober.go`), which is never held across `SendLocal`. It is a separate engine from `identityResolver` even though both send `get_identity`: a resolution ENDS when it succeeds and a liveness question never does. The two are told apart at ingest by whose label an answer carries.
 
 - `identityResolver` — immutable after `NewService`; every mutable field of the identity lookup engine lives behind the resolver's own mutex (`identity_resolver.go`), and its disk I/O (the durable intent table) runs outside any domain mutex.
+- `connBudget` (`internal/core/connbudget`) — the shared connection ceiling, and a **leaf** by
+  construction rather than by discipline: nothing inside that package calls out, so no other lock
+  can be taken while its mutex is held. That is what makes it usable from BOTH sides of a boundary
+  the canonical order forbids crossing — `ConnectionManager` takes it under `cm.mu` when it reserves
+  capacity for a dial, and `registerInboundConn` takes it under `peerMu` when it admits a socket.
+  Neither one reaches the other, so the forbidden `cm.mu → peerMu` edge does not appear. Both take
+  it LAST; nothing takes anything under it.
+
+  The reservation handle it returns is deliberately a value that can be MOVED rather than a counter
+  someone has to remember to decrement: an outbound unit travels with the dial attempt and, when
+  its slot disappears mid-dial, is parked in `ConnectionManager.orphanReservations` keyed by the
+  attempt's generation, because removing a slot does not cancel a dial and the socket it may still
+  open must stay accounted for. Release is idempotent, so the several ends an attempt can have —
+  failure, shutdown, a late success closing a stale socket — cannot free the same unit twice and
+  inflate the ceiling.
+
 - `identityFileMu` — a leaf mutex serialising the `identity_backup` / `identity_restore` local RPC pair: both funnel secrets through one predictable `<path>.tmp` (`identity.Save`, `writeSecretFile`), so two concurrent calls could interleave write-then-rename — or remove each other's temp — and acknowledge content another call wrote. The name→path resolution (`resolveIdentityBackupPath`) runs INSIDE the same section, not before it: its symlink check is a check on what is there right now, and a check performed outside the lock that guards the write is a TOCTOU window, not a check. Held only inside the two frame handlers around the file I/O; it takes no domain mutex, no domain mutex takes it, and it adds no edge to the canonical order.
 - The two snapshot-persisted stores (`trustStore`, `identityIntentStore`) share one write discipline: a mutator takes the store's own state mutex, advances a **snapshot generation counter**, copies the state and releases the mutex BEFORE any disk I/O. The write itself runs under the store's dedicated `saveMu` (they share one `.tmp` path), and a snapshot whose generation is ≤ the last persisted one is dropped — two mutators racing to the disk can land in either order, and the generation, not scheduling luck, decides what the file holds. `saveMu` is never taken with the state mutex held and no domain mutex is anywhere near either lock.
 - `messageStore`, `seenAckJournal`, `deliveryFailureJournal`, `emissionJournal` — registered once before `Run` (RegisterMessageStore / RegisterDeliveryOutbox) and immutable afterwards, so reads need no mutex; their SQLite I/O never runs under a domain mutex. The failure-journal write is synchronous after lock release (it is the durable boundary of retry abandonment — shutdown does not wait for backgroundWg before the chatlog closes); MarkSeenConfirmed may run on the background pool, losing it only costs one redundant idempotent seen re-send. `emissionJournal` is the one reached through a lane of its own — `emissionLane`, described in the delivery-retry section below — because its two writers compete for the same single SQLite writer and one of them is on the critical path of an outgoing message.
@@ -373,6 +389,22 @@ Every migration step must keep the existing node test suite green. Targeted regr
 
   `sessionTransitionSeq` перечислен выше под `peerMu` — это счётчик, упорядочивающий закрытие сессии против реконнекта (`nextSessionTransitionLocked`). Он выдаётся внутри той же секции `peerMu`, в которой определяется переход 0 → 1 / 1 → 0, и место здесь и есть смысл: показание часов приходится снимать ДО лока, поэтому две перекрывающиеся сессии могут снять свои показания и дойти до лока в обратном порядке. Присутствие сравнивает номера переходов и никогда — показания.
 - `identityResolver` — иммутабелен после `NewService`; всё мутабельное состояние движка identity lookup живёт за собственным мьютексом резолвера (`identity_resolver.go`), а его дисковый I/O (durable-таблица намерений) выполняется вне любых доменных мьютексов.
+- `connBudget` (`internal/core/connbudget`) — общий потолок соединений, **leaf по построению**, а не
+  по договорённости: внутри пакета нет ни одного вызова наружу, поэтому под его мьютексом нельзя
+  взять никакой другой. Именно это позволяет обращаться к нему **с обеих сторон** границы, которую
+  канонический порядок пересекать запрещает: `ConnectionManager` берёт его под `cm.mu`, резервируя
+  ёмкость под дозвон, а `registerInboundConn` — под `peerMu`, допуская сокет. Друг до друга они не
+  дотягиваются, поэтому запрещённое ребро `cm.mu → peerMu` не возникает. Оба берут его ПОСЛЕДНИМ;
+  под ним не берётся ничего.
+
+  Возвращаемая резервация намеренно является значением, которое можно **передать**, а не счётчиком,
+  который кто-то обязан не забыть уменьшить: исходящая единица едет вместе с попыткой дозвона, а
+  если её слот исчез посреди дозвона — паркуется в `ConnectionManager.orphanReservations` по
+  поколению попытки, потому что удаление слота **не отменяет** дозвон, и сокет, который он ещё может
+  открыть, обязан оставаться учтённым. Освобождение идемпотентно, поэтому несколько возможных концов
+  попытки — отказ, остановка узла, поздний успех, закрывающий устаревший сокет — не могут освободить
+  одну единицу дважды и раздуть потолок.
+
 - `identityFileMu` — leaf-мьютекс, сериализующий пару локальных RPC `identity_backup` / `identity_restore`: обе гонят секреты через один предсказуемый `<path>.tmp` (`identity.Save`, `writeSecretFile`), и два конкурентных вызова могли бы перемешать write-then-rename — или удалить чужой temp — и подтвердить содержимое, которое записал другой вызов. Резолв имени в путь (`resolveIdentityBackupPath`) выполняется ВНУТРИ той же секции, а не до неё: его проверка на symlink — это проверка того, что лежит там прямо сейчас, и проверка вне лока, охраняющего запись, — не проверка, а TOCTOU-окно. Держится только внутри двух frame-хендлеров вокруг файлового I/O; доменных мьютексов не берёт, доменные его не берут, ребра в канонический порядок не добавляет.
 - Два snapshot-персистируемых стора (`trustStore`, `identityIntentStore`) делят одну дисциплину записи: мутатор берёт собственный state-мьютекс стора, продвигает **счётчик поколений снапшота**, копирует состояние и отпускает мьютекс ДО любого дискового I/O. Сама запись идёт под выделенным `saveMu` стора (они делят один `.tmp`-путь), и снапшот с поколением ≤ последнего персистированного отбрасывается — два мутатора могут добежать до диска в любом порядке, и что лежит в файле, решает поколение, а не удача планировщика. `saveMu` никогда не берётся при удерживаемом state-мьютексе, и ни один доменный мьютекс рядом с этими локами не участвует.
 - `messageStore`, `seenAckJournal`, `deliveryFailureJournal`, `emissionJournal` — регистрируются один раз до `Run` (RegisterMessageStore / RegisterDeliveryOutbox) и далее иммутабельны, поэтому чтения не требуют мьютекса; их SQLite I/O никогда не выполняется под доменным мьютексом. Запись failure-журнала — синхронная после освобождения локов (это durable-граница отказа от ретраев — shutdown не ждёт backgroundWg перед закрытием chatlog); MarkSeenConfirmed может идти через background-пул: его потеря стоит лишь одного избыточного идемпотентного повтора seen. К `emissionJournal` единственному ходят через собственную полосу — `emissionLane`, описанную ниже в разделе про ретраи доставки, — потому что два его писателя конкурируют за одного и того же единственного writer'а SQLite, и один из них лежит на критическом пути исходящего сообщения.

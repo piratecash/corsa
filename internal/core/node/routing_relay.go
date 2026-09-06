@@ -26,7 +26,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"sort"
 	"strings"
 	"time"
@@ -1166,7 +1165,11 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		return
 	}
 
-	conn, err := net.DialTimeout("tcp", string(address), syncHandshakeTimeout)
+	// Budgeted: the notice fallback opens a real socket when no connection
+	// exists, so it draws on the same ceiling. Refused means the notice is
+	// not delivered by this path — a notice is not worth exceeding the limit,
+	// and the peer will learn the same fact from the next live connection.
+	conn, err := s.dialAddressWithBudget(address, syncHandshakeTimeout)
 	if err != nil {
 		return
 	}

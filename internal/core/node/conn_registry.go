@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
@@ -525,8 +526,8 @@ func (s *Service) setTrackedByIDLocked(id domain.ConnID, tracked bool) {
 // index in lock-step — the only place in the codebase where a (conn, id, entry)
 // triple is created for an inbound connection. The caller must hold s.peerMu
 // write lock and must ensure the connection is not already registered.
-func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore, metered *netcore.MeteredConn) {
-	entry := &connEntry{core: core}
+func (s *Service) registerInboundConnLocked(conn net.Conn, core *netcore.NetCore, metered *netcore.MeteredConn, budget *connbudget.Reservation) {
+	entry := &connEntry{core: core, budget: budget}
 	if metered != nil {
 		entry.metered = metered
 	}
@@ -555,6 +556,12 @@ func (s *Service) unregisterConnLocked(conn net.Conn) {
 	id, ok := s.connIDByNetConn[conn]
 	if !ok {
 		return
+	}
+	// The connection stops existing here, so its unit of the shared ceiling
+	// stops being owed here. Release is idempotent, so a path that
+	// unregisters twice cannot inflate free capacity.
+	if entry, exists := s.conns[id]; exists {
+		entry.budget.Release()
 	}
 	delete(s.conns, id)
 	delete(s.connIDByNetConn, conn)

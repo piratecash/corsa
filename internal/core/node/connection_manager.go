@@ -9,6 +9,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/connbudget"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 )
@@ -56,6 +57,18 @@ type slot struct {
 	RetryCount       int
 	Generation       uint64 // incremented on every state transition
 	Session          *peerSession
+
+	// reservation is this slot's unit of the shared connection budget. It is
+	// taken BEFORE the first dial starts and handed along the attempt — the
+	// slot is where it rests between attempts, not what owns it.
+	//
+	// The distinction matters because removing a slot does NOT cancel a dial
+	// already in flight: the socket still gets opened and is closed later, in
+	// handleDialSucceeded. Releasing on slot removal would therefore free
+	// capacity while the connection it paid for still exists. Instead the
+	// reservation is MOVED to orphanReservations, keyed by the generation the
+	// in-flight worker carries, and released when that attempt reports back.
+	reservation *connbudget.Reservation
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +141,16 @@ type DialResult struct {
 type ConnectionManagerConfig struct {
 	// MaxSlotsFn returns the current slot limit. Called on every fill().
 	MaxSlotsFn func() int
+
+	// Budget is the SHARED connection ceiling (inbound + outbound + attempts
+	// in flight). It is injected rather than reached for, because the whole
+	// point is that this manager and the Service consult the SAME object
+	// without either one taking the other's lock — connbudget's mutex is a
+	// leaf, so the forbidden cm.mu → peerMu edge never appears.
+	//
+	// Nil is legal and reserves freely: it is the "no budget wired" case
+	// used by tests, not a silent zero ceiling.
+	Budget *connbudget.Budget
 
 	// Provider supplies filtered, sorted candidates.
 	Provider *PeerProvider
@@ -232,6 +255,16 @@ type ConnectionManager struct {
 	slots      []*slot
 	generation uint64 // monotonic counter for slot generations
 
+	// orphanReservations holds budget units whose slot is gone while their
+	// dial is still in flight, keyed by the slot generation the worker
+	// carries. The dial that reports back under that generation releases it,
+	// which is the only moment at which the socket it may have opened is
+	// known to be closed.
+	//
+	// Bounded by the number of dials in flight, which is bounded by the slot
+	// limit; drained on shutdown so nothing is leaked past Run.
+	orphanReservations map[uint64]*connbudget.Reservation
+
 	config     ConnectionManagerConfig
 	slotEvents chan SlotEvent
 	hintEvents chan HintEvent
@@ -293,7 +326,8 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 	}
 	maxSlots := cfg.MaxSlotsFn()
 	return &ConnectionManager{
-		slots:       make([]*slot, 0, maxSlots),
+		slots:              make([]*slot, 0, maxSlots),
+		orphanReservations: make(map[uint64]*connbudget.Reservation),
 		config:      cfg,
 		slotEvents:  make(chan SlotEvent, slotEventBuffer(maxSlots)),
 		hintEvents:  make(chan HintEvent, hintEventBuffer),
@@ -303,6 +337,137 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		// treated as "disabled" by Acquire-site nil checks below, so
 		// disabled mode pays no overhead on the hot path.
 		pacer: newDialPacer(cfg.DialPacerInterval, cfg.DialPacerBurst),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared connection budget
+// ---------------------------------------------------------------------------
+
+// reserveOutbound takes one unit of the shared ceiling for one dial attempt.
+// A nil budget reserves freely, so call sites need no nil check.
+func (cm *ConnectionManager) reserveOutbound() (*connbudget.Reservation, error) {
+	return cm.config.Budget.Reserve(connbudget.DirectionOutbound)
+}
+
+// orphanReservationLocked moves a slot's reservation to the in-flight table
+// when the slot goes away while its dial is still running, and releases it
+// outright when nothing is in flight.
+//
+// This is the whole reason the reservation is not simply released on removal:
+// removing a slot does not cancel a dial, so the capacity must stay accounted
+// until the attempt that may still open a socket reports back. Caller holds
+// cm.mu.
+func (cm *ConnectionManager) orphanReservationLocked(s *slot) {
+	if s == nil || s.reservation == nil {
+		return
+	}
+	reservation := s.reservation
+	s.reservation = nil
+
+	if !dialInFlight(s.State) {
+		reservation.Release()
+		return
+	}
+	// A generation is used by exactly one attempt, so it can only ever hold
+	// one orphan. Releasing anything already parked under it would be a
+	// double release of a live attempt's capacity.
+	if _, exists := cm.orphanReservations[s.Generation]; exists {
+		reservation.Release()
+		return
+	}
+	cm.orphanReservations[s.Generation] = reservation
+}
+
+// takeReservationLocked detaches a slot's reservation WITHOUT parking it. It is
+// for the one case orphaning would be wrong: the attempt has already reported
+// back, so no further event will ever arrive under its generation and a parked
+// unit would be held until shutdown.
+//
+// ⚠️ This is the P1 that review found: a terminal dial failure (incompatible
+// peer, retries exhausted) removes the slot while its state still says
+// "dialing", so removeSlotLocked parked the unit for an attempt that had just
+// ended. A handful of such failures exhausted the outbound capacity even with
+// the shared ceiling off, because the per-direction limit applies regardless.
+//
+// Caller holds cm.mu and must release the returned reservation.
+func (cm *ConnectionManager) takeReservationLocked(s *slot) *connbudget.Reservation {
+	if s == nil {
+		return nil
+	}
+	reservation := s.reservation
+	s.reservation = nil
+	return reservation
+}
+
+// takeOrphanLocked removes the reservation parked for a generation and hands
+// it to the caller WITHOUT releasing it. Callers that still have to close a
+// socket use this: capacity must outlive the socket it paid for, so the
+// release happens after the close, not before it. Caller holds cm.mu.
+func (cm *ConnectionManager) takeOrphanLocked(generation uint64) *connbudget.Reservation {
+	reservation, ok := cm.orphanReservations[generation]
+	if !ok {
+		return nil
+	}
+	delete(cm.orphanReservations, generation)
+	return reservation
+}
+
+// releaseOrphanLocked releases the reservation parked for a generation, if the
+// attempt that carried it left one behind. For paths where nothing is left to
+// close — a failed dial produced no socket. Caller holds cm.mu.
+func (cm *ConnectionManager) releaseOrphanLocked(generation uint64) {
+	cm.takeOrphanLocked(generation).Release()
+}
+
+// releaseAllOrphans drains the table on shutdown. Without it a node that
+// stopped with dials in flight would leave capacity accounted against a
+// budget nobody will ever consult again — harmless in a process that is
+// exiting, wrong in a test that reuses one.
+func (cm *ConnectionManager) releaseAllOrphans() {
+	cm.mu.Lock()
+	orphans := cm.orphanReservations
+	cm.orphanReservations = make(map[uint64]*connbudget.Reservation)
+	cm.mu.Unlock()
+
+	for _, reservation := range orphans {
+		reservation.Release()
+	}
+}
+
+// evictionWouldHelp answers whether evicting THIS victim can clear the refusal
+// the budget just returned. Two independent reasons it cannot:
+//
+//   - the refusal is not about slots. The shared ceiling and the outbound
+//     reserve are not freed by giving up an outbound slot — that capacity is
+//     held by somebody else's inbound connections;
+//   - the victim's unit would not actually be freed. A slot whose dial is
+//     still in flight keeps its reservation parked (removal does not cancel a
+//     dial, see orphanReservationLocked), so evicting it costs the attempt and
+//     returns nothing. THIS is the case where the direction limit masks an
+//     equally exhausted ceiling: the count does not go down, so the retry is
+//     refused again and the session was closed for nothing.
+//
+// A nil victim cannot help by definition.
+func evictionWouldHelp(refusal error, victim *slot) bool {
+	if victim == nil {
+		return false
+	}
+	if !errors.Is(refusal, connbudget.ErrDirectionLimit) {
+		return false
+	}
+	return !dialInFlight(victim.State)
+}
+
+// dialInFlight reports whether a slot in this state has a worker that may
+// still open a socket. RetryWait counts: its goroutine is sleeping, and it
+// will dial when the backoff elapses.
+func dialInFlight(state domain.SlotState) bool {
+	switch state {
+	case domain.SlotStateDialing, domain.SlotStateReconnecting, domain.SlotStateRetryWait:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -636,13 +801,62 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 		}
 	}
 
-	// Enforce slot limit: evict one slot if at capacity.
+	// The operator's dial pays the same budget as any other, and the POLICY
+	// here has to answer two questions that reviews found conflated twice.
+	//
+	// ⚠️ First conflation: the original order evicted before reserving, so a
+	// refusal by the SHARED ceiling cost a live session and bought nothing.
+	// ⚠️ Second: the fix made the slot-limit check CONDITIONAL on a budget
+	// error, which broke the manager's own invariant whenever the budget said
+	// yes — no budget wired, or a ceiling wider than MaxSlotsFn — and let the
+	// slot table grow past its maximum.
+	//
+	// Both are avoided by asking the two questions SEPARATELY:
+	//
+	//   1. is the slot table full? That is the manager's own invariant and
+	//      holds whether or not a budget exists;
+	//   2. does the shared ceiling have room for one more outbound?
+	//
+	// Eviction is justified by (1) alone, and ONLY when (2) can be satisfied
+	// afterwards. Killing a session to make room the ceiling would refuse
+	// anyway is exactly what §0.1.1 forbids — and, crucially, "refused by the
+	// direction limit" does not by itself mean the ceiling has room: the
+	// budget reports the most specific reason, so a node against BOTH limits
+	// answers ErrDirectionLimit while the shared ceiling is equally full.
 	maxSlots := cm.config.MaxSlotsFn()
+	slotsFull := len(cm.slots) >= maxSlots
+
 	var teardownInfo *SessionInfo
 	var evictedAddr domain.PeerAddress
-	if len(cm.slots) >= maxSlots {
+
+	reservation, budgetErr := cm.reserveOutbound()
+
+	// Evict when the slot table is what stands in the way — either the budget
+	// already said yes (so only the invariant blocks us) or the refusal is one
+	// that evicting THIS victim can actually clear.
+	if slotsFull {
 		victim := cm.findLowestScoringSlotLocked()
-		if victim != nil {
+		switch {
+		case budgetErr != nil && !evictionWouldHelp(budgetErr, victim):
+			// The refusal is not about slots, or the victim's unit would
+			// not be freed by evicting it. Closing a session for room
+			// that never appears is what §0.1.1 forbids.
+			cm.mu.Unlock()
+			log.Warn().
+				Err(budgetErr).
+				Str("address", string(ev.Address)).
+				Msg("cm: manual peer refused by connection budget; nothing evicted")
+			return
+		case victim == nil:
+			// Nothing to evict: the invariant wins over operator intent,
+			// and the reservation we may hold must not be leaked.
+			reservation.Release()
+			cm.mu.Unlock()
+			log.Warn().
+				Str("address", string(ev.Address)).
+				Msg("cm: manual peer refused — slot table full with no evictable slot")
+			return
+		default:
 			evictedAddr = victim.Address
 			log.Info().
 				Str("evicted", string(victim.Address)).
@@ -651,8 +865,31 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 			if info := cm.deactivateSlotLocked(victim); info != nil {
 				teardownInfo = info
 			}
+			// Removal settles the victim's own unit: a live session
+			// releases it here, an in-flight dial keeps it parked.
 			cm.removeSlotLocked(victim)
+
+			if budgetErr != nil {
+				reservation, budgetErr = cm.reserveOutbound()
+			}
 		}
+	}
+
+	if budgetErr != nil {
+		cm.mu.Unlock()
+
+		log.Warn().
+			Err(budgetErr).
+			Str("address", string(ev.Address)).
+			Msg("cm: manual peer refused by connection budget")
+
+		if evictedAddr != "" {
+			cm.emitSlotRemoved(evictedAddr)
+		}
+		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
+			cm.config.OnSessionTeardown(*teardownInfo)
+		}
+		return
 	}
 
 	gen := cm.nextGenerationLocked()
@@ -661,6 +898,7 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 		DialAddresses: dialAddrs,
 		State:         domain.SlotStateDialing,
 		Generation:    gen,
+		reservation:   reservation,
 	}
 	cm.slots = append(cm.slots, s)
 	cm.mu.Unlock()
@@ -859,10 +1097,14 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 
 	s := cm.findSlotLocked(ev.Address)
 	if s == nil {
+		// The attempt outlived its slot: release the capacity parked for
+		// it. No socket was opened — this is the failure path.
+		cm.releaseOrphanLocked(ev.SlotGeneration)
 		cm.mu.Unlock()
 		return
 	}
 	if s.Generation != ev.SlotGeneration {
+		cm.releaseOrphanLocked(ev.SlotGeneration)
 		cm.mu.Unlock()
 		return
 	}
@@ -876,9 +1118,16 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 			Int("retries", s.RetryCount).
 			Msg("cm: replacing slot")
 
+		// The attempt is OVER: this handler is its final event, so nothing
+		// will arrive later to release a parked unit. Detach before the
+		// removal that would otherwise park it, and release once the lock
+		// is gone.
+		finished := cm.takeReservationLocked(s)
 		teardownInfo := cm.replaceSlotLocked(s)
 		replacedAddr := s.Address
 		cm.mu.Unlock()
+
+		finished.Release()
 
 		// Slot removed — emit empty state so subscribers clear the peer.
 		cm.emitSlotRemoved(replacedAddr)
@@ -926,7 +1175,15 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 
 	s := cm.findSlotLocked(ev.Address)
 	if s == nil || s.Generation != ev.SlotGeneration {
+		// Late success after the slot was replaced or removed. The socket
+		// below is real, so its unit is taken OUT of the parking table here
+		// but released only AFTER the socket is closed: releasing first
+		// would let another attempt occupy the capacity while the old
+		// socket is still open, which is the overshoot the ceiling exists
+		// to prevent.
+		stale := cm.takeOrphanLocked(ev.SlotGeneration)
 		cm.mu.Unlock()
+		defer stale.Release()
 		// Stale: slot already replaced or transitioned.
 		// openPeerSessionForCM left Service maps untouched, but dialForCM
 		// may have registered a fallback→primary entry in Service.dialOrigin
@@ -1036,12 +1293,26 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 	tasks := make([]dialTask, 0, toAdd)
 
 	for i := 0; i < toAdd; i++ {
+		// The budget is taken BEFORE the dial exists, because a socket
+		// being opened costs the same whether or not the handshake ever
+		// finishes. Refusal ends the fill: the ceiling is global, so the
+		// next candidate would be refused for the same reason.
+		reservation, err := cm.reserveOutbound()
+		if err != nil {
+			log.Debug().
+				Err(err).
+				Str("address", string(candidates[i].Address)).
+				Msg("cm: dial refused by connection budget")
+			break
+		}
+
 		gen := cm.nextGenerationLocked()
 		s := &slot{
 			Address:       candidates[i].Address,
 			DialAddresses: candidates[i].DialAddresses,
 			State:         domain.SlotStateDialing,
 			Generation:    gen,
+			reservation:   reservation,
 		}
 		cm.slots = append(cm.slots, s)
 		tasks = append(tasks, dialTask{
@@ -1431,7 +1702,12 @@ func (cm *ConnectionManager) shutdown() {
 		}
 	}
 
-	// 2. Clear slots.
+	// 2. Clear slots, settling each slot's budget unit on the way out. The
+	//    dials still in flight keep theirs until they report back; the
+	//    orphan table is drained after the workers are joined below.
+	for _, s := range cm.slots {
+		cm.orphanReservationLocked(s)
+	}
 	cm.slots = nil
 
 	cm.mu.Unlock()
@@ -1451,6 +1727,11 @@ func (cm *ConnectionManager) shutdown() {
 	// 5. Drain channels: pick up events from workers that finished
 	//    between ctx.Done() and now. Close any stale sessions.
 	cm.drainChannels()
+
+	// 6. Every dial worker has returned and every stale session it may have
+	//    produced is closed, so nothing accounted against the budget is
+	//    still alive. Release what is left.
+	cm.releaseAllOrphans()
 }
 
 func (cm *ConnectionManager) drainChannels() {
@@ -1484,6 +1765,10 @@ func (cm *ConnectionManager) findSlotLocked(address domain.PeerAddress) *slot {
 func (cm *ConnectionManager) removeSlotLocked(target *slot) {
 	for i, s := range cm.slots {
 		if s == target {
+			// Settle the budget BEFORE the slot stops existing: a dial
+			// still in flight keeps the capacity accounted (parked by
+			// generation), anything else releases it now.
+			cm.orphanReservationLocked(s)
 			cm.slots = append(cm.slots[:i], cm.slots[i+1:]...)
 			return
 		}
