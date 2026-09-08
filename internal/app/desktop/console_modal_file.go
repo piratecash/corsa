@@ -210,7 +210,7 @@ func (c *consoleModal) hasPendingThumbnail(transfers []filetransfer.TransferSnap
 		if path == "" {
 			continue
 		}
-		if c.parent.thumbCache.lookup(path, c.parent.window).Pending {
+		if c.parent.thumbCache.lookup(imageSource{Path: path, ContentID: t.FileHash}, c.parent.window).Pending {
 			return true
 		}
 	}
@@ -551,6 +551,7 @@ func (c *consoleModal) layoutFileRowThumbnail(gtx layout.Context, t filetransfer
 			messageID: domain.MessageID(t.FileID),
 			peer:      t.Peer,
 			path:      path,
+			contentID: t.FileHash,
 			name:      fileDisplayName(t),
 			size:      t.FileSize,
 			mine:      mine,
@@ -559,7 +560,7 @@ func (c *consoleModal) layoutFileRowThumbnail(gtx layout.Context, t filetransfer
 
 	var res thumbnailLookup
 	if path != "" {
-		res = c.parent.thumbCache.lookup(path, c.parent.window)
+		res = c.parent.thumbCache.lookup(imageSource{Path: path, ContentID: t.FileHash}, c.parent.window)
 	}
 	if res.Entry == nil {
 		// Waiting on the file itself or on its decode; a failed decode is the

@@ -1223,7 +1223,7 @@ func TestARefusalLearnedInAnotherChatIsToldOnReturn(t *testing.T) {
 
 	// Going back to the first is where it has to be said.
 	w.snap.ActivePeer = first
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	if told() != 1 || onScreen() != notice {
 		t.Fatalf("returning to the refused conversation said %v", router.statuses)
 	}
@@ -1231,7 +1231,7 @@ func TestARefusalLearnedInAnotherChatIsToldOnReturn(t *testing.T) {
 	// Walking into a conversation that CAN take them takes the notice off the
 	// line: it is about the chat the user has left.
 	w.snap.ActivePeer = second
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	if onScreen() != "" {
 		t.Fatalf("the notice about another chat stayed on screen: %q", onScreen())
 	}
@@ -1239,7 +1239,7 @@ func TestARefusalLearnedInAnotherChatIsToldOnReturn(t *testing.T) {
 	// And coming back does not say it again: it is one fact about that
 	// conversation, and the line is shared with everything else.
 	w.snap.ActivePeer = first
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	if told() != 1 {
 		t.Fatalf("the notice was repeated on every visit: %v", router.statuses)
 	}
@@ -1248,14 +1248,14 @@ func TestARefusalLearnedInAnotherChatIsToldOnReturn(t *testing.T) {
 	// say each once — not re-announce whichever was not the last one seen.
 	router.unsupportedPeers[second] = true
 	w.snap.ActivePeer = second
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	if told() != 2 {
 		t.Fatalf("the second refused conversation was not announced: %v", router.statuses)
 	}
 	w.snap.ActivePeer = first
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	w.snap.ActivePeer = second
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	if told() != 2 {
 		t.Fatalf("walking between two refused conversations kept repeating: %v", router.statuses)
 	}
@@ -1397,7 +1397,7 @@ func TestTheLocalOnlyNoticeGoesWhenNoConversationIsOpen(t *testing.T) {
 
 	// Back: nothing is open.
 	w.snap.ActivePeer = domain.PeerIdentity{}
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	if last := router.statuses[len(router.statuses)-1]; last != "" {
 		t.Fatalf("the line still says %q with no conversation open", last)
 	}
@@ -1405,7 +1405,7 @@ func TestTheLocalOnlyNoticeGoesWhenNoConversationIsOpen(t *testing.T) {
 	// Coming back in does not say it again: it is one fact about that
 	// conversation, and Back is not a new conversation.
 	w.snap.ActivePeer = peer
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 	if told() != 1 {
 		t.Fatalf("an ordinary Back made the notice repeat: %v", router.statuses)
 	}

@@ -70,8 +70,8 @@ const viewerCacheMaxBytes = 96 << 20
 // same reason: the viewer must tell "not yet" (keep the placeholder, expect
 // a redraw) from "never" (draw the fallback), and reading those as two
 // separate calls has a Pending→Ready window between them.
-func (c *viewerImageCache) lookup(path string, window *app.Window) thumbnailLookup {
-	if path == "" {
+func (c *viewerImageCache) lookup(src imageSource, window *app.Window) thumbnailLookup {
+	if src.Path == "" {
 		return thumbnailLookup{}
 	}
 	c.mu.Lock()
@@ -79,24 +79,32 @@ func (c *viewerImageCache) lookup(path string, window *app.Window) thumbnailLook
 	if c.entries == nil {
 		c.entries = make(map[string]*thumbnailEntry)
 	}
-	if entry, ok := c.entries[path]; ok {
-		switch entry.state {
-		case thumbReady:
-			return thumbnailLookup{Entry: entry}
-		case thumbPending:
-			return thumbnailLookup{Pending: true}
-		default: // thumbFailed
-			return thumbnailLookup{}
+	if entry, ok := c.entries[src.Path]; ok {
+		if entry.contentID == src.ContentID {
+			switch entry.state {
+			case thumbReady:
+				return thumbnailLookup{Entry: entry}
+			case thumbPending:
+				return thumbnailLookup{Pending: true}
+			default: // thumbFailed
+				return thumbnailLookup{}
+			}
 		}
+		// The file name outlived the file: see imageSource. The viewer
+		// keeps far less than the thumbnail cache does, which is why it
+		// showed the right picture while the bubble behind it showed the
+		// erased one — but "less" is not "none", and a preload held across
+		// a step is the same bitmap under the same reused name.
+		c.dropLocked(src.Path)
 	}
 	if window == nil {
 		// Nothing to wake when the decode finishes, so there is no point
 		// starting one — what is already decoded is still returned above.
 		return thumbnailLookup{}
 	}
-	entry := &thumbnailEntry{state: thumbPending}
-	c.putLocked(path, entry)
-	go c.decodeInBackground(path, entry, window)
+	entry := &thumbnailEntry{state: thumbPending, contentID: src.ContentID}
+	c.putLocked(src.Path, entry)
+	go c.decodeInBackground(src.Path, entry, window)
 	return thumbnailLookup{Pending: true}
 }
 
@@ -152,12 +160,12 @@ func (c *viewerImageCache) evictBeyondBudgetLocked() {
 // Dropping a PENDING entry is safe: its decode goroutine re-checks the
 // entry it was spawned for by pointer identity and discards a result whose
 // entry is gone.
-func (c *viewerImageCache) retain(primary string, neighbours ...string) {
+func (c *viewerImageCache) retain(primary imageSource, neighbours ...imageSource) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.primary = primary
+	c.primary = primary.Path
 	for _, path := range append([]string(nil), c.order...) {
-		if path != primary && !containsPath(neighbours, path) {
+		if path != primary.Path && !containsPath(neighbours, path) {
 			c.dropLocked(path)
 		}
 	}
@@ -171,9 +179,9 @@ func (c *viewerImageCache) forget(path string) {
 	c.dropLocked(path)
 }
 
-func containsPath(paths []string, want string) bool {
-	for _, path := range paths {
-		if path == want {
+func containsPath(sources []imageSource, want string) bool {
+	for _, source := range sources {
+		if source.Path == want {
 			return true
 		}
 	}

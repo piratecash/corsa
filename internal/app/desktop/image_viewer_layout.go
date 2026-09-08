@@ -469,10 +469,10 @@ func (v *imageViewer) metaLine(item viewerItem, compact bool) string {
 // already decoded it. Zero until one of them has: the header is a caption,
 // not a reason to read a file header on the layout path.
 func (v *imageViewer) naturalSize(item viewerItem) image.Point {
-	if entry := v.cache.lookup(item.path, v.parent.window).Entry; entry != nil {
+	if entry := v.cache.lookup(item.source(), v.parent.window).Entry; entry != nil {
 		return entry.natural
 	}
-	if entry := v.parent.thumbCache.get(item.path, v.parent.window); entry != nil {
+	if entry := v.parent.thumbCache.get(item.source(), v.parent.window); entry != nil {
 		return entry.natural
 	}
 	return image.Point{}
@@ -541,7 +541,7 @@ func (v *imageViewer) paintCurrent(gtx layout.Context, item viewerItem) (image.R
 		return image.Rectangle{}, false
 	}
 
-	full := v.cache.lookup(item.path, v.parent.window)
+	full := v.cache.lookup(item.source(), v.parent.window)
 	if full.Entry != nil {
 		return v.paintPicture(gtx, full.Entry), true
 	}
@@ -557,7 +557,7 @@ func (v *imageViewer) paintCurrent(gtx layout.Context, item viewerItem) (image.R
 	// a lower resolution, so it stands in — a soft image is closer to the
 	// truth than an empty rectangle, and it appears in the right place and
 	// at the right aspect ratio, so nothing moves when the full one lands.
-	if thumb := v.parent.thumbCache.get(item.path, v.parent.window); thumb != nil {
+	if thumb := v.parent.thumbCache.get(item.source(), v.parent.window); thumb != nil {
 		return v.paintPicture(gtx, thumb), true
 	}
 	v.fit = image.Point{}
@@ -765,7 +765,7 @@ func (v *imageViewer) layoutThumbTile(gtx layout.Context, index, width, height i
 		inner := image.Rect(borderWidth, borderWidth, size.X-borderWidth, size.Y-borderWidth)
 		paint.FillShape(gtx.Ops, viewerThumbFill(), clip.UniformRRect(inner, max(0, radius-borderWidth)).Op(gtx.Ops))
 
-		entry := v.parent.thumbCache.get(item.path, v.parent.window)
+		entry := v.parent.thumbCache.get(item.source(), v.parent.window)
 		if entry == nil {
 			return layout.Dimensions{Size: size}
 		}

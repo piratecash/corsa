@@ -136,7 +136,7 @@ const reactionReadTimeout = 2 * time.Second
 
 // messageReactionChips returns the chip row's widget state for one message,
 // creating it on first access. Like every other per-message cache it is dropped
-// on a conversation change (resetReplyOnPeerChange), which is what keeps it
+// on a conversation change (resetConversationStateOnPeerChange), which is what keeps it
 // from growing across peers.
 func (w *Window) messageReactionChips(id domain.MessageID) *ui.ReactionChipsState {
 	chips := w.msgReactionChips[id]

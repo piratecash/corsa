@@ -736,6 +736,69 @@ what actually bounds the decode: `estimateDecodeBytes` reads the header and
 rejects the bombs, and the byte-weighted `thumbDecodeAdmit` budget serializes
 large decodes across both.
 
+**What a cached bitmap is for.** Both caches are asked with an
+`imageSource` — where to read the picture AND which content is expected
+there, the announce's file hash. A path alone is not an identity: a
+received file is stored under the sender's file name, and that name is
+handed out again the moment nothing occupies it. Erasing a conversation
+unlinks those files, so the next picture called `photo.jpg` lands on
+exactly the path a decoded bitmap still claimed, and the chat bubble
+repainted the ERASED picture while the viewer — which keeps nothing once it
+closes — decoded the file and showed the new one. An entry is therefore
+served only for the content id it was decoded under; anything else replaces
+it, one entry per location, so the superseded megabytes go back at once
+instead of waiting for an unrelated eviction.
+
+Leaving a conversation gives back everything decoded for it
+(`thumbnailCache.clear`, alongside the per-message widget maps in
+`resetConversationStateOnPeerChange`). The LRU is what BOUNDS this cache;
+this is about not holding a chat's pictures for a screen nobody is looking
+at, and the chat being entered decodes its own either way. The file cards'
+button maps — the preview's click target and the download / cancel /
+restart / reveal / open / delete rows — are reset in the same place and
+were not reset anywhere before it: keyed by message id, they kept a
+`widget.Clickable` for every attachment the process had ever drawn, in
+every conversation, for as long as it ran.
+
+**A deletion is not a conversation change.** A message deleted here, one
+the peer deleted, or the whole thread wiped from either side all leave
+ActivePeer exactly where it was, so the reset above never sees them —
+until `dropStateOfRemovedMessages`, the erased pictures' bitmaps stayed in
+the cache until the user happened to switch chats. That pass runs once per
+DM generation and states a fact rather than applying a delta: whatever is
+keyed by a message the open conversation no longer has, goes. Being
+idempotent, a generation it skips is corrected by the next one, and it
+takes the same `CacheReady` gate as `dropStaleReply` — an empty
+conversation that is merely still loading is not one whose messages are
+gone.
+
+The bitmaps need one thing the message ids cannot give: a deleted message
+takes its file-transfer mapping with it, so by the time the window sees the
+message gone, nothing knows where its picture was any more. `msgImagePaths`
+is that memory — the file each message's preview was last read from,
+written where a card, a reply quote or the viewer's strip resolves a path,
+and pruned by the same pass.
+
+The pass carries two obligations with different triggers. What the chat
+thread alone owns is settled once per DM generation. The three buttons the
+console's Files tab also draws can only be settled while it is closed —
+that tab lists every peer's transfers, so the open conversation is not
+authority over their keys, and taking a button away from a row being drawn
+loses the press in flight. Closing the console moves no generation, so what
+it still owes is REMEMBERED (`sharedFileButtonsOwed`) rather than inferred
+from the counter: a single generation gate advanced past the deletion and
+never came back, and those maps kept the erased message until the next
+change or a chat switch.
+
+The debt therefore has two sources, and the second is not about deletion at
+all: it stands for as long as the Files tab is OPEN, because while it is up
+it writes keys of its own — other chats' transfers — into those maps, and
+browsing it changes nothing this window counts. Raised on a generation and
+raised on every pass the console is visible; paid on the first pass after it
+closes, against the live set like everything else here. With the console
+closed all along, it is raised and paid inside the same call, so nothing is
+deferred in the ordinary case.
+
 While the full bitmap is being decoded the thumbnail stands in, stretched —
 it is the same picture at the same aspect ratio, so nothing moves when the
 full one lands; with neither, the viewer says so, and a decode that fails
@@ -2005,6 +2068,68 @@ OpenGL ES 3.0 (базовая для минимальной версии Android
 остаётся то, что реально ограничивает декод: `estimateDecodeBytes` читает
 заголовок и отсекает бомбы, а байтовый бюджет `thumbDecodeAdmit` сериализует
 крупные декоды сразу для обоих.
+
+**Для чего именно лежит битмап.** Оба кэша спрашивают через `imageSource` —
+где читать картинку И какое содержимое там ожидается (хеш файла из
+анонса). Путь сам по себе идентичностью не является: принятый файл
+сохраняется под именем, которое дал отправитель, и это имя выдаётся снова,
+как только его никто не занимает. Очистка переписки удаляет такие файлы, и
+следующая картинка с именем `photo.jpg` ложится ровно на тот путь, на
+который всё ещё ссылается декодированный битмап: пузырь чата перерисовывал
+УДАЛЁННУЮ картинку, а просмотрщик, который после закрытия не хранит ничего,
+декодировал файл и показывал новую. Поэтому запись отдаётся только под тот
+content id, под которым она декодирована; любой другой её заменяет — одна
+запись на одно место, и вытесненные мегабайты возвращаются сразу, а не
+дожидаются постороннего вытеснения.
+
+Уход из переписки отдаёт всё, что было декодировано для неё
+(`thumbnailCache.clear` рядом с per-message картами виджетов в
+`resetConversationStateOnPeerChange`). Размер кэша ОГРАНИЧИВАЕТ LRU; здесь
+речь о другом — не держать картинки чата ради экрана, на который никто не
+смотрит, а входящий чат всё равно декодирует свои. Там же сбрасываются
+карты кнопок файловых карточек — цель клика по превью и ряд
+скачать / отменить / перезапустить / показать в папке / открыть / удалить, —
+которые до этого не сбрасывались нигде: ключ у них — id сообщения, и они
+держали по `widget.Clickable` на каждое вложение, которое процесс когда-либо
+нарисовал, во всех переписках и всё время работы.
+
+**Удаление — это не смена переписки.** Сообщение, удалённое здесь, удалённое
+собеседником, и полная очистка ветки с любой стороны оставляют ActivePeer
+там же, где он был, поэтому сброс выше их не видит: до
+`dropStateOfRemovedMessages` битмапы стёртых картинок лежали в кэше, пока
+пользователь случайно не переключит чат. Этот проход выполняется раз на
+DM-поколение и утверждает факт, а не применяет дельту: всё, что ключевано
+сообщением, которого в открытой переписке больше нет, отдаётся. Он
+идемпотентен, поэтому пропущенное поколение исправляется следующим, и берёт
+тот же гейт `CacheReady`, что и `dropStaleReply`: пустая переписка, которая
+всего лишь ещё грузится, — не та, у которой удалили сообщения.
+
+Битмапам нужно то, чего id сообщения дать не может: удалённое сообщение
+уносит с собой mapping файловой передачи, и к моменту, когда окно видит его
+исчезновение, где лежала картинка, не знает уже никто. `msgImagePaths` — это
+и есть та память: файл, из которого превью сообщения читалось последний раз;
+пишется там, где путь резолвят карточка, квота ответа или лента
+просмотрщика, и подчищается тем же проходом.
+
+У прохода два обязательства с разными триггерами. То, чем владеет только
+лента чата, закрывается раз на DM-поколение. Три кнопки, которые рисует ещё
+и вкладка Files консоли, закрыть можно лишь при закрытой консоли: та вкладка
+перечисляет передачи всех собеседников, поэтому открытая переписка их ключам
+не хозяйка, а отнять кнопку у строки, которую сейчас рисуют, — значит
+потерять нажатие на лету. Закрытие консоли не двигает поколение, поэтому её
+долг именно ЗАПОМИНАЕТСЯ (`sharedFileButtonsOwed`), а не выводится из
+счётчика: одиночный гейт по поколению проскакивал удаление и больше не
+возвращался, и эти карты держали стёртое сообщение до следующего изменения
+или переключения чата.
+
+Источников у долга два, и второй к удалению не относится вовсе: он стоит всё
+время, пока вкладка Files ОТКРЫТА, потому что она пишет в эти карты
+собственные ключи — передачи других переписок, — а её просмотр не меняет
+ничего из того, что окно считает. Поднимается на смене поколения и на каждом
+проходе, пока консоль видима; гасится первым проходом после её закрытия,
+против живого набора, как и всё здесь. Если консоль не открывали вовсе, долг
+возникает и гасится в том же вызове, так что в обычном случае ничего не
+откладывается.
 
 Пока полный битмап декодируется, его подменяет растянутая миниатюра — это то
 же изображение с тем же соотношением сторон, поэтому при появлении полного

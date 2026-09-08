@@ -1419,7 +1419,7 @@ func TestResetReplyOnPeerChange(t *testing.T) {
 		lastChatPeer: domaintest.ID("peer-a"),
 	}
 
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 
 	if w.replyToMsg != nil {
 		t.Error("replyToMsg should be nil after peer change")
@@ -1441,7 +1441,7 @@ func TestResetReplyOnPeerChangeSamePeer(t *testing.T) {
 		lastChatPeer: domaintest.ID("peer-a"),
 	}
 
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
 
 	if w.replyToMsg != replyMsg {
 		t.Error("replyToMsg should remain unchanged when peer is the same")

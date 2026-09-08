@@ -383,6 +383,23 @@ type Window struct {
 	// the old count+first/last heuristic missed.
 	msgCacheByID map[string]cachedMsg
 	msgCacheGen  uint64 // snapshot DMGeneration when cache was built
+	// prunedMsgGen is the DM generation whose live message set has already
+	// been applied to the per-message state below
+	// (dropStateOfRemovedMessages). Zero is honest as a starting value: at
+	// generation zero nothing has been drawn, so nothing is owed.
+	prunedMsgGen uint64
+	// sharedFileButtonsOwed says the three file-card button maps the
+	// console's Files tab draws too are still to be settled. It is a debt
+	// and not a generation, because what pays it is the console CLOSING,
+	// and that moves no counter this window can compare against.
+	sharedFileButtonsOwed bool
+	// msgImagePaths remembers the file each message's preview was last read
+	// from, because a DELETED message cannot be asked any more: the file
+	// transfer's mapping is dropped together with the row, so by the time
+	// the window sees the message gone, the bridge no longer knows where its
+	// picture was. Without this memory the bitmap of an erased message stays
+	// in thumbCache until the user leaves the chat.
+	msgImagePaths map[string]string
 
 	// replyQuoteTags maps message IDs to stable pointer event tags for
 	// click-to-scroll behavior on reply quotes.
@@ -446,8 +463,8 @@ type Window struct {
 	// under the peer being left and restored when that peer is reopened. Held
 	// in memory only (lost on app exit). draftPeer is kept separate from
 	// lastChatPeer: they change in different places (draft swap vs the
-	// per-message cache reset in resetReplyOnPeerChange) and coupling them
-	// historically let the swap clobber live input.
+	// per-message cache reset in resetConversationStateOnPeerChange) and
+	// coupling them historically let the swap clobber live input.
 	drafts    map[domain.PeerIdentity]composerDraft
 	draftPeer domain.PeerIdentity
 
@@ -1200,7 +1217,11 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.invalidateStaleMenuRects() // drop ⋯ rects a reorder, scroll or resize moved
 	w.applyDeferredScroll()
 	w.swapComposerDraftOnPeerChange()
-	w.resetReplyOnPeerChange()
+	w.resetConversationStateOnPeerChange()
+	// After the peer-change reset and before the two stale-singleton drops:
+	// the same family of "the message this belongs to is gone", applied to
+	// the maps rather than to the reply and the open menu.
+	w.dropStateOfRemovedMessages()
 	w.dropStaleReply()
 	w.dropStaleMsgMenu()
 	// Evaluate LAST frame's outside-tap records BEFORE any action handlers:
@@ -1631,11 +1652,20 @@ func (w *Window) forgetPeerComposerState(peer domain.PeerIdentity, wasActive boo
 	}
 }
 
-// resetReplyOnPeerChange clears reply and message-context-menu state when
-// the active conversation changes. This runs every frame so that even
-// switching to an empty chat (where no message bubbles are rendered)
-// properly discards stale reply references from the previous peer.
-func (w *Window) resetReplyOnPeerChange() {
+// resetConversationStateOnPeerChange gives back everything the window held
+// FOR ONE CONVERSATION when the active one changes: the reply context, the
+// message context menu, the per-message widget maps, and the decoded
+// picture bitmaps.
+//
+// It runs every frame so that even switching to an empty chat (where no
+// message bubbles are rendered) discards the previous peer's state.
+//
+// One place, because these are one fact — "the chat on screen is not the
+// chat these belong to" — and a map that misses the switch is either a
+// widget answering for the wrong message or memory nothing ever frees. The
+// name says conversation and not reply for that reason: the reply was
+// merely the first of them.
+func (w *Window) resetConversationStateOnPeerChange() {
 	peer := w.snap.ActivePeer
 	if peer == w.lastChatPeer {
 		return
@@ -1654,6 +1684,25 @@ func (w *Window) resetReplyOnPeerChange() {
 	w.replyQuoteTags = make(map[string]*widget.Clickable)
 	w.msgMenuBtns = make(map[string]*widget.Clickable)
 	w.msgReactionChips = make(map[domain.MessageID]*ui.ReactionChipsState)
+	// The buttons of file cards are per MESSAGE too, and were the family
+	// nothing ever emptied: every attachment the process had ever drawn kept
+	// a Clickable each, in every conversation, until it exited. Three of them
+	// are shared with the console's Files tab, which lists other chats'
+	// transfers — recreated here for the same reason the maps above are, and
+	// at the same point: before any row of this frame has registered a tag
+	// against the old pointer.
+	w.thumbClickBtns = make(map[string]*widget.Clickable)
+	w.fileDownloadBtns = make(map[string]*widget.Clickable)
+	w.fileCancelDownloadBtns = make(map[string]*widget.Clickable)
+	w.fileRestartBtns = make(map[string]*widget.Clickable)
+	w.fileRevealBtns = make(map[string]*widget.Clickable)
+	w.fileOpenBtns = make(map[string]*widget.Clickable)
+	w.fileRowDeleteBtns = make(map[string]*widget.Clickable)
+	// And the bitmaps behind those previews, which are the actual weight —
+	// up to 64MB of decoded pixels belonging to a chat that is no longer on
+	// screen. The next conversation decodes its own; nothing here is a
+	// picture the user is looking at.
+	w.thumbCache.clear()
 	// The reactions on screen belong to the conversation being left. Reloading
 	// rather than clearing keeps the new conversation's chips from appearing a
 	// frame late, which reads as them being added by the switch.
@@ -1666,7 +1715,122 @@ func (w *Window) resetReplyOnPeerChange() {
 	// drop their cached rectangles so the map cannot accumulate entries
 	// keyed by buttons that no longer exist.
 	w.menuBtnRects = make(map[*widget.Clickable]image.Rectangle)
+	// Nothing left to remember where the previous chat's pictures were: the
+	// bitmaps they name were just given back.
+	w.msgImagePaths = make(map[string]string)
 	w.lastChatPeer = peer
+}
+
+// dropStateOfRemovedMessages gives back what the window holds for messages
+// the open conversation no longer has.
+//
+// This is the OTHER half of resetConversationStateOnPeerChange, and it
+// exists because the peer does not change when history does: a message
+// deleted here, one the peer deleted, or the whole thread wiped on either
+// side all leave ActivePeer exactly where it was. Until this pass, the
+// bitmaps of erased pictures — up to thumbnailCacheMaxBytes of them — sat
+// in the cache until the user happened to switch chats.
+//
+// The live set is msgCacheByID, which rebuildMsgCache has just derived from
+// the snapshot; a key that is not in it names a message that is gone. The
+// pass therefore states a fact rather than applying a delta: it is
+// idempotent, and a generation it skipped is corrected by the next one.
+//
+// The pass carries TWO obligations with different triggers, and that is why
+// it is written as two steps rather than one condition. What the chat thread
+// alone owns is settled once per DM generation, because that is the
+// granularity at which the set of messages can change. The three file-card
+// buttons the console's Files tab draws too can only be settled while it is
+// closed — and closing it moves no generation, so a single generation gate
+// would advance past them and never come back. What the console still owes
+// is therefore remembered (sharedFileButtonsOwed) rather than inferred from
+// the counter.
+//
+// Both steps take the CacheReady gate: an empty conversation that is merely
+// still loading is not a conversation whose messages are gone. Same gate,
+// same reason, as dropStaleReply.
+//
+// msgReactionState is deliberately absent: it is owned by reloadReactions,
+// which replaces it wholesale from the database on the very event that
+// carries a deletion, and a second writer here would be a second source of
+// truth for the same rows.
+func (w *Window) dropStateOfRemovedMessages() {
+	// The debt stands for as long as the Files tab is open, whether or not
+	// this conversation changed: while it is up it is putting keys of its
+	// OWN into those three maps — other chats' transfers — and closing it
+	// leaves them behind with nobody drawing them. Raised before the gate
+	// below, because whether this conversation is readable says nothing
+	// about what the console is writing.
+	if w.consoleModalVisible() {
+		w.sharedFileButtonsOwed = true
+	}
+	if !w.snap.CacheReady {
+		return
+	}
+	// Re-read on every pass rather than captured with the obligation: the
+	// live set is a fact about NOW, and a deferred step that applied an old
+	// one would take away state a message re-delivered since has earned.
+	live := w.msgCacheByID
+
+	if w.prunedMsgGen != w.snap.DMGeneration {
+		w.prunedMsgGen = w.snap.DMGeneration
+		// The bitmaps first — they are the weight, and they are the one thing
+		// here that cannot be recovered from the message id alone.
+		for id, path := range w.msgImagePaths {
+			if _, ok := live[id]; ok {
+				continue
+			}
+			w.thumbCache.forget(path)
+			delete(w.msgImagePaths, id)
+		}
+		// The ⋯ rectangles are keyed by the BUTTON, not by the message, so
+		// they are dropped through the buttons that are about to go.
+		for id, btn := range w.msgMenuBtns {
+			if _, ok := live[id]; !ok {
+				delete(w.menuBtnRects, btn)
+			}
+		}
+		retainLiveMessages(w.messageSelectables, live)
+		retainLiveMessages(w.msgRightClick, live)
+		retainLiveMessages(w.replyQuoteTags, live)
+		retainLiveMessages(w.msgMenuBtns, live)
+		retainLiveMessages(w.msgReactionChips, live)
+		retainLiveMessages(w.thumbClickBtns, live)
+		retainLiveMessages(w.fileDownloadBtns, live)
+		retainLiveMessages(w.fileRestartBtns, live)
+		retainLiveMessages(w.fileRowDeleteBtns, live)
+		w.sharedFileButtonsOwed = true
+	}
+
+	// The console's share, settled once it is closed and the chat thread is
+	// their only writer again. With the console closed all along this runs
+	// in the very same call — the flag is raised and lowered without a frame
+	// in between, so nothing is deferred in the ordinary case. With it open,
+	// the debt stands until it closes: that tab lists every peer's
+	// transfers, so the open conversation is not authority over their keys,
+	// and taking a button away from a row being drawn loses the press in
+	// flight.
+	if w.sharedFileButtonsOwed && !w.consoleModalVisible() {
+		w.sharedFileButtonsOwed = false
+		retainLiveMessages(w.fileCancelDownloadBtns, live)
+		retainLiveMessages(w.fileRevealBtns, live)
+		retainLiveMessages(w.fileOpenBtns, live)
+	}
+}
+
+// retainLiveMessages drops every entry of a per-message map whose message
+// is not in live. Deleting during a range is defined in Go, so this is one
+// pass over the map and no allocation.
+//
+// Generic over the key because the message id is spelled two ways in this
+// package — string in the widget maps, domain.MessageID in the reaction
+// ones — and one rule about liveness should not be written twice.
+func retainLiveMessages[K ~string, V any](m map[K]V, live map[string]cachedMsg) {
+	for id := range m {
+		if _, ok := live[string(id)]; !ok {
+			delete(m, id)
+		}
+	}
 }
 
 // dropStaleReply clears the reply context when the quoted message no
@@ -1683,7 +1847,7 @@ func (w *Window) resetReplyOnPeerChange() {
 // check + one map hit while a reply is active. Gated on CacheReady so a
 // transiently empty snapshot mid conversation-load cannot wipe a reply
 // that is still valid; the peer-switch case is already handled by
-// resetReplyOnPeerChange above.
+// resetConversationStateOnPeerChange above.
 func (w *Window) dropStaleReply() {
 	if w.replyToMsg == nil || !w.snap.CacheReady {
 		return
@@ -1706,7 +1870,8 @@ func (w *Window) dropStaleReply() {
 // Same mechanism and same gate as dropStaleReply just above, deliberately: one
 // map hit per frame while a menu is open, and CacheReady keeps a transiently
 // empty snapshot mid conversation-load from closing a menu that is still valid.
-// The peer-switch case is already covered by resetReplyOnPeerChange.
+// The peer-switch case is already covered by
+// resetConversationStateOnPeerChange.
 //
 // Called from layout() before every handler that reads msgContextMsg, so the
 // clear is what those handlers see: handleReplyContextClicks and
@@ -4564,6 +4729,7 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 		var nameRowButton *widget.Clickable
 		if isImageContentType(payload.ContentType) {
 			filePath := w.router.FileBridge().FilePath(fileID, isMine)
+			w.rememberImagePath(message.ID, filePath)
 			// receiverDownloadActive is the "it is on its way" half: the file
 			// is not on disk yet, and the viewer says so rather than
 			// pretending the attachment is not an image.
@@ -4572,6 +4738,7 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 					messageID: domain.MessageID(message.ID),
 					peer:      conversationPeer(message, w.snap.MyAddress),
 					path:      filePath,
+					contentID: payload.FileHash,
 					name:      payload.FileName,
 					size:      payload.FileSize,
 					mine:      isMine,
@@ -4596,7 +4763,7 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 				// failed, nil is returned and the name row carries the click
 				// instead — one Clickable, two possible hosts, only ever one
 				// of them in the frame.
-				entry := w.thumbCache.get(filePath, w.window)
+				entry := w.thumbCache.get(openItem.source(), w.window)
 				if entry == nil {
 					nameRowButton = thumbBtn
 				} else {
@@ -5311,6 +5478,12 @@ type cachedMsg struct {
 	// the frame path — the payload is immutable for a given message ID,
 	// which is exactly the granularity of this cache.
 	IsImageFile bool
+	// FileHash is the announced content hash of that image, read from the
+	// SAME parse as IsImageFile. It is meaningless unless IsImageFile is
+	// set. Reply quotes hand it to the thumbnail cache so the preview is
+	// the picture this message brought rather than the one that later took
+	// its file name — see imageSource.
+	FileHash string
 }
 
 // menuAnchorForClick returns the screen anchor for a menu opened by a ⋯
@@ -6582,8 +6755,8 @@ func messageStatusText(message service.DirectMessage, tr func(string, ...any) st
 // message ID, creating one on first access. This allows users to select
 // and copy message text in the chat view. All per-message caches
 // (including this one) are reset on conversation change in
-// resetReplyOnPeerChange — early in layout, before any bubble registers
-// event tags — to prevent unbounded growth across chat peers.
+// resetConversationStateOnPeerChange — early in layout, before any bubble
+// registers event tags — to prevent unbounded growth across chat peers.
 func (w *Window) messageSelectable(id string) *widget.Selectable {
 	sel := w.messageSelectables[id]
 	if sel == nil {
@@ -8312,7 +8485,7 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 	// renders text-only.
 	var quotedThumb *thumbnailEntry
 	if cmFound && cm.IsImageFile {
-		quotedThumb = w.replyThumb(replyToStr, cm.Sender)
+		quotedThumb = w.replyThumb(replyToStr, cm.Sender, cm.FileHash)
 	}
 
 	barColor := color.NRGBA{R: 100, G: 140, B: 200, A: 255}
@@ -8436,13 +8609,37 @@ func replyBodyForDisplay(body string, isImageFile bool, tr func(string, ...any) 
 // failed permanently — callers render a text-only quote then. When an
 // in-flight decode completes, the decode goroutine invalidates the
 // window, so the preview appears on the next frame without polling.
-func (w *Window) replyThumb(msgID string, sender domain.PeerIdentity) *thumbnailEntry {
+// contentID is the quoted announce's file hash, carried in the message
+// cache beside the "this is an image" verdict it was parsed with: the
+// preview of a quote must be the picture that message brought, not
+// whatever now answers to the same file name.
+func (w *Window) replyThumb(msgID string, sender domain.PeerIdentity, contentID string) *thumbnailEntry {
 	isSender := sender == w.snap.MyAddress
 	path := w.router.FileBridge().FilePath(domain.FileID(msgID), isSender)
+	w.rememberImagePath(msgID, path)
 	if path == "" {
 		return nil
 	}
-	return w.thumbCache.get(path, w.window)
+	return w.thumbCache.get(imageSource{Path: path, ContentID: contentID}, w.window)
+}
+
+// rememberImagePath records where a message's picture was read from, so the
+// bitmap can still be given back after the message — and with it the file
+// transfer's mapping, the only thing that knows this path — is gone. See
+// msgImagePaths and dropStateOfRemovedMessages.
+//
+// An empty path is the file not being on disk (yet, or any more) rather
+// than a message with no picture, so it retracts nothing: what was
+// remembered while the file WAS there is what the eventual deletion has to
+// forget.
+func (w *Window) rememberImagePath(msgID, path string) {
+	if path == "" {
+		return
+	}
+	if w.msgImagePaths == nil {
+		w.msgImagePaths = make(map[string]string)
+	}
+	w.msgImagePaths[msgID] = path
 }
 
 // layoutReplyThumb renders a small square, center-cropped image preview
@@ -8559,12 +8756,14 @@ func (w *Window) rebuildMsgCache() {
 	m := make(map[string]cachedMsg, len(msgs))
 	order := menuDigestOffset
 	for i := range msgs {
+		fileHash, isImage := imageAnnounce(msgs[i].Command, msgs[i].CommandData)
 		m[msgs[i].ID] = cachedMsg{
 			Body:        msgs[i].Body,
 			Sender:      msgs[i].Sender,
 			Timestamp:   msgs[i].Timestamp,
 			Index:       i,
-			IsImageFile: isImageFileAnnounce(msgs[i].Command, msgs[i].CommandData),
+			IsImageFile: isImage,
+			FileHash:    fileHash,
 		}
 		// Message IDs are variable length, unlike PeerIdentity, so the
 		// concatenation is ambiguous on its own: "ab","c" and "a","bc" would
@@ -8721,7 +8920,7 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 
 	var replyThumbEntry *thumbnailEntry
 	if replyIsImage {
-		replyThumbEntry = w.replyThumb(w.replyToMsg.ID, w.replyToMsg.Sender)
+		replyThumbEntry = w.replyThumb(w.replyToMsg.ID, w.replyToMsg.Sender, cm.FileHash)
 	}
 
 	quotedBody := ellipsize(replyBodyForDisplay(w.replyToMsg.Body, replyIsImage, w.t), 80)

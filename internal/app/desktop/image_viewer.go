@@ -48,11 +48,23 @@ type viewerItem struct {
 	// below — that is how a picture appears in an open viewer the moment its
 	// download finishes.
 	path string
-	name string
-	size uint64
+	// contentID is the announced file hash — what the picture at path IS,
+	// as opposed to where it is kept. Everything that decodes this item
+	// asks for it through source(); see imageSource for why the path alone
+	// is not enough.
+	contentID string
+	name      string
+	size      uint64
 	// mine says which side of the transfer this node is on, which is what
 	// decides where the file lives (the transmit blob or the download).
 	mine bool
+}
+
+// source is what either bitmap cache is asked with for this item: the two
+// halves always travel together, so no caller can pair a path with another
+// picture's identity.
+func (i viewerItem) source() imageSource {
+	return imageSource{Path: i.path, ContentID: i.contentID}
 }
 
 // viewerZoomSteps are the stops the desktop zoom buttons and Ctrl+wheel walk.
@@ -258,7 +270,7 @@ func (w *Window) closeImageViewer() {
 	viewer.index = 0
 	viewer.standalone = false
 	viewer.gestures.reset()
-	viewer.cache.retain("")
+	viewer.cache.retain(imageSource{})
 	// The viewer can be opened from the console's Files tab, and closing it
 	// puts the console back in front. The keyboard has to go back INTO the
 	// console then: the fallback the focus ring restores to is the composer,
@@ -321,17 +333,17 @@ func (v *imageViewer) show(index int) {
 func (v *imageViewer) retainAndPreload() {
 	item, ok := v.current()
 	if !ok {
-		v.cache.retain("")
+		v.cache.retain(imageSource{})
 		return
 	}
-	neighbours := viewerNeighbourPaths(v.items, v.index)
-	v.cache.retain(item.path, neighbours...)
+	neighbours := viewerNeighbourSources(v.items, v.index)
+	v.cache.retain(item.source(), neighbours...)
 	// The picture on screen first: it is the one decode the user is waiting
 	// on, and the admission budget is shared, so asking for it before its
 	// neighbours is what keeps them from taking the slot.
-	v.cache.lookup(item.path, v.parent.window)
-	for _, path := range neighbours {
-		v.cache.lookup(path, v.parent.window)
+	v.cache.lookup(item.source(), v.parent.window)
+	for _, source := range neighbours {
+		v.cache.lookup(source, v.parent.window)
 	}
 }
 
@@ -422,6 +434,14 @@ func (v *imageViewer) rebuildItems(now time.Time) {
 	v.items = collectViewerItems(snap.ActiveMessages, snap.MyAddress, snap.ActivePeer, v.parent.resolveViewerFile)
 	v.itemsPeer = snap.ActivePeer
 	v.itemsGen = snap.DMGeneration
+	// The strip decodes pictures whose BUBBLE may never have been on screen,
+	// and those bitmaps are as much the conversation's as the cards' are.
+	// Recorded here rather than where the strip paints, because this list is
+	// the open conversation by construction — a viewer opened from the
+	// console's Files tab shows another chat's file and never comes here.
+	for _, item := range v.items {
+		v.parent.rememberImagePath(string(item.messageID), item.path)
+	}
 	v.noteItemsBuilt(now)
 	if len(v.thumbBtns) < len(v.items) {
 		v.thumbBtns = make([]widget.Clickable, len(v.items))
@@ -541,6 +561,7 @@ func collectViewerItems(
 			messageID: domain.MessageID(message.ID),
 			peer:      peer,
 			path:      path,
+			contentID: payload.FileHash,
 			name:      payload.FileName,
 			size:      payload.FileSize,
 			mine:      mine,
@@ -586,20 +607,20 @@ func stepViewerIndex(index, delta, count int) int {
 	return next
 }
 
-// viewerNeighbourPaths is what to decode ahead: the files on either side of
-// the one on screen, which are the two the next step can ask for.
+// viewerNeighbourSources is what to decode ahead: the files on either side
+// of the one on screen, which are the two the next step can ask for.
 //
 // An item with no path yet — a file still arriving — is skipped rather than
 // held as an empty key.
-func viewerNeighbourPaths(items []viewerItem, index int) []string {
-	paths := make([]string, 0, viewerCacheMaxEntries-1)
+func viewerNeighbourSources(items []viewerItem, index int) []imageSource {
+	sources := make([]imageSource, 0, viewerCacheMaxEntries-1)
 	for _, at := range []int{index - 1, index + 1} {
 		if at < 0 || at >= len(items) || items[at].path == "" {
 			continue
 		}
-		paths = append(paths, items[at].path)
+		sources = append(sources, items[at].source())
 	}
-	return paths
+	return sources
 }
 
 // zoomBy walks the zoom stops. It is what the buttons and Ctrl+wheel do; a

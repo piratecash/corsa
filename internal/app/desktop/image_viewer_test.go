@@ -297,21 +297,22 @@ func TestViewerOffsetAfterZoomHoldsTheAnchor(t *testing.T) {
 	}
 }
 
-func TestViewerNeighbourPaths(t *testing.T) {
+func TestViewerNeighbourSources(t *testing.T) {
 	items := []viewerItem{
-		{path: "a"}, {path: "b"}, {path: "c"}, {path: ""},
+		{path: "a", contentID: "ha"}, {path: "b", contentID: "hb"},
+		{path: "c", contentID: "hc"}, {path: ""},
 	}
-	if got := viewerNeighbourPaths(items, 0); len(got) != 1 || got[0] != "b" {
+	if got := viewerNeighbourSources(items, 0); len(got) != 1 || got[0] != (imageSource{Path: "b", ContentID: "hb"}) {
 		t.Fatalf("at the first image = %v, want [b]", got)
 	}
-	if got := viewerNeighbourPaths(items, 1); len(got) != 2 || got[0] != "a" || got[1] != "c" {
+	if got := viewerNeighbourSources(items, 1); len(got) != 2 || got[0].Path != "a" || got[1].Path != "c" {
 		t.Fatalf("in the middle = %v, want [a c]", got)
 	}
 	// The neighbour whose file has not arrived yet has nothing to decode.
-	if got := viewerNeighbourPaths(items, 2); len(got) != 1 || got[0] != "b" {
+	if got := viewerNeighbourSources(items, 2); len(got) != 1 || got[0].Path != "b" {
 		t.Fatalf("beside a file still arriving = %v, want [b]", got)
 	}
-	if got := viewerNeighbourPaths(nil, 0); len(got) != 0 {
+	if got := viewerNeighbourSources(nil, 0); len(got) != 0 {
 		t.Fatalf("empty list = %v, want nothing", got)
 	}
 }
@@ -351,14 +352,14 @@ func TestViewerCacheRetainDropsWhatIsNotNamed(t *testing.T) {
 		cache.putLocked(path, &thumbnailEntry{state: thumbReady, byteSize: 10})
 		cache.totalBytes += 10
 	}
-	cache.retain("b", "c")
+	cache.retain(imageSource{Path: "b"}, imageSource{Path: "c"})
 	if len(cache.entries) != 2 || cache.entries["a"] != nil {
 		t.Fatalf("entries = %v, want b and c", cache.entries)
 	}
 	if cache.totalBytes != 20 {
 		t.Fatalf("held bytes = %d, want 20", cache.totalBytes)
 	}
-	cache.retain("")
+	cache.retain(imageSource{})
 	if len(cache.entries) != 0 || cache.totalBytes != 0 {
 		t.Fatalf("closing the viewer must give everything back: %v / %d bytes", cache.entries, cache.totalBytes)
 	}

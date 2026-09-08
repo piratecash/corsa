@@ -41,22 +41,52 @@ const (
 	composerReplyThumbDp = 32
 )
 
-// isImageFileAnnounce reports whether a DM is a file_announce whose
-// payload describes an image the thumbnail pipeline can decode. Reply
-// quotes use this to decide if a mini preview should be rendered next
-// to the quoted text.
+// imageAnnounce reports whether a DM is a file_announce whose payload
+// describes an image the thumbnail pipeline can decode, and returns the
+// hash of the content that picture IS. Reply quotes use it to decide if a
+// mini preview should be rendered next to the quoted text, and the hash is
+// what tells that preview apart from another picture that came to occupy
+// the same file name (see imageSource).
 //
-// A payload that fails to parse yields false: the quote then degrades
-// to plain text, mirroring layoutFileCard's "invalid file data" path.
-func isImageFileAnnounce(command domain.DMCommand, commandData string) bool {
+// The hash comes back from the SAME parse as the verdict on purpose: read
+// separately, the two could describe different announces, and the identity
+// of a picture is not something to pair up afterwards.
+//
+// A payload that fails to parse yields false: the quote then degrades to
+// plain text, mirroring layoutFileCard's "invalid file data" path.
+func imageAnnounce(command domain.DMCommand, commandData string) (fileHash string, ok bool) {
 	if command != domain.DMCommandFileAnnounce || commandData == "" {
-		return false
+		return "", false
 	}
 	var payload domain.FileAnnouncePayload
 	if err := json.Unmarshal([]byte(commandData), &payload); err != nil {
-		return false
+		return "", false
 	}
-	return isImageContentType(payload.ContentType)
+	if !isImageContentType(payload.ContentType) {
+		return "", false
+	}
+	return payload.FileHash, true
+}
+
+// imageSource names the picture a cache entry is FOR: where to read it and
+// which content that location is expected to hold.
+//
+// A path on its own is NOT an identity, and treating it as one is what put
+// the wrong picture in a chat bubble. A received file is stored under the
+// sender's file name (completedDownloadPath), and that name is handed out
+// again the moment nothing occupies it — erasing a conversation unlinks
+// exactly those files, so the next picture called photo.jpg lands on the
+// very path a decoded bitmap still claimed. The bubble then repainted the
+// erased picture while the viewer, which keeps nothing after it closes,
+// decoded the file and showed the right one.
+//
+// ContentID is the announce's file hash: the identity of the bytes, which
+// is what the file store itself addresses a blob by. An entry is served
+// only for the exact ContentID it was decoded under — same content, same
+// bitmap; anything else is a different picture and is decoded again.
+type imageSource struct {
+	Path      string
+	ContentID string
 }
 
 // thumbnailState describes the lifecycle of a single cache entry.
@@ -84,6 +114,11 @@ type thumbnailEntry struct {
 	// path.
 	natural  image.Point
 	byteSize int64 // decoded bytes held (0 until ready)
+	// contentID is the imageSource.ContentID this entry was created for.
+	// It is what makes the entry answerable for its picture rather than for
+	// its file name: a lookup naming other content replaces the entry
+	// instead of being served this one.
+	contentID string
 }
 
 // decodeEstimate is what reading an image header tells the decode pipeline:
@@ -97,7 +132,9 @@ type decodeEstimate struct {
 
 // thumbnailCache is a concurrency-safe cache of decoded image thumbnails.
 // Keyed by the on-disk file path (content-addressed hash for sender,
-// CompletedPath for receiver).
+// CompletedPath for receiver) and answerable for the CONTENT each entry
+// was decoded from — one entry per location, replaced as soon as the
+// location is asked for on behalf of different content (see imageSource).
 //
 // Decoding happens in a background goroutine. The first call to get() for
 // an unknown path spawns the goroutine and returns nil (no thumbnail yet).
@@ -207,6 +244,16 @@ func (tc *thumbnailCache) forget(path string) {
 	}
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
+	tc.dropLocked(path)
+}
+
+// dropLocked removes one entry and everything that accounts for it: the
+// map, the LRU order and the byte total. Caller holds tc.mu.
+//
+// Dropping a PENDING entry is safe for the same reason evictLocked's is:
+// the decode goroutine re-checks entries[path] by POINTER and discards a
+// result whose entry is no longer the cached one.
+func (tc *thumbnailCache) dropLocked(path string) {
 	entry, ok := tc.entries[path]
 	if !ok {
 		return
@@ -219,6 +266,22 @@ func (tc *thumbnailCache) forget(path string) {
 			break
 		}
 	}
+}
+
+// clear gives back every bitmap the cache holds.
+//
+// It is what leaving a conversation does. The LRU bounds this cache, so
+// this is not what keeps it from growing without end — it is that the
+// pictures of a chat the user has walked away from are megabytes held for
+// a screen nobody is looking at, and the next chat's images are decoded
+// anyway. An in-flight decode is not cancelled and its result is simply
+// discarded (see dropLocked).
+func (tc *thumbnailCache) clear() {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.entries = nil
+	tc.lru = nil
+	tc.totalBytes = 0
 }
 
 // thumbnailLookup is the atomic result of resolving a cache entry
@@ -247,8 +310,8 @@ type thumbnailLookup struct {
 // request. Use this instead of get()+isPending() when both pieces
 // of state matter — the two-call form has a nil→ready race window
 // that drops the polling gate prematurely.
-func (tc *thumbnailCache) lookup(path string, window *app.Window) thumbnailLookup {
-	if path == "" || window == nil {
+func (tc *thumbnailCache) lookup(src imageSource, window *app.Window) thumbnailLookup {
+	if src.Path == "" || window == nil {
 		return thumbnailLookup{}
 	}
 	tc.mu.Lock()
@@ -256,30 +319,37 @@ func (tc *thumbnailCache) lookup(path string, window *app.Window) thumbnailLooku
 	if tc.entries == nil {
 		tc.entries = make(map[string]*thumbnailEntry)
 	}
-	if entry, ok := tc.entries[path]; ok {
-		tc.touchLocked(path)
-		switch entry.state {
-		case thumbReady:
-			return thumbnailLookup{Entry: entry}
-		case thumbPending:
-			return thumbnailLookup{Pending: true}
-		default: // thumbFailed
-			return thumbnailLookup{}
+	if entry, ok := tc.entries[src.Path]; ok {
+		if entry.contentID == src.ContentID {
+			tc.touchLocked(src.Path)
+			switch entry.state {
+			case thumbReady:
+				return thumbnailLookup{Entry: entry}
+			case thumbPending:
+				return thumbnailLookup{Pending: true}
+			default: // thumbFailed
+				return thumbnailLookup{}
+			}
 		}
+		// Different content under the same name: the bitmap is of a file
+		// that is no longer there. Serving it would repaint an erased
+		// picture — the failure this identity exists to end.
+		tc.dropLocked(src.Path)
 	}
-	entry := &thumbnailEntry{state: thumbPending}
-	tc.insertLocked(path, entry)
-	go tc.decodeInBackground(path, entry, window)
+	entry := &thumbnailEntry{state: thumbPending, contentID: src.ContentID}
+	tc.insertLocked(src.Path, entry)
+	go tc.decodeInBackground(src.Path, entry, window)
 	return thumbnailLookup{Pending: true}
 }
 
-// get returns the cached thumbnail for the given path.
+// get returns the cached thumbnail for src, or nil when there is nothing
+// to draw yet.
 //
-// Three possible outcomes:
+// It is lookup() with the two "nothing to draw" answers collapsed:
 //   - entry is ready (thumbReady): returns the entry — caller renders it.
 //   - entry is pending (thumbPending): returns nil — decode in progress,
 //     a redraw will be triggered when it finishes.
-//   - path not seen before: spawns a background decode goroutine and
+//   - source not seen before: spawns a background decode goroutine and
 //     returns nil. The goroutine calls window.Invalidate() on completion.
 //   - entry failed (thumbFailed): returns nil — will not retry.
 //
@@ -295,35 +365,8 @@ func (tc *thumbnailCache) lookup(path string, window *app.Window) thumbnailLooku
 //
 // The window parameter is used solely to call Invalidate() from the
 // background goroutine; it is safe to call from any goroutine.
-func (tc *thumbnailCache) get(path string, window *app.Window) *thumbnailEntry {
-	if path == "" || window == nil {
-		return nil
-	}
-
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
-	if tc.entries == nil {
-		tc.entries = make(map[string]*thumbnailEntry)
-	}
-
-	if entry, ok := tc.entries[path]; ok {
-		tc.touchLocked(path)
-		if entry.state == thumbReady {
-			return entry
-		}
-		// pending or failed — nothing to render yet (or ever).
-		return nil
-	}
-
-	// First access for this path — create a pending entry and spawn
-	// background decode.
-	entry := &thumbnailEntry{state: thumbPending}
-	tc.insertLocked(path, entry)
-
-	go tc.decodeInBackground(path, entry, window)
-
-	return nil
+func (tc *thumbnailCache) get(src imageSource, window *app.Window) *thumbnailEntry {
+	return tc.lookup(src, window).Entry
 }
 
 // decodeInBackground decodes the image at path and updates the cache
