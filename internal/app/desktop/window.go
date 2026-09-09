@@ -4245,6 +4245,91 @@ func composerSendActionState(hasRecipient, deletePending, hasContent bool) (enab
 	}
 }
 
+// layoutComposerChrome draws what stands above the editor: the "Message body
+// for: NAME" header and, when there is one, the attached file's chip.
+//
+// It is its own function because its HEIGHT is a number the rest of the card
+// needs — the editor and the emoji picker are budgeted against what is left
+// after it — and the only honest way to have that number is to lay these
+// rows out and look. messageInputCard therefore records this once and replays
+// the recording into the flex, the same way layoutComposerCard already
+// handles its footer.
+func (w *Window) layoutComposerChrome(gtx layout.Context, recipient domain.PeerIdentity) layout.Dimensions {
+	return layout.Flex{
+		Axis: layout.Vertical,
+	}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if recipient.IsZero() {
+				label := material.Body2(w.theme, w.t("compose.body"))
+				label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
+				return label.Layout(gtx)
+			}
+			// The single-line invariant is kept for the reader's sake and
+			// not for the arithmetic's any more — the card measures this
+			// row rather than assuming its height — but a wrapped header
+			// is still a worse header: the name is Flexed and truncated
+			// instead of wrapping, and the decorative ID chunk is dropped
+			// when the row is too narrow to plausibly hold it.
+			showID := gtx.Constraints.Max.X >= gtx.Dp(unit.Dp(420))
+			children := []layout.FlexChild{
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					label := material.Body2(w.theme, w.t("compose.body_for"))
+					label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
+					label.MaxLines = 1
+					return label.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					name := w.peerDisplayName(recipient)
+					lbl := material.Body1(w.theme, name)
+					lbl.Font.Weight = font.Bold
+					lbl.TextSize = unit.Sp(17)
+					lbl.Color = color.NRGBA{R: 150, G: 210, B: 255, A: 255}
+					lbl.MaxLines = 1
+					return lbl.Layout(gtx)
+				}),
+			}
+			if showID {
+				children = append(children,
+					layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Caption(w.theme, w.t("compose.identity_label"))
+						lbl.Color = color.NRGBA{R: 160, G: 170, B: 190, A: 255}
+						lbl.MaxLines = 1
+						return lbl.Layout(gtx)
+					}),
+					layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						lbl := material.Body1(w.theme, shortFingerprint(recipient.String()))
+						lbl.Font.Weight = font.Bold
+						lbl.TextSize = unit.Sp(15)
+						lbl.Color = color.NRGBA{R: 130, G: 235, B: 190, A: 255}
+						lbl.MaxLines = 1
+						// A fingerprint is an identifier, not a word.
+						return lbl.Layout(leftToRight(gtx))
+					}),
+				)
+			}
+			// "Message body for: NAME  ID: fingerprint" is a sentence, so it
+			// has to be arranged in the direction the interface is read in.
+			// Left as written, the Arabic build strands the label on the left
+			// and the name it introduces on the right — see inReadingOrder.
+			// Every child here is a label, a value or a spacer, none of which
+			// has a side of its own, so reversing them is the whole of it.
+			return layout.Flex{
+				Axis:      layout.Horizontal,
+				Alignment: layout.Baseline,
+			}.Layout(gtx, inReadingOrder(gtx, children...)...)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if w.attachedFile == "" {
+				return layout.Dimensions{}
+			}
+			return w.layoutAttachedFilePreview(gtx)
+		}),
+	)
+}
+
 func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdentity, maxInputHeight, footerReserve int) layout.Dimensions {
 	borderColor := color.NRGBA{R: 96, G: 114, B: 142, A: 255}
 	backgroundColor := color.NRGBA{R: 25, G: 31, B: 40, A: 255}
@@ -4253,10 +4338,31 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 	scrollThumb := color.NRGBA{R: 112, G: 132, B: 164, A: 255}
 	lineStep := gtx.Sp(composerEditorLineHeight)
 	baseEditorHeight := 2 * lineStep
-	chromeHeight := gtx.Dp(unit.Dp(26))
-	if w.attachedFile != "" {
-		chromeHeight += gtx.Dp(unit.Dp(40))
-	}
+
+	// The card's own frame, named once: the measurement below and the layout
+	// further down must describe the same box, and two copies of "1 and 8"
+	// would be two chances to describe different ones.
+	cardBorder := unit.Dp(1)
+	cardPad := layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(5), Left: unit.Dp(8), Right: unit.Dp(8)}
+
+	// What stands above the editor is MEASURED, not estimated: laid out once
+	// here, at the width it will have inside the card, and replayed into the
+	// flex below — the same record-and-replay layoutComposerCard uses for its
+	// footer, so nothing is laid out twice.
+	//
+	// It used to be a constant: 26dp, plus 40 for an attachment. Nothing kept
+	// that number in step with the rows it stood for — the chip alone is 44 —
+	// and the four missing points came out of whatever the card was allowed
+	// to overrun. That was the border while the card was painted at a height
+	// decided in advance, and the footer's reserve once it was painted at the
+	// size of its content.
+	chromeGtx := gtx
+	chromeGtx.Constraints.Max.X = max(0, gtx.Constraints.Max.X-2*gtx.Dp(cardBorder)-gtx.Dp(cardPad.Left)-gtx.Dp(cardPad.Right))
+	chromeGtx.Constraints.Min.X = min(gtx.Constraints.Min.X, chromeGtx.Constraints.Max.X)
+	chromeMacro := op.Record(gtx.Ops)
+	chromeDims := w.layoutComposerChrome(chromeGtx, recipient)
+	chromeCall := chromeMacro.Stop()
+	chromeHeight := chromeDims.Size.Y + gtx.Dp(cardPad.Top) + gtx.Dp(cardPad.Bottom) + 2*gtx.Dp(cardBorder)
 
 	line, _ := w.messageEditor.CaretPos()
 	totalLines := max(line+1, strings.Count(w.messageEditor.Text(), "\n")+1)
@@ -4266,211 +4372,154 @@ func (w *Window) messageInputCard(gtx layout.Context, recipient domain.PeerIdent
 	if w.emojiPicker.visible {
 		pickerHeight = w.emojiPickerRoom(gtx, chromeHeight, editorHeight, footerReserve)
 	}
-	cardHeight := chromeHeight + editorHeight + pickerHeight
-
-	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		gtx.Constraints.Min.Y = cardHeight
-		gtx.Constraints.Max.Y = cardHeight
-		ui.Fill(gtx, borderColor)
-
-		return layout.UniformInset(unit.Dp(1)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			ui.Fill(gtx, backgroundColor)
-
-			return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(1), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{
-					Axis: layout.Vertical,
-				}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if recipient.IsZero() {
-							label := material.Body2(w.theme, w.t("compose.body"))
-							label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-							return label.Layout(gtx)
-						}
-						// cardHeight above budgets a FIXED chrome height,
-						// which assumes this header stays on one line. If
-						// it wraps, the editor row is pushed below the
-						// painted card rectangle (visible on narrow phone
-						// widths). Keep the single-line invariant: the name
-						// is Flexed and truncated instead of wrapping, and
-						// the decorative ID chunk is dropped when the row
-						// is too narrow to plausibly hold it.
-						showID := gtx.Constraints.Max.X >= gtx.Dp(unit.Dp(420))
-						children := []layout.FlexChild{
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								label := material.Body2(w.theme, w.t("compose.body_for"))
-								label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-								label.MaxLines = 1
-								return label.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								name := w.peerDisplayName(recipient)
-								lbl := material.Body1(w.theme, name)
-								lbl.Font.Weight = font.Bold
-								lbl.TextSize = unit.Sp(17)
-								lbl.Color = color.NRGBA{R: 150, G: 210, B: 255, A: 255}
-								lbl.MaxLines = 1
-								return lbl.Layout(gtx)
-							}),
-						}
-						if showID {
-							children = append(children,
-								layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
+	// The card is drawn AT THE SIZE OF ITS CONTENT.
+	//
+	// It used to be given a height computed in advance — chrome + editor +
+	// picker — and painted at exactly that, while the content inside was free
+	// to need more. When it did, the content simply drew past the bottom
+	// edge, over the border: that is why the outline disappeared under an
+	// attachment. A height written beside the thing it is a height OF cannot
+	// be kept in step with it, so there is no longer one: ui.Filled paints
+	// each layer behind the size its content actually took, and what the
+	// editor and the picker are budgeted against is measured above.
+	//
+	// cardPad's bottom is 5 and not 1 because that is what the card had: the
+	// old estimate ran four points over the chrome it stood for, and the
+	// difference was drawn as padding under the editor. It is stated as a
+	// size the layout asks for now, instead of being the leftover of a number
+	// that was wrong.
+	return ui.Filled(gtx, borderColor, 0, func(gtx layout.Context) layout.Dimensions {
+		return layout.UniformInset(cardBorder).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return ui.Filled(gtx, backgroundColor, 0, func(gtx layout.Context) layout.Dimensions {
+				return cardPad.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{
+						Axis: layout.Vertical,
+					}.Layout(gtx,
+						// The rows measured above, placed rather than laid
+						// out again: one layout, one set of event handlers,
+						// and a height the budget below already knows.
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							chromeCall.Add(gtx.Ops)
+							return chromeDims
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{
+								Axis:      layout.Horizontal,
+								Alignment: layout.Middle,
+							}.Layout(gtx,
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Caption(w.theme, w.t("compose.identity_label"))
-									lbl.Color = color.NRGBA{R: 160, G: 170, B: 190, A: 255}
-									lbl.MaxLines = 1
-									return lbl.Layout(gtx)
+									btn := material.IconButton(w.theme, &w.attachButton, w.attachIcon, w.t("file.attach"))
+									btn.Background = backgroundColor
+									btn.Color = color.NRGBA{R: 157, G: 176, B: 201, A: 255}
+									btn.Size = unit.Dp(22)
+									btn.Inset = layout.UniformInset(unit.Dp(6))
+									return btn.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									w.messageEditor.SingleLine = false
+									w.messageEditor.Submit = false
+									editor := composerEditorStyle(w.theme, &w.messageEditor, w.t("compose.placeholder"))
+
+									radius := gtx.Dp(unit.Dp(12))
+									defer clip.UniformRRect(image.Rectangle{Max: image.Pt(gtx.Constraints.Max.X, editorHeight)}, radius).Push(gtx.Ops).Pop()
+									return layout.Stack{}.Layout(gtx,
+										layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+											gtx.Constraints.Min.Y = editorHeight
+											gtx.Constraints.Max.Y = editorHeight
+											ui.Fill(gtx, editorBg)
+											return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, editorHeight)}
+										}),
+										layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+											gtx.Constraints.Min.Y = editorHeight
+											gtx.Constraints.Max.Y = editorHeight
+											return layout.Inset{
+												Top:    unit.Dp(0),
+												Bottom: unit.Dp(0),
+												Left:   unit.Dp(9),
+												Right:  unit.Dp(6),
+											}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+												return layout.Flex{
+													Axis:      layout.Horizontal,
+													Alignment: layout.Middle,
+												}.Layout(gtx,
+													layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+														// The draft is the user's own text, so it
+														// takes its direction from itself rather
+														// than from the interface: an Arabic
+														// message typed into an English build
+														// reads right to left, and an English one
+														// typed into the Arabic build does not.
+														// An empty draft keeps the interface's
+														// direction, which is where its caret and
+														// its hint belong.
+														gtx = directedByContent(gtx, w.messageEditor.Text())
+														return editorTouchKeyboardArea(gtx, &w.touchKbdTags[0], &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
+															dims := layoutComposerEditorContent(gtx, totalLines, editor.Layout)
+															if w.emojiPicker.takeSoftKeyboardSuppression(gtx.Enabled()) {
+																// Editor.Layout may emit Show:true for the FocusEvent
+																// caused by opening the picker. Close wins once, on that
+																// enabled layout; later taps in the editor can show the
+																// keyboard normally while the picker remains open.
+																gtx.Execute(key.SoftKeyboardCmd{Show: false})
+															}
+															return dims
+														})
+													}),
+													layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+														if !showScrollbar {
+															return layout.Dimensions{}
+														}
+														return w.layoutComposerScrollbar(gtx, totalLines, visibleLines, editorHeight, scrollTrack, scrollThumb)
+													}),
+												)
+											})
+										}),
+									)
 								}),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									lbl := material.Body1(w.theme, shortFingerprint(recipient.String()))
-									lbl.Font.Weight = font.Bold
-									lbl.TextSize = unit.Sp(15)
-									lbl.Color = color.NRGBA{R: 130, G: 235, B: 190, A: 255}
-									lbl.MaxLines = 1
-									// A fingerprint is an identifier, not a word.
-									return lbl.Layout(leftToRight(gtx))
+									description := w.t("emoji.open")
+									background := backgroundColor
+									iconColor := color.NRGBA{R: 157, G: 176, B: 201, A: 255}
+									if w.emojiPicker.visible {
+										description = w.t("emoji.close")
+										background = color.NRGBA{R: 34, G: 83, B: 151, A: 255}
+										iconColor = color.NRGBA{R: 225, G: 240, B: 255, A: 255}
+									}
+									btn := material.IconButton(w.theme, &w.emojiPicker.toggleButton, w.emojiIcon, description)
+									btn.Background = background
+									btn.Color = iconColor
+									btn.Size = unit.Dp(22)
+									btn.Inset = layout.UniformInset(unit.Dp(6))
+									return btn.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									pending := !recipient.IsZero() && w.router.IsConversationDeletePending(recipient)
+									hasContent := strings.TrimSpace(w.messageEditor.Text()) != "" || w.attachedFile != ""
+									enabled, reasonKey := composerSendActionState(!recipient.IsZero(), pending, hasContent)
+									description := w.t("compose.send")
+									if reasonKey != "" {
+										description = w.t(reasonKey)
+									}
+									return w.layoutComposerSendButton(gtx, enabled, description, reasonKey != "")
 								}),
 							)
-						}
-						// "Message body for: NAME  ID: fingerprint" is a
-						// sentence, so it has to be arranged in the direction
-						// the interface is read in. Left as written, the
-						// Arabic build strands the label on the left and the
-						// name it introduces on the right — see
-						// inReadingOrder. Every child here is a label, a value
-						// or a spacer, none of which has a side of its own, so
-						// reversing them is the whole of it.
-						return layout.Flex{
-							Axis:      layout.Horizontal,
-							Alignment: layout.Baseline,
-						}.Layout(gtx, inReadingOrder(gtx, children...)...)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if w.attachedFile == "" {
-							return layout.Dimensions{}
-						}
-						return w.layoutAttachedFilePreview(gtx)
-					}),
-					layout.Rigid(layout.Spacer{Height: unit.Dp(0)}.Layout),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{
-							Axis:      layout.Horizontal,
-							Alignment: layout.Middle,
-						}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								btn := material.IconButton(w.theme, &w.attachButton, w.attachIcon, w.t("file.attach"))
-								btn.Background = backgroundColor
-								btn.Color = color.NRGBA{R: 157, G: 176, B: 201, A: 255}
-								btn.Size = unit.Dp(22)
-								btn.Inset = layout.UniformInset(unit.Dp(6))
-								return btn.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								w.messageEditor.SingleLine = false
-								w.messageEditor.Submit = false
-								editor := composerEditorStyle(w.theme, &w.messageEditor, w.t("compose.placeholder"))
-
-								radius := gtx.Dp(unit.Dp(12))
-								defer clip.UniformRRect(image.Rectangle{Max: image.Pt(gtx.Constraints.Max.X, editorHeight)}, radius).Push(gtx.Ops).Pop()
-								return layout.Stack{}.Layout(gtx,
-									layout.Expanded(func(gtx layout.Context) layout.Dimensions {
-										gtx.Constraints.Min.Y = editorHeight
-										gtx.Constraints.Max.Y = editorHeight
-										ui.Fill(gtx, editorBg)
-										return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, editorHeight)}
-									}),
-									layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-										gtx.Constraints.Min.Y = editorHeight
-										gtx.Constraints.Max.Y = editorHeight
-										return layout.Inset{
-											Top:    unit.Dp(0),
-											Bottom: unit.Dp(0),
-											Left:   unit.Dp(9),
-											Right:  unit.Dp(6),
-										}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-											return layout.Flex{
-												Axis:      layout.Horizontal,
-												Alignment: layout.Middle,
-											}.Layout(gtx,
-												layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-													// The draft is the user's own text, so it
-													// takes its direction from itself rather
-													// than from the interface: an Arabic
-													// message typed into an English build
-													// reads right to left, and an English one
-													// typed into the Arabic build does not.
-													// An empty draft keeps the interface's
-													// direction, which is where its caret and
-													// its hint belong.
-													gtx = directedByContent(gtx, w.messageEditor.Text())
-													return editorTouchKeyboardArea(gtx, &w.touchKbdTags[0], &w.touchKbd, func(gtx layout.Context) layout.Dimensions {
-														dims := layoutComposerEditorContent(gtx, totalLines, editor.Layout)
-														if w.emojiPicker.takeSoftKeyboardSuppression(gtx.Enabled()) {
-															// Editor.Layout may emit Show:true for the FocusEvent
-															// caused by opening the picker. Close wins once, on that
-															// enabled layout; later taps in the editor can show the
-															// keyboard normally while the picker remains open.
-															gtx.Execute(key.SoftKeyboardCmd{Show: false})
-														}
-														return dims
-													})
-												}),
-												layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-													if !showScrollbar {
-														return layout.Dimensions{}
-													}
-													return w.layoutComposerScrollbar(gtx, totalLines, visibleLines, editorHeight, scrollTrack, scrollThumb)
-												}),
-											)
-										})
-									}),
-								)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								description := w.t("emoji.open")
-								background := backgroundColor
-								iconColor := color.NRGBA{R: 157, G: 176, B: 201, A: 255}
-								if w.emojiPicker.visible {
-									description = w.t("emoji.close")
-									background = color.NRGBA{R: 34, G: 83, B: 151, A: 255}
-									iconColor = color.NRGBA{R: 225, G: 240, B: 255, A: 255}
-								}
-								btn := material.IconButton(w.theme, &w.emojiPicker.toggleButton, w.emojiIcon, description)
-								btn.Background = background
-								btn.Color = iconColor
-								btn.Size = unit.Dp(22)
-								btn.Inset = layout.UniformInset(unit.Dp(6))
-								return btn.Layout(gtx)
-							}),
-							layout.Rigid(layout.Spacer{Width: unit.Dp(4)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								pending := !recipient.IsZero() && w.router.IsConversationDeletePending(recipient)
-								hasContent := strings.TrimSpace(w.messageEditor.Text()) != "" || w.attachedFile != ""
-								enabled, reasonKey := composerSendActionState(!recipient.IsZero(), pending, hasContent)
-								description := w.t("compose.send")
-								if reasonKey != "" {
-									description = w.t(reasonKey)
-								}
-								return w.layoutComposerSendButton(gtx, enabled, description, reasonKey != "")
-							}),
-						)
-					}),
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						if !w.emojiPicker.visible || pickerHeight <= 0 {
-							return layout.Dimensions{}
-						}
-						return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-							height := max(0, pickerHeight-gtx.Dp(unit.Dp(6)))
-							gtx.Constraints.Min.Y = height
-							gtx.Constraints.Max.Y = height
-							return w.layoutEmojiPicker(gtx)
-						})
-					}),
-				)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							if !w.emojiPicker.visible || pickerHeight <= 0 {
+								return layout.Dimensions{}
+							}
+							return layout.Inset{Top: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								height := max(0, pickerHeight-gtx.Dp(unit.Dp(6)))
+								gtx.Constraints.Min.Y = height
+								gtx.Constraints.Max.Y = height
+								return w.layoutEmojiPicker(gtx)
+							})
+						}),
+					)
+				})
 			})
 		})
 	})

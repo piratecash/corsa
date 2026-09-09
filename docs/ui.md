@@ -66,6 +66,26 @@ are stored in desktop preferences, with rapid selections coalesced into one
 write and the pending snapshot flushed on shutdown, then restored on the next
 start.
 
+**The composer card is drawn at the size of its content.** It used to be
+painted at a height computed in advance — chrome + editor + picker — while
+the content inside was free to need more, and when it did the content drew
+past the bottom edge, over the border: attaching a file left the outline
+broken, because the chip is 44dp and the chrome had reserved 40 for it. The
+same arithmetic is what a wrapped header runs into on a narrow phone. A
+height written beside the thing it is a height OF cannot be kept in step
+with it, so there is no longer one — each layer is painted behind the size
+its content took (`ui.Filled`).
+
+The rows above the editor are **measured** for the same reason. Their height
+is what the editor and the emoji picker are budgeted against, so an estimate
+that runs short of them does not stop being wrong once the card is painted
+honestly — it moves, from the border to the footer's reserve, and the
+composer takes room the status row was going to use. `layoutComposerChrome`
+is therefore laid out once, at the width it will have inside the card, and
+the recording is replayed into the flex: one layout, one set of handlers,
+and a height the budgets already know. It is the same record-and-replay the
+composer already uses for its footer.
+
 The composer measures the rendered footer once and uses that exact height when
 sizing the emoji picker. Below the picker's own chrome plus one row of emoji
 the surface is not drawn at all: it stays open, asks for the touch keyboard to
@@ -1403,6 +1423,27 @@ Window (Gio event loop)
 При активном глобальном запросе категория не подсвечивается. До 12 недавних эмодзи
 хранятся в desktop-настройках: быстрые выборы объединяются в одну запись,
 ожидающий снимок сохраняется при завершении, а при следующем запуске список восстанавливается.
+
+**Карточка композера рисуется по размеру своего содержимого.** Раньше её
+высота считалась заранее — хром плюс редактор плюс пикер, — и ровно этим
+размером карточка и закрашивалась, тогда как содержимому внутри ничто не
+мешало потребовать больше. Когда оно требовало, содержимое рисовалось за
+нижней границей, поверх рамки: при вложении файла контур оставался разорван,
+потому что чип занимает 44dp, а хром резервировал под него 40. На узком
+экране в ту же арифметику упирается перенос шапки. Высоту, записанную рядом
+с тем, чьей высотой она является, невозможно держать в согласии с ним —
+поэтому её больше нет: каждый слой закрашивается под тем размером, который
+содержимое заняло (`ui.Filled`).
+
+Ряды над редактором по той же причине **измеряются**. Их высота — то, от чего
+считается бюджет редактора и эмодзи-пикера, поэтому оценка, не дотягивающая до
+них, не перестаёт быть неверной оттого, что карточка стала рисоваться честно:
+она переезжает с рамки на резерв футера, и композер забирает место, которое
+собиралась занять строка состояния. Поэтому `layoutComposerChrome`
+раскладывается ОДИН раз, шириной, которую получит внутри карточки, а запись
+переигрывается во flex: одна раскладка, один набор обработчиков и высота,
+которую бюджеты уже знают. Тот же record-and-replay, каким композер уже
+пользуется для футера.
 
 Композер один раз измеряет отрисованный footer и использует его точную
 высоту при расчёте пикера. Если остатка не хватает на собственный хром пикера
