@@ -18,6 +18,7 @@ Related documentation:
 - [encryption.md](../encryption.md) — cryptographic primitives
 - [mesh.md](../mesh.md) — mesh network topology, peer scoring, gossip
 - [presence.md](presence.md) — per-contact presence: the four states, what each rests on, the liveness probe, the first-hop guard set, and the `fetch_presence` / `fetch_first_hop_guards` commands
+- [overlay_role.md](overlay_role.md) — the overlay role classification `Q(NodeID)`: hash, canonical input, extracted bit and test vectors. ⚠️ Contract only — the mechanism using it is **not accepted**, and computing `Q` is classification, never authentication
 - [debug.md](../debug.md) — log levels and protocol tracing
 
 ### Command index
@@ -182,6 +183,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 - [encryption.md](../encryption.md) — криптографические примитивы
 - [mesh.md](../mesh.md) — топология mesh-сети, scoring пиров, gossip
 - [presence.md](presence.md) — присутствие контакта: четыре состояния, на чём каждое стоит, liveness-проба, набор guard-ов первого хопа и команды `fetch_presence` / `fetch_first_hop_guards`
+- [overlay_role.md](overlay_role.md) — классификация ролей оверлея `Q(NodeID)`: хеш, каноническая форма входа, извлекаемый бит и тестовые векторы. ⚠️ Только контракт — механизм, который её использует, **не принят**, а вычисление `Q` есть классификация, а не аутентификация
 - [debug.md](../debug.md) — уровни логирования и трассировка протокола
 
 ### Индекс команд
