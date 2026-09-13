@@ -159,7 +159,7 @@ func TestM1ConnectivitySweep(t *testing.T) {
 		for quota := range sh.degree + 1 {
 			minShare, maxIsolated := 1.0, 0
 			for _, seed := range sweepSeeds {
-				report := measure(sh, seed, quota)
+				report := measure(sh, seed, quota, policyBaseline)
 
 				if report.StructuralNodes == 0 {
 					t.Fatalf("%s seed=%d: the structural half is empty — the harness is broken, "+
@@ -227,7 +227,7 @@ func TestM1ConnectivitySweep(t *testing.T) {
 		for quota := range sh.degree + 1 {
 			good := true
 			for _, seed := range sweepSeeds {
-				if measure(sh, seed, quota).Structural.Components != 1 {
+				if measure(sh, seed, quota, policyBaseline).Structural.Components != 1 {
 					good = false
 					break
 				}

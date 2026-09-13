@@ -297,6 +297,15 @@ type quotaShortfall struct {
 	// fill while the quota was still unmet. That is the POLICY declining to
 	// prefer, not the network declining to accept.
 	LeftoverIgnoredQuota int
+
+	// SecondPassLinks, SecondPassFoundNobody and SecondPassOutOfBudget exist
+	// only under policy 3, and the last two are the two DIFFERENT ways the
+	// repair can fail to finish a node: the network had nobody left to give,
+	// or this node had no room left to take. Without both, "the second pass
+	// did not help" has no answer in the record.
+	SecondPassLinks       int
+	SecondPassFoundNobody int
+	SecondPassOutOfBudget int
 }
 
 // Unmet reports whether this node lost the quota for a reason that was recorded
@@ -366,6 +375,43 @@ func attributeShortfall(g *graph, nodes int, member func(int) bool) shortfallSli
 // neighbours at all".
 func (s quotaShortfall) Searched() bool { return !s.FullBeforeSearch }
 
+// policy is a neighbour-selection rule, §2.4 of the model. The three exist to
+// answer one question: can the isolation of structural nodes be removed by
+// changing the SELECTION, without raising B and without softening the
+// "one component" criterion.
+//
+// ⚠️ Their rules were written down before any of them was implemented. A policy
+// shaped around a result already seen is a policy nobody can tell from a fitted
+// curve afterwards.
+type policy int
+
+const (
+	// policyBaseline is the algorithm the earlier runs measured, unchanged. It
+	// is the control, not a candidate.
+	policyBaseline policy = iota
+
+	// policyInitiatedLimit caps a node's OWN set at d counting only the links
+	// it initiated, leaving B as the only limit on total connections.
+	// Incoming links stop consuming the search.
+	policyInitiatedLimit
+
+	// policySecondPass runs the baseline to completion and then gives the nodes
+	// that missed their quota one more attempt, spending free B rather than
+	// free d.
+	policySecondPass
+)
+
+func (p policy) String() string {
+	switch p {
+	case policyInitiatedLimit:
+		return "initiated-limit"
+	case policySecondPass:
+		return "second-pass"
+	default:
+		return "baseline"
+	}
+}
+
 // buildGraph is §2.2 of the model.
 //
 // Nodes are processed in index order, each filling first its Q quota and then
@@ -375,7 +421,7 @@ func (s quotaShortfall) Searched() bool { return !s.FullBeforeSearch }
 //
 // ⚠️ No edge is ever added to make the graph connected. The quota moves slots a
 // node was going to spend anyway; it does not add slots.
-func buildGraph(sh shape, seed uint64, quota int) *graph {
+func buildGraph(sh shape, seed uint64, quota int, selection policy) *graph {
 	ids := make([]nodeID, sh.nodes)
 	roles := make([]int, sh.nodes)
 	for i := range ids {
@@ -402,6 +448,18 @@ func buildGraph(sh shape, seed uint64, quota int) *graph {
 	degreeOf := func(i int32) int { return len(g.adjacency[i]) }
 	hasRoom := func(i int32) bool { return degreeOf(i) < sh.budget }
 
+	// The ONE line that separates policy 2 from the baseline: what counts
+	// against the desired degree. The baseline counts every link, so being
+	// dialled d times ends the search; the initiated limit counts only the
+	// links this node chose, so incoming ones no longer consume it. B still
+	// caps the total either way.
+	wantsMore := func(i int32) bool {
+		if selection == policyInitiatedLimit {
+			return g.initiated[i] < sh.degree
+		}
+		return degreeOf(i) < sh.degree
+	}
+
 	connect := func(u, v int32) {
 		g.initiated[u]++
 		g.adjacency[u] = append(g.adjacency[u], v)
@@ -423,7 +481,7 @@ func buildGraph(sh shape, seed uint64, quota int) *graph {
 		// has to be captured here: after the loop the two cases are
 		// indistinguishable, and telling them apart is the difference between
 		// "never searched" and "searched and ran out".
-		fullBeforeSearch := degreeOf(u) >= sh.degree || !hasRoom(u)
+		fullBeforeSearch := !wantsMore(u) || !hasRoom(u)
 
 		// One contact per BUCKET, from the shallowest level outwards — the
 		// routing table of ADR 00 §5, not a nearest-neighbour graph.
@@ -438,7 +496,7 @@ func buildGraph(sh shape, seed uint64, quota int) *graph {
 		// Level i is the set sharing exactly i leading bits with u: level 0 is
 		// half the network, level 1 a quarter, and so on. One contact from each
 		// gives the logarithmic diameter the geometry is chosen for.
-		for level := 0; level < sh.degree && degreeOf(u) < sh.degree && hasRoom(u); level++ {
+		for level := 0; level < sh.degree && wantsMore(u) && hasRoom(u); level++ {
 			free := func(candidate int32) bool {
 				if candidate == u {
 					return false
@@ -494,7 +552,7 @@ func buildGraph(sh shape, seed uint64, quota int) *graph {
 		// whatever budget they have. That is a cause of an unmet quota which
 		// has nothing to do with the ceiling B, and until it is counted apart
 		// the shortfall cannot be blamed on receiving capacity.
-		if g.structuralNeighbours[u] < quota && (degreeOf(u) >= sh.degree || !hasRoom(u)) {
+		if g.structuralNeighbours[u] < quota && (!wantsMore(u) || !hasRoom(u)) {
 			if fullBeforeSearch {
 				g.shortfall[u].FullBeforeSearch = true
 			} else {
@@ -505,7 +563,7 @@ func buildGraph(sh shape, seed uint64, quota int) *graph {
 		// Buckets that were empty leave slots unused. They are filled from
 		// whoever is closest, which is what a node with spare capacity and a
 		// sparse table does.
-		for degreeOf(u) < sh.degree && hasRoom(u) {
+		for wantsMore(u) && hasRoom(u) {
 			accept := func(candidate int32) bool {
 				if candidate == u {
 					return false
@@ -537,7 +595,72 @@ func buildGraph(sh shape, seed uint64, quota int) *graph {
 			connect(u, found[0])
 		}
 	}
+
+	if selection == policySecondPass {
+		secondPassForUnmetQuota(g, sh, trie, quota, linked, hasRoom, connect)
+	}
 	return g
+}
+
+// secondPassForUnmetQuota is policy 3, §2.4. It runs only after the baseline
+// has finished every node, walks the nodes whose OWN quota went unmet, and
+// spends free B — not free d — on the closest structural nodes left.
+//
+// ⚠️ The trigger is the node's own shortfall and nothing else. Adding edges
+// because the component analysis asked for them would make the model prove
+// what it arranged, so connectivity is never consulted here.
+//
+// ⚠️ One pass, in index order. Repeating until nothing changes is a different
+// policy and would have to be measured as one.
+func secondPassForUnmetQuota(
+	g *graph,
+	sh shape,
+	trie *idTrie,
+	quota int,
+	linked []map[int32]struct{},
+	hasRoom func(int32) bool,
+	connect func(u, v int32),
+) {
+	for i := range sh.nodes {
+		u := int32(i)
+
+		if g.structuralNeighbours[u] < quota && !hasRoom(u) {
+			// Out of its OWN budget before the repair could start. Recorded
+			// apart from "nobody to link to": one is answered by raising B,
+			// the other is not, and a report that merges them answers neither.
+			g.shortfall[u].SecondPassOutOfBudget++
+		}
+
+		for g.structuralNeighbours[u] < quota && hasRoom(u) {
+			// Closest structural node anywhere, rather than one per bucket:
+			// this is repair of a shortfall, not construction of a routing
+			// table, and the bucket structure was already built by the pass
+			// before.
+			found := trie.nearest(g.ids[u], 1, func(candidate int32) bool {
+				if candidate == u || g.roles[candidate] != roleStructural {
+					return false
+				}
+				if _, already := linked[u][candidate]; already {
+					return false
+				}
+				return hasRoom(candidate)
+			})
+			if len(found) == 0 {
+				// Every structural node is either a neighbour already or at
+				// its ceiling. The first pass recorded why the quota went
+				// unmet; this records that the repair had nothing to work
+				// with either.
+				g.shortfall[u].SecondPassFoundNobody++
+				break
+			}
+			connect(u, found[0])
+			g.shortfall[u].SecondPassLinks++
+
+			if g.structuralNeighbours[u] < quota && !hasRoom(u) {
+				g.shortfall[u].SecondPassOutOfBudget++
+			}
+		}
+	}
 }
 
 // --- components -------------------------------------------------------------
@@ -630,9 +753,25 @@ func analyseComponents(g *graph, member func(int32) bool) componentReport {
 
 // runReport is one (shape, seed, quota) point of the sweep.
 type runReport struct {
-	Shape string
-	Seed  uint64
-	Quota int
+	Shape  string
+	Seed   uint64
+	Quota  int
+	Policy policy
+
+	// Links is the number of EDGES in the graph — every link is initiated by
+	// exactly one end, so summing the initiated counts gives it. This is the
+	// price of a policy, stated in the unit the budget is stated in.
+	//
+	// SecondPassLinks is how many of them the repair pass added, and
+	// SecondPassStuck how many nodes the repair reached with nothing left to
+	// give them. Both are zero for every policy but the third.
+	Links           int
+	SecondPassLinks int
+	// SecondPassStuck counts nodes the repair could find nobody for;
+	// SecondPassOutOfBudget counts nodes that ran out of their own B. Two
+	// different failures, and only the second is about capacity.
+	SecondPassStuck       int
+	SecondPassOutOfBudget int
 
 	Base       componentReport
 	Structural componentReport
@@ -675,10 +814,10 @@ type runReport struct {
 	MaxInitiated int
 }
 
-func measure(sh shape, seed uint64, quota int) runReport {
-	g := buildGraph(sh, seed, quota)
+func measure(sh shape, seed uint64, quota int, selection policy) runReport {
+	g := buildGraph(sh, seed, quota, selection)
 
-	report := runReport{Shape: sh.name, Seed: seed, Quota: quota}
+	report := runReport{Shape: sh.name, Seed: seed, Quota: quota, Policy: selection}
 	report.Base = analyseComponents(g, func(int32) bool { return true })
 	report.Structural = analyseComponents(g, func(i int32) bool { return g.roles[i] == roleStructural })
 
@@ -703,6 +842,14 @@ func measure(sh shape, seed uint64, quota int) runReport {
 		}
 		if g.initiated[i] > report.MaxInitiated {
 			report.MaxInitiated = g.initiated[i]
+		}
+		report.Links += g.initiated[i]
+		report.SecondPassLinks += g.shortfall[i].SecondPassLinks
+		if g.shortfall[i].SecondPassFoundNobody > 0 {
+			report.SecondPassStuck++
+		}
+		if g.shortfall[i].SecondPassOutOfBudget > 0 {
+			report.SecondPassOutOfBudget++
 		}
 		structuralCounts = append(structuralCounts, g.structuralNeighbours[i])
 		if g.structuralNeighbours[i] >= quota {

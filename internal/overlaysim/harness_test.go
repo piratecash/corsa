@@ -427,7 +427,7 @@ func TestQuotaShortfallIsAttributedNotAssumed(t *testing.T) {
 	sh := shape{name: "10k×8", nodes: 10_000, degree: 8, budget: 16}
 	const quota = 8
 
-	g := buildGraph(sh, 1, quota)
+	g := buildGraph(sh, 1, quota, policyBaseline)
 
 	t.Run("every node below the quota has a recorded reason", func(t *testing.T) {
 		t.Parallel()
@@ -536,7 +536,7 @@ func TestQuotaShortfallIsAttributedNotAssumed(t *testing.T) {
 		// this is where an "everyone is short and nobody knows why" report
 		// would come from.
 		tiny := shape{name: "5×8", nodes: 5, degree: 8, budget: 16}
-		small := buildGraph(tiny, 1, tiny.degree)
+		small := buildGraph(tiny, 1, tiny.degree, policyBaseline)
 
 		short := 0
 		for i := range tiny.nodes {
@@ -567,7 +567,7 @@ func TestQuotaShortfallIsAttributedNotAssumed(t *testing.T) {
 		// every node below the quota, a set that also holds ¬Q nodes and Q
 		// nodes only a neighbour or two short. Re-derive both memberships from
 		// the finished graph so the slices cannot quietly become the same set.
-		report := measure(sh, 1, quota)
+		report := measure(sh, 1, quota, policyBaseline)
 
 		short, isolated := 0, 0
 		for i := range sh.nodes {
@@ -642,8 +642,8 @@ func TestOneSeedReproducesOneGraph(t *testing.T) {
 
 	sh := shape{name: "1k×8", nodes: 1000, degree: 8, budget: 16}
 
-	first := measure(sh, 42, 2)
-	second := measure(sh, 42, 2)
+	first := measure(sh, 42, 2, policyBaseline)
+	second := measure(sh, 42, 2, policyBaseline)
 
 	if fmt.Sprintf("%+v", first) != fmt.Sprintf("%+v", second) {
 		t.Fatalf("same seed produced different reports:\n%+v\n%+v", first, second)
@@ -662,8 +662,8 @@ func TestDifferentSeedsProduceDifferentGraphs(t *testing.T) {
 		t.Fatal("the seed does not reach the identifiers")
 	}
 
-	first := measure(sh, 1, 2)
-	second := measure(sh, 2, 2)
+	first := measure(sh, 1, 2, policyBaseline)
+	second := measure(sh, 2, 2, policyBaseline)
 	if fmt.Sprintf("%+v", first) == fmt.Sprintf("%+v", second) {
 		t.Fatal("two different seeds produced an identical report")
 	}
@@ -681,7 +681,7 @@ func TestBudgetIsNeverExceeded(t *testing.T) {
 
 	for _, sh := range shapes {
 		for quota := range sh.degree + 1 {
-			g := buildGraph(sh, 7, quota)
+			g := buildGraph(sh, 7, quota, policyBaseline)
 			for i := range sh.nodes {
 				if degree := len(g.adjacency[i]); degree > sh.budget {
 					t.Fatalf("%s quota=%d: node %d holds %d connections, budget is %d",
@@ -699,7 +699,7 @@ func TestLinksAreSymmetric(t *testing.T) {
 	t.Parallel()
 
 	sh := shape{name: "500×6", nodes: 500, degree: 6, budget: 12}
-	g := buildGraph(sh, 3, 2)
+	g := buildGraph(sh, 3, 2, policyBaseline)
 
 	for i := range sh.nodes {
 		for _, peer := range g.adjacency[i] {
@@ -737,7 +737,7 @@ func TestQuotaOnlyMovesSlotsItDoesNotAddThem(t *testing.T) {
 	// the test doing its job: the quota loop was ignoring the desired degree
 	// and buying extra connections outright.
 	for quota := range sh.degree + 1 {
-		got := measure(sh, 11, quota)
+		got := measure(sh, 11, quota, policyBaseline)
 		if got.MaxInitiated > sh.degree {
 			t.Errorf("quota=%d: a node initiated %d links, desired degree is %d — the quota is "+
 				"adding slots rather than redirecting them", quota, got.MaxInitiated, sh.degree)
