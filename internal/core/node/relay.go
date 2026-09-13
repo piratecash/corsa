@@ -2313,6 +2313,32 @@ func receiptFrame(receipt protocol.DeliveryReceipt) protocol.ReceiptFrame {
 	}
 }
 
+// localReceiptFrame is receiptFrame for the backlog this node serves to its
+// OWN client, and the only builder that fills ObservedAt.
+//
+// Separate from receiptFrame rather than a flag on it, because the two answer
+// different questions and only one of them crosses the wire: a relayed
+// receipt carries the author's claim and nothing of ours, while the backlog
+// the desktop reads has to agree with the live event it may have missed —
+// and the live event carries our admission time.
+func localReceiptFrame(receipt protocol.DeliveryReceipt) protocol.ReceiptFrame {
+	frame := receiptFrame(receipt)
+	if !receipt.ObservedAt.IsZero() {
+		frame.ObservedAt = receipt.ObservedAt.UTC().Format(time.RFC3339)
+	}
+	return frame
+}
+
+// receiptDisplayTime is when to say the message was delivered: what this
+// node saw, falling back to the sender's claim for a receipt that predates
+// the local stamp (a restart's reseed, or a fixture).
+func receiptDisplayTime(receipt protocol.DeliveryReceipt) time.Time {
+	if !receipt.ObservedAt.IsZero() {
+		return receipt.ObservedAt
+	}
+	return receipt.DeliveredAt
+}
+
 func receiptFromFrame(frame protocol.Frame) (protocol.DeliveryReceipt, error) {
 	if strings.TrimSpace(frame.ID) == "" || strings.TrimSpace(frame.Address) == "" || strings.TrimSpace(frame.Recipient) == "" || strings.TrimSpace(frame.Status) == "" || strings.TrimSpace(frame.DeliveredAt) == "" {
 		return protocol.DeliveryReceipt{}, fmt.Errorf("missing delivery receipt fields")

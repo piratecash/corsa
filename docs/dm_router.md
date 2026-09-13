@@ -709,8 +709,12 @@ To prevent data races (which cause Go runtime fatals that are uncatchable):
    `loadConversation()` completes asynchronously.
 
    - New messages for the **active conversation** where the cache is
-     loaded are decrypted inline via `DecryptIncomingMessage`, appended
-     to `ConversationCache`, and `activeMessages` is refreshed.
+     loaded are decrypted inline via `DecryptIncomingMessage`, placed in
+     `ConversationCache` at their arrival sequence (`DirectMessage.Seq`,
+     the chatlog rowid — NOT at the end, because the row is written
+     outside the lock and announced after it, so two messages stored in
+     one order can reach the cache in the other), and `activeMessages` is
+     refreshed.
      `RouterPeerState.Preview` is updated to reflect the new message.
      If inline decryption fails, `loadConversation` reloads the full
      history and `updatePreviewFromStore` refreshes the preview from
@@ -884,6 +888,24 @@ When a real delivery receipt later arrives with the same status rank (e.g.
 update if it upgrades a nil/zero `DeliveredAt` to a real timestamp. This
 replaces the synthetic value with the actual receipt time without requiring
 a status rank advance.
+
+### Whose clock the ✓✓ speaks with
+
+A delivery receipt is stamped by the node that took delivery, and that node's
+clock is not ours. A peer running a minute slow confirms a message the user
+sent at 13:47 with "delivered at 13:46", and the badge under their own bubble
+then reads as delivery preceding the send.
+
+So a receipt carries two times. `DeliveredAt` is the remote claim: forwarded
+verbatim by the relay and gossip builders, never rewritten, because it is
+somebody else's statement. `ObservedAt` is this node's admission time, set at
+the single door every receipt passes through (`storeDeliveryReceipt`), and it
+is what the client draws. It reaches the client by two routes that have to
+agree — the live receipt event (`receiptUpdateEvent`) and the backlog reply
+(`fetch_delivery_receipts`, built by `localReceiptFrame`, the one builder that
+fills `observed_at`) — because a reload must not change the time a badge shows.
+A node that sends no `observed_at` leaves the remote claim in place, which is
+what was displayed before.
 
 ---
 
@@ -1601,8 +1623,12 @@ DMRouter запускает две фоновые горутины:
    асинхронного `loadConversation()`.
 
    - Новые сообщения для **активного разговора** с загруженным cache
-     расшифровываются inline через `DecryptIncomingMessage`, добавляются
-     в `ConversationCache`, и `activeMessages` обновляется.
+     расшифровываются inline через `DecryptIncomingMessage` и кладутся в
+     `ConversationCache` на позицию своего порядка прибытия
+     (`DirectMessage.Seq`, rowid чатлога), а НЕ в конец: строка пишется
+     вне мьютекса и объявляется после, поэтому два сообщения, записанные
+     в одном порядке, могут дойти до кэша в другом. После этого
+     `activeMessages` обновляется.
      `RouterPeerState.Preview` обновляется для отражения нового
      сообщения. При неудачной inline-расшифровке `loadConversation`
      перезагружает историю, а `updatePreviewFromStore` обновляет превью
@@ -1775,3 +1801,22 @@ receipt отсутствует. Рендеринг switch также явно о
 разрешает обновление, если оно заменяет nil/zero `DeliveredAt` на реальную
 временную метку. Это заменяет синтетическое значение на фактическое время
 доставки без необходимости повышения ранга статуса.
+
+### Чьими часами говорит ✓✓
+
+Квитанцию о доставке штампует узел, который принял сообщение, и его часы —
+не наши. Собеседник с часами, отстающими на минуту, подтверждает сообщение,
+отправленное пользователем в 13:47, временем «доставлено в 13:46», и бейдж
+под собственным пузырём читается как доставка раньше отправки.
+
+Поэтому квитанция несёт два времени. `DeliveredAt` — чужое заявление:
+пересылается relay- и gossip-конструкторами дословно и никогда не
+переписывается, потому что это слова другого узла. `ObservedAt` — время
+допуска на ЭТОМ узле, проставляется в единственной двери, через которую
+проходит любая квитанция (`storeDeliveryReceipt`), и именно оно рисуется
+клиенту. До клиента оно доходит двумя путями, которые обязаны совпадать, —
+живым событием квитанции (`receiptUpdateEvent`) и ответом с бэклогом
+(`fetch_delivery_receipts`, собирается в `localReceiptFrame`, единственном
+конструкторе, который заполняет `observed_at`), — потому что перезагрузка не
+должна менять время на бейдже. Узел, который `observed_at` не присылает,
+оставляет в силе чужое заявление — ровно то, что показывалось раньше.

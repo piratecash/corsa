@@ -240,6 +240,13 @@ type ReceiptFrame struct {
 	Recipient   string `json:"recipient"`
 	Status      string `json:"status"`
 	DeliveredAt string `json:"delivered_at"`
+	// ObservedAt is the receiving node's own admission time, and it is
+	// written by ONE builder — the local fetch_delivery_receipts reply —
+	// so that a client reading the backlog sees the same time the live
+	// receipt event gave it. The relay and gossip builders leave it empty:
+	// forwarding a receipt means forwarding the author's claim, and our
+	// note about when we happened to see it is not part of that claim.
+	ObservedAt string `json:"observed_at,omitempty"`
 }
 
 type NoticeFrame struct {

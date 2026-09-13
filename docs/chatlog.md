@@ -147,7 +147,7 @@ sequenceDiagram
     UI->>UI: user clicks on peer in sidebar
     UI->>SVC: FetchConversation(peerAddress)
     SVC->>LOG: chatLog.Read("dm", peerAddress)
-    Note over LOG: SELECT from messages table<br/>WHERE conversation matches peer<br/>ORDER BY created_at ASC, rowid ASC
+    Note over LOG: SELECT from messages table<br/>WHERE conversation matches peer<br/>ORDER BY rowid ASC<br/>(arrival order — see "Which row is LAST")
     LOG-->>SVC: []Entry
     SVC->>SVC: fetch trusted contacts
     SVC->>SVC: decryptDirectMessages()
@@ -341,8 +341,8 @@ signatures:
 
 - `Append(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) error`
 - `AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
-- `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
-- `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
+- `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)` — the whole thread in ARRIVAL order, each entry carrying its sequence in `Entry.RowID`
+- `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)` — the n newest by arrival, oldest first, sequences included
 - `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)` — the LAST ARRIVED row, with its arrival sequence in `Entry.RowID`
 - `MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error)` — where a message landed in the local arrival order, and whether the store holds it at all; the sidebar asks it about a message it learned of from the live event stream, which carries no such number
 - `UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
@@ -421,7 +421,8 @@ On startup, `DMRouter.initializeFromDB()` restores sidebar state from the chatlo
   IDs rather than a count because the database is ahead of the event stream —
   the same message arrives from both — and adding an id twice changes nothing.
   Peers with unread messages are promoted to the front of `peerOrder`.
-- **Which row is LAST**: `ReadLastEntry()`, `ReadLastEntryPerPeer()` and
+- **Which row is LAST, and in which order the thread reads**: `Read()`,
+  `ReadLast()`, `ReadLastEntry()`, `ReadLastEntryPerPeer()` and
   `ListConversations()` answer this by `rowid` — the local insertion counter —
   and not by `created_at`. The column holds what the SENDER printed, and the
   node accepts a message dated up to ten minutes into the future and
@@ -435,14 +436,25 @@ On startup, `DMRouter.initializeFromDB()` restores sidebar state from the chatlo
   reused value only ever goes to a row inserted after every remaining row —
   but it does mean a deleted row and its replacement can share a number, so
   nothing outside the store may treat equal sequences as proof of being the
-  same message; the router separates those by its own deletion epoch. The conversation itself is NOT
-  reordered — `Read()` and `ReadLast()` stay in `created_at` order, with
-  `rowid` as the tie-break so rows sharing a second (wire stamps have
-  second resolution) come back in the order they were written rather than in
-  whatever order the sorter chose. So a message delivered long after it was
-  written sits in its chronological place in the thread and still counts as
-  the newest thing in the sidebar, which is also what the badge and the
-  conversation order already say about it.
+  same message; the router separates those by its own deletion epoch.
+
+  The thread was once excluded from this and read in `created_at` order, on
+  the argument that a conversation should be shown as the chronology its
+  authors dated. It does not survive a peer whose clock lags: the user sends a
+  message, the answer arrives a second later dated a minute earlier, and it is
+  drawn ABOVE the message it answers. The two orders also disagreed with each
+  other — a message arriving into an OPEN conversation is placed live, by
+  arrival, while any reload re-read it by stamp — so the same exchange
+  rendered one way until something re-read it and another way afterwards.
+  Both surfaces now answer by arrival. The cost is stated rather than hidden:
+  a message delivered long after it was written lands at the END of the
+  thread carrying its older timestamp, instead of being spliced into the
+  middle where the user would never notice it had arrived. The timestamp
+  shown is still the author's — what changed is the position, not the claim.
+  What arrival order does not give is agreement between the two ends: each
+  node orders by what it saw, so crossing messages can sit differently on the
+  two screens, and closing that needs a causal reference carried by the
+  message itself — a protocol change, tracked separately.
 - **Last-online evidence**: `LastIncomingAtPerPeer()` returns, per
   conversation, the creation time of the newest message the peer wrote. The
   sidebar spends it as the weakest form of "last online" — a message can only
@@ -1272,7 +1284,7 @@ sequenceDiagram
     UI->>UI: пользователь нажимает на peer в боковой панели
     UI->>SVC: FetchConversation(peerAddress)
     SVC->>LOG: chatLog.Read("dm", peerAddress)
-    Note over LOG: SELECT из таблицы messages<br/>WHERE диалог совпадает с peer<br/>ORDER BY created_at ASC, rowid ASC
+    Note over LOG: SELECT из таблицы messages<br/>WHERE диалог совпадает с peer<br/>ORDER BY rowid ASC<br/>(порядок прибытия — см. «Какая строка ПОСЛЕДНЯЯ»)
     LOG-->>SVC: []Entry
     SVC->>SVC: получение trusted contacts
     SVC->>SVC: decryptDirectMessages()
@@ -1463,8 +1475,8 @@ SQLite через общую state-базу, и отмена обязана ех
 
 - `Append(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) error`
 - `AppendReportNew(ctx context.Context, topic string, selfAddress domain.PeerIdentity, entry Entry) (bool, error)`
-- `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)`
-- `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)`
+- `Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error)` — весь тред в порядке ПРИБЫТИЯ, каждая запись несёт свой номер в `Entry.RowID`
+- `ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error)` — n самых свежих по прибытию, старые первыми, с номерами
 - `ReadLastEntry(ctx context.Context, topic string, peerAddress domain.PeerIdentity) (*Entry, error)` — ПОСЛЕДНЯЯ ПРИБЫВШАЯ строка, её порядковый номер приходит в `Entry.RowID`
 - `MessageSeq(ctx context.Context, messageID domain.MessageID) (int64, bool, error)` — куда сообщение легло в локальном порядке прибытия и держит ли хранилище его вообще; сайдбар спрашивает это про сообщение, о котором узнал из живого потока событий, где такого номера нет
 - `UpdateStatus(ctx context.Context, topic string, peerAddress domain.PeerIdentity, messageID domain.MessageID, status string) (bool, error)`
@@ -1544,7 +1556,8 @@ stateDiagram-v2
   которого и есть бейдж. Именно ID, а не счёт: база опережает поток событий —
   одно сообщение приходит из обоих источников, — а повторное добавление id
   ничего не меняет. Peers с непрочитанными продвигаются в начало `peerOrder`.
-- **Какая строка ПОСЛЕДНЯЯ**: `ReadLastEntry()`, `ReadLastEntryPerPeer()` и
+- **Какая строка ПОСЛЕДНЯЯ и в каком порядке читается тред**: `Read()`,
+  `ReadLast()`, `ReadLastEntry()`, `ReadLastEntryPerPeer()` и
   `ListConversations()` отвечают на это по `rowid` — локальному счётчику
   вставки, — а не по `created_at`. В колонке лежит то, что напечатал
   ОТПРАВИТЕЛЬ, а нода принимает сообщение с датой до десяти минут вперёд и
@@ -1559,13 +1572,26 @@ stateDiagram-v2
   вставленной позже всех оставшихся. Но это значит, что удалённая строка и её
   замена могут делить один номер, поэтому за пределами хранилища равные
   последовательности нельзя считать доказательством, что это одно и то же
-  сообщение; роутер различает их своей эпохой удалений. Сам диалог НЕ переупорядочивается — `Read()` и `ReadLast()`
-  остаются в порядке `created_at`, с `rowid` как тайбрейкером, чтобы строки
-  одной секунды (штампы на проводе секундные) возвращались в порядке записи,
-  а не в том, который выбрал сортировщик. Поэтому сообщение, доставленное
-  сильно позже написания, стоит в треде на своём хронологическом месте и при
-  этом считается самым свежим событием в сайдбаре — ровно то же самое про него
-  уже говорят бейдж и порядок диалогов.
+  сообщение; роутер различает их своей эпохой удалений.
+
+  Тред раньше был исключением и читался в порядке `created_at` — на том
+  основании, что диалог показывают как хронологию, которую проставили его
+  авторы. Это не выживает при собеседнике с отстающими часами: пользователь
+  отправляет сообщение, через секунду приходит ответ, датированный минутой
+  раньше, и он рисуется ВЫШЕ сообщения, на которое отвечает. Вдобавок два
+  порядка расходились между собой — сообщение, пришедшее в ОТКРЫТЫЙ диалог,
+  размещается живым потоком, по прибытию, а любая перезагрузка перечитывала
+  его по штампу, — и одна и та же переписка выглядела одним образом до того,
+  как что-то её перечитало, и другим после. Теперь обе поверхности отвечают
+  по прибытию. Цена названа, а не спрятана: сообщение, доставленное сильно
+  позже написания, встаёт в КОНЕЦ треда со своей старой датой, вместо того
+  чтобы вклиниться в середину, где пользователь не заметил бы, что оно вообще
+  пришло. Показываемое время по-прежнему авторское — изменилась позиция, а не
+  заявление. Чего порядок прибытия НЕ даёт — согласия между двумя концами:
+  каждый узел упорядочивает по тому, что видел, поэтому встречные сообщения
+  могут стоять на двух экранах по-разному; закрыть это можно только причинной
+  ссылкой в самом сообщении, то есть изменением протокола — отдельной
+  задачей.
 - **Свидетельство last-online**: `LastIncomingAtPerPeer()` возвращает по
   каждому диалогу время создания самого свежего сообщения, написанного
   собеседником. Sidebar тратит это как самую слабую форму «последний раз

@@ -2684,13 +2684,15 @@ func (s *Service) publishRetryableSnapshot(topic string, event protocol.LocalCha
 // handler and the repair pass cannot describe the same receipt differently.
 func receiptUpdateEvent(receipt protocol.DeliveryReceipt) protocol.LocalChangeEvent {
 	return protocol.LocalChangeEvent{
-		Type:        protocol.LocalChangeReceiptUpdate,
-		Topic:       "dm",
-		MessageID:   string(receipt.MessageID),
-		Sender:      receipt.Sender,
-		Recipient:   receipt.Recipient,
-		Status:      receipt.Status,
-		DeliveredAt: receipt.DeliveredAt,
+		Type:      protocol.LocalChangeReceiptUpdate,
+		Topic:     "dm",
+		MessageID: string(receipt.MessageID),
+		Sender:    receipt.Sender,
+		Recipient: receipt.Recipient,
+		Status:    receipt.Status,
+		// The time the UI draws, so it is ours and not the remote's — see
+		// protocol.DeliveryReceipt.ObservedAt.
+		DeliveredAt: receiptDisplayTime(receipt),
 	}
 }
 

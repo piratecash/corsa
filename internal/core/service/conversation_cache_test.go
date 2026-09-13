@@ -92,6 +92,81 @@ func TestCacheAppendPreservesOrder(t *testing.T) {
 	}
 }
 
+func idsInCache(cache *ConversationCache) []string {
+	msgs := cache.Messages()
+	ids := make([]string, 0, len(msgs))
+	for i := range msgs {
+		ids = append(ids, msgs[i].ID)
+	}
+	return ids
+}
+
+func sameIDs(got []string, want ...string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestALateEventCannotJumpAheadOfTheRowItFollows: the rows were written in
+// one order and announced in the other. The cache is what the open
+// conversation draws, so placing them by the moment the event arrived would
+// show an order that the very next reload — which reads the rows themselves —
+// would take back.
+func TestALateEventCannotJumpAheadOfTheRowItFollows(t *testing.T) {
+	cache := NewConversationCache()
+	peer := domaintest.ID("bob")
+	cache.Load(peer, []DirectMessage{{ID: "m1", Seq: 7, Body: "earlier"}}, 7)
+
+	// m3 (row 9) is announced before m2 (row 8).
+	cache.AppendForPeer(peer, DirectMessage{ID: "m3", Seq: 9, Body: "third"})
+	cache.AppendForPeer(peer, DirectMessage{ID: "m2", Seq: 8, Body: "second"})
+
+	if got := idsInCache(cache); !sameIDs(got, "m1", "m2", "m3") {
+		t.Fatalf("order = %v, want [m1 m2 m3]: the rows decide, not the events", got)
+	}
+
+	// The index has to survive the insert, or every later status update and
+	// removal addresses the wrong message.
+	if !cache.UpdateStatus("m3", MessageStatusDelivered, domain.TimeOf(time.Unix(1, 0)), true) {
+		t.Fatal("status update did not reach m3 after the insert shifted it")
+	}
+	msgs := cache.Messages()
+	if msgs[2].ReceiptStatus != MessageStatusDelivered {
+		t.Fatalf("status landed on %q instead of m3", msgs[2].ID)
+	}
+	if msgs[1].ReceiptStatus != "" {
+		t.Fatalf("status also landed on %q", msgs[1].ID)
+	}
+}
+
+// TestAMessageWithNoSequenceHoldsItsArrivalPlace: Seq zero is "the store
+// could not be asked", never "oldest". Reading it as a small number would
+// put a message whose row lookup timed out above everything on screen.
+func TestAMessageWithNoSequenceHoldsItsArrivalPlace(t *testing.T) {
+	cache := NewConversationCache()
+	peer := domaintest.ID("bob")
+	cache.Load(peer, []DirectMessage{{ID: "m1", Seq: 7}, {ID: "m2", Seq: 8}}, 8)
+
+	cache.AppendForPeer(peer, DirectMessage{ID: "unplaced", Seq: 0})
+	if got := idsInCache(cache); !sameIDs(got, "m1", "m2", "unplaced") {
+		t.Fatalf("order = %v, want [m1 m2 unplaced]", got)
+	}
+
+	// And nothing may be ordered against it afterwards: a row number cannot
+	// be compared with an absent one, so the next message stays behind it
+	// rather than being given a position it has not earned.
+	cache.AppendForPeer(peer, DirectMessage{ID: "m9", Seq: 9})
+	if got := idsInCache(cache); !sameIDs(got, "m1", "m2", "unplaced", "m9") {
+		t.Fatalf("order = %v, want [m1 m2 unplaced m9]", got)
+	}
+}
+
 func TestCacheUpdateStatusMonotonic(t *testing.T) {
 	cache := NewConversationCache()
 	now := time.Now()

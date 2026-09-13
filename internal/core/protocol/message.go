@@ -65,11 +65,27 @@ type Envelope struct {
 }
 
 type DeliveryReceipt struct {
-	MessageID   MessageID
-	Sender      string
-	Recipient   string
-	Status      string
+	MessageID MessageID
+	Sender    string
+	Recipient string
+	Status    string
+	// DeliveredAt is the REMOTE node's claim about when it took delivery,
+	// printed by its clock. It is forwarded verbatim and never rewritten:
+	// it is somebody else's statement, and relaying an altered copy would
+	// be putting words in their mouth.
 	DeliveredAt time.Time
+	// ObservedAt is the LOCAL admission time — when THIS node learned of
+	// the receipt — and is what the UI shows, for the same reason
+	// Envelope.StoredAt anchors the transit sweep instead of CreatedAt.
+	// The two clocks are not the same clock, and the user's own message
+	// carries theirs: a peer running a minute slow otherwise puts "✓✓
+	// 13:46" under a message the user sent at 13:47, which reads as
+	// delivery preceding the send.
+	//
+	// Local to this node: set on admission, carried to the desktop by the
+	// receipt event and by the local fetch reply, and left out of every
+	// frame this node sends to another one.
+	ObservedAt time.Time
 }
 
 const (

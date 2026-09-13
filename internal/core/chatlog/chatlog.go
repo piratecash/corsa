@@ -202,24 +202,26 @@ func (s *Store) UpdateStatus(ctx context.Context, topic string, peerAddress doma
 	return n > 0, nil
 }
 
-// Read returns the conversation entries in ascending time order, rows of the
-// same second in the order they were written. The context deadline is
-// propagated to SQLite so callers can bound I/O time.
+// Read returns the conversation entries in the order this node learned of
+// them. The context deadline is propagated to SQLite so callers can bound
+// I/O time.
 //
-// The rowid tie-break is not cosmetic. Wire timestamps have second
-// resolution, so a question and its answer share a stamp routinely, and
-// created_at alone left those rows to the sorter: the plan for this query
-// walks the two directions of the conversation as separate index legs, so a
-// four-message exchange inside one second came back grouped by direction
-// rather than as a conversation.
+// The ordering key is rowid, not created_at — see lastArrivedOrder for the
+// whole argument, which the thread shares with the sidebar. The short form:
+// created_at is the stamp the SENDER printed, and a peer whose clock lags
+// writes a reply that reads as older than the message it answers, so the
+// answer is drawn above the question. Ordering a conversation by a number
+// no remote clock can reach is the only way the thread on screen matches
+// the sequence the user lived through.
 func (s *Store) Read(ctx context.Context, topic string, peerAddress domain.PeerIdentity) ([]Entry, error) {
-	// rowid comes back with the row, not only as the tie-break: it is the
-	// local arrival order, and a reader that has to tell "stored after my
-	// read" from "deleted while I read" has nothing else to go by. See
+	// rowid comes back with the row, not only as the ordering key: callers
+	// need the number itself. A reader that has to tell "stored after my
+	// read" from "deleted while I read" has nothing else to go by, and the
+	// live cache places an arriving message against it. See
 	// service.ConversationCache.Load.
 	query, args := s.peerQuery(topic, peerAddress,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata, rowid
-		 FROM messages WHERE `, ` ORDER BY created_at ASC, rowid ASC`)
+		 FROM messages WHERE `, ` ORDER BY rowid ASC`)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -370,19 +372,23 @@ func (s *Store) UndeliveredOutgoing(ctx context.Context, self domain.PeerIdentit
 
 // ReadLast returns the newest n entries of a conversation, oldest first.
 //
-// Both halves carry the rowid tie-break, and the outer one is what the thread
-// is actually read in: without it the re-ordering was a no-op over rows that
-// share a second, so a conversation held inside one second came back in the
-// inner query's DESCENDING order — the whole exchange upside down.
+// "Newest" is the same question ReadLastEntry answers and is settled the same
+// way — by arrival, not by the senders' stamps. Taking the largest created_at
+// instead would let a peer running fast pin its message inside the window and
+// push a genuinely later one out of it.
+//
+// row_id is carried out of the subquery, not just used inside it: an entry
+// that reaches the UI without its sequence cannot be placed against a live
+// message, and the caller's only recourse is a second round-trip to the store.
 func (s *Store) ReadLast(ctx context.Context, topic string, peerAddress domain.PeerIdentity, n int) ([]Entry, error) {
 	// Use a subquery to get the last N, then re-order ascending.
 	innerQuery, args := s.peerQuery(topic, peerAddress,
 		`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata, rowid AS row_id
-		 FROM messages WHERE `, ` ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+		 FROM messages WHERE `, ` ORDER BY rowid DESC LIMIT ?`)
 	args = append(args, n)
 
-	query := fmt.Sprintf(`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata
-		FROM (%s) sub ORDER BY created_at ASC, row_id ASC`, innerQuery)
+	query := fmt.Sprintf(`SELECT id, sender, recipient, body, created_at, flag, delivery_status, ttl_seconds, metadata, row_id
+		FROM (%s) sub ORDER BY row_id ASC`, innerQuery)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -390,7 +396,7 @@ func (s *Store) ReadLast(ctx context.Context, topic string, peerAddress domain.P
 	}
 	defer func() { _ = rows.Close() }()
 
-	return scanEntries(rows)
+	return scanEntriesWithRowID(rows)
 }
 
 // ListConversations lists every DM conversation. Conversations with unread
@@ -718,12 +724,14 @@ func (s *Store) ReadLastEntry(ctx context.Context, topic string, peerAddress dom
 	return &e, nil
 }
 
-// lastArrivedOrder is why the three "which row is last" readers below order by
-// rowid rather than by created_at.
+// lastArrivedOrder is why every reader that puts messages in an order —
+// the three "which row is last" readers below, and Read/ReadLast above —
+// orders by rowid rather than by created_at.
 //
-// created_at is the timestamp the SENDER printed, and the sidebar is the one
-// surface where trusting it changes what the user sees. Two things go wrong
-// when the largest stamp is taken to be the last message:
+// created_at is the timestamp the SENDER printed, and it decides what the user
+// sees on two surfaces: which conversation the sidebar calls newest, and where
+// a message sits in the thread. Two things go wrong when the largest stamp is
+// taken to be the last message:
 //
 //   - a peer whose clock lags writes a message that reads as OLDER than the
 //     reply we sent a moment earlier. The node accepts it — drift is tolerated
@@ -742,12 +750,27 @@ func (s *Store) ReadLastEntry(ctx context.Context, topic string, peerAddress dom
 // cannot invert it — SQLite hands out max(rowid)+1, so a reused value is only
 // ever given to a row inserted after every row still present.
 //
-// The chat history itself is deliberately NOT reordered (see Read/ReadLast):
-// a thread is read as the chronology its authors dated, while the sidebar
-// answers "what happened here last", which is also what the badge counts and
-// what moved the conversation to the top. A message delivered long after it
-// was written therefore appears in its chronological place in the thread and
-// still shows up as the newest thing in the sidebar.
+// The thread was once left on created_at on the argument that a conversation
+// should be read as the chronology its authors dated. That argument does not
+// survive contact with a peer whose clock lags: the user sends a message,
+// their answer arrives a second later, and it is drawn ABOVE the message it
+// answers — a reply that precedes its question is not a chronology, it is a
+// misordering that happens to be dated. Worse, the two orders disagreed with
+// each other, because a message arriving into an OPEN conversation is appended
+// live, by arrival, while any reload re-read it by stamp: the same exchange
+// rendered one way until something re-read it and another way afterwards.
+//
+// So both surfaces now answer with arrival order, and the cost is stated
+// rather than hidden: a message delivered long after it was written lands at
+// the END of the thread carrying its older timestamp, instead of being spliced
+// into the middle where the user would never notice it had arrived. The
+// timestamp still shown is the author's — what changed is the position, not
+// the claim.
+//
+// What arrival order does NOT give is agreement between the two ends: each
+// node orders by what it saw, so crossing messages can sit differently on the
+// two screens. Making both sides agree needs a causal reference carried by the
+// message itself, which is a protocol change and a separate piece of work.
 
 // MessageSeq returns a message's arrival sequence — the same number
 // ReadLastEntry hands up as Entry.RowID — and whether the store holds the id

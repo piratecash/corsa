@@ -7523,6 +7523,14 @@ type receiptOutcome struct {
 }
 
 func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receiptOutcome {
+	// Stamped here because this is the one door: every receipt that gets
+	// stored, deduped, backlogged or announced comes through it, whether it
+	// arrived over the wire, over the relay, or was raised by this node
+	// itself. Stamping at the parsers instead would mean four places to
+	// keep in step and a fifth that forgets. It does not enter
+	// receiptKeyOf: two copies of one receipt seen a second apart are still
+	// one receipt.
+	receipt.ObservedAt = time.Now().UTC()
 	key := receiptKeyOf(receipt)
 
 	log.Trace().Str("site", "storeDeliveryReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("peer_mu_writer")
@@ -8166,7 +8174,11 @@ func (s *Service) fetchDeliveryReceiptsFrame(recipient string) protocol.Frame {
 
 	frames := make([]protocol.ReceiptFrame, 0, len(items))
 	for _, item := range items {
-		frames = append(frames, receiptFrame(item))
+		// localReceiptFrame, not receiptFrame: this reply is what the
+		// desktop rebuilds its badges from after a reload, and it has to
+		// give the same answer the live receipt event gave — which is this
+		// node's admission time, not the remote clock's.
+		frames = append(frames, localReceiptFrame(item))
 	}
 
 	return protocol.Frame{

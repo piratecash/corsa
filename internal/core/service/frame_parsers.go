@@ -78,12 +78,20 @@ func messageRecordFromFrame(message protocol.MessageFrame) (MessageRecord, error
 // fetch_delivery_receipts. Frames with unparseable DeliveredAt are dropped
 // because a receipt without a valid timestamp cannot be ordered against
 // the lifecycle.
+//
+// observed_at wins when the node supplied it: delivered_at is the remote
+// recipient's clock, and the message it will be drawn under is stamped by
+// ours. A node that does not send the field — an older one, or a fixture —
+// leaves the remote claim in place, which is what was shown before.
 func receiptRecordsFromFrames(receipts []protocol.ReceiptFrame) []DeliveryReceipt {
 	out := make([]DeliveryReceipt, 0, len(receipts))
 	for _, receipt := range receipts {
 		deliveredAt, err := time.Parse(time.RFC3339, receipt.DeliveredAt)
 		if err != nil {
 			continue
+		}
+		if observed, err := time.Parse(time.RFC3339, receipt.ObservedAt); err == nil {
+			deliveredAt = observed
 		}
 		out = append(out, DeliveryReceipt{
 			MessageID:   receipt.MessageID,

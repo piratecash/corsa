@@ -181,9 +181,7 @@ func (c *ConversationCache) Len() int {
 	return len(c.messages)
 }
 
-// AppendMessage ensures idempotency by message ID: only unique messages are stored.
-// Returns true if the message was new, false if it was a duplicate.
-// AppendForPeer appends msg only if the cache still belongs to peer, and
+// AppendForPeer places msg only if the cache still belongs to peer, and
 // reports whether it did. The pair has to be atomic: checking the owner and
 // appending in two acquisitions leaves a window in which the cache is loaded
 // for someone else, and the message is spliced into their thread.
@@ -197,11 +195,12 @@ func (c *ConversationCache) AppendForPeer(peer domain.PeerIdentity, msg DirectMe
 	if _, exists := c.index[msg.ID]; exists {
 		return true
 	}
-	c.index[msg.ID] = len(c.messages)
-	c.messages = append(c.messages, msg)
+	c.placeLocked(msg)
 	return true
 }
 
+// AppendMessage ensures idempotency by message ID: only unique messages are
+// stored. Returns true if the message was new, false if it was a duplicate.
 func (c *ConversationCache) AppendMessage(msg DirectMessage) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -210,9 +209,51 @@ func (c *ConversationCache) AppendMessage(msg DirectMessage) bool {
 		return false
 	}
 
-	c.index[msg.ID] = len(c.messages)
-	c.messages = append(c.messages, msg)
+	c.placeLocked(msg)
 	return true
+}
+
+// placeLocked puts msg at its arrival position and repairs the index.
+// Caller MUST hold c.mu for writing and MUST have established that the id is
+// not already present.
+//
+// The position is the message's Seq — the chatlog row's sequence — and not
+// the moment this call happened, because those two are not the same order.
+// A row is written to SQLite outside the lock and announced after it, the
+// send path applies its own echo from a third goroutine, and the bus between
+// them is asynchronous; so two messages stored in one order can perfectly
+// well be handed to this cache in the other. Appending blind made the open
+// conversation disagree with the same conversation after a reload, which is
+// the whole defect this ordering exists to remove.
+//
+// The scan walks back from the end rather than binary-searching: it is the
+// tail that a new message belongs to virtually always, so the ordinary case
+// costs one comparison, and the loop stops on the first thing it cannot order
+// rather than assuming a sorted slice it does not have.
+//
+// Seq zero means "the store could not be asked", not "oldest". Such a message
+// goes to the end — the only position that claims nothing — and it also stops
+// a later message from moving past it: its own place is arrival and nothing
+// else, so ordering anything against it would be inventing an answer.
+func (c *ConversationCache) placeLocked(msg DirectMessage) {
+	at := len(c.messages)
+	if msg.Seq != 0 {
+		for at > 0 {
+			prev := c.messages[at-1].Seq
+			if prev == 0 || prev <= msg.Seq {
+				break
+			}
+			at--
+		}
+	}
+
+	c.messages = append(c.messages, DirectMessage{})
+	copy(c.messages[at+1:], c.messages[at:])
+	c.messages[at] = msg
+
+	for i := at; i < len(c.messages); i++ {
+		c.index[c.messages[i].ID] = i
+	}
 }
 
 // UpdateStatus enforces forward-only transitions (sent→delivered→seen) to maintain
