@@ -29,6 +29,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/rpc"
 	"github.com/piratecash/corsa/internal/core/service"
+	"github.com/piratecash/corsa/internal/core/updatecheck"
 
 	"gioui.org/app"
 	"gioui.org/f32"
@@ -111,6 +112,7 @@ type Window struct {
 	deleteIcon               *widget.Icon
 	brokenImageIcon          *widget.Icon
 	hourglassIcon            *widget.Icon
+	checkIcon                *widget.Icon
 	emojiCategoryIcons       map[emojiCategoryID]*widget.Icon
 	emojiPicker              emojiPickerState
 	// lastContactLinkTried edge-triggers the search-paste import
@@ -140,26 +142,22 @@ type Window struct {
 	// received. Signalling a goroutine that is not the platform thread
 	// is what keeps Invalidate a client-goroutine call, which is the
 	// only way Gio supports it.
-	deepLinkWake     chan struct{}
-	languageToggle   widget.Clickable
-	languageOptions  map[string]*widget.Clickable
-	languageMenuList widget.List
-	// languageMenuDismissTag is the popup backdrop's pointer target.
-	languageMenuDismissTag struct{}
-	// headerHeight and languageButtonSize are what the last drawn frame
-	// measured for the header row and for the language button inside it. They
-	// are the only way to know where that button IS: Gio exposes no absolute
-	// position, so the popup reconstructs the anchor from the window padding
-	// plus these two. Both keep their last value on a frame that does not draw
-	// the header — see languageMenuAnchor.
-	headerHeight       int
-	languageButtonSize image.Point
-	shutdown           func()
-	shutdownOnce       sync.Once
-	uiOpMu             sync.RWMutex
-	uiOpClosed         bool
-	uiStopOnce         sync.Once
-	uiStopCh           chan struct{}
+	deepLinkWake chan struct{}
+	// languageOptions is one Clickable per supported language, shared by
+	// whatever draws the choice. The rows live on the console's Settings tab
+	// (console_modal_settings.go); the header no longer carries a language
+	// control at all.
+	languageOptions map[string]*widget.Clickable
+	// releaseChecker asks GitHub which release is the newest, when the user
+	// has consented (Preferences.CheckGitHubReleases). Nil in tests that build
+	// a Window by literal, so every path through it is nil-guarded.
+	releaseChecker *updatecheck.Checker
+	shutdown       func()
+	shutdownOnce   sync.Once
+	uiOpMu         sync.RWMutex
+	uiOpClosed     bool
+	uiStopOnce     sync.Once
+	uiStopCh       chan struct{}
 	// sendWG tracks UI-side goroutines that write through the router /
 	// chatlog: sendFileCore (transmit import + handoff), async message
 	// deletes and conversation-delete completion. The shutdown path
@@ -174,7 +172,6 @@ type Window struct {
 	sendStatusSelectable widget.Selectable
 	lastChatPeer         domain.PeerIdentity
 	language             string
-	showLanguageMenu     bool
 	// consoleFocusReturn asks the next frame to hand the keyboard back to the
 	// Console button, once the modal that took it has closed. See
 	// restoreConsoleFocus.
@@ -572,11 +569,9 @@ type pendingFailedMsg struct {
 
 const (
 	// windowPadXDp and windowPadYDp are the window's own margin, applied once
-	// in Window.layout. The language popup measures its anchor against them,
-	// so they are constants rather than literals in one place.
-	windowPadXDp       = 6
-	windowPadYDp       = 4
-	languageMenuHeight = 316
+	// in Window.layout.
+	windowPadXDp = 6
+	windowPadYDp = 4
 )
 
 // editorTags lists every widget in this window that a caret can sit in.
@@ -665,6 +660,7 @@ type windowIcons struct {
 	remove          *widget.Icon
 	brokenImage     *widget.Icon
 	hourglass       *widget.Icon
+	check           *widget.Icon
 	emojiCategories map[emojiCategoryID]*widget.Icon
 }
 
@@ -696,6 +692,7 @@ func loadWindowIcons() (windowIcons, error) {
 		{name: "delete", data: icons.ActionDelete, dst: &loaded.remove},
 		{name: "broken-image", data: icons.ImageBrokenImage, dst: &loaded.brokenImage},
 		{name: "hourglass", data: icons.ActionHourglassEmpty, dst: &loaded.hourglass},
+		{name: "check", data: icons.NavigationCheck, dst: &loaded.check},
 	}
 	for _, definition := range definitions {
 		icon, err := loadUIIcon(definition.name, definition.data)
@@ -800,6 +797,7 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 		deleteIcon:               loadedIcons.remove,
 		brokenImageIcon:          loadedIcons.brokenImage,
 		hourglassIcon:            loadedIcons.hourglass,
+		checkIcon:                loadedIcons.check,
 		emojiCategoryIcons:       loadedIcons.emojiCategories,
 		emojiPicker:              emojiPicker,
 		// Generously buffered and fully drained each frame so background
@@ -812,6 +810,17 @@ func NewWindow(client *service.DesktopClient, router *service.DMRouter, eventBus
 	// Depth one: the frame that follows a wake drains EVERY queued link,
 	// so a second signal while one is pending would ask for nothing new.
 	w.deepLinkWake = make(chan struct{}, 1)
+
+	// The release checker is built whether or not the preference is on — a
+	// disabled one sends nothing — so the Settings tab always has a state to
+	// report. Enable restores the stored consent WITHOUT asking for a check:
+	// the first one waits out the start delay, which is what keeps the request
+	// from coinciding with the node coming up.
+	w.releaseChecker = newReleaseChecker(w.invalidate)
+	if w.releaseChecker != nil {
+		w.releaseChecker.Enable(w.releaseCheckEnabled())
+	}
+
 	return w, nil
 }
 
@@ -1457,7 +1466,7 @@ func (w *Window) layoutWindowSurfaces(gtx layout.Context, inset layout.Inset) la
 							return layout.Flex{
 								Axis: layout.Vertical,
 							}.Layout(gtx,
-								layout.Rigid(w.layoutMeasuredHeader),
+								layout.Rigid(w.layoutHeader),
 								layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 							)
 						})
@@ -1475,12 +1484,6 @@ func (w *Window) layoutWindowSurfaces(gtx layout.Context, inset layout.Inset) la
 					}),
 				)
 			})
-		}),
-		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
-			if !w.showLanguageMenu {
-				return layout.Dimensions{}
-			}
-			return w.layoutLanguageOverlay(gtx)
 		}),
 		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
 			if w.contextMenuPeer.IsZero() {
@@ -2200,10 +2203,10 @@ func (w *Window) handleActions(gtx layout.Context) {
 	// While the console modal covers the window, none of the window's own
 	// controls are there to be used — and reading them is not free. Clicked
 	// registers the widget's key.FocusFilter, which is what puts it in Gio's
-	// focus traversal, so draining Send, Attach or the language button here
-	// would keep them Tab-reachable from inside the modal no matter that
-	// layoutMain is drawn with input disabled. Enter on a focused Send would
-	// then post the hidden draft.
+	// focus traversal, so draining Send or Attach here would keep them
+	// Tab-reachable from inside the modal no matter that layoutMain is drawn
+	// with input disabled. Enter on a focused Send would then post the hidden
+	// draft.
 	//
 	// Back is the exception above: it is a key filter, not a widget, and it is
 	// how the modal is dismissed on Android.
@@ -2213,13 +2216,8 @@ func (w *Window) handleActions(gtx layout.Context) {
 
 	w.handleEmojiEscapeNavigation(gtx)
 
-	for w.languageToggle.Clicked(gtx) {
-		w.showLanguageMenu = !w.showLanguageMenu
-	}
-	w.handleLanguageMenu(gtx)
-
 	for w.updateButton.Clicked(gtx) {
-		openBrowser("https://github.com/piratecash/corsa/releases")
+		openBrowser(releasesPageURL)
 	}
 
 	// Compact (single-pane) layout only: return from an open chat to the
@@ -2955,17 +2953,6 @@ func (w *Window) sendFileCore(to domain.PeerIdentity, srcPath, caption string, r
 	}()
 }
 
-// layoutMeasuredHeader draws the header and records its height for the
-// language popup's anchor. It is a wrapper rather than a line inside
-// layoutHeader because the header is also laid out by measuring passes that
-// must not publish anything (keyboardYieldingChrome records it before deciding
-// whether to draw it) — this is the call site that ends up on screen.
-func (w *Window) layoutMeasuredHeader(gtx layout.Context) layout.Dimensions {
-	dims := w.layoutHeader(gtx)
-	w.headerHeight = dims.Size.Y
-	return dims
-}
-
 func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 	titleText := w.t("app.title")
 	if w.isCompactLayout(gtx) {
@@ -2996,8 +2983,6 @@ func (w *Window) layoutHeader(gtx layout.Context) layout.Dimensions {
 				Alignment: layout.Middle,
 			}.Layout(gtx,
 				layout.Rigid(w.layoutUpdateBadge),
-				layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-				layout.Rigid(w.layoutLanguageSelectorInline),
 			)
 		}),
 	)
@@ -3014,7 +2999,6 @@ const (
 	dismissIdentityPanel
 	dismissMessageMenu
 	dismissIdentityMenu
-	dismissLanguageMenu
 	dismissEmojiPicker
 	dismissCompactChat
 )
@@ -3034,8 +3018,6 @@ func (w *Window) topNavigationDismissTarget(gtx layout.Context) navigationDismis
 		return dismissMessageMenu
 	case !w.contextMenuPeer.IsZero():
 		return dismissIdentityMenu
-	case w.showLanguageMenu:
-		return dismissLanguageMenu
 	case w.emojiPicker.visible:
 		return dismissEmojiPicker
 	case w.isCompactLayout(gtx) && !w.snap.ActivePeer.IsZero():
@@ -3050,15 +3032,11 @@ func (w *Window) topNavigationDismissTarget(gtx layout.Context) navigationDismis
 // is something in-app to dismiss, top-most first:
 //
 //  1. an open overlay, in REVERSE draw order — the overlays are Stacked
-//     language → identity menu → message menu → my identity (see layout()),
-//     so identity details close first, followed by the message menu and then
-//     the identity menu (backing out of its confirmation / alias sub-views one
-//     step at a time, exactly like Escape — reusing escapePeerMenu keeps the
-//     focus-restore invariants of the menu machinery intact), and the language
-//     dropdown last. The language dropdown now carries the shared popup
-//     backdrop (menu_popup.go), so nothing new can be opened while it is up —
-//     but one opened BEFORE it still outranks it here, which is why it stays
-//     at the bottom of the list rather than being assumed unreachable;
+//     identity menu → message menu → my identity (see layout()), so identity
+//     details close first, followed by the message menu and then the identity
+//     menu (backing out of its confirmation / alias sub-views one step at a
+//     time, exactly like Escape — reusing escapePeerMenu keeps the
+//     focus-restore invariants of the menu machinery intact);
 //  2. the non-modal emoji picker;
 //  3. in the compact layout, an open chat — Back returns to the contact
 //     list (DeselectPeer).
@@ -3092,8 +3070,6 @@ func (w *Window) handleBackNavigation(gtx layout.Context) {
 			w.escapeMsgMenu()
 		case dismissIdentityMenu:
 			w.escapePeerMenu()
-		case dismissLanguageMenu:
-			w.closeLanguageMenu()
 		case dismissEmojiPicker:
 			w.closeEmojiPicker(gtx)
 			w.dropEmojiToggleClicks(gtx)
@@ -3912,7 +3888,7 @@ func (w *Window) layoutChatCard(gtx layout.Context, status service.NodeStatus) l
 
 func (w *Window) layoutLoadingCard(gtx layout.Context, title string) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, ui.PanelFill())
 
 		inset := layout.UniformInset(unit.Dp(8))
 		return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -6986,23 +6962,47 @@ func (w *Window) contextMenuDeleteEnabled() bool {
 	return w != nil && w.msgContextMsg != nil && w.router != nil
 }
 
-func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
-	return w.kit().ToolbarButton(gtx, &w.consoleButton, ui.ToolbarButtonOpts{
+// consoleToolbarButton describes the header's Console button. Active while the
+// modal it opens is on screen, the same way a selected console tab is — that is
+// what says which button the surface belongs to.
+//
+// Split out of the layout so the state can be asserted without a frame: it is
+// the one remaining toolbar button in the application, and what makes it read
+// as "open" is a property, not a pixel.
+func (w *Window) consoleToolbarButton() ui.ToolbarButtonOpts {
+	return ui.ToolbarButtonOpts{
 		Label:    w.t("header.console"),
 		Icon:     w.consoleIcon,
 		IconSide: ui.IconLeading,
 		Active:   w.consoleModalVisible(),
-	})
+	}
+}
+
+func (w *Window) layoutConsoleButton(gtx layout.Context) layout.Dimensions {
+	return w.kit().ToolbarButton(gtx, &w.consoleButton, w.consoleToolbarButton())
 }
 
 func (w *Window) layoutUpdateBadge(gtx layout.Context) layout.Dimensions {
-	if !w.nodeUpdateAvailable() {
+	if !w.updateAvailable() {
 		return layout.Dimensions{}
 	}
 	btn := material.Button(w.theme, &w.updateButton, w.t("header.update"))
 	btn.Background = color.NRGBA{R: 230, G: 126, B: 34, A: 255}
 	btn.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	return btn.Layout(gtx)
+}
+
+// updateAvailable is the badge's question, answered by EITHER source.
+//
+// The two are independent and neither subsumes the other. The peer signal
+// needs several peers running a newer build before it concludes anything, so
+// it says nothing to the first user to fall behind and nothing at all to a
+// node with no peers; the release check answers immediately but only for a
+// user who consented to it. An OR is therefore the whole of the policy — there
+// is no ranking to make between them, and adding the release check does not
+// weaken the peer signal in any case.
+func (w *Window) updateAvailable() bool {
+	return w.nodeUpdateAvailable() || w.releaseUpdateAvailable()
 }
 
 // nodeUpdateAvailable returns the node-computed update_available signal.
@@ -7013,6 +7013,12 @@ func (w *Window) nodeUpdateAvailable() bool {
 		return false
 	}
 	return w.snap.NodeStatus.AggregateStatus.UpdateAvailable
+}
+
+// releaseUpdateAvailable returns the GitHub release check's signal: false
+// unless the user consented AND a completed check found a newer release.
+func (w *Window) releaseUpdateAvailable() bool {
+	return w.releaseChecker != nil && w.releaseChecker.UpdateAvailable()
 }
 
 // openBrowser, openFile and revealFileInDir are platform-selected:
@@ -7030,41 +7036,6 @@ func (w *Window) languageButton(code string) *widget.Clickable {
 	btn := new(widget.Clickable)
 	w.languageOptions[code] = btn
 	return btn
-}
-
-func (w *Window) layoutLanguageSelectorInline(gtx layout.Context) layout.Dimensions {
-	return layout.Flex{
-		Axis:      layout.Horizontal,
-		Alignment: layout.Middle,
-	}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			label := material.Body2(w.theme, w.t("header.language"))
-			label.Color = color.NRGBA{R: 176, G: 187, B: 205, A: 255}
-			return label.Layout(gtx)
-		}),
-		layout.Rigid(layout.Spacer{Width: unit.Dp(10)}.Layout),
-		layout.Rigid(w.layoutLanguageDropdown),
-	)
-}
-
-// languageToolbarButton describes the header's language button. Active while
-// its menu is open, the same way a selected console tab is — that is what says
-// which button the popup belongs to.
-func (w *Window) languageToolbarButton() ui.ToolbarButtonOpts {
-	return ui.ToolbarButtonOpts{
-		Label:    currentLanguageLabel(w.language),
-		Icon:     w.chevronDownIcon,
-		IconSide: ui.IconTrailing,
-		Active:   w.showLanguageMenu,
-	}
-}
-
-func (w *Window) layoutLanguageDropdown(gtx layout.Context) layout.Dimensions {
-	return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		dims := w.kit().ToolbarButton(gtx, &w.languageToggle, w.languageToolbarButton())
-		w.languageButtonSize = dims.Size
-		return dims
-	})
 }
 
 func (w *Window) layoutIdentityPanelOverlay(gtx layout.Context) layout.Dimensions {
@@ -7163,75 +7134,6 @@ func (w *Window) layoutIdentityActionButton(gtx layout.Context, button *widget.C
 			})
 		})
 	})
-}
-
-func (w *Window) layoutLanguageOverlay(gtx layout.Context) layout.Dimensions {
-	// The backdrop goes down first, under the card and over everything else.
-	// Until this existed the overlay let input through, so the click a user
-	// aims at empty space to dismiss the menu also hit whatever was there. It
-	// does not tint: a wash over the whole application for a six-row dropdown
-	// reads as a modal dialogue, and the design does not ask for one here.
-	w.kit().MenuPopupBackdrop(gtx, &w.languageMenuDismissTag, ui.MenuPopupScrimNone, w.closeLanguageMenu)
-
-	anchor := w.languageMenuAnchor(gtx)
-	width := gtx.Dp(unit.Dp(ui.MenuPopupLanguageWidthDp))
-	// Right-aligned with the button, and just under it. The offset used to be
-	// the constant 58dp below a 24dp window inset, which stopped matching the
-	// header the day its padding changed — the menu opened a finger's width
-	// below the button it belongs to.
-	x := ui.MenuPopupAnchorX(anchor.Max.X-width, width, gtx.Constraints.Max.X)
-	y := anchor.Max.Y + gtx.Dp(unit.Dp(ui.MenuPopupAnchorGapDp))
-
-	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
-	defer stack.Pop()
-
-	// The height is a CAP, never a size: the card hugs its rows and scrolls
-	// only what does not fit. In phone landscape the window below the anchor
-	// can be shorter than the full list (six rows need ≈250dp), which used to
-	// clip the bottom languages with no way to reach them.
-	h := gtx.Dp(unit.Dp(languageMenuHeight))
-	if avail := gtx.Constraints.Max.Y - y - gtx.Dp(unit.Dp(windowPadYDp)); avail < h {
-		h = avail
-	}
-	if h < gtx.Dp(unit.Dp(menuMinUsableDp)) {
-		h = gtx.Dp(unit.Dp(menuMinUsableDp))
-	}
-
-	menuGTX := gtx
-	menuGTX.Constraints.Min.X = width
-	menuGTX.Constraints.Max.X = width
-	menuGTX.Constraints.Min.Y = 0
-	menuGTX.Constraints.Max.Y = h
-	_ = w.kit().MenuPopupCard(menuGTX, ui.MenuPopup{
-		Items:  w.languageMenuItems(),
-		Scroll: &w.languageMenuList,
-	})
-
-	return layout.Dimensions{}
-}
-
-// languageMenuAnchor is the language button's rectangle in window
-// coordinates, which is where its popup hangs from.
-//
-// Gio gives no way to read a widget's absolute position, so the rectangle is
-// reconstructed from the two things that DO place it: the window padding the
-// header sits inside, and the header's own measured height. Both are recorded
-// as the header is laid out (Window.layout), on the same frame this reads
-// them, so the anchor cannot lag the button.
-//
-// The button is flush with the right edge of the header (layout.E), which is
-// what makes "window width less the padding" its right edge.
-//
-// The fallbacks matter: the header YIELDS its whole row when the touch
-// keyboard leaves too little space (keyboardYieldingChrome), so on the frames
-// where it is not drawn its height is zero and the popup would climb to the
-// top of the window. Holding the last measured height keeps the menu where the
-// user last saw the button.
-func (w *Window) languageMenuAnchor(gtx layout.Context) image.Rectangle {
-	right := gtx.Constraints.Max.X - gtx.Dp(unit.Dp(windowPadXDp))
-	bottom := gtx.Dp(unit.Dp(windowPadYDp)) + w.headerHeight
-	size := w.languageButtonSize
-	return image.Rect(right-size.X, bottom-size.Y, right, bottom)
 }
 
 // menuMinUsableDp is the smallest height in which drawing a context menu is
@@ -7740,9 +7642,14 @@ func (w *Window) contextMenuItemDisabled(gtx layout.Context, label string) layou
 	})
 }
 
-// languageMenuItems builds the language menu's rows. The em dash between code
-// and name is the design's (screen 7e), not a hyphen.
-func (w *Window) languageMenuItems() []ui.MenuPopupItem {
+// languageOptionRows builds the language choices. The em dash between code and
+// name is the design's (screen 7e), not a hyphen.
+//
+// They are rows of the shared popup component rather than a shape of their own.
+// The lookup they fill moved from the window header to the console's Settings
+// tab, and what a chosen row LOOKS like should not depend on where the lookup
+// that holds it happens to hang.
+func (w *Window) languageOptionRows() []ui.MenuPopupItem {
 	current := normalizeLanguage(w.language)
 	items := make([]ui.MenuPopupItem, 0, len(supportedLanguages))
 	for _, option := range supportedLanguages {
@@ -7755,30 +7662,42 @@ func (w *Window) languageMenuItems() []ui.MenuPopupItem {
 	return items
 }
 
-// handleLanguageMenu drains the language rows' clicks. It runs from
-// handleActions rather than from inside the row builder, so that choosing a
-// language is not a side effect of drawing one — the popup component lays rows
-// out and nothing else.
-func (w *Window) handleLanguageMenu(gtx layout.Context) {
+// currentLanguageRowLabel names the language in use, in the same "EN — English"
+// form the rows use, so the closed lookup and the row it stands for read alike.
+func (w *Window) currentLanguageRowLabel() string {
+	current := normalizeLanguage(w.language)
+	for _, option := range supportedLanguages {
+		if option.Code == current {
+			return option.Label + " — " + localizedLanguageName(option.Code)
+		}
+	}
+	return supportedLanguages[0].Label + " — " + localizedLanguageName(supportedLanguages[0].Code)
+}
+
+// handleLanguageSelection drains the language rows' clicks and reports whether
+// one was picked. It runs from the console's own handler rather than from
+// inside the row builder, so that choosing a language is not a side effect of
+// drawing one — the component lays rows out and nothing else.
+//
+// The bool is what closes the lookup: picking from a menu is the menu's job
+// done, and only the caller knows which menu these rows were in.
+func (w *Window) handleLanguageSelection(gtx layout.Context) bool {
+	picked := false
 	for _, option := range supportedLanguages {
 		for w.languageButton(option.Code).Clicked(gtx) {
 			w.selectLanguage(option.Code)
+			picked = true
 		}
 	}
+	return picked
 }
 
 func (w *Window) selectLanguage(code string) {
 	w.language = normalizeLanguage(code)
-	w.showLanguageMenu = false
 	if w.prefs != nil {
 		w.prefs.Language = w.language
 		_ = w.prefs.Save()
 	}
-	w.invalidate()
-}
-
-func (w *Window) closeLanguageMenu() {
-	w.showLanguageMenu = false
 	w.invalidate()
 }
 
@@ -7832,7 +7751,7 @@ func (w *Window) card(gtx layout.Context, titleText string, rows []string, extra
 		bgHeight = gtx.Constraints.Min.Y
 	}
 	bgStack := clip.Rect{Max: image.Pt(gtx.Constraints.Max.X, bgHeight)}.Push(gtx.Ops)
-	paint.ColorOp{Color: color.NRGBA{R: 21, G: 26, B: 34, A: 255}}.Add(gtx.Ops)
+	paint.ColorOp{Color: ui.PanelFill()}.Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
 	bgStack.Pop()
 

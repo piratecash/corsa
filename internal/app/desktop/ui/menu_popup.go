@@ -14,19 +14,18 @@ import (
 	"gioui.org/widget/material"
 )
 
-// menu_popup.go is the one dropdown in the application: the language selector
-// and the console tabs that do not fit on a narrow strip. See §1, §2, §4 and
+// menu_popup.go is the dropdown in the application — the console tabs that do
+// not fit on a narrow strip — and the rows it is built from. See §1, §2, §4 and
 // screen `7e` of docs/design/CHANGES1.md.
 //
-// Before it, the two were different things. The language menu was a card with
-// no border whose rows were material.Buttons 8dp apart; the folded tabs were
-// bare pills drawn straight over the tab content, with no card at all — they
-// read as part of the content rather than as an open menu.
+// Before it, the folded tabs were bare pills drawn straight over the tab
+// content, with no card at all: they read as part of the content rather than as
+// an open menu.
 //
 // The component is the CARD and its backdrop. Where the card goes is the
-// caller's business, because the two anchors have nothing in common: the
-// language menu hangs under a header button in window coordinates, the tab
-// menu under a strip inside the console modal.
+// caller's business, because the two anchors have nothing in common: the tab
+// menu hangs under the right end of a strip, the language lookup under the left
+// edge of a button in a scrolling section.
 
 const (
 	menuPopupRadiusDp    = 8
@@ -39,21 +38,19 @@ const (
 	// MenuPopupAnchorGapDp is the air between the button that opens a popup
 	// and the popup itself. Small on purpose: a dropdown that floats away from
 	// its button stops looking like it belongs to it, which is what the first
-	// cut of the language menu did with a hard-coded 58dp offset that no
-	// longer matched the header it was measured against.
+	// cut of the language menu did with a hard-coded 58dp offset that no longer
+	// matched the header it was measured against.
 	MenuPopupAnchorGapDp = 4
-	// MenuPopupLanguageWidthDp is the fixed width of the language menu. The
-	// tab menu takes its width from its content instead — its labels are one
-	// word each, and a 220dp card over a phone-width tab strip would cover
-	// most of it.
-	MenuPopupLanguageWidthDp = 220
 	// menuPopupChromeDp is everything the card puts around its rows on one
 	// side: the padding and the border.
 	menuPopupChromeDp = menuPopupPaddingDp + 1
 )
 
+// menuPopupCardColor is the panel ground: a popup card sits on the same colour
+// as the surfaces around it, so there is one definition of it rather than a
+// literal here and another seven elsewhere.
 func menuPopupCardColor() color.NRGBA {
-	return color.NRGBA{R: 0x15, G: 0x1a, B: 0x22, A: 255}
+	return PanelFill()
 }
 
 func menuPopupBorderColor() color.NRGBA {
@@ -85,7 +82,7 @@ type MenuPopupWidth uint8
 
 const (
 	// MenuPopupWidthGiven takes the width from the constraints the caller has
-	// already applied. The language menu is a fixed 220dp.
+	// already applied.
 	MenuPopupWidthGiven MenuPopupWidth = iota
 	// MenuPopupWidthFit measures the widest row and takes that.
 	MenuPopupWidthFit
@@ -97,8 +94,8 @@ type MenuPopup struct {
 	// it is a menu that should not have opened.
 	Items []MenuPopupItem
 	// Scroll owns the list position. The card scrolls when the height it is
-	// given cannot hold every row — which is the normal case for the language
-	// menu on a phone in landscape.
+	// given cannot hold every row — the normal case on a phone in landscape,
+	// where the room under the anchor is a few rows tall.
 	Scroll *widget.List
 	// Width selects how wide the card is.
 	Width MenuPopupWidth
@@ -108,10 +105,10 @@ type MenuPopup struct {
 //
 // Catching the press and tinting the background are two different jobs, and
 // the design asks for them separately: the console's tab menu sits over the
-// console card and dims it (screen 6m), while the language menu over the whole
+// console card and dims it (screen 6m), while a popup over the whole
 // application does not (screen 7b) — a 40% wash over every contact and message
-// for the sake of a six-row dropdown reads as a modal dialogue, which it is
-// not. Both still swallow the press.
+// for the sake of a short dropdown reads as a modal dialogue, which it is not.
+// Both still swallow the press.
 type MenuPopupScrim uint8
 
 const (
@@ -125,9 +122,11 @@ const (
 // drawn in. want is where the anchor puts it, width the card's width and
 // available the width of that area.
 //
-// Both menus anchor to the RIGHT edge of their button, and both buttons sit at
-// the right end of their row, so without the clamp the card hangs off the edge
-// exactly when it is wider than the button — the normal case.
+// Which edge a popup anchors to is the caller's: the tab menu takes the RIGHT
+// edge of a button at the right end of its strip, the language lookup the LEFT
+// edge of a button at the left of its section. Either way the card is wider
+// than its button in the normal case, so without the clamp it hangs off the
+// edge of the area it is drawn in.
 func MenuPopupAnchorX(want, width, available int) int {
 	if limit := available - width; want > limit {
 		want = limit
@@ -142,9 +141,9 @@ func MenuPopupAnchorX(want, width, available int) int {
 // press.
 //
 // It consumes every press it receives, whether or not the press is what closed
-// the menu. That is the half the language menu never had: it used to be a
-// Stacked layer that let input through, so the click a user aims at empty
-// space to dismiss the menu also selected whatever contact was underneath.
+// the menu. That is the half a plain Stacked layer never had: it let input
+// through, so the click a user aims at empty space to dismiss the menu also
+// selected whatever sat underneath.
 func (k Kit) MenuPopupBackdrop(gtx layout.Context, tag event.Tag, scrim MenuPopupScrim, dismiss func()) layout.Dimensions {
 	if scrim == MenuPopupScrimDim {
 		Fill(gtx, menuPopupBackdropColor())
@@ -185,6 +184,31 @@ func (k Kit) MenuPopupFitWidth(gtx layout.Context, popup MenuPopup) int {
 		widest = max(widest, label.Layout(measure).Size.X)
 	}
 	return widest + 2*gtx.Dp(unit.Dp(menuPopupRowPadXDp)) + 2*gtx.Dp(unit.Dp(menuPopupChromeDp))
+}
+
+// MenuPopupFitHeight measures the height the card wants: its rows, the gaps
+// between them and its own chrome.
+//
+// The caller needs this BEFORE the card is laid out, to decide whether it fits
+// under its button or has to flip above it — and it cannot get the answer by
+// laying the card out and looking, because that would drain every row's click
+// queue. So the labels are measured, for the same reason and in the same way as
+// MenuPopupFitWidth.
+func (k Kit) MenuPopupFitHeight(gtx layout.Context, popup MenuPopup) int {
+	measure := gtx
+	measure.Ops = new(op.Ops)
+	measure.Constraints.Min = image.Point{}
+
+	rows := 0
+	for _, item := range popup.Items {
+		label := material.Label(k.Theme, unit.Sp(menuPopupTextSp), item.Label)
+		label.MaxLines = 1
+		rows += label.Layout(measure).Size.Y + 2*gtx.Dp(unit.Dp(menuPopupRowPadYDp))
+	}
+	if count := len(popup.Items); count > 1 {
+		rows += (count - 1) * gtx.Dp(unit.Dp(menuPopupGapDp))
+	}
+	return rows + 2*gtx.Dp(unit.Dp(menuPopupChromeDp))
 }
 
 // MenuPopupCard draws the card itself, at the position the caller has already

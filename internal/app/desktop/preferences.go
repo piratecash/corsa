@@ -9,11 +9,20 @@ import (
 	"github.com/piratecash/corsa/internal/core/domain"
 )
 
+// Preferences is what the user has chosen, persisted next to the identity it
+// belongs to. Exported fields are the persisted shape; path is unexported and
+// therefore invisible to encoding/json, which is what lets Save marshal the
+// value itself instead of restating the field list.
 type Preferences struct {
 	path         string
 	Language     string            `json:"language"`
 	Aliases      map[string]string `json:"aliases,omitempty"`
 	RecentEmojis []string          `json:"recent_emojis,omitempty"`
+	// CheckGitHubReleases is consent to ask the project's repository which
+	// release is the newest. OFF by default and never implied: the request
+	// goes straight to a third party, outside the p2p transport, and shows
+	// that party this node's IP address. See internal/core/updatecheck.
+	CheckGitHubReleases bool `json:"check_github_releases,omitempty"`
 }
 
 func LoadPreferences(path string) (*Preferences, error) {
@@ -49,20 +58,18 @@ func (p *Preferences) Save() error {
 		return fmt.Errorf("create preferences directory: %w", err)
 	}
 
-	aliases := p.Aliases
-	if len(aliases) == 0 {
-		aliases = nil
+	// A normalized COPY of the value, not a hand-written mirror struct. The
+	// mirror repeated every field a second time, and the compiler could not
+	// tell that a field added to Preferences alone would load and then never
+	// be written back. path is unexported, so json leaves it out.
+	persisted := *p
+	persisted.Language = normalizeLanguage(p.Language)
+	persisted.RecentEmojis = normalizeRecentEmojis(p.RecentEmojis)
+	if len(persisted.Aliases) == 0 {
+		persisted.Aliases = nil
 	}
 
-	payload, err := json.MarshalIndent(struct {
-		Language     string            `json:"language"`
-		Aliases      map[string]string `json:"aliases,omitempty"`
-		RecentEmojis []string          `json:"recent_emojis,omitempty"`
-	}{
-		Language:     normalizeLanguage(p.Language),
-		Aliases:      aliases,
-		RecentEmojis: normalizeRecentEmojis(p.RecentEmojis),
-	}, "", "  ")
+	payload, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal preferences: %w", err)
 	}

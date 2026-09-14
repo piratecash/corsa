@@ -324,6 +324,13 @@ func Run() error {
 	// has somewhere to go.
 	startDeepLinkDelivery(deepLinkSocket, window)
 
+	// Opt-in GitHub release check. The loop runs for the application's
+	// lifetime and withholds the request entirely while the preference is off,
+	// which is the default — see internal/core/updatecheck. It is started
+	// here, alongside the other ctx-bound workers, and only here: a headless
+	// node (cmd/corsa-node) has no user to consent and never gets one.
+	go window.RunReleaseChecker(ctx)
+
 	// From here the UI owns the teardown, on both platforms but for two
 	// different reasons. On desktop its exit paths (window closed) terminate
 	// the process straight from the event loop, so the defers above never get

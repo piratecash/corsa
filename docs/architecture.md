@@ -35,6 +35,7 @@ The repository contains the current Go-based CORSA stack:
 - `internal/core/protocol`: protocol models (see [protocol/](protocol/) for the full protocol specification)
 - `internal/core/netcore`: transport core — owns the raw `net.Conn`, the writer goroutine and the framing loop; exposes the typed `netcore.Network` boundary (`SendFrame`, `SendFrameSync`, `Enumerate`, `Close`, `RemoteAddr`, all keyed by `domain.ConnID`) that `node.Service` goes through. See [protocol/network_core.md](protocol/network_core.md).
 - `internal/core/transport`: p2p transport abstractions
+- `internal/core/updatecheck`: opt-in GitHub release check — the ONLY outbound connection this project makes outside the p2p transport, and therefore the only one that shows a third party the operator's IP. UI-only and off by default; nothing under `internal/core/node`, `sdk` or `cmd/corsa-node` imports it. See [ui.md](ui.md#settings-tab).
 - `internal/platform/mobile`: future mobile bindings
 - see [debug.md](debug.md) for log levels and protocol tracing
 
@@ -314,6 +315,7 @@ API surface on `domain.OptionalTime`:
 - `internal/core/protocol`: модели протокола (см. [protocol/](protocol/) для полной спецификации протокола)
 - `internal/core/netcore`: сетевое ядро — владеет raw `net.Conn`, writer-горутиной и циклом фреймирования; предоставляет типизированную границу `netcore.Network` (`SendFrame`, `SendFrameSync`, `Enumerate`, `Close`, `RemoteAddr`, все ключены `domain.ConnID`), через которую ходит `node.Service`. См. [protocol/network_core.md](protocol/network_core.md).
 - `internal/core/transport`: p2p-абстракции транспорта
+- `internal/core/updatecheck`: опциональная проверка релизов на GitHub — ЕДИНСТВЕННОЕ исходящее соединение проекта вне p2p-транспорта и, соответственно, единственное, показывающее третьей стороне IP оператора. Только для UI и по умолчанию выключено; ничто под `internal/core/node`, `sdk` или `cmd/corsa-node` его не импортирует. См. [ui.md](ui.md#вкладка-настройки).
 - `internal/platform/mobile`: будущие mobile bindings
 - см. [debug.md](debug.md) для уровней логирования и трассировки протокола
 

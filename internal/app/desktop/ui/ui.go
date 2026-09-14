@@ -187,3 +187,11 @@ func ChipFill(active bool) color.NRGBA {
 func ChipActiveLabel() color.NRGBA {
 	return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 }
+
+// PanelFill is the background every content panel sits on: the main window's
+// cards and each of the console's tabs. It was the same literal written out at
+// seven call sites, which is one repaint away from a console tab that no longer
+// matches the tab beside it.
+func PanelFill() color.NRGBA {
+	return color.NRGBA{R: 0x15, G: 0x1a, B: 0x22, A: 255}
+}

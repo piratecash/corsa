@@ -80,6 +80,7 @@ const (
 	consoleTabTraffic
 	consoleTabFile
 	consoleTabInfo
+	consoleTabSettings
 	consoleTabDonate
 )
 
@@ -179,6 +180,35 @@ type consoleModal struct {
 	suggestList widget.List
 	donateList  widget.List
 	fileList    widget.List
+	// settingsList scrolls the Settings tab. Its single row holds every
+	// section, so the language rows inside it never become a second scrolling
+	// surface under the same finger.
+	settingsList widget.List
+	// updateCheckToggle is the consent switch for the GitHub release check and
+	// updateCheckNow the manual run of it. Both change state on the Window
+	// (which owns the preference and the checker), not here.
+	updateCheckToggle widget.Clickable
+	updateCheckNow    widget.Clickable
+	// The language lookup on the Settings tab: the button that opens it,
+	// whether it is open, the scroll position of its card, and the backdrop's
+	// pointer target. languageButtonSize is what the last frame measured for
+	// the button, which is half of where the card hangs — the other half is
+	// computed in languageAnchor.
+	//
+	// The same shape as the tab "More" menu a few fields up, deliberately:
+	// these are the two dropdowns inside this modal and they should behave
+	// alike.
+	languageMenuButton     widget.Clickable
+	languageMenuOpen       bool
+	languageMenuList       widget.List
+	languageMenuDismissTag struct{}
+	languageButtonSize     image.Point
+	// languageMenuRect is where the open card landed, in the Settings tab's
+	// own coordinates. Written by the layout that draws it and read by nothing
+	// in production — it exists because the frame's semantics cannot answer the
+	// question: a list reports the unclipped bounds of rows scrolled out of
+	// view, so "inside the tab" is not a thing they can be asked.
+	languageMenuRect image.Rectangle
 
 	// peerRows memoizes per-frame-derived peers/info-tab data so the O(peers)
 	// derivations run on state change instead of on every frame. The peers
@@ -317,6 +347,19 @@ func newConsoleModal(parent *Window) *consoleModal {
 		fileList: widget.List{
 			List: layout.List{Axis: layout.Vertical},
 		},
+		settingsList: widget.List{
+			List: layout.List{Axis: layout.Vertical},
+		},
+		languageMenuList: widget.List{
+			List: layout.List{Axis: layout.Vertical},
+		},
+		// tabMenuList worked without this because MenuPopupCard sets the axis
+		// on the list it is handed. Left on the zero value it was the one
+		// console list sitting on layout.Axis's HORIZONTAL default, which is
+		// only ever one refactor away from being a sideways menu.
+		tabMenuList: widget.List{
+			List: layout.List{Axis: layout.Vertical},
+		},
 		fileDeleteButtons:   make(map[domain.FileID]*widget.Clickable),
 		fileDownloadButtons: make(map[domain.FileID]*widget.Clickable),
 		fileRestartButtons:  make(map[domain.FileID]*widget.Clickable),
@@ -430,8 +473,8 @@ func (c *consoleModal) focusTarget() event.Tag {
 	return &c.closeButton
 }
 
-// escapeConsoleModal backs out one layer of the console: the completion popup
-// or the More menu first, the modal itself once neither is open.
+// escapeConsoleModal backs out one layer of the console: an open dropdown or
+// the completion popup first, the modal itself once none is open.
 //
 // Escape and system Back share it. They used to disagree — Escape stepped out
 // of the inner surface while Back closed the whole console from inside an open
@@ -457,6 +500,10 @@ func (w *Window) escapeConsoleModal(gtx layout.Context) {
 func (c *consoleModal) dismissInnerSurface(gtx layout.Context) bool {
 	if c.tabMenuOpen {
 		c.tabMenuOpen = false
+		return true
+	}
+	if c.languageMenuOpen {
+		c.languageMenuOpen = false
 		return true
 	}
 	return c.dismissSuggestions(gtx)
@@ -487,6 +534,7 @@ func (w *Window) closeConsoleModal() {
 // history does.
 func (c *consoleModal) closeInnerSurfaces() {
 	c.tabMenuOpen = false
+	c.languageMenuOpen = false
 	c.restoreTypedQuery()
 	c.hideSuggestionsUntilRetyped()
 }
@@ -502,7 +550,6 @@ func (c *consoleModal) shutdown() {
 // closeOverlaysForModal dismisses whatever else is open before a modal takes
 // over the window. Mirrors the block in openIdentityPanel.
 func (w *Window) closeOverlaysForModal(gtx layout.Context) {
-	w.showLanguageMenu = false
 	w.contextMenuPeer = domain.PeerIdentity{}
 	w.showDeleteConfirm = false
 	w.showClearChatConfirm = false
@@ -591,7 +638,10 @@ func (c *consoleModal) layoutContent(gtx layout.Context) layout.Dimensions {
 	// above it is the only thing that raises it at all. The inset still
 	// earns its place there by keeping the history below the input out from
 	// under the keyboard.
-	strip := consoleTabStripFor(c.parent.isCompactLayout(gtx), c.currentTab())
+	// The same decision layoutTabs makes, from the same constraints: the strip
+	// is a Rigid child of a vertical Flex in this area, so its available width
+	// is this one's.
+	strip := c.tabStripFor(gtx)
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return keyboardYieldingChrome(gtx, &c.parent.touchKbd, func(gtx layout.Context) layout.Dimensions {
@@ -635,7 +685,8 @@ func (c *consoleModal) handleActions(gtx layout.Context) {
 	c.syncHistoryNavigation()
 	suggestions := c.consoleSuggestions()
 
-	c.handleTabActions(gtx, c.parent.isCompactLayout(gtx))
+	c.handleTabActions(gtx)
+	c.handleSettingsActions(gtx)
 
 	for c.donateLinkButton.Clicked(gtx) {
 		go func() {
@@ -738,8 +789,16 @@ func (c *consoleModal) handleEscape(gtx layout.Context) {
 // consoleTabOrder is the tabs left to right. It is the single list every part
 // of the tab machinery walks — the strip, the More menu and the click
 // handlers — so a tab can never be drawn somewhere it cannot be clicked.
+//
+// This is PRESENTATION order and is deliberately not the order the constants
+// are declared in. The constants are identity; the zero value is the Console
+// tab because that is where a console opens. Settings leads the strip because
+// it is the only tab a user goes looking for rather than stumbles into: below
+// the compact breakpoint the tail folds behind a "More" button, and a setting
+// nobody suspects exists is a setting behind a button nobody presses.
 func consoleTabOrder() []consoleTab {
 	return []consoleTab{
+		consoleTabSettings,
 		consoleTabConsole,
 		consoleTabPeers,
 		consoleTabTraffic,
@@ -750,12 +809,13 @@ func consoleTabOrder() []consoleTab {
 }
 
 var consoleTabLabelKeys = map[consoleTab]string{
-	consoleTabConsole: "console.tab.console",
-	consoleTabPeers:   "console.tab.peers",
-	consoleTabTraffic: "console.tab.traffic",
-	consoleTabFile:    "console.tab.file",
-	consoleTabInfo:    "console.tab.info",
-	consoleTabDonate:  "console.tab.donate",
+	consoleTabConsole:  "console.tab.console",
+	consoleTabPeers:    "console.tab.peers",
+	consoleTabTraffic:  "console.tab.traffic",
+	consoleTabFile:     "console.tab.file",
+	consoleTabInfo:     "console.tab.info",
+	consoleTabSettings: "console.tab.settings",
+	consoleTabDonate:   "console.tab.donate",
 }
 
 func (c *consoleModal) tabLabel(tab consoleTab) string {
@@ -795,19 +855,121 @@ type consoleTabStrip struct {
 	MenuHasActive bool
 }
 
-// consoleTabStripFor decides how many tabs the strip can show. Six of them
-// need about 700dp and a phone has 360—420, so below the breakpoint the tail
-// folds into a menu rather than running off the edge of the screen, which is
-// what it used to do.
-func consoleTabStripFor(compact bool, active consoleTab) consoleTabStrip {
+// tabStripFor decides how many tabs this width can show.
+//
+// It MEASURES rather than reading a breakpoint. The strip used to fold on
+// Window.isCompactLayout, the single-pane PANE breakpoint (600dp), which
+// answers a different question: the tabs need whatever their LABELS need, and
+// the labels are translated — the Chinese set is half the width of the French
+// one. Two failures followed from it, and the second is why the count is not a
+// constant either:
+//
+//   - between the pane breakpoint and the width the labels actually want, the
+//     full strip was drawn unfolded and ran off the edge of the card — exactly
+//     the failure the menu exists to prevent. Adding a seventh tab widened that
+//     band by a whole pill;
+//   - below the breakpoint it showed a FIXED four tabs plus the More slot, and
+//     four Arabic labels plus that slot do not fit a 360dp phone either.
+//
+// So the number of visible tabs is whatever fits, capped on a narrow window at
+// the four the design asks for.
+func (c *consoleModal) tabStripFor(gtx layout.Context) consoleTabStrip {
 	all := consoleTabOrder()
-	if !compact {
+	active := c.currentTab()
+
+	maxVisible := len(all)
+	if c.parent.isCompactLayout(gtx) {
+		maxVisible = min(consoleVisibleTabs, len(all))
+	}
+
+	widths := c.tabPillWidths(gtx)
+	for visible := maxVisible; visible > 0; visible-- {
+		strip := consoleTabStripFor(visible, active)
+		if c.stripWidth(gtx, strip, widths) <= gtx.Constraints.Max.X {
+			return strip
+		}
+	}
+	// Nothing fits — draw the narrowest thing that is still navigable rather
+	// than an empty strip: the More slot alone reaches every tab.
+	return consoleTabStripFor(0, active)
+}
+
+// tabPillWidths measures each tab's pill plus the "More" slot, in tab order
+// with the More slot last.
+//
+// Only the LABELS are measured, never the pills themselves: a pill is a
+// widget.Clickable and laying one out drains its click queue, so measuring them
+// would swallow every second press on the strip. Same reasoning as
+// ui.MenuPopupFitWidth. Measured ONCE per frame and reused by every candidate
+// count, so the search costs arithmetic rather than another pass of shaping.
+func (c *consoleModal) tabPillWidths(gtx layout.Context) map[consoleTab]int {
+	measure := gtx
+	measure.Ops = new(op.Ops)
+	measure.Constraints.Min = image.Point{}
+
+	padding := 2 * gtx.Dp(unit.Dp(consoleTabPaddingXDp))
+	widths := make(map[consoleTab]int, len(consoleTabOrder()))
+	for _, tab := range consoleTabOrder() {
+		widths[tab] = c.measureTabLabel(measure, c.tabLabel(tab)) + padding
+	}
+	return widths
+}
+
+func (c *consoleModal) measureTabLabel(measure layout.Context, text string) int {
+	label := material.Label(c.theme(), unit.Sp(consoleTabTextSp), text)
+	label.Font.Weight = 600
+	label.MaxLines = 1
+	return label.Layout(measure).Size.X
+}
+
+// stripWidth is what one candidate strip would take, including the More slot
+// and the gaps between pills.
+func (c *consoleModal) stripWidth(gtx layout.Context, strip consoleTabStrip, widths map[consoleTab]int) int {
+	gap := gtx.Dp(unit.Dp(consoleTabGapDp))
+
+	total, slots := 0, 0
+	for _, tab := range strip.Visible {
+		total += widths[tab]
+		slots++
+	}
+	if len(strip.Menu) > 0 {
+		measure := gtx
+		measure.Ops = new(op.Ops)
+		measure.Constraints.Min = image.Point{}
+
+		label := c.parent.t("console.tab.more")
+		if strip.MenuHasActive {
+			label = c.tabLabel(strip.MenuActive)
+		}
+		// The More slot's own geometry: 1dp less side padding, a gap and a
+		// glyph — see layoutTabPill.
+		total += c.measureTabLabel(measure, label) +
+			2*gtx.Dp(unit.Dp(consoleTabIconPaddingXDp)) +
+			gtx.Dp(unit.Dp(consoleTabIconGapDp)) +
+			gtx.Dp(unit.Dp(consoleTabIconDp))
+		slots++
+	}
+	if slots > 1 {
+		total += (slots - 1) * gap
+	}
+	return total
+}
+
+// consoleTabStripFor splits the tabs into the ones on the strip and the ones
+// behind the "More" slot. visible is how many stay on the strip; anything at or
+// above the tab count keeps the whole set and folds nothing.
+func consoleTabStripFor(visible int, active consoleTab) consoleTabStrip {
+	all := consoleTabOrder()
+	if visible >= len(all) {
 		return consoleTabStrip{Visible: all}
+	}
+	if visible < 0 {
+		visible = 0
 	}
 
 	strip := consoleTabStrip{
-		Visible: all[:consoleVisibleTabs],
-		Menu:    all[consoleVisibleTabs:],
+		Visible: all[:visible],
+		Menu:    all[visible:],
 	}
 	for _, tab := range strip.Menu {
 		if tab == active {
@@ -836,10 +998,13 @@ func (c *consoleModal) selectTab(tab consoleTab) {
 }
 
 // handleTabActions runs the tab strip's click handlers. Every tab is handled,
-// including the ones the compact strip has folded away: their buttons are laid
-// out by the More menu, and a Clickable whose clicks nobody drains keeps them
-// queued for whenever it is next asked.
-func (c *consoleModal) handleTabActions(gtx layout.Context, compact bool) {
+// including the ones the strip has folded away: their buttons are laid out by
+// the More menu, and a Clickable whose clicks nobody drains keeps them queued
+// for whenever it is next asked.
+//
+// Whether anything IS folded is layoutTabs's decision — it is the one that
+// measures — so the "a widened window puts the menu away" rule lives there too.
+func (c *consoleModal) handleTabActions(gtx layout.Context) {
 	for _, tab := range consoleTabOrder() {
 		for c.tabButton(tab).Clicked(gtx) {
 			c.selectTab(tab)
@@ -847,11 +1012,6 @@ func (c *consoleModal) handleTabActions(gtx layout.Context, compact bool) {
 	}
 	for c.tabMenuButton.Clicked(gtx) {
 		c.tabMenuOpen = !c.tabMenuOpen
-	}
-	// A window widened past the breakpoint puts every tab back on the strip,
-	// and the menu button goes with them.
-	if !compact {
-		c.tabMenuOpen = false
 	}
 	if c.focusPending {
 		// claimFocus already ran this frame, with the old tab. The frame that
@@ -871,7 +1031,13 @@ func (c *consoleModal) handleTabActions(gtx layout.Context, compact bool) {
 // it here also keeps the pills at their natural width instead of the equal
 // shares a Flexed layout would give them.
 func (c *consoleModal) layoutTabs(gtx layout.Context) layout.Dimensions {
-	strip := consoleTabStripFor(c.parent.isCompactLayout(gtx), c.currentTab())
+	strip := c.tabStripFor(gtx)
+	// Every tab is back on the strip, so the menu that held the tail has
+	// nothing left to hold. Decided here because this is where the fold is
+	// decided; handleTabActions runs before any of it is measured.
+	if len(strip.Menu) == 0 {
+		c.tabMenuOpen = false
+	}
 	gap := gtx.Dp(unit.Dp(consoleTabGapDp))
 
 	// Each pill is measured at its natural size. The minimum has to be dropped
@@ -1070,6 +1236,8 @@ func (c *consoleModal) layoutActiveTab(gtx layout.Context) layout.Dimensions {
 		return c.layoutFileTab(gtx)
 	case consoleTabInfo:
 		return c.layoutInfoTab(gtx, snap)
+	case consoleTabSettings:
+		return c.layoutSettingsTab(gtx)
 	case consoleTabDonate:
 		return c.layoutDonateTab(gtx)
 	default:
@@ -1138,7 +1306,7 @@ func (c *consoleModal) layoutInfoTab(gtx layout.Context, snap service.RouterSnap
 
 func (c *consoleModal) layoutDonateTab(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, ui.PanelFill())
 		// 8dp panel padding matching the main window cards (window.go card).
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			title := material.Label(c.theme(), unit.Sp(20), c.parent.t("console.donate_title"))
@@ -1186,7 +1354,7 @@ func (c *consoleModal) layoutPeersTab(gtx layout.Context, snap service.RouterSna
 	}
 
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, ui.PanelFill())
 		// 8dp panel padding matching the main window cards (window.go card).
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			title := material.Label(c.theme(), unit.Sp(20), c.parent.t("console.peers_title"))
@@ -2258,7 +2426,7 @@ func openExternalURL(url string) error {
 // a data race with the parent window's text shaper (not thread-safe on Linux).
 func (c *consoleModal) card(gtx layout.Context, titleText string, rows []string, extras ...func(layout.Context) layout.Dimensions) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, ui.PanelFill())
 
 		// 8dp panel padding matching the main window cards (window.go card).
 		inset := layout.UniformInset(unit.Dp(8))
@@ -3515,7 +3683,7 @@ func (c *consoleModal) appendNewTrafficSamples() {
 
 func (c *consoleModal) layoutTrafficTab(gtx layout.Context) layout.Dimensions {
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		ui.Fill(gtx, color.NRGBA{R: 21, G: 26, B: 34, A: 255})
+		ui.Fill(gtx, ui.PanelFill())
 		// 8dp panel padding matching the main window cards (window.go card).
 		return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,

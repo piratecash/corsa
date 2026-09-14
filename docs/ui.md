@@ -10,7 +10,7 @@ The desktop UI is built with [Gio](https://gioui.org) — a portable immediate-m
 
 ```
 Window (Gio event loop)
-  ├── Header (language selector, update badge)
+  ├── Header (update badge)
   ├── Sidebar (contacts card)
   │   ├── My identity card (fingerprint, fully wrapped address, known count)
   │   │   └── Identity details overlay
@@ -365,29 +365,40 @@ ended up with no hover at all — a component copied by eye is a component whose
 states are copied by eye. Only the palette varies now: the destructive delete
 button carries its own pair, everything else takes the shared one.
 
-**Toolbar button** (`toolbar_button.go`) is the language selector in the header
-and the Console button in the footer. Content-sized, icon on either side,
-active while the surface it owns is open.
+**Toolbar button** (`toolbar_button.go`) is the Console button in the footer.
+Content-sized, icon on either side, active while the surface it owns is open.
+It had a second user — the header's language selector — until that moved onto
+the console's Settings tab.
 
-**Menu popup** (`menu_popup.go`) is every dropdown: the language selector and
-the console tabs that do not fit a narrow strip. The component is the card and
-its backdrop; where the card goes is the caller's, because the two anchors have
-nothing in common — one hangs under a header button in window coordinates, the
-other under a tab strip inside the console modal. Both anchor to the RIGHT edge
-of the button that opened them, clamped into the area they are drawn in.
+**Menu popup** (`menu_popup.go`) is the dropdown — the console tabs that do not
+fit a narrow strip — and the rows it is built from. The component is the card
+and its backdrop; where the card goes is the caller's business.
 
 The backdrop is what makes a press aimed at empty space dismiss the menu
 instead of selecting whatever sits underneath it. Catching that press and
-tinting the background are separate: the console's tab menu dims the card it
-covers, the language menu does not — a wash over every contact and message for
-the sake of a six-row dropdown reads as a modal dialogue, which it is not.
+tinting the background are separate jobs, described separately by the design.
 
 The card hugs its rows in both directions. Its height is capped by the room
 under the anchor and scrolls past that, never stretched to it; its width is
-either fixed (language, 220dp) or measured from the widest row (tabs), and
-every row is then laid out at that width so two rows in one card cannot come
-out different sizes. The scrollbar overlays the rows rather than reserving a
+either taken from the constraints or measured from the widest row, and every
+row is then laid out at that width so two rows in one card cannot come out
+different sizes. The scrollbar overlays the rows rather than reserving a
 gutter, which is Gio's default and made the card visibly lopsided.
+
+There are two of these in the application and they share everything but their
+anchor: the console's tab menu, hanging from the right end of a strip, and the
+language lookup on the Settings tab, hanging from the left edge of a button
+inside a scrolling section. Which edge to anchor to is the caller's; the clamp
+(`MenuPopupAnchorX`) keeps either from hanging off the area it is drawn in.
+
+**Checkbox** (`checkbox.go`) is the on/off control. Not `material.CheckBox`,
+for the reason the chip is not `material.Clickable`: the Material ink is drawn
+against a square clip and shows as pale corner dots and a flashing ring that
+appear nowhere in this design. It shares the chip palette instead, so a ticked
+box reads as the same "chosen" state as a selected tab or menu row. The whole
+row is the target, label included — an 18dp box is hard to hit with a finger,
+and the label beside it is the part the user is looking at. A second, dimmer
+line under the label (`Note`) carries the consequence of ticking the box.
 
 The fill of a small selectable control — console tab pill, toolbar button,
 popup row — is one shared pair (`chipFill`), because the design describes each
@@ -757,12 +768,137 @@ command. They used to disagree — Back closed the whole console from
 inside an open menu — and nothing open inside the console survives its close,
 so a reopened console never restores a menu the user did not ask for.
 
-The tab strip shows all six tabs on a desktop window. Below the compact
-breakpoint it shows the first four and folds Info and Donate into a "More"
+The tab strip holds Settings, Console, Peers, Traffic, File, Info and Donate,
+and shows as many of them as the width can take; the rest fold into a "More"
 dropdown, whose button carries the selected tab's name when the selection is
 inside it. Escape closes the dropdown first and the modal second; before the
 console became a modal, an Escape with no completion popup showing fell through
 and RAN the typed command.
+
+How many fit is MEASURED, not read off a breakpoint. The fold used to happen at
+`Window.isCompactLayout`, the single-pane PANE breakpoint of 600dp, which
+answers a different question: the tabs need whatever their LABELS need, and the
+labels are translated — the Chinese set is half the width of the French one.
+That produced two failures. Between the breakpoint and the width the labels
+actually want, the full strip was drawn unfolded and ran off the edge of the
+card, which is the exact failure the menu exists to prevent; and below the
+breakpoint it showed a fixed four tabs plus the More slot, which four Arabic
+labels and that slot do not fit on a 360dp phone either. So the visible count is
+whatever fits, capped on a narrow window at the four the design asks for. Only
+the labels are measured, never the pills: a pill is a `widget.Clickable` and
+laying one out drains its click queue, so measuring them would swallow every
+second press on the strip.
+
+#### Settings tab
+
+The Settings tab holds the choices that belong to this installation rather than
+to a peer or a message: the interface language and the opt-in GitHub release
+check.
+
+It LEADS the strip, which is presentation order and deliberately not the order
+the tab constants are declared in — the constants are identity, and the zero
+value stays the Console tab because that is where a console opens. Settings is
+first because it is the only tab a user goes looking for rather than stumbles
+into: below the compact breakpoint the tail folds behind a "More" button, and a
+setting nobody suspects exists is a setting behind a button nobody presses.
+
+The language selector lives here rather than in the window header. As a
+It is the same lookup it always was — a button naming the language in use, a
+card of options under it — and it stayed a lookup on purpose: six options laid
+out as full-width rows is a wall in a tab that has one other setting in it. What
+it stopped costing is the header, which was paying a permanent slot, on a phone
+the widest one, for a control a user touches about twice in the life of an
+installation.
+
+The card is drawn AFTER the tab's column rather than inside it. Later ops paint
+on top and win the press, so the card covers the sections instead of pushing
+them down; drawing it inside the scrolling list would have let the list clip it
+at the bottom of the viewport. Its anchor is reconstructed — Gio exposes no
+absolute position — but only from what this tab lays out above the button, and
+only from LABELS: the title, the heading and the two gaps. Measuring a label
+disturbs nothing, while measuring the button would drain its click queue. The
+list's scroll offset is subtracted, or the card would stay put while the button
+it belongs to scrolled away. It is on the same Back/Escape ladder as the tab
+menu, and the console's close takes it down with everything else open inside.
+
+The card never leaves the tab. Under the button is the natural side and it keeps
+that side while there is room, or while there is simply more room there than
+above — flipping for a few pixels would make the card jump sides as the section
+scrolls. When neither side can show even one row it takes the whole tab and
+scrolls. The first cut placed it below always and, when less than a usable row
+was left, raised its HEIGHT to a floor without moving it: the last options then
+sat past the bottom edge, where scrolling inside the card could not reach them.
+A menu that does not fit has to move, not grow — the floor is a decision about
+which side to use, never a size to force.
+
+**Release check.** The messenger is anonymous: every other byte the process
+sends goes over the p2p transport. `internal/core/updatecheck` is the one place
+that opens a direct connection to a third party, and doing so shows that party
+the node operator's IP address. So it is off by default, the checkbox says what
+the request costs, and the preference (`Preferences.CheckGitHubReleases`) is the
+single source of truth for the state — the box is a view of it rather than a
+second copy that could drift from what the checker is doing.
+
+The checker reads the repository's tag list and takes the MAXIMUM release
+version rather than the first entry: the endpoint documents no ordering for
+tags, so "the newest is at the top" holds only until someone re-tags an old
+commit. Comparison is by `domain.ReleaseVersion`, three ordered numeric
+components — `ClientVersion` is a display string, and two display strings sort
+"2.3.9" above "2.3.70", which is exactly the component releases differ in.
+
+It reads the WHOLE listing, not one page. The endpoint serves 30 tags by
+default, and the two assumptions compound: the only reason to expect the newest
+tag on the first page is the ordering that was never promised, so a release
+sitting further along is one the program answers "no update" about. The request
+asks for the largest page the endpoint serves and follows `rel="next"` from the
+`Link` header for the rest. The next-page URL comes out of the response, so it
+is checked rather than trusted: a page cannot move the request to another host,
+the same rule the redirect handler applies.
+
+The walk is bounded at ten pages, and **reaching that bound is a failed check,
+not an answer**. A self-referencing `Link` header would otherwise keep the
+checker fetching for the life of the process — but stopping and reporting what
+was read is the worse half of the same bug, because the maximum of a prefix is
+not the maximum. Ten pages of old tags with the newest release on the eleventh
+would read as "you are up to date", which is the one conclusion an incomplete
+listing cannot support and the one the user acts on by doing nothing. The
+truncation surfaces as `ErrTagListingTruncated`, so the badge stays dark and
+the Settings tab says the check failed.
+
+One goroutine owns the schedule, and the periodic tick and the "Check now"
+button both wake THAT goroutine rather than starting a request of their own, so
+two checks can never be in flight against the same endpoint. The first
+automatic check waits out a start delay — not a warm-up: a request that leaves
+the moment the application opens correlates the operator's IP with "this node
+just came up", which is the sort of timing fact the rest of the program avoids
+publishing. Consent given by ticking the box is also a request, so that one
+does not wait.
+
+The header badge reads BOTH update signals and is lit by either. Neither
+subsumes the other: the peer-based version policy needs several peers on a
+newer build before it concludes anything and says nothing at all to a node with
+no peers, while the release check answers at once but only for a user who opted
+in. A FAILED check is not an update signal — a failure says nothing about
+whether a release exists, and lighting the badge on one would turn every flaky
+connection into an update prompt. That is what the status block under the
+checkbox is for: the badge is dark both when the build is current and when the
+check could not be made, and only one of those supports the conclusion a user
+would otherwise draw.
+
+Withdrawing consent does three things, and all three are needed. It stops
+future checks; it discards the last result, because leaving it standing would
+keep showing a conclusion drawn from a source the user just switched off; and
+it CANCELS the request in flight. The third is not a refinement of the second:
+dropping the answer still lets a request that has already left — or one still
+inside a connect the client gives fifteen seconds — reach the endpoint after
+the box was unticked, and the request itself is the thing that shows a third
+party this node's address. The gate on starting a check and the withdrawal take
+the same lock, so there is no window between "consent still holds" and "the
+request left" either.
+
+Only the UI has a checker. A headless node has nobody to ask for consent, so
+nothing under `cmd/corsa-node` imports `internal/core/updatecheck`, and the
+peer-based policy remains its only update signal.
 
 Two surfaces of one window now carry an input row the on-screen keyboard must
 not cover — the composer underneath and the console's command line on top. Only
@@ -1476,7 +1612,7 @@ Desktop UI построен на [Gio](https://gioui.org) — кроссплат
 
 ```
 Window (Gio event loop)
-  ├── Header (выбор языка, бейдж обновления)
+  ├── Header (бейдж обновления)
   ├── Sidebar (карточка контактов)
   │   ├── Карточка «Мой identity» (fingerprint, полный адрес с переносом, число известных identity)
   │   │   └── Оверлей сведений об identity
@@ -1800,6 +1936,21 @@ toolbar-кнопкой и строкой попапа, `ui.Filled` — скру�
 вылезала четырьмя светлыми точками по углам скруглённой пилюли, а ripple давал
 белое кольцо на каждый клик. Ни того, ни другого в макете нет.
 
+Таких в приложении два, и различаются они только привязкой: меню вкладок
+консоли висит под правым концом полосы, а лукап языка на вкладке «Настройки» —
+под левым краем кнопки внутри прокручиваемой секции. К какому краю привязываться,
+решает вызывающий; подрезка (`MenuPopupAnchorX`) не даёт ни одному вылезти за
+область, в которой он рисуется.
+
+**Checkbox** (`checkbox.go`) — переключатель вкл/выкл. Не `material.CheckBox` —
+по той же причине, по какой чип не `material.Clickable`: Material-ink рисуется
+по прямоугольному клипу и вылезает светлыми точками по углам и мигающим
+кольцом, которых в макете нет. Вместо этого он берёт палитру чипа, и отмеченный
+флажок читается тем же «выбрано», что и активная вкладка или строка меню. Цель
+нажатия — вся строка, включая подпись: в коробку 18dp трудно попасть пальцем, а
+смотрит пользователь именно на подпись. Вторая, приглушённая строка под
+подписью (`Note`) несёт последствие включения.
+
 **Modal shell** (`modal_shell.go`) — любое модальное окно: подложка, карточка,
 шапка с заголовком и кнопкой закрытия, правила размера. На нём identity-панель
 и консоль. Подложка накрывает всё окно и съедает КАЖДОЕ нажатие по себе, и это
@@ -1827,27 +1978,23 @@ hover: компонент, скопированный на глаз, — это 
 скопированы на глаз. Теперь различается только палитра: у деструктивной кнопки
 удаления своя пара, у остальных общая.
 
-**Toolbar button** (`toolbar_button.go`) — кнопка языка в шапке и кнопка
-консоли в футере. Ширина по содержимому, иконка с любой стороны, активна пока
-открыта поверхность, которой она владеет.
+**Toolbar button** (`toolbar_button.go`) — кнопка консоли в футере. Ширина по
+содержимому, иконка с любой стороны, активна пока открыта поверхность, которой
+она владеет. У неё был второй потребитель — выбор языка в шапке, — пока тот не
+переехал на вкладку «Настройки» в консоли.
 
-**Menu popup** (`menu_popup.go`) — любое выпадающее меню: выбор языка и
-вкладки консоли, не поместившиеся на узкую полосу. Компонент — это карточка и
-подложка; куда карточку поставить, решает вызывающий, потому что у двух меню
-нет ничего общего в привязке: одно висит под кнопкой шапки в координатах окна,
-другое — под полосой вкладок внутри модалки консоли. Оба привязаны к ПРАВОМУ
-краю своей кнопки и подрезаются по границам области, в которой рисуются.
+**Menu popup** (`menu_popup.go`) — выпадающее меню (вкладки консоли, не
+поместившиеся на узкую полосу) и строки, из которых оно собрано. Компонент —
+это карточка и подложка; куда карточку поставить, решает вызывающий.
 
 Именно подложка делает так, что нажатие по пустому месту закрывает меню, а не
-выбирает то, что под ним. Поймать нажатие и затемнить фон — разные задачи: меню
-вкладок затемняет карточку, которую накрывает, меню языка — нет: заливка поверх
-всех контактов и сообщений ради выпадающего списка из шести строк читается как
-модальный диалог, которым оно не является.
+выбирает то, что под ним. Поймать нажатие и затемнить фон — разные задачи, и
+дизайн описывает их раздельно.
 
 Карточка обжимает содержимое в обе стороны. Высота ограничена местом под якорем
-и дальше прокручивается, но никогда не растягивается до него; ширина либо
-фиксированная (язык, 220dp), либо измеряется по самой широкой строке (вкладки),
-и все строки затем раскладываются на эту ширину, чтобы две строки в одной
+и дальше прокручивается, но никогда не растягивается до него; ширина либо берётся
+из ограничений, либо измеряется по самой широкой строке, и все строки затем
+раскладываются на эту ширину, чтобы две строки в одной
 карточке не вышли разного размера. Скроллбар рисуется поверх строк, а не
 резервирует жёлоб, — по умолчанию в Gio наоборот, и карточка выглядела
 кособокой.
@@ -2213,11 +2360,133 @@ Escape и системный Back выходят по одному слою за
 подсказкам, когда в редакторе стоит выделенная команда, а настоящий ввод
 отложен: закрытие возвращает настоящий ввод.
 
-На desktop полоса показывает все шесть вкладок. Ниже компактного breakpoint —
-первые четыре, а Info и Donate уезжают в выпадающее меню «Ещё», кнопка которого
-берёт имя выбранной вкладки, если выбранная среди них. Escape закрывает сначала
-меню, потом модалку; до перевода консоли в модалку Escape при закрытом списке
-подсказок проваливался дальше и ВЫПОЛНЯЛ набранную команду.
+На полосе вкладок: Настройки, Консоль, Пиры, Трафик, Файлы, Инфо, Донаты —
+столько, сколько влезает по ширине; остальные уезжают в выпадающее меню «Ещё»,
+кнопка которого берёт имя выбранной вкладки, если выбранная среди них. Escape
+закрывает сначала меню, потом модалку; до перевода консоли в модалку Escape при
+закрытом списке подсказок проваливался дальше и ВЫПОЛНЯЛ набранную команду.
+
+Сколько влезает — ИЗМЕРЯЕТСЯ, а не берётся из breakpoint-а. Раньше сворачивание
+решал `Window.isCompactLayout`, то есть PANE-breakpoint однопанельной раскладки
+на 600dp, а он отвечает на другой вопрос: вкладкам нужно столько, сколько нужно
+их ПОДПИСЯМ, а подписи переведены — китайский набор вдвое уже французского.
+Отсюда две поломки. Между breakpoint-ом и шириной, которой подписи на самом деле
+хотят, полоса рисовалась несвёрнутой и уезжала за край карточки — ровно то, ради
+чего меню и существует; а ниже breakpoint-а показывались фиксированные четыре
+вкладки плюс слот «Ещё», и четыре арабские подписи вместе с этим слотом в 360dp
+телефона тоже не помещаются. Поэтому число видимых вкладок — это то, что влезло,
+с потолком в четыре на узком окне, как просит макет. Измеряются только подписи,
+никогда не пилюли: пилюля это `widget.Clickable`, её раскладка вычерпывает
+очередь кликов, и обмер пилюль съедал бы каждое второе нажатие по полосе.
+
+#### Вкладка «Настройки»
+
+На вкладке «Настройки» лежат выборы, которые принадлежат этой установке, а не
+пиру или сообщению: язык интерфейса и опциональная проверка релизов на GitHub.
+
+Она ПЕРВАЯ на полосе — это порядок показа, и он намеренно не совпадает с
+порядком объявления констант: константы это идентичность, и нулевым значением
+остаётся вкладка «Консоль», потому что консоль открывается именно на ней.
+«Настройки» первые потому, что это единственная вкладка, которую пользователь
+ищет, а не встречает по дороге: ниже компактного breakpoint хвост уезжает под
+кнопку «Ещё», а настройка, о существовании которой не догадываются, — это
+настройка за кнопкой, которую не нажимают.
+
+Выбор языка живёт здесь, а не в шапке окна. Это тот же лукап, каким он и был —
+кнопка с названием текущего языка, карточка вариантов под ней, — и лукапом он
+остался намеренно: шесть вариантов, разложенных строками во всю ширину, это
+стена на вкладке, где кроме них одна настройка. Перестал он стоить шапки,
+которая держала постоянный слот — на телефоне самый широкий — ради контроля, к
+которому пользователь прикасается раза два за всю жизнь установки.
+
+Карточка рисуется ПОСЛЕ колонки вкладки, а не внутри неё. Более поздние ops
+рисуются поверх и выигрывают нажатие, поэтому карточка накрывает секции, а не
+раздвигает их; внутри прокручиваемого списка её обрезало бы нижней границей
+вьюпорта. Привязка восстанавливается — абсолютной позиции Gio не даёт, — но
+только из того, что эта вкладка сама раскладывает над кнопкой, и только из
+ПОДПИСЕЙ: заголовок, подзаголовок и два зазора. Обмер подписи ничего не портит,
+а обмер кнопки вычерпал бы её очередь кликов. Смещение прокрутки вычитается,
+иначе карточка осталась бы на месте, пока кнопка, которой она принадлежит,
+уезжает вверх. Лукап стоит на той же лестнице Back/Escape, что и меню вкладок, и
+закрытие консоли убирает его вместе со всем остальным открытым внутри.
+
+За пределы вкладки карточка не выходит. Под кнопкой — естественная сторона, и
+она сохраняется, пока там есть место или пока его там просто больше, чем сверху:
+переворот ради нескольких пикселей заставлял бы карточку прыгать со стороны на
+сторону при прокрутке секции. Когда ни одна сторона не вмещает даже одной
+строки, карточка занимает всю вкладку и прокручивается. Первый вариант всегда
+клал её под кнопку и, если снизу оставалось меньше пригодной строки, поднимал ей
+ВЫСОТУ до минимума, не сдвигая: последние варианты оказывались за нижней
+границей, где прокрутка внутри карточки до них не достаёт. Меню, которое не
+влезает, должно переехать, а не вырасти — минимум это решение о том, какую
+сторону взять, а не размер, который надо выставить.
+
+**Проверка релизов.** Мессенджер анонимный: каждый байт, который процесс
+отправляет наружу, идёт по p2p-транспорту. `internal/core/updatecheck` —
+единственное место, открывающее прямое соединение с третьей стороной, и это
+показывает ей IP-адрес оператора узла. Поэтому по умолчанию она выключена,
+чекбокс прямо говорит, чего стоит запрос, а настройка
+(`Preferences.CheckGitHubReleases`) — единственный источник истины о состоянии:
+флажок её отображает, а не хранит вторую копию, способную разъехаться с тем, что
+делает чекер.
+
+Чекер читает список тегов репозитория и берёт МАКСИМАЛЬНУЮ версию, а не первую
+запись: порядок тегов эндпоинт не документирует, так что «самый новый сверху»
+верно ровно до того, как кто-нибудь перетегирует старый коммит. Сравнение идёт
+через `domain.ReleaseVersion` — три упорядоченных числовых компонента:
+`ClientVersion` это строка для показа, а две строки для показа ставят «2.3.9»
+выше «2.3.70», то есть ровно в том компоненте, которым релизы и отличаются.
+
+Читается ВЕСЬ список, а не одна страница. По умолчанию эндпоинт отдаёт 30
+тегов, и два допущения складываются: единственная причина ждать самый новый тег
+на первой странице — тот самый непообещанный порядок, а значит релиз подальше по
+списку это релиз, про который программа скажет «обновлений нет». Запрос просит
+максимальный размер страницы и дальше идёт по `rel="next"` из заголовка `Link`.
+URL следующей страницы приходит ИЗ ОТВЕТА, поэтому он проверяется, а не
+принимается на веру: страница не может увести запрос на другой хост — то же
+правило, что у обработчика редиректов.
+
+Обход ограничен десятью страницами, и **упереться в этот потолок — это провал
+проверки, а не ответ**. Заголовок, указывающий сам на себя, иначе заставил бы
+чекер ходить по кругу до конца жизни процесса — но остановиться и отчитаться
+прочитанным это худшая половина той же ошибки: максимум префикса не есть
+максимум. Десять страниц старых тегов, а самый новый релиз на одиннадцатой —
+прочиталось бы как «у вас актуальная версия», то есть ровно тот вывод, которого
+неполный список не поддерживает и по которому пользователь бездействует.
+Усечение отдаётся как `ErrTagListingTruncated`, поэтому бейдж остаётся тёмным, а
+вкладка «Настройки» пишет, что проверка не удалась.
+
+Расписанием владеет одна горутина, и периодический тик, и кнопка «Проверить
+сейчас» будят ИМЕННО ЕЁ, а не запускают свой запрос, — поэтому двух проверок в
+полёте к одному эндпоинту быть не может. Первая автоматическая проверка ждёт
+стартовую задержку — это не прогрев: запрос, уходящий в момент открытия
+приложения, связывает IP оператора с фактом «этот узел только что поднялся», а
+именно такие временные факты остальная программа старается не публиковать.
+Согласие, данное щелчком по флажку, само является запросом, поэтому оно не ждёт.
+
+Бейдж в шапке читает ОБА сигнала обновления и загорается от любого. Ни один не
+поглощает другой: пиринговая version policy требует нескольких пиров на более
+новой сборке, прежде чем что-то заключить, и вообще молчит на узле без пиров, а
+проверка релизов отвечает сразу, но только тому, кто её включил. УПАВШАЯ
+проверка сигналом обновления не является — отказ ничего не говорит о том, есть
+ли релиз, и бейдж от него загорался бы на каждом обрыве связи. Для этого под
+чекбоксом и стоит блок статуса: бейдж тёмный и когда сборка актуальна, и когда
+проверить не удалось, а вывод, который иначе сделает пользователь, поддерживает
+только один из этих случаев.
+
+Снятие согласия делает три вещи, и нужны все три. Останавливает будущие
+проверки; выбрасывает последний результат, потому что оставленный стоять, он
+продолжал бы показывать вывод из источника, который пользователь только что
+отключил; и ОТМЕНЯЕТ летящий запрос. Третье — не уточнение второго: выброшенный
+ответ не мешает запросу, который уже ушёл (или всё ещё сидит в connect-е, на
+который у клиента пятнадцать секунд), дойти до эндпоинта уже после снятия
+галочки, а показывает третьей стороне адрес узла именно сам запрос. Гейт на
+старте проверки и снятие согласия берут один и тот же мьютекс, так что окна
+между «согласие ещё есть» и «запрос ушёл» тоже нет.
+
+Чекер есть только у UI. У headless-узла некого спросить о согласии, поэтому
+ничто под `cmd/corsa-node` не импортирует `internal/core/updatecheck`, и
+пиринговая policy остаётся его единственным сигналом обновления.
 
 Теперь в одном окне две поверхности с полем ввода, которое не должна закрывать
 экранная клавиатура: composer снизу и командная строка консоли сверху. Решать,

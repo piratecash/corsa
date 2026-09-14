@@ -7,16 +7,19 @@ import (
 // The component itself is covered in internal/app/desktop/ui. What belongs
 // here is how this application drives it.
 
-// The language button reads as active while its menu is open, the same way the
-// selected console tab does.
-func TestLanguageToolbarButtonIsActiveWhileTheMenuIsOpen(t *testing.T) {
+// The Console button reads as active while the modal it opens is on screen,
+// the same way the selected console tab does.
+func TestConsoleToolbarButtonIsActiveWhileTheModalIsOpen(t *testing.T) {
 	w := newIdentityLayoutTestWindow(t)
 
-	if w.languageToolbarButton().Active {
-		t.Fatal("language button is active with the menu closed")
+	if w.consoleToolbarButton().Active {
+		t.Fatal("console button is active with the modal closed")
 	}
-	w.showLanguageMenu = true
-	if !w.languageToolbarButton().Active {
-		t.Fatal("language button is not active with the menu open")
+
+	w.consoleModal = newConsoleModal(w)
+	w.consoleModal.visible.Store(true)
+
+	if !w.consoleToolbarButton().Active {
+		t.Fatal("console button is not active with the modal open")
 	}
 }

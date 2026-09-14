@@ -66,9 +66,14 @@ func menuPopupRowBounds(t *testing.T, popup MenuPopup, offered image.Point) ([]i
 }
 
 // Each row is a button the keyboard and a screen reader can reach.
+// menuPopupTestWidthDp is a width wide enough for the rows below to lay out
+// without wrapping. It is the test's own number: the card takes its width from
+// its caller, so there is no production constant for one to borrow.
+const menuPopupTestWidthDp = 220
+
 func TestMenuPopupCardDrawsOneButtonPerRow(t *testing.T) {
 	popup := testMenuPopup("EN — English", "RU — Русский", "ES — Español")
-	rows, _ := menuPopupRowBounds(t, popup, image.Pt(MenuPopupLanguageWidthDp, 400))
+	rows, _ := menuPopupRowBounds(t, popup, image.Pt(menuPopupTestWidthDp, 400))
 
 	if len(rows) != len(popup.Items) {
 		t.Fatalf("popup drew %d buttons for %d rows", len(rows), len(popup.Items))
@@ -99,7 +104,7 @@ func TestMenuPopupRowsAreAllTheSameWidth(t *testing.T) {
 // scrollbar gutter by default, which took its width out of the content and left
 // the rows 8dp from the left edge and 8dp plus a bar from the right.
 func TestMenuPopupPaddingIsSymmetric(t *testing.T) {
-	const width = MenuPopupLanguageWidthDp
+	const width = menuPopupTestWidthDp
 	rows, _ := menuPopupRowBounds(t, testMenuPopup("EN — English", "RU — Русский"), image.Pt(width, 400))
 
 	left := rows[0].Min.X
@@ -113,7 +118,7 @@ func TestMenuPopupPaddingIsSymmetric(t *testing.T) {
 // stretched card ends in a slab of empty background under the last row.
 func TestMenuPopupCardHugsItsRows(t *testing.T) {
 	const offered = 600
-	_, card := menuPopupRowBounds(t, testMenuPopup("EN", "RU", "ES"), image.Pt(MenuPopupLanguageWidthDp, offered))
+	_, card := menuPopupRowBounds(t, testMenuPopup("EN", "RU", "ES"), image.Pt(menuPopupTestWidthDp, offered))
 
 	if card.Y >= offered {
 		t.Fatalf("card took the whole %ddp it was offered instead of hugging its rows", offered)

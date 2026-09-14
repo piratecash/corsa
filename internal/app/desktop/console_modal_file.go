@@ -88,7 +88,7 @@ func (c *consoleModal) layoutFileTab(gtx layout.Context) layout.Dimensions {
 		c.scheduleFileTabInvalidate()
 	}
 
-	bg := color.NRGBA{R: 21, G: 26, B: 34, A: 255}
+	bg := ui.PanelFill()
 	return layout.UniformInset(unit.Dp(0)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		ui.Fill(gtx, bg)
 		// 8dp panel padding matching the main window cards (window.go card).

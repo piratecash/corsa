@@ -51,7 +51,6 @@ func (w *Window) openIdentityPanel(link string, qrImage widget.Image) {
 	w.identityPanelList.Position = layout.Position{}
 	w.identityPanelVisible = true
 	w.identityPanelFocus.open(&w.myIdentityButton)
-	w.showLanguageMenu = false
 	w.contextMenuPeer = domain.PeerIdentity{}
 	w.showDeleteConfirm = false
 	w.showClearChatConfirm = false

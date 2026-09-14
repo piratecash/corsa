@@ -553,7 +553,9 @@ func runEmojiNavigationFrameAt(w *Window, router *input.Router, ops *op.Ops, now
 func TestNavigationDismissTargetUsesOneOverlayPriority(t *testing.T) {
 	w := &Window{emojiPicker: newEmojiPickerState()}
 	w.emojiPicker.visible = true
-	w.showLanguageMenu = true
+	peer := domain.PeerIdentity{}
+	copy(peer[:], "11ab110000000000000000000000000000000000")
+	w.contextMenuPeer = peer
 	w.identityPanelVisible = true
 	gtx := layout.Context{
 		Metric:      unit.Metric{PxPerDp: 1, PxPerSp: 1},
@@ -564,12 +566,12 @@ func TestNavigationDismissTargetUsesOneOverlayPriority(t *testing.T) {
 		t.Fatalf("top target = %v, want identity panel", got)
 	}
 	w.identityPanelVisible = false
-	if got := w.topNavigationDismissTarget(gtx); got != dismissLanguageMenu {
-		t.Fatalf("target after identity = %v, want language menu", got)
+	if got := w.topNavigationDismissTarget(gtx); got != dismissIdentityMenu {
+		t.Fatalf("target after identity panel = %v, want identity menu", got)
 	}
-	w.showLanguageMenu = false
+	w.contextMenuPeer = domain.PeerIdentity{}
 	if got := w.topNavigationDismissTarget(gtx); got != dismissEmojiPicker {
-		t.Fatalf("target after language = %v, want emoji picker", got)
+		t.Fatalf("target after identity menu = %v, want emoji picker", got)
 	}
 }
 
