@@ -405,21 +405,24 @@ type Window struct {
 	// click-to-scroll behavior on reply quotes.
 	replyQuoteTags map[string]*widget.Clickable
 
-	// scrollToMsgID is set when the user clicks a reply quote. The actual
-	// scroll is deferred to the next frame's layout() — applying Position
-	// changes inside list.Layout() is unreliable because the list overwrites
-	// them during its own position computation.
-	scrollToMsgID string
-	// scrollClickY stores the cursor Y position relative to the chat
-	// viewport at the moment the user clicked the reply quote.
-	scrollClickY int
-	// chatViewportH stores the chat list viewport height (pixels) from
-	// the most recent layout pass, used for cursor-relative scroll math.
+	// chatJump is the pending scroll to a quoted message, and msgHighlight the
+	// fade that marks it once it arrives. Both live in chat_jump.go.
+	chatJump     chatJump
+	msgHighlight msgHighlight
+	// chatImagesArriving is set by any bubble drawn THIS frame that is still
+	// waiting for a thumbnail to decode, and chatImagesWerePending is the
+	// previous frame's answer — which is the one a jump can act on, since it
+	// runs before anything lays out. While it is true the conversation's
+	// heights are not final: a picture appearing adds up to 200dp to the
+	// bubble it lands in.
+	chatImagesArriving    bool
+	chatImagesWerePending bool
+	// chatViewportH is the chat list's viewport height in pixels, recorded by
+	// the last layout pass. The jump is computed a frame before the list lays
+	// out, so the height it centres against is necessarily the previous
+	// frame's — which is the same height unless the window was resized in
+	// between, and a resize redraws anyway.
 	chatViewportH int
-	// chatCursorY tracks the cursor Y relative to the chat viewport,
-	// updated by a pointer tracker scoped to layoutConversation.
-	chatCursorY   int
-	chatCursorTag int // stable tag for the chat-area pointer tracker
 
 	// File attachment state: when the user picks a file via the native dialog,
 	// these fields hold the selected file path until Send is pressed.
@@ -1215,7 +1218,6 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	// line reads menuBtnRects, so the move costs nothing, and the scroll/resize
 	// half of the check still happens before any row lays out.
 	w.invalidateStaleMenuRects() // drop ⋯ rects a reorder, scroll or resize moved
-	w.applyDeferredScroll()
 	w.swapComposerDraftOnPeerChange()
 	w.resetConversationStateOnPeerChange()
 	// After the peer-change reset and before the two stale-singleton drops:
@@ -1224,6 +1226,17 @@ func (w *Window) layout(gtx layout.Context) layout.Dimensions {
 	w.dropStateOfRemovedMessages()
 	w.dropStaleReply()
 	w.dropStaleMsgMenu()
+	// Last of the per-frame reconciliations and still before anything lays the
+	// list out, which is the half that matters — see chat_jump.go. After the
+	// three above because they are what settles whether the jump's target and
+	// the conversation it belongs to are still here at all.
+	//
+	// The roll happens here and not inside the jump: the flag has to be
+	// turned over on every frame, or a conversation whose pictures finished
+	// long ago would hand the NEXT jump a stale "still arriving".
+	w.chatImagesWerePending, w.chatImagesArriving = w.chatImagesArriving, false
+	w.applyChatJump(gtx)
+	w.tickMessageHighlight(gtx)
 	// Evaluate LAST frame's outside-tap records BEFORE any action handlers:
 	// a touch outside every editor cancels pending keyboard shows and
 	// clears editor focus (→ blur-driven hide), while handlers below that
@@ -1672,7 +1685,8 @@ func (w *Window) resetConversationStateOnPeerChange() {
 	}
 	w.clearReplyQuiet()
 	w.msgContextMsg = nil
-	w.scrollToMsgID = ""
+	w.chatJump = chatJump{}
+	w.msgHighlight = msgHighlight{}
 	// Reset ALL per-message widget caches HERE, at the top of layout,
 	// rather than lazily inside messageSelectable(): the lazy reset ran
 	// mid-frame, AFTER the first bubble had already registered its
@@ -1934,8 +1948,11 @@ func (w *Window) handlePendingActions() {
 			drained = true
 		}
 	}
+	// Through applyScrollToEnd, which knows about jumps: the user asked to be
+	// somewhere, and a message arriving while they are being taken there must
+	// not drag them back to the end of the conversation instead.
 	if pa.ScrollToEnd {
-		w.chatList.Position.BeforeEnd = false
+		w.applyScrollToEnd()
 	}
 	if !pa.RecipientText.IsZero() {
 		w.recipientEditor.SetText(pa.RecipientText.String())
@@ -4807,12 +4824,19 @@ func (w *Window) layoutFileCard(gtx layout.Context, message service.DirectMessag
 					w.openImageViewer(openItem, gtx.Now)
 				}
 
-				// get() returns non-nil only when the image is decoded and
-				// ready (thumbReady). While decoding is in progress or if it
-				// failed, nil is returned and the name row carries the click
-				// instead — one Clickable, two possible hosts, only ever one
-				// of them in the frame.
-				entry := w.thumbCache.get(openItem.source(), w.window)
+				// lookup() rather than get(): Entry is non-nil only when the
+				// image is decoded and ready (thumbReady), and while decoding
+				// is in progress the name row carries the click instead — one
+				// Clickable, two possible hosts, only ever one of them in the
+				// frame. Pending is the other half, and it is not about this
+				// card: a bubble waiting for a picture is a bubble whose
+				// height is not final, which is what a jump in flight has to
+				// know before it decides it has arrived (see chat_jump.go).
+				thumb := w.thumbCache.lookup(openItem.source(), w.window)
+				if thumb.Pending {
+					w.chatImagesArriving = true
+				}
+				entry := thumb.Entry
 				if entry == nil {
 					nameRowButton = thumbBtn
 				} else {
@@ -6534,35 +6558,28 @@ func intToString(v int) string {
 func (w *Window) layoutConversation(gtx layout.Context, recipient domain.PeerIdentity, conversation []service.DirectMessage) layout.Dimensions {
 	w.chatViewportH = gtx.Constraints.Max.Y
 
-	// Track cursor Y relative to the chat viewport (not the window).
-	// This scoped tracker gives correct coordinates for scroll math
-	// in applyDeferredScroll, since the chat area is offset from the
-	// top of the window by headers, paddings, etc.
-	defer clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Push(gtx.Ops).Pop()
-	event.Op(gtx.Ops, &w.chatCursorTag)
-	for {
-		ev, ok := gtx.Event(pointer.Filter{
-			Target: &w.chatCursorTag,
-			Kinds:  pointer.Move | pointer.Press | pointer.Drag,
-		})
-		if !ok {
-			break
-		}
-		if pe, ok := ev.(pointer.Event); ok {
-			w.chatCursorY = int(pe.Position.Y)
-		}
-	}
-
 	// The row count behind menuRectSig is recorded in layoutChatCard, above the
 	// early returns that lay out no list — not here, where those paths never
 	// reach it.
 	list := material.List(w.theme, &w.chatList)
-	return list.Layout(gtx, len(conversation), func(gtx layout.Context, index int) layout.Dimensions {
+	dims := list.Layout(gtx, len(conversation), func(gtx layout.Context, index int) layout.Dimensions {
 		message := conversation[index]
-		return layout.Inset{Bottom: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		child := layout.Inset{Bottom: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return w.layoutChatBubble(gtx, recipient, message)
 		})
+		// The heights a jump needs, taken where the list itself measured them
+		// — insets included, because the inset is part of what the list
+		// scrolls past. Nothing else knows these numbers: a bubble's height is
+		// its text, its quote, its thumbnail and its reaction row, and none of
+		// those are known until they are laid out.
+		w.chatJump.measure(index, child.Size.Y)
+		return child
 	})
+	// After the list, never before it: this is where a jump finds out whether
+	// the target went where it was put, and Position only means that once the
+	// pass that rewrites it has finished.
+	w.noteChatJumpDrawn(len(conversation))
+	return dims
 }
 
 func (w *Window) layoutChatBubble(gtx layout.Context, recipient domain.PeerIdentity, message service.DirectMessage) layout.Dimensions {
@@ -6625,6 +6642,7 @@ func (w *Window) chatBubbleCard(gtx layout.Context, message service.DirectMessag
 		Body:      w.bubbleBody(message, isMine),
 		Reactions: w.bubbleReactions(message),
 		Status:    w.bubbleStatus(message, isMine),
+		Highlight: w.msgHighlight.levelFor(message.ID),
 	})
 	bubbleCall := macro.Stop()
 
@@ -8534,7 +8552,11 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 	// renders text-only.
 	var quotedThumb *thumbnailEntry
 	if cmFound && cm.IsImageFile {
-		quotedThumb = w.replyThumb(replyToStr, cm.Sender, cm.FileHash)
+		var arriving bool
+		quotedThumb, arriving = w.replyThumb(replyToStr, cm.Sender, cm.FileHash)
+		if arriving {
+			w.chatImagesArriving = true
+		}
 	}
 
 	barColor := color.NRGBA{R: 100, G: 140, B: 200, A: 255}
@@ -8560,10 +8582,18 @@ func (w *Window) layoutReplyQuote(gtx layout.Context, replyTo domain.MessageID, 
 		if !ok {
 			continue
 		}
-		if pe.Kind == pointer.Press && pe.Buttons.Contain(pointer.ButtonPrimary) {
-			w.scrollToMsgID = replyToStr
-			w.scrollClickY = w.chatCursorY
+		if pe.Kind != pointer.Press || !pe.Buttons.Contain(pointer.ButtonPrimary) {
+			continue
 		}
+		// Only when there is something to go to. A quote whose target is gone
+		// already says so in its text, and accepting the click anyway armed a
+		// jump that the next frame silently threw away — the user pressed a
+		// thing that looked like a control and nothing happened, twice, before
+		// concluding it was broken rather than empty.
+		if !cmFound {
+			continue
+		}
+		w.beginChatJump(gtx, replyToStr)
 	}
 
 	// Record content to measure, then create a clip area for pointer events.
@@ -8662,14 +8692,21 @@ func replyBodyForDisplay(body string, isImageFile bool, tr func(string, ...any) 
 // cache beside the "this is an image" verdict it was parsed with: the
 // preview of a quote must be the picture that message brought, not
 // whatever now answers to the same file name.
-func (w *Window) replyThumb(msgID string, sender domain.PeerIdentity, contentID string) *thumbnailEntry {
+// The second return says the decode is still in flight, which is a different
+// question from "there is nothing to draw" and belongs to a different caller:
+// the quote inside a bubble reports it, because a bubble waiting for a picture
+// has a height that is not final yet and a jump in flight has to know that
+// (see chat_jump.go). The composer's banner does not — it is not in the list,
+// and its growth moves nothing the jump is aiming at.
+func (w *Window) replyThumb(msgID string, sender domain.PeerIdentity, contentID string) (*thumbnailEntry, bool) {
 	isSender := sender == w.snap.MyAddress
 	path := w.router.FileBridge().FilePath(domain.FileID(msgID), isSender)
 	w.rememberImagePath(msgID, path)
 	if path == "" {
-		return nil
+		return nil, false
 	}
-	return w.thumbCache.get(imageSource{Path: path, ContentID: contentID}, w.window)
+	found := w.thumbCache.lookup(imageSource{Path: path, ContentID: contentID}, w.window)
+	return found.Entry, found.Pending
 }
 
 // rememberImagePath records where a message's picture was read from, so the
@@ -8705,55 +8742,6 @@ func layoutReplyThumb(gtx layout.Context, entry *thumbnailEntry, edge unit.Dp) l
 	}
 	gtx.Constraints = layout.Exact(sz)
 	return imgWidget.Layout(gtx)
-}
-
-// applyDeferredScroll scrolls the chat list so that the target message
-// appears at the same vertical level where the user clicked the quote.
-//
-// Uses scrollClickY (cursor Y at click time) and chatViewportH (chat
-// area height from the previous layout pass) to compute the fraction
-// of the viewport, then offsets Position.First so the target message
-// lands at that fraction of the visible item range.
-func (w *Window) applyDeferredScroll() {
-	if w.scrollToMsgID == "" {
-		return
-	}
-	target := w.scrollToMsgID
-	w.scrollToMsgID = ""
-	cm, ok := w.findCachedMsg(target)
-	if !ok {
-		return
-	}
-
-	visibleCount := w.chatList.Position.Count
-	if visibleCount <= 0 {
-		visibleCount = 1
-	}
-
-	// Estimate how many items above the target we need to show so
-	// that the target ends up at the cursor's vertical position.
-	// fraction=0 → top of viewport, fraction=1 → bottom.
-	// Subtract 1 to compensate for item spacing and partial-item
-	// rendering that shifts the target below the cursor.
-	itemsAbove := visibleCount / 2 // default: center
-	if w.chatViewportH > 0 {
-		fraction := float64(w.scrollClickY) / float64(w.chatViewportH)
-		if fraction < 0 {
-			fraction = 0
-		}
-		if fraction > 1 {
-			fraction = 1
-		}
-		itemsAbove = int(fraction*float64(visibleCount) + 0.5)
-	}
-
-	first := cm.Index - itemsAbove
-	if first < 0 {
-		first = 0
-	}
-	w.chatList.Position.First = first
-	w.chatList.Position.Offset = 0
-	w.chatList.Position.BeforeEnd = true
 }
 
 // rebuildMsgCache populates msgCacheByID from the current snapshot.
@@ -8969,7 +8957,9 @@ func (w *Window) layoutReplyPreview(gtx layout.Context) layout.Dimensions {
 
 	var replyThumbEntry *thumbnailEntry
 	if replyIsImage {
-		replyThumbEntry = w.replyThumb(w.replyToMsg.ID, w.replyToMsg.Sender, cm.FileHash)
+		// The banner is not in the list, so its growth moves nothing a jump
+		// is aiming at — the pending half is deliberately dropped here.
+		replyThumbEntry, _ = w.replyThumb(w.replyToMsg.ID, w.replyToMsg.Sender, cm.FileHash)
 	}
 
 	quotedBody := ellipsize(replyBodyForDisplay(w.replyToMsg.Body, replyIsImage, w.t), 80)

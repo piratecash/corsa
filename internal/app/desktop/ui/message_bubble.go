@@ -1,9 +1,13 @@
 package ui
 
 import (
+	"image"
 	"image/color"
 
 	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 )
@@ -54,6 +58,39 @@ func MessageBubbleBorder(mine bool) color.NRGBA {
 	return color.NRGBA{R: 0x37, G: 0x44, B: 0x56, A: 255}
 }
 
+// MessageBubbleHighlight is the fill behind a bubble the reader was SENT to —
+// the message a reply quote points at — and the second return says whether
+// there is anything to paint at all.
+//
+// It is the bubble's own border colour at a fraction of its opacity, so no new
+// colour enters the palette: the message reads as itself, lit. This is not the
+// general fill proposed in docs/design/CHANGES-reactions.md §4 and does not
+// decide it — that one distinguishes mine from theirs on every bubble and is
+// still the product owner's call; this one marks exactly one message and fades.
+//
+// The two peaks differ because the two borders are not equally bright: the blue
+// of a sent message carries at a lower alpha than the grey of a received one,
+// and matching the numbers rather than the appearance left one side looking
+// washed out beside the other.
+func MessageBubbleHighlight(mine bool, strength float32) (color.NRGBA, bool) {
+	if strength <= 0 {
+		return color.NRGBA{}, false
+	}
+	if strength > 1 {
+		strength = 1
+	}
+	peak := float32(0x62)
+	if mine {
+		peak = float32(0x4e)
+	}
+	fill := MessageBubbleBorder(mine)
+	fill.A = uint8(peak*strength + 0.5)
+	if fill.A == 0 {
+		return color.NRGBA{}, false
+	}
+	return fill, true
+}
+
 // MessageAuthorColor is the author name in the bubble's header. The timestamp
 // and the "⋯" button beside it are the same on both sides; only the name
 // changes.
@@ -91,6 +128,11 @@ type MessageBubble struct {
 	// Status is the delivery line. nil on incoming messages and on outgoing
 	// ones whose status is not known yet.
 	Status layout.Widget
+	// Highlight fills the bubble, 0 for none and 1 for the full strength of
+	// MessageBubbleHighlight. It is a level rather than a flag because the
+	// only thing that sets it is a fade, and a caller holding a flag would
+	// have to own the fade's colours to animate it.
+	Highlight float32
 }
 
 // MessageBubble draws one, no wider than MessageBubbleMaxWidthDp.
@@ -103,9 +145,26 @@ func (k Kit) MessageBubble(gtx layout.Context, bubble MessageBubble) layout.Dime
 		Width:        unit.Dp(1),
 	}
 	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.UniformInset(messageBubbleInsetDp).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		// The content is recorded before it is added so the fill can go
+		// UNDER it: a bubble is sized by what it holds, and the fill needs
+		// that size. A Stack.Expanded would take the size from the
+		// constraints instead, which is the whole column, not the bubble.
+		content := op.Record(gtx.Ops)
+		dims := layout.UniformInset(messageBubbleInsetDp).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, messageBubbleSlots(bubble)...)
 		})
+		call := content.Stop()
+
+		// Filling the whole rectangle, border included: widget.Border paints
+		// its stroke AFTER this closure returns, so the line is drawn over
+		// the fill's edge rather than beside it.
+		if fill, ok := MessageBubbleHighlight(bubble.Mine, bubble.Highlight); ok {
+			area := clip.UniformRRect(image.Rectangle{Max: dims.Size}, gtx.Dp(messageBubbleRadiusDp)).Push(gtx.Ops)
+			paint.Fill(gtx.Ops, fill)
+			area.Pop()
+		}
+		call.Add(gtx.Ops)
+		return dims
 	})
 }
 

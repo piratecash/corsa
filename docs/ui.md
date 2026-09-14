@@ -408,7 +408,112 @@ reactions pays nothing for the slot. What goes IN the slots stays with the
 screen: the quote resolves a message by ID, the body may be a file card, the
 status line reads delivery receipts. Only the border colour and the author
 colour follow the sender; which side of the chat the bubble sits on is the
-list's business, not the bubble's.
+list's business, not the bubble's. The one thing that is not a slot is
+`Highlight`, a level from 0 to 1 that fills the bubble with its own border
+colour at a fraction of that colour's opacity — no new colour, the message lit
+rather than repainted. It is a level and not a flag because the only thing that
+ever sets it is a fade, and a caller holding a flag would have to own the
+fade's colours to animate it. This is not the general fill proposed in
+`docs/design/CHANGES-reactions.md` §4 and does not decide it.
+
+**Jumping to a quoted message** (`chat_jump.go`) is what a click on a reply
+quote does: the conversation moves so the quoted message is centred, and that
+message lights up for about a second and a half so the eye can find it among
+its neighbours.
+
+The position is computed in PIXELS, and the reason is worth stating because the
+version it replaces got this wrong. `layout.List` offers two ways to say where
+a list sits: `Position.First` is an index, `Position.Offset` is pixels. The old
+code mixed them — it took the click's height within the viewport as a fraction
+of pixels, multiplied by `Position.Count`, a count of children, and used the
+product as "how many messages to show above the target". That is only a
+position if every message is the same height. One long message in the way and
+the jump missed by as much as that message was tall, over or under depending on
+which side of the target it sat; `Position.Count` made it worse by coming from
+the previous frame, describing the neighbourhood being left rather than the one
+being entered. A negative `Offset` needs none of that: it says "leave this many
+pixels above the target", and the list fills them by walking backwards through
+the preceding messages itself, measuring each as it goes. Whether that takes
+one message or nine is the list's business, and it is the only party that can
+answer it.
+
+A jump is exactly two frames long. Centring needs the target's own height, and
+nothing knows a message's height until it has been laid out, so the first frame
+puts the target's top edge at the middle of the viewport — already within half
+a bubble for a short message — and records what the list measured for it; the
+second moves it up by half that height. The second frame ends the jump whether
+or not a height arrived, because a jump that waits for a measurement reads as
+harmless until the list does not lay out at all, and then the window redraws at
+full rate for as long as that lasts. The list's own clamps finish the job at
+the two ends: a message among the first or the last cannot be centred, and
+"centre it" degrades to "as close as the conversation allows" without the
+application testing for it. A message taller than the viewport is shown from
+its beginning instead.
+
+Two things hold that together and both were needed twice before they were
+right. A jump owns the list position for one frame LONGER than it takes to
+place it, because the pending-actions drain runs between the jump and the
+layout: a message arriving on the frame that writes the final position would
+otherwise ask for the end of the conversation and get it, and the reader would
+be taken somewhere and then dumped at the bottom with no idea what happened.
+And arming a jump asks for a frame (`op.InvalidateCmd`), because everything it
+does happens at the top of a later one and nothing schedules that by itself — a
+press is normally followed by a release and a release draws a frame, which is
+why the omission was invisible until the two arrived together.
+
+The third thing the jump has to survive is the pictures. A thumbnail decodes on
+a background goroutine and appears in a LATER frame, and the bubble it lands in
+grows by up to 200dp when it does; one that grows ABOVE the target pushes the
+target down by its whole height, because by then the list is anchored on a
+message above the target rather than on the target itself — measured at 582px
+in a 400px viewport, which is to say off the screen the jump had just put it
+on. So the jump keeps re-anchoring on the target until a whole frame goes by
+with nothing waiting for a picture, which is what `chatImagesArriving` reports
+from the two places that draw one (the file card and the quote, both through
+`thumbnailCache.lookup` rather than `get`, because `get` collapses "still
+decoding" into the same nil as "no picture"). Writing `Position.First` back to
+the target every frame makes everything above it irrelevant by construction
+rather than by correction.
+
+Reserving the space instead would be better and cannot be done today: a
+picture's proportions are known only once it is decoded, and `file_announce`
+does not carry them (`domain.FileAnnouncePayload`), so a placeholder would be a
+guess — trading a large displacement for a smaller one under every undecoded
+picture in the app, for ever. The hold has a cap (`jumpHoldCap`, 600ms) because
+a decode that never finishes must not own the list.
+
+Writing the position at the top of every frame is also what makes the hold
+something the reader has to be able to take away, and the first version did not:
+a wheel scroll was applied and then undone on the next frame, over and over, for
+as long as a picture kept decoding. So every held frame is closed by working out where
+the target HAD to land if nobody but the jump moved the list, and a difference
+from that ends the hold (`noteChatJumpDrawn`).
+
+Predicting rather than remembering is the part that took three attempts.
+Comparing the position with the offset asked for is wrong at either end of a
+conversation, where the list clamps and the target legitimately lands somewhere
+else. Comparing this frame's answer with the previous frame's answer to the SAME
+request is wrong for exactly the case the hold exists for: near the start of a
+conversation the target cannot be centred while there is too little above it,
+and a picture landing above MAKES room — the same request then correctly
+produces a different answer, and reading that as a scroll ended the hold on the
+one frame it was needed. So the clamps are predicted instead: which of them
+binds is read off the list (`Position.First` back at zero means the start held
+it back, `!BeforeEnd` means the end did), and the heights each case needs are
+exactly the ones the list measured — when the start binds, every child from the
+first to the target was laid out; when the end binds, every child from the
+target to the last was.
+
+A position that cannot be worked out at all is the reader too, and that is not
+a fallback but the case the scrollbar makes. `material.List` moves the list for
+the scrollbar AFTER measuring the messages and by a number of ITEMS
+(`widget/material/list.go`, `ScrollBy`), so a long drag lands where no child of
+that frame was measured — the report that found it had `Position.First` go
+47 → 83 and then be dragged back to 47. Reading that as "cannot tell" left the
+drag unnoticed; it is the one thing the jump provably did not do, because it
+writes `First` back to the target on every frame and the target is therefore
+always among the children laid out. What the reader keeps when the hold lets go
+is the highlight: the message stays marked, it just stops being chased.
 
 **Emoji panel** (`emoji_picker.go`) is one component drawn in two places: under
 the composer, where a choice is inserted into the draft, and over a message,
@@ -1763,7 +1868,106 @@ hover: компонент, скопированный на глаз, — это 
 платит. Что именно лежит В слотах — дело экрана: цитата разрешает сообщение по
 ID, телом может быть карточка файла, строка статуса читает квитанции. От
 отправителя зависят только цвет рамки и цвет автора; на какой стороне чата
-стоит пузырь — дело списка, а не пузыря.
+стоит пузырь — дело списка, а не пузыря. Единственное, что не является слотом,
+— `Highlight`, уровень от 0 до 1: он заливает пузырь его же цветом рамки на
+часть её непрозрачности — нового цвета не вводится, сообщение подсвечивается, а
+не перекрашивается. Именно уровень, а не флаг, потому что единственное, что его
+ставит, — затухание, и вызывающему с флагом пришлось бы владеть цветами
+затухания, чтобы его анимировать. Это не общая заливка из §4
+`docs/design/CHANGES-reactions.md` и её не решает.
+
+**Прыжок к цитируемому сообщению** (`chat_jump.go`) — то, что делает клик по
+цитате: диалог сдвигается так, чтобы цитируемое сообщение оказалось по центру,
+и это сообщение подсвечивается примерно на полторы секунды, чтобы глаз нашёл
+его среди соседей.
+
+Позиция считается в ПИКСЕЛЯХ, и это стоит записать, потому что предыдущая
+версия считала иначе. `layout.List` даёт два способа сказать, где стоит список:
+`Position.First` — индекс, `Position.Offset` — пиксели. Старый код их смешивал:
+брал высоту клика внутри вьюпорта как долю ПИКСЕЛЕЙ, умножал на
+`Position.Count` — число ДЕТЕЙ — и использовал произведение как «сколько
+сообщений показать выше цели». Это позиция только если все сообщения одинаковой
+высоты. Одно длинное сообщение на пути — и прыжок промахивался на его высоту,
+выше или ниже в зависимости от того, с какой стороны от цели оно стояло; а
+`Position.Count` брался с предыдущего кадра, то есть описывал то место, откуда
+уходим, а не то, куда приходим. Отрицательному `Offset` ничего этого не нужно:
+он говорит «оставь столько-то пикселей над целью», а список сам идёт назад по
+предыдущим сообщениям, измеряя каждое. Сколько их туда влезет — одно или
+девять — дело списка, и ответить на это может только он.
+
+Прыжок длится ровно два кадра. Центрирование требует высоты самой цели, а
+высоту сообщения никто не знает, пока оно не разложено, — поэтому первый кадр
+ставит верхнюю кромку цели на середину вьюпорта (для короткого сообщения это
+уже в пределах половины пузыря) и запоминает, что список для неё намерил, а
+второй поднимает её на половину этой высоты. Второй кадр завершает прыжок
+независимо от того, пришла ли высота: прыжок, ждущий измерения, выглядит
+безобидно ровно до случая, когда список не раскладывается вовсе, и тогда окно
+перерисовывается на полной частоте всё это время. Края доделывают собственные
+зажимы списка: сообщение среди первых или последних центрировать не на чем, и
+«центрируй» вырождается в «настолько близко, насколько позволяет диалог», без
+проверок на стороне приложения. Сообщение выше вьюпорта показывается с начала.
+
+Держат это две вещи, и обе пришлось делать дважды, прежде чем они стали верны.
+Прыжок владеет позицией списка на кадр ДОЛЬШЕ, чем занимает её установка,
+потому что разбор отложенных действий идёт между прыжком и раскладкой:
+сообщение, пришедшее на кадре, который пишет финальную позицию, иначе попросит
+конец диалога и получит его, а читателя перенесут куда-то и тут же бросят внизу
+без объяснений. И постановка прыжка запрашивает кадр (`op.InvalidateCmd`),
+потому что всё, что он делает, происходит наверху ПОЗДНЕЙШЕГО кадра, а сам себя
+никто не планирует: за нажатием обычно идёт отпускание, а отпускание рисует
+кадр, — поэтому пропуск был не виден, пока эти два события не приходят вместе.
+
+Третье, что прыжок обязан пережить, — картинки. Миниатюра декодируется в
+фоновой горутине и появляется в ПОЗДНЕЙШЕМ кадре, и пузырь, в который она
+приезжает, вырастает при этом до 200dp; тот, что вырос ВЫШЕ цели, сдвигает цель
+вниз на всю свою высоту, потому что к этому моменту список закреплён на
+сообщении выше цели, а не на самой цели, — замерено 582 px при вьюпорте 400, то
+есть за пределами экрана, на который цель только что поставили. Поэтому прыжок
+перезакрепляется на цели, пока не пройдёт целый кадр, в котором никто не ждёт
+картинку; об этом сообщает `chatImagesArriving` из двух мест, которые их рисуют
+(карточка файла и цитата, обе через `thumbnailCache.lookup`, а не `get`:
+`get` схлопывает «ещё декодируется» в тот же nil, что и «картинки нет»). Запись
+`Position.First` обратно на цель каждый кадр делает всё, что выше, неважным по
+построению, а не по коррекции.
+
+Зарезервировать место было бы лучше, и сегодня это невозможно: пропорции
+картинки известны только после декода, а `file_announce` их не несёт
+(`domain.FileAnnouncePayload`), поэтому заглушка была бы догадкой — крупное
+смещение поменялось бы на мелкое под каждой недекодированной картинкой в
+приложении и навсегда. У удержания есть потолок (`jumpHoldCap`, 600 мс):
+декод, который не завершается, не должен владеть списком.
+
+Запись позиции наверху каждого кадра — это ещё и то, что читатель обязан уметь
+отобрать, а первая версия этого не позволяла: прокрутка колесом применялась и
+отменялась на следующем кадре, снова и снова, пока декодировалась картинка.
+Поэтому каждый удерживаемый кадр закрывается вычислением того, где цель ОБЯЗАНА
+была оказаться, если списка не трогал никто, кроме прыжка; расхождение с этим
+завершает удержание (`noteChatJumpDrawn`).
+
+Предсказывать, а не запоминать — это то, что заняло три попытки. Сравнивать
+позицию с запрошенным смещением неверно у краёв диалога, где список зажимает и
+цель законно оказывается не там. Сравнивать ответ этого кадра с ответом
+прошлого на ТОТ ЖЕ запрос неверно ровно для случая, ради которого удержание и
+существует: у начала диалога цель нельзя отцентрировать, пока сверху слишком
+мало, а приехавшая выше картинка ДОБАВЛЯЕТ места — тот же запрос тогда законно
+даёт другой ответ, и прочтение этого как прокрутки завершало удержание на
+единственном кадре, где оно было нужно. Поэтому зажимы предсказываются: какой
+из них действует, читается у списка (`Position.First`, вернувшийся в ноль, —
+придержало начало; `!BeforeEnd` — конец), а высоты, нужные каждому случаю, —
+ровно те, что список намерил: когда действует начало, разложены все дети от
+первого до цели, когда конец — все от цели до последнего.
+
+Позиция, которую вычислить нельзя вовсе, — тоже читатель, и это не запасной
+вариант, а тот случай, который создаёт полоса прокрутки. `material.List`
+двигает список за полосой ПОСЛЕ измерения сообщений и на число ЭЛЕМЕНТОВ
+(`widget/material/list.go`, `ScrollBy`), поэтому длинное перемещение попадает
+туда, где ни один ребёнок этого кадра не измерен: в отчёте, который это нашёл,
+`Position.First` ушёл 47 → 83 и был возвращён на 47. Прочтение «не могу
+определить» оставляло перемещение незамеченным; между тем это единственное, чего
+прыжок заведомо не делал, — он пишет `First` обратно на цель каждый кадр, и цель
+поэтому всегда среди разложенных детей. Что читатель сохраняет, когда удержание
+отпускает, — подсветку: сообщение остаётся отмеченным, его просто перестают
+догонять.
 
 **Панель эмодзи** (`emoji_picker.go`) — один компонент в двух местах: под
 композером, где выбор вставляется в черновик, и над сообщением, где он

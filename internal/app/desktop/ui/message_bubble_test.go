@@ -124,3 +124,56 @@ func TestMessageBubbleGapsFollowTheDesign(t *testing.T) {
 		}
 	}
 }
+
+// A highlight is a light, not a layout: it says which message the reader was
+// sent to, and a bubble that changed size to say it would move every message
+// under it on the frame the fade began and again on the frame it ended.
+func TestAHighlightDoesNotResizeTheBubble(t *testing.T) {
+	kit := testKit(t)
+	recorder := newSlotRecorder()
+	plain := kit.MessageBubble(testGtx(600, 400, 1), MessageBubble{
+		Mine:   true,
+		Header: recorder.slot("header", 16),
+		Body:   recorder.slot("body", 30),
+	})
+	lit := kit.MessageBubble(testGtx(600, 400, 1), MessageBubble{
+		Mine:      true,
+		Header:    recorder.slot("header", 16),
+		Body:      recorder.slot("body", 30),
+		Highlight: 1,
+	})
+	if plain.Size != lit.Size {
+		t.Fatalf("lit bubble is %v, unlit is %v", lit.Size, plain.Size)
+	}
+}
+
+func TestAHighlightIsTheBubblesOwnColourAtPartialOpacity(t *testing.T) {
+	for _, mine := range []bool{true, false} {
+		if _, ok := MessageBubbleHighlight(mine, 0); ok {
+			t.Fatalf("mine=%v: an unlit bubble still has something to paint", mine)
+		}
+		full, ok := MessageBubbleHighlight(mine, 1)
+		if !ok {
+			t.Fatalf("mine=%v: a fully lit bubble has nothing to paint", mine)
+		}
+		border := MessageBubbleBorder(mine)
+		if full.R != border.R || full.G != border.G || full.B != border.B {
+			t.Fatalf("mine=%v: highlight %v is not the border's colour %v — the palette "+
+				"is closed, and a light is the message's own hue", mine, full, border)
+		}
+		if full.A >= border.A {
+			t.Fatalf("mine=%v: highlight alpha %d is not below the border's %d, so the "+
+				"fill would swallow the text it sits behind", mine, full.A, border.A)
+		}
+		half, ok := MessageBubbleHighlight(mine, 0.5)
+		if !ok || half.A == 0 || half.A >= full.A {
+			t.Fatalf("mine=%v: half strength gives alpha %d against a peak of %d",
+				mine, half.A, full.A)
+		}
+		// A level arriving above 1 is a clock that jumped, not a brighter
+		// light: it must not wrap the alpha byte round to nothing.
+		if over, ok := MessageBubbleHighlight(mine, 4); !ok || over != full {
+			t.Fatalf("mine=%v: strength 4 gives %v, want the peak %v", mine, over, full)
+		}
+	}
+}
