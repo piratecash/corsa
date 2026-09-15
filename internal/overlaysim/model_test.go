@@ -412,6 +412,60 @@ func (p policy) String() string {
 	}
 }
 
+// selectionPhase says which of the three selection rules produced a moment:
+// the quota preference inside a bucket, the ordinary bucket contact, or the
+// leftover fill.
+type selectionPhase int
+
+const (
+	phaseQuota selectionPhase = iota
+	phasePlain
+	phaseLeftover
+)
+
+func (p selectionPhase) String() string {
+	switch p {
+	case phaseQuota:
+		return "quota"
+	case phasePlain:
+		return "plain"
+	default:
+		return "leftover"
+	}
+}
+
+// selectionMoment is one decision, reported to an observer AT THE INSTANT it is
+// made. Availability is the thing that cannot be reconstructed afterwards: who
+// had room changes as the graph is built, so a post-hoc answer to "was there a
+// candidate" describes the end state and not the moment of the choice.
+type selectionMoment struct {
+	Node   int32
+	Level  int
+	Phase  selectionPhase
+	Chosen int32 // -1 when the rule found nobody
+
+	// Available answers, with the builder's own live filter plus `extra`,
+	// which candidate this rule WOULD have taken. It is a question about this
+	// instant, asked from the same trie the builder is using.
+	Available func(extra func(int32) bool) int32
+}
+
+// bucketChooser answers "which member of this bucket does the node take",
+// given the filter the builder has already applied. nil means the model's own
+// rule: the XOR-nearest one.
+//
+// ⚠️ This exists for ONE diagnostic question — whether the preservation of bit d
+// comes from the nearest-rule or from the bucket structure itself
+// (21-m1-split-diagnosis.md §7). It is a PROBE, not a policy: a node that picks
+// bucket members at random has no routing property left, and nothing may be
+// adopted on the strength of a run that uses it.
+type bucketChooser func(node int32, level int, accept func(int32) bool) int32
+
+// selectionObserver watches the construction without touching it. A test that
+// attaches one must produce a byte-identical graph — there is a guard for that,
+// because a diagnostic that changes what it measures measures nothing.
+type selectionObserver func(selectionMoment)
+
 // buildGraph is §2.2 of the model.
 //
 // Nodes are processed in index order, each filling first its Q quota and then
@@ -422,6 +476,24 @@ func (p policy) String() string {
 // ⚠️ No edge is ever added to make the graph connected. The quota moves slots a
 // node was going to spend anyway; it does not add slots.
 func buildGraph(sh shape, seed uint64, quota int, selection policy) *graph {
+	return buildGraphObserved(sh, seed, quota, selection, nil)
+}
+
+// buildGraphObserved is buildGraph with an optional observer. The two share
+// this one body on purpose: a diagnostic built on a copy of the algorithm
+// diagnoses the copy.
+func buildGraphObserved(
+	sh shape, seed uint64, quota int, selection policy, observe selectionObserver,
+) *graph {
+	return buildGraphProbed(sh, seed, quota, selection, observe, nil)
+}
+
+// buildGraphProbed is buildGraphObserved with the in-bucket choice replaceable.
+// Everything else — levels, budget, quota, order, filters — is the same code.
+func buildGraphProbed(
+	sh shape, seed uint64, quota int, selection policy,
+	observe selectionObserver, chooseInBucket bucketChooser,
+) *graph {
 	ids := make([]nodeID, sh.nodes)
 	roles := make([]int, sh.nodes)
 	for i := range ids {
@@ -512,13 +584,40 @@ func buildGraph(sh shape, seed uint64, quota int, selection policy) *graph {
 			// when the bucket has no structural member the ordinary contact is
 			// taken and the quota simply goes unmet — which is the outcome the
 			// report has a column for.
+			pick := func(accept func(int32) bool) int32 {
+				if chooseInBucket != nil {
+					return chooseInBucket(u, level, accept)
+				}
+				if found := trie.nearestInBucket(ids[u], level, 1, accept); len(found) == 1 {
+					return found[0]
+				}
+				return -1
+			}
+
+			// ⚠️ Availability is asked through the SAME chooser: with a probe
+			// installed, "who would this rule have taken" is a question about
+			// the probe, not about the model's nearest-rule.
+			available := func(extra func(int32) bool) int32 {
+				return pick(func(candidate int32) bool {
+					return free(candidate) && extra(candidate)
+				})
+			}
+
 			if g.structuralNeighbours[u] < quota {
-				structural := trie.nearestInBucket(ids[u], level, 1, func(candidate int32) bool {
+				structural := pick(func(candidate int32) bool {
 					return roles[candidate] == roleStructural && free(candidate)
 				})
-				if len(structural) == 1 {
-					connect(u, structural[0])
+				if structural != -1 {
+					if observe != nil {
+						observe(selectionMoment{Node: u, Level: level, Phase: phaseQuota,
+							Chosen: structural, Available: available})
+					}
+					connect(u, structural)
 					continue
+				}
+				if observe != nil {
+					observe(selectionMoment{Node: u, Level: level, Phase: phaseQuota,
+						Chosen: -1, Available: available})
 				}
 
 				// The quota was wanted here and not filled. WHY is a separate
@@ -541,8 +640,13 @@ func buildGraph(sh shape, seed uint64, quota int, selection policy) *graph {
 				}
 			}
 
-			if found := trie.nearestInBucket(ids[u], level, 1, free); len(found) == 1 {
-				connect(u, found[0])
+			chosen := pick(free)
+			if observe != nil {
+				observe(selectionMoment{Node: u, Level: level, Phase: phasePlain,
+					Chosen: chosen, Available: available})
+			}
+			if chosen != -1 {
+				connect(u, chosen)
 			}
 		}
 
