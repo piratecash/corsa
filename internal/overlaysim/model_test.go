@@ -10,6 +10,7 @@ package overlaysim
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"sort"
 )
 
@@ -495,9 +496,27 @@ func buildGraphProbed(
 	observe selectionObserver, chooseInBucket bucketChooser,
 ) *graph {
 	ids := make([]nodeID, sh.nodes)
-	roles := make([]int, sh.nodes)
 	for i := range ids {
 		ids[i] = makeNodeID(seed, i)
+	}
+	return buildGraphOnIDs(ids, sh, quota, selection, observe, chooseInBucket)
+}
+
+// buildGraphOnIDs is the body of the builder, over identifiers somebody else
+// chose. M3-a needs a population with a given share of Q, and it gets it by
+// SELECTING identifiers (m3a_test.go) rather than by relabelling nodes — which
+// is why this seam exists and why roles are computed here, from the identifier,
+// by the one classifier. There is no path through this file that assigns a role
+// any other way.
+func buildGraphOnIDs(
+	ids []nodeID, sh shape, quota int, selection policy,
+	observe selectionObserver, chooseInBucket bucketChooser,
+) *graph {
+	if len(ids) != sh.nodes {
+		panic(fmt.Sprintf("shape %s wants %d nodes, got %d identifiers", sh.name, sh.nodes, len(ids)))
+	}
+	roles := make([]int, sh.nodes)
+	for i := range ids {
 		roles[i] = roleOf(ids[i])
 	}
 
