@@ -16,8 +16,10 @@ package overlaysim
 // already full, is it already known. Nothing else.
 //
 // ⚠️ NO NODE SEES THE SIMULATION'S IDENTIFIERS. A source that may offer anybody
-// exists (omniscientCandidates) and is labelled a CONTROL: it bounds what any
-// mechanism could achieve and is never reported as one.
+// exists (omniscientCandidates) and is labelled a CONTROL: it says what perfect
+// knowledge buys with everything else held fixed, and is never reported as a
+// mechanism — nor as a mathematical upper bound, which would be a claim about
+// every possible mechanism and needs a proof this stand does not have.
 //
 // ⚠️ Instrument only. O-M6-1…O-M6-7 of the contract are open; no threshold is
 // proposed and a working instrument is not a passed M6.
@@ -155,6 +157,13 @@ const (
 	m6SlotFilled m6Outcome = iota
 	m6CandidateUnreachable
 	m6CandidateAtBudget
+	// m6OwnerAtBudget — the OWNER has no room. It only arises where a probe
+	// would re-establish a connection the owner had released after detecting the
+	// peer gone: an ordinary fill stores a record and costs no slot (П-2), while
+	// bringing a released edge back does. ⚠️ Kept apart from m6CandidateAtBudget
+	// because WHICH END was full points at a different fix, and a merged counter
+	// would blame the network for the node's own ceiling.
+	m6OwnerAtBudget
 	m6BucketFull
 	m6AlreadyKnown
 	// m6NoCandidate — the source offered nobody. Not a probe.
@@ -171,6 +180,8 @@ func (o m6Outcome) String() string {
 		return "candidate unreachable"
 	case m6CandidateAtBudget:
 		return "candidate at B"
+	case m6OwnerAtBudget:
+		return "owner at B (re-connect refused)"
 	case m6BucketFull:
 		return "bucket full"
 	case m6AlreadyKnown:
@@ -370,10 +381,16 @@ func (s *scriptedCandidates) Describe() string {
 
 // omniscientCandidates may offer ANY node of the simulation.
 //
-// ⚠️ CONTROL ONLY. No mechanism of 19 §3 can do this: it is the upper bound of
-// what perfect knowledge would achieve. Its Describe says so, and a test checks
-// that the word survives into the report — a control silently reported as a
-// mechanism is the worst possible outcome of this file.
+// ⚠️ CONTROL ONLY. No mechanism of 19 §3 can do this — the node is handed
+// knowledge it has no way to acquire — so the number it produces is a CONTROL
+// RESULT UNDER THE STATED CONSTRAINTS and nothing more.
+//
+// ⚠️ It is NOT called a mathematical upper bound, and the difference is not
+// pedantry. An upper bound is a claim that no mechanism can do better, and that
+// claim would need a proof this stand does not have: the control is bounded by
+// the same k, the same B, the same probe ceiling and the same graph, and a
+// mechanism that changed any of those could land outside it. What the control
+// does say is what perfect knowledge buys WITH EVERYTHING ELSE HELD FIXED.
 type omniscientCandidates struct {
 	Nodes int
 	next  map[int32]int
@@ -396,7 +413,10 @@ func (o *omniscientCandidates) Next(owner int32) (int32, bool) {
 
 func (o *omniscientCandidates) Describe() string {
 	return fmt.Sprintf("CONTROL — omniscient source over all %d simulated nodes; no discovery "+
-		"mechanism of 19 §3 can do this, so this is an upper bound and not a variant", o.Nodes)
+		"mechanism of 19 §3 can do this, so this is a CONTROL RESULT UNDER THE STATED "+
+		"CONSTRAINTS (same k, same B, same probe ceiling, same graph) and NOT a variant. ⚠️ It is "+
+		"not claimed to be a mathematical upper bound: that would need a proof this stand does "+
+		"not have", o.Nodes)
 }
 
 // --- the scenario --------------------------------------------------------------
@@ -690,8 +710,51 @@ func runBucketScenario(
 	return report, nil
 }
 
-// probeOnce is one attempt to fill a slot, and the whole of the "mechanism" in
-// this file: arithmetic over the candidate the source handed out.
+// classifyProbe is the WHOLE arithmetic of one probe, and the only copy of it.
+//
+// ⚠️ It is shared by the scripted single-owner scenario below and by the
+// tick-driven network of m6_model_test.go on purpose. Two engines with two
+// copies of "what does this probe mean" is how the two would come to disagree
+// about a filled slot, and every number of all three axes is denominated in
+// probes.
+//
+// The world arrives as identifiers plus three functions rather than as a graph:
+// the identifier space is WIDER than the built graph in the network model, which
+// draws its newcomers beyond the population. The scripted
+// scenario reads liveness from its event list and budget from the adjacency,
+// while the network holds both itself and releases budget on DETECTION (П-4).
+// Neither may impose its own answer on the other.
+//
+// It returns the outcome and the level that was filled (-1 when none was).
+func classifyProbe(
+	ids []nodeID, table *m6Table, candidate int32,
+	online func(int32) bool, heldBudget func(int32) int, budget int,
+) (m6Outcome, int) {
+	if !online(candidate) {
+		return m6CandidateUnreachable, -1
+	}
+	if heldBudget(candidate) >= budget {
+		return m6CandidateAtBudget, -1
+	}
+	if table.holds(candidate) {
+		return m6AlreadyKnown, -1
+	}
+
+	level := levelOf(ids[table.Owner], ids[candidate], table.Coverage.Levels)
+	if level < 0 {
+		// Shares the whole prefix the table can address: nowhere to put it.
+		return m6BucketFull, -1
+	}
+	if table.Coverage.Held[level] >= table.Coverage.Capacity {
+		return m6BucketFull, -1
+	}
+
+	table.members[level][candidate] = struct{}{}
+	table.Coverage.Held[level]++
+	return m6SlotFilled, level
+}
+
+// probeOnce is one attempt to fill a slot in the SCRIPTED scenario.
 //
 // It returns the outcome, the candidate that was probed (-1 when none was) and
 // the level that was filled (-1 when none was) — the caller needs all three to
@@ -717,28 +780,11 @@ func probeOnce(
 	// From here a connection is attempted, so every path below is a probe.
 	*probesSpent++
 
-	if !online[candidate] {
-		return m6CandidateUnreachable, candidate, -1
-	}
-	if len(g.adjacency[candidate]) >= setup.Shape.budget {
-		return m6CandidateAtBudget, candidate, -1
-	}
-	if table.holds(candidate) {
-		return m6AlreadyKnown, candidate, -1
-	}
-
-	level := levelOf(g.ids[table.Owner], g.ids[candidate], table.Coverage.Levels)
-	if level < 0 {
-		// Shares the whole prefix the table can address: nowhere to put it.
-		return m6BucketFull, candidate, -1
-	}
-	if table.Coverage.Held[level] >= table.Coverage.Capacity {
-		return m6BucketFull, candidate, -1
-	}
-
-	table.members[level][candidate] = struct{}{}
-	table.Coverage.Held[level]++
-	return m6SlotFilled, candidate, level
+	outcome, level := classifyProbe(g.ids, table, candidate,
+		func(node int32) bool { return online[node] },
+		func(node int32) int { return len(g.adjacency[node]) },
+		setup.Shape.budget)
+	return outcome, candidate, level
 }
 
 // copyCoverage freezes a snapshot. Without the copy every "before" and "after"

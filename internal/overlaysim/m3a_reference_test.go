@@ -317,8 +317,21 @@ func TestM3aSweepIsAProposalNotAParameterSet(t *testing.T) {
 		"PROPOSED skew sweep",
 		"AWAITING AGREEMENT",
 		"not an adopted parameter set",
-		"Open decisions",
-		"RESULT of this experiment and not an input to it",
+		// ⚠️ The open list is checked ITEM BY ITEM, not by the phrase "open
+		// decisions". A heading can survive an edit that empties the list under
+		// it, and the whole reason the list exists is that these particular
+		// questions must reach the owner before a run: index §0.2 item 2 is not
+		// agreed.
+		"OPEN, and to be settled BEFORE the runs",
+		"which population is NORMATIVE",
+		"LOWER BOUND",
+		"guardPrimaryCount = 3",
+		"None of the three implemented is measured user load",
+		"RESULT of this experiment, not an input to it",
+		// The candidate the acceptance numbers belong to, and its base, both
+		// named — a sweep that does not say which rule it ran describes no graph.
+		"C1/v1 (CANDIDATE",
+		"initiated-limit (comparison base",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the proposal does not say %q:\n%s", want, rendered)
@@ -561,4 +574,92 @@ func TestM3aClassificationSurvivesTheWholePath(t *testing.T) {
 	if structural != people.Structural {
 		t.Errorf("the built graph holds %d Q nodes, the population %d", structural, people.Structural)
 	}
+}
+
+// TestM3aRunCarriesBothReadingsTheirGapAndTheSetsBehindThem is the M3-a half of
+// the presentation rule.
+//
+// One aggregate is not a result: §4.3.4″.3 leaves the normative population open,
+// so a point of the sweep has to hand over both readings, their difference over
+// the SAME requests, and enough about the sets to say where the difference came
+// from. The composition digest is the last of those — an aggregate cannot carry
+// two hundred listings, but it can prove which two hundred sets it used.
+func TestM3aRunCarriesBothReadingsTheirGapAndTheSetsBehindThem(t *testing.T) {
+	t.Parallel()
+
+	setup := skewSetup{
+		Shape:          shape{name: "600×6", nodes: 600, degree: 6, budget: 12},
+		Seed:           21,
+		ShuffleSeed:    22,
+		RequestedShare: 0.5,
+		Quota:          1,
+		Policy:         policyCandidateC1,
+		Guards:         guardModel{SetSize: 3, ConfirmedPrefix: 1, Requests: 40, TargetSeed: 7},
+		// ⚠️ The load that FORCES the two readings apart. Under uniform targets
+		// they may coincide, and a test that only ever saw them coincide would
+		// pass against a measurer that kept one aggregate.
+		Workload:      skewTargetsTheConfirmedGuard,
+		Requesters:    50,
+		RequesterSeed: 23,
+	}
+
+	run, err := runSkewPoint(setup)
+	if err != nil {
+		t.Fatalf("running the point: %v", err)
+	}
+
+	if run.RefusalsConfirmed.Requests != run.RefusalsSampled.Requests {
+		t.Fatalf("the two readings answered %d and %d requests",
+			run.RefusalsConfirmed.Requests, run.RefusalsSampled.Requests)
+	}
+	if run.RefusalsConfirmed.Requests == 0 {
+		t.Fatal("no request was measured, so nothing here is exercised")
+	}
+	if run.MembersTotal == 0 || run.ConfirmedTotal == 0 {
+		t.Fatalf("%d guard members of which %d confirmed — the composition is not being recorded",
+			run.MembersTotal, run.ConfirmedTotal)
+	}
+	if run.ConfirmedTotal >= run.MembersTotal {
+		t.Fatalf("%d of %d members are confirmed — then the two readings cannot differ and this "+
+			"fixture proves nothing", run.ConfirmedTotal, run.MembersTotal)
+	}
+
+	rendered := run.String()
+	for _, want := range []string{
+		"M4 confirmed only:",
+		"M4 whole set:",
+		"M4 gap:",
+		"pp (confirmed-only minus whole-set, over the same",
+		"DECLARED confirmed",
+		"DECLARED by the guard model, not observed in any network",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("the point does not carry %q:\n%s", want, rendered)
+		}
+	}
+
+	t.Run("the digest identifies the sets, not the run", func(t *testing.T) {
+		again, err := runSkewPoint(setup)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if again.SetsDigest != run.SetsDigest {
+			t.Error("one setup produced two different set digests")
+		}
+
+		// A different requester sample is a different set of sets, and the
+		// digest has to show it — otherwise it would identify the parameters
+		// rather than the composition, which is what a name already does.
+		other := setup
+		other.RequesterSeed = 99
+		different, err := runSkewPoint(other)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if different.SetsDigest == run.SetsDigest {
+			t.Error("two different requester samples produced the same set digest")
+		}
+	})
+
+	t.Logf("%s", run)
 }

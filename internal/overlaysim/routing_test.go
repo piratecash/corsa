@@ -184,9 +184,21 @@ type routingReport struct {
 	Pairs    int
 	Outcomes map[routingOutcome]int
 	Lengths  lengthStats
-	// HopsByPair keeps the successful lengths per pair index, so two graphs can
-	// later be compared on the pairs that succeeded in BOTH.
-	HopsByPair map[int]int
+	// ByPair keeps the FULL result of every pair, in sample order: the outcome
+	// and the transitions performed, refusals included.
+	//
+	// ⚠️ It replaced a map that held the SUCCESSFUL lengths only, and the
+	// difference is not bookkeeping. Two things are impossible without the
+	// refusals: (a) comparing two graphs pair by pair on anything but success,
+	// and (b) answering what the same searches would have done under a hop
+	// budget L — a dead end after four hops and a success after forty are the
+	// same "absent from the map", and they behave differently at L = 18. The
+	// experimental limit of §5.3 is chosen after seeing the lengths, so the
+	// record has to survive the run that produced them.
+	ByPair []routingResult
+	// Budget is the hop budget this report was measured under, so a recomputed
+	// view cannot be taken from an already limited run — see underHopLimit.
+	Budget int
 }
 
 func (r routingReport) share(outcome routingOutcome) string {
@@ -201,25 +213,106 @@ func measureRouting(
 	g *graph, inGraph func(int32) bool, component []int, pairs [][2]int32, budget int,
 ) (routingReport, error) {
 	report := routingReport{
-		Pairs:      len(pairs),
-		Outcomes:   map[routingOutcome]int{},
-		HopsByPair: map[int]int{},
+		Pairs:    len(pairs),
+		Outcomes: map[routingOutcome]int{},
+		ByPair:   make([]routingResult, 0, len(pairs)),
+		Budget:   budget,
 	}
 	hops := make([]int, 0, len(pairs))
 
-	for index, pair := range pairs {
+	for _, pair := range pairs {
 		result, err := greedyRoute(g, inGraph, component, pair[0], pair[1], budget)
 		if err != nil {
 			return routingReport{}, err
 		}
 		report.Outcomes[result.Outcome]++
+		report.ByPair = append(report.ByPair, result)
 		if result.Outcome == routingSuccess {
 			hops = append(hops, result.Hops)
-			report.HopsByPair[index] = result.Hops
 		}
 	}
 	report.Lengths = summariseLengths(hops)
 	return report, nil
+}
+
+// underHopLimit answers what the SAME searches would have done under a hop
+// budget, without walking any of them again.
+//
+// ⚠️ It is only valid because greedy routing with a budget is the unlimited walk
+// truncated: the rule at each step looks at the current node and the target and
+// at nothing else, so the first L transitions are the same ones whatever the
+// budget is, and the budget is checked BEFORE a transition it would forbid. So a
+// pair that finished within L finished identically, and a pair that needed more
+// stops with the budget spent after exactly L transitions.
+//
+// ⚠️ That argument is an argument. It is PROVEN by reference instead: for every
+// fixture and every limit, this function's output is compared against actually
+// re-running the searches under that limit, dead ends and the exact boundary
+// included (routing_reference_test.go).
+//
+// What it deliberately does NOT reconstruct is WHERE a truncated walk stopped:
+// the stopping node is not derivable from an outcome and a hop count, so every
+// recomputed result carries Stopped = -1 rather than a plausible guess.
+func underHopLimit(report routingReport, limit int) (routingReport, error) {
+	if report.Budget != noBudget {
+		return routingReport{}, fmt.Errorf(
+			"cannot recompute a hop limit from a report already measured under budget %d: its "+
+				"searches were cut short, so what they would have done past that point is not in "+
+				"the record", report.Budget)
+	}
+	if limit < 0 {
+		return routingReport{}, fmt.Errorf("hop limit %d is negative", limit)
+	}
+
+	limited := routingReport{
+		Pairs:    report.Pairs,
+		Outcomes: map[routingOutcome]int{},
+		ByPair:   make([]routingResult, 0, len(report.ByPair)),
+		Budget:   limit,
+	}
+	hops := make([]int, 0, len(report.ByPair))
+
+	for _, result := range report.ByPair {
+		if result.Outcome == routingNoPath {
+			// Reachability is a property of the graph, not of the walk: the
+			// answer is settled before a step is taken, so no limit can turn it
+			// into a budget refusal.
+			//
+			// ⚠️ The guard below is BELT AND BRACES and a mutation proved it:
+			// removing "not no-path" from the condition changes nothing, because
+			// an unreachable pair carries zero hops and zero is never past a
+			// limit. So the property is asserted where it can actually fail —
+			// on the hop count itself — rather than defended by a condition that
+			// cannot be made red.
+			if result.Hops != 0 {
+				return routingReport{}, fmt.Errorf(
+					"a pair reported as unreachable carries %d transitions — no step is taken "+
+						"when the target is in another component, so the measurer is broken",
+					result.Hops)
+			}
+			limited.Outcomes[result.Outcome]++
+			limited.ByPair = append(limited.ByPair, result)
+			continue
+		}
+
+		// ⚠️ A pair the limit did not touch keeps EVERYTHING it had, the stopping
+		// node included: the walk is literally the same walk. Only a truncated
+		// pair loses it, because where a walk would have been after L
+		// transitions is not derivable from an outcome and a hop count — and a
+		// plausible guess there would be worse than an admitted gap.
+		truncated := result
+		if result.Hops > limit {
+			truncated = routingResult{Outcome: routingBudgetSpent, Hops: limit, Stopped: -1}
+		}
+
+		limited.Outcomes[truncated.Outcome]++
+		limited.ByPair = append(limited.ByPair, truncated)
+		if truncated.Outcome == routingSuccess {
+			hops = append(hops, truncated.Hops)
+		}
+	}
+	limited.Lengths = summariseLengths(hops)
+	return limited, nil
 }
 
 // comparedLengths is M2-L and M2-G: the two graphs compared ON THE PAIRS THAT
@@ -229,11 +322,18 @@ type comparedLengths struct {
 	Common int
 	Full   lengthStats
 	Half   lengthStats
+	// Mismatch is set when the two reports did not come from one pair sample.
+	// ⚠️ A stand defect rather than a result, and it must surface where the
+	// number would have been rather than as a quietly shorter comparison.
+	Mismatch string
 }
 
 // Ratio is M2-G, the normative "half / whole network" figure. It is a string
 // because "no data" is a legitimate answer and must not arrive as 0.0.
 func (c comparedLengths) Ratio() string {
+	if c.Mismatch != "" {
+		return "STAND DEFECT: " + c.Mismatch
+	}
 	if c.Common == 0 || c.Full.Median == 0 {
 		return "no data"
 	}
@@ -241,16 +341,28 @@ func (c comparedLengths) Ratio() string {
 }
 
 func compareLengths(full, half routingReport) comparedLengths {
-	fullHops := make([]int, 0, len(full.HopsByPair))
-	halfHops := make([]int, 0, len(half.HopsByPair))
+	fullHops := make([]int, 0, len(full.ByPair))
+	halfHops := make([]int, 0, len(half.ByPair))
 
-	for index, hopsFull := range full.HopsByPair {
-		hopsHalf, both := half.HopsByPair[index]
-		if !both {
+	// ⚠️ Pair INDEX is the join key, and the two reports must therefore come
+	// from one sample. That is the §5.3 rule "one pair sample for both graphs",
+	// and a difference in length means the two were NOT measured on one sample —
+	// a stand defect, not a shorter comparison. Returning what the shorter one
+	// happens to cover would compare two graphs on pairs only one of them was
+	// asked about.
+	if len(full.ByPair) != len(half.ByPair) {
+		return comparedLengths{Mismatch: fmt.Sprintf(
+			"%d pairs in the full graph against %d in the half — the two were not measured on "+
+				"one sample", len(full.ByPair), len(half.ByPair))}
+	}
+
+	for index, resultFull := range full.ByPair {
+		resultHalf := half.ByPair[index]
+		if resultFull.Outcome != routingSuccess || resultHalf.Outcome != routingSuccess {
 			continue
 		}
-		fullHops = append(fullHops, hopsFull)
-		halfHops = append(halfHops, hopsHalf)
+		fullHops = append(fullHops, resultFull.Hops)
+		halfHops = append(halfHops, resultHalf.Hops)
 	}
 
 	return comparedLengths{

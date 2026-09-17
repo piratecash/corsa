@@ -1,14 +1,21 @@
 package overlaysim
 
 // policy_sweep_test.go is the comparative experiment of §2.4: the same
-// identifiers, seeds, shapes and quotas run through three neighbour-selection
-// policies, to answer whether the isolation of structural nodes can be removed
-// by changing the SELECTION — without raising B and without softening the
-// "one component" criterion.
+// identifiers, seeds, shapes and quotas run through every neighbour-selection
+// policy in allPolicies, to answer whether the isolation of structural nodes can
+// be removed by changing the SELECTION — without raising B and without softening
+// the "one component" criterion.
 //
 // Run one shape at a time; each is a subtest:
 //
 //	go test ./internal/overlaysim/ -run 'TestM1PolicyComparison/1k' -timeout 30m -v
+//
+// ⚠️ COST, because it decides how the run has to be scheduled and it is not the
+// same for every policy. C1/v1 ranks every member of a bucket, so it is
+// quadratic in N where the other three are not: measured at ≈70 ms per graph on
+// 1k×8 and ≈6 s on 10k×8, which extrapolates to ≈4.5 minutes on 64k×8 — about
+// 3.5 hours for the nine quotas × five seeds of that one shape. Run 64k×8 apart
+// from the rest, and chunk it with M1_QUOTAS.
 //
 // The report has three parts, in this order: the FULL record of every
 // (seed, quota, policy) run, the attribution of every one of them, and only
@@ -33,15 +40,24 @@ import (
 // detailColumns is every measurement of one run, kept because the summary
 // cannot answer the questions the comparison exists for: what the improvement
 // cost, and where the second pass ran out of room.
+//
+// ⚠️ `bucket` and `leftovr` are not decoration either. C1/v1 changes the rule
+// INSIDE a bucket and leaves the leftover fill alone (candidate §2.5), so the
+// share of edges the leftover fill produced is the share of the graph the
+// candidate did not touch — and any difference attributed to the candidate is
+// only as strong as that share is small. `Q degmax` and `Q at B` are the
+// concentration figures of §5.4: a hub, if the hash order makes one, forms in
+// the structural half first, and a network-wide average would hide it.
 var detailColumns = []string{
 	"quota", "seed", "Q comps", "Q share", "iso Q", "base cmp",
 	"quota✓", "q min", "q med", "short",
-	"links", "2p add", "2p none", "2p ownB", "init max", "deg avg", "deg max", "at B", "unfilled",
+	"links", "bucket", "leftovr", "2p add", "2p none", "2p ownB", "init max",
+	"deg avg", "deg max", "at B", "Q degmax", "Q at B", "unfilled",
 }
 
 const (
-	detailHeaderFormat = "%5s %6s %8s %8s %7s %8s %7s %6s %6s %8s %9s %8s %8s %8s %8s %8s %8s %7s %9s\n"
-	detailRowFormat    = "%5d %6d %8d %8.4f %7d %8d %7.3f %6d %6d %8d %9d %8d %8d %8d %8d %8.2f %8d %6.1f%% %8.1f%%\n"
+	detailHeaderFormat = "%5s %6s %8s %8s %7s %8s %7s %6s %6s %8s %9s %9s %8s %8s %8s %8s %8s %8s %8s %7s %9s %7s %9s\n"
+	detailRowFormat    = "%5d %6d %8d %8.4f %7d %8d %7.3f %6d %6d %8d %9d %9d %8d %8d %8d %8d %8d %8.2f %8d %6.1f%% %9d %6.1f%% %8.1f%%\n"
 )
 
 func detailHeader() string {
@@ -58,9 +74,11 @@ func formatDetailRow(report runReport) string {
 		report.Structural.Components, report.Structural.LargestShare(),
 		report.Structural.Isolated, report.Base.Components,
 		report.QuotaMet, report.QuotaMin, report.QuotaMedian, report.ShortOfQuota.Nodes,
-		report.Links, report.SecondPassLinks, report.SecondPassStuck,
+		report.Links, report.BucketLinks, report.LeftoverLinks,
+		report.SecondPassLinks, report.SecondPassStuck,
 		report.SecondPassOutOfBudget, report.MaxInitiated, report.MeanDegree, report.MaxDegree,
-		report.AtBudget*100, report.Unfilled*100)
+		report.AtBudget*100, report.MaxStructuralDegree, report.StructuralAtBudget*100,
+		report.Unfilled*100)
 }
 
 // --- the summary ------------------------------------------------------------
@@ -259,7 +277,34 @@ func quotasFromEnvironment() (quotas []int, present bool, err error) {
 	return quotas, true, nil
 }
 
-// TestM1PolicyComparison runs the three policies over the same inputs.
+// policiesFor is the set of policies a shape is asked about.
+//
+// ⚠️ IT EXISTS BECAUSE ONE POLICY IS QUADRATIC AND THE OTHERS ARE NOT. C1/v1
+// costs ≈4.5 minutes per graph at 64k×8, so the default sweep over that shape is
+// ≈3.5 hours — past any sane `go test` timeout, and `go test ./...` coming back
+// green is the project's own definition of a finished task. Leaving the cost as
+// a sentence in a comment would have made that definition unverifiable in one
+// call.
+//
+// So the expensive policy is SKIPPED on the large shapes unless M1_SLOW is set,
+// and the skip is PRINTED in the report rather than applied quietly: a table
+// that silently dropped a policy would be read as a table where that policy did
+// not help.
+func policiesFor(sh shape) (selected []policy, skipped []policy) {
+	const affordable = 10_000
+
+	slow := strings.TrimSpace(os.Getenv("M1_SLOW")) != ""
+	for _, selection := range allPolicies {
+		if selection == policyCandidateC1 && sh.nodes > affordable && !slow {
+			skipped = append(skipped, selection)
+			continue
+		}
+		selected = append(selected, selection)
+	}
+	return selected, skipped
+}
+
+// TestM1PolicyComparison runs every policy of allPolicies over the same inputs.
 //
 // It fails only on harness faults — a broken budget, an empty structural half.
 // Whether a policy's result is acceptable is not a question a test may answer.
@@ -275,12 +320,14 @@ func TestM1PolicyComparison(t *testing.T) {
 				t.Fatalf("%s: %v", sh.name, err)
 			}
 
+			policies, skipped := policiesFor(sh)
+
 			// Every run is kept. Rendering reads from this rather than from a
 			// counter updated in flight, which is how the isolated maximum was
 			// lost once already.
 			runs := map[policy][]runReport{}
 
-			for _, selection := range allPolicies {
+			for _, selection := range policies {
 				for _, quota := range quotas {
 					for _, seed := range sweepSeeds {
 						report := measure(sh, seed, quota, selection)
@@ -312,12 +359,30 @@ func TestM1PolicyComparison(t *testing.T) {
 				sh.name, sh.nodes, sh.degree, sh.budget)
 			fmt.Fprintf(&out, "  seeds %v\n", sweepSeeds)
 			fmt.Fprintf(&out, "  quotas %v\n", quotas)
-			fmt.Fprintf(&out, "  policies: %s, %s, %s\n\n",
-				policyBaseline, policyInitiatedLimit, policySecondPass)
+			names := make([]string, 0, len(policies))
+			for _, selection := range policies {
+				names = append(names, selection.String())
+			}
+			fmt.Fprintf(&out, "  policies: %s\n", strings.Join(names, ", "))
+			// ⚠️ Which run is the BASE is part of the report, because the
+			// comparison means nothing without it: C1/v1 differs from
+			// initiated-limit by ONE rule, so that is what it is measured
+			// against; the baseline rides along as a control that the stand
+			// itself has not moved (candidate §5.2).
+			fmt.Fprintf(&out, "  comparison base: %s — the candidate differs from it by ONE "+
+				"rule.\n  %s is a CONTROL that the stand has not moved, not the base.\n",
+				policyInitiatedLimit, policyBaseline)
+			for _, selection := range skipped {
+				fmt.Fprintf(&out, "  ⚠️ %s NOT RUN on this shape: it is quadratic in N (≈4.5 min "+
+					"per graph at 64k), so the sweep would take hours. Set M1_SLOW=1 to include "+
+					"it.\n  ⚠️ ITS ABSENCE IS NOT A RESULT — nothing below says anything about "+
+					"it.\n", selection)
+			}
+			fmt.Fprintf(&out, "\n")
 
 			// 1. The full record, per policy: every seed, every quota, every
 			//    field the model measures.
-			for _, selection := range allPolicies {
+			for _, selection := range policies {
 				fmt.Fprintf(&out, "══ %s — every run ═══════════════════════════════\n", selection)
 				out.WriteString(detailHeader())
 				for _, report := range runs[selection] {
@@ -351,14 +416,14 @@ func TestM1PolicyComparison(t *testing.T) {
 			// Restating it per policy, or after seeing the rows, would be
 			// fitting — so it is computed here, unchanged, for all three.
 			connecting := map[policy]map[int]bool{}
-			for _, selection := range allPolicies {
+			for _, selection := range policies {
 				connecting[selection] = map[int]bool{}
 			}
 
 			for quotaIndex, quota := range quotas {
 				baselineLinks := 0
 
-				for _, selection := range allPolicies {
+				for _, selection := range policies {
 					first := quotaIndex * len(sweepSeeds)
 					seeds := runs[selection][first : first+len(sweepSeeds)]
 
@@ -391,7 +456,7 @@ func TestM1PolicyComparison(t *testing.T) {
 					"about the untested ones: success is not monotone in the quota.\n",
 					len(quotas), sh.degree+1)
 			}
-			for _, selection := range allPolicies {
+			for _, selection := range policies {
 				working := make([]int, 0, len(quotas))
 				for _, quota := range quotas {
 					if connecting[selection][quota] {

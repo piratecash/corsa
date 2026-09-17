@@ -220,6 +220,42 @@ func (s m4Slice) String() string {
 		s.RefusalShare(), s.ExclusionShare(), s.NobodySuitableShare())
 }
 
+// refusalRate is the refusal share as a number, for the gap below. It is
+// unexported and returns a second value rather than a bare float: an empty
+// sample has no rate, and a zero standing in for one is the mistake the whole
+// "no data" discipline of this file exists against.
+func (s m4Slice) refusalRate() (float64, bool) {
+	if s.Requests == 0 {
+		return 0, false
+	}
+	return float64(s.Refused()) / float64(s.Requests), true
+}
+
+// refusalGap renders the difference between two readings of the same requests IN
+// PERCENTAGE POINTS.
+//
+// ⚠️ It exists because §4.3.4″.3 leaves the normative population open and says
+// the value is MEASURED. Two shares printed apart leave the reader to subtract
+// them, and a reader who subtracts is a reader who may compare numbers taken on
+// different request sets. This refuses to subtract anything unless the two
+// readings answered the SAME requests, and says so when it refuses.
+//
+// ⚠️ Percentage points, never percent. "Refusal fell by 30 %" is ambiguous
+// between 40 %→10 % and 40 %→28 %; "by 30 pp" is not.
+func refusalGap(confirmed, sampled m4Slice) string {
+	confirmedRate, haveConfirmed := confirmed.refusalRate()
+	sampledRate, haveSampled := sampled.refusalRate()
+	if !haveConfirmed || !haveSampled {
+		return "no data"
+	}
+	if confirmed.Requests != sampled.Requests {
+		return fmt.Sprintf("NOT COMPARABLE: %d requests against %d — the two readings did not "+
+			"answer the same questions", confirmed.Requests, sampled.Requests)
+	}
+	return fmt.Sprintf("%+.1f pp (confirmed-only minus whole-set, over the same %d requests)",
+		(confirmedRate-sampledRate)*100, confirmed.Requests)
+}
+
 // guardSnapshotMember is one member AS IT WAS when the measurement ran,
 // including the role the graph gave it. The role belongs in the snapshot
 // because suitability depends on it and the graph is not part of the report:
@@ -316,10 +352,27 @@ type m4Report struct {
 	Sampled   m4Slice
 }
 
+// GapPP is the difference between the two readings, in percentage points.
+func (r m4Report) GapPP() string { return refusalGap(r.Confirmed, r.Sampled) }
+
 func (r m4Report) String() string {
-	return fmt.Sprintf("%s\n%s\n  confirmed only: %s\n  whole set:      %s",
-		r.Set, r.Workload, r.Confirmed, r.Sampled)
+	return fmt.Sprintf("%s\n%s\n  confirmed only: %s\n  whole set:      %s\n  gap:            %s\n"+
+		"  %s",
+		r.Set, r.Workload, r.Confirmed, r.Sampled, r.GapPP(), m4DeclaredNotObserved)
 }
+
+// m4DeclaredNotObserved travels with every pair of refusal numbers this file
+// produces.
+//
+// ⚠️ It is not a disclaimer, it is the scope of the result. "Confirmed" here
+// means the guard model DECLARED a member confirmed; in the tree it means a
+// frame actually went through that member (NoteUsed in first_hop_guards.go).
+// The gap between the two readings is therefore the price of a rule under an
+// assumed set, and a reader who takes it for the behaviour of a real network has
+// been misled by the report rather than by their own reading.
+const m4DeclaredNotObserved = "⚠️ ‘confirmed’, ‘alive’, ‘transit-capable’ and ‘identity-proven’ " +
+	"are DECLARED by the guard model, not observed in any network: this is the price of a rule " +
+	"under an assumed set, not a measured refusal rate of the tree"
 
 // measureFirstHopRefusals runs one workload against one set, twice.
 //

@@ -17,7 +17,13 @@ import (
 
 // allPolicies is the comparison set. Kept in one place so a policy added later
 // cannot quietly skip the invariants below.
-var allPolicies = []policy{policyBaseline, policyInitiatedLimit, policySecondPass}
+//
+// ⚠️ C1/v1 joined it when the candidate was implemented, and joining THIS list
+// is what subjects it to the budget, symmetry and initiated-limit invariants
+// below without anybody remembering to add it to each of them.
+var allPolicies = []policy{
+	policyBaseline, policyInitiatedLimit, policySecondPass, policyCandidateC1,
+}
 
 // --- the quota grid is an instruction, not a suggestion ----------------------
 
@@ -311,7 +317,7 @@ func TestEveryPolicyRespectsTheBudgetAtBothEnds(t *testing.T) {
 }
 
 // TestInitiatedLinksStayWithinThePolicyThatOwnsThem states the OTHER limit,
-// which is not the same for all three — and saying so explicitly is the point.
+// which is not the same for every policy — and saying so explicitly is the point.
 func TestInitiatedLinksStayWithinThePolicyThatOwnsThem(t *testing.T) {
 	t.Parallel()
 

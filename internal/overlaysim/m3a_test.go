@@ -222,6 +222,36 @@ func (m guardModel) Assumptions() string {
 		m.SetSize, m.ConfirmedPrefix, m.Requests, m.TargetSeed)
 }
 
+// OpenDecisions is the list that has to be put to the owner BEFORE any run, and
+// it is deliberately a list of QUESTIONS rather than a sentence saying the model
+// is a proposal.
+//
+// ⚠️ Index §0.2 item 2 is open: the guard model is not agreed. A number produced
+// under an unagreed model is not wrong — it is unreadable, because nobody can
+// say what it is a number about. Each line below names one thing whose value
+// changes the result, so the list can be answered item by item instead of
+// approved as a whole.
+func (m guardModel) OpenDecisions() string {
+	return strings.Join([]string{
+		"OPEN, and to be settled BEFORE the runs (index §0.2 item 2):",
+		fmt.Sprintf("  1. set size k = %d — the rule of §4.3.4″.3 is stated over the WHOLE pinned "+
+			"set, while today's code cuts to guardPrimaryCount = 3 before any filter. Which of "+
+			"the two is measured changes the refusal rate directly", m.SetSize),
+		fmt.Sprintf("  2. how many members count as confirmed (here: the first %d) — and by what, "+
+			"since in the tree confirmation comes from a frame having gone through the member",
+			m.ConfirmedPrefix),
+		"  3. which population is NORMATIVE — confirmed-only or the whole set. Both are measured " +
+			"and never merged; the gap between them is the price of the answer, but the answer " +
+			"itself is the owner's",
+		"  4. whether alive / transit-capable / identity-proven stay DECLARED. While they do, " +
+			"every refusal rate here is a LOWER BOUND and must be published as one",
+		"  5. how a set is formed — here: the first ¬Q neighbours in adjacency order of the built " +
+			"graph. Adjacency order is construction order, which is not how a node would choose",
+		fmt.Sprintf("  6. the workload: %d requests per requester and which distributions count. "+
+			"None of the three implemented is measured user load", m.Requests),
+	}, "\n")
+}
+
 // buildGuardSet forms the pinned set of one requester from the GRAPH: its ¬Q
 // neighbours, in adjacency order.
 //
@@ -324,6 +354,28 @@ type m3aRun struct {
 	// guard model asked for — an undersized set is a finding, not a detail.
 	RequestersMeasured      int
 	RequestersShortOfGuards int
+
+	// SetsDigest identifies the COMPOSITION of every guard set that went into
+	// the two aggregates, in one token.
+	//
+	// ⚠️ A per-requester snapshot is what M4 keeps for a single set; an
+	// aggregate over two hundred of them cannot carry two hundred listings, and
+	// without anything at all the difference between two points of the sweep
+	// would be unexplainable — the gap between the readings is a fact about the
+	// MEMBERS. The digest is the compromise that stays honest: it does not
+	// explain the gap, but it proves two runs did or did not use the same sets.
+	SetsDigest string
+	// MembersTotal and ConfirmedTotal are the composition in numbers: how many
+	// guard slots the sample held altogether and how many of them the model
+	// DECLARED confirmed.
+	MembersTotal   int
+	ConfirmedTotal int
+}
+
+// RefusalGapPP is the difference between the two readings of §4.3.4″.3, in
+// percentage points, over the same requests.
+func (r m3aRun) RefusalGapPP() string {
+	return refusalGap(r.RefusalsConfirmed, r.RefusalsSampled)
 }
 
 // describeConnectivity renders the subgraph report. ⚠️ An EMPTY subgraph is
@@ -343,17 +395,20 @@ func (r m3aRun) String() string {
 	if r.RequestersMeasured > 0 {
 		guardLine = fmt.Sprintf(
 			"%d requesters sampled with seed %d (independently of construction order), "+
-				"%d short of the requested set size",
-			r.RequestersMeasured, r.Setup.RequesterSeed, r.RequestersShortOfGuards)
+				"%d short of the requested set size; sets [%s]: %d members, %d of them DECLARED "+
+				"confirmed",
+			r.RequestersMeasured, r.Setup.RequesterSeed, r.RequestersShortOfGuards,
+			r.SetsDigest, r.MembersTotal, r.ConfirmedTotal)
 	}
 	return fmt.Sprintf(
 		"%s\npolicy %s, quota %d, load: %s\n  Q-subgraph:  %s\n  M5 all:      %s\n"+
 			"  M5 Q:        %s\n  M5 ¬Q:       %s\n  M4 confirmed only: %s\n"+
-			"  M4 whole set:      %s\n  M4 inputs:   %s\n  %s",
+			"  M4 whole set:      %s\n  M4 gap:            %s\n  M4 inputs:   %s\n  %s\n  %s",
 		r.Population, r.Setup.Policy, r.Setup.Quota, r.Setup.Workload,
 		describeConnectivity(r.Connectivity),
 		r.Neighbourless.All, r.Neighbourless.Structural, r.Neighbourless.NonStructural,
-		r.RefusalsConfirmed, r.RefusalsSampled, guardLine, r.Setup.Guards.Assumptions())
+		r.RefusalsConfirmed, r.RefusalsSampled, r.RefusalGapPP(), guardLine,
+		r.Setup.Guards.Assumptions(), m4DeclaredNotObserved)
 }
 
 // runSkewPoint builds one population and measures it.
@@ -394,10 +449,25 @@ func runSkewPoint(setup skewSetup) (m3aRun, error) {
 	model := setup.Guards
 	uniform := uniformWorkload(model.TargetSeed, sh.nodes, model.Requests)
 
+	// The composition of every set that enters the two aggregates, folded into
+	// one digest as it goes. Order matters and is the sample order: two runs
+	// that measured the same sets in a different order measured different
+	// experiments, because the order decides who carries a served request.
+	composition := sha256.New()
+
 	for _, requester := range sampleRequesters(sh.nodes, setup.Requesters, setup.RequesterSeed) {
 		set := buildGuardSet(g, requester, model)
 		if len(set.Members) < model.SetSize {
 			run.RequestersShortOfGuards++
+		}
+		snapshot := snapshotGuardSet(g, set)
+		composition.Write([]byte(snapshot.Composition()))
+		composition.Write([]byte{0})
+		run.MembersTotal += len(set.Members)
+		for _, member := range set.Members {
+			if member.Confirmed {
+				run.ConfirmedTotal++
+			}
 		}
 
 		load := uniform
@@ -415,6 +485,18 @@ func runSkewPoint(setup skewSetup) (m3aRun, error) {
 		addRefusals(&run.RefusalsConfirmed, report.Confirmed)
 		addRefusals(&run.RefusalsSampled, report.Sampled)
 		run.RequestersMeasured++
+	}
+	run.SetsDigest = fmt.Sprintf("%x", composition.Sum(nil)[:4])
+
+	// ⚠️ The two aggregates must have answered the SAME requests, or the gap
+	// between them is a difference in what was asked. The measurer puts one
+	// workload to both populations, so an inequality here is a stand defect and
+	// not a result.
+	if run.RefusalsConfirmed.Requests != run.RefusalsSampled.Requests {
+		return m3aRun{}, fmt.Errorf(
+			"the confirmed-only reading answered %d requests and the whole-set reading %d — the "+
+				"two populations must see one workload, or their difference means nothing",
+			run.RefusalsConfirmed.Requests, run.RefusalsSampled.Requests)
 	}
 	return run, nil
 }
@@ -466,8 +548,17 @@ type m3aProposal struct {
 	ToShare   float64
 	Step      float64
 	Quota     int
-	Policy    policy
-	Guards    guardModel
+	// Policies is what every point is measured under.
+	//
+	// ⚠️ A LIST, not one policy, and the order is the meaning: the FIRST entry is
+	// the candidate whose acceptance numbers these are, the rest are bases run on
+	// IDENTICAL inputs so a difference has somewhere to come from. An earlier
+	// version named policyInitiatedLimit alone, which quietly made the base the
+	// subject: acceptance measurements belong to the agreed candidate (index
+	// §0.2 — "измерения ступени 1 привязаны к кандидату"), and a number taken on
+	// another rule describes another graph.
+	Policies []policy
+	Guards   guardModel
 	// Requesters is how many nodes per point have their refusals measured, and
 	// the two seeds decide the population's ORDER and WHICH nodes are measured
 	// — both kept apart from the identifier seed so that a skew does not arrive
@@ -490,7 +581,10 @@ func proposedSkewSweep() m3aProposal {
 		ToShare:   0.95,
 		Step:      0.05,
 		Quota:     1,
-		Policy:    policyInitiatedLimit,
+		// The candidate first, its base second: acceptance is measured on
+		// C1/v1, and initiated-limit is run on the same inputs so the pair can
+		// be read as one rule apart.
+		Policies: []policy{policyCandidateC1, policyInitiatedLimit},
 		Guards: guardModel{
 			SetSize:         3,
 			ConfirmedPrefix: 1,
@@ -522,19 +616,27 @@ func (p m3aProposal) String() string {
 	for _, load := range p.Workloads {
 		loads = append(loads, load.String())
 	}
+	rules := make([]string, 0, len(p.Policies))
+	for index, selection := range p.Policies {
+		role := "comparison base, same inputs"
+		if index == 0 {
+			role = "CANDIDATE — the acceptance numbers are its"
+		}
+		rules = append(rules, fmt.Sprintf("%s (%s)", selection, role))
+	}
 	return fmt.Sprintf(
 		"PROPOSED skew sweep — AWAITING AGREEMENT, not an adopted parameter set:\n"+
 			"  shapes %s, seeds %v\n"+
 			"  Q share from %.2f to %.2f step %.2f (%d points)\n"+
-			"  policy %s, quota %d, %d requesters per point\n"+
+			"  policies %s, quota %d, %d requesters per point\n"+
 			"  order seed %d, requester seed %d — separate from the identifier seed so a skew "+
 			"is not measured together with an ordering\n"+
 			"  loads: %s\n"+
 			"  %s\n"+
-			"  ⚠️ Open decisions: the guard model above; whether the confirmed-only or the whole "+
-			"sampled population is normative (§4.3.4″.3); the acceptable skew itself, which is the "+
-			"RESULT of this experiment and not an input to it",
+			"  %s\n"+
+			"  ⚠️ And the acceptable skew itself is the RESULT of this experiment, not an input "+
+			"to it",
 		strings.Join(names, ", "), p.Seeds, p.FromShare, p.ToShare, p.Step, len(p.Points()),
-		p.Policy, p.Quota, p.Requesters, p.ShuffleSeed, p.RequesterSeed,
-		strings.Join(loads, "; "), p.Guards.Assumptions())
+		strings.Join(rules, "; "), p.Quota, p.Requesters, p.ShuffleSeed, p.RequesterSeed,
+		strings.Join(loads, "; "), p.Guards.Assumptions(), p.Guards.OpenDecisions())
 }

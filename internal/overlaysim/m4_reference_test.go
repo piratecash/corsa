@@ -628,3 +628,92 @@ func TestM4SetsWithTheSameNameAreDistinguishable(t *testing.T) {
 		t.Errorf("reordering the members kept the digest %s", reorderedReport.Set.Digest())
 	}
 }
+
+// TestM4GapIsStatedInPercentagePoints is the presentation rule of §4.3.4″.3: the
+// two readings are shown side by side AND their difference is computed, over the
+// same requests, in percentage points.
+//
+// ⚠️ It exists because leaving the subtraction to the reader is how a hidden
+// choice of population gets made. A report that prints two shares and no
+// difference invites the reader to pick one — and a reader who subtracts shares
+// taken over different request sets gets a number that means nothing.
+func TestM4GapIsStatedInPercentagePoints(t *testing.T) {
+	t.Parallel()
+
+	g := m4Graph()
+
+	// One confirmed member which is also the target, and one unconfirmed spare.
+	// Under the confirmed-only reading every request refuses; under the
+	// whole-set reading the spare serves every one. That is the widest the gap
+	// can be, and it is the case the open sub-question is about.
+	set := guardSet{
+		Name: "one confirmed member, which is the target; one unconfirmed spare",
+		Members: []guardMember{
+			eligibleGuard(1, true),
+			eligibleGuard(2, false),
+		},
+	}
+	report, err := measureFirstHopRefusals(g, set, mainContactInSetWorkload(1, 200))
+	if err != nil {
+		t.Fatalf("measuring: %v", err)
+	}
+
+	if got, want := report.Confirmed.Refused(), 200; got != want {
+		t.Fatalf("confirmed-only refused %d of 200", got)
+	}
+	if got := report.Sampled.Refused(); got != 0 {
+		t.Fatalf("whole set refused %d of 200, want 0 — the unconfirmed spare serves them", got)
+	}
+	if got, want := report.GapPP(), "+100.0 pp (confirmed-only minus whole-set, over the same 200 requests)"; got != want {
+		t.Errorf("gap %q, want %q", got, want)
+	}
+
+	// The refusal that the gap is about must be attributed to the RULE, not to
+	// an unusable set: the confirmed member was suitable until the target
+	// excluded it.
+	if report.Confirmed.RefusedByTargetExclusion != 200 ||
+		report.Confirmed.RefusedNobodySuitable != 0 {
+		t.Errorf("confirmed-only refusals: %d by exclusion, %d nobody suitable — the whole 200 "+
+			"belong to the exclusion", report.Confirmed.RefusedByTargetExclusion,
+			report.Confirmed.RefusedNobodySuitable)
+	}
+
+	rendered := report.String()
+	for _, want := range []string{
+		"confirmed only:",
+		"whole set:",
+		"gap:",
+		"+100.0 pp",
+		// ⚠️ And the scope, next to the numbers rather than in a footnote.
+		"DECLARED by the guard model, not observed in any network",
+		"not a measured refusal rate of the tree",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, rendered)
+		}
+	}
+}
+
+// TestM4GapRefusesIncomparableReadings covers the two cases where no difference
+// may be printed at all.
+func TestM4GapRefusesIncomparableReadings(t *testing.T) {
+	t.Parallel()
+
+	if got := refusalGap(m4Slice{}, m4Slice{}); got != "no data" {
+		t.Errorf("two empty readings: %q, want %q", got, "no data")
+	}
+	if got := refusalGap(m4Slice{Requests: 10}, m4Slice{}); got != "no data" {
+		t.Errorf("one empty reading: %q, want %q", got, "no data")
+	}
+
+	// ⚠️ Different denominators are the dangerous case: both shares exist, both
+	// look fine, and subtracting them compares answers to different questions.
+	got := refusalGap(m4Slice{Requests: 10, RefusedNobodySuitable: 5},
+		m4Slice{Requests: 20, RefusedNobodySuitable: 5})
+	if !strings.Contains(got, "NOT COMPARABLE") {
+		t.Errorf("unequal denominators: %q, want a refusal to compare", got)
+	}
+	if strings.Contains(got, "pp") {
+		t.Errorf("a difference was printed for unequal denominators: %q", got)
+	}
+}

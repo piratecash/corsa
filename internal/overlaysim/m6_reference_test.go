@@ -450,7 +450,15 @@ func TestM6OmniscientSourceIsLabelledAControl(t *testing.T) {
 	}
 
 	rendered := report.String()
-	for _, want := range []string{"CONTROL", "upper bound", "not a variant"} {
+	for _, want := range []string{
+		"CONTROL",
+		"CONTROL RESULT UNDER THE STATED CONSTRAINTS",
+		"NOT a variant",
+		// ⚠️ And the claim it must NOT make. "Upper bound" says no mechanism can
+		// do better, which needs a proof the stand does not have; the control is
+		// bounded by the same k, B, probe ceiling and graph as everything else.
+		"not claimed to be a mathematical upper bound",
+	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the report does not mark the omniscient source as a control (%q):\n%s",
 				want, rendered)

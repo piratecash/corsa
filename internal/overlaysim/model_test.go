@@ -8,6 +8,7 @@ package overlaysim
 // Nothing here is production code and nothing may import it — see doc.go.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -30,6 +31,12 @@ const (
 	// idSeparator derives simulated identifiers. A DIFFERENT domain from the
 	// role: these are test subjects, not another use of the role space.
 	idSeparator = "corsa/overlay/sim/v1"
+
+	// c1PickSeparator is the domain of the C1/v1 in-bucket order,
+	// docs/refactoring/dht/21-m1-candidate-c1.md §2.2. It is a THIRD domain: the
+	// rank of a candidate must not coincide with its identifier or its role,
+	// or the rule would inherit a correlation it exists to remove.
+	c1PickSeparator = "corsa/overlay/sim/pick/v1"
 
 	// roleStructural is Q = 1: the half that may carry the structural leg.
 	//
@@ -224,6 +231,117 @@ func (t *idTrie) nearestInBucket(target nodeID, level, want int, accept func(int
 	return out
 }
 
+// forEachInBucket visits EVERY member of the bucket, in no particular order.
+//
+// It exists for C1/v1, whose order over the bucket is a hash of
+// (owner, level, candidate) and therefore cannot be walked towards: there is no
+// branch to prefer, so the minimum is only known once every member has been
+// seen. The walk is still over the bucket's subtree rather than the whole
+// population — the saving that makes the rule runnable at all — and a reference
+// test compares it against a naive scan (§5.5 п.1).
+//
+// ⚠️ The early return when the descent meets a leaf is the same one
+// nearestInBucket makes, and it is correct for the same reason: the trie holds
+// the target itself, so a leaf on the target's own path means the target is the
+// only identifier with that prefix and the bucket below it is empty.
+func (t *idTrie) forEachInBucket(target nodeID, level int, visit func(int32)) {
+	node := int32(0)
+	for depth := range level {
+		node = t.child[node][bitAt(target, depth)]
+		if node == -1 || t.leaf[node] != -1 {
+			return
+		}
+	}
+	sibling := t.child[node][1-bitAt(target, level)]
+	if sibling == -1 {
+		return
+	}
+
+	var walk func(node int32)
+	walk = func(node int32) {
+		if node == -1 {
+			return
+		}
+		if leaf := t.leaf[node]; leaf != -1 {
+			visit(leaf)
+			return
+		}
+		walk(t.child[node][0])
+		walk(t.child[node][1])
+	}
+	walk(sibling)
+}
+
+// --- C1/v1: the bucket representative by hash -------------------------------
+
+// c1Rank is the published rule of
+// docs/refactoring/dht/21-m1-candidate-c1.md §2.2, byte for byte:
+//
+//	H( "corsa/overlay/sim/pick/v1" ‖ NodeID(u) ‖ uint8(i) ‖ NodeID(c) )
+//
+// compared as a 32-byte big-endian number.
+//
+// ⚠️ The owner is INSIDE the hash, and that is the whole point: without it every
+// node of a bucket would rank its members identically and they would all pick
+// the same representative — a hub by construction. Whether hubs appear anyway is
+// still measured (§5.4) rather than argued from this comment.
+func c1Rank(owner nodeID, level int, candidate nodeID) [sha256.Size]byte {
+	if level < 0 || level > 255 {
+		panic(fmt.Sprintf("C1/v1 ranks levels 0…255, got %d — the rule encodes the level as "+
+			"one byte and a wider level would silently alias", level))
+	}
+
+	var buf [len(c1PickSeparator) + nodeIDLen + 1 + nodeIDLen]byte
+	at := copy(buf[:], c1PickSeparator)
+	at += copy(buf[at:], owner[:])
+	buf[at] = uint8(level)
+	at++
+	copy(buf[at:], candidate[:])
+
+	return sha256.Sum256(buf[:])
+}
+
+// c1Representative is the C1/v1 in-bucket choice: the accepted member of the
+// bucket with the smallest rank.
+//
+// ⚠️ It returns -1 when the bucket holds no acceptable member, exactly as
+// nearestInBucket does when its walk finds none — the two rules must be
+// indistinguishable in every respect but WHICH member they take, or a difference
+// in the results would be unattributable.
+//
+// ⚠️ THE COST IS THE RULE'S, not the implementation's, and it is not small. A
+// hash order gives the walk no branch to prefer, so every member of the bucket
+// has to be ranked, and the level-0 bucket is half the network: the candidate is
+// quadratic in N where its base is not. Measured on four cores at 56 ns per
+// rank: 1k ≈ 70 ms per graph, 10k ≈ 6 s, and 64k extrapolates to ≈4.5 minutes.
+// Spreading the ranking over goroutines was tried and gave ≈1.2× end to end —
+// the walk and the filter cost as much as the hash — which does not pay for
+// concurrency inside a model whose value is that it can be read. The number
+// belongs in the run registry so the owner can plan around it.
+func c1Representative(
+	trie *idTrie, ids []nodeID, scratch *[]int32, owner int32, level int, accept func(int32) bool,
+) int32 {
+	// The scratch buffer is the caller's and is reused across picks: the
+	// builder is sequential, so the level-0 bucket is not re-allocated N times.
+	members := (*scratch)[:0]
+	trie.forEachInBucket(ids[owner], level, func(candidate int32) {
+		if accept(candidate) {
+			members = append(members, candidate)
+		}
+	})
+	*scratch = members
+
+	best := int32(-1)
+	var bestRank [sha256.Size]byte
+	for _, candidate := range members {
+		rank := c1Rank(ids[owner], level, ids[candidate])
+		if best == -1 || bytes.Compare(rank[:], bestRank[:]) < 0 {
+			best, bestRank = candidate, rank
+		}
+	}
+	return best
+}
+
 // --- graph ------------------------------------------------------------------
 
 // shape is one network form of the measurement plan: how many nodes, how many
@@ -254,6 +372,11 @@ type graph struct {
 	initiated []int
 	// shortfall records WHY a node's quota went unmet, per node.
 	shortfall []quotaShortfall
+	// edges records every edge with the rule that produced it, in creation
+	// order. ⚠️ It is the only place the provenance exists: adjacency lists say
+	// who is connected to whom and nothing about which rule decided it, and
+	// §2.5 of the candidate requires the two rules to be reported apart.
+	edges []edgeRecord
 }
 
 // quotaShortfall separates the reasons a node ended below its Q quota. They are
@@ -400,6 +523,19 @@ const (
 	// that missed their quota one more attempt, spending free B rather than
 	// free d.
 	policySecondPass
+
+	// policyCandidateC1 is the candidate of
+	// docs/refactoring/dht/21-m1-candidate-c1.md §2: the initiated limit of
+	// policy 2 plus ONE further change — the member taken from a bucket is the
+	// one with the smallest c1Rank instead of the XOR-nearest one.
+	//
+	// ⚠️ Everything else is deliberately identical to policyInitiatedLimit:
+	// levels 0…d-1, the Q quota as a per-bucket preference, the ceiling B, and
+	// the leftover fill by XOR-nearest over the whole network (§2.5). That is
+	// what makes initiated-limit the comparison BASE — one rule apart, so a
+	// difference has one place to come from. The baseline stays in the runs as
+	// a control that the stand itself has not moved, not as the base.
+	policyCandidateC1
 )
 
 func (p policy) String() string {
@@ -408,9 +544,55 @@ func (p policy) String() string {
 		return "initiated-limit"
 	case policySecondPass:
 		return "second-pass"
+	case policyCandidateC1:
+		return "C1/v1"
 	default:
 		return "baseline"
 	}
+}
+
+// --- where an edge came from -------------------------------------------------
+
+// edgeOrigin says WHICH rule produced an edge. §2.5 of the candidate keeps the
+// leftover fill unchanged on purpose, so the two rules coexist in one run and
+// their results must not be read as one: "every bucket edge is born at a level
+// below d" is true of the first and false of the second by construction, and a
+// check applied to both would call a correct run defective.
+type edgeOrigin int
+
+const (
+	// edgeFromBucket — the per-level contact, quota preference included.
+	edgeFromBucket edgeOrigin = iota
+	// edgeFromLeftover — the fill that takes the XOR-nearest node of the WHOLE
+	// network for a slot no bucket could fill.
+	edgeFromLeftover
+	// edgeFromRepair — the second pass of policySecondPass. Zero under every
+	// other policy.
+	edgeFromRepair
+)
+
+func (o edgeOrigin) String() string {
+	switch o {
+	case edgeFromBucket:
+		return "bucket"
+	case edgeFromLeftover:
+		return "leftover"
+	default:
+		return "repair"
+	}
+}
+
+// edgeRecord is one edge with its provenance. The initiator is kept apart from
+// the peer because only the initiator chose: an incoming edge is not evidence
+// about the rule that runs at the receiving end.
+type edgeRecord struct {
+	Initiator int32
+	Peer      int32
+	Origin    edgeOrigin
+	// Level is the bucket level the edge was born at, or -1 where the origin
+	// has no level (the leftover fill and the repair pass both range over the
+	// whole network).
+	Level int
 }
 
 // selectionPhase says which of the three selection rules produced a moment:
@@ -522,6 +704,9 @@ func buildGraphOnIDs(
 
 	trie := newIDTrie(ids)
 
+	// Owned by the builder, reused by every C1/v1 pick: see c1Representative.
+	c1Scratch := make([]int32, 0, sh.nodes)
+
 	g := &graph{
 		ids:                  ids,
 		roles:                roles,
@@ -545,13 +730,14 @@ func buildGraphOnIDs(
 	// links this node chose, so incoming ones no longer consume it. B still
 	// caps the total either way.
 	wantsMore := func(i int32) bool {
-		if selection == policyInitiatedLimit {
+		if selection == policyInitiatedLimit || selection == policyCandidateC1 {
 			return g.initiated[i] < sh.degree
 		}
 		return degreeOf(i) < sh.degree
 	}
 
-	connect := func(u, v int32) {
+	connect := func(u, v int32, origin edgeOrigin, level int) {
+		g.edges = append(g.edges, edgeRecord{Initiator: u, Peer: v, Origin: origin, Level: level})
 		g.initiated[u]++
 		g.adjacency[u] = append(g.adjacency[u], v)
 		g.adjacency[v] = append(g.adjacency[v], u)
@@ -607,6 +793,10 @@ func buildGraphOnIDs(
 				if chooseInBucket != nil {
 					return chooseInBucket(u, level, accept)
 				}
+				// ⚠️ The candidate differs from the base HERE and nowhere else.
+				if selection == policyCandidateC1 {
+					return c1Representative(trie, ids, &c1Scratch, u, level, accept)
+				}
 				if found := trie.nearestInBucket(ids[u], level, 1, accept); len(found) == 1 {
 					return found[0]
 				}
@@ -631,7 +821,7 @@ func buildGraphOnIDs(
 						observe(selectionMoment{Node: u, Level: level, Phase: phaseQuota,
 							Chosen: structural, Available: available})
 					}
-					connect(u, structural)
+					connect(u, structural, edgeFromBucket, level)
 					continue
 				}
 				if observe != nil {
@@ -665,7 +855,7 @@ func buildGraphOnIDs(
 					Chosen: chosen, Available: available})
 			}
 			if chosen != -1 {
-				connect(u, chosen)
+				connect(u, chosen, edgeFromBucket, level)
 			}
 		}
 
@@ -715,7 +905,7 @@ func buildGraphOnIDs(
 			if g.structuralNeighbours[u] < quota && roles[found[0]] != roleStructural {
 				g.shortfall[u].LeftoverIgnoredQuota++
 			}
-			connect(u, found[0])
+			connect(u, found[0], edgeFromLeftover, -1)
 		}
 	}
 
@@ -742,7 +932,7 @@ func secondPassForUnmetQuota(
 	quota int,
 	linked []map[int32]struct{},
 	hasRoom func(int32) bool,
-	connect func(u, v int32),
+	connect func(u, v int32, origin edgeOrigin, level int),
 ) {
 	for i := range sh.nodes {
 		u := int32(i)
@@ -776,7 +966,7 @@ func secondPassForUnmetQuota(
 				g.shortfall[u].SecondPassFoundNobody++
 				break
 			}
-			connect(u, found[0])
+			connect(u, found[0], edgeFromRepair, -1)
 			g.shortfall[u].SecondPassLinks++
 
 			if g.structuralNeighbours[u] < quota && !hasRoom(u) {
@@ -890,6 +1080,19 @@ type runReport struct {
 	// give them. Both are zero for every policy but the third.
 	Links           int
 	SecondPassLinks int
+
+	// BucketLinks, LeftoverLinks and RepairLinks split Links by the rule that
+	// produced the edge (§2.5 of the candidate).
+	//
+	// ⚠️ The leftover share is a REPORTED NUMBER, not a footnote. C1/v1 changes
+	// the bucket rule and leaves the leftover fill alone, so the share of edges
+	// the leftover fill produced is the share of the graph the candidate did not
+	// touch. If it turns out to be large, the attribution of any difference is
+	// weaker than it looks — and that is a question for the owner, not a quiet
+	// correction inside the rule.
+	BucketLinks   int
+	LeftoverLinks int
+	RepairLinks   int
 	// SecondPassStuck counts nodes the repair could find nobody for;
 	// SecondPassOutOfBudget counts nodes that ran out of their own B. Two
 	// different failures, and only the second is about capacity.
@@ -930,6 +1133,21 @@ type runReport struct {
 	AtBudget   float64
 	Unfilled   float64
 
+	// MaxStructuralDegree is the largest degree of any Q node, and
+	// StructuralAtBudget the share of Q nodes sitting on the ceiling — the
+	// concentration figures of §5.4, measured on the structural half because a
+	// hub would form there first and a network-wide average would hide it.
+	//
+	// ⚠️ OF THE TWO, ONLY THE SECOND CAN SHOW A HUB. MaxStructuralDegree is
+	// bounded by B by construction, so in any run where some node reaches the
+	// ceiling it reads exactly B whatever the policy — measured: 16 under all
+	// four. It is kept because "the maximum is below B" is a real (if weak)
+	// statement about a network that is not saturated; the figure that separates
+	// the policies is StructuralAtBudget (measured at 1k×8 quota 1: 61 % under
+	// the base against 84 % under the candidate).
+	MaxStructuralDegree int
+	StructuralAtBudget  float64
+
 	// MaxInitiated is the largest number of links any node CHOSE. It must
 	// never exceed the desired degree: everything above that in MeanDegree is
 	// connections other nodes made TO it, which is how a quota concentrates
@@ -944,13 +1162,34 @@ func measure(sh shape, seed uint64, quota int, selection policy) runReport {
 	report.Base = analyseComponents(g, func(int32) bool { return true })
 	report.Structural = analyseComponents(g, func(i int32) bool { return g.roles[i] == roleStructural })
 
+	// The provenance split, taken from the edge record rather than counted
+	// alongside it: two counters of one thing drift, and this one would drift
+	// silently because both summands still add up to Links.
+	for _, edge := range g.edges {
+		switch edge.Origin {
+		case edgeFromBucket:
+			report.BucketLinks++
+		case edgeFromLeftover:
+			report.LeftoverLinks++
+		default:
+			report.RepairLinks++
+		}
+	}
+
 	structuralCounts := make([]int, 0, sh.nodes)
 	totalDegree := 0
 	met, atBudget, unfilled := 0, 0, 0
+	structuralAtBudget := 0
 
 	for i := range sh.nodes {
 		if g.roles[i] == roleStructural {
 			report.StructuralNodes++
+			if degree := len(g.adjacency[i]); degree > report.MaxStructuralDegree {
+				report.MaxStructuralDegree = degree
+			}
+			if len(g.adjacency[i]) >= sh.budget {
+				structuralAtBudget++
+			}
 		}
 		degree := len(g.adjacency[i])
 		totalDegree += degree
@@ -1007,6 +1246,18 @@ func measure(sh shape, seed uint64, quota int, selection policy) runReport {
 	report.MeanDegree = float64(totalDegree) / float64(sh.nodes)
 	report.AtBudget = float64(atBudget) / float64(sh.nodes)
 	report.Unfilled = float64(unfilled) / float64(sh.nodes)
+	if report.StructuralNodes > 0 {
+		report.StructuralAtBudget = float64(structuralAtBudget) / float64(report.StructuralNodes)
+	}
 
 	return report
+}
+
+// LeftoverShare is the share of edges the leftover fill produced, rendered so an
+// empty graph says "no data" rather than claiming a clean zero.
+func (r runReport) LeftoverShare() string {
+	if r.Links == 0 {
+		return "no data"
+	}
+	return fmt.Sprintf("%.1f%%", float64(r.LeftoverLinks)/float64(r.Links)*100)
 }

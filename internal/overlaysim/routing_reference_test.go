@@ -99,6 +99,25 @@ func hypercubeFixture() *graph {
 	return referenceGraph(values, edges)
 }
 
+// ringFixture is Э2, starFixture Э3 and twoTriplesFixture Э4. They are named
+// rather than written inline in the table below because the hop-limit
+// equivalence proof (m2_pairs_reference_test.go) needs exactly these graphs: one
+// copy, so the two files cannot drift into testing different fixtures under the
+// same names.
+func ringFixture() *graph {
+	return referenceGraph([]byte{0, 1, 2, 3, 4, 5, 6, 7},
+		[][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 0}})
+}
+
+func starFixture() *graph {
+	return referenceGraph([]byte{7, 1, 2, 4}, [][2]int{{0, 1}, {0, 2}, {0, 3}})
+}
+
+func twoTriplesFixture() *graph {
+	return referenceGraph([]byte{0, 1, 2, 8, 9, 10},
+		[][2]int{{0, 1}, {1, 2}, {0, 2}, {3, 4}, {4, 5}, {3, 5}})
+}
+
 func chainFixture() *graph {
 	values := make([]byte, 64)
 	edges := make([][2]int, 0, 63)
@@ -137,7 +156,7 @@ func TestRoutingReferenceGraphs(t *testing.T) {
 			// ⚠️ Э2 — a ring is NOT a success fixture. It is the fixture for a
 			// legitimate refusal: the plan once claimed the opposite.
 			name:        "Э2 ring of eight — legitimate dead ends",
-			graph:       referenceGraph([]byte{0, 1, 2, 3, 4, 5, 6, 7}, [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 0}}),
+			graph:       ringFixture(),
 			wantSuccess: 40,
 			wantDeadEnd: 16,
 		},
@@ -146,7 +165,7 @@ func TestRoutingReferenceGraphs(t *testing.T) {
 			// 1 to leaf 2 the only neighbour is centre 7, and XOR(7,2)=5 is
 			// FARTHER than XOR(1,2)=3.
 			name:        "Э3 star with a centre — connected yet stuck",
-			graph:       referenceGraph([]byte{7, 1, 2, 4}, [][2]int{{0, 1}, {0, 2}, {0, 3}}),
+			graph:       starFixture(),
 			wantSuccess: 9,
 			wantDeadEnd: 3,
 			wantLengths: map[int]int{1: 6, 2: 3},
@@ -155,7 +174,7 @@ func TestRoutingReferenceGraphs(t *testing.T) {
 			// Э4 — the other half of the pair: unreachable must never be
 			// reported as a dead end.
 			name:        "Э4 two disjoint triangles — no path is not a dead end",
-			graph:       referenceGraph([]byte{0, 1, 2, 8, 9, 10}, [][2]int{{0, 1}, {1, 2}, {0, 2}, {3, 4}, {4, 5}, {3, 5}}),
+			graph:       twoTriplesFixture(),
 			wantSuccess: 12,
 			wantNoPath:  18,
 			wantLengths: map[int]int{1: 12},
@@ -186,8 +205,10 @@ func TestRoutingReferenceGraphs(t *testing.T) {
 
 			if fixture.wantLengths != nil {
 				lengths := map[int]int{}
-				for _, hops := range report.HopsByPair {
-					lengths[hops]++
+				for _, result := range report.ByPair {
+					if result.Outcome == routingSuccess {
+						lengths[result.Hops]++
+					}
 				}
 				if fmt.Sprint(lengths) != fmt.Sprint(fixture.wantLengths) {
 					t.Errorf("lengths %v, want %v", lengths, fixture.wantLengths)
@@ -361,8 +382,15 @@ func TestRoutingEmptySampleSaysNoData(t *testing.T) {
 func TestRoutingComparesOnlyPairsSuccessfulInBoth(t *testing.T) {
 	t.Parallel()
 
-	full := routingReport{Pairs: 3, HopsByPair: map[int]int{0: 2, 1: 4, 2: 6}}
-	half := routingReport{Pairs: 3, HopsByPair: map[int]int{0: 3, 2: 9}} // pair 1 failed
+	success := func(hops int) routingResult {
+		return routingResult{Outcome: routingSuccess, Hops: hops}
+	}
+	deadEnd := routingResult{Outcome: routingDeadEnd, Hops: 1}
+
+	full := routingReport{Pairs: 3, ByPair: []routingResult{success(2), success(4), success(6)}}
+	// Pair 1 failed in the half — and it failed with a DEAD END rather than by
+	// being absent, which is the record the report now keeps.
+	half := routingReport{Pairs: 3, ByPair: []routingResult{success(3), deadEnd, success(9)}}
 
 	compared := compareLengths(full, half)
 	if compared.Common != 2 {
