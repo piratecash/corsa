@@ -118,6 +118,12 @@ type Service struct {
 	externalListenCached atomic.Pointer[string]
 	eventBus             *ebus.Bus
 	trust                *trustStore
+	// recordProtection names the identities whose cached identity record —
+	// their seq floor — must not be evicted: the ones this node holds a
+	// session with or has an open lookup for. Pinned by those paths
+	// themselves, read lock-free by the trust store's session-record
+	// cache. See record_protection.go.
+	recordProtection *recordProtection
 	// identityResolver is the identity lookup engine (identity_resolver.go).
 	// Immutable after NewService; all mutable state lives behind the
 	// resolver's own mutex, so the field sits outside the domain-mutex
@@ -1637,6 +1643,11 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	if err != nil {
 		panic(err)
 	}
+	// The live set the session-record cache checks before dropping an
+	// entry. Wired here, before anything can open a session or a lookup,
+	// so the cache never runs an eviction without an oracle to ask.
+	recordProtection := newRecordProtection()
+	trust.setRecordProtection(recordProtection)
 
 	known := newBoundedKnownIdentities(maxKnownIdentities)
 	boxKeys := map[string]string{}
@@ -1762,6 +1773,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	relayRetry := make(map[string]relayAttempt)
 
 	svc := &Service{
+		recordProtection: recordProtection,
 		// Default lifecycle context: replaced by Run(ctx) with the real
 		// cancellable ctx. The default prevents nil-deref in code paths
 		// (e.g. handleInboundPushMessage sender-key recovery) that derive
@@ -4131,6 +4143,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 		}
 	case "fetch_identities":
 		return s.identitiesFrame()
+	case "search_identities":
+		return s.searchIdentitiesFrame(frame.Query, frame.Exclude, frame.Limit)
 	case "fetch_contacts":
 		return s.contactsFrame()
 	case "fetch_trusted_contacts":
@@ -5724,6 +5738,76 @@ func (s *Service) identitiesFrame() protocol.Frame {
 		Type:       "identities",
 		Count:      len(parts),
 		Identities: parts,
+	}
+}
+
+// SeedKnownIdentitiesForTest records addresses in the known-identity set
+// without the discovery side effects (no IdentityAdded event, no key
+// material, no LRU promotion semantics beyond Add's own). It exists so a
+// test in another package — the address search lives half in service — can
+// give this node something to find.
+//
+// The "ForTest" suffix is the conventional Go signal that production code
+// must NOT call this: the real path is addKnownIdentity, which also
+// publishes the event the UI's staleness counter rides on.
+func (s *Service) SeedKnownIdentitiesForTest(addresses ...string) {
+	s.knowledgeMu.Lock()
+	defer s.knowledgeMu.Unlock()
+	for _, address := range addresses {
+		if address == "" {
+			continue
+		}
+		s.known.Add(address)
+	}
+}
+
+// searchIdentitiesLimit bounds what one search may return, whatever the
+// caller asked for. The UI shows a handful of rows and fetches a few more
+// than it shows so it can drop the ones it is already displaying; a cap here
+// is what keeps the answer a fixed cost no matter how broad the fragment is
+// — a one-character query matches most of a 50 000-entry set, and the node
+// decides how much of that leaves the node.
+const searchIdentitiesLimit = 64
+
+// searchIdentitiesFrame answers the in-process address search: up to limit
+// known identities containing fragment, smallest address first.
+//
+// It replaces handing the whole identity list to the UI and letting it
+// filter. That list was republished on every newly discovered identity, so
+// N discoveries cost N copies of a list of length N, and the UI's copy also
+// outlived the node's own eviction — it kept identities the LRU had already
+// dropped. The search is asked for instead, per query, and its cost is
+// bounded by this cap rather than by how much the node has ever seen.
+//
+// `exclude` is what the caller will not show whatever this answers — its
+// own address, and the identities it already lists. Applying it here, in
+// the same walk, is what keeps the cap on the ANSWER from becoming a cap on
+// the SEARCH: the node holds the whole set, so it is the only party that
+// can take the smallest matches the caller can actually use. Filtering
+// afterwards left a match invisible whenever the addresses before it were
+// ones the caller was always going to discard, and no limit, page budget or
+// cursor fixes that — they only decide how far away the cut sits.
+//
+// Local frame table only: see protocol.Frame.Query.
+func (s *Service) searchIdentitiesFrame(fragment string, exclude []string, limit int) protocol.Frame {
+	if limit <= 0 || limit > searchIdentitiesLimit {
+		limit = searchIdentitiesLimit
+	}
+	excluded := make(map[string]struct{}, len(exclude))
+	for _, address := range exclude {
+		if address != "" {
+			excluded[address] = struct{}{}
+		}
+	}
+
+	s.knowledgeMu.RLock()
+	matches := s.known.SearchByFragment(fragment, excluded, limit)
+	s.knowledgeMu.RUnlock()
+
+	return protocol.Frame{
+		Type:       "identities",
+		Count:      len(matches),
+		Identities: matches,
 	}
 }
 
@@ -8775,6 +8859,29 @@ func (s *Service) addKnownIdentity(identity domain.PeerIdentity) {
 	}
 }
 
+// noteIdentityDiscovered publishes the discovery event when the bounded set
+// actually grew. Called after knowledgeMu is released — an ebus publish
+// under a domain mutex is forbidden (CLAUDE.md), and the subscriber patches
+// UI state of its own.
+//
+// It exists because the set has more than one way in. addKnownIdentity is
+// the explicit one; addKnownBoxKey / addKnownPubKey / addKnownBoxSig also
+// insert, because a key must be reachable by the set's eviction hook or the
+// key maps stop being bounded — and those three used to insert SILENTLY. A
+// verified identity record imported through them therefore grew the node's
+// set without telling anybody, and the UI, whose address search is keyed by
+// this event's counter, went on answering from an answer taken before it.
+func (s *Service) noteIdentityDiscovered(address string, novel bool) {
+	if !novel || address == "" {
+		return
+	}
+	identity := domain.PeerIdentityFromWire(address)
+	if identity.IsZero() {
+		return
+	}
+	ebus.PublishIdentityAdded(s.eventBus, identity)
+}
+
 // suppressesSelfBoxKey reports whether box-key material for address must
 // be kept out of the contact plane (knowledge maps / trust store). True
 // only for THIS node's own identity under the relay-only DM opt-out
@@ -8802,15 +8909,15 @@ func (s *Service) addKnownBoxKey(address, boxKey string) {
 	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
 	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	defer func() {
-		s.knowledgeMu.Unlock()
-		log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
-	}()
 	// Register the RAW address in the bounded known set so the entry
 	// written below is always reachable by the set's eviction hook —
 	// the invariant that keeps s.boxKeys bounded (see NewService).
-	s.known.Add(address)
+	novel := s.known.Add(address)
 	s.boxKeys[address] = boxKey
+	s.knowledgeMu.Unlock()
+	log.Trace().Str("site", "addKnownBoxKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
+
+	s.noteIdentityDiscovered(address, novel)
 }
 
 func (s *Service) addKnownPubKey(address, pubKey string) {
@@ -8821,13 +8928,13 @@ func (s *Service) addKnownPubKey(address, pubKey string) {
 	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
 	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	defer func() {
-		s.knowledgeMu.Unlock()
-		log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
-	}()
 	// Same bounded-set registration as addKnownBoxKey — see NewService.
-	s.known.Add(address)
+	novel := s.known.Add(address)
 	s.pubKeys[address] = pubKey
+	s.knowledgeMu.Unlock()
+	log.Trace().Str("site", "addKnownPubKey").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
+
+	s.noteIdentityDiscovered(address, novel)
 }
 
 func (s *Service) addKnownBoxSig(address, boxSig string) {
@@ -8841,13 +8948,13 @@ func (s *Service) addKnownBoxSig(address, boxSig string) {
 	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_wait").Str("address", address).Msg("knowledgeMu_writer")
 	s.knowledgeMu.Lock()
 	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_held").Str("address", address).Msg("knowledgeMu_writer")
-	defer func() {
-		s.knowledgeMu.Unlock()
-		log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
-	}()
 	// Same bounded-set registration as addKnownBoxKey — see NewService.
-	s.known.Add(address)
+	novel := s.known.Add(address)
 	s.boxSigs[address] = boxSig
+	s.knowledgeMu.Unlock()
+	log.Trace().Str("site", "addKnownBoxSig").Str("phase", "lock_released").Str("address", address).Msg("knowledgeMu_writer")
+
+	s.noteIdentityDiscovered(address, novel)
 }
 
 // forgetKnownBoxKey drops the box-key half of an identity's knowledge —

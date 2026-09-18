@@ -105,19 +105,33 @@ type Frame struct {
 	// originator did not stamp a budget" and the receiver assigns
 	// defaultMessageHopBudget AS IF IT ORIGINATED the message — the
 	// value 0 is therefore never emitted on the wire.
-	Hops            int    `json:"hops,omitempty"`
-	Body            string `json:"body,omitempty"`
-	Ciphertext      string `json:"ciphertext,omitempty"`
-	ExpiresAt       int64  `json:"expires_at,omitempty"`
-	Count           int    `json:"count,omitempty"`
-	Limit           int    `json:"limit,omitempty"`
-	Status          string `json:"status,omitempty"`
-	AckType         string `json:"ack_type,omitempty"`
-	ObservedAddress string `json:"observed_address,omitempty"`
-	Challenge       string `json:"challenge,omitempty"`
-	Signature       string `json:"signature,omitempty"`
-	Code            string `json:"code,omitempty"`
-	Error           string `json:"error,omitempty"`
+	Hops       int    `json:"hops,omitempty"`
+	Body       string `json:"body,omitempty"`
+	Ciphertext string `json:"ciphertext,omitempty"`
+	ExpiresAt  int64  `json:"expires_at,omitempty"`
+	Count      int    `json:"count,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	// Query is the fragment an in-process caller is searching for. It has no
+	// network command behind it — search_identities lives only in the local
+	// frame table, because answering "which of your identities look like
+	// this" for a remote caller is an enumeration oracle over everybody this
+	// node has ever met.
+	Query string `json:"query,omitempty"`
+	// Exclude names the addresses a search_identities caller will not show
+	// whatever the answer says: its own identity, and the identities it
+	// already lists. They travel WITH the query so the node applies them
+	// before its limit — a limit applied first turns a page of addresses
+	// the caller was always going to discard into "nothing found", however
+	// large the limit is. The frame never leaves the process, so this
+	// costs a slice header rather than a serialisation.
+	Exclude         []string `json:"exclude,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	AckType         string   `json:"ack_type,omitempty"`
+	ObservedAddress string   `json:"observed_address,omitempty"`
+	Challenge       string   `json:"challenge,omitempty"`
+	Signature       string   `json:"signature,omitempty"`
+	Code            string   `json:"code,omitempty"`
+	Error           string   `json:"error,omitempty"`
 	// Details carries machine-readable payload for connection_notice-style
 	// control frames. Shape is a function of Code. Kept as json.RawMessage
 	// so the wire layer stays agnostic to per-code schemas — decode it in

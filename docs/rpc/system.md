@@ -237,10 +237,16 @@ Field notes:
   disappearing, so "nothing is holding it there" stays distinguishable
   from "this build cannot answer".
 - `subsystems[].gauges[].count` — **exact**: the live cardinality of one
-  container, read as a `len` under the lock its owner already holds. No
-  container is walked, because an accounting pass that scanned the
-  routing table under its mutex would stall the announce loop it shares
-  that mutex with.
+  container, read as a `len` under the lock its owner already holds, or
+  a byte total the owner already maintains. The few walks that do happen
+  are over containers with a bound of their own (live sessions and
+  connections, topic backlogs under their byte budget, relay states
+  under their cap, the key maps under the known-identity cap) and read
+  one field per entry. The one exception is `route_plane/
+  route_health_orphans`, which probes storage once per health entry
+  under the table's read lock: it answers an invariant a `len` cannot
+  (see below), costs low milliseconds at tens of thousands of entries,
+  and this command is one an operator runs, not one a client samples.
 - `subsystems[].gauges[].entry_bytes` — what one entry of that container
   costs: its key plus its value, and **nothing they point at**.
 - `subsystems[].gauges[].kind` — `memory` or `saturation`. A **saturation**
@@ -267,9 +273,43 @@ Field notes:
   global lock across every domain would make one timestamp tidier at the
   cost of stalling the node being measured.
 
-Two gauges are not memory figures at all and are documented here because
-they are easy to misread as ones. Both are `kind: "saturation"` and both
-contribute zero bytes:
+Several gauges are not memory figures at all and are documented here
+because they are easy to misread as ones. All are `kind: "saturation"` and
+all contribute zero bytes:
+
+- `route_plane/route_health_orphans` — health entries whose
+  `(destination, uplink)` pair has no claim in storage. The invariant is
+  `health keys ⊆ storage keys`, maintained at the claim-removal
+  chokepoints; the only correct value is `0`, and a non-zero value names
+  a cleanup path that forgot to evict. This was the 28 510-against-3 585
+  shape of the five-day relay: cap replacement displaced a claim without
+  its health entry, and the reconcile that would have caught it ran only
+  when TTL removed something.
+- `sessions/session_send_queued`, `sessions/session_inbox_queued`,
+  `sessions/conn_writer_queued` — occupancy of the per-session and
+  per-connection queues whose slots `*_slots` beside them already price.
+- `knowledge/pinned_identities` — members of `known_identities` exempt
+  from its bound: the trust-store mirror.
+- `knowledge/identity_record_cache` — records held in the session-record
+  cache, against `maxSessionIdentityRecords`. It is saturation rather than
+  memory because `identity_record_cache_bytes` beside it is the cache's own
+  complete account, structural cost included; pricing the count again by the
+  entry struct charged every header twice and lifted the knowledge floor
+  above the truth.
+- `knowledge/identity_record_cache_protected` — how many of those records
+  belong to identities with a live session or an open lookup and are
+  therefore held against both the TTL and the budget (see
+  `docs/protocol/identity-lookup.md` §4). A subset of the count above,
+  counted when the breakdown is taken rather than tracked as records come
+  and go. When it approaches the budget the cache is carrying its entire
+  working set and can no longer shed anything: the count and the bytes may
+  then sit above their ceilings, by that working set and no more.
+- `knowledge/identity_record_cache_evicted`,
+  `knowledge/identity_record_cache_expired` — **monotonic counters**, not
+  occupancies: records the session-record cache has pushed out for its
+  budget and retired for its TTL since process start. A steadily rising
+  `evicted` beside a flat `identity_record_cache` is the cache doing its
+  job under peer churn.
 
 - `datagram/reverse_local_slots` — how many of the shared local-request
   slots are occupied. Read it against `limits.reverse.per_upstream_cap`
@@ -280,6 +320,40 @@ contribute zero bytes:
   `announce_peers`: a value below it means some peer's first full sync
   has not landed. It is a subset of records `announce_peers` has already
   priced, so it must never be multiplied by anything.
+
+Gauges added with the September 2026 relay-memory work, so a reader of an
+older dump knows what a missing series means:
+
+- `route_plane/route_health_orphans` — above.
+- `delivery/transit_envelopes` now counts **only** transit envelopes —
+  messages neither from nor to this node, the ones the transit byte
+  budget governs — where it used to sum every topic backlog and so
+  counted the node's own inbox as transit. `delivery/transit_payload_bytes`
+  is their payload total, exact, to read against the 64 MiB budget;
+  `delivery/local_envelopes` is everything else in the backlogs.
+- `sessions/session_send_slots`, `sessions/session_inbox_slots`,
+  `sessions/conn_writer_slots` — the queue capacities a session or a
+  connection allocates up front (a buffered channel holds all its slots
+  from construction), priced per slot. This is the fixed per-connection
+  cost the sessions line used to leave out.
+- `sessions/relay_states`, `sessions/relay_frame_bytes` — transit
+  forwarding records (one per relayed message, ≤ 180 s, capped at 10 000)
+  and the wire bytes stashed on them for failover, exact. The stash is
+  released on the hop ack, so on a healthy mesh the bytes figure is a
+  small fraction of what the count alone would suggest.
+- `knowledge/key_material_bytes` — the base64 strings the three key maps
+  point at, which their per-entry price excludes.
+- `knowledge/trust_contacts`, `knowledge/trust_conflicts`,
+  `knowledge/trust_records` — the persistent trust store: contacts, TOFU
+  conflict markers, and identity records of the node and its contacts.
+- `knowledge/identity_record_cache`, `knowledge/identity_record_cache_bytes`,
+  `knowledge/identity_record_cache_protected` — the memory-only
+  session-record cache (4 096 records / 4 MiB / 24 h): its count, its own
+  exact byte account, and the part of it pinned by live sessions and open
+  lookups; see `docs/protocol/identity-lookup.md` §4.
+- `knowledge/identity_lookup_cooldowns` — targets whose lookup reached a
+  terminal within the last 30 s. Swept on the resolver's tick; a value
+  that only grows is the leak this gauge was added to catch.
 
 **Removed:** `announce/last_sent_entries` no longer exists. It reported
 the size of the projection retained for every peer, which was the
@@ -535,9 +609,16 @@ challenge-и.
   отвечать».
 - `subsystems[].gauges[].count` — **точное** число: живая мощность одного
   контейнера, снятая как `len` под уже удерживаемой владельцем
-  блокировкой. Ни один контейнер не обходится: проход, сканирующий
-  таблицу маршрутов под её мьютексом, застопорил бы announce-цикл, с
-  которым он этот мьютекс делит.
+  блокировкой, либо сумма байт, которую владелец и так ведёт. Немногие
+  обходы, которые всё же есть, идут по контейнерам с собственной границей
+  (живые сессии и соединения, backlog'и топиков под их байтовым бюджетом,
+  relay-состояния под их капом, key-карты под капом known identities) и
+  читают по одному полю на запись. Единственное исключение —
+  `route_plane/route_health_orphans`: он опрашивает хранилище по разу на
+  health-запись под read-lock'ом таблицы, потому что отвечает на
+  инвариант, который `len` выразить не может (см. ниже), стоит единицы
+  миллисекунд на десятках тысяч записей, и эту команду оператор запускает
+  сам, а не клиент по таймеру.
 - `subsystems[].gauges[].entry_bytes` — во что обходится одна запись:
   ключ плюс значение и **ничего из того, на что они ссылаются**.
 - `subsystems[].gauges[].kind` — `memory` или `saturation`. Gauge вида
@@ -563,8 +644,42 @@ challenge-и.
   прохода. Глобальная блокировка по всем доменам сделала бы одну метку
   времени опрятнее ценой остановки измеряемого узла.
 
-Два gauge вообще не про память и вынесены сюда, потому что их легко
-принять за память. Оба — `kind: "saturation"`, оба дают ноль байт:
+Несколько gauge вообще не про память и вынесены сюда, потому что их легко
+принять за память. Все — `kind: "saturation"`, все дают ноль байт:
+
+- `route_plane/route_health_orphans` — health-записи, у чьей пары
+  `(destination, uplink)` нет claim'а в хранилище. Инвариант —
+  `health keys ⊆ storage keys`, он держится в точках удаления claim'ов;
+  единственное правильное значение — `0`, а ненулевое называет путь
+  очистки, забывший evict. Это и была форма 28 510 против 3 585 на relay
+  с uptime 5 суток: cap-замена вытесняла claim без его health-записи, а
+  reconcile, который бы это поймал, запускался только когда TTL что-то
+  удалял.
+- `sessions/session_send_queued`, `sessions/session_inbox_queued`,
+  `sessions/conn_writer_queued` — заполненность per-session и
+  per-connection очередей, чьи слоты уже оценены соседними `*_slots`.
+- `knowledge/pinned_identities` — члены `known_identities`, на которых
+  его граница не действует: зеркало trust store.
+- `knowledge/identity_record_cache` — записей в кэше session-record'ов,
+  против `maxSessionIdentityRecords`. Это saturation, а не memory, потому
+  что соседний `identity_record_cache_bytes` — собственный полный счёт
+  кэша, включая структурную стоимость; повторная оценка count по структуре
+  записи считала каждый заголовок дважды и поднимала knowledge-пол выше
+  истины.
+- `knowledge/identity_record_cache_protected` — сколько из этих записей
+  принадлежит identity с живой сессией или открытым lookup'ом и потому
+  защищено и от TTL, и от бюджета (см. `docs/protocol/identity-lookup.md`
+  §4). Подмножество count выше, считается в момент снятия breakdown, а не
+  ведётся по мере прихода и ухода записей. Когда он приближается к бюджету,
+  кэш несёт весь свой рабочий набор и сбрасывать ему больше нечего: count и
+  bytes тогда могут стоять выше своих потолков — ровно на этот рабочий
+  набор и не более.
+- `knowledge/identity_record_cache_evicted`,
+  `knowledge/identity_record_cache_expired` — **монотонные счётчики**, а
+  не заполненность: сколько записей кэш session-record'ов вытеснил по
+  бюджету и списал по TTL с запуска процесса. Ровно растущий `evicted`
+  при плоском `identity_record_cache` — кэш делает свою работу под churn
+  пиров.
 
 - `datagram/reverse_local_slots` — сколько общих слотов локальных
   запросов занято. Читать его надо против
@@ -575,6 +690,41 @@ challenge-и.
   `announce_peers`: значение ниже означает, что чей-то первый full sync
   так и не долетел. Это подмножество записей, которые `announce_peers`
   уже оценил, поэтому умножать его ни на что нельзя.
+
+Gauge, добавленные в работе по памяти relay в сентябре 2026, — чтобы
+читатель старого дампа понимал, что означает отсутствующая серия:
+
+- `route_plane/route_health_orphans` — выше.
+- `delivery/transit_envelopes` теперь считает **только** транзитные
+  конверты — сообщения не от этого узла и не ему, те, которыми управляет
+  транзитный байтовый бюджет, — тогда как раньше суммировал все backlog'и
+  топиков и засчитывал собственный inbox узла как транзит.
+  `delivery/transit_payload_bytes` — их суммарный payload, точный, чтобы
+  читать против бюджета 64 MiB; `delivery/local_envelopes` — всё остальное
+  в backlog'ах.
+- `sessions/session_send_slots`, `sessions/session_inbox_slots`,
+  `sessions/conn_writer_slots` — ёмкости очередей, которые сессия или
+  соединение выделяет заранее (буферизованный канал держит все слоты с
+  момента создания), по цене слота. Это та фиксированная стоимость
+  соединения, которую строка sessions раньше не показывала.
+- `sessions/relay_states`, `sessions/relay_frame_bytes` — записи
+  транзитной пересылки (по одной на relayed-сообщение, ≤ 180 с, кап
+  10 000) и wire-байты, отложенные на них для failover, точно. Отложенное
+  освобождается по hop ack, поэтому на здоровом mesh байты — малая доля
+  того, что подсказал бы один только count.
+- `knowledge/key_material_bytes` — base64-строки, на которые ссылаются три
+  key-карты и которые их цена за запись исключает.
+- `knowledge/trust_contacts`, `knowledge/trust_conflicts`,
+  `knowledge/trust_records` — персистентный trust store: контакты,
+  TOFU-маркеры конфликтов и identity-записи узла и его контактов.
+- `knowledge/identity_record_cache`, `knowledge/identity_record_cache_bytes`,
+  `knowledge/identity_record_cache_protected` — memory-only кэш
+  session-record'ов (4 096 записей / 4 MiB / 24 ч): число, его собственный
+  точный счёт байт и та часть, что удерживается живыми сессиями и открытыми
+  lookup'ами; см. `docs/protocol/identity-lookup.md` §4.
+- `knowledge/identity_lookup_cooldowns` — цели, чей lookup достиг терминала
+  за последние 30 с. Подметается на tick'е resolver'а; значение, которое
+  только растёт, — та утечка, ради которой gauge и добавлен.
 
 **Удалено:** `announce/last_sent_entries` больше не существует. Он
 показывал размер проекции, удерживаемой на каждого пира, и был

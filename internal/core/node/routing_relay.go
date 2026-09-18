@@ -323,7 +323,11 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		if !s.sendFrameToAddress(s.runCtx, address, frame) {
 			continue
 		}
-		if !s.relayStates.recordFailoverRetry(state.MessageID, address) {
+		// The frame we just sent is re-stamped with the retry so the
+		// re-armed hop-ack budget has something to resend or gossip
+		// when it elapses — a late ack for the abandoned uplink may
+		// have released the stored copy while we were sending.
+		if !s.relayStates.recordFailoverRetry(state.MessageID, address, state.FrameLine) {
 			// TTL evicted between send and bookkeeping. The
 			// frame is already on the wire; the receiver will
 			// dedupe by ID if the original arrived too.

@@ -78,6 +78,14 @@ func (s *Service) onPeerSessionEstablished(peerIdentity domain.PeerIdentity, cap
 	s.peerMu.Lock()
 	log.Trace().Str("site", "onPeerSessionEstablished").Str("phase", "lock_held").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
 	s.identitySessions[peerIdentity]++
+	// The identity's cached identity record — its seq floor — must not be
+	// evictable while this session lives, and the protection has to become
+	// visible WITH the session rather than at the next maintenance pass:
+	// the session's own initial push_identity lands within milliseconds,
+	// and one import into a full cache in that window would drop the floor
+	// the push is checked against. recordProtection's mutex is a leaf and
+	// takes nothing further, so holding peerMu across it adds no ordering.
+	s.pinRecordProtection(peerIdentity)
 
 	if hasRelayCap {
 		s.identityRelaySessions[peerIdentity]++
@@ -408,6 +416,10 @@ func (s *Service) onPeerSessionClosedWithAttribution(
 	if isLastTotal {
 		delete(s.identitySessions, peerIdentity)
 	}
+	// Released in the same section that ends the session, so the two stay
+	// one fact. An open lookup for the same identity holds its own pin and
+	// keeps the record protected past this point.
+	s.releaseRecordProtection(peerIdentity)
 
 	// Minted under the same lock and from the same counter as the establish
 	// side, so the two are ordered by the transitions themselves.

@@ -158,6 +158,70 @@ A keyless (`dm: false`) record empties the contact's box fields. Deleting a
 contact deletes its records. A legacy contacts-only file migrates in place
 on first save; a torn record row is skipped with a log, never fatal.
 
+Only the owner's and the interlocutors' records are on disk. A record of
+anybody else — a session peer's initial push, a lookup answer for a target
+that is not a contact — is the session-memory class and lives in a
+memory-only cache under a fixed budget: 4 096 records, 4 MiB priced at the
+structural size plus the signed bytes and key strings each entry holds,
+24 h from acceptance, oldest accepted evicted first. It never touches the
+disk, so a stream of never-seen identities costs bounded memory and no
+I/O — an earlier build persisted every one of them, and a relay carried
+the records of every peer it had ever held.
+
+Neither the TTL nor the budget may drop the record of an identity the node
+is **currently talking to or asking about**: the records of identities
+with a live session, and of the targets of open lookups, are held against
+both. That set is the cache's correctness boundary rather than a
+performance choice — the record IS the seq floor, and a floor that
+disappears under a live peer would let that peer's own earlier record, the
+predecessor of a revocation, merge as `inserted` and bring a withdrawn box
+key back. A plain lookup cannot supply the floor itself: `min_seq` starts
+at zero and only recovery flows raise it, so while an answer is awaited
+the cached record is what the answer is checked against.
+
+The set is maintained by the **events themselves**, not sampled: the hold
+is taken inside the very step that makes the session or the lookup real —
+the same critical section that counts the session, the same one that opens
+the resolution — and released by its counterpart. It has to be, because a
+periodically sampled set is stale exactly where it matters: a session that
+comes up between two samples would be unprotected for the rest of the
+interval, its own `push_identity` arrives within milliseconds of the
+session, and a single unrelated import into a full cache in that window
+takes the floor away. Holds are counted, because the two sources overlap
+and outlive each other independently — a peer may hold several sessions,
+and a lookup for the same address can still be open when the last of them
+closes. The maintenance pass recomputes the holds from the live sources
+and replaces them, so a hold whose release was missed, or a release that
+ran twice, survives at most one pass.
+
+An eviction does not consult the set and then delete — it deletes INSIDE
+it, with the check and the removal in one critical section. Asking first
+and removing afterwards leaves the interleaving where the hold is taken in
+between and the record is deleted under a session that is by then live,
+and re-reading the answer only narrows that gap. When a hold loses the
+race outright, the record was already gone when the session began, which
+is the ordinary state of a node that has never met the peer — what must
+not happen is a floor disappearing from under a session that already had
+one. The maintenance pass carries a generation for the same reason: it
+installs its recomputed holds only if nothing pinned or released while it
+was gathering them, so a session that opened during the gather is never
+overwritten by counts that predate it.
+
+The set is bounded by what fills it — live sessions and open lookups — so
+a fully protected cache exceeds its budget by that working set and no
+more, and reports it (`identity_record_cache_protected`).
+
+What the cache gives up when an unprotected entry ages out or is evicted
+is the seq gate for an identity the node has stopped talking to, which the
+freshness rules of §6.1 and the target proof cover — the only party that
+can present a record of an address over a session or in a lookup answer is
+its owner. Trusting an identity promotes its cached record to the disk set;
+forgetting an address drops its record from either. A file written by a
+build that persisted session-peer records loads without those rows and is
+rewritten without them on the first save; contacts and their records are
+untouched. The cache reports its count, bytes, evictions and expirations in
+`getResourceBreakdown` (`knowledge/identity_record_cache*`).
+
 ### 5. Identity backup
 
 The identity file keeps both private keys. The versioned **full backup**
@@ -356,10 +420,10 @@ conflict closes the session (the owner must bump seq), and a second
 rate-limit breach (floor: one push per minute per session, keyed by
 peer + connection so a reconnect's mandatory initial push never inherits
 a previous session's violations) inside one window
-closes it too. Records received from session peers are persisted in the
-trust store — a superset of the design's session-memory model; the seq gate
-and the §6.1 confirmation-freshness rules of the transport spec cover the
-staleness this introduces.
+closes it too. Records received from session peers are held as the
+design's session memory — the bounded memory-only cache of §4 — and never
+persisted; the seq gate and the §6.1 confirmation-freshness rules of the
+transport spec cover the staleness this introduces.
 
 **The initiator engine** (single-flight per target, cooldown 30 s after a
 terminal): phase 1 sends at t = 0/1/4/12/32 s with a fresh 20-byte label
@@ -380,11 +444,23 @@ this table alone after a restart. A verified answer terminates the
 resolution on merge outcomes inserted / replaced / duplicate; stale,
 conflict and a record below `min_seq` keep it running.
 
-**Legacy bridge.** `fetch_contacts` behaviour is unchanged; the wire
-surface and its sync legs are marked deprecated
+**Legacy bridge.** `fetch_contacts` behaviour on the wire is unchanged;
+the surface and its sync legs are marked deprecated
 (`TODO(fetch-contacts-floor)`) and retire only when nothing is left to
 bridge, per recipient or behind a new mandatory floor — never on a
-telemetric share.
+telemetric share. The per-recipient retirement is in force at session
+setup: the fetch that every new session used to pay is skipped when the
+peer's welcome declared both `push_identity` and `get_identity` and this
+node is itself a discovery endpoint — a fact about declared features, read
+from the dtype set fixed for the session (§6.1), never inferred from a
+version number. With such a peer the initial push has delivered its own
+record and any other identity is one addressed lookup away; what the bulk
+fetch added on top was third-party key material learned before anybody
+asked, which is the accumulation the bounded knowledge maps were carrying.
+A peer that declares neither type, or an absent field, still gets the
+epidemic. The targeted recovery legs — the sender-key sync a keyless DM
+triggers, the fresh-dial `syncPeer` — are not part of this gate: they fetch
+for one named sender, on demand.
 
 #### 6.1 Why the request type is visible, and what padding cannot do
 
@@ -820,6 +896,69 @@ Keyless-запись (`dm: false`) очищает box-поля контакта.
 первом сохранении; порванная строка записи пропускается с логом и не
 фатальна.
 
+На диске лежат только записи владельца и собеседников. Запись кого угодно
+ещё — initial push пира сессии, ответ на lookup цели, которая не контакт, —
+это класс session memory, и живёт она в memory-only кэше с фиксированным
+бюджетом: 4 096 записей, 4 MiB по цене структуры плюс подписанные байты и
+строки ключей каждой записи, 24 ч от принятия, первой вытесняется самая
+давно принятая. Диска кэш не касается, поэтому поток никогда не виденных
+identity стоит ограниченную память и ноль I/O — прежняя сборка персистила
+каждую из них, и relay носил записи всех пиров, что у него когда-либо были.
+
+Ни TTL, ни бюджет не вправе удалить запись identity, с которой узел
+**говорит прямо сейчас или о которой спрашивает**: записи identity с живой
+сессией и целей открытых lookup'ов защищены от обоих. Это граница
+корректности кэша, а не оптимизация — запись И ЕСТЬ seq-floor, и floor,
+исчезнувший под живым пиром, позволил бы собственной более ранней записи
+этого пира, предшественнику отзыва, смержиться как `inserted` и вернуть
+отозванный box-ключ. Сам lookup floor не даёт: `min_seq` стартует с нуля и
+поднимается только recovery-потоками, поэтому пока ответ ждут, именно
+кэшированная запись — то, против чего ответ проверяется.
+
+Множество ведут САМИ СОБЫТИЯ, а не периодический снимок: удержание берётся
+внутри того самого шага, который делает сессию или lookup реальными — в той
+же критической секции, что считает сессию, и в той же, что открывает
+resolution, — и снимается парной операцией. Иначе нельзя: периодически
+снимаемое множество устаревает ровно там, где это важно — сессия,
+поднявшаяся между снимками, осталась бы незащищённой до конца интервала, её
+собственный `push_identity` приходит через миллисекунды после сессии, и один
+посторонний импорт в заполненный кэш в этом окне уносит floor. Удержания
+считаются, потому что два источника пересекаются и переживают друг друга
+независимо: у пира может быть несколько сессий, а lookup по тому же адресу
+может быть ещё открыт, когда закрылась последняя из них. Maintenance-проход
+пересчитывает удержания по живым источникам и заменяет их, поэтому
+удержание с пропущенным release — или release, отработавший дважды, —
+живёт не дольше одного прохода.
+
+Вытеснение не спрашивает множество, а затем удаляет — оно удаляет ВНУТРИ
+него, проверка и удаление идут одной критической секцией. Схема «спросить,
+потом удалить» оставляет интерливинг, в котором удержание берётся между
+этими шагами, и запись удаляется под сессией, которая к этому моменту уже
+живая; перечитывание ответа лишь сужает щель. Если удержание проигрывает
+гонку полностью, запись пропала ещё до начала сессии — это обычное
+состояние узла, никогда не встречавшего пира; чего быть не должно —
+исчезновения floor'а ИЗ-ПОД сессии, у которой он уже был.
+Maintenance-проход несёт поколение по той же причине: он ставит свои
+пересчитанные удержания, только если за время сбора никто не брал и не
+снимал защиту, — сессия, открывшаяся во время сбора, не будет затёрта
+счётчиками, которые старше её.
+
+Множество ограничено тем, что его наполняет — живыми сессиями и открытыми
+lookup'ами, — поэтому полностью защищённый кэш превышает свой бюджет ровно
+на этот рабочий набор и не более, и сообщает об этом
+(`identity_record_cache_protected`).
+
+Что кэш отдаёт при старении или вытеснении незащищённой записи — seq-гейт
+для identity, с которой узел говорить перестал, и это покрывают правила
+свежести §6.1 и target proof: единственный, кто может предъявить запись
+адреса по сессии или в ответе на lookup, — её владелец. Доверие identity поднимает её
+кэшированную запись в дисковый набор; забывание адреса удаляет запись
+откуда бы то ни было. Файл, записанный сборкой, персистившей записи пиров
+сессий, загружается без этих строк и при первом сохранении переписывается
+без них; контакты и их записи не трогаются. Кэш отдаёт число записей, байты,
+вытеснения и истечения в `getResourceBreakdown`
+(`knowledge/identity_record_cache*`).
+
 ### 5. Backup identity
 
 Файл identity хранит оба приватных ключа. Versioned **full backup** несёт
@@ -1013,10 +1152,10 @@ handshake реконнекта разнесёт запись заново. Пр�
 no-op, конфликт одинакового seq закрывает сессию (владелец обязан бампнуть
 seq), повторное нарушение rate-limit (пол: один push в минуту на сессию,
 ключ — пир + соединение, чтобы обязательный initial push после реконнекта
-не наследовал нарушения прошлой сессии) в одном окне — тоже закрытие. Записи от пиров сессий персистятся в trust
-store — надмножество session-memory-модели дизайна; вносимую этим
-несвежесть покрывают seq-гейт и правила свежести подтверждений §6.1
-транспортной спеки.
+не наследовал нарушения прошлой сессии) в одном окне — тоже закрытие. Записи от пиров сессий держатся как
+session memory дизайна — ограниченный memory-only кэш §4 — и не
+персистятся; вносимую этим несвежесть покрывают seq-гейт и правила свежести
+подтверждений §6.1 транспортной спеки.
 
 **Движок инициатора** (single-flight на цель, cooldown 30 с после
 терминала): фаза 1 шлёт на t = 0/1/4/12/32 с со свежим 20-байтовым ярлыком
@@ -1037,10 +1176,23 @@ refcount-семантику: снятие одной причины ничего
 replaced / duplicate; stale, conflict и запись ниже `min_seq` оставляют её
 работать.
 
-**Легаси-мост.** Поведение `fetch_contacts` не меняется; wire-поверхность и
-sync-ноги помечены deprecated (`TODO(fetch-contacts-floor)`) и выпиливаются
-только когда мостить станет некого — per-recipient либо за новым
-обязательным floor, никогда по телеметрической доле.
+**Легаси-мост.** Поведение `fetch_contacts` на проводе не меняется;
+поверхность и sync-ноги помечены deprecated (`TODO(fetch-contacts-floor)`)
+и выпиливаются только когда мостить станет некого — per-recipient либо за
+новым обязательным floor, никогда по телеметрической доле. Per-recipient
+отказ действует при установке сессии: fetch, который платила каждая новая
+сессия, пропускается, когда welcome пира объявил и `push_identity`, и
+`get_identity`, а этот узел сам является discovery-endpoint'ом — факт об
+объявленных функциях, читаемый из набора dtypes, фиксированного на сессию
+(§6.1), а не выведенный из номера версии. С таким пиром initial push уже
+доставил его собственную запись, а любая другая identity — в одном
+адресном lookup; что массовый fetch добавлял сверх этого — ключи третьих
+лиц, выученные до того, как их кто-то спросил, то есть ровно то накопление,
+которое несли ограниченные knowledge-карты. Пир, не объявивший ни одного из
+типов, или отсутствующее поле — по-прежнему получает эпидемию. Адресные
+ноги восстановления — sync ключей отправителя по DM без ключей, fresh-dial
+`syncPeer` — под этот гейт не попадают: они запрашивают одного названного
+отправителя по требованию.
 
 #### 6.1 Почему тип запроса виден и чего паддинг не может
 

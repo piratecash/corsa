@@ -9922,3 +9922,62 @@ func TestWriteJSONFrameSyncDropsOnUnregisteredConn(t *testing.T) {
 		t.Fatalf("expected unregistered_write error log; got: %s", out)
 	}
 }
+
+// search_identities is the in-process answer that replaced handing the UI
+// the whole identity list: a fragment in, at most a capped number of
+// matching addresses out, smallest first.
+func TestSearchIdentitiesFrame(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+
+	svc.knowledgeMu.Lock()
+	for _, address := range []string{"aa01", "aa02", "bb03"} {
+		svc.known.Add(address)
+	}
+	svc.knowledgeMu.Unlock()
+
+	// The node is a member of its own set, and its address is a fresh
+	// random fingerprint per run — roughly one run in seven contains "aa"
+	// somewhere. Every real caller excludes itself (DMRouter does, always),
+	// so the test asks the way they ask; without it this reads as a flaky
+	// search rather than as a test that forgot the node is in there too.
+	self := []string{svc.identity.Address}
+
+	reply := svc.HandleLocalFrame(protocol.Frame{Type: "search_identities", Query: "aa", Limit: 10, Exclude: self})
+	if reply.Type != "identities" {
+		t.Fatalf("reply type = %q, want identities", reply.Type)
+	}
+	if len(reply.Identities) != 2 || reply.Identities[0] != "aa01" || reply.Identities[1] != "aa02" {
+		t.Fatalf("identities = %v, want the two aa addresses in order", reply.Identities)
+	}
+	if reply.Count != len(reply.Identities) {
+		t.Fatalf("count = %d, identities = %d", reply.Count, len(reply.Identities))
+	}
+
+	// And the exclusion is honoured for an address that certainly matches:
+	// the node's own, asked for by a fragment taken from it.
+	reply = svc.HandleLocalFrame(protocol.Frame{Type: "search_identities", Query: svc.identity.Address[:6], Limit: 10, Exclude: self})
+	for _, address := range reply.Identities {
+		if address == svc.identity.Address {
+			t.Fatalf("an excluded address came back: %v", reply.Identities)
+		}
+	}
+
+	// The handler owns the ceiling: a caller asking for more than the node
+	// is willing to enumerate gets the node's answer, not its own.
+	svc.knowledgeMu.Lock()
+	for i := range searchIdentitiesLimit * 2 {
+		svc.known.Add(fmt.Sprintf("cc%04d", i))
+	}
+	svc.knowledgeMu.Unlock()
+	reply = svc.HandleLocalFrame(protocol.Frame{Type: "search_identities", Query: "cc", Limit: 1_000_000, Exclude: self})
+	if len(reply.Identities) != searchIdentitiesLimit {
+		t.Fatalf("identities = %d, want the handler's cap %d", len(reply.Identities), searchIdentitiesLimit)
+	}
+
+	// An absent limit is the cap too, not "unlimited".
+	reply = svc.HandleLocalFrame(protocol.Frame{Type: "search_identities", Query: "cc", Exclude: self})
+	if len(reply.Identities) != searchIdentitiesLimit {
+		t.Fatalf("identities without a limit = %d, want the cap", len(reply.Identities))
+	}
+}

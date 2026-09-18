@@ -1353,6 +1353,37 @@ snapRecipients()
       └── Cleaned on RemovePeer
 ```
 
+### Address search
+
+Typing in the new-recipient field does not filter a list the UI holds — it asks the node.
+
+```
+resolveIdentitySearchRows (layout)
+  └── identitySearchMatches(query, status.KnownIDsVersion)
+      ├── holds an answer for this query at this version → use it
+      ├── this query already in flight → draw nothing, do not ask again
+      └── otherwise → go DMRouter.SearchIdentities(query)
+                       ├── search_identities with the exclusions (self,
+                       │   existing conversations) IN the request, so the
+                       │   node applies them before its limit
+                       └── on arrival: keep only if the request generation
+                           is still current, then invalidate() the window
+  └── searchKnownIdentities(matches, ReachableIDs, recipients, self, query)
+      └── cap to identitySearchMaxRows (4)
+```
+
+The list used to live in `NodeStatus.KnownIDs`: every identity the node had ever observed, republished into the UI snapshot on every new discovery and filtered in the layout pass. That cost a copy of the whole list per discovery — quadratic over a node's lifetime — and the copy had no eviction of its own, so the sidebar went on offering identities the node's LRU had dropped. `NodeStatus` now carries `KnownIDsVersion`, a counter, and the search is a question for the node (`search_identities`, in-process only, capped at 64 matches).
+
+What stayed in the UI, because the node has no opinion about it: the routed identities (`ReachableIDs`) as a second source, the exclusion of the user's own address and of identities already listed as conversations, the candidate row for a complete address nobody has heard of, the sort by address and the four-row cap.
+
+Two orderings the window owns: a query already in flight is not asked again (a render loop would otherwise issue a request per frame), and an answer whose request generation is no longer current is dropped rather than shown for a query the user has since edited past.
+
+The exclusions travel WITH the query, and that is what keeps the cap on the answer from becoming a cap on the search: the node holds the whole set, so only it can take the smallest matches the caller can actually use. Filtering afterwards — at any limit, with or without paging — leaves a match invisible whenever the addresses before it are ones the UI was always going to discard. Nothing is cached in the router: the window already holds the answer it is drawing and re-asks when its key changes, so a second cache could only let an answer outlive it — which it did, for identities learned through a path that did not announce itself.
+
+The window's key has three parts, because three different things can make an answer untrue: the query, `KnownIDsVersion`, and a membership digest of the conversations the answer was filtered against. The third is what makes a deleted conversation put its address back into the search — deleting one moves neither of the other two. The digest is membership-only (`peerSetDigest`), so an arriving message reordering the sidebar costs nothing, and the answer records the keys it was ASKED with rather than whatever is current when it lands.
+
+`KnownIDsVersion` advances on every path that grows the node's known set, including the key-map imports that used to grow it silently. Eviction does not advance it: a held answer may therefore name an identity the node has since forgotten, which costs nothing — the address stays valid and opening the chat is what starts key discovery, exactly as it does for an address pasted from outside.
+
 ### UIEvent types
 
 | Event | Trigger | UI effect |
@@ -2936,6 +2967,37 @@ snapRecipients()
       ├── Обновляется входящими сообщениями в реальном времени
       └── Очищается при RemovePeer
 ```
+
+### Поиск по адресу
+
+Набор текста в поле нового получателя не фильтрует список, который держит UI, — он спрашивает ноду.
+
+```
+resolveIdentitySearchRows (layout)
+  └── identitySearchMatches(query, status.KnownIDsVersion)
+      ├── держим ответ на этот запрос при этой версии → используем
+      ├── этот запрос уже в полёте → строк не рисуем, повторно не спрашиваем
+      └── иначе → go DMRouter.SearchIdentities(query)
+                   ├── search_identities с исключениями (свой адрес,
+                   │   существующие диалоги) В САМОМ запросе, чтобы нода
+                   │   применила их до своего лимита
+                   └── по приходу: оставляем, только если поколение запроса
+                       ещё актуально, затем invalidate() окна
+  └── searchKnownIdentities(matches, ReachableIDs, recipients, self, query)
+      └── обрезка до identitySearchMaxRows (4)
+```
+
+Раньше список жил в `NodeStatus.KnownIDs`: все identity, что нода когда-либо наблюдала, переиздавались в UI-снимок на каждое новое обнаружение и фильтровались в layout-проходе. Это стоило копии всего списка на обнаружение — квадратично за время жизни ноды, — а у копии не было собственного вытеснения, поэтому sidebar продолжал предлагать identity, выброшенные LRU ноды. Теперь `NodeStatus` несёт `KnownIDsVersion` — счётчик, а поиск стал вопросом к ноде (`search_identities`, только внутри процесса, не более 64 совпадений).
+
+Что осталось на стороне UI, потому что у ноды об этом мнения нет: маршрутизируемые identity (`ReachableIDs`) как второй источник, исключение собственного адреса и identity, уже показанных как диалоги, строка-кандидат для полного адреса, о котором никто не слышал, сортировка по адресу и ограничение в четыре строки.
+
+Два порядка, за которые отвечает окно: запрос, уже находящийся в полёте, повторно не задаётся (иначе render-цикл выдавал бы по запросу на кадр), а ответ, чьё поколение запроса больше не актуально, отбрасывается, а не показывается для запроса, который пользователь уже сменил.
+
+Исключения едут ВМЕСТЕ с запросом, и именно это не даёт ограничению ответа стать ограничением поиска: весь набор держит нода, поэтому только она может взять наименьшие совпадения, которыми вызывающая сторона действительно может воспользоваться. Фильтрация после — при любом лимите, с пагинацией или без — оставляет совпадение невидимым всякий раз, когда адреса перед ним UI всё равно собирался выбросить. В роутере ничего не кэшируется: окно и так держит ответ, который рисует, и переспрашивает при смене своего ключа, поэтому второй кэш мог бы только дать ответу пережить его — что он и делал для identity, выученных путём, который о себе не сообщал.
+
+Ключ окна состоит из трёх частей, потому что сделать ответ неверным могут три разные вещи: запрос, `KnownIDsVersion` и digest состава диалогов, против которых ответ был отфильтрован. Третья часть и возвращает адрес удалённого диалога в поиск — при удалении первые две не меняются. Digest считает только состав (`peerSetDigest`), поэтому пришедшее сообщение, переупорядочившее sidebar, ничего не стоит, а ответ запоминает ключи, с которыми он был ЗАПРОШЕН, а не те, что актуальны в момент его прихода.
+
+`KnownIDsVersion` растёт на каждом пути, который увеличивает известный ноде набор, включая импорт ключевого материала, который раньше увеличивал его молча. Вытеснение счётчик не двигает: удерживаемый ответ поэтому может назвать identity, которую нода уже забыла, и это ничего не стоит — адрес остаётся валидным, а открытие чата как раз и запускает поиск ключей, ровно как для адреса, вставленного извне.
 
 ### Типы UIEvent
 

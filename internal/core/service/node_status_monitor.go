@@ -29,7 +29,7 @@ type NodeStatusProvider interface {
 	// PeerHealthSnapshot returns an independent copy of just the PeerHealth
 	// slice. Cheap counterpart to NodeStatus() for the periodic traffic
 	// batch, which only mutates per-peer byte counters and must not deep-
-	// copy KnownIDs / ReachableIDs / contacts / messages to refresh them.
+	// copy ReachableIDs / contacts / messages to refresh them.
 	PeerHealthSnapshot() []PeerHealth
 
 	// ReachableIDsSnapshot returns an independent copy of just the
@@ -54,9 +54,11 @@ type NodeStatusProvider interface {
 	// removes the choice rather than documenting it.
 	PresenceSnapshot() (domain.PresenceSet, uint64)
 
-	// KnownIDsSnapshot returns an independent copy of just the KnownIDs
-	// slice. Cheap counterpart to NodeStatus() for identity-added events.
-	KnownIDsSnapshot() []string
+	// KnownIDsVersion returns the counter that advances on every newly
+	// discovered identity. Cheap counterpart to NodeStatus() for
+	// identity-added events, and the cache key of the on-demand address
+	// search that replaced the list this used to hand out.
+	KnownIDsVersion() uint64
 
 	// AggregateStatusSnapshot returns an independent clone of the
 	// AggregateStatus pointer plus the CheckedAt timestamp (the two fields
@@ -100,7 +102,7 @@ const (
 	// seen", the other is "are they here now", and they change on different
 	// events.
 	NodeStatusDomainContactPresence
-	// NodeStatusDomainKnownIDs — discovered identity list (identity added).
+	// NodeStatusDomainKnownIDs — the discovery counter (identity added).
 	NodeStatusDomainKnownIDs
 	// NodeStatusDomainAggregate — AggregateStatus + CheckedAt (aggregate
 	// status / version policy).
@@ -309,7 +311,7 @@ func (m *NodeStatusMonitor) ResourceUsageSnapshot() *ResourceUsage {
 // PeerHealthSnapshot returns an independent copy of just the PeerHealth
 // slice. Cheap counterpart to NodeStatus() for the periodic traffic batch:
 // the subscriber patches this single slice on the cached snapshot instead
-// of deep-copying KnownIDs / ReachableIDs / contacts / messages that the
+// of deep-copying ReachableIDs / contacts / messages that the
 // traffic update never touched. PeerHealth elements are value types
 // (scalars + domain.OptionalTime), so the append-copy is fully independent
 // of monitor-owned memory, matching the deepCopyNodeStatus contract.
@@ -325,7 +327,7 @@ func (m *NodeStatusMonitor) PeerHealthSnapshot() []PeerHealth {
 // ReachableIDsSnapshot returns an independent copy of just the ReachableIDs
 // map. Cheap counterpart to NodeStatus() for route-table changes: the
 // subscriber patches this single map instead of deep-copying PeerHealth /
-// KnownIDs / contacts / messages the route change never touched. The values
+// contacts / messages the route change never touched. The values
 // are bools, so the per-entry copy is fully independent of monitor-owned
 // memory, matching the deepCopyNodeStatus contract.
 // PresenceSnapshot returns an independent copy of the per-contact presence.
@@ -362,18 +364,17 @@ func (m *NodeStatusMonitor) ReachableIDsSnapshot() map[domain.PeerIdentity]bool 
 	return clone
 }
 
-// KnownIDsSnapshot returns an independent copy of just the KnownIDs slice.
-// Cheap counterpart to NodeStatus() for identity-added events: the
-// subscriber patches this single slice instead of deep-copying PeerHealth /
-// ReachableIDs / contacts / messages. Elements are strings (immutable), so
-// the append-copy is fully independent of monitor-owned memory.
-func (m *NodeStatusMonitor) KnownIDsSnapshot() []string {
+// KnownIDsVersion returns the discovery counter. Cheap counterpart to
+// NodeStatus() for identity-added events: the subscriber patches this one
+// scalar instead of deep-copying PeerHealth / ReachableIDs / contacts /
+// messages — and instead of the identity list that used to live here,
+// which was copied in full on every discovery and had to be, because the
+// UI searched it. The search moved to the node; the counter is what tells
+// a cached answer it is stale.
+func (m *NodeStatusMonitor) KnownIDsVersion() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.status.KnownIDs == nil {
-		return nil
-	}
-	return append([]string(nil), m.status.KnownIDs...)
+	return m.status.KnownIDsVersion
 }
 
 // AggregateStatusSnapshot returns an independent clone of the AggregateStatus
@@ -631,28 +632,30 @@ func (m *NodeStatusMonitor) subscribeEvents() {
 		m.notifyChanged()
 	})
 
-	// New identity discovered — append to local list.
+	// New identity discovered — advance the counter that tells a cached
+	// address-search answer it may be stale.
+	//
+	// This handler used to keep the identity list itself: scan the slice
+	// for the address, append, and have DMRouter copy the whole thing on
+	// the way to the UI. That is O(list) twice per discovery, so a node
+	// meeting N identities paid O(N²) to maintain a list whose only
+	// consumer was a substring search. The search is the node's question
+	// now (search_identities); the counter carries no set, so nothing here
+	// can drift from what the node actually still remembers — the old list
+	// did, because the node's LRU evicts and this copy never did.
+	//
+	// The node publishes only on first sight (addKnownIdentity), so every
+	// event here is a real discovery and the dedup scan has nothing left
+	// to do.
 	m.eventBus.Subscribe(ebus.TopicIdentityAdded, func(identity domain.PeerIdentity) {
-		address := identity.String()
+		if identity.IsZero() {
+			return
+		}
 		m.mu.Lock()
-		found := false
-		for _, id := range m.status.KnownIDs {
-			if id == address {
-				found = true
-				break
-			}
-		}
-		changed := !found
-		if changed {
-			m.status.KnownIDs = append(m.status.KnownIDs, address)
-		}
+		m.status.KnownIDsVersion++
 		m.mu.Unlock()
 
-		// Only notify when the identity was actually new — a duplicate add
-		// must not fire a redundant snapshot rebuild.
-		if changed {
-			m.notifyPartial(NodeStatusDomainKnownIDs)
-		}
+		m.notifyPartial(NodeStatusDomainKnownIDs)
 	})
 
 	// Capture session started — flip Recording* on the matching row so the
@@ -1416,7 +1419,6 @@ func (m *NodeStatusMonitor) mergeNodeStatusLocked(s NodeStatus) {
 	// values for any keys that overlap (they are fresher).
 	m.status.PeerHealth = mergePeerHealth(m.status.PeerHealth, s.PeerHealth, m.ebusHealthSeeded)
 	m.status.Contacts = mergeContacts(m.status.Contacts, s.Contacts)
-	m.status.KnownIDs = mergeKnownIDs(m.status.KnownIDs, s.KnownIDs)
 	m.status.AggregateStatus = mergeAggregateStatus(
 		m.status.AggregateStatus, s.AggregateStatus,
 		m.ebusAggregateCountersSeeded, m.ebusVersionPolicySeeded,
@@ -1798,27 +1800,6 @@ func newerOptional(current, candidate domain.OptionalTime) domain.OptionalTime {
 		return candidate
 	}
 	return current
-}
-
-// mergeKnownIDs appends probe IDs that are not already in the ebus list.
-func mergeKnownIDs(ebusIDs, probeIDs []string) []string {
-	if len(ebusIDs) == 0 {
-		return probeIDs
-	}
-	if len(probeIDs) == 0 {
-		return ebusIDs
-	}
-	existing := make(map[string]struct{}, len(ebusIDs))
-	for _, id := range ebusIDs {
-		existing[id] = struct{}{}
-	}
-	merged := append([]string(nil), ebusIDs...)
-	for _, id := range probeIDs {
-		if _, ok := existing[id]; !ok {
-			merged = append(merged, id)
-		}
-	}
-	return merged
 }
 
 // mergeCaptureSessions combines ebus-driven CaptureSession state with a

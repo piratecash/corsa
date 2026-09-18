@@ -373,3 +373,89 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 		t.Fatal("expected NewPeersDiscovered hint in hintEvents, but channel was empty")
 	}
 }
+
+// TestSyncPeerSession_SkipsContactSyncForDiscoveryPeer: with a peer that
+// declared the identity-discovery types in its welcome, and this node an
+// endpoint of the datagram plane, session setup sends no fetch_contacts —
+// the initial push_identity and the addressed get_identity cover what the
+// epidemic used to. The decision is made on the DECLARED dtype set, not on
+// a protocol version.
+func TestSyncPeerSession_SkipsContactSyncForDiscoveryPeer(t *testing.T) {
+	t.Parallel()
+
+	svc := newDatagramLayerService(t, true)
+	if !svc.localDatagramAdvertise().Endpoint {
+		t.Fatal("test setup: node is not a datagram endpoint")
+	}
+
+	local, remote := net.Pipe()
+	defer func() { _ = local.Close() }()
+	session := &peerSession{
+		address: domain.PeerAddress("10.0.0.60:9000"),
+		conn:    local,
+		metered: netcore.NewMeteredConn(local),
+		inboxCh: make(chan protocol.Frame, 16),
+		errCh:   make(chan error, 1),
+		sendCh:  make(chan peerSendItem, 16),
+		declarations: netcore.HandshakeDeclarations{
+			DeclaredDTypes: domain.ExplicitDTypes([]domain.DType{domain.DTypeGetIdentity, domain.DTypePostIdentity, domain.DTypePushIdentity}),
+		},
+	}
+	attachTestNetCore(svc, session)
+
+	// A reply is provided so that a regression (the fetch being sent)
+	// shows up as a failed assertion rather than a hung request.
+	responses := map[string]protocol.Frame{"fetch_contacts": {Type: "contacts"}}
+	receivedCh := make(chan []string, 1)
+	go func() { receivedCh <- mockResponder(t, remote, session, responses) }()
+
+	if err := svc.syncPeerSession(session, false, peerExchangePathSessionCM); err != nil {
+		t.Fatalf("syncPeerSession: %v", err)
+	}
+	_ = local.Close()
+	if received := <-receivedCh; len(received) != 0 {
+		t.Fatalf("discovery-capable peer still received %v, want no legacy sync", received)
+	}
+}
+
+// TestSyncPeerSession_KeepsContactSyncWithoutDiscovery: a peer that declared
+// the plane but not the discovery types, or no dtypes at all, still gets the
+// bridge — support is read from the declaration, and an absent field names
+// no type.
+func TestSyncPeerSession_KeepsContactSyncWithoutDiscovery(t *testing.T) {
+	t.Parallel()
+
+	for name, declared := range map[string]domain.DeclaredDTypeSet{
+		"absent":         domain.AbsentDTypes(),
+		"push_only":      domain.ExplicitDTypes([]domain.DType{domain.DTypePushIdentity}),
+		"unrelated_only": domain.ExplicitDTypes([]domain.DType{"presence_probe"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			svc := newDatagramLayerService(t, true)
+			local, remote := net.Pipe()
+			defer func() { _ = local.Close() }()
+			session := &peerSession{
+				address:      domain.PeerAddress("10.0.0.61:9000"),
+				conn:         local,
+				metered:      netcore.NewMeteredConn(local),
+				inboxCh:      make(chan protocol.Frame, 16),
+				errCh:        make(chan error, 1),
+				sendCh:       make(chan peerSendItem, 16),
+				declarations: netcore.HandshakeDeclarations{DeclaredDTypes: declared},
+			}
+			attachTestNetCore(svc, session)
+			responses := map[string]protocol.Frame{"fetch_contacts": {Type: "contacts"}}
+			receivedCh := make(chan []string, 1)
+			go func() { receivedCh <- mockResponder(t, remote, session, responses) }()
+
+			if err := svc.syncPeerSession(session, false, peerExchangePathSessionCM); err != nil {
+				t.Fatalf("syncPeerSession: %v", err)
+			}
+			_ = local.Close()
+			if received := <-receivedCh; len(received) != 1 || received[0] != "fetch_contacts" {
+				t.Fatalf("received %v, want the legacy fetch_contacts", received)
+			}
+		})
+	}
+}

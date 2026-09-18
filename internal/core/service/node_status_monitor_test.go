@@ -738,7 +738,6 @@ func TestSeedFromProbeSetsAlwaysWriteFields(t *testing.T) {
 		Connected: true,
 		NodeID:    "node-1",
 		NodeType:  "full",
-		KnownIDs:  []string{"a", "b"},
 	})
 
 	m.mu.RLock()

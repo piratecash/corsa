@@ -500,6 +500,12 @@ func NewTable(opts ...TableOption) *Table {
 	// options run so any future `With*` option closure that mutates
 	// store.flap.* (none today) sees the same pointer.
 	t.store.flap = t.flap
+	// Route health follows the claim set: every physical drop of a
+	// claim (cap displacement, TTL compaction) evicts the pair's
+	// health entry in the same mutation, under the same t.mu writer
+	// lock. See routeStore.onClaimDropped for why this is a hook at
+	// the removal chokepoints and not a periodic reconcile.
+	t.store.onClaimDropped = t.health.evictUplinkLocked
 	for _, opt := range opts {
 		opt(t)
 	}

@@ -32,7 +32,7 @@ Every frame carries a `type` field that determines the command. Commands are gro
 | [Realtime delivery](realtime.md) | `push_message`, `push_delivery_receipt`, `ack_delete` | Live push at auth-time subscription, backlog replay, acknowledgement |
 | [Delivery receipts](delivery.md) | `send_delivery_receipt`, `fetch_delivery_receipts` | Delivery and seen tracking |
 | [Message delivery](message_delivery.md) | — | Sender-owned delivery: the reachability hold, the per-recipient queue, the retry budget |
-| [Contacts](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers` | Identity management and contact exchange |
+| [Contacts](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `search_identities`, `fetch_dm_headers` | Identity management and contact exchange |
 | [Peers](peers.md) | `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`, `fetch_traffic_history` | Peer discovery, health monitoring, network stats, traffic history |
 | [Relay](relay.md) | `relay_message`, `relay_hop_ack`, `fetch_relay_status` | Hop-by-hop message forwarding (Iteration 1, capability-gated by `mesh_relay_v1`) |
 | [Gazeta](gazeta.md) | `publish_notice`, `fetch_notices` | Anonymous encrypted notice board |
@@ -81,6 +81,7 @@ Not every command is available on every connection type. Commands are split acro
 | `fetch_trusted_contacts` | yes | — | — |
 | `import_contacts` | yes | — | — |
 | `fetch_identities` | yes | — | — |
+| `search_identities` | yes (in-process only) | — | — |
 | `fetch_dm_headers` | yes | — | — |
 | `add_peer` | yes | — | — |
 | `fetch_peer_health` | yes | — | — |
@@ -197,7 +198,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 | [Realtime-доставка](realtime.md) | `push_message`, `push_delivery_receipt`, `ack_delete` | Live push по auth-time подписке, replay бэклога, подтверждения |
 | [Delivery receipts](delivery.md) | `send_delivery_receipt`, `fetch_delivery_receipts` | Отслеживание доставки и просмотра |
 | [Message delivery](message_delivery.md) | — | Доставка на стороне отправителя: удержание по достижимости, очередь на получателя, бюджет повторов |
-| [Контакты](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `fetch_dm_headers` | Управление identity и обмен контактами |
+| [Контакты](contacts.md) | `fetch_contacts`, `fetch_trusted_contacts`, `import_contacts`, `fetch_identities`, `search_identities`, `fetch_dm_headers` | Управление identity и обмен контактами |
 | [Пиры](peers.md) | `get_peers`, `announce_peer`, `add_peer`, `fetch_peer_health`, `fetch_network_stats`, `fetch_traffic_history` | Обнаружение пиров, мониторинг, статистика, история трафика |
 | [Ретрансляция](relay.md) | `relay_message`, `relay_hop_ack`, `fetch_relay_status` | Пошаговая пересылка сообщений (Итерация 1, ограничение по capability `mesh_relay_v1`) |
 | [Gazeta](gazeta.md) | `publish_notice`, `fetch_notices` | Анонимная зашифрованная доска объявлений |
@@ -246,6 +247,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 | `fetch_trusted_contacts` | да | — | — |
 | `import_contacts` | да | — | — |
 | `fetch_identities` | да | — | — |
+| `search_identities` | да (только внутри процесса) | — | — |
 | `fetch_dm_headers` | да | — | — |
 | `add_peer` | да | — | — |
 | `fetch_peer_health` | да | — | — |

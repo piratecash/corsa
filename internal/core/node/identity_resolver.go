@@ -360,6 +360,12 @@ func (r *identityResolver) StartResolution(target domain.PeerIdentity, reason id
 		res.authority = domain.IdentityAuthorityProvisional
 	}
 	r.resolutions[target] = res
+	// The answer this lookup is waiting for is checked against the cached
+	// record: minSeq starts at zero and only recovery flows raise it, so
+	// while the lookup runs that record IS the floor. Pin it inside the
+	// section that opens the resolution, so no window exists in which the
+	// lookup is running and its floor is evictable.
+	r.svc.pinRecordProtection(target)
 	state := res.stateLocked()
 	r.scheduleWakeLocked()
 	r.mu.Unlock()
@@ -491,6 +497,7 @@ func (r *identityResolver) reseedFromIntents() {
 				res.authority = domain.IdentityAuthorityProvisional
 			}
 			r.resolutions[seed.Target] = res
+			r.svc.pinRecordProtection(seed.Target)
 		}
 		r.mu.Unlock()
 	}
@@ -533,7 +540,8 @@ func (r *identityResolver) tick(ctx context.Context) {
 	}
 }
 
-// expireAttemptsLocked sweeps attempt windows past their 60 seconds.
+// expireAttemptsLocked sweeps attempt windows past their 60 seconds and
+// cooldowns past their deadline.
 func (r *identityResolver) expireAttemptsLocked(now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -544,6 +552,45 @@ func (r *identityResolver) expireAttemptsLocked(now time.Time) {
 		delete(r.attempts, label)
 		if res, ok := r.resolutions[entry.dst]; ok && res.openAttempts > 0 {
 			res.openAttempts--
+		}
+	}
+	r.expireCooldownsLocked(now)
+}
+
+// openResolutionTargets lists the identities with a non-terminal
+// resolution. Membership in r.resolutions IS that predicate: finishLocked
+// deletes the entry as it records the terminal. Used by the trust store's
+// live set, so an answer that is still being waited for cannot have its
+// seq floor evicted out from under it.
+func (r *identityResolver) openResolutionTargets() []domain.PeerIdentity {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	targets := make([]domain.PeerIdentity, 0, len(r.resolutions))
+	for target := range r.resolutions {
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+// cooldownCount reports the live cooldown map size for the resource
+// breakdown.
+func (r *identityResolver) cooldownCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cooldownUntil)
+}
+
+// expireCooldownsLocked drops cooldowns whose deadline has passed. A
+// cooldown is consulted only by StartResolution inside its 30 s window;
+// past it the entry is dead weight, and without this sweep the map kept
+// one entry per target ever resolved for the life of the process. Runs
+// on every tick and on every terminal, so the map is bounded by the
+// number of targets that finished within the last cooldown window.
+// Caller holds r.mu.
+func (r *identityResolver) expireCooldownsLocked(now time.Time) {
+	for target, until := range r.cooldownUntil {
+		if !until.After(now) {
+			delete(r.cooldownUntil, target)
 		}
 	}
 }
@@ -927,12 +974,17 @@ func (r *identityResolver) finishLocked(target domain.PeerIdentity, terminal dom
 	res.lifecycle = terminal
 	state := res.stateLocked()
 	delete(r.resolutions, target)
+	// The floor this lookup was holding goes with it; a live session for
+	// the same identity holds its own pin.
+	r.svc.releaseRecordProtection(target)
 	for label, entry := range r.attempts {
 		if entry.dst == target {
 			delete(r.attempts, label)
 		}
 	}
-	r.cooldownUntil[target] = r.clock().Add(identityLookupCooldown)
+	now := r.clock()
+	r.expireCooldownsLocked(now)
+	r.cooldownUntil[target] = now.Add(identityLookupCooldown)
 	if err := r.intents.removeTarget(target); err != nil {
 		log.Warn().Err(err).Str("target", target.String()).Msg("identity_lookup_intent_persist_failed")
 	}

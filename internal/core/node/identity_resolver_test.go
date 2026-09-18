@@ -2,6 +2,7 @@ package node
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -480,6 +481,9 @@ func TestPersistedRecordsReseedKnowledgeOnRestart(t *testing.T) {
 
 	first := NewService(cfg, selfID, nil)
 	t.Cleanup(first.WaitBackground)
+	// Only a contact's record is persistent; a session peer's is session
+	// memory and is re-pushed on the next session instead.
+	trustOwner(t, first.trust, owner)
 	record, body := issueTestRecord(t, owner, 3, true)
 	if _, err := first.importVerifiedIdentityRecord(testRecordStoreNetwork, record, body); err != nil {
 		t.Fatalf("import: %v", err)
@@ -592,5 +596,59 @@ func TestNotifyIdentityKeysImportedFlipsUsable(t *testing.T) {
 	}
 	if flipped.Authority != domain.IdentityAuthorityProvisional {
 		t.Fatalf("authority = %s, want provisional", flipped.Authority)
+	}
+}
+
+// TestResolverExpiredCooldownsAreSwept: a cooldown is dead 30 s after the
+// terminal that armed it, and the map must not keep one entry per target
+// ever resolved. Unique targets finishing one after another must leave the
+// map at the size of the live cooldown set, not of the history.
+func TestResolverExpiredCooldownsAreSwept(t *testing.T) {
+	t.Parallel()
+	resolver, _ := newTestResolver(t)
+	now := time.Unix(1780000000, 0)
+	resolver.clock = func() time.Time { return now }
+
+	const targets = 200
+	for i := range targets {
+		target := domaintest.ID(fmt.Sprintf("cooldown-%d", i))
+		if _, err := resolver.StartResolution(target, identityIntentReason{Type: identityIntentReasonUIChat}); err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		resolver.mu.Lock()
+		if _, finished := resolver.finishLocked(target, domain.IdentityResolutionSucceeded); !finished {
+			resolver.mu.Unlock()
+			t.Fatalf("finish %d: not finished", i)
+		}
+		resolver.mu.Unlock()
+		// Each terminal lands after the previous cooldown expired, so at
+		// most one cooldown is live at any instant.
+		now = now.Add(identityLookupCooldown + time.Second)
+	}
+
+	resolver.tick(t.Context())
+
+	resolver.mu.Lock()
+	live := len(resolver.cooldownUntil)
+	resolver.mu.Unlock()
+	if live != 0 {
+		t.Fatalf("cooldownUntil holds %d entries after every cooldown expired, want 0", live)
+	}
+
+	// A cooldown that is still running must survive the sweep.
+	target := domaintest.ID("cooldown-live")
+	if _, err := resolver.StartResolution(target, identityIntentReason{Type: identityIntentReasonUIChat}); err != nil {
+		t.Fatalf("start live: %v", err)
+	}
+	resolver.mu.Lock()
+	resolver.finishLocked(target, domain.IdentityResolutionSucceeded)
+	resolver.mu.Unlock()
+	now = now.Add(identityLookupCooldown / 2)
+	resolver.tick(t.Context())
+	resolver.mu.Lock()
+	_, stillCooling := resolver.cooldownUntil[target]
+	resolver.mu.Unlock()
+	if !stillCooling {
+		t.Fatal("a running cooldown was swept")
 	}
 }

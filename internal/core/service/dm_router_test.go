@@ -5200,13 +5200,10 @@ func (p *testStatusProvider) PresenceSnapshot() (domain.PresenceSet, uint64) {
 	return p.Status.Presence.Clone(), p.Status.PresenceGeneration
 }
 
-func (p *testStatusProvider) KnownIDsSnapshot() []string {
+func (p *testStatusProvider) KnownIDsVersion() uint64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.Status.KnownIDs == nil {
-		return nil
-	}
-	return append([]string(nil), p.Status.KnownIDs...)
+	return p.Status.KnownIDsVersion
 }
 
 func (p *testStatusProvider) AggregateStatusSnapshot() (*AggregateStatus, time.Time) {

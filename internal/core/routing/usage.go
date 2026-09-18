@@ -82,6 +82,10 @@ func (t *Table) Usage() domain.SubsystemUsage {
 		domain.NewResourceGauge("outbound_content_seq", len(store.outboundContent), outboundContentBytes),
 		// Identities × uplinks.
 		domain.NewResourceGauge("route_health", len(t.health.states), routeHealthBytes),
+		// Health entries with no backing claim. A subset of route_health
+		// (saturation: no bytes charged twice) whose only correct value is
+		// zero — anything else is a cleanup path that forgot to evict.
+		domain.NewSaturationGauge("route_health_orphans", t.health.orphanCountLocked(store.hasClaimLocked)),
 		domain.NewResourceGauge("route_identities", len(store.buckets), identityBucketBytes),
 		domain.NewResourceGauge("identity_hex_memo", len(store.identityHex), identityHexBytes),
 		// Three counters keyed by identity that are never pruned by design:

@@ -970,6 +970,22 @@ func (pc *NetCore) WriterDone() <-chan struct{} {
 	return pc.writerDone
 }
 
+// WriterQueue reports the writer queue's occupancy and capacity. The
+// capacity is what the connection allocated up front (a buffered channel
+// holds all its slots from construction), the occupancy is what is
+// waiting for the socket right now. sendCh is immutable, so this reads
+// without pc.mu; len/cap on a channel are atomic snapshots. Diagnostic
+// (resource breakdown) only.
+func (pc *NetCore) WriterQueue() (queued, capacity int) {
+	return len(pc.sendCh), cap(pc.sendCh)
+}
+
+// WriterQueueSlotBytes is what one writer queue slot costs before any
+// payload is queued into it — the per-connection fixed cost is
+// sendChBuffer of these. Exported so the owner reporting the slot count
+// prices it with the struct it actually describes.
+func WriterQueueSlotBytes() uint64 { return domain.SizeOfAll(sendItem{}) }
+
 // HasCapability returns true if the peer negotiated the given capability.
 func (pc *NetCore) HasCapability(cap domain.Capability) bool {
 	pc.mu.RLock()

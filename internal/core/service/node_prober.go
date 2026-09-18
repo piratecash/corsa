@@ -23,7 +23,7 @@ import (
 //   - ProbeNode orchestrates the welcome + parallel data fetches that the
 //     status monitor uses to build a NodeStatus snapshot every tick.
 //
-//   - FetchContacts / FetchKnownIDs / FetchPeerHealth / FetchMessage* are
+//   - FetchContacts / FetchPeerHealth / FetchMessage* are
 //     explicit read endpoints that DMRouter and NodeStatusMonitor call when
 //     the cached probe snapshot does not cover their need (e.g. a follow-up
 //     fetch after a routing-table update).
@@ -109,12 +109,12 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 	status.Services = welcome.Services
 	status.Capabilities = welcome.Capabilities
 
-	idsReply, err := p.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_identities"})
-	if err != nil {
-		status.Error = err.Error()
-		status.CheckedAt = time.Now()
-		return status
-	}
+	// fetch_identities used to run here, on every probe, to seed a list the
+	// status no longer carries: the node's whole known-identity set, copied
+	// out under its knowledge lock and into a UI struct to be searched by
+	// substring. The search asks the node directly now
+	// (DMRouter.SearchIdentities), so the probe neither fetches it nor
+	// carries it.
 	contactsReply, err := p.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_trusted_contacts"})
 	if err != nil {
 		status.Error = err.Error()
@@ -146,7 +146,6 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 		return status
 	}
 
-	ids := idsReply.Identities
 	contacts := contactsFromFrame(contactsReply)
 	dmHeaders := dmHeadersFromFrame(dmHeadersReply)
 	deliveryReceipts := receiptRecordsFromFrames(receiptsReply.Receipts)
@@ -168,7 +167,6 @@ func (p *NodeProber) ProbeNode(ctx context.Context) NodeStatus {
 	}
 
 	status.Connected = true
-	status.KnownIDs = ids
 	status.Contacts = contacts
 	status.PeerHealth = peerHealthFromFrame(peerHealthReply)
 	status.CaptureSessions = captureSessionsFromFrame(peerHealthReply)
@@ -209,16 +207,6 @@ func (p *NodeProber) FetchContacts(ctx context.Context) (map[string]Contact, err
 		return nil, err
 	}
 	return contactsFromFrame(reply), nil
-}
-
-// FetchKnownIDs queries the node for the current identity list.
-// Used by ProbeNode during startup and by DMRouter on TopicIdentityAdded.
-func (p *NodeProber) FetchKnownIDs(ctx context.Context) ([]string, error) {
-	reply, err := p.rpc.LocalRequestFrameCtx(ctx, protocol.Frame{Type: "fetch_identities"})
-	if err != nil {
-		return nil, err
-	}
-	return reply.Identities, nil
 }
 
 // FetchPeerHealth queries the node for the current peer health snapshot.

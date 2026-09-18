@@ -135,6 +135,7 @@ func TestDataCommandViaTCP_UnknownCommand_SnakeCase(t *testing.T) {
 		frame protocol.Frame
 	}{
 		{"fetch_identities", protocol.Frame{Type: "fetch_identities"}},
+		{"search_identities", protocol.Frame{Type: "search_identities", Query: "aa"}},
 		{"fetch_trusted_contacts", protocol.Frame{Type: "fetch_trusted_contacts"}},
 		{"fetch_peer_health", protocol.Frame{Type: "fetch_peer_health"}},
 		{"fetch_network_stats", protocol.Frame{Type: "fetch_network_stats"}},

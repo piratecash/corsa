@@ -638,6 +638,27 @@ func (h *pushIdentityHandler) closePushSession(ctx context.Context, delivery dat
 // The initial push
 // ---------------------------------------------------------------------------
 
+// sessionSupportsIdentityDiscovery reports whether the legacy contact
+// epidemic (fetch_contacts at session setup) has anything left to bridge
+// for this peer. It is a statement about FEATURES both sides actually
+// declared, never about a version number: the peer's dtype set is the one
+// it put in its welcome and is fixed for the session (§6.1), and this node
+// must itself be a discovery endpoint — able to ask get_identity on demand
+// — for the epidemic to be redundant. A peer that declares push_identity
+// has already pushed its own record; one that declares get_identity
+// answers for itself, and everybody else's record is one routed lookup
+// away. What the epidemic still provided beyond that — the keys of third
+// parties, learned in bulk before anybody asked — is exactly the
+// accumulation the bounded knowledge maps were paying for (12 116 key
+// triples against 894 live destinations on a five-day relay).
+func (s *Service) sessionSupportsIdentityDiscovery(session *peerSession) bool {
+	if session == nil || !s.localDatagramAdvertise().Endpoint {
+		return false
+	}
+	declared := datagramDeclaredDTypes(session.declarations)
+	return declared.Supports(domain.DTypePushIdentity) && declared.Supports(domain.DTypeGetIdentity)
+}
+
 // sendInitialIdentityPush sends this node's own record to a freshly
 // authenticated session peer: routed mode, ttl = 1, mandatory auth.
 //

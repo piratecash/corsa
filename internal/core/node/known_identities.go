@@ -1,6 +1,10 @@
 package node
 
-import "container/list"
+import (
+	"container/list"
+	"sort"
+	"strings"
+)
 
 // known_identities.go bounds the s.known accumulator.
 //
@@ -8,7 +12,9 @@ import "container/list"
 // recipients in storeIncomingMessage, contacts and handshake peers via
 // addKnownIdentity). It is read in only two places: the fetch_identities RPC
 // listing and the first-sight check that fires an IdentityAdded event. It has
-// NO routing, gossip, or verification role.
+// NO routing, gossip, or verification role. A third reader joined them: the
+// on-demand address search the UI runs instead of keeping its own copy of
+// the list (SearchByFragment).
 //
 // As a plain map it only ever grew: one entry per distinct identity ever seen,
 // never evicted. On a long-lived relay that transits many parties this is a
@@ -123,6 +129,62 @@ func (b *boundedKnownIdentities) Has(address string) bool {
 	return ok
 }
 
+// SearchByFragment returns up to limit members containing fragment and not
+// named in exclude, the smallest by address first. Case-insensitive,
+// matching what the operator typed against the hex address.
+//
+// The exclusions are applied INSIDE the walk, before the limit, and that
+// order is the contract. Filtering the answer afterwards makes the limit a
+// ceiling on the search rather than on the answer: a fragment whose
+// smallest matches are all addresses the caller already shows comes back
+// as "nothing found" while the match it wanted sits one place past the
+// cut. Raising the limit only moves the cut; paging around it only moves
+// it further and costs a walk per page.
+//
+// It exists so that a caller asking "which identities look like this" does
+// not have to be handed the whole set to find out. Snapshot allocates a
+// header for every member — 50 000 of them on a busy relay — and the one
+// consumer that used to do this copied that slice on every newly
+// discovered identity, which is quadratic in the number of identities a
+// node ever meets. Here the walk allocates only the answer.
+//
+// Ordering is by address rather than by recency on purpose: it is stable
+// between calls, so a result list does not reshuffle under the reader
+// while they are looking at it, and it makes "the first K of all matches"
+// a well-defined set rather than whichever K the map handed over first.
+// Recency is what the LRU uses to decide who stays, which is a different
+// question from who to show.
+//
+// The walk is O(members) with O(limit) memory and no allocation per
+// non-match; the bounded insert keeps the K smallest without sorting the
+// matches. Caller must hold s.knowledgeMu (reader is enough).
+func (b *boundedKnownIdentities) SearchByFragment(fragment string, exclude map[string]struct{}, limit int) []string {
+	if limit <= 0 || len(b.nodes) == 0 {
+		return nil
+	}
+	fragment = strings.ToLower(strings.TrimSpace(fragment))
+
+	best := make([]string, 0, limit)
+	for address := range b.nodes {
+		if _, skip := exclude[address]; skip {
+			continue
+		}
+		if fragment != "" && !strings.Contains(strings.ToLower(address), fragment) {
+			continue
+		}
+		if len(best) == limit && address >= best[len(best)-1] {
+			continue
+		}
+		at := sort.SearchStrings(best, address)
+		if len(best) < limit {
+			best = append(best, "")
+		}
+		copy(best[at+1:], best[at:])
+		best[at] = address
+	}
+	return best
+}
+
 // Snapshot returns a copy of the current members in unspecified order.
 func (b *boundedKnownIdentities) Snapshot() []string {
 	out := make([]string, 0, len(b.nodes))
@@ -135,6 +197,13 @@ func (b *boundedKnownIdentities) Snapshot() []string {
 // Len is the current member count.
 func (b *boundedKnownIdentities) Len() int {
 	return len(b.nodes)
+}
+
+// PinnedLen reports how many members are exempt from capacity eviction —
+// the trust-store mirror. Diagnostic: it is the part of Len the bound does
+// not apply to.
+func (b *boundedKnownIdentities) PinnedLen() int {
+	return len(b.pinned)
 }
 
 // evictOldestLocked drops the least-recently-used non-pinned member and

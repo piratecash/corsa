@@ -1408,10 +1408,12 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity, []PeerI
 		origLen := len(bucket)
 		n := 0
 		for i := range bucket {
-			if !bucket[i].IsExpired(now) {
-				bucket[n] = bucket[i]
-				n++
+			if bucket[i].IsExpired(now) {
+				s.noteClaimDroppedLocked(identity, bucket[i].Uplink)
+				continue
 			}
+			bucket[n] = bucket[i]
+			n++
 		}
 		removed := origLen - n
 		if removed == 0 {
@@ -1428,6 +1430,13 @@ func (s *routeStore) CompactExpired(now time.Time) (int, []PeerIdentity, []PeerI
 			delete(s.identityHex, identity)
 			continue
 		}
+		// The survivors were compacted to the front; the vacated tail
+		// still holds copies of the removed claims, and through them
+		// their Extra / signature / SeenOriginSeqs allocations. The
+		// shrunken slice keeps the backing array alive, so the tail
+		// must be zeroed or the removed claims stay reachable until
+		// the bucket is next reallocated.
+		clear(bucket[n:])
 		s.buckets[identity] = bucket[:n]
 		// Some claims expired but survivors remain. Check if any
 		// survivor is non-withdrawn — that means a usable backup

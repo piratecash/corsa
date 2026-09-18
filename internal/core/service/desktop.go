@@ -331,7 +331,17 @@ type NodeStatus struct {
 	ProtocolVersion int
 	Services        []string
 	Capabilities    []string
-	KnownIDs        []string
+	// KnownIDsVersion advances whenever the node discovers an identity it
+	// had not seen. It replaced the identity list itself, which used to
+	// travel in this struct and be recopied on every one of those events:
+	// N discoveries cost N copies of a list of length N, and the copy also
+	// outlived the node's own LRU, so the UI went on offering identities
+	// the node had already forgotten. Nobody needs the list here — the one
+	// consumer was an address search, which now asks the node per query
+	// (DMRouter.SearchIdentities). What a consumer does need is to know
+	// that an answer it cached may be out of date, and a counter says that
+	// in eight bytes.
+	KnownIDsVersion uint64
 	Contacts        map[string]Contact
 	Peers           []string
 	PeerHealth      []PeerHealth
@@ -816,7 +826,7 @@ func (c *DesktopClient) BuildReachableIDs() map[domain.PeerIdentity]bool {
 // uptime — the lightweight single-fetch the NodeStatusMonitor resource
 // ticker uses to keep status.ResourceUsage fresh between full probes.
 // Thin delegator to NodeProber.FetchResourceUsage, matching the other
-// read-side helpers (FetchContacts, FetchKnownIDs, …).
+// read-side helpers (FetchContacts, …).
 func (c *DesktopClient) FetchResourceUsage(ctx context.Context) *ResourceUsage {
 	return c.prober.FetchResourceUsage(ctx)
 }
@@ -824,11 +834,6 @@ func (c *DesktopClient) FetchResourceUsage(ctx context.Context) *ResourceUsage {
 // FetchContacts queries the node for the current trusted contacts map.
 func (c *DesktopClient) FetchContacts(ctx context.Context) (map[string]Contact, error) {
 	return c.prober.FetchContacts(ctx)
-}
-
-// FetchKnownIDs queries the node for the current identity list.
-func (c *DesktopClient) FetchKnownIDs(ctx context.Context) ([]string, error) {
-	return c.prober.FetchKnownIDs(ctx)
 }
 
 // FetchPeerHealth queries the node for the current peer health snapshot.

@@ -12,15 +12,16 @@ import "time"
 // invariant per state holds: Table's t.mu.Lock() serialises every
 // mutation.
 //
-// Eviction of stale health entries is driven by storage-side
-// cleanup, not by WithdrawRoute / RemoveDirectPeer directly.
-// reconcileHealthLocked (in table_mutation.go) walks the
-// health store after TickTTL / CompactExpired and drops any
-// entry whose backing (Identity, Uplink) claim is gone from
-// storage. Until that reconcile fires, health entries for
-// withdrawn routes live as harmless orphans in the map: Lookup
-// filters withdrawn claims before health is consulted, so an
-// orphan entry never influences ranking. See docs/locking.md
+// Eviction of health entries is driven by storage: every physical
+// drop of a claim (cap displacement in AdmitNew / AdmitDirect, TTL
+// compaction in CompactExpired) evicts the pair's health entry in
+// the same mutation through routeStore.onClaimDropped, and
+// RemoveDirectPeer / InvalidateTransitRoutes evict eagerly on
+// tombstoning. Health entries behind a WithdrawRoute /
+// InvalidateUplinkClaim tombstone stay until the tombstone is
+// compacted; Lookup filters withdrawn claims before health is
+// consulted, so such an entry never influences ranking, and it is
+// bounded 1:1 by the tombstone it shadows. See docs/locking.md
 // "Cluster-mesh Phase 2" for the full eviction contract.
 
 // MarkHopAck records a relay_hop_ack confirmation for the
@@ -401,8 +402,8 @@ func (t *Table) MarkHopFailure(identity, uplink PeerIdentity) {
 
 	// Anti-orphan guard symmetric to Phase 2 MarkProbeAck
 	// (reachable=false) and MarkProbeFailure: getLocked returns
-	// nil for pairs whose health entry was evicted (TickTTL,
-	// reconcileHealthLocked after cap pressure), and a single
+	// nil for pairs whose health entry was evicted (TTL compaction,
+	// cap displacement), and a single
 	// late hop-ack timeout must NOT resurrect such a pair as a
 	// fresh Good-labelled entry with ConsecutiveFailures=1. The
 	// Phase 3 plan §4.2 spells this out as "если pair не tracked —

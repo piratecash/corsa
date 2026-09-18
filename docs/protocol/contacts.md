@@ -188,6 +188,33 @@ Retrieves the list of known identity addresses — the local node, contacts, and
 - Does not include key material — use `fetch_contacts` to get pubkey/boxkey/boxsig for specific addresses
 - The set includes the node's own address plus addresses discovered via peer exchange, contact import, and transit
 
+### search_identities
+
+**Scope:** IN-PROCESS ONLY — `handleLocalFrameDispatch` and nothing else. It is deliberately absent from the RPC command table and from the TCP data port: answering "which of the identities you know look like this" for anybody but the node's own UI is an enumeration oracle over every peer this node has met.
+
+Returns the known identities whose address contains a fragment, smallest address first, capped by the node at `searchIdentitiesLimit` (64) however large a `limit` the caller asks for. An empty fragment is not a request to enumerate: it returns the first page by address, still capped.
+
+It exists because the desktop address search used to run over `fetch_identities`: the whole set travelled into the UI status snapshot, was recopied on every newly discovered identity — so N discoveries cost N copies of a list of length N — and the copy outlived the node's own LRU, so the UI went on offering identities the node had already evicted. Asking per query costs one bounded walk of `s.known` under `knowledgeMu.RLock`, allocates only the answer, and can never name an identity the node has forgotten.
+
+**Request Format:**
+```json
+{
+  "type": "search_identities",
+  "query": "a1b2",
+  "exclude": ["a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"],
+  "limit": 16
+}
+```
+
+**Response Format:** identical to `fetch_identities` — `{"type": "identities", "count": N, "identities": [...]}`.
+
+**Implementation Notes:**
+- Matching is a case-insensitive substring of the hex address, which is what the operator is typing
+- Ordering is by address, not by recency: it is stable between calls, so a result list does not reshuffle under the reader, and "the first K matches" is a well-defined set rather than whichever K the map handed over first
+- `exclude` names the addresses the caller will not show whatever the answer says: its own identity, and the identities it already lists. They are applied INSIDE the walk, before `limit`, and that order is the contract. A limit applied first bounds the SEARCH rather than the answer: a fragment whose smallest matches are all addresses the caller was going to discard comes back empty while the match it wanted sits one place past the cut. Raising the limit only moves the cut; paging past the discarded rows only moves it further and costs a walk of the node's set per page. The node holds the whole set, so it is the only party that can take the smallest matches the caller can actually use
+- The list is the caller's own on-screen set, and the frame is handed to the embedded node in memory rather than serialised, so it costs a slice header
+- `limit` above the node's cap, absent, or non-positive all mean the cap (`searchIdentitiesLimit`, 64)
+
 ### fetch_dm_headers
 
 Retrieves metadata-only view of direct messages without decrypting bodies.
@@ -485,6 +512,33 @@ sequenceDiagram
 - Это только диагностический листинг. Авторитетный персистентный список контактов — `fetch_trusted_contacts` (trust store), который не вытесняется
 - Не включает ключевой материал — используйте `fetch_contacts` для получения pubkey/boxkey/boxsig конкретных адресов
 - Набор включает собственный адрес ноды плюс адреса, обнаруженные через peer exchange, import contacts и транзит
+
+### search_identities
+
+**Область:** ТОЛЬКО ВНУТРИ ПРОЦЕССА — `handleLocalFrameDispatch` и больше нигде. Команды намеренно нет ни в RPC-таблице, ни на TCP data port: отвечать «какие из известных тебе identity похожи на это» кому-либо, кроме собственного UI ноды, — это enumeration-оракул по всем пирам, что нода встречала.
+
+Возвращает известные identity, чей адрес содержит фрагмент, по возрастанию адреса, с ограничением `searchIdentitiesLimit` (64) на стороне ноды, каким бы большим ни был запрошенный `limit`. Пустой фрагмент не означает «перечисли всё»: он вернёт первую страницу по адресу, с тем же ограничением.
+
+Команда появилась потому, что поиск адресов в desktop работал по `fetch_identities`: весь набор ехал в UI-снимок статуса, перекопировался на каждую новую обнаруженную identity — то есть N обнаружений стоили N копий списка длины N — и эта копия переживала собственный LRU ноды, так что UI продолжал предлагать identity, которые нода уже вытеснила. Запрос по требованию стоит один ограниченный обход `s.known` под `knowledgeMu.RLock`, аллоцирует только ответ и не может назвать identity, которую нода забыла.
+
+**Формат запроса:**
+```json
+{
+  "type": "search_identities",
+  "query": "a1b2",
+  "exclude": ["a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"],
+  "limit": 16
+}
+```
+
+**Формат ответа:** такой же, как у `fetch_identities` — `{"type": "identities", "count": N, "identities": [...]}`.
+
+**Замечания по реализации:**
+- Сопоставление — регистронезависимая подстрока hex-адреса, то есть того, что набирает оператор
+- Порядок — по адресу, а не по recency: он стабилен между вызовами, поэтому список не перетасовывается под читателем, а «первые K совпадений» — определённое множество, а не то, что первым отдала map
+- `exclude` перечисляет адреса, которые вызывающая сторона не покажет, что бы ни ответила нода: собственный identity и те, что она уже перечисляет. Они применяются ВНУТРИ обхода, до `limit`, и этот порядок — контракт. Лимит, применённый первым, ограничивает ПОИСК, а не ответ: фрагмент, чьи наименьшие совпадения — сплошь адреса, которые вызывающая сторона всё равно выбросит, вернётся пустым, а нужное совпадение окажется на одну позицию за срезом. Увеличение лимита лишь отодвигает срез; пагинация мимо отброшенных строк отодвигает его ещё дальше и стоит по обходу набора на страницу. Весь набор держит нода, поэтому только она может взять наименьшие совпадения, которыми вызывающая сторона действительно может воспользоваться
+- Список — это собственный экранный набор вызывающей стороны, а кадр передаётся встроенной ноде в памяти, а не сериализуется, поэтому стоит он заголовка слайса
+- `limit` больше предела ноды, отсутствующий или неположительный означают предел (`searchIdentitiesLimit`, 64)
 
 ### fetch_dm_headers
 

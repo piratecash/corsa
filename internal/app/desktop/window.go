@@ -67,6 +67,17 @@ type Window struct {
 
 	recipientEditor      widget.Editor
 	identitySearchEditor widget.Editor
+	// identitySearch holds the node's answer to the address query being
+	// typed. Guarded by its own mutex because the answer arrives on a
+	// background goroutine; see identitySearchMatches.
+	identitySearchMu sync.Mutex
+	identitySearch   identitySearchState
+	// searchIdentities asks the node. nil in production — the call site
+	// falls back to router.SearchIdentities. Overridable ONLY in tests, so
+	// the ordering this window is responsible for (a late answer to a
+	// superseded query, a query already in flight) can be driven without a
+	// node behind it.
+	searchIdentities     func(query string) ([]domain.PeerIdentity, error)
 	messageEditor        widget.Editor
 	focusComposerPending bool
 	// composerKeyboardPending rides alongside focusComposerPending but is
@@ -3498,6 +3509,30 @@ func (w *Window) layoutKnownIdentitiesHeader(gtx layout.Context) layout.Dimensio
 	return label.Layout(gtx)
 }
 
+// identitySearchState is what the window holds between frames about the
+// address search: the answer, the question it answers, the node's discovery
+// counter it was taken at, the question currently in flight, and the
+// generation that lets a late reply tell whether it is still wanted.
+type identitySearchState struct {
+	answeredQuery   string
+	answeredVersion uint64
+	// answeredExcludes is the membership digest of the conversations the
+	// request was made with. The node applies the exclusions, so an answer
+	// describes one particular exclusion set and stops being true when that
+	// set changes — deleting a conversation must put its address back into
+	// the search, and neither the query nor the discovery counter moves
+	// when it does.
+	answeredExcludes uint64
+	results          []domain.PeerIdentity
+	// pending* describe the request in flight, so a frame can tell "the
+	// question I am about to ask is already being asked" from "the question
+	// changed while a stale one is still running".
+	pending         string
+	pendingVersion  uint64
+	pendingExcludes uint64
+	gen             uint64
+}
+
 // identitySearchMaxRows caps how many search hits get a row. The cap belongs to
 // resolveIdentitySearchRows and not to the card, because it has to be applied to
 // the same slice the digest is taken from: a cap in the card would let the rows
@@ -3521,13 +3556,125 @@ const identitySearchTextTopInset = unit.Dp(2)
 // query change would open a real menu at the coordinates of a row that has
 // since moved. See menuRectSig.
 func (w *Window) resolveIdentitySearchRows(status service.NodeStatus, recipients []domain.PeerIdentity) []domain.PeerIdentity {
-	results := searchKnownIdentities(status.KnownIDs, status.ReachableIDs, recipients, w.snap.MyAddress, w.identitySearchEditor.Text())
+	query := strings.TrimSpace(w.identitySearchEditor.Text())
+	results := searchKnownIdentities(
+		w.identitySearchMatches(query, status.KnownIDsVersion, peerSetDigest(recipients)),
+		status.ReachableIDs, recipients, w.snap.MyAddress, query,
+	)
 	if len(results) > identitySearchMaxRows {
 		results = results[:identitySearchMaxRows]
 	}
 	w.searchOrder = peerOrderDigest(results)
 	w.setMenuListItems(&w.searchItems, len(results))
 	return results
+}
+
+// identitySearchMatches returns the node's answer for query, asking for it
+// in the background when what is held does not answer it.
+//
+// It never blocks the frame. The address search used to be a filter over a
+// list the status snapshot carried, so it cost nothing to run in layout and
+// everything to maintain: the node republished the whole list on every
+// identity it discovered. Now the question goes to the node, which means it
+// has to leave the render path — a frame may not wait on an RPC, however
+// local. So the frame draws what is already known (an answer for this query
+// that may be one discovery old, or nothing at all on the first keystroke)
+// and the reply invalidates the window when it lands.
+//
+// An answer is held against three things, all of which can make it untrue:
+// the query, the node's discovery counter, and `excludes` — the membership
+// digest of the conversations the answer was filtered against. The node
+// applies those exclusions, so deleting a conversation must bring its
+// address back into the search even though the query and the counter are
+// exactly as they were.
+//
+// Answers to superseded questions are dropped: the request generation is
+// compared on arrival, so a slow reply for a question the user has already
+// moved past can never overwrite the current one, and the reply records the
+// exclusion set it was ASKED with rather than whatever is current when it
+// lands. A question with an in-flight request is not asked again while it
+// is in flight, and one whose answer failed is not retried until something
+// in the key changes — a render loop must not turn a persistent error into
+// a request per frame.
+func (w *Window) identitySearchMatches(query string, version, excludes uint64) []domain.PeerIdentity {
+	if query == "" {
+		// The generation advances even here, so an answer already on its
+		// way to a question the user has just erased is discarded on
+		// arrival rather than left sitting in the state.
+		w.identitySearchMu.Lock()
+		w.identitySearch = identitySearchState{gen: w.identitySearch.gen + 1}
+		w.identitySearchMu.Unlock()
+		return nil
+	}
+
+	w.identitySearchMu.Lock()
+	state := &w.identitySearch
+	answered := state.answeredQuery == query &&
+		state.answeredVersion == version &&
+		state.answeredExcludes == excludes
+	if answered || (state.pending == query && state.pendingExcludes == excludes && state.pendingVersion == version) {
+		matches := state.results
+		if state.answeredQuery != query {
+			// In flight for this query, nothing held for it yet: draw no
+			// rows rather than the previous query's.
+			matches = nil
+		}
+		w.identitySearchMu.Unlock()
+		return matches
+	}
+	state.gen++
+	gen := state.gen
+	state.pending = query
+	state.pendingVersion = version
+	state.pendingExcludes = excludes
+	stale := state.results
+	if state.answeredQuery != query {
+		stale = nil
+	}
+	w.identitySearchMu.Unlock()
+
+	ask := w.searchIdentities
+	if ask == nil && w.router != nil {
+		ask = w.router.SearchIdentities
+	}
+	if ask != nil && w.beginUIOp() {
+		go func() {
+			defer w.endUIOp()
+			results, err := ask(query)
+			w.identitySearchMu.Lock()
+			if w.identitySearch.gen == gen {
+				w.identitySearch.pending = ""
+				// Recorded even on failure, so the next frame does not ask
+				// again for the same question; a new query, a new discovery
+				// or a change to the conversations moves it on. The keys
+				// stored are the ones the request was MADE with — an answer
+				// describes the world it was asked about, not the one it
+				// arrived in.
+				w.identitySearch.answeredQuery = query
+				w.identitySearch.answeredVersion = version
+				w.identitySearch.answeredExcludes = excludes
+				w.identitySearch.results = results
+				if err != nil {
+					w.identitySearch.results = nil
+				}
+			}
+			w.identitySearchMu.Unlock()
+			if err != nil {
+				log.Debug().Err(err).Msg("identity_search_failed")
+			}
+			w.invalidate()
+		}()
+	} else {
+		// Shutting down, or a window with nothing to ask (construction,
+		// layout tests): nothing will answer, so do not leave the query
+		// marked in flight.
+		w.identitySearchMu.Lock()
+		if w.identitySearch.gen == gen {
+			w.identitySearch.pending = ""
+		}
+		w.identitySearchMu.Unlock()
+	}
+	return stale
 }
 
 // recordSearchRowAnchor notes where this frame is about to put the search hits.
@@ -5694,6 +5841,25 @@ const (
 // re-deriving it from the snapshot, is what guarantees the digest describes the
 // order actually laid out. A conversation has no such bound, which is why the
 // chat digest rides rebuildMsgCache instead.
+// peerSetDigest fingerprints peers as a SET: the same identities in a
+// different order give the same answer. That is what the identity search
+// needs from it — the node excludes the conversations by membership, so an
+// answer stops being true when one is added or removed, and not when an
+// arriving message reorders the sidebar. peerOrderDigest below answers the
+// other question, and the two are deliberately separate.
+func peerSetDigest(peers []domain.PeerIdentity) uint64 {
+	var digest uint64
+	for i := range peers {
+		h := menuDigestOffset
+		for _, b := range peers[i] {
+			h ^= uint64(b)
+			h *= menuDigestPrime
+		}
+		digest ^= h
+	}
+	return digest
+}
+
 func peerOrderDigest(peers []domain.PeerIdentity) uint64 {
 	h := menuDigestOffset
 	for i := range peers {
@@ -6810,18 +6976,29 @@ func (w *Window) messageSelectable(id string) *widget.Selectable {
 }
 
 // searchKnownIdentities matches the query against the UNION of the observed
-// identities (KnownIDs) and the routed ones (ReachableIDs). The two sets
-// answer different questions — "whose keys have I seen" and "whom can I
-// reach" — and a freshly announced node lives in the second long before it
-// reaches the first, which is exactly the row the search used to lose
+// identities and the routed ones (ReachableIDs). The two sets answer
+// different questions — "whose keys have I seen" and "whom can I reach" —
+// and a freshly announced node lives in the second long before it reaches
+// the first, which is exactly the row the search used to lose
 // (docs/protocol/identity-lookup.md).
+//
+// `matched` is the node's answer for this query, not the whole observed
+// set: the set itself used to travel in every status snapshot and be
+// filtered here, which made the UI hold a copy of everything the node had
+// ever met — including identities the node's own LRU had since dropped —
+// and cost a full copy per discovery. The node is asked per query now
+// (Window.identitySearchMatches), so what arrives here is already the
+// matching side of that question, already capped. Everything else is
+// unchanged, and deliberately: the routed set, the self and already-listed
+// exclusions and the pasted-address candidate are UI-side facts the node
+// has no opinion about.
 //
 // A full, valid 40-hex query absent from BOTH sets still yields a candidate
 // row: absence from ReachableIDs does not prove absence of a route — a nil
 // map means "state unknown", the snapshot has lawful staleness, and in the
 // DHT era no full reachable set will exist at all. "No route" is only ever
 // stated by the resolver's outcome, never by this filter.
-func searchKnownIdentities(knownIDs []string, reachable map[domain.PeerIdentity]bool, recipients []domain.PeerIdentity, self domain.PeerIdentity, query string) []domain.PeerIdentity {
+func searchKnownIdentities(matched []domain.PeerIdentity, reachable map[domain.PeerIdentity]bool, recipients []domain.PeerIdentity, self domain.PeerIdentity, query string) []domain.PeerIdentity {
 	query = strings.TrimSpace(strings.ToLower(query))
 	if query == "" {
 		return nil
@@ -6832,8 +7009,8 @@ func searchKnownIdentities(knownIDs []string, reachable map[domain.PeerIdentity]
 		alreadyListed[recipient] = struct{}{}
 	}
 
-	results := make([]domain.PeerIdentity, 0, len(knownIDs))
-	seen := make(map[domain.PeerIdentity]struct{}, len(knownIDs)+len(reachable))
+	results := make([]domain.PeerIdentity, 0, len(matched))
+	seen := make(map[domain.PeerIdentity]struct{}, len(matched)+len(reachable))
 	admit := func(raw string, id domain.PeerIdentity) {
 		if raw == "" || id == self || id.IsZero() {
 			return
@@ -6850,9 +7027,8 @@ func searchKnownIdentities(knownIDs []string, reachable map[domain.PeerIdentity]
 		}
 		results = append(results, id)
 	}
-	for _, raw := range knownIDs {
-		raw = strings.TrimSpace(raw)
-		admit(raw, domain.PeerIdentityFromWire(raw))
+	for _, identity := range matched {
+		admit(identity.String(), identity)
 	}
 	for id, hasRoute := range reachable {
 		if hasRoute {

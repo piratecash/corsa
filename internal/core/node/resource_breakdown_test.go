@@ -8,6 +8,8 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // resource_breakdown_test.go pins the breakdown at the surface an operator
@@ -209,4 +211,99 @@ func TestBreakdownAnswersOnANodeWithoutTheDatagramPlane(t *testing.T) {
 		return
 	}
 	t.Fatal("the datagram subsystem vanished instead of reporting empty: an absent plane is a state, not a missing line")
+}
+
+// TestBreakdownSeparatesTransitFromLocalEnvelopes: the transit gauge names
+// "other people's messages this node is carrying" and must count exactly
+// those. It used to sum every backlog in s.topics — a node's own inbox
+// read as transit, and the transit byte budget could never be checked
+// against it.
+func TestBreakdownSeparatesTransitFromLocalEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, config.NodeTypeFull)
+	other1, _ := identity.Generate()
+	other2, _ := identity.Generate()
+	now := time.Now().UTC()
+	transit := protocol.Envelope{
+		ID: "transit-1", Topic: "dm", Sender: other1.Address, Recipient: other2.Address,
+		CreatedAt: now, StoredAt: now, Payload: []byte(strings.Repeat("x", 100)),
+	}
+	local := protocol.Envelope{
+		ID: "local-1", Topic: "dm", Sender: other1.Address, Recipient: svc.identity.Address,
+		CreatedAt: now, StoredAt: now, Payload: []byte(strings.Repeat("y", 50)),
+	}
+	broadcast := protocol.Envelope{
+		ID: "bcast-1", Topic: "general", Sender: other1.Address, Recipient: "*",
+		CreatedAt: now, Payload: []byte(strings.Repeat("z", 30)),
+	}
+	svc.gossipMu.Lock()
+	svc.topics["dm"] = []protocol.Envelope{transit, local}
+	svc.topics["general"] = []protocol.Envelope{broadcast}
+	svc.gossipMu.Unlock()
+
+	gauges := map[string]domain.ResourceGauge{}
+	for _, usage := range svc.ResourceBreakdown().Subsystems() {
+		if usage.Subsystem() != domain.ResourceSubsystemDelivery {
+			continue
+		}
+		for _, gauge := range usage.Gauges() {
+			gauges[gauge.Name()] = gauge
+		}
+	}
+	if got := gauges["transit_envelopes"].Count(); got != 1 {
+		t.Fatalf("transit_envelopes = %d, want 1 (the one envelope neither from nor to this node)", got)
+	}
+	if got := gauges["transit_payload_bytes"].Count(); got != 100 {
+		t.Fatalf("transit_payload_bytes = %d, want 100", got)
+	}
+	if got := gauges["local_envelopes"].Count(); got != 2 {
+		t.Fatalf("local_envelopes = %d, want 2 (own inbox + broadcast)", got)
+	}
+}
+
+// The session-record cache prices itself: cache.bytes already includes the
+// structural cost of every entry. Publishing the count as a memory gauge
+// beside it charged those structs a second time and lifted the knowledge
+// floor — and the grand total — above the truth a floor is supposed to sit
+// under.
+func TestBreakdownDoesNotDoubleCountIdentityRecordCache(t *testing.T) {
+	t.Parallel()
+
+	svc := newDatagramLayerService(t, true)
+	peer, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	record, body := issueTestRecord(t, peer, 1, true)
+	if _, err := svc.trust.rememberRecord(testRecordStoreNetwork, record, body); err != nil {
+		t.Fatalf("rememberRecord: %v", err)
+	}
+	usage := svc.trust.sessionRecordUsage()
+	if usage.count != 1 || usage.bytes <= 0 {
+		t.Fatalf("test setup: cache usage = %+v", usage)
+	}
+
+	var cacheFloor uint64
+	var countKind domain.ResourceGaugeKind
+	for _, subsystem := range svc.ResourceBreakdown().Subsystems() {
+		if subsystem.Subsystem() != domain.ResourceSubsystemKnowledge {
+			continue
+		}
+		for _, gauge := range subsystem.Gauges() {
+			switch gauge.Name() {
+			case "identity_record_cache":
+				countKind = gauge.Kind()
+				cacheFloor += gauge.FloorBytes()
+			case "identity_record_cache_bytes":
+				cacheFloor += gauge.FloorBytes()
+			}
+		}
+	}
+	if countKind != domain.ResourceGaugeSaturation {
+		t.Errorf("identity_record_cache kind = %v, want saturation: its entries are priced by the bytes gauge", countKind)
+	}
+	if cacheFloor != uint64(usage.bytes) {
+		t.Errorf("cache contributes %d bytes to the knowledge floor, but accounts for %d itself", cacheFloor, usage.bytes)
+	}
 }

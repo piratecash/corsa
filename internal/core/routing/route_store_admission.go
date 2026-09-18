@@ -186,10 +186,24 @@ func (s *routeStore) AdmitNew(identity PeerIdentity, claim UplinkClaim, now time
 		return AdmissionRejectedFull
 	}
 
-	bucket[worstIdx] = claim
-	s.buckets[identity] = bucket
+	s.replaceClaimLocked(identity, bucket, worstIdx, claim)
 	s.capStats.acceptedReplaced.Add(1)
 	return AdmissionAcceptedReplaced
+}
+
+// replaceClaimLocked overwrites bucket[idx] with claim and reports the
+// displaced pair to the owner. The displaced uplink always differs
+// from claim.Uplink — the (Identity, Uplink) dedup key guarantees the
+// incoming uplink holds no live slot, and tombstones are never
+// eviction candidates — so the drop notification never refers to the
+// pair that is being admitted. Caller must hold t.mu (writer).
+func (s *routeStore) replaceClaimLocked(identity PeerIdentity, bucket []UplinkClaim, idx int, claim UplinkClaim) {
+	displaced := bucket[idx].Uplink
+	bucket[idx] = claim
+	s.buckets[identity] = bucket
+	if displaced != claim.Uplink {
+		s.noteClaimDroppedLocked(identity, displaced)
+	}
 }
 
 // AdmitDirect admits a freshly-arrived direct UplinkClaim into
@@ -290,8 +304,7 @@ func (s *routeStore) AdmitDirect(identity PeerIdentity, claim UplinkClaim, now t
 		return
 	}
 
-	bucket[worstIdx] = claim
-	s.buckets[identity] = bucket
+	s.replaceClaimLocked(identity, bucket, worstIdx, claim)
 	s.capStats.acceptedReplaced.Add(1)
 }
 

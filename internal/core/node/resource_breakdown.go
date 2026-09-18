@@ -29,7 +29,20 @@ import (
 //     announce peers — tens, bounded by the connection count;
 //     pending frames — at most maxPendingFramesTotal keys (2000), since the
 //     admission gate refuses beyond that total and a map cannot hold more
-//     keys than frames.
+//     keys than frames;
+//     sessions and connections — bounded by the connection count, read for
+//     their queue len/cap;
+//     relay forwarding states — at most maxRelayStates (10 000), under the
+//     store's own leaf mutex, summed for their stashed frame bytes;
+//     route health — the orphan gauge in routing.Table.Usage probes storage
+//     once per health entry under the table's read lock. It is the one walk
+//     proportional to a container that has no cap of its own, and it is
+//     paid because its answer is the invariant "health keys ⊆ storage keys",
+//     which a len cannot express; a node with 30 000 entries answers in
+//     low milliseconds, and getResourceBreakdown is a command an operator
+//     runs, not a sampler;
+//     non-contact identity records — bounded by their own budget, priced
+//     by the byte total the cache already maintains.
 //
 //     Two containers are NOT summed for exactly this reason and report their
 //     cardinality instead: the receipt backlog is keyed by recipient with no
@@ -68,6 +81,13 @@ var (
 	observedIPPeerBytes   = domain.SizeOfAll(domain.PeerAddress(""), []domain.PeerIP(nil))
 	knownIdentityBytes    = domain.SizeOfAll(domain.PeerIdentity{}, time.Time{})
 	receiptDedupKeyBytes  = domain.SizeOfAll([16]byte{})
+	relayStateBytes       = domain.SizeOfAll("", relayForwardState{})
+	trustContactBytes     = domain.SizeOfAll("", trustedContact{})
+	trustRecordBytes      = domain.SizeOfAll(trustRecordKey{}, trustedIdentityRecord{})
+	identityCooldownBytes = domain.SizeOfAll(domain.PeerIdentity{}, time.Time{})
+	sessionSendSlotBytes  = domain.SizeOfAll(peerSendItem{})
+	sessionInboxSlotBytes = domain.SizeOfAll(protocol.Frame{})
+	connWriterSlotBytes   = netcore.WriterQueueSlotBytes()
 )
 
 // ResourceBreakdown reports which subsystem holds what, right now.
@@ -285,25 +305,70 @@ func (s *Service) datagramUsage() domain.SubsystemUsage {
 // connection rather than a property of these maps, and the constant is
 // measured on the bench rather than asserted in a comment (13-measurements.md
 // §2, "стоимость одной сессии").
+//
+// The queues ARE counted, as slots: a buffered channel allocates every slot
+// at construction, so an outbound session costs its send and inbox
+// capacities and a connection its writer capacity whether or not anything
+// is queued. The walks here are over the live sessions and connections —
+// bounded by the connection count, which is the one number the operator
+// already knows — and read only channel len/cap, which need no lock beyond
+// the map's own. Occupancy is reported beside each as a saturation gauge:
+// the slots are already priced, and what sits in them is a copy of frames
+// counted elsewhere.
 func (s *Service) sessionsUsage() domain.SubsystemUsage {
 	s.peerMu.RLock()
 	sessions := len(s.sessions)
 	health := len(s.health)
 	conns := len(s.conns)
+	var sendSlots, sendQueued, inboxSlots, inboxQueued, writerSlots, writerQueued int
+	for _, session := range s.sessions {
+		sendSlots += cap(session.sendCh)
+		sendQueued += len(session.sendCh)
+		inboxSlots += cap(session.inboxCh)
+		inboxQueued += len(session.inboxCh)
+	}
+	for _, entry := range s.conns {
+		if entry == nil || entry.core == nil {
+			continue
+		}
+		queued, capacity := entry.core.WriterQueue()
+		writerSlots += capacity
+		writerQueued += queued
+	}
 	s.peerMu.RUnlock()
+
+	relayStates, relayFrameBytes := 0, 0
+	if s.relayStates != nil {
+		relayStates = s.relayStates.count()
+		relayFrameBytes = s.relayStates.frameLineBytes()
+	}
 
 	return domain.NewSubsystemUsage(
 		domain.ResourceSubsystemSessions,
 		domain.NewResourceGauge("peer_health", health, peerHealthBytes),
 		domain.NewResourceGauge("sessions", sessions, sessionBytes),
 		domain.NewResourceGauge("connections", conns, connEntryBytes),
+		domain.NewResourceGauge("session_send_slots", sendSlots, sessionSendSlotBytes),
+		domain.NewSaturationGauge("session_send_queued", sendQueued),
+		domain.NewResourceGauge("session_inbox_slots", inboxSlots, sessionInboxSlotBytes),
+		domain.NewSaturationGauge("session_inbox_queued", inboxQueued),
+		domain.NewResourceGauge("conn_writer_slots", writerSlots, connWriterSlotBytes),
+		domain.NewSaturationGauge("conn_writer_queued", writerQueued),
+		// Transit forwarding state, one record per relayed message for up
+		// to 180 s, capped at maxRelayStates. The frame bytes stashed on
+		// those records for failover are priced separately and exactly:
+		// they are the part of the record that is a payload rather than a
+		// header, and the part that is released early — on the hop ack.
+		domain.NewResourceGauge("relay_states", relayStates, relayStateBytes),
+		domain.NewResourceGauge("relay_frame_bytes", relayFrameBytes, 1),
 	)
 }
 
 // deliveryUsage reports the message-delivery domain and the transit backlog.
 //
 // Two sums iterate here and both are bounded: pending frames by
-// maxPendingFramesTotal, transit envelopes by the topic count. The receipt
+// maxPendingFramesTotal, topic backlogs by the transit byte budget and the
+// per-recipient caps (the walk is the one admission runs per message). The receipt
 // backlog is deliberately NOT summed — it is keyed by recipient and nothing
 // caps how many recipients there are, so summing it would put an unbounded
 // walk under deliveryMu on a node whose delivery path is exactly what a
@@ -335,19 +400,39 @@ func (s *Service) deliveryUsage() domain.SubsystemUsage {
 	// key present in both generations occupies a slot in each.
 	seenReceipts := s.seenReceipts.StoredLen()
 
+	// One pass over the backlogs, the same pass admission already pays on
+	// every stored message (scanTopicForAdmission). Transit is classified
+	// by the same predicate the retention policy uses, so the gauge and
+	// the byte budget it is read against agree on what a transit
+	// envelope is; summing every backlog blindly, as this once did,
+	// counted the node's own inbox as transit.
 	s.gossipMu.RLock()
-	envelopes := 0
+	transitEnvelopes, transitPayload, localEnvelopes := 0, 0, 0
 	for _, backlog := range s.topics {
-		envelopes += len(backlog)
+		for i := range backlog {
+			if s.isTransitEnvelope(backlog[i]) {
+				transitEnvelopes++
+				transitPayload += len(backlog[i].Payload)
+				continue
+			}
+			localEnvelopes++
+		}
 	}
 	s.gossipMu.RUnlock()
 
 	return domain.NewSubsystemUsage(
 		domain.ResourceSubsystemDelivery,
 		// The transit backlog: other people's messages this node is carrying.
-		// Bounded by a byte ceiling rather than a count, so a large number
-		// here is not by itself a fault.
-		domain.NewResourceGauge("transit_envelopes", envelopes, envelopeBytes),
+		// Bounded by maxTransitBacklogBytes of payload (reported exactly
+		// beside it) rather than by a count, so a large number here is not
+		// by itself a fault; a payload figure near the budget is the
+		// number to read.
+		domain.NewResourceGauge("transit_envelopes", transitEnvelopes, envelopeBytes),
+		domain.NewResourceGauge("transit_payload_bytes", transitPayload, 1),
+		// This node's own messages held in topic backlogs: its inbox and
+		// the broadcast topics. Not transit, and not subject to the transit
+		// budget.
+		domain.NewResourceGauge("local_envelopes", localEnvelopes, envelopeBytes),
 		domain.NewResourceGauge("pending_frames", pending, pendingFrameBytes),
 		// Recipients holding a backlog, not receipts held. Each backlog is
 		// capped per recipient; the number of recipients is not, which is
@@ -367,21 +452,84 @@ func (s *Service) deliveryUsage() domain.SubsystemUsage {
 
 // knowledgeUsage reports the identity cache and the key material hanging off
 // it.
+//
+// The key maps are walked for their string bytes: an entry of each is priced
+// as two string headers, and the base64 material they point at is where the
+// memory actually is. The walk is bounded by maxKnownIdentities plus the
+// pinned trust set, because every key map is a subset of the known set.
+//
+// The trust store and the identity resolver keep their own leaf mutexes and
+// are read after the knowledge domain is released.
 func (s *Service) knowledgeUsage() domain.SubsystemUsage {
 	s.knowledgeMu.RLock()
 	known := s.known.Len()
+	pinned := s.known.PinnedLen()
 	boxKeys := len(s.boxKeys)
 	pubKeys := len(s.pubKeys)
 	boxSigs := len(s.boxSigs)
+	keyBytes := 0
+	for address, key := range s.boxKeys {
+		keyBytes += len(address) + len(key)
+	}
+	for address, key := range s.pubKeys {
+		keyBytes += len(address) + len(key)
+	}
+	for address, sig := range s.boxSigs {
+		keyBytes += len(address) + len(sig)
+	}
 	s.knowledgeMu.RUnlock()
 
-	return domain.NewSubsystemUsage(
-		domain.ResourceSubsystemKnowledge,
+	gauges := []domain.ResourceGauge{
 		domain.NewResourceGauge("known_identities", known, knownIdentityBytes),
+		// Members the bound does not apply to: the trust-store mirror. A
+		// subset of known_identities.
+		domain.NewSaturationGauge("pinned_identities", pinned),
 		domain.NewResourceGauge("box_keys", boxKeys, keyMaterialBytes),
 		domain.NewResourceGauge("public_keys", pubKeys, keyMaterialBytes),
 		domain.NewResourceGauge("box_signatures", boxSigs, keyMaterialBytes),
-	)
+		// The bytes the three maps' strings point at — the part the entry
+		// price above deliberately excludes.
+		domain.NewResourceGauge("key_material_bytes", keyBytes, 1),
+	}
+	if s.trust != nil {
+		contacts, conflicts, records := s.trust.persistentUsage()
+		cache := s.trust.sessionRecordUsage()
+		gauges = append(gauges,
+			domain.NewResourceGauge("trust_contacts", contacts, trustContactBytes),
+			domain.NewResourceGauge("trust_conflicts", conflicts, keyMaterialBytes),
+			// Persistent identity records: the node's own and its contacts'.
+			// Bounded by the contact count, which the user controls.
+			domain.NewResourceGauge("trust_records", records, trustRecordBytes),
+			// Session-peer identity records: memory only, under a count,
+			// byte and TTL budget (trust_session_records.go). The bytes
+			// gauge is the cache's own exact account — structural cost
+			// plus the signed bytes and key strings each entry holds — so
+			// it is the ONLY memory figure here; the count is saturation
+			// against maxSessionIdentityRecords, and pricing it again by
+			// the struct size would charge every entry's header twice.
+			domain.NewSaturationGauge("identity_record_cache", cache.count),
+			domain.NewResourceGauge("identity_record_cache_bytes", cache.bytes, 1),
+			// Entries the live set holds against the TTL and the budget:
+			// identities with a session or an open lookup, whose seq floor
+			// must not be evicted. A subset of the count above; when it
+			// approaches the budget, the cache is carrying its whole
+			// working set and can no longer shed anything.
+			domain.NewSaturationGauge("identity_record_cache_protected", cache.protected),
+			// Monotonic counters, not occupancies: how many records the
+			// budget has pushed out and how many the TTL has retired since
+			// start. Reported as saturation so they add no bytes.
+			domain.NewSaturationGauge("identity_record_cache_evicted", int(cache.evicted)),
+			domain.NewSaturationGauge("identity_record_cache_expired", int(cache.expired)),
+		)
+	}
+	if s.identityResolver != nil {
+		gauges = append(gauges,
+			// Lookup cooldowns: one per target that reached a terminal within
+			// the last cooldown window. Swept on the resolver's tick.
+			domain.NewResourceGauge("identity_lookup_cooldowns", s.identityResolver.cooldownCount(), identityCooldownBytes),
+		)
+	}
+	return domain.NewSubsystemUsage(domain.ResourceSubsystemKnowledge, gauges...)
 }
 
 // banUsage reports the IP-level ban and observation state.

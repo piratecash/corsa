@@ -58,7 +58,7 @@ func TestSearchKnownIdentities(t *testing.T) {
 		noMatchHex = "ffffffffffffffffffffffffffffffffffffffff" // no "abc"
 		selfHex    = "1111111111111111111111111111111111111111"
 	)
-	knownIDs := []string{listedHex, matchHex, noMatchHex}
+	knownIDs := identitiesFromHex(listedHex, matchHex, noMatchHex)
 	recipients := []domain.PeerIdentity{domain.PeerIdentityFromWire(listedHex)} // already listed
 	self := domain.PeerIdentityFromWire(selfHex)
 
@@ -75,7 +75,7 @@ func TestSearchKnownIdentities(t *testing.T) {
 }
 
 func TestSearchKnownIdentitiesEmptyQuery(t *testing.T) {
-	results := searchKnownIdentities([]string{"a", "b"}, nil, nil, domaintest.ID("self"), "")
+	results := searchKnownIdentities(identitiesFromHex(), nil, nil, domaintest.ID("self"), "")
 	if results != nil {
 		t.Fatalf("expected nil for empty query, got %v", results)
 	}
@@ -935,7 +935,7 @@ func TestSearchUnionIncludesReachable(t *testing.T) {
 	}
 
 	// The same identity in both sets stays a single row.
-	results = searchKnownIdentities([]string{routedHex}, reachable, nil, domaintest.ID("self"), "abc")
+	results = searchKnownIdentities(identitiesFromHex(routedHex), reachable, nil, domaintest.ID("self"), "abc")
 	if len(results) != 1 {
 		t.Fatalf("union produced duplicates: %v", results)
 	}
@@ -1584,12 +1584,13 @@ func TestMenuRectCacheDropsWhenIdentitySearchRowsChange(t *testing.T) {
 		hexA = "11ab110000000000000000000000000000000000"
 		hexB = "22ab220000000000000000000000000000000000"
 	)
-	status := service.NodeStatus{KnownIDs: []string{hexA, hexB}}
+	status := service.NodeStatus{}
 	w := &Window{menuBtnRects: make(map[*widget.Clickable]image.Rectangle)}
 	btn := new(widget.Clickable)
 	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }
 
 	w.identitySearchEditor.SetText("11")
+	seedIdentitySearch(w, "11", hexA)
 	if got := w.resolveIdentitySearchRows(status, nil); len(got) != 1 || got[0] != domain.PeerIdentityFromWire(hexA) {
 		t.Fatalf("query \"11\" gave %v, want exactly [%s]", got, domain.PeerIdentityFromWire(hexA))
 	}
@@ -1606,6 +1607,7 @@ func TestMenuRectCacheDropsWhenIdentitySearchRowsChange(t *testing.T) {
 	// One hit swapped for another: same count, same heights, different peer in
 	// the only row there is.
 	w.identitySearchEditor.SetText("22")
+	seedIdentitySearch(w, "22", hexB)
 	if got := w.resolveIdentitySearchRows(status, nil); len(got) != 1 || got[0] != domain.PeerIdentityFromWire(hexB) {
 		t.Fatalf("query \"22\" gave %v, want exactly [%s]", got, domain.PeerIdentityFromWire(hexB))
 	}
@@ -1632,7 +1634,8 @@ func TestIdentitySearchCapAndDigestDescribeTheSameRows(t *testing.T) {
 	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }
 	w.identitySearchEditor.SetText("ab")
 
-	rows := w.resolveIdentitySearchRows(service.NodeStatus{KnownIDs: []string{hex1, hex2, hex3, hex4, hex5}}, nil)
+	seedIdentitySearch(w, "ab", hex1, hex2, hex3, hex4, hex5)
+	rows := w.resolveIdentitySearchRows(service.NodeStatus{}, nil)
 	if len(rows) != identitySearchMaxRows {
 		t.Fatalf("laid-out rows = %d, want the cap %d", len(rows), identitySearchMaxRows)
 	}
@@ -1642,13 +1645,15 @@ func TestIdentitySearchCapAndDigestDescribeTheSameRows(t *testing.T) {
 	w.menuBtnRects[btn] = image.Rect(0, 0, 10, 10)
 
 	// hex5 was over the cap and never had a row, so losing it moves nothing.
-	w.resolveIdentitySearchRows(service.NodeStatus{KnownIDs: []string{hex1, hex2, hex3, hex4}}, nil)
+	seedIdentitySearch(w, "ab", hex1, hex2, hex3, hex4)
+	w.resolveIdentitySearchRows(service.NodeStatus{}, nil)
 	if !cached() {
 		t.Fatal("a hit beyond the cap has no row: dropping it must not cost every cached rectangle")
 	}
 
 	// A hit that sorts ahead of all of them pushes every row down one.
-	w.resolveIdentitySearchRows(service.NodeStatus{KnownIDs: []string{hex0, hex1, hex2, hex3, hex4}}, nil)
+	seedIdentitySearch(w, "ab", hex0, hex1, hex2, hex3, hex4)
+	w.resolveIdentitySearchRows(service.NodeStatus{}, nil)
 	if cached() {
 		t.Fatal("a new first hit moved every search row down one; the cached rectangle now names the row above")
 	}
@@ -1714,13 +1719,14 @@ func TestSearchRowAnchorTracksTheBlockAndNotItsContents(t *testing.T) {
 		hexA     = "11ab110000000000000000000000000000000000"
 		headerDp = 66
 	)
-	status := service.NodeStatus{KnownIDs: []string{hexA}}
+	status := service.NodeStatus{}
 	w := newIdentityLayoutTestWindow(t)
 	w.recipientButtons = make(map[domain.PeerIdentity]*widget.Clickable)
 	w.recipientRightClick = make(map[domain.PeerIdentity]*rightClickState)
 	w.recipientMenuBtns = make(map[domain.PeerIdentity]*widget.Clickable)
 	w.menuBtnRects = make(map[*widget.Clickable]image.Rectangle)
 	w.identitySearchEditor.SetText("11")
+	seedIdentitySearch(w, "11", hexA)
 	btn := new(widget.Clickable)
 	cached := func() bool { _, ok := w.menuBtnRects[btn]; return ok }
 
@@ -1764,5 +1770,213 @@ func TestSearchRowAnchorTracksTheBlockAndNotItsContents(t *testing.T) {
 	}
 	if cached() {
 		t.Fatal("the block slid up while its one row stayed the same peer; a kept rectangle anchors the menu where the row no longer is")
+	}
+}
+
+// identitiesFromHex builds the node-answer shape searchKnownIdentities now
+// takes: the matching identities, not the whole observed set.
+func identitiesFromHex(addresses ...string) []domain.PeerIdentity {
+	if len(addresses) == 0 {
+		return nil
+	}
+	out := make([]domain.PeerIdentity, 0, len(addresses))
+	for _, address := range addresses {
+		out = append(out, domain.PeerIdentityFromWire(address))
+	}
+	return out
+}
+
+// seedIdentitySearch gives the window an answer for query as if the node
+// had already replied, for the layout tests that are about rows rather
+// than about where the rows come from.
+func seedIdentitySearch(w *Window, query string, addresses ...string) {
+	w.identitySearchMu.Lock()
+	defer w.identitySearchMu.Unlock()
+	w.identitySearch = identitySearchState{
+		answeredQuery: query,
+		results:       identitiesFromHex(addresses...),
+		gen:           w.identitySearch.gen,
+	}
+}
+
+// The search leaves the render path: a frame asks for what is held, and
+// the node is asked on a goroutine whose answer invalidates the window.
+// This pins the three orderings that behaviour has to get right.
+func TestIdentitySearchIsAsynchronousAndDropsStaleAnswers(t *testing.T) {
+	const (
+		hexOld = "11ab110000000000000000000000000000000000"
+		hexNew = "22ab220000000000000000000000000000000000"
+	)
+
+	release := make(chan struct{})
+	answers := make(chan string, 8)
+	w := &Window{}
+	w.searchIdentities = func(query string) ([]domain.PeerIdentity, error) {
+		answers <- query
+		<-release
+		switch query {
+		case "11":
+			return identitiesFromHex(hexOld), nil
+		default:
+			return identitiesFromHex(hexNew), nil
+		}
+	}
+
+	// First frame with a query: nothing held yet, so no rows and one ask.
+	if got := w.identitySearchMatches("11", 0, 0); got != nil {
+		t.Fatalf("first frame returned %v, want nothing while the node is being asked", got)
+	}
+	if query := <-answers; query != "11" {
+		t.Fatalf("asked for %q, want \"11\"", query)
+	}
+
+	// Further frames with the same query in flight must not ask again — a
+	// render loop would otherwise issue one request per frame.
+	for range 5 {
+		w.identitySearchMatches("11", 0, 0)
+	}
+
+	// The user types on before the answer lands. The answer to "11" is now
+	// stale and must not become the answer to "22".
+	if got := w.identitySearchMatches("22", 0, 0); got != nil {
+		t.Fatalf("new query returned %v, want nothing of the previous query", got)
+	}
+	close(release)
+	if query := <-answers; query != "22" {
+		t.Fatalf("second ask was for %q, want \"22\"", query)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		matches := w.identitySearchMatches("22", 0, 0)
+		if len(matches) == 1 && matches[0] == domain.PeerIdentityFromWire(hexNew) {
+			break
+		}
+		if len(matches) != 0 {
+			t.Fatalf("held answer = %v, want the answer to the current query", matches)
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the answer to the current query never landed")
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The node discovering something new retires the held answer: the
+	// counter is the only thing the status snapshot still carries about
+	// identities, and this is what it is for.
+	w.identitySearchMatches("22", 1, 0)
+	select {
+	case query := <-answers:
+		if query != "22" {
+			t.Fatalf("re-ask after a discovery was for %q", query)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a new discovery did not retire the cached answer")
+	}
+}
+
+// A window with nothing to ask — construction, and every layout test —
+// must neither panic nor wedge the query as permanently in flight.
+func TestIdentitySearchWithoutARouterIsInert(t *testing.T) {
+	w := &Window{}
+	if got := w.identitySearchMatches("11", 0, 0); got != nil {
+		t.Fatalf("matches = %v, want nil", got)
+	}
+	w.identitySearchMu.Lock()
+	pending := w.identitySearch.pending
+	w.identitySearchMu.Unlock()
+	if pending != "" {
+		t.Fatalf("pending = %q, want cleared so the next frame can ask again", pending)
+	}
+}
+
+// The node applies the exclusions now, so an answer describes one
+// particular set of existing conversations. Deleting one changes neither
+// the query nor the discovery counter — and the address it hid must come
+// back into the search anyway.
+func TestIdentitySearchReAsksWhenTheConversationsChange(t *testing.T) {
+	const hexFound = "11ab110000000000000000000000000000000000"
+
+	asked := make(chan uint64, 8)
+	w := &Window{}
+	var nextExcludes uint64
+	w.searchIdentities = func(string) ([]domain.PeerIdentity, error) {
+		asked <- nextExcludes
+		if nextExcludes == 0 {
+			return nil, nil
+		}
+		return identitiesFromHex(hexFound), nil
+	}
+
+	// First question, with the address excluded as an existing conversation.
+	w.identitySearchMatches("11", 0, 7)
+	if got := <-asked; got != 0 {
+		t.Fatalf("first ask carried excludes=%d", got)
+	}
+	waitForIdentitySearch(t, w, "11", 0, 7)
+	if matches := w.identitySearchMatches("11", 0, 7); len(matches) != 0 {
+		t.Fatalf("matches = %v, want none while the conversation exists", matches)
+	}
+
+	// Same query, same discovery counter, different conversations: the
+	// window must ask again rather than hold the filtered answer.
+	nextExcludes = 1
+	w.identitySearchMatches("11", 0, 9)
+	select {
+	case <-asked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("deleting a conversation did not re-ask; its address stays hidden")
+	}
+	waitForIdentitySearch(t, w, "11", 0, 9)
+	matches := w.identitySearchMatches("11", 0, 9)
+	if len(matches) != 1 || matches[0] != domain.PeerIdentityFromWire(hexFound) {
+		t.Fatalf("matches = %v, want the address the deleted conversation was hiding", matches)
+	}
+}
+
+// waitForIdentitySearch blocks until the window holds an answer for exactly
+// this question.
+func waitForIdentitySearch(t *testing.T, w *Window, query string, version, excludes uint64) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		w.identitySearchMu.Lock()
+		answered := w.identitySearch.answeredQuery == query &&
+			w.identitySearch.answeredVersion == version &&
+			w.identitySearch.answeredExcludes == excludes
+		w.identitySearchMu.Unlock()
+		if answered {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("no answer for query %q at version %d / excludes %d", query, version, excludes)
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The digest the search keys on answers membership, not order: a message
+// arriving reorders the sidebar and must not cost a re-ask, while adding or
+// removing a conversation must.
+func TestPeerSetDigestIsMembershipNotOrder(t *testing.T) {
+	a := domaintest.ID("a")
+	b := domaintest.ID("b")
+	c := domaintest.ID("c")
+
+	if peerSetDigest([]domain.PeerIdentity{a, b}) != peerSetDigest([]domain.PeerIdentity{b, a}) {
+		t.Error("reordering the conversations changed the digest")
+	}
+	if peerSetDigest([]domain.PeerIdentity{a, b}) == peerSetDigest([]domain.PeerIdentity{a}) {
+		t.Error("removing a conversation did not change the digest")
+	}
+	if peerSetDigest([]domain.PeerIdentity{a, b}) == peerSetDigest([]domain.PeerIdentity{a, b, c}) {
+		t.Error("adding a conversation did not change the digest")
+	}
+	if peerSetDigest(nil) != peerSetDigest([]domain.PeerIdentity{}) {
+		t.Error("nil and empty must agree")
 	}
 }

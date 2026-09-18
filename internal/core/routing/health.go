@@ -971,6 +971,22 @@ func (s *healthStore) lenLocked() int {
 	return len(s.states)
 }
 
+// orphanCountLocked counts tracked pairs for which hasClaim answers
+// false — health entries that outlived their claim. The invariant
+// maintained by routeStore.onClaimDropped is that this is always
+// zero; the count exists so a running node can prove it without a
+// heap profile. O(N_health); observability-only. Callers must hold
+// t.mu (reader OK).
+func (s *healthStore) orphanCountLocked(hasClaim func(identity, uplink domain.PeerIdentity) bool) int {
+	orphans := 0
+	for key := range s.states {
+		if !hasClaim(key.Identity, key.Uplink) {
+			orphans++
+		}
+	}
+	return orphans
+}
+
 // snapshotLocked returns a deep copy of every tracked state.
 // Backs Table.HealthSnapshot, which is called synchronously per
 // fetchRouteHealth AND fetchRouteLookup RPC request (the latter joined

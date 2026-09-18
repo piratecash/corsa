@@ -510,8 +510,40 @@ func (rs *relayStateStore) markHopAckObserved(messageID string) bool {
 	if !ok {
 		return false
 	}
+	// Release the stashed wire bytes only when this call is the one
+	// CANCELLING a live timer. Then the ack proves the next hop holds
+	// the frame and the failover resend — FrameLine's only reader —
+	// can never fire for this forward, so the store's memory bound
+	// becomes "payload only while an ack is outstanding" instead of
+	// "10 000 × payload for the whole TTL".
+	//
+	// HopAckObserved already true means the budget ELAPSED and
+	// tickHopAckBudgets flipped it as it handed the state to
+	// onRelayHopAckTimeout. A late ack for the abandoned uplink then
+	// arrives while that failover is still running, and releasing here
+	// would empty the field under it: the retry re-arms the budget
+	// (recordFailoverRetry) and the next timeout would find nothing to
+	// resend or gossip. The failover owns the payload from that point
+	// and re-stamps what it sent; leave it alone.
+	if !state.HopAckObserved {
+		state.FrameLine = ""
+	}
 	state.HopAckObserved = true
 	return true
+}
+
+// frameLineBytes sums the wire payload bytes stashed for failover
+// across all tracked states. The walk is bounded by maxRelayStates and
+// runs under rs.mu, which no Service domain mutex nests with; it is a
+// diagnostic (resource breakdown), not a hot-path counter.
+func (rs *relayStateStore) frameLineBytes() int {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	total := 0
+	for _, state := range rs.states {
+		total += len(state.FrameLine)
+	}
+	return total
 }
 
 // recordFailoverRetry atomically transitions a relayForwardState to its
@@ -524,6 +556,15 @@ func (rs *relayStateStore) markHopAckObserved(messageID string) bool {
 // RouteOrigin metadata is cleared because failover does not carry the
 // original routing-table origin (the new path may have come from a
 // different uplink claim altogether).
+//
+// frameLine is the wire payload the caller just put on the new uplink,
+// and it is re-stamped here because a re-armed budget means a further
+// timeout can follow: the state must describe the forward that is
+// actually outstanding. It also restores the field against a late ack
+// for the abandoned uplink, which lands while this failover runs and
+// would otherwise have released it (see markHopAckObserved). An empty
+// frameLine leaves whatever the state holds — the caller had nothing to
+// say about the payload.
 //
 // Returns true on success — the message ID was present and the
 // transition landed. Returns false when the message ID is unknown
@@ -538,7 +579,7 @@ func (rs *relayStateStore) markHopAckObserved(messageID string) bool {
 // routing_relay.go is the only production caller — see
 // onRelayHopAckTimeout's doc-comment for the lock-ordering contract
 // against routing.Table.mu (rs.mu released BEFORE Table reads).
-func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress domain.PeerAddress) bool {
+func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress domain.PeerAddress, frameLine string) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	state, ok := rs.states[messageID]
@@ -547,6 +588,9 @@ func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress doma
 	}
 	if state.ForwardedTo != "" && state.ForwardedTo != newAddress {
 		state.AbandonedForwardedTo = append(state.AbandonedForwardedTo, state.ForwardedTo)
+	}
+	if frameLine != "" {
+		state.FrameLine = frameLine
 	}
 	state.ForwardedTo = newAddress
 	state.RouteOrigin = domain.PeerIdentity{}
@@ -1661,7 +1705,12 @@ func (s *Service) retryRelayDeliveries() {
 
 	now := time.Now().UTC()
 	for _, msg := range s.retryableRelayMessages(now) {
-		attempts := s.noteRelayAttempt(relayMessageKey(msg.ID), now)
+		attempts, tracked := s.noteRelayAttempt(relayMessageKey(msg.ID), now)
+		if !tracked {
+			// Removed between the snapshot and now — the message is no
+			// longer ours to retry.
+			continue
+		}
 		decision := s.router.Route(msg)
 		// Build the gossip-target string slice ONLY when debug logging is
 		// enabled — it is purely for the log line, and at production log levels
@@ -1702,7 +1751,11 @@ func (s *Service) retryRelayDeliveries() {
 		}
 	}
 	for _, receipt := range s.retryableRelayReceipts(now) {
-		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", s.noteRelayAttempt(relayReceiptKey(receipt), now)).Msg("relay_retry_receipt")
+		attempts, tracked := s.noteRelayAttempt(relayReceiptKey(receipt), now)
+		if !tracked {
+			continue
+		}
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).Str("status", receipt.Status).Int("attempts", attempts).Msg("relay_retry_receipt")
 		if !s.handleRelayReceipt(receipt) {
 			// Inline for the same reason as executeGossipTargets above:
 			// the body is now a cheap enqueue loop on the dispatch pool.
@@ -1828,20 +1881,29 @@ func relayRetryBackoff(attempts int) time.Duration {
 	return backoff
 }
 
-func (s *Service) noteRelayAttempt(key string, now time.Time) int {
+// noteRelayAttempt records one retry attempt on an entry that is still
+// tracked and returns the attempt count. The bool is false when the
+// entry is gone: the retry loop works from a snapshot taken under
+// deliveryMu and released before this call, so a receipt ack, a
+// cancel or a transit eviction can remove the message — and its entry
+// — in between. Re-creating the entry here made it unreachable for
+// every reaper (they all walk the live backlog, which no longer holds
+// the message), so it stayed until process exit and burned the
+// maxRelayRetryEntries quota. Absent entry → no write, and the caller
+// skips the send, because the work it was about to do was cancelled.
+func (s *Service) noteRelayAttempt(key string, now time.Time) (int, bool) {
 	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_wait").Str("key", key).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
 	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_held").Str("key", key).Msg("delivery_mu_writer")
-	state := s.relayRetry[key]
-	if state.FirstSeen.IsZero() {
-		state.FirstSeen = now
+	state, tracked := s.relayRetry[key]
+	if tracked {
+		state.LastAttempt = now
+		state.Attempts++
+		s.relayRetry[key] = state
 	}
-	state.LastAttempt = now
-	state.Attempts++
-	s.relayRetry[key] = state
 	s.deliveryMu.Unlock()
 	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_released").Str("key", key).Msg("delivery_mu_writer")
-	return state.Attempts
+	return state.Attempts, tracked
 }
 
 func (s *Service) trackRelayMessage(msg protocol.Envelope) {

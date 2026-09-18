@@ -41,6 +41,17 @@ func issueTestRecord(t *testing.T, owner *identity.Identity, seq domain.Identity
 	return record, body
 }
 
+// trustOwner makes owner a contact of store: only a contact's (or the
+// node's own) record is persistent — a session peer's is cache only
+// (trust_session_records.go), so tests about disk round-trips first
+// trust the owner.
+func trustOwner(t *testing.T, store *trustStore, owner *identity.Identity) {
+	t.Helper()
+	if stored, err := store.remember(trustedContact{Address: owner.Address, PubKey: "pk", Source: "test"}); err != nil || !stored {
+		t.Fatalf("remember owner: stored=%v err=%v", stored, err)
+	}
+}
+
 func newRecordTestStore(t *testing.T) (*trustStore, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "trust.json")
@@ -59,6 +70,7 @@ func TestTrustStoreRecordPersistsAcrossReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
+	trustOwner(t, store, owner)
 	record, body := issueTestRecord(t, owner, 3, true)
 
 	outcome, err := store.rememberRecord(testRecordStoreNetwork, record, body)
@@ -361,8 +373,10 @@ func TestEnsureSelfIdentityRecordLifecycle(t *testing.T) {
 		t.Errorf("first seq = %d, want 1", firstBody.Seq)
 	}
 
-	// Publish-after-persist: the returned record is already on disk.
-	reloaded, err := loadTrustStore(path, trustedContact{})
+	// Publish-after-persist: the returned record is already on disk. The
+	// reload names the owner as self, as NewService does: the own record
+	// row is restored for the self address, not for a stranger.
+	reloaded, err := loadTrustStore(path, trustedContact{Address: owner.Address, PubKey: "pk", Source: "self"})
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -464,6 +478,7 @@ func TestTrustStoreRejectsTamperedRecordRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
+	trustOwner(t, store, owner)
 	record, body := issueTestRecord(t, owner, 3, true)
 	if _, err := store.rememberRecord(testRecordStoreNetwork, record, body); err != nil {
 		t.Fatalf("remember: %v", err)
@@ -545,7 +560,8 @@ func TestTrustStoreStaleSnapshotCannotClobberNewer(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 
-	// The OLD (empty) snapshot, taken before the record lands.
+	trustOwner(t, store, owner)
+	// The OLD (record-less) snapshot, taken before the record lands.
 	store.mu.Lock()
 	stale := store.snapshotLocked()
 	store.mu.Unlock()

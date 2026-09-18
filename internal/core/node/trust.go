@@ -86,7 +86,19 @@ type trustStore struct {
 	mu        sync.RWMutex
 	contacts  map[string]trustedContact
 	conflicts map[string]string
-	records   map[trustRecordKey]trustedIdentityRecord
+	// records holds the PERSISTENT records: the node's own and those of
+	// trusted contacts (docs/protocol/identity-lookup.md §4, the owner and
+	// the interlocutor). A record is persistent exactly when its address is
+	// a contact at the time it is accepted or promoted, and it leaves with
+	// the contact (forget). Everything else lives in sessionRecords.
+	records map[trustRecordKey]trustedIdentityRecord
+	// sessionRecords holds the records of everybody else — session peers
+	// and lookup targets that are not contacts — in memory only and under
+	// a budget. See trust_session_records.go for the contract.
+	sessionRecords *sessionRecordCache
+	// clock is the store's time source; tests pin it to drive the session
+	// record TTL. Wall time otherwise.
+	clock func() time.Time
 	// snapshotGen numbers snapshots in mutation order (owned by mu, taken
 	// with write intent). Disk writes happen outside mu, so two mutators
 	// can reach saveSnapshot in either order — the generation is what
@@ -103,10 +115,12 @@ type trustStore struct {
 
 func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 	store := &trustStore{
-		path:      path,
-		contacts:  map[string]trustedContact{},
-		conflicts: map[string]string{},
-		records:   map[trustRecordKey]trustedIdentityRecord{},
+		path:           path,
+		contacts:       map[string]trustedContact{},
+		conflicts:      map[string]string{},
+		records:        map[trustRecordKey]trustedIdentityRecord{},
+		sessionRecords: newSessionRecordCache(maxSessionIdentityRecords, maxSessionIdentityRecordBytes, sessionIdentityRecordTTL),
+		clock:          func() time.Time { return time.Now().UTC() },
 	}
 
 	if path != "" {
@@ -126,7 +140,19 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 			// first save rewrites it as trustFileVersion. Individual rows
 			// that fail to parse are skipped, not fatal: one torn row must
 			// not take the whole contact store (and the node) down.
+			//
+			// Rows whose address is neither a contact nor this node are
+			// the session-peer records an earlier build persisted; they
+			// are not restored (a session peer re-pushes its record right
+			// after auth, and a lookup recovers any other), and the save
+			// at the end of this load rewrites the file without them. The
+			// contacts themselves are untouched by this migration.
+			migrated := 0
 			for _, row := range payload.Records {
+				if _, contact := store.contacts[row.Address]; !contact && row.Address != self.Address {
+					migrated++
+					continue
+				}
 				key, restored, err := restoreTrustRecordRow(row)
 				if err != nil {
 					log.Warn().Err(err).
@@ -137,13 +163,16 @@ func loadTrustStore(path string, self trustedContact) (*trustStore, error) {
 				}
 				store.records[key] = restored
 			}
+			if migrated > 0 {
+				log.Info().Int("records", migrated).Msg("trust_store_session_records_not_restored")
+			}
 		} else if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("read trust store %s: %w", path, err)
 		}
 	}
 
 	if self.Address != "" {
-		now := time.Now().UTC()
+		now := store.clock()
 		if existing, ok := store.contacts[self.Address]; ok {
 			// The caller-supplied self contact is canonical for OUR OWN
 			// key material — it is derived from the identity file plus the
@@ -231,7 +260,7 @@ func (s *trustStore) recordLastOnlineAt(identities []domain.PeerIdentity, at tim
 // cannot distinguish "conflict-path save failed" (not stored) from
 // "stored but save failed".
 func (s *trustStore) remember(contact trustedContact) (stored bool, err error) {
-	now := time.Now().UTC()
+	now := s.clock()
 
 	s.mu.Lock()
 	if existing, ok := s.contacts[contact.Address]; ok {
@@ -256,9 +285,72 @@ func (s *trustStore) remember(contact trustedContact) (stored bool, err error) {
 	contact.FirstSeenAt = now
 	contact.LastSeenAt = now
 	s.contacts[contact.Address] = contact
+	s.promoteSessionRecordsLocked(contact.Address)
 	snapshot := s.snapshotLocked()
 	s.mu.Unlock()
 	return true, s.saveSnapshot(snapshot)
+}
+
+// promoteSessionRecordsLocked moves every cached record of an address that
+// just became a contact into the persistent set: the interlocutor's record
+// belongs on disk, and the seq gate it carries must not depend on the
+// cache budget from now on. Caller holds mu (write).
+func (s *trustStore) promoteSessionRecordsLocked(address string) {
+	for key := range s.sessionRecords.entries {
+		if key.address != address {
+			continue
+		}
+		if stored, ok := s.sessionRecords.takeLocked(key); ok {
+			s.records[key] = stored
+		}
+	}
+}
+
+// isPersistentRecordAddressLocked reports whether a record for address
+// belongs on disk — the address is a contact (the node's own contact row
+// included). Caller holds mu.
+func (s *trustStore) isPersistentRecordAddressLocked(address string) bool {
+	_, ok := s.contacts[address]
+	return ok
+}
+
+// sweepSessionRecords drops session records past their TTL. Called on the
+// maintenance cadence so the cache shrinks while the node is quiet, not
+// only when the next record arrives. Records of identities the node is
+// still talking to or asking about are stepped over — see
+// setRecordProtection.
+func (s *trustStore) sweepSessionRecords(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionRecords.sweepLocked(now)
+}
+
+// setRecordProtection installs the live set the session-record cache
+// evicts through. Wired once, at construction: the cache does not consult
+// it and then delete, it deletes INSIDE it, so a pin taken while an
+// eviction is choosing cannot be overtaken by that eviction.
+func (s *trustStore) setRecordProtection(protection *recordProtection) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessionRecords.protection = protection
+}
+
+// sessionRecordUsage reports the cache's live count and bytes, how much of
+// it the live set is holding, and its eviction history, for the resource
+// breakdown.
+func (s *trustStore) sessionRecordUsage() sessionRecordStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stats := s.sessionRecords.stats
+	stats.protected = s.sessionRecords.protectedCountLocked()
+	return stats
+}
+
+// persistentUsage reports the sizes of the persistent maps.
+func (s *trustStore) persistentUsage() (contacts, conflicts, records int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.contacts), len(s.conflicts), len(s.records)
 }
 
 // forget removes a contact from the trust store and persists the change.
@@ -273,6 +365,12 @@ func (s *trustStore) forget(identity domain.PeerIdentity) (removed bool, err err
 
 	s.mu.Lock()
 	if _, ok := s.contacts[address]; !ok {
+		// Not a contact — nothing on disk to forget, but "forget X" still
+		// means the cached session record goes: it is the one record the
+		// user can name, and the cache would otherwise keep it until the
+		// budget or the TTL got there. removed stays false: no contact
+		// was deleted, and that is what the caller's unpin keys on.
+		s.sessionRecords.deleteAddressLocked(address)
 		s.mu.Unlock()
 		return false, nil
 	}
@@ -280,12 +378,15 @@ func (s *trustStore) forget(identity domain.PeerIdentity) (removed bool, err err
 	delete(s.conflicts, address)
 	// The stored record follows the contact out: it exists because there was
 	// a dialogue, and keeping the keys of a deleted contact on disk would
-	// contradict the deletion.
+	// contradict the deletion. The cache can hold nothing for a contact,
+	// but a record accepted between the two map writes of a racing
+	// promotion would; clearing it costs one walk of a bounded map.
 	for key := range s.records {
 		if key.address == address {
 			delete(s.records, key)
 		}
 	}
+	s.sessionRecords.deleteAddressLocked(address)
 	snapshot := s.snapshotLocked()
 	s.mu.Unlock()
 
@@ -348,11 +449,21 @@ func (s *trustStore) recordBodies(network string) []protocol.IdentityRecordBody 
 func (s *trustStore) recordFor(network domain.NetworkID, identity domain.PeerIdentity) (protocol.SignedIdentityRecord, protocol.IdentityRecordBody, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	stored, ok := s.records[trustRecordKey{network: network.String(), address: identity.String()}]
+	stored, ok := s.recordLocked(trustRecordKey{network: network.String(), address: identity.String()})
 	if !ok {
 		return protocol.SignedIdentityRecord{}, protocol.IdentityRecordBody{}, false
 	}
 	return stored.record, stored.body, true
+}
+
+// recordLocked finds a record in whichever set holds it. A key is in at
+// most one: acceptance routes it by contact membership, promotion moves it
+// from the cache to the persistent set, and forget clears both.
+func (s *trustStore) recordLocked(key trustRecordKey) (trustedIdentityRecord, bool) {
+	if stored, ok := s.records[key]; ok {
+		return stored, true
+	}
+	return s.sessionRecords.getLocked(key)
 }
 
 // rememberRecord merges an ALREADY VERIFIED signed record into the store
@@ -369,13 +480,35 @@ func (s *trustStore) recordFor(network domain.NetworkID, identity domain.PeerIde
 // Duplicate and stale are silent no-ops. A conflict (same seq, different
 // bytes) keeps the stored record; the caller logs it — the owner is obliged
 // to issue a new seq.
+//
+// Where an accepted record lands depends on whose it is: a contact's (or
+// the node's own) goes to the persistent set and to disk; anybody else's
+// goes to the bounded session cache and never touches the disk — so a
+// stream of pushes from ever-new session peers costs bounded memory and no
+// I/O, instead of one full rewrite of the trust file per peer.
 func (s *trustStore) rememberRecord(network domain.NetworkID, record protocol.SignedIdentityRecord, body protocol.IdentityRecordBody) (domain.IdentityRecordMergeOutcome, error) {
-	now := time.Now().UTC()
+	return s.mergeRecord(network, record, body, false)
+}
+
+// rememberOwnRecord merges the node's OWN record. It is persistent by
+// construction — the owner is the first of the three holders in
+// identity-lookup.md §4 — and does not depend on the self contact row
+// being present, which a store loaded without a self contact (tests, a
+// relay-only profile) would otherwise lack.
+func (s *trustStore) rememberOwnRecord(network domain.NetworkID, record protocol.SignedIdentityRecord, body protocol.IdentityRecordBody) (domain.IdentityRecordMergeOutcome, error) {
+	return s.mergeRecord(network, record, body, true)
+}
+
+// mergeRecord is the shared merge: the seq gate against whichever set holds
+// the current record, then placement. persistent forces the disk set;
+// otherwise contact membership at this moment decides.
+func (s *trustStore) mergeRecord(network domain.NetworkID, record protocol.SignedIdentityRecord, body protocol.IdentityRecordBody, persistent bool) (domain.IdentityRecordMergeOutcome, error) {
+	now := s.clock()
 	key := trustRecordKey{network: network.String(), address: body.Address.String()}
 
 	s.mu.Lock()
 	stored := domain.AbsentIdentityRecord()
-	if existing, ok := s.records[key]; ok {
+	if existing, ok := s.recordLocked(key); ok {
 		stored = domain.ExistingIdentityRecord(existing.body.Seq, existing.record.Body)
 	}
 	outcome := domain.DecideIdentityRecordMerge(stored, body.Seq, record.Body)
@@ -384,7 +517,18 @@ func (s *trustStore) rememberRecord(network domain.NetworkID, record protocol.Si
 		return outcome, nil
 	}
 
-	s.records[key] = trustedIdentityRecord{record: record, body: body, storedAt: now}
+	accepted := trustedIdentityRecord{record: record, body: body, storedAt: now}
+	if !persistent && !s.isPersistentRecordAddressLocked(key.address) {
+		s.sessionRecords.putLocked(key, accepted)
+		s.mu.Unlock()
+		return outcome, nil
+	}
+
+	// A record that was cached before its address became persistent (a
+	// forced own record, or a contact added after the record arrived and
+	// promoted here rather than in remember) must not exist in both sets.
+	s.sessionRecords.deleteLocked(key)
+	s.records[key] = accepted
 	if contact, ok := s.contacts[key.address]; ok {
 		contact.PubKey = string(body.PubKey)
 		contact.BoxKey = string(body.BoxKey)

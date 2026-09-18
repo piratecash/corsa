@@ -373,7 +373,7 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 		FrameLine:            "{\"type\":\"relay_message\"}\n",
 	})
 
-	if !rs.recordFailoverRetry("msg-fail", domain.PeerAddress("peer-b")) {
+	if !rs.recordFailoverRetry("msg-fail", domain.PeerAddress("peer-b"), "") {
 		t.Fatal("recordFailoverRetry returned false for live state")
 	}
 
@@ -410,7 +410,7 @@ func TestFailoverRetry_RecordTransitionsAllFieldsAtomically(t *testing.T) {
 // log and move on.
 func TestFailoverRetry_RecordNoopOnUnknownMessage(t *testing.T) {
 	rs := newRelayStateStore()
-	if rs.recordFailoverRetry("never-existed", "peer-b") {
+	if rs.recordFailoverRetry("never-existed", "peer-b", "") {
 		t.Fatal("recordFailoverRetry returned true on unknown message ID")
 	}
 	if rs.count() != 0 {
@@ -435,7 +435,7 @@ func TestFailoverRetry_RecordSamePeerDoesNotAppendAbandoned(t *testing.T) {
 		HopAckObserved:       true,
 	})
 
-	if !rs.recordFailoverRetry("msg-same", domain.PeerAddress("peer-a")) {
+	if !rs.recordFailoverRetry("msg-same", domain.PeerAddress("peer-a"), "") {
 		t.Fatal("recordFailoverRetry returned false for same-peer retry")
 	}
 
@@ -498,10 +498,10 @@ func TestFailoverRetry_AccumulatesAbandonedAcrossMultipleRetries(t *testing.T) {
 		HopAckRemainingTicks: defaultHopAckBudgetSeconds,
 	})
 
-	if !rs.recordFailoverRetry("msg-chain", "peer-b") {
+	if !rs.recordFailoverRetry("msg-chain", "peer-b", "") {
 		t.Fatal("first retry returned false")
 	}
-	if !rs.recordFailoverRetry("msg-chain", "peer-c") {
+	if !rs.recordFailoverRetry("msg-chain", "peer-c", "") {
 		t.Fatal("second retry returned false")
 	}
 

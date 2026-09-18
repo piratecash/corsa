@@ -552,8 +552,8 @@ func (t *Table) RemoveDirectPeer(peerIdentity PeerIdentity) (RemoveDirectPeerRes
 	withdrawals, transitInvalidated, affected, exposed := t.store.InvalidateAllVia(peerIdentity, now)
 	// Eagerly evict the health states backing the just-invalidated routes
 	// (identity, uplink=peerIdentity). Same reasoning as InvalidateTransitRoutes:
-	// without this they linger for a whole tombstone TTL until CompactExpired +
-	// reconcileHealthLocked, accumulating O(identities) stale entries per
+	// without this they linger for a whole tombstone TTL until CompactExpired
+	// drops the tombstone, accumulating O(identities) stale entries per
 	// departed peer under churn.
 	if t.health != nil {
 		for _, identity := range affected {
@@ -614,14 +614,13 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 	if invalidated > 0 {
 		// Eagerly evict the health states backing the just-tombstoned transit
 		// claims (identity, uplink=peerIdentity). Without this they linger until
-		// the tombstone's TTL elapses AND CompactExpired physically removes the
-		// claim AND reconcileHealthLocked runs (it only fires on totalRemoved>0)
-		// — so under peer churn the health store accumulates O(identities) stale
-		// entries per departed peer for a whole TTL window (observed as the
+		// the tombstone's TTL elapses and CompactExpired physically removes the
+		// claim — so under peer churn the health store accumulates O(identities)
+		// stale entries per departed peer for a whole TTL window (observed as the
 		// dominant time-growing heap allocator). Evicting now is consistent with
-		// reconcileHealthLocked's own intent: a later announce that resurrects
-		// the (Identity, Uplink) pair must not be filtered by a stale Bad/Dead
-		// label, so it gets a fresh placeholder via ensureLocked.
+		// the storage-driven eviction's own intent: a later announce that
+		// resurrects the (Identity, Uplink) pair must not be filtered by a stale
+		// Bad/Dead label, so it gets a fresh placeholder via ensureLocked.
 		if t.health != nil {
 			for _, identity := range affected {
 				t.health.evictUplinkLocked(identity, peerIdentity)
@@ -742,18 +741,11 @@ func (t *Table) TickTTL() TickTTLResult {
 	for _, id := range seqHoldReleased {
 		t.markRouteChangedLocked(id, JournalCauseHoldDownRelease)
 	}
-	// Phase 2 health reconciliation: when CompactExpired physically
-	// removes a claim, the matching RouteHealthState entry is no
-	// longer backed by storage. Without the reconciliation step,
-	// a future announce that resurrects the same (Identity, Uplink)
-	// pair could be filtered out of Lookup by a stale Bad/Dead
-	// health label — see docs/protocol/route_health.md
-	// §4.7 Resolved decision #6 (tight sync). Reconciliation runs
-	// only when storage actually removed something so the common
-	// no-op tick stays cheap.
-	if totalRemoved > 0 {
-		t.reconcileHealthLocked()
-	}
+	// Route health for the compacted claims was evicted inside
+	// CompactExpired through routeStore.onClaimDropped — the same
+	// hook that covers cap displacement — so no reconcile pass is
+	// needed here.
+	//
 	// Phase 3 PR 12.5: reap stale digest snapshots on the same
 	// cadence as the route TTL sweep. Entries that aged past
 	// SessionDigestCacheTTL without a reconnect are dead weight;
@@ -790,25 +782,6 @@ func (t *Table) TickTTL() TickTTLResult {
 		}
 	}
 	return TickTTLResult{Exposed: exposed, Removed: totalRemoved}
-}
-
-// reconcileHealthLocked drops every RouteHealthState entry whose
-// (Identity, Uplink) pair has no remaining claim in storage.
-// Invoked after operations that physically remove claims
-// (TickTTL.CompactExpired). The walk is O(N_health) per call but
-// only fires after a non-empty CompactExpired pass; for steady-
-// state nodes (no expirations on a tick) the cost is zero.
-//
-// Caller must hold t.mu in W mode.
-func (t *Table) reconcileHealthLocked() {
-	if t.health == nil || len(t.health.states) == 0 {
-		return
-	}
-	for key := range t.health.states {
-		if _, idx := t.store.findByUplinkLocked(key.Identity, key.Uplink); idx < 0 {
-			delete(t.health.states, key)
-		}
-	}
 }
 
 // RefreshDirectPeers is a no-op retained for API compatibility.

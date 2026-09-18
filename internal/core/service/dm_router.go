@@ -1228,6 +1228,99 @@ func (r *DMRouter) ResolveIdentity(target domain.PeerIdentity) (string, error) {
 	return reply.Resolution.ResolutionID, nil
 }
 
+// identitySearchRows is how many results SearchIdentities asks for. The
+// window shows fewer (identitySearchMaxRows); the surplus is headroom for
+// the rows it merges from its own sources and for one snapshot's worth of
+// disagreement about which conversations already exist.
+const identitySearchRows = 16
+
+// SearchIdentities returns the identities the node still knows whose
+// address contains fragment and which are not already on screen — this
+// node's own address, and the identities the user already has a
+// conversation with.
+//
+// Those exclusions travel WITH the query rather than being applied to the
+// answer, because the node is the only party holding the whole set and so
+// the only one that can take the smallest matches the caller can actually
+// use. Filtering afterwards means the limit bounds the search instead of
+// the answer: a fragment whose smallest matches are all existing
+// conversations comes back empty while the match the user wanted sits one
+// place past the cut. Neither a larger limit nor paging past the discarded
+// rows fixes that — both only decide how far away the cut sits, and paging
+// pays a walk of the node's set for every page.
+//
+// It replaced a full copy of the node's identity list travelling in every
+// status snapshot. The list was republished per discovered identity and
+// filtered in the UI's layout pass; asking per query instead makes the cost
+// proportional to how often somebody searches rather than to how many
+// identities the node meets, and it means the answer can never offer an
+// identity the node has evicted.
+//
+// Nothing is cached here. The window holds the answer it is drawing and
+// re-asks when the query, the node's discovery counter or its own exclusion
+// set changes, so a second cache at this level could only add a way for an
+// answer to outlive all three — which is exactly what it did: an identity
+// learned through a path that does not publish the discovery event left the
+// cached answer standing with no way to retire it.
+//
+// Blocking: it calls the embedded node synchronously. The caller must not
+// be a render path — the desktop runs it on its own goroutine and discards
+// answers whose query is no longer current.
+func (r *DMRouter) SearchIdentities(fragment string) ([]domain.PeerIdentity, error) {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return nil, nil
+	}
+
+	reply, err := r.client.rpc.LocalRequestFrameCtx(r.opContext(), protocol.Frame{
+		Type:    "search_identities",
+		Query:   fragment,
+		Exclude: r.identitySearchExclusions(),
+		Limit:   identitySearchRows,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if reply.Type == "error" {
+		return nil, fmt.Errorf("search_identities: %s", reply.Error)
+	}
+
+	results := make([]domain.PeerIdentity, 0, len(reply.Identities))
+	for _, address := range reply.Identities {
+		identity := domain.PeerIdentityFromWire(strings.TrimSpace(address))
+		if identity.IsZero() {
+			continue
+		}
+		results = append(results, identity)
+	}
+	return results, nil
+}
+
+// identitySearchExclusions is what the search must not offer: this node,
+// and every identity already listed as a conversation. Built before the
+// node call so r.mu is not held across it.
+//
+// Wire form, because it goes into the frame: the node keys its set by
+// address string. The list is the user's own conversations, so it is
+// user-scale, and the frame is handed to the embedded node in memory
+// rather than serialised.
+func (r *DMRouter) identitySearchExclusions() []string {
+	r.mu.Lock()
+	excluded := make([]string, 0, len(r.peers)+1)
+	for peer := range r.peers {
+		if peer.IsZero() {
+			continue
+		}
+		excluded = append(excluded, peer.String())
+	}
+	r.mu.Unlock()
+
+	if self := r.client.Address(); !self.IsZero() {
+		excluded = append(excluded, self.String())
+	}
+	return excluded
+}
+
 // ImportContactLink verifies and imports a pasted corsa: link, returning
 // the imported identity.
 func (r *DMRouter) ImportContactLink(raw string) (domain.PeerIdentity, error) {
@@ -4994,7 +5087,6 @@ func deepCopyNodeStatus(src NodeStatus) NodeStatus {
 	// the element copy is complete.
 	dst.Services = append([]string(nil), src.Services...)
 	dst.Capabilities = append([]string(nil), src.Capabilities...)
-	dst.KnownIDs = append([]string(nil), src.KnownIDs...)
 	dst.Peers = append([]string(nil), src.Peers...)
 	dst.Messages = append([]string(nil), src.Messages...)
 	dst.MessageIDs = append([]string(nil), src.MessageIDs...)
@@ -5052,7 +5144,8 @@ func (r *DMRouter) notify(eventType UIEventType) {
 // NotifyStatusDomainChanged is the lightweight analogue of
 // NotifyStatusChanged: instead of deep-copying the whole NodeStatus, it
 // patches just the one field the monitor reports as changed and recomposes.
-// Profiling flagged deepCopyNodeStatus (PeerHealth ~19MB, KnownIDs ~11MB per
+// Profiling flagged deepCopyNodeStatus (PeerHealth ~19MB, the since-removed
+// KnownIDs ~11MB per
 // copy) as the dominant allocator under a status-event storm on a large mesh;
 // resource/traffic/route/identity/aggregate events each touch a single field,
 // so re-cloning the rest is pure waste.
@@ -5103,7 +5196,7 @@ func (r *DMRouter) NotifyStatusDomainChanged(d NodeStatusDomain) {
 		// snapshot label one projection with another's number.
 		r.cachedNS.Presence, r.cachedNS.PresenceGeneration = r.statusMonitor.PresenceSnapshot()
 	case NodeStatusDomainKnownIDs:
-		r.cachedNS.KnownIDs = r.statusMonitor.KnownIDsSnapshot()
+		r.cachedNS.KnownIDsVersion = r.statusMonitor.KnownIDsVersion()
 	case NodeStatusDomainAggregate:
 		r.cachedNS.AggregateStatus, r.cachedNS.CheckedAt = r.statusMonitor.AggregateStatusSnapshot()
 	default:

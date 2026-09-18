@@ -95,6 +95,18 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			// peer — so every transient offender left a permanent
 			// residue. See ban_purge.go.
 			s.purgeExpiredBanState()
+			// The live set that holds a talking peer's seq floor is
+			// maintained by the session and lookup paths themselves; this
+			// is the self-heal that repairs a missed pin or a double
+			// release, and it must run BEFORE the sweep so the sweep sees
+			// the repaired set. See record_protection.go.
+			s.reconcileRecordProtection()
+			// Session-peer identity records age out on the same cadence,
+			// so the cache shrinks while the node is quiet and not only
+			// when the next push arrives. See trust_session_records.go.
+			if s.trust != nil {
+				s.trust.sweepSessionRecords(time.Now().UTC())
+			}
 			s.retryRelayDeliveries()
 			// Sender-side end-to-end retry (delivery_retry.go): the 2s
 			// tick is the resolution; the per-entry exponential schedule
@@ -3118,6 +3130,15 @@ func (s *Service) syncPeerSession(session *peerSession, requestPeers bool, path 
 		s.logPeerExchangeExecuted(path, session.address, len(peersFrame.Peers), peersImported)
 	}
 
+	// The contact epidemic is the bridge for peers WITHOUT the identity
+	// discovery layer. With a peer that declared it, the session's initial
+	// push_identity has delivered the peer's own record and get_identity
+	// answers for anyone else on demand, so the bulk fetch would only
+	// refill the knowledge maps with third-party keys nobody asked for.
+	if s.sessionSupportsIdentityDiscovery(session) {
+		log.Debug().Str("peer", string(session.address)).Str("path", string(path)).Msg("session_contact_sync_skipped_identity_discovery")
+		return nil
+	}
 	_, err := s.syncContactsViaSession(session)
 	return err
 }

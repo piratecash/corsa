@@ -142,6 +142,28 @@ type routeStore struct {
 	// env var stay first-class operator surface.
 	maxNextHopsPerOrigin int
 
+	// onClaimDropped is invoked, under the same writer t.mu the
+	// mutation runs under, for every (Identity, Uplink) pair whose
+	// claim is PHYSICALLY dropped from storage: displaced in place by
+	// cap admission (AdmitNew / AdmitDirect) or compacted by TTL
+	// (CompactExpired). It is the single mechanism by which the
+	// owning Table keeps per-pair state (route health) in lockstep
+	// with the claim set — the invariant "health keys ⊆ storage
+	// keys" is enforced at the removal chokepoints rather than by a
+	// separate reconcile pass, because a reconcile that only ran
+	// when TTL removed something let cap replacement leak one
+	// health entry per displaced uplink for as long as the winner
+	// kept its TTL refreshed (28 510 health entries against 3 585
+	// claims on a five-day relay, Sep 2026).
+	//
+	// Tombstoning (WithdrawTriple, InvalidateAllVia,
+	// InvalidateTransitVia) is NOT a drop: the withdrawn claim still
+	// occupies its slot, and the hook fires when TTL compacts it.
+	// The tombstone-promotion detach/re-append in ApplyUpdate is
+	// not a drop either — the pair keeps its slot or gets it back.
+	// Nil means no observer (bare stores in tests).
+	onClaimDropped func(identity, uplink PeerIdentity)
+
 	// localOrigin is this node's Ed25519 fingerprint. Used by
 	// AdmitNew / syncSeqCounterLocked / InvalidateAllVia /
 	// AnnounceProjectionFor for own-origin handling. Mirrored from
@@ -565,6 +587,24 @@ func (s *routeStore) findByUplinkLocked(identity, uplink PeerIdentity) ([]Uplink
 		}
 	}
 	return bucket, -1
+}
+
+// hasClaimLocked reports whether storage holds any claim — live or
+// tombstone — for the (identity, uplink) pair. It is the predicate
+// behind the route-health orphan gauge: a health entry without a
+// backing claim is state the table has already forgotten about.
+// Read-only; caller must hold t.mu (reader OK).
+func (s *routeStore) hasClaimLocked(identity, uplink PeerIdentity) bool {
+	_, idx := s.findByUplinkLocked(identity, uplink)
+	return idx >= 0
+}
+
+// noteClaimDroppedLocked notifies the owner that the claim for the
+// pair left storage. Caller must hold t.mu (writer).
+func (s *routeStore) noteClaimDroppedLocked(identity, uplink PeerIdentity) {
+	if s.onClaimDropped != nil {
+		s.onClaimDropped(identity, uplink)
+	}
 }
 
 // peekLiveUplinkSeqLocked returns the SeqNo stored on the live

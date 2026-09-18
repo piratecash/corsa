@@ -86,7 +86,7 @@ func ensureSelfIdentityRecord(trust *trustStore, owner *identity.Identity, spec 
 		return protocol.SignedIdentityRecord{}, protocol.IdentityRecordBody{}, fmt.Errorf("self record failed self-verification: %w", err)
 	}
 
-	outcome, err := trust.rememberRecord(spec.network, record, body)
+	outcome, err := trust.rememberOwnRecord(spec.network, record, body)
 	if err != nil {
 		return protocol.SignedIdentityRecord{}, protocol.IdentityRecordBody{}, err
 	}
