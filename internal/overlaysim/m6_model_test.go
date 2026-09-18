@@ -312,9 +312,34 @@ type m6ModelConfig struct {
 	// gives up, which is a counted outcome and not a silent drop.
 	JoinMaxWait int
 
-	// Ticks is how long the scenario runs, ChurnAt the tick a shock lands on.
-	Ticks    int
-	ChurnAt  int
+	// Ticks and ChurnAt are the FLAT schedule: how long the scenario runs and
+	// the tick churn begins. ⚠️ The fixture schedule, used when Phases is nil;
+	// a run under it is not the grid scenario and its report says so.
+	Ticks   int
+	ChurnAt int
+	// Phases is the §5.9.1 schedule — F1 filling, F2 churn, F3 recovery, F4
+	// cadence with T_fill, T_idle, T_rec, T_cad and the early-stop rules. When
+	// set, Ticks and ChurnAt must be zero: a run cannot be under two schedules,
+	// and the constructor refuses one that names both.
+	Phases *m6PhasePlan
+	// ReplayPhases pins the phase boundaries to those of another run instead
+	// of letting this run's own early-stop rules decide them.
+	//
+	// ⚠️ REQUIRED for the ‘from scratch’ control under the phased schedule.
+	// The control has nothing to recover, so its own F3 rule stops early and
+	// its F4 lands on different ticks than the main run's — and every churn
+	// event is keyed on the tick. A control that plays a different scenario is
+	// measuring the scenario, not the memory.
+	ReplayPhases []m6PhaseBoundary
+	// TraceOffers keeps the offer trace and the exposure snapshot at the churn
+	// onset (m6_trace_test.go). Off by default: it is large.
+	TraceOffers bool
+	// Stream, when set, REPLACES the branch's source with a recorded stream
+	// (m6_stream_test.go): the paired control that holds the candidate stream
+	// fixed in both memory modes. Branch and OmniscientControl must name the
+	// source the stream was recorded from; exchanges and addressed requests are
+	// not performed. ⚠️ A control, never a measurement of the branch.
+	Stream   *m6RecordedStream
 	Measured int // how many owners are measured; 0 = every member
 
 	// OmniscientControl replaces the branch with a source that may offer ANY
@@ -343,8 +368,10 @@ func (c m6ModelConfig) String() string {
 	cadence := fmt.Sprintf("%d ticks", c.Cadence)
 	if c.Cadence <= 0 {
 		cadence = "∞ — NEGATIVE CONTROL: the SCHEDULED refresh is off, detection is NOT. In A and B " +
-			"nothing else re-probes a held record, so no loss is found; in A′ and C a repeat handed " +
-			"back by a neighbour is a paid probe (§5.1.0) and may find the record dead"
+			"records ALREADY HELD are never re-probed, so a per-level table loss is not found — " +
+			"but a FILLING probe can still find a peer gone and free the edge; in A′ and C a " +
+			"repeat handed back by a neighbour is a paid probe (§5.1.0) and may find a held " +
+			"record dead"
 	}
 	repair := fmt.Sprintf("%d probes/tick", c.Repair)
 	if c.Repair <= 0 {
@@ -373,6 +400,13 @@ func (c m6ModelConfig) String() string {
 			"whole network. It is a CONTROL RESULT UNDER THE STATED CONSTRAINTS (same k, same B, " +
 			"same ceiling R, same graph), and it is NOT claimed to be a mathematical upper bound"
 	}
+	if c.Stream != nil {
+		branchLine = "PAIRED CONTROL — " + c.Stream.String()
+		reveals = "⚠️ NOT a measurement of the recorded source: the stream was produced by nodes " +
+			"that had memory, no exchange or addressed request is performed here, and the " +
+			"recording's mechanism cost is not counted again. The pair (kept memory / cleared) " +
+			"answers what memory buys when the candidate stream is held fixed (П-6), and only that"
+	}
 	start := "the node keeps what it knew (П-6, main mode)"
 	if c.StartEmpty {
 		start = "CONTROL ‘from scratch’: tables and shelves cleared at the churn tick — FIRST " +
@@ -384,13 +418,26 @@ func (c m6ModelConfig) String() string {
 			"  branch %s\n    %s\n  bucket capacity k=%d, near levels from %d (%s)\n"+
 			"  repair ceiling R: %s\n  cadence C: %s\n  shelf: T_stale=%d ticks AFTER DETECTION, "+
 			"shelved records probed %s\n  A′ exchange: %s\n  addressed request: %s\n"+
-			"  churn: %s, share %.2f at tick %d; returns %.2f after %d ticks; entry queue gives up "+
-			"after %d ticks\n  run: %d ticks; start: %s",
+			"  churn: %s, share %.2f; returns %.2f after %d ticks; entry queue gives up "+
+			"after %d ticks\n  schedule: %s\n  start: %s",
 		m6ModelRevision, c.Shape.name, c.Shape.nodes, c.Shape.degree, c.Shape.budget, c.Seed,
 		c.Policy, c.Quota, c.Membership, branchLine, reveals, c.Capacity, c.NearFrom,
 		c.NearFromRule, repair, cadence, c.StaleTicks, shelfOrder(c.ShelfFirst), exchange,
-		addressed, c.Churn, c.ChurnShare, c.ChurnAt, c.ReturnShare, c.ReturnAfter, c.JoinMaxWait,
-		c.Ticks, start)
+		addressed, c.Churn, c.ChurnShare, c.ReturnShare, c.ReturnAfter, c.JoinMaxWait,
+		c.scheduleLine(), start)
+}
+
+// scheduleLine names the schedule the configuration is under, without running
+// it — the boundaries a phased run actually played are in the report.
+func (c m6ModelConfig) scheduleLine() string {
+	if c.Phases == nil {
+		return newM6FlatSchedule(c.Ticks, c.ChurnAt).String()
+	}
+	line := c.Phases.String()
+	if c.ReplayPhases != nil {
+		line += "; boundaries REPLAYED from another run"
+	}
+	return line
 }
 
 func shelfOrder(first bool) string {
@@ -443,6 +490,17 @@ type m6Pending struct {
 type m6Network struct {
 	g      *graph
 	config m6ModelConfig
+	// schedule says which phase a tick is in, when churn begins and when the
+	// run stops (m6_schedule_test.go); trace is what the run records for a
+	// comparison with another run (m6_trace_test.go).
+	schedule m6Schedule
+	trace    *m6Trace
+	// consumed and streamCursor are the replay's consumption state
+	// (m6_stream_test.go): which handed entries each owner has used up, and
+	// which entry the owner is probing right now. ⚠️ World state, not memory —
+	// the ‘from scratch’ clearing leaves both alone.
+	consumed     map[int32]map[int]struct{}
+	streamCursor map[int32]int
 	// member decides the MEASURED population, and it takes an IDENTIFIER rather
 	// than an index.
 	//
@@ -516,7 +574,10 @@ type m6Network struct {
 	// churnSeen turns on the recovery accounting; clearedAt records when the
 	// "from scratch" control wiped the tables, or -1.
 	churnSeen bool
-	clearedAt int
+	// onsetThisTick is raised by applyChurn in the onset tick and consumed at
+	// the end of prepareTick, where the exposure snapshot is taken.
+	onsetThisTick bool
+	clearedAt     int
 
 	tick int
 	// returning[t] lists nodes due back at tick t.
@@ -759,6 +820,33 @@ type m6ModelReport struct {
 	AddressedAnswers, AddressedRateLimited, AddressedRefused int
 	// ExchangesDone counts A′ exchanges actually performed.
 	ExchangesDone int
+
+	// Phases is every phase the schedule played, with its boundary, the reason
+	// it ended and the per-phase ledgers (m6_schedule_test.go). Under the flat
+	// schedule it is one record that names itself as such.
+	Phases []m6PhaseRecord
+	// Trace is the scenario and offer traces (m6_trace_test.go).
+	Trace *m6Trace
+	// StreamExhaustedOwners, StreamParticipants and StreamConsumed describe a
+	// replay at its end: how many measured owners had nothing left to be
+	// offered, out of how many measured owners TOOK PART (joined at some
+	// point), and how many handed entries were used up (m6_stream_test.go).
+	//
+	// ⚠️ The denominator is the participants, the same population the
+	// numerator is counted over. The measured reserve as a whole is not: under
+	// compensated load most of it never joins, and against that denominator a
+	// replay in which every participant ran dry read as a small share.
+	StreamExhaustedOwners, StreamParticipants, StreamConsumed int
+}
+
+// PhaseLine is the played schedule: actual boundaries and stop reasons.
+func (r m6ModelReport) PhaseLine() string {
+	return phaseLine(r.Phases)
+}
+
+// PhaseBoundaries is what a control passes as ReplayPhases.
+func (r m6ModelReport) PhaseBoundaries() []m6PhaseBoundary {
+	return boundariesOf(r.Phases)
 }
 
 func medianOf(values []int) (int, bool) {
@@ -808,9 +896,11 @@ func (r m6ModelReport) DetectionDelaySummary() string {
 				"but a record this branch is handed again is still a paid probe and COULD have " +
 				"detected one: this is a MEASUREMENT, not a property of the negative control"
 		case r.Config.Cadence <= 0:
-			return "no data — with C = ∞ the scheduled refresh is off and this branch re-probes a " +
-				"held record by no other path, so no loss can be detected; the expected result of " +
-				"the negative control, not a missing measurement"
+			return "no data — with C = ∞ the scheduled refresh is off and this branch re-probes an " +
+				"ALREADY HELD record by no other path, so a per-level table loss cannot be " +
+				"detected; the expected result of the negative control. ⚠️ It does not mean " +
+				"nothing is ever noticed: a filling probe can still find a peer gone and free the " +
+				"edge, which is why the cost ledger may be non-empty here"
 		}
 		return "no data — no loss was detected in this run"
 	}
@@ -872,9 +962,11 @@ func (r m6ModelReport) RecoveryLine() string {
 				"is off, but a repeat handed back by a neighbour is a paid probe and COULD have " +
 				"detected a loss: the empty axis is a MEASUREMENT, not a property of the control"
 		case r.Config.Cadence <= 0 && r.Config.Churn != churnNone:
-			return "no data (nothing was DETECTED as lost — with C = ∞ this branch re-probes a " +
-				"held record by no other path, so the recovery axis degenerates; the expected " +
-				"result of the negative control)"
+			return "no data (no per-level table loss was DETECTED — with C = ∞ this branch " +
+				"re-probes an ALREADY HELD record by no other path, so the recovery axis " +
+				"degenerates; the expected result of the negative control. ⚠️ A filling probe " +
+				"can still find a peer gone and free its edge — that is not a table loss and " +
+				"does not appear on this axis)"
 		}
 		return "no data (nothing was lost)"
 	}
@@ -954,14 +1046,17 @@ func (r m6ModelReport) String() string {
 		exchanges = fmt.Sprintf("\n  exchanges: %d performed", r.ExchangesDone)
 	}
 	return fmt.Sprintf(
-		"%s\n  at the churn moment: %s\n  coverage (final):    %s\n  cost (MEASURED population): "+
+		"%s\n  phases played:\n%s\n  at the churn moment: %s\n  coverage (final):    %s\n  "+
+			"cost (MEASURED population): "+
 			"%s%s%s\n  cost (whole physical network, measured included): %s; %d losses detected "+
 			"altogether\n  unreachable STRANGERS (no edge, no record — not losses): %d measured, "+
-			"%d physical\n  detection: %s\n  recovery: %s\n  population: %s\n  pool: %s\n  %s",
-		r.Config, coverageLineOf(r.LevelsAtChurn, "at the churn moment nothing had been lost yet"),
+			"%d physical\n  detection: %s\n  recovery: %s\n  population: %s\n  pool: %s\n  "+
+			"candidate stream: %s\n  %s",
+		r.Config, r.PhaseLine(),
+		coverageLineOf(r.LevelsAtChurn, "at the churn moment nothing had been lost yet"),
 		r.CoverageLine(), r.Probes, exchanges, addressed,
 		r.PhysicalProbes, r.PhysicalDetections,
 		r.StrangersUnreachable, r.PhysicalStrangersUnreachable,
 		r.DetectionDelaySummary(), r.RecoveryLine(), r.PopulationLine(), r.PoolSummary(),
-		m6StandAssumptions)
+		r.StreamLine(), m6StandAssumptions)
 }

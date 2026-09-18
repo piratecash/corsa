@@ -1439,7 +1439,7 @@ func TestM6AShelvedRecordSurvivesAFailedProbe(t *testing.T) {
 	// survive it.
 	network.tick = 2
 	clear(state.TriedThisTick)
-	candidate, ok := network.candidateFor(owner, state, level)
+	candidate, _, ok := network.candidateFor(owner, state, level)
 	if !ok || candidate != peer {
 		t.Fatalf("the shelf offered %v (ok=%v), want the lost peer %d", candidate, ok, peer)
 	}
@@ -1457,7 +1457,7 @@ func TestM6AShelvedRecordSurvivesAFailedProbe(t *testing.T) {
 	network.tick = 4
 	network.online[peer] = true
 	clear(state.TriedThisTick)
-	candidate, ok = network.candidateFor(owner, state, level)
+	candidate, _, ok = network.candidateFor(owner, state, level)
 	if !ok || candidate != peer {
 		t.Fatalf("after the return the shelf offered %v (ok=%v), want %d", candidate, ok, peer)
 	}
@@ -1571,14 +1571,14 @@ func TestM6OneCandidateFromTwoNeighboursCostsOneProbeATick(t *testing.T) {
 		}
 	}
 
-	first, ok := network.fromBranch(owner, state, level)
+	first, _, ok := network.fromBranch(owner, state, level)
 	if !ok || first != candidate {
 		t.Fatalf("the queue offered %v (ok=%v), want %d", first, ok, candidate)
 	}
 	network.probe(owner, state, first, level, false)
 
 	// Within the SAME tick the duplicate must not be handed out again.
-	if again, ok := network.fromBranch(owner, state, level); ok && again == candidate {
+	if again, _, ok := network.fromBranch(owner, state, level); ok && again == candidate {
 		t.Error("the same candidate was offered twice in one tick — one node offered by two " +
 			"neighbours would spend the ceiling R twice on it")
 	}
@@ -1871,7 +1871,7 @@ func TestM6AnExchangedRecordSurvivesATemporaryRefusal(t *testing.T) {
 			state.TriedThisTick[peer] = struct{}{}
 		}
 	}
-	taken, ok := network.fromBranch(owner, state, level)
+	taken, _, ok := network.fromBranch(owner, state, level)
 	if !ok || taken != candidate {
 		t.Fatalf("the queue offered %v (ok=%v), want %d", taken, ok, candidate)
 	}
@@ -1904,7 +1904,7 @@ func TestM6AnExchangedRecordSurvivesATemporaryRefusal(t *testing.T) {
 			state.TriedThisTick[peer] = struct{}{}
 		}
 	}
-	again, ok := network.fromBranch(owner, state, level)
+	again, _, ok := network.fromBranch(owner, state, level)
 	if !ok || again != candidate {
 		t.Fatalf("after the budget freed, the queue offered %v (ok=%v), want %d",
 			again, ok, candidate)
@@ -2378,20 +2378,29 @@ func TestM6EveryInvariantHoldsAfterAFullRun(t *testing.T) {
 	// shock filled `leaving` without booking a single decision, so its report
 	// said "0 departures decided … 200 actually left". A sweep that fixes one of
 	// the model's switches is a sweep with a blind side.
+	// ⚠️ And the SCHEDULE is a dimension too, for the same reason: the phased
+	// schedule of §5.9.1 decides the onset and the length from the data, and a
+	// sweep pinned to the flat schedule would never see a boundary decision
+	// interact with the mechanism.
 	type setup struct {
 		branch m6Branch
 		churn  m6ChurnForm
+		phased bool
 	}
 	var setups []setup
 	for _, branch := range []m6Branch{branchA, branchB, branchAPrime, branchC} {
 		for _, churn := range []m6ChurnForm{churnShock, churnShrink, churnCompensated} {
-			setups = append(setups, setup{branch, churn})
+			setups = append(setups, setup{branch, churn, false}, setup{branch, churn, true})
 		}
 	}
 
 	for _, each := range setups {
-		branch, churnForm := each.branch, each.churn
-		t.Run(fmt.Sprintf("%s/%s", branch, churnForm), func(t *testing.T) {
+		branch, churnForm, phased := each.branch, each.churn, each.phased
+		schedule := "flat"
+		if phased {
+			schedule = "phased"
+		}
+		t.Run(fmt.Sprintf("%s/%s/%s", branch, churnForm, schedule), func(t *testing.T) {
 			t.Parallel()
 
 			config := m6ModelBase()
@@ -2402,6 +2411,10 @@ func TestM6EveryInvariantHoldsAfterAFullRun(t *testing.T) {
 			config.ReturnShare = 0.5
 			config.ReturnAfter = 3
 			config.Ticks = 18
+			if phased {
+				config.Ticks, config.ChurnAt = 0, 0
+				config.Phases = &m6PhasePlan{FillTicks: 6, IdleTicks: 3, RecoveryTicks: 6, CadenceTicks: 6}
+			}
 
 			g := buildGraph(config.Shape, config.Seed, config.Quota, config.Policy)
 			structural := func(id nodeID) bool { return roleOf(id) == roleStructural }
@@ -2628,7 +2641,7 @@ func TestM6WithNoCadenceARepeatStillDetects(t *testing.T) {
 	}
 	delete(state.TriedThisTick, peer)
 
-	candidate, ok := network.fromBranch(owner, state, level)
+	candidate, _, ok := network.fromBranch(owner, state, level)
 	if !ok || candidate != peer {
 		t.Fatalf("the queue offered %v (ok=%v), want the repeat %d", candidate, ok, peer)
 	}
@@ -3042,7 +3055,7 @@ func TestM6TheOfferedPrefixOfTheReserveKeepsTheMix(t *testing.T) {
 	}
 	g := buildGraphOnIDs(people.IDs, sh, config.Quota, config.Policy, nil, nil)
 
-	ids, roles := drawM6Reserve(g, config)
+	ids, roles := drawM6Reserve(g, config, config.Ticks)
 	if len(ids) < 100 {
 		t.Fatalf("the reserve is %d identifiers, too few to talk about prefixes", len(ids))
 	}
@@ -3075,7 +3088,7 @@ func TestM6TheOfferedPrefixOfTheReserveKeepsTheMix(t *testing.T) {
 	// pacing is a function of the population's share, never of the total drawn.
 	longer := config
 	longer.Ticks = config.Ticks * 4
-	longIDs, _ := drawM6Reserve(g, longer)
+	longIDs, _ := drawM6Reserve(g, longer, longer.Ticks)
 	if len(longIDs) <= len(ids) {
 		t.Fatalf("the longer run drew %d identifiers against %d — the fixture needs it to be "+
 			"bigger", len(longIDs), len(ids))
@@ -3111,7 +3124,7 @@ func TestM6TheReportDoesNotDenyDetectionUnderCInfinity(t *testing.T) {
 	if strings.Contains(signature, "no refresh, therefore no detection") {
 		t.Error("the configuration line still says C = ∞ means no detection")
 	}
-	for _, want := range []string{"SCHEDULED refresh is off", "A′ and C"} {
+	for _, want := range []string{"SCHEDULED refresh is off", "A′ and C", "ALREADY HELD"} {
 		if !strings.Contains(signature, want) {
 			t.Errorf("the configuration line does not say %q, so a reader cannot tell which "+
 				"branches can still detect a loss", want)
@@ -3130,10 +3143,18 @@ func TestM6TheReportDoesNotDenyDetectionUnderCInfinity(t *testing.T) {
 	// A with C = ∞: there the claim is true, and it must still be made.
 	plain := config
 	plain.Branch = branchA
-	if line := (m6ModelReport{Config: plain}).DetectionDelaySummary(); !strings.Contains(
-		line, "no loss can be detected") {
-		t.Errorf("A with C = ∞ reports %q — this branch re-probes a held record by no other "+
-			"path, and the control's expected result has to be stated", line)
+	// ⚠️ And it must say WHICH loss, not "no loss": in A and B a FILLING probe can still find a
+	// peer gone and free its edge. Only the per-level TABLE loss is what the absent refresh
+	// hides, and an over-broad claim here is the same defect as the over-broad claim §6.7
+	// removed — one branch wider.
+	plainLine := (m6ModelReport{Config: plain}).DetectionDelaySummary()
+	if !strings.Contains(plainLine, "per-level table loss cannot be detected") {
+		t.Errorf("A with C = ∞ reports %q — this branch re-probes an already held record by no "+
+			"other path, and the control's expected result has to be stated", plainLine)
+	}
+	if !strings.Contains(plainLine, "filling probe can still find a peer gone") {
+		t.Errorf("A with C = ∞ reports %q — it claims more than is true: the absent refresh hides "+
+			"table losses, not every departure", plainLine)
 	}
 
 	// And the branch that CAN detect must be able to say so: a detected loss
@@ -3757,4 +3778,252 @@ func TestM6AShockReportsItsDecisions(t *testing.T) {
 			report.PopulationLine())
 	}
 	t.Logf("%s", report.PopulationLine())
+}
+
+// TestM6AReturnDueInThePastIsRefusedAtTheDoor guards a configuration that
+// silently deletes the axis it claims to measure.
+//
+// ⚠️ applyChurn reads the returns due THIS tick before it decides who leaves, so
+// a departure in tick t with T_back = 0 files its return into t — a slot already
+// read and never read again; T_back < 0 files it into the past outright. The run
+// still counts the departures and still prints `ret`, so a reader sees a recovery
+// scenario where not one return ever happens: at ret = 1 and T_back = 0 every
+// departed node is promised back and none arrives. The contract's T_back = 32
+// never reaches this, which is why nothing in the grid would have caught it.
+func TestM6AReturnDueInThePastIsRefusedAtTheDoor(t *testing.T) {
+	t.Parallel()
+
+	base := m6ModelBase()
+	base.Churn = churnShock
+	base.ChurnShare = 0.2
+	base.ChurnAt = 1
+	g := buildGraph(base.Shape, base.Seed, base.Quota, base.Policy)
+
+	for _, after := range []int{0, -1, -32} {
+		config := base
+		config.ReturnShare = 1
+		config.ReturnAfter = after
+		if _, err := newM6Network(g, config, everybody); err == nil {
+			t.Errorf("T_back = %d was accepted with returns enabled — every return is filed into "+
+				"a tick that has already been read, so none of them happens and the recovery "+
+				"axis is empty while the report still claims ret = 1", after)
+		}
+	}
+
+	// ⚠️ With no returns the field is never read, and forbidding it there would
+	// reject a scenario the contract defines: ret = 0 is one of the two agreed
+	// values.
+	for _, after := range []int{0, -1} {
+		config := base
+		config.ReturnShare = 0
+		config.ReturnAfter = after
+		if _, err := newM6Network(g, config, everybody); err != nil {
+			t.Errorf("T_back = %d was rejected although ret = 0 never reads it: %v", after, err)
+		}
+	}
+
+	// And the contract's own value passes, so the guard is a floor, not a wall.
+	valid := base
+	valid.ReturnShare = 0.5
+	valid.ReturnAfter = 32
+	if _, err := newM6Network(g, valid, everybody); err != nil {
+		t.Errorf("the contract's T_back = 32 was rejected: %v", err)
+	}
+
+	// The property behind the guard, stated as a run: with a legal T_back EVERY
+	// promised return is honoured.
+	//
+	// ⚠️ "At least one" would have been the wrong assertion. One shock, ret = 1
+	// and a due tick inside the window means every departure owes exactly one
+	// return, so the fixture can demand the exact count — and a queue that loses
+	// most of its entries, which is what the guarded defect does to a subset,
+	// would satisfy "at least one" and fail here.
+	honoured := base
+	honoured.ReturnShare = 1
+	honoured.ReturnAfter = 1
+	honoured.Ticks = 6
+	report := runM6ModelOn(t, g, honoured, everybody)
+	if report.Departed == 0 {
+		t.Fatal("nothing left under the shock, so this fixture measures nothing")
+	}
+	if report.ReturnsOffered != report.Departed {
+		t.Errorf("%d nodes left with ret = 1 and T_back = 1, and %d returns were offered — with "+
+			"one shock and a due tick inside the run every departure owes exactly one return",
+			report.Departed, report.ReturnsOffered)
+	}
+	// ⚠️ And OFFERED is not ARRIVED: a return that never leaves the queue is the
+	// same missing measurement in a different place. A return needs no host and
+	// no free slot (stand assumption 7), so under one shock all of them land.
+	returned := report.ReturnedWithATable + report.ReturnedEmptyHanded
+	if returned != report.Departed {
+		t.Errorf("%d nodes left and %d came back (%d with a table, %d empty-handed) — every "+
+			"promised return is due inside this run and nothing can refuse one",
+			report.Departed, returned, report.ReturnedWithATable, report.ReturnedEmptyHanded)
+	}
+	if report.NewcomersOffered != 0 {
+		t.Errorf("%d newcomers were offered under a shock, which has no compensation quota",
+			report.NewcomersOffered)
+	}
+}
+
+// TestM6ADetectionIsCountedOncePerLossWhateverWasHeld pins the accounting of
+// a probe that finds a departed peer, on the three things the owner may have
+// held — an EDGE without a record, a RECORD without an edge, both — and on a
+// second probe of the same peer. The expectations come from the construction
+// of each case, not from the totals: a detection is one departed peer found
+// gone (whatever was held), a lost slot is one table entry dropped, and
+// neither is ever counted twice for the same peer.
+//
+// ⚠️ Mutations that must break it (all three proven): counting a detection
+// only when a slot was lost (case 1 then shows zero detections); counting a
+// detection per probe rather than per loss (the repeat in case 3 shows two);
+// counting the edge loss as a lost slot (case 1 shows a lost slot).
+func TestM6ADetectionIsCountedOncePerLossWhateverWasHeld(t *testing.T) {
+	t.Parallel()
+
+	type counters struct {
+		detections, phaseDetections, physicalDetections, lostSlots, physicalLost, shelved, held int
+	}
+	read := func(network *m6Network, owner int32) counters {
+		lost := 0
+		for _, count := range network.report.LostByLevel {
+			lost += count
+		}
+		return counters{
+			detections:         len(network.report.DetectionDelays),
+			phaseDetections:    network.schedule.current().Detections,
+			physicalDetections: network.report.PhysicalDetections,
+			lostSlots:          lost,
+			physicalLost:       network.report.PhysicalLost,
+			shelved:            len(network.states[owner].Shelf),
+			held:               network.heldEdges(owner),
+		}
+	}
+	// depart takes the peer offline the way departShare does: offline, with
+	// the departure tick recorded, so that a detection can be dated.
+	depart := func(network *m6Network, peer int32) {
+		network.tick++
+		network.online[peer] = false
+		network.departedAt[peer] = network.tick
+	}
+	probeGone := func(t *testing.T, network *m6Network, owner, peer int32, refresh bool) {
+		t.Helper()
+		state := network.states[owner]
+		state.TriedThisTick = map[int32]struct{}{}
+		level := levelOf(network.ids[owner], network.ids[peer], network.config.Shape.degree)
+		if got := network.probe(owner, state, peer, level, refresh); got != m6CandidateUnreachable {
+			t.Fatalf("the probe of the departed peer ended in %q, not unreachable", got)
+		}
+	}
+	const owner = int32(0)
+
+	t.Run("an edge without a record: one detection, no lost slot, the edge released", func(t *testing.T) {
+		network := m6DirectFixture(t, m6ModelBase())
+		state := network.states[owner]
+		peer := network.neighboursOf(owner)[0]
+		if !network.holdsEdge(owner, peer) || state.Table.holds(peer) {
+			t.Fatal("the fixture needs a held edge and an empty table")
+		}
+		before := read(network, owner)
+		depart(network, peer)
+		probeGone(t, network, owner, peer, false)
+		after := read(network, owner)
+
+		want := before
+		want.detections, want.phaseDetections, want.physicalDetections = before.detections+1,
+			before.phaseDetections+1, before.physicalDetections+1
+		want.held = before.held - 1
+		if after != want {
+			t.Fatalf("edge-only loss:\n got  %+v\n want %+v", after, want)
+		}
+		if _, released := state.ReleasedEdge[peer]; !released {
+			t.Fatal("the released edge is not marked as one")
+		}
+	})
+
+	t.Run("a record without an edge: one detection, one lost slot, no edge released", func(t *testing.T) {
+		config := m6ModelBase()
+		config.Branch = branchAPrime
+		config.StaleTicks = 64
+		network := m6DirectFixture(t, config)
+		state := network.states[owner]
+		// A stranger with room at both ends, stored as a record by a probe.
+		peer, level := int32(-1), -1
+		for _, node := range network.all {
+			if node == owner || network.holdsEdge(owner, node) || network.holdsEdge(node, owner) ||
+				!network.online[node] || network.heldEdges(node) >= config.Shape.budget {
+				continue
+			}
+			at := levelOf(network.ids[owner], network.ids[node], config.Shape.degree)
+			if at < 0 || len(state.Table.members[at]) >= config.Capacity {
+				continue
+			}
+			peer, level = node, at
+			break
+		}
+		if peer < 0 {
+			t.Fatal("no stranger with room at both ends")
+		}
+		state.Offered = append(state.Offered, peer)
+		if got := network.probe(owner, state, peer, level, false); got != m6SlotFilled || network.holdsEdge(owner, peer) {
+			t.Fatalf("the record was not stored without an edge: %q, edge=%v", got, network.holdsEdge(owner, peer))
+		}
+		before := read(network, owner)
+		depart(network, peer)
+		probeGone(t, network, owner, peer, true)
+		after := read(network, owner)
+
+		want := before
+		want.detections, want.phaseDetections, want.physicalDetections = before.detections+1,
+			before.phaseDetections+1, before.physicalDetections+1
+		want.lostSlots, want.physicalLost, want.shelved = before.lostSlots+1, before.physicalLost+1, before.shelved+1
+		if after != want {
+			t.Fatalf("record-only loss:\n got  %+v\n want %+v", after, want)
+		}
+		if _, released := state.ReleasedEdge[peer]; released {
+			t.Fatal("a record-only loss was marked as a released edge")
+		}
+	})
+
+	t.Run("an edge with a record: one detection, one lost slot, the edge released — and never twice", func(t *testing.T) {
+		network := m6DirectFixture(t, m6ModelBase())
+		state := network.states[owner]
+		peer := network.neighboursOf(owner)[0]
+		level := levelOf(network.ids[owner], network.ids[peer], network.config.Shape.degree)
+		if level < 0 {
+			t.Fatal("the first neighbour shares the whole prefix; the fixture needs another")
+		}
+		if got := network.probe(owner, state, peer, level, false); got != m6SlotFilled {
+			t.Fatalf("the neighbour was not stored as a record: %q", got)
+		}
+		if !network.holdsEdge(owner, peer) || !state.Table.holds(peer) {
+			t.Fatal("the fixture needs both an edge and a record")
+		}
+		before := read(network, owner)
+		depart(network, peer)
+		probeGone(t, network, owner, peer, true)
+		after := read(network, owner)
+
+		want := before
+		want.detections, want.phaseDetections, want.physicalDetections = before.detections+1,
+			before.phaseDetections+1, before.physicalDetections+1
+		want.lostSlots, want.physicalLost, want.shelved = before.lostSlots+1, before.physicalLost+1, before.shelved+1
+		want.held = before.held - 1
+		if after != want {
+			t.Fatalf("edge-and-record loss:\n got  %+v\n want %+v", after, want)
+		}
+
+		// The same peer probed again while still gone: a probe is spent, nothing
+		// is detected or lost a second time.
+		probesBefore := network.report.Probes.Probes()
+		network.tick++
+		probeGone(t, network, owner, peer, false)
+		if again := read(network, owner); again != after {
+			t.Fatalf("a repeated probe of the same departed peer changed the accounting:\n got  %+v\n want %+v",
+				again, after)
+		}
+		if got := network.report.Probes.Probes(); got != probesBefore+1 {
+			t.Fatalf("the repeated probe was not charged: %d probes, want %d", got, probesBefore+1)
+		}
+	})
 }
