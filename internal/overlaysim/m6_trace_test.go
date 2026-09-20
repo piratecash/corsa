@@ -118,6 +118,15 @@ type m6OfferEntry struct {
 	Level  int
 	Peer   int32
 	Handed []int32
+	// QuotaSkipped is, for an ADDRESSED request, the responders the asker
+	// passed over because their rate limit (r_pair / r_node) was already spent
+	// when it asked — in the asker's contact order, before the one it asked.
+	// ⚠️ Recorded at the moment of the choice, because nothing else can tell
+	// it later: the quota counters are reset every tick and move while the
+	// tick is served, so a snapshot at the start of the tick sees them at
+	// zero (owner's P2, round 32). Diagnostic only — not part of `equal`, not
+	// part of the recorded stream.
+	QuotaSkipped []int32
 }
 
 func (o m6OfferEntry) equal(other m6OfferEntry) bool {
@@ -319,12 +328,26 @@ func (n *m6Network) traceTick() *m6TickEvents {
 // different source from the full-graph replay. Readers that want the measured
 // population filter by membership.
 func (n *m6Network) noteOffer(owner int32, source m6OfferSource, level int, peer int32, handed []int32) {
+	n.noteOfferSkipping(owner, source, level, peer, handed, nil)
+}
+
+// noteOfferSkipping is noteOffer for an addressed request, with the
+// responders skipped for quota carried into the trace.
+func (n *m6Network) noteOfferSkipping(
+	owner int32, source m6OfferSource, level int, peer int32, handed, quotaSkipped []int32,
+) {
+	if n.recording != nil {
+		// The DIRECT recording (decision 3.4): the same entries recordStream
+		// would derive from the trace, written now, without the trace.
+		n.recording.appendOffer(n.tick, owner, source, peer, handed)
+	}
 	if !n.config.TraceOffers {
 		return
 	}
 	n.trace.Offers = append(n.trace.Offers, m6OfferEntry{
 		Tick: n.tick, Owner: owner, Source: source, Level: level, Peer: peer,
-		Handed: append([]int32(nil), handed...),
+		Handed:       append([]int32(nil), handed...),
+		QuotaSkipped: append([]int32(nil), quotaSkipped...),
 	})
 }
 

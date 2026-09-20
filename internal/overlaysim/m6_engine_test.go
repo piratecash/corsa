@@ -68,7 +68,10 @@ const m6StandAssumptions = "⚠️ STAND ASSUMPTIONS, not contract — every one
 	"decides what comes back: no edge and no record is an unreachable STRANGER, counted as " +
 	"itself; a record without an edge is shelved and restored as a RECORD, never as a link; only " +
 	"a loss that freed an established edge may re-establish one, and ANY restoration lifts the " +
-	"burial; (16) every per-(tick, node) coin is keyed on the tick and the IDENTITY, and a " +
+	"burial; (16) every coin of the LOAD — a departure, its return, a newcomer's host — is keyed " +
+	"on τ = tick − onset and the IDENTITY (decision 3.3(в)), so the same seed draws the same " +
+	"decisions at the same τ whatever tick F1 ended on and whatever the mechanism spent inside, " +
+	"while the REALISED events follow the online sets and agree only while those do; and " +
 	"every scan of the network — a newcomer's host, the omniscient control's candidates — walks the " +
 	"JOINED population and never an index space padded with the unjoined reserve, so neither the " +
 	"event stream, nor the early topology, nor the order of offers depends on how long the run " +
@@ -102,11 +105,13 @@ const m6StandAssumptions = "⚠️ STAND ASSUMPTIONS, not contract — every one
 	"control is refused without them, because its own F3 rule would stop early and move every " +
 	"tick-keyed event after it, and a replayed span outside what the plan allows (F2 ≠ 1 tick, " +
 	"F4 ≠ T_cad, F1/F3 past their budgets) is refused at the door because replay suppresses " +
-	"the rules that would otherwise enforce it; (27) the clearing of the ‘from scratch’ control also erases the " +
-	"exchange stamps (when the node last asked each neighbour), which RESTARTS the exchange " +
-	"clock of §5.1.0 for the control — the stamp lives at the asker in this model, and whether " +
-	"the interval is the asker's memory or the responder's rule is an open reading of the " +
-	"contract, printed here rather than chosen; (28) the PAIRED CONTROL with a recorded stream " +
+	"the rules that would otherwise enforce it; (27) the interval of §5.1.0 is the RESPONDER'S rule (decision 3.6(b)): the responder " +
+	"stamps every exchange it SERVES per asker and refuses an asker inside T_exch — the refusal " +
+	"is counted and moves no stamp; the asker keeps a planning stamp of its own requests and " +
+	"does not send one it knows is forbidden (a model of planning, not knowledge of the " +
+	"responder's clock); both stamps are directed, keyed on the node's identity, kept for the " +
+	"whole run, and NOT erased by the ‘from scratch’ clearing, which loses routing state and " +
+	"not the network's clocks; (28) the PAIRED CONTROL with a recorded stream " +
 	"replays an adaptive run's candidates as the only source in both memory modes: a pool entry " +
 	"(acquaintance, omniscient) is re-offered whenever the owner does not hold it, a handed entry " +
 	"(exchange, addressed) is offered once and consumed on a final outcome with a repeat costing " +
@@ -123,6 +128,9 @@ func newM6Network(g *graph, config m6ModelConfig, member func(nodeID) bool) (*m6
 	}
 	schedule, err := newM6Schedule(config)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateRecoveryWindow(config); err != nil {
 		return nil, err
 	}
 	if config.NearFrom < 0 || config.NearFrom > config.Shape.degree {
@@ -160,6 +168,15 @@ func newM6Network(g *graph, config m6ModelConfig, member func(nodeID) bool) (*m6
 			"%s (omniscient=%v): a replay is labelled with the source it was recorded from, and "+
 			"nothing else", config.Stream.Branch, config.Stream.Omniscient, config.Branch,
 			config.OmniscientControl)
+	}
+	if config.RecordStream && config.Stream != nil {
+		return nil, fmt.Errorf("a replay cannot record its stream: recording it would record " +
+			"consumption, not a source")
+	}
+	if config.LocalRepeatFilter && (config.Branch != branchAPrime || config.Stream != nil) {
+		return nil, fmt.Errorf("the ‘local repeat filter’ control is defined for branch A′ adaptive "+
+			"runs only (decision 3.2(c)); this run is %s with stream=%v, and its conclusions are not "+
+			"carried over to branch C", config.Branch, config.Stream != nil)
 	}
 	if config.Stream == nil && config.Branch.ExchangesRecords() && !config.ExchangeOnce &&
 		config.ExchangeEvery < 1 {
@@ -208,6 +225,10 @@ func newM6Network(g *graph, config m6ModelConfig, member func(nodeID) bool) (*m6
 	network.trace.Members = make([]bool, len(network.ids))
 	for index, id := range network.ids {
 		network.trace.Members[index] = member(id)
+	}
+	if config.RecordStream {
+		network.recording = newM6RecordedStream(config.Branch, config.OmniscientControl,
+			network.ids, network.trace.Members)
 	}
 	if config.Stream != nil {
 		if err := config.Stream.compatibleWith(network.ids, member); err != nil {
@@ -435,10 +456,51 @@ func drawM6Reserve(g *graph, config m6ModelConfig, horizon int) ([]nodeID, []int
 // the reference pool as zero scenario runs — measuring it costs the graph build
 // that every other run needs anyway, and not a pass of the scenario.
 func referencePool(g *graph, config m6ModelConfig, member func(nodeID) bool) (int, string, error) {
+	// ⚠️ EVERYTHING THAT DESCRIBES THE SCENARIO IS CLEARED, not just the branch
+	// (two defects found 2026-09-19 by the M6 driver, both of the same shape).
+	// S_ref is a reading of the BUILT GRAPH under branch A, so a field that
+	// belongs to the run rather than to the graph must not reach it — and the
+	// list below is fail-closed rather than "the ones that have bitten us":
+	//
+	//   RecoveryWindow — legal only under a churn form, and the churn is
+	//     cleared right above, so a reference that kept W_rec was REFUSED at the
+	//     door. Every configuration of the agreed grid carries W_rec = 1024
+	//     (decision 3.5(ii)), so the border could be derived for none of them.
+	//   LocalRepeatFilter — the constructor refuses it outside an adaptive A′
+	//     run (decision 3.2(c)), and the branch has just been set to A, so the
+	//     control of §5.2 could not derive its border at all.
+	//   OmniscientControl — worse than a refusal: it would have been ACCEPTED,
+	//     and the pool measured would have been the omniscient source's rather
+	//     than branch A's. §5.1.1 fixes the reference as branch A over the full
+	//     graph precisely so every branch and both populations are compared at
+	//     the same levels; a control deriving its own, larger border would have
+	//     been compared at different ones, and nothing in the report would have
+	//     said so.
+	//   Stream, RecordStream, TraceOffers, ReplayPhases, ExchangeOnce — a
+	//     recorded stream replaces the source outright, a recording and a trace
+	//     are cost the reference need not pay, and boundaries belong to another
+	//     run.
+	//
+	// ⚠️ NOT cleared, and the reason is that they cannot reach the reading: the
+	// reference is CONSTRUCTED and never run (PoolAtStart is filled by the
+	// constructor), so the churn shares, the return schedule, the tick counts
+	// and the measured-owner count have nothing to act on. The constructor's own
+	// consistency checks still see them, which is why a caller whose churn
+	// parameters are internally inconsistent would be refused here as well —
+	// and that refusal would be correct, because such a configuration cannot be
+	// run either.
 	reference := config
 	reference.Branch = branchA
 	reference.Churn = churnNone
 	reference.StartEmpty = false
+	reference.RecoveryWindow = 0
+	reference.LocalRepeatFilter = false
+	reference.OmniscientControl = false
+	reference.Stream = nil
+	reference.RecordStream = false
+	reference.TraceOffers = false
+	reference.ReplayPhases = nil
+	reference.ExchangeOnce = false
 
 	network, err := newM6Network(g, reference, member)
 	if err != nil {
@@ -500,6 +562,9 @@ func (n *m6Network) Run() (*m6ModelReport, error) {
 			break
 		}
 	}
+	if err := n.requireWindowClosed(); err != nil {
+		return nil, err
+	}
 
 	n.report.Phases = n.schedule.trace()
 	n.collect()
@@ -523,6 +588,11 @@ func (n *m6Network) prepareTick() error {
 	n.answersByNode = map[int32]int{}
 	n.answersByPair = map[[3]int32]int{}
 
+	// The recovery window opens at the START of the onset tick, before its
+	// churn: the state it opens on is the one nothing has been lost in.
+	if err := n.openRecoveryWindowIfDue(); err != nil {
+		return err
+	}
 	if err := n.applyChurn(); err != nil {
 		return err
 	}
@@ -556,6 +626,10 @@ func (n *m6Network) serveTick() bool {
 	n.report.OnlineFromPopulation = fromPopulation
 	n.report.OnlineFromReserve = fromReserve
 
+	// The window's criterion is judged at the END of every tick inside it,
+	// and the window closes at the end of its last tick — before the schedule
+	// decides whether the run is over, so a run that ends here still closed it.
+	n.closeRecoveryWindowIfDue()
 	return n.schedule.afterTick(n)
 }
 
@@ -598,6 +672,19 @@ func (n *m6Network) deficitByLevel() []int {
 	return deficit
 }
 
+// ticksSinceOnset is τ, the key of every external draw: the ticks since churn
+// began. ⚠️ It is asked only where churn is possible — a departure, a return,
+// a newcomer's host — and all three happen at or after the onset, so the
+// schedule always knows it by then; a call before the onset is a defect of the
+// caller, and −1 makes it visible rather than silently keying on the tick.
+func (n *m6Network) ticksSinceOnset() int {
+	onset, known := n.schedule.churnOnset()
+	if !known || n.tick < onset {
+		return -1
+	}
+	return n.tick - onset
+}
+
 // countOnline splits the measured population from the measured reserve that has
 // actually joined. ⚠️ Two numbers, because one denominator cannot serve both: the
 // reserve is sized for the length of the run, so folding it into "all
@@ -620,16 +707,15 @@ func (n *m6Network) countOnline() (fromPopulation, fromReserve int) {
 // --- churn -------------------------------------------------------------------------
 
 func (n *m6Network) applyChurn() error {
-	// Returns due this tick are offered first and fill the compensation quota
-	// (§5.9.2: "сперва возвраты, чей срок наступил, остаток — новые узлы").
-	//
-	// ⚠️ A RETURN IS A PROMISE MADE AT THE DEPARTURE, and it is honoured even
-	// when it does not fit the quota: a tick can have no departures and a return
-	// that came due, and cancelling it would mean a node that said it was coming
-	// back never does. So the offered total is max(departures, returns due), not
-	// the departures — and because that is NOT the exact compensation §5.9.2
-	// describes, the two are counted apart and printed apart rather than summed
-	// into a single "offered" that would read as exact.
+	// Returns due this tick are offered first, UNCONDITIONALLY — the rule of
+	// §5.9.2 under decision 3.1(a): a return is a promise made at the departure
+	// and is honoured whatever the tick's departures, and newcomers make up
+	// max(departures − returns due, 0). The offered total is therefore
+	// max(departures, returns due); the excess over the departures is booked
+	// as the surplus, and returns and newcomers are counted apart, because the
+	// rule is NOT exact compensation and the report must not read as if it
+	// were. An offered return is not an admitted one: whether it gets in is a
+	// separate number.
 	returned := 0
 	events := n.traceTick()
 	for _, node := range n.returning[n.tick] {
@@ -669,10 +755,11 @@ func (n *m6Network) applyChurn() error {
 		if n.config.Churn == churnShrink {
 			return nil
 		}
-		// ⚠️ As many arrivals are OFFERED as departed — the returns above count
-		// towards that number, and the REMAINDER comes from the reserve. Whether
-		// any of them gets in is a separate number, which is why the report
-		// shows offered and admitted apart.
+		// The returns above count towards the departures, and the REMAINDER
+		// comes from the reserve; returns beyond the departures are the tick's
+		// surplus. Whether any of them gets in is a separate number, which is
+		// why the report shows offered and admitted apart.
+		n.report.OfferedSurplus += max(returned-left, 0)
 		for range max(left-returned, 0) {
 			if n.reserveAt >= len(n.reserve) {
 				// ⚠️ Counted PER ARRIVAL, not once per tick: a tick in which ten
@@ -736,6 +823,16 @@ func (n *m6Network) noteDepartureDecision(node int32) {
 func (n *m6Network) departShare(share float64, purpose string) (int, error) {
 	leaving := make([]int32, 0, len(n.all))
 
+	// ⚠️ EVERY EXTERNAL DRAW IS KEYED ON τ = tick − onset (decision 3.3(в),
+	// review package §4), never on the absolute tick: the onset is decided by
+	// F1's own data, so keying on the tick made two configurations with F1 of
+	// different length draw different departures at the same τ — the shock took
+	// different nodes, the background decided differently — and comparing them
+	// meant comparing different churn. The purposes are the load's own
+	// ("<form>/leave", "<form>/return", "join"): no internal draw of the model
+	// shares one, so what the mechanism spends inside never reaches the load.
+	tau := n.ticksSinceOnset()
+
 	if purpose == "shock" {
 		live := make([]int32, 0, len(n.all))
 		for _, node := range n.all {
@@ -750,7 +847,7 @@ func (n *m6Network) departShare(share float64, purpose string) (int, error) {
 		order := make([]int32, len(live))
 		copy(order, live)
 		for i := len(order) - 1; i > 0; i-- {
-			j := int(m6Random(n.config.Seed, purpose+"/leave", n.tick*1000+i) % uint64(i+1))
+			j := int(m6Random(n.config.Seed, purpose+"/leave", tau*1000+i) % uint64(i+1))
 			order[i], order[j] = order[j], order[i]
 		}
 		leaving = append(leaving, order[:count]...)
@@ -767,7 +864,7 @@ func (n *m6Network) departShare(share float64, purpose string) (int, error) {
 		// DECISIONS is identical in every run of this seed; only their effect
 		// depends on who is online.
 		for _, node := range n.all {
-			draw := m6RandomEvent(n.config.Seed, purpose+"/leave", n.tick, n.ids[node]) % 1_000_000
+			draw := m6RandomEvent(n.config.Seed, purpose+"/leave", tau, n.ids[node]) % 1_000_000
 			if float64(draw)/1_000_000 >= share {
 				continue
 			}
@@ -796,11 +893,11 @@ func (n *m6Network) departShare(share float64, purpose string) (int, error) {
 		// was no better: that counter skips events that did not happen, so once
 		// two runs differed in a single admission, the same departure of the same
 		// node drew a different coin in each — the randomness became a function
-		// of the mechanism being compared. The key is the tick and the IDENTITY,
-		// never an offset into an array whose length the configuration decides
-		// (see m6RandomEvent).
+		// of the mechanism being compared. The key is τ and the IDENTITY, never
+		// an offset into an array whose length the configuration decides (see
+		// m6RandomEvent).
 		if n.config.ReturnShare > 0 {
-			draw := m6RandomEvent(n.config.Seed, purpose+"/return", n.tick, n.ids[node]) % 1000
+			draw := m6RandomEvent(n.config.Seed, purpose+"/return", tau, n.ids[node]) % 1000
 			if float64(draw)/1000 < n.config.ReturnShare {
 				back := n.tick + n.config.ReturnAfter
 				n.returning[back] = append(n.returning[back], node)
@@ -881,6 +978,7 @@ func (n *m6Network) admit(pending m6Pending) bool {
 			n.report.ReturnedEmptyHanded++
 		}
 		n.report.ArrivalsAdmitted++
+		n.report.ReturnsAdmitted++
 		n.schedule.current().Admitted++
 		return true
 	}
@@ -898,7 +996,7 @@ func (n *m6Network) admit(pending m6Pending) bool {
 	}
 
 	host := int32(-1)
-	start := int(m6RandomEvent(n.config.Seed, "join", n.tick, n.ids[pending.Node]) %
+	start := int(m6RandomEvent(n.config.Seed, "join", n.ticksSinceOnset(), n.ids[pending.Node]) %
 		uint64(len(n.joinedOrder)))
 	for offset := range n.joinedOrder {
 		candidate := n.joinedOrder[(start+offset)%len(n.joinedOrder)]
@@ -935,21 +1033,44 @@ func (n *m6Network) admit(pending m6Pending) bool {
 
 // clearForTheFromScratchControl is П-6's control, and the whole of it.
 //
-// ⚠️ WHAT IS ERASED, at the moment of the first departure and not before: every
-// measured node's bucket table, its shelf, its per-level refresh stamps, the
-// candidates an exchange had already handed it, its record of whom it has
-// already probed, and when it last exchanged with each neighbour.
+// ⚠️ WHAT IS ERASED — the ROUTING STATE of every measured node, at the moment
+// of the first departure and not before (decision 3.4, element by element):
 //
-// ⚠️ THE LAST TWO MATTER MORE THAN THEY LOOK. They are memory like the table is:
-// a node that forgot its records but remembered whom it had asked could never
-// find those nodes again, and the control would measure "a node that lost its
-// table AND its ability to refill it" — which is not first filling, it is
-// paralysis. Leaving them in place cost the control its meaning once already.
+//	bucket table                 erased — the memory under measurement;
+//	shelf                        erased — records of detected losses are table
+//	                             memory too;
+//	per-level refresh clocks     erased — they belong to the levels' records;
+//	refresh cursors              erased — a cursor carried over made the first
+//	                             refresh of a refilled level depend on the
+//	                             table's previous life;
+//	loss / refill accounting     erased — a first filling has lost nothing;
+//	exchange queue (Offered)     erased — candidates the old table's exchanges
+//	                             handed over are memory of those exchanges;
+//	Exhausted, TriedThisTick     erased — memory of whom the node probed; a
+//	                             node that forgot its records but remembered
+//	                             whom it had tried could never find them again,
+//	                             and the control would measure paralysis;
+//	FilledElsewhere              erased — coverage accounting of the old table.
 //
-// ⚠️ WHAT IS NOT: the graph, the event sequence, the candidate stream and its
-// internal state, who is online, and the budget already released. The control
-// differs from the main run in the node's MEMORY and in nothing else; rewinding
-// the world as well would make the comparison meaningless.
+// ⚠️ WHAT IS KEPT — everything that is not the node's routing memory:
+//
+//	the graph, the event sequence, who is online, the candidate stream and
+//	its consumption state, the budget already released (all world state);
+//	the node's HELD EDGES — its starting contacts are exactly the main run's,
+//	so the clearing is a loss of routing state and not a re-bootstrap with
+//	other initial contacts (decision 3.4, p. 5);
+//	the exchange clocks — the responder's ServedExchange (the limiter of
+//	§5.1.0 is the RESPONDER'S, and the control is a loss of routing state,
+//	not a restart of every process in the network) and the asker's planning
+//	stamp LastExchange (it mirrors the limiter; erasing it buys only refused
+//	frames, which is a planning artefact and not memory the control measures);
+//	Released / ReleasedEdge — nothing has been released yet at the clearing
+//	(asserted below), so there is nothing to keep or erase.
+//
+// The control differs from the main run in the node's routing memory and in
+// nothing else; rewinding the world as well would make the comparison
+// meaningless, and restarting the clocks handed the control a free salvo of
+// exchanges at the onset — a systematic advantage of the cleared half.
 func (n *m6Network) clearForTheFromScratchControl() error {
 	// ⚠️ The invariant that makes the erasure above complete, asserted instead
 	// of re-zeroed. The control clears at the FIRST departure, before anybody
@@ -975,7 +1096,8 @@ func (n *m6Network) clearForTheFromScratchControl() error {
 		state.Offered = nil
 		state.Exhausted = map[int32]struct{}{}
 		state.TriedThisTick = map[int32]struct{}{}
-		state.LastExchange = map[int32]int{}
+		// LastExchange and ServedExchange are deliberately NOT touched: see
+		// the list above.
 		for level := range state.LastRefreshed {
 			state.LastRefreshed[level] = -1
 			// ⚠️ The cursor goes with the clock. It rotates WHICH member of a
@@ -1051,6 +1173,9 @@ func (n *m6Network) probeOnceInTheNetwork(owner int32, state *m6NodeState) bool 
 			// inside the common window, and a refresh the owner's ceiling
 			// refused was still scheduled and still cost a probe.
 			n.schedule.current().Refreshes++
+			if n.window.contains(n.tick) {
+				n.window.Refreshes++
+			}
 		}
 		n.probe(owner, state, target, level, true)
 		return true
@@ -1240,6 +1365,14 @@ func (n *m6Network) fromBranch(
 
 	// A′ and C: whatever an earlier exchange or answer already handed over.
 	//
+	// ⚠️ Under the ‘local repeat filter’ CONTROL (3.2(c)) — and only there —
+	// a handed record the owner already holds leaves the queue HERE, before
+	// any probe: received, counted, not paid, nothing confirmed. The base of
+	// the grid does not do this (see the next note).
+	if n.config.LocalRepeatFilter {
+		n.filterHeldRepeats(owner, state)
+	}
+	//
 	// ⚠️ THE RECORD IS NOT REMOVED HERE. A record that does not fit right now is
 	// kept, one already probed this tick is skipped, and the entry leaves the
 	// queue only on a FINAL outcome — it was stored, it was already known, or no
@@ -1274,6 +1407,32 @@ func (n *m6Network) fromBranch(
 		return n.fromBranch(owner, state, level)
 	}
 	return -1, offerQueue, false
+}
+
+// filterHeldRepeats is the whole of the ‘local repeat filter’ control: every
+// queued record the owner's table already holds is dropped, and every copy is
+// counted as a repeat received and processed without a probe.
+//
+// ⚠️ What the filter must NOT do, because a repeat it dropped was never
+// probed: touch the level's cadence clock, the tried-set, the burial, the
+// shelf — nothing about the record is confirmed by its arrival. The probe
+// that is not made can detect nothing, and that lost detection is the price
+// the control exists to measure beside the probes it saves.
+func (n *m6Network) filterHeldRepeats(owner int32, state *m6NodeState) {
+	kept := state.Offered[:0]
+	for _, offered := range state.Offered {
+		if state.Table.holds(offered) {
+			if n.measured(owner) {
+				n.report.RepeatsFiltered++
+			}
+			if n.window != nil {
+				n.noteFrame(owner, &n.window.RepeatsFiltered)
+			}
+			continue
+		}
+		kept = append(kept, offered)
+	}
+	state.Offered = kept
 }
 
 // fromOmniscience is the CONTROL of §4.4: anybody in the membership may be
@@ -1394,13 +1553,35 @@ func (n *m6Network) exchangeWithANeighbour(owner int32, state *m6NodeState) bool
 		if !n.visible(owner, peer) || !n.online[peer] || n.states[peer] == nil {
 			continue
 		}
-		last, done := state.LastExchange[peer]
-		if done && (n.config.ExchangeOnce || n.tick-last < n.config.ExchangeEvery) {
+		// The asker's PLANNING: it does not send a request it knows the
+		// interval forbids, judged by its own record of when it last asked.
+		// ⚠️ A model of planning, not knowledge of the responder's clock — the
+		// two agree only because both are stamped by the same served exchange.
+		last, asked := state.LastExchange[peer]
+		if asked && (n.config.ExchangeOnce || n.tick-last < n.config.ExchangeEvery) {
 			continue
 		}
 		state.LastExchange[peer] = n.tick
+		// The RESPONDER'S RULE (§5.1.0, decision 3.6(b)): it does not serve an
+		// asker it served less than T_exch ticks ago — once ever, under the
+		// control. The refusal is counted (the request was a frame), and it
+		// does NOT move the responder's stamp: a run of refused requests never
+		// pushes the next served exchange further out.
+		if !n.responderServes(peer, owner) {
+			if n.measured(owner) {
+				n.report.ExchangesRefused++
+			}
+			if n.window != nil {
+				n.noteFrame(owner, &n.window.ExchangesRefused)
+			}
+			continue
+		}
+		n.states[peer].ServedExchange[owner] = n.tick
 		if n.measured(owner) {
 			n.report.ExchangesDone++
+		}
+		if n.window != nil {
+			n.noteFrame(owner, &n.window.ExchangesServed)
 		}
 
 		// ⚠️ No exclusion list travels with the request: the responder answers
@@ -1415,10 +1596,30 @@ func (n *m6Network) exchangeWithANeighbour(owner int32, state *m6NodeState) bool
 	return false
 }
 
+// responderServes is the responder's half of the interval of §5.1.0: whether
+// `responder` may serve an exchange to `asker` now, read off the responder's
+// own stamp of the last exchange it SERVED that asker — and nothing at the
+// asker decides it. ⚠️ Directed: v serving u says nothing about u serving v.
+// An empty answer is a served exchange too: it consumed the responder's slot
+// and revealed that it holds nothing close, so the stamp moves.
+func (n *m6Network) responderServes(responder, asker int32) bool {
+	served, ever := n.states[responder].ServedExchange[asker]
+	if !ever {
+		return true
+	}
+	if n.config.ExchangeOnce {
+		return false
+	}
+	return n.tick-served >= n.config.ExchangeEvery
+}
+
 // addressedRequest is branch C: up to n records of a NAMED level, from a node
 // already known, answered out of its own table and nothing else.
 func (n *m6Network) addressedRequest(owner int32, state *m6NodeState, level int) bool {
 	refused := false
+	// The responders passed over for quota, in contact order: the one fact
+	// about this choice the comparator cannot recover from any snapshot.
+	quotaSkipped := make([]int32, 0, 2)
 	for _, responder := range n.knownTo(owner, state) {
 		if !n.online[responder] || n.states[responder] == nil {
 			continue
@@ -1445,12 +1646,16 @@ func (n *m6Network) addressedRequest(owner int32, state *m6NodeState, level int)
 			if n.measured(owner) {
 				n.report.AddressedRateLimited++
 			}
+			if n.window != nil {
+				n.noteFrame(owner, &n.window.AddressedRateLimited)
+			}
 			refused = true
+			quotaSkipped = append(quotaSkipped, responder)
 			continue
 		}
 
 		answer := n.recordsOnLevel(responder, owner, level)
-		n.noteOffer(owner, offerAddressed, level, responder, answer)
+		n.noteOfferSkipping(owner, offerAddressed, level, responder, answer, quotaSkipped)
 		if len(answer) == 0 {
 			// The responder holds nothing on that level. ⚠️ Still an answer, and
 			// it still costs the responder its rate-limit slot: refusing to
@@ -1461,6 +1666,9 @@ func (n *m6Network) addressedRequest(owner int32, state *m6NodeState, level int)
 			if n.measured(owner) {
 				n.report.AddressedAnswers++
 			}
+			if n.window != nil {
+				n.noteFrame(owner, &n.window.AddressedAnswers)
+			}
 			return false
 		}
 
@@ -1469,12 +1677,18 @@ func (n *m6Network) addressedRequest(owner int32, state *m6NodeState, level int)
 		if n.measured(owner) {
 			n.report.AddressedAnswers++
 		}
+		if n.window != nil {
+			n.noteFrame(owner, &n.window.AddressedAnswers)
+		}
 		state.Offered = append(state.Offered, answer...)
 		n.noteReachable(state, answer...)
 		return true
 	}
 	if refused && n.measured(owner) {
 		n.report.AddressedRefused++
+	}
+	if refused && n.window != nil {
+		n.noteFrame(owner, &n.window.AddressedRefused)
 	}
 	return false
 }
@@ -1655,6 +1869,9 @@ func (n *m6Network) record(owner int32, outcome m6Outcome) {
 	if n.churnSeen {
 		n.report.ProbesAfterChurn.add(outcome)
 	}
+	if n.window.contains(n.tick) {
+		n.window.Probes.add(outcome)
+	}
 }
 
 // measured says whether this node's work belongs in the measured aggregates.
@@ -1800,6 +2017,9 @@ func (n *m6Network) probe(
 		if n.measured(owner) {
 			n.report.RefilledByLevel[filled]++
 			n.schedule.current().Refilled++
+			if n.window.contains(n.tick) {
+				n.window.noteRefilled(owner, candidate)
+			}
 		}
 		return outcome
 	}
@@ -1849,6 +2069,9 @@ func (n *m6Network) detectLoss(owner int32, state *m6NodeState, gone int32) {
 		state.LostByLevel[level]++
 		if n.measured(owner) {
 			n.report.LostByLevel[level]++
+			if n.window.contains(n.tick) {
+				n.window.noteLost(owner, gone)
+			}
 		}
 		n.report.PhysicalLost++
 		state.Shelf = append(state.Shelf,
@@ -1876,6 +2099,9 @@ func (n *m6Network) detectLoss(owner int32, state *m6NodeState, gone int32) {
 		if n.measured(owner) {
 			n.report.DetectionDelays = append(n.report.DetectionDelays, n.tick-left)
 			n.schedule.current().Detections++
+			if n.window.contains(n.tick) {
+				n.window.DetectionEvents++
+			}
 		}
 	}
 }
@@ -1943,6 +2169,11 @@ func (n *m6Network) coverageByLevel() []m6LevelCoverage {
 
 func (n *m6Network) collect() {
 	n.report.Levels = n.coverageByLevel()
+	n.report.PendingAtEnd = len(n.queue)
+	if n.recording != nil {
+		n.recording.Exchanges, n.recording.Answers = n.report.ExchangesDone, n.report.AddressedAnswers
+		n.report.Recording = n.recording
+	}
 	if n.config.Stream != nil {
 		n.report.StreamExhaustedOwners, n.report.StreamParticipants, n.report.StreamConsumed =
 			n.streamExhaustion()

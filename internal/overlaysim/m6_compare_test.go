@@ -64,6 +64,10 @@ const (
 	// onset. ⚠️ EXPECTED TO FAIL for a control worth having: the failure
 	// carries the first divergence and its cause.
 	claimOffersSameAfterOnset
+	// claimSameRecoveryWindow — both halves read their recovery axis on one
+	// window: the same onset tick and the same W_rec (decision 3.5(ii)). Not
+	// applicable when neither asked for a window.
+	claimSameRecoveryWindow
 )
 
 func (k m6ClaimKind) String() string {
@@ -86,8 +90,10 @@ func (k m6ClaimKind) String() string {
 		return "same recorded stream, unmodified by either run"
 	case claimOffersSameBeforeOnset:
 		return "offers identical before the onset"
-	default:
+	case claimOffersSameAfterOnset:
 		return "offers identical after the onset"
+	default:
+		return "same recovery window (onset tick and W_rec)"
 	}
 }
 
@@ -151,6 +157,11 @@ const (
 	// would have handed over in the other run is not observable after the
 	// fact, so the comparison says so rather than guessing.
 	causeUndetermined
+	// causeDifferentInputs — the two halves do not read ONE source: two
+	// different recordings, or a replay against an adaptive run. Whatever the
+	// owner's memory did, the inputs differed by construction, so nothing
+	// about memory is provable from the divergence (owner's P2, round 31).
+	causeDifferentInputs
 )
 
 func (c m6DivergenceCause) String() string {
@@ -161,8 +172,56 @@ func (c m6DivergenceCause) String() string {
 		return "a RESPONDER'S TABLE (another node's memory)"
 	case causeNetworkState:
 		return "NETWORK STATE that had already changed"
-	default:
+	case causeUndetermined:
 		return "NOT ESTABLISHED from the live state"
+	default:
+		return "DIFFERENT INPUTS of the two halves (different recordings, or a replay against an " +
+			"adaptive run) — not attributable to memory"
+	}
+}
+
+// m6SourcePairing is what the two halves READ: one and the same source, or
+// not. Decided ONCE by prepareStreamClaims from both halves and read by the
+// classifier — the claim "same recorded stream" and the explanation "both
+// candidates come from the one recording" must rest on the same fact.
+type m6SourcePairing int
+
+const (
+	// pairAdaptive — neither half replays: both read the world (their own
+	// edges, the joined population, their neighbours' tables).
+	pairAdaptive m6SourcePairing = iota
+	// pairSharedRecording — both halves replay ONE recording (same fingerprint).
+	pairSharedRecording
+	// pairDifferentRecordings — both replay, but not the same recording.
+	pairDifferentRecordings
+	// pairMixed — one half replays, the other adapts.
+	pairMixed
+)
+
+func (p m6SourcePairing) String() string {
+	switch p {
+	case pairAdaptive:
+		return "both halves adapt"
+	case pairSharedRecording:
+		return "both halves replay one recording"
+	case pairDifferentRecordings:
+		return "the halves replay DIFFERENT recordings"
+	default:
+		return "one half replays and the other adapts"
+	}
+}
+
+func sourcePairingOf(main, control *m6Network) m6SourcePairing {
+	left, right := main.config.Stream, control.config.Stream
+	switch {
+	case left == nil && right == nil:
+		return pairAdaptive
+	case left == nil || right == nil:
+		return pairMixed
+	case left.fingerprint() != right.fingerprint():
+		return pairDifferentRecordings
+	default:
+		return pairSharedRecording
 	}
 }
 
@@ -188,6 +247,10 @@ type m6WorldSnapshot struct {
 	online []bool
 	held   []map[int32]struct{}
 	queues map[int32][]int32
+	// served is every responder's limiter (ServedExchange) at the start of
+	// the tick: world state, because the interval of §5.1.0 is the
+	// responder's rule (decision 3.6(b)) and the clearing leaves it alone.
+	served map[int32]map[int32]int
 }
 
 func snapshotWorldOf(n *m6Network) m6WorldSnapshot {
@@ -195,6 +258,7 @@ func snapshotWorldOf(n *m6Network) m6WorldSnapshot {
 		online: append([]bool(nil), n.online...),
 		held:   make([]map[int32]struct{}, len(n.held)),
 		queues: make(map[int32][]int32, len(n.states)),
+		served: make(map[int32]map[int32]int, len(n.states)),
 	}
 	for node, edges := range n.held {
 		copied := make(map[int32]struct{}, len(edges))
@@ -205,6 +269,11 @@ func snapshotWorldOf(n *m6Network) m6WorldSnapshot {
 	}
 	for node, state := range n.states {
 		snapshot.queues[node] = append([]int32(nil), state.Offered...)
+		stamps := make(map[int32]int, len(state.ServedExchange))
+		for asker, tick := range state.ServedExchange {
+			stamps[asker] = tick
+		}
+		snapshot.served[node] = stamps
 	}
 	return snapshot
 }
@@ -248,9 +317,12 @@ func (a m6Availability) String() string {
 // omniscient walk a joined member — both are world, and their absence means
 // the world had changed. An exchange or an addressed request needs its
 // RESPONDER: online and connected is world; reachable only through the
-// asker's table (addressed) is memory. ⚠️ What the responder would have
-// ANSWERED is a different question, not answered here — see
-// contentFromResponder.
+// asker's table (addressed) is memory. An exchange further needs the
+// responder's LIMITER to allow it (decision 3.6(b)): the responder's stamp of
+// the last exchange it served this asker is world state, so a responder that
+// would have refused is a responder that was not available. ⚠️ What the
+// responder would have ANSWERED is a different question, not answered here —
+// see contentFromResponder.
 func availableIn(n *m6Network, world m6WorldSnapshot, owner int32, offer *m6OfferEntry) m6Availability {
 	switch offer.Source {
 	case offerRefresh, offerShelf, offerQueue:
@@ -259,7 +331,9 @@ func availableIn(n *m6Network, world m6WorldSnapshot, owner int32, offer *m6Offe
 		if n.config.Stream != nil {
 			// The recording is the world of a replay; every entry of it was
 			// available to both halves alike, and whether it was consumed is
-			// behaviour.
+			// behaviour. ⚠️ True only when both halves replay ONE recording —
+			// classifyDivergence asks this only for a shared pairing and answers
+			// "different inputs" before reaching here for any other.
 			return memoryOnly
 		}
 		var there bool
@@ -276,12 +350,21 @@ func availableIn(n *m6Network, world m6WorldSnapshot, owner int32, offer *m6Offe
 		if !world.online[offer.Peer] || n.states[offer.Peer] == nil {
 			return missingFromWorld
 		}
-		if _, edge := world.held[owner][offer.Peer]; edge {
+		_, edge := world.held[owner][offer.Peer]
+		if offer.Source == offerExchange {
+			// An exchange goes over a held edge and nothing else, and the
+			// responder serves it only outside its interval.
+			if !edge {
+				return missingFromWorld
+			}
+			if served, ever := world.served[offer.Peer][owner]; ever &&
+				(n.config.ExchangeOnce || offer.Tick-served < n.config.ExchangeEvery) {
+				return missingFromWorld
+			}
 			return availableInWorld
 		}
-		if offer.Source == offerExchange {
-			// An exchange goes over a held edge and nothing else.
-			return missingFromWorld
+		if edge {
+			return availableInWorld
 		}
 		// An addressed request can also go to a node known from the table.
 		return memoryOnly
@@ -364,6 +447,9 @@ type m6Comparison struct {
 	OnsetTick               int
 	MainOnset, ControlOnset int
 	Ticks                   int
+	// Pairing is what the two halves read (one source or not), decided once
+	// in prepareStreamClaims and read by the classifier.
+	Pairing m6SourcePairing
 }
 
 func (c *m6Comparison) claim(kind m6ClaimKind) *m6Claim {
@@ -488,7 +574,7 @@ func (c *m6Comparison) String() string {
 		}
 		onset = fmt.Sprintf("ONSET MISMATCH (main %s, control %s)", name(c.MainOnset), name(c.ControlOnset))
 	}
-	lines := []string{fmt.Sprintf("comparison over %d ticks, %s:", c.Ticks, onset)}
+	lines := []string{fmt.Sprintf("comparison over %d ticks, %s; sources: %s:", c.Ticks, onset, c.Pairing)}
 	for _, claim := range c.Claims {
 		lines = append(lines, "    "+claim.String())
 	}
@@ -497,7 +583,7 @@ func (c *m6Comparison) String() string {
 		return strings.Join(lines, "\n")
 	}
 	lines = append(lines, "    first offer divergence: "+c.Divergence.String())
-	for cause := causeLocalMemory; cause <= causeUndetermined; cause++ {
+	for cause := causeLocalMemory; cause <= causeDifferentInputs; cause++ {
 		if first := c.FirstByCause[cause]; first != nil && first != c.Divergence {
 			lines = append(lines, fmt.Sprintf("    first divergence caused by %s: %s", cause, first))
 		}
@@ -517,7 +603,7 @@ func newM6Comparison() *m6Comparison {
 		FirstByCause: map[m6DivergenceCause]*m6Divergence{},
 		diverged:     map[int32]struct{}{},
 	}
-	for kind := claimSameInputs; kind <= claimOffersSameAfterOnset; kind++ {
+	for kind := claimSameInputs; kind <= claimSameRecoveryWindow; kind++ {
 		comparison.Claims = append(comparison.Claims, m6Claim{Kind: kind, Status: claimHolds})
 	}
 	return comparison
@@ -607,10 +693,32 @@ func compareM6Runs(main, control *m6Network) (*m6Comparison, error) {
 		}
 	}
 	for _, network := range []*m6Network{main, control} {
+		if err := network.requireWindowClosed(); err != nil {
+			return nil, err
+		}
 		network.report.Phases = network.schedule.trace()
 		network.collect()
 	}
+	comparison.checkRecoveryWindow(main, control)
 	return comparison, nil
+}
+
+// checkRecoveryWindow judges the window claim on both halves' ledgers: the
+// same onset tick and the same W_rec, or the two recovery axes were read on
+// different intervals and their sums are not comparable.
+func (c *m6Comparison) checkRecoveryWindow(main, control *m6Network) {
+	left, right := main.report.Window, control.report.Window
+	switch {
+	case left == nil && right == nil:
+		c.notApplicable(claimSameRecoveryWindow, "neither half asked for a recovery window")
+	case left == nil || right == nil:
+		c.fail(claimSameRecoveryWindow, 0, "one half read its recovery axis on a window and the other on "+
+			"the phases alone")
+	case left.From != right.From || left.Ticks != right.Ticks:
+		c.fail(claimSameRecoveryWindow, min(left.From, right.From), fmt.Sprintf("the main run's window "+
+			"is [%d, %d), the control's [%d, %d): the recovery axes were read on different intervals",
+			left.From, left.To, right.From, right.To))
+	}
 }
 
 // streamFingerprints digests both halves' recordings (empty for an adaptive
@@ -684,6 +792,7 @@ func (c *m6Comparison) checkInputs(main, control *m6Network) {
 // come from different sources. The inputs claim fails there too, but the
 // claims are stated as independent and each has to be right on its own.
 func (c *m6Comparison) prepareStreamClaims(main, control *m6Network) {
+	c.Pairing = sourcePairingOf(main, control)
 	mainStream, controlStream := main.config.Stream, control.config.Stream
 	switch {
 	case mainStream == nil && controlStream == nil:
@@ -859,7 +968,7 @@ func (c *m6Comparison) noteDivergence(
 	mainOffer, controlOffer *m6OfferEntry,
 ) {
 	divergence := &m6Divergence{Tick: tick, Owner: owner, Main: mainOffer, Control: controlOffer}
-	divergence.Cause, divergence.Detail = classifyDivergence(main, control, worlds, owner, mainOffer, controlOffer)
+	divergence.Cause, divergence.Detail = classifyDivergence(main, control, worlds, c.Pairing, owner, mainOffer, controlOffer)
 
 	kind := claimOffersSameAfterOnset
 	if c.OnsetTick < 0 || tick < c.OnsetTick {
@@ -937,12 +1046,26 @@ func sameNodesAnyOrder(a, b []int32) bool {
 // ⚠️ The rules are conservative in one direction: a difference that CAN be
 // explained by the owner's own memory is attributed to it only when the
 // candidate involved is available to both runs — otherwise the world differs
-// and the world is blamed. Exchange timing is the asker's memory (the stamps,
-// assumption 27); what an exchange or an answer HANDS OVER is the responder's.
+// and the world is blamed. Whether an exchange may be served is the
+// responder's limiter, world state read off the snapshot (assumption 27);
+// what an exchange or an answer HANDS OVER is the responder's.
+//
+// ⚠️ And before any of that: the halves must READ ONE SOURCE. Two different
+// recordings, or a replay against an adaptive run, differ in their inputs by
+// construction, so no divergence between them says anything about memory —
+// "both candidates come from the one recording" was said for such pairs too
+// (owner's P2, round 31), and the verdict blamed memory for what the inputs
+// did. The pairing is decided once, from both halves, and read here; the
+// path of an ABSENT offer (one == nil) goes through the same gate.
 func classifyDivergence(
-	main, control *m6Network, worlds m6WorldPair, owner int32, one, other *m6OfferEntry,
+	main, control *m6Network, worlds m6WorldPair, pairing m6SourcePairing, owner int32,
+	one, other *m6OfferEntry,
 ) (m6DivergenceCause, string) {
-	replayed := main.config.Stream != nil
+	if pairing == pairDifferentRecordings || pairing == pairMixed {
+		return causeDifferentInputs, fmt.Sprintf("%s: the inputs of the two halves differ by construction, "+
+			"so neither memory nor the world can be blamed for this divergence from the live state", pairing)
+	}
+	replayed := pairing == pairSharedRecording
 	switch {
 	case one == nil || other == nil:
 		// ⚠️ A live owner with nothing to offer is NOT enough for "memory": its
@@ -985,8 +1108,9 @@ func classifyDivergence(
 		return causeLocalMemory, "the refresh cursor / table or the shelf of this owner differ"
 	case offerAcquaintance, offerOmniscient, offerQueue:
 		if replayed {
-			// One recording feeds both: whichever entry was let through, the
-			// input was the same, so the filter is the owner's.
+			// ONE recording feeds both — the pairing says so, from BOTH halves:
+			// whichever entry was let through, the input was the same, so the
+			// filter is the owner's.
 			return causeLocalMemory, "both candidates come from the one recording; the owner's " +
 				"table, tried-set or consumption let a different one through"
 		}
@@ -1004,15 +1128,31 @@ func classifyDivergence(
 	default: // offerExchange, offerAddressed
 		if one.Peer != other.Peer {
 			// Different responders: the divergence is the CHOICE of responder,
-			// and the choice is settled by reachability alone — the content of
+			// and the choice is settled by reachability — the content of
 			// either answer is beside the point. Reachability is read off the
 			// world snapshot, so it is established, not assumed.
+			//
+			// ⚠️ For an ADDRESSED request reachability is not the whole of it:
+			// addressedRequest passes a responder over when its quota (r_pair /
+			// r_node) is spent, and that quota is spent by OTHER askers of the
+			// tick — load on the responder, world state the snapshot cannot
+			// show (the counters are reset per tick and move during serving).
+			// The asker records whom it skipped for quota at the moment of the
+			// choice (QuotaSkipped), and that is read here before memory is
+			// blamed (owner's P2, round 32).
+			if containsNode(one.QuotaSkipped, other.Peer) || containsNode(other.QuotaSkipped, one.Peer) {
+				return causeNetworkState, fmt.Sprintf("different responders asked (%d against %d) because "+
+					"a responder's quota was already spent by earlier askers of the tick in one half "+
+					"(the main run skipped %v for quota, the control %v): load on the responder, not "+
+					"the asker's memory", one.Peer, other.Peer, one.QuotaSkipped, other.QuotaSkipped)
+			}
 			mainInControl := availableIn(control, worlds.control, owner, one)
 			controlInMain := availableIn(main, worlds.main, owner, other)
 			cause := causeFromAvailability(false, mainInControl, controlInMain)
 			return cause, fmt.Sprintf("different responders asked (%d against %d); the main run's "+
 				"responder in the control's world: %s; the control's responder in the main run's "+
-				"world: %s", one.Peer, other.Peer, mainInControl, controlInMain)
+				"world: %s; neither half skipped the other's responder for quota", one.Peer, other.Peer,
+				mainInControl, controlInMain)
 		}
 		if one.Level != other.Level {
 			// ⚠️ The same responder was asked DIFFERENT QUESTIONS. An addressed

@@ -2701,11 +2701,18 @@ func TestM6AReturnIsHonouredEvenWithoutADeparture(t *testing.T) {
 		t.Errorf("%d newcomers offered on a tick with no departures", got)
 	}
 
-	// And the report must not present the total as exact compensation.
+	// The tick offered two arrivals against no departure: that is the surplus.
+	if got := network.report.OfferedSurplus - before.OfferedSurplus; got != 2 {
+		t.Errorf("the surplus of offers over departures grew by %d, want 2", got)
+	}
+
+	// And the report names the rule (decision 3.1(a)) and does not present the
+	// total as exact compensation.
 	line := network.report.PopulationLine()
 	for _, want := range []string{
-		"returns honoured as promised at their departure",
-		"NOT exact compensation",
+		"returns honoured as promised at their departure, offered UNCONDITIONALLY",
+		"max(departures − returns due, 0)",
+		"NOT exact compensation is claimed",
 	} {
 		if !strings.Contains(line, want) {
 			t.Errorf("the population line does not carry %q:\n%s", want, line)

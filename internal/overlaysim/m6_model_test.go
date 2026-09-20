@@ -172,11 +172,23 @@ type m6NodeState struct {
 	// successful probe "restored" a connection that had never existed — it
 	// changed the graph and spent B at both ends, off the back of a table entry.
 	ReleasedEdge map[int32]struct{}
-	// LastExchange is the tick of the last A′ exchange with each neighbour, and
-	// Offered the candidates that exchange produced and that have not been
-	// probed yet.
-	LastExchange map[int32]int
-	Offered      []int32
+	// LastExchange is the ASKER'S planning stamp: the tick this node last
+	// ASKED each neighbour for an exchange (served or refused). It is what
+	// stops the node from sending a request it knows the interval forbids —
+	// its own memory of its own requests, not knowledge of the responder's
+	// clock. ServedExchange is the RESPONDER'S limiter: the tick this node
+	// last SERVED each asker, and the rule of §5.1.0 is enforced there
+	// (decision 3.6(b)): a request inside T_exch of the last served one is
+	// refused, counted, and does not move the stamp. Offered is the queue of
+	// candidates the exchanges handed over that have not been probed yet.
+	//
+	// ⚠️ Neither stamp is erased by the ‘from scratch’ clearing (decision
+	// 3.4): the limiter is the responder's state and the control loses routing
+	// state, not the other nodes' clocks; the planning stamp mirrors it, and
+	// erasing it would only buy the control refused frames.
+	LastExchange   map[int32]int
+	ServedExchange map[int32]int
+	Offered        []int32
 	// Exhausted is every node this owner can never use: the ones whose
 	// identifier shares the whole prefix its table can address, so there is no
 	// bucket for them at any time.
@@ -217,6 +229,7 @@ func newM6NodeState(owner int32, levels, capacity, nearFrom int) *m6NodeState {
 		Released:        map[int32]struct{}{},
 		ReleasedEdge:    map[int32]struct{}{},
 		LastExchange:    map[int32]int{},
+		ServedExchange:  map[int32]int{},
 		Exhausted:       map[int32]struct{}{},
 		TriedThisTick:   map[int32]struct{}{},
 		Reachable:       map[int32]struct{}{},
@@ -237,10 +250,15 @@ const (
 	churnNone m6ChurnForm = iota
 	// churnShock — a share f leaves at one tick.
 	churnShock
-	// churnCompensated — a share f_bg leaves every tick and as many arrivals are
-	// OFFERED. ⚠️ Offered, not guaranteed: an arrival needs a receiving side
-	// with free B and may be refused, which is why the report shows offered,
-	// admitted and the actual online count apart.
+	// churnCompensated — "compensation of departures with returns offered
+	// UNCONDITIONALLY" (decision 3.1(a)): a share f_bg leaves every tick, the
+	// returns due are offered whatever the tick's departures, and newcomers
+	// are offered to make up max(departures − returns due, 0). ⚠️ Offered,
+	// not guaranteed: an arrival needs a receiving side with free B and may be
+	// refused, and the population is neither claimed steady nor exactly
+	// compensated — the report shows offered, admitted, waiting, given up and
+	// the actual online count apart, and names the surplus of offers over
+	// departures.
 	churnCompensated
 	// churnShrink — departures with no compensation. ⚠️ Named for what it is:
 	// this measures degradation, not a steady state.
@@ -254,7 +272,8 @@ func (f m6ChurnForm) String() string {
 	case churnShock:
 		return "shock"
 	case churnCompensated:
-		return "compensated load (arrivals are OFFERED, not guaranteed)"
+		return "compensation of departures with returns offered UNCONDITIONALLY (newcomers make up " +
+			"the rest; arrivals are OFFERED, not guaranteed; not a steady population)"
 	default:
 		return "SHRINKING NETWORK — degradation, not a steady state"
 	}
@@ -296,6 +315,20 @@ type m6ModelConfig struct {
 	ExchangeEvery   int
 	ExchangeOnce    bool
 
+	// LocalRepeatFilter is the CONTROL of decision 3.2(c): a record a neighbour
+	// hands back that the owner ALREADY HOLDS is dropped at the owner, before
+	// any probe — no exclusion list travels to the neighbour, the repeat is
+	// received and processed (counted), and the probe that is not made is not
+	// paid. ⚠️ A different algorithm, not a cheaper reading of the base: the
+	// filtered repeat confirms nothing about the record — it does not refresh
+	// the level's clock, does not mark the node reachable again and cannot
+	// detect the record's death; the base of the grid keeps §5.1.0 (the repeat
+	// is a paid probe and may detect). A′ only; refused elsewhere. Record
+	// identity in this model is the NodeID (index) — records carry no address
+	// or other mutable field, so "the same NodeID" is the whole rule here; in
+	// the protocol a changed address is not a safe repeat (§5.1.0).
+	LocalRepeatFilter bool
+
 	// AddressedRecords is n, RatePair is r_pair and RateNode is r_node — the
 	// SINGLE definition of the rate limit lives in §5.1.2 п.4 and is carried
 	// here, never restated elsewhere.
@@ -331,9 +364,21 @@ type m6ModelConfig struct {
 	// event is keyed on the tick. A control that plays a different scenario is
 	// measuring the scenario, not the memory.
 	ReplayPhases []m6PhaseBoundary
+	// RecoveryWindow is W_rec (decision 3.5(ii)): the recovery axis is read on
+	// [onset, onset + W_rec) ticks, the same interval for every configuration
+	// with a churn form, whatever the phases decided (m6_window_test.go). 0
+	// asks for no window — the fixtures' default; the grid sets 1024, a
+	// parameter of the experiment and not a derivation from T_cad. A window
+	// the run cannot hold in full is refused at the door.
+	RecoveryWindow int
 	// TraceOffers keeps the offer trace and the exposure snapshot at the churn
 	// onset (m6_trace_test.go). Off by default: it is large.
 	TraceOffers bool
+	// RecordStream records the candidate stream DIRECTLY, without the offer
+	// trace (decision 3.4, for the 10k×8 scale): the same entries recordStream
+	// derives from a trace, written as they are produced, at the size of the
+	// recording rather than of the diagnostic trace. Refused for a replay.
+	RecordStream bool
 	// Stream, when set, REPLACES the branch's source with a recorded stream
 	// (m6_stream_test.go): the paired control that holds the candidate stream
 	// fixed in both memory modes. Branch and OmniscientControl must name the
@@ -364,6 +409,41 @@ type m6ModelConfig struct {
 	Membership string
 }
 
+// m6HeldRecordReading is how a configuration re-probes a record it ALREADY
+// HOLDS when the scheduled refresh is off (C = ∞) — the one thing the three
+// readings of the negative control differ in, decided ONCE here and read by
+// the configuration signature, the detection line and the recovery axis.
+// Three readings, not two (owner's P2, round 30): the ‘local repeat filter’
+// control drops a repeat BEFORE a probe, so under it a repeat pays nothing,
+// confirms nothing and detects nothing — and the base reading "a repeat is a
+// paid probe" was false there.
+type m6HeldRecordReading int
+
+const (
+	// heldNeverReprobed — A and B: nothing but the refresh re-probes a held
+	// record, so with C = ∞ a per-level table loss is never found.
+	heldNeverReprobed m6HeldRecordReading = iota
+	// heldReprobedByRepeat — A′ and C under §5.1.0: a repeat a neighbour hands
+	// back is a PAID probe of the held record and may find it dead.
+	heldReprobedByRepeat
+	// heldRepeatFiltered — A′ under the ‘local repeat filter’ control: the
+	// repeat is dropped at the owner before a probe; it pays nothing, confirms
+	// nothing and cannot detect the record's death. Probes of OTHER candidates
+	// still detect what they find.
+	heldRepeatFiltered
+)
+
+func (c m6ModelConfig) heldRecordReading() m6HeldRecordReading {
+	switch {
+	case !c.Branch.ExchangesRecords():
+		return heldNeverReprobed
+	case c.LocalRepeatFilter:
+		return heldRepeatFiltered
+	default:
+		return heldReprobedByRepeat
+	}
+}
+
 func (c m6ModelConfig) String() string {
 	cadence := fmt.Sprintf("%d ticks", c.Cadence)
 	if c.Cadence <= 0 {
@@ -372,6 +452,14 @@ func (c m6ModelConfig) String() string {
 			"but a FILLING probe can still find a peer gone and free the edge; in A′ and C a " +
 			"repeat handed back by a neighbour is a paid probe (§5.1.0) and may find a held " +
 			"record dead"
+		if c.heldRecordReading() == heldRepeatFiltered {
+			cadence = "∞ — NEGATIVE CONTROL: the SCHEDULED refresh is off, detection is NOT. ⚠️ Under " +
+				"the ‘local repeat filter’ control a repeat handed back by a neighbour is dropped " +
+				"at the owner before any probe: it pays nothing, confirms nothing about the record " +
+				"and cannot detect its death, so a held record is re-probed by NO path here (as in " +
+				"A and B); a probe of any OTHER candidate can still find a departed node and free " +
+				"the edge"
+		}
 	}
 	repair := fmt.Sprintf("%d probes/tick", c.Repair)
 	if c.Repair <= 0 {
@@ -379,11 +467,18 @@ func (c m6ModelConfig) String() string {
 	}
 	exchange := "not used by this branch"
 	if c.Branch.ExchangesRecords() {
-		exchange = fmt.Sprintf("m=%d records, one exchange per neighbour every %d ticks",
-			c.ExchangeRecords, c.ExchangeEvery)
+		exchange = fmt.Sprintf("m=%d records, one exchange per neighbour every %d ticks (the "+
+			"interval is the RESPONDER'S rule)", c.ExchangeRecords, c.ExchangeEvery)
 		if c.ExchangeOnce {
 			exchange = fmt.Sprintf("m=%d records, ONE exchange per neighbour ever — CONTROL for "+
 				"the price of repeating it", c.ExchangeRecords)
+		}
+		if c.LocalRepeatFilter {
+			exchange += "; ⚠️ CONTROL ‘local repeat filter’ (3.2(c)): a record already held is dropped " +
+				"at the owner before any probe — received and counted, not paid, and it confirms " +
+				"nothing about the record; NOT the base of the grid, where a repeat is a paid probe"
+		} else {
+			exchange += "; a repeat handed back is a PAID probe and may detect (§5.1.0)"
 		}
 	}
 	addressed := "not used by this branch"
@@ -409,8 +504,18 @@ func (c m6ModelConfig) String() string {
 	}
 	start := "the node keeps what it knew (П-6, main mode)"
 	if c.StartEmpty {
-		start = "CONTROL ‘from scratch’: tables and shelves cleared at the churn tick — FIRST " +
-			"FILLING, not recovery (П-6)"
+		start = "CONTROL ‘from scratch’ — recovery after a loss of the network's ROUTING STATE: at " +
+			"the churn tick every measured node's table, shelf, exchange queue, refresh clocks and " +
+			"probe memory are cleared; its held edges (the starting contacts), the exchange clocks " +
+			"of both sides, the graph and the events are kept — FIRST FILLING, not recovery (П-6); " +
+			"for A′/C the candidate stream is NOT the same as the main run's (the neighbours' " +
+			"tables are among what is cleared), see the candidate-stream line"
+	}
+	window := "none asked for — the recovery axis is read off the phases only"
+	if c.RecoveryWindow > 0 {
+		window = fmt.Sprintf("W_rec=%d ticks from the onset, [onset, onset+%d), the same for every "+
+			"configuration with churn (decision 3.5(ii)); a parameter of the experiment, not derived "+
+			"from T_cad", c.RecoveryWindow, c.RecoveryWindow)
 	}
 
 	return fmt.Sprintf(
@@ -419,12 +524,12 @@ func (c m6ModelConfig) String() string {
 			"  repair ceiling R: %s\n  cadence C: %s\n  shelf: T_stale=%d ticks AFTER DETECTION, "+
 			"shelved records probed %s\n  A′ exchange: %s\n  addressed request: %s\n"+
 			"  churn: %s, share %.2f; returns %.2f after %d ticks; entry queue gives up "+
-			"after %d ticks\n  schedule: %s\n  start: %s",
+			"after %d ticks\n  schedule: %s\n  recovery window: %s\n  start: %s",
 		m6ModelRevision, c.Shape.name, c.Shape.nodes, c.Shape.degree, c.Shape.budget, c.Seed,
 		c.Policy, c.Quota, c.Membership, branchLine, reveals, c.Capacity, c.NearFrom,
 		c.NearFromRule, repair, cadence, c.StaleTicks, shelfOrder(c.ShelfFirst), exchange,
 		addressed, c.Churn, c.ChurnShare, c.ReturnShare, c.ReturnAfter, c.JoinMaxWait,
-		c.scheduleLine(), start)
+		c.scheduleLine(), window, start)
 }
 
 // scheduleLine names the schedule the configuration is under, without running
@@ -495,6 +600,13 @@ type m6Network struct {
 	// comparison with another run (m6_trace_test.go).
 	schedule m6Schedule
 	trace    *m6Trace
+	// recording is the stream being recorded directly (RecordStream), nil
+	// otherwise; the report carries it when the run ends.
+	recording *m6RecordedStream
+	// window is the recovery window of decision 3.5(ii), opened at the onset
+	// tick and closed W_rec ticks later (m6_window_test.go); nil when the
+	// configuration asked for none or the onset has not come.
+	window *m6RecoveryWindow
 	// consumed and streamCursor are the replay's consumption state
 	// (m6_stream_test.go): which handed entries each owner has used up, and
 	// which entry the owner is probing right now. ⚠️ World state, not memory —
@@ -733,14 +845,20 @@ type m6ModelReport struct {
 	// words rather than leaving a reader to infer it from a shortfall.
 	Departed, ArrivalsOffered, ArrivalsAdmitted, GaveUpJoining int
 	ArrivalsNotOffered                                         int
-	// ReturnsOffered and NewcomersOffered split ArrivalsOffered.
+	// ReturnsOffered and NewcomersOffered split ArrivalsOffered; ReturnsAdmitted
+	// splits ArrivalsAdmitted the same way (NewcomersAdmitted is below);
+	// PendingAtEnd is the entry queue when the run ended — arrivals neither
+	// admitted nor given up.
 	//
-	// ⚠️ They are printed apart because their totals are NOT the exact
-	// compensation §5.9.2 describes: a return is a promise made at the departure
-	// and is honoured even when the tick had fewer departures than returns due,
-	// so the offered total is max(departures, returns due). Summing them into one
-	// "offered" would read as exact compensation and would be wrong.
+	// ⚠️ Printed apart because the rule of §5.9.2 (decision 3.1(a)) is not
+	// exact compensation: the returns due are offered UNCONDITIONALLY — a
+	// promise made at the departure — and newcomers make up
+	// max(departures − returns due, 0), so a tick with more returns due than
+	// departures offers more arrivals than departures. OfferedSurplus is that
+	// excess summed over the ticks: how far the offers exceeded the departures.
 	ReturnsOffered, NewcomersOffered int
+	ReturnsAdmitted, PendingAtEnd    int
+	OfferedSurplus                   int
 	// DeparturesDecided counts the EXOGENOUS decisions to leave — the draws the
 	// seed determines, whether or not the node was online to act on them.
 	//
@@ -818,8 +936,16 @@ type m6ModelReport struct {
 	// first and not in the second, and reporting only one of the two would
 	// either hide the limit doing its job or make it look like an outage.
 	AddressedAnswers, AddressedRateLimited, AddressedRefused int
-	// ExchangesDone counts A′ exchanges actually performed.
-	ExchangesDone int
+	// RepeatsFiltered counts, under the ‘local repeat filter’ control, the
+	// handed records the owner already held and dropped before a probe — each
+	// copy received, so a record two neighbours handed back is two.
+	RepeatsFiltered int
+	// ExchangesDone counts A′ exchanges actually SERVED; ExchangesRefused the
+	// requests a responder turned down under its interval (§5.1.0 as the
+	// responder's rule, decision 3.6(b)) — a frame the asker paid for and got
+	// no record from. ⚠️ Counted apart: the served ones are the mechanism's
+	// yield, the refused ones the price of asking too early.
+	ExchangesDone, ExchangesRefused int
 
 	// Phases is every phase the schedule played, with its boundary, the reason
 	// it ended and the per-phase ledgers (m6_schedule_test.go). Under the flat
@@ -827,6 +953,11 @@ type m6ModelReport struct {
 	Phases []m6PhaseRecord
 	// Trace is the scenario and offer traces (m6_trace_test.go).
 	Trace *m6Trace
+	// Window is the recovery window's ledger (m6_window_test.go), nil when
+	// none was asked for.
+	Window *m6RecoveryWindow
+	// Recording is the stream recorded directly (RecordStream), nil otherwise.
+	Recording *m6RecordedStream
 	// StreamExhaustedOwners, StreamParticipants and StreamConsumed describe a
 	// replay at its end: how many measured owners had nothing left to be
 	// offered, out of how many measured owners TOOK PART (joined at some
@@ -885,22 +1016,32 @@ func (r m6ModelReport) DetectionDelaySummary() string {
 	median, ok := medianOf(r.DetectionDelays)
 	if !ok {
 		// ⚠️ C = ∞ switches off the SCHEDULED refresh, not detection, and what
-		// that implies is BRANCH-DEPENDENT: §5.1.0 charges a probe for a record a
-		// neighbour hands back, so in A′ and C an empty result is a measurement
-		// and not a property of the control. Saying "therefore no detection" for
-		// every branch was the report contradicting the contract.
-		repeats := r.Config.Branch.ExchangesRecords()
-		switch {
-		case r.Config.Cadence <= 0 && repeats:
-			return "no loss was detected in this run. ⚠️ With C = ∞ the scheduled refresh is off, " +
-				"but a record this branch is handed again is still a paid probe and COULD have " +
-				"detected one: this is a MEASUREMENT, not a property of the negative control"
-		case r.Config.Cadence <= 0:
-			return "no data — with C = ∞ the scheduled refresh is off and this branch re-probes an " +
-				"ALREADY HELD record by no other path, so a per-level table loss cannot be " +
-				"detected; the expected result of the negative control. ⚠️ It does not mean " +
-				"nothing is ever noticed: a filling probe can still find a peer gone and free the " +
-				"edge, which is why the cost ledger may be non-empty here"
+		// that implies depends on how the configuration re-probes a HELD record
+		// (heldRecordReading): §5.1.0 charges a probe for a record a neighbour
+		// hands back, so in A′ and C an empty result is a measurement and not a
+		// property of the control — but under the ‘local repeat filter’ control
+		// that repeat never reaches a probe. Saying "a paid probe COULD have
+		// detected" there was the report contradicting the control it printed.
+		if r.Config.Cadence <= 0 {
+			switch r.Config.heldRecordReading() {
+			case heldReprobedByRepeat:
+				return "no loss was detected in this run. ⚠️ With C = ∞ the scheduled refresh is off, " +
+					"but a record this branch is handed again is still a paid probe and COULD have " +
+					"detected one: this is a MEASUREMENT, not a property of the negative control"
+			case heldRepeatFiltered:
+				return "no loss was detected in this run. With C = ∞ the scheduled refresh is off, and " +
+					"under the ‘local repeat filter’ control a repeat of a HELD record is dropped at " +
+					"the owner before a probe: it is not paid, confirms nothing about the record and " +
+					"cannot detect its death — so a held record is re-probed by no path here. ⚠️ Not " +
+					"‘nothing is ever detected’: a probe of any OTHER candidate still finds a departed " +
+					"node when it meets one, and none did in this run"
+			default:
+				return "no data — with C = ∞ the scheduled refresh is off and this branch re-probes an " +
+					"ALREADY HELD record by no other path, so a per-level table loss cannot be " +
+					"detected; the expected result of the negative control. ⚠️ It does not mean " +
+					"nothing is ever noticed: a filling probe can still find a peer gone and free the " +
+					"edge, which is why the cost ledger may be non-empty here"
+			}
 		}
 		return "no data — no loss was detected in this run"
 	}
@@ -948,25 +1089,46 @@ func coverageLineOf(levels []m6LevelCoverage, empty string) string {
 // RecoveryLine reports the third axis. ⚠️ Per level: filling a level that lost
 // nothing is coverage, not recovery, and totals cannot tell the two apart.
 func (r m6ModelReport) RecoveryLine() string {
+	line := r.recoveryAxisLine()
+	if r.Window != nil {
+		line += "\n    " + r.windowLine()
+	}
+	return line
+}
+
+// recoveryAxisLine is the axis over the whole run; the window, when asked
+// for, is printed beside it by RecoveryLine.
+func (r m6ModelReport) recoveryAxisLine() string {
 	lost, refilled := sumOf(r.LostByLevel), sumOf(r.RefilledByLevel)
 	if lost == 0 {
-		// ⚠️ Branch-dependent, like the detection line and the configuration
-		// signature: C = ∞ switches off the SCHEDULED refresh, and in A′ and C a
-		// record a neighbour hands back is still a paid probe that may find it
-		// dead (§5.1.0, §6.7). Saying "detection is off" here contradicted the
-		// contract in the one line a reader checks when the axis is empty.
-		repeats := r.Config.Branch.ExchangesRecords()
-		switch {
-		case r.Config.Cadence <= 0 && r.Config.Churn != churnNone && repeats:
-			return "nothing was DETECTED as lost in this run. ⚠️ With C = ∞ the scheduled refresh " +
-				"is off, but a repeat handed back by a neighbour is a paid probe and COULD have " +
-				"detected a loss: the empty axis is a MEASUREMENT, not a property of the control"
-		case r.Config.Cadence <= 0 && r.Config.Churn != churnNone:
-			return "no data (no per-level table loss was DETECTED — with C = ∞ this branch " +
-				"re-probes an ALREADY HELD record by no other path, so the recovery axis " +
-				"degenerates; the expected result of the negative control. ⚠️ A filling probe " +
-				"can still find a peer gone and free its edge — that is not a table loss and " +
-				"does not appear on this axis)"
+		// ⚠️ The same three readings as the detection line and the
+		// configuration signature (heldRecordReading): C = ∞ switches off the
+		// SCHEDULED refresh; in A′ and C a record a neighbour hands back is
+		// still a paid probe that may find it dead (§5.1.0, §6.7) — unless the
+		// ‘local repeat filter’ control drops it first. Saying "detection is
+		// off" for A′/C, or "a paid probe COULD have detected" under the filter,
+		// contradicted the contract in the one line a reader checks when the
+		// axis is empty.
+		if r.Config.Cadence <= 0 && r.Config.Churn != churnNone {
+			switch r.Config.heldRecordReading() {
+			case heldReprobedByRepeat:
+				return "nothing was DETECTED as lost in this run. ⚠️ With C = ∞ the scheduled refresh " +
+					"is off, but a repeat handed back by a neighbour is a paid probe and COULD have " +
+					"detected a loss: the empty axis is a MEASUREMENT, not a property of the control"
+			case heldRepeatFiltered:
+				return "nothing was DETECTED as lost in this run. With C = ∞ the scheduled refresh is " +
+					"off, and under the ‘local repeat filter’ control a repeat of a HELD record is " +
+					"dropped at the owner before a probe — not paid, confirms nothing, cannot detect " +
+					"the record's death — so a held record is re-probed by no path here and the axis " +
+					"is expected to be empty. ⚠️ Not ‘nothing is ever detected’: a probe of any OTHER " +
+					"candidate still finds a departed node when it meets one"
+			default:
+				return "no data (no per-level table loss was DETECTED — with C = ∞ this branch " +
+					"re-probes an ALREADY HELD record by no other path, so the recovery axis " +
+					"degenerates; the expected result of the negative control. ⚠️ A filling probe " +
+					"can still find a peer gone and free its edge — that is not a table loss and " +
+					"does not appear on this axis)"
+			}
 		}
 		return "no data (nothing was lost)"
 	}
@@ -1015,15 +1177,18 @@ func (r m6ModelReport) PopulationLine() string {
 		"load on the WHOLE PHYSICAL network: %d departures decided over its %d original nodes "+
 			"(%d more drawn over a reserve of %d, which is sized for the run's length and is NOT "+
 			"network load), %d actually left; %d arrivals OFFERED (%d returns honoured as "+
-			"promised at their departure, %d newcomers from the compensation quota — ⚠️ their sum "+
-			"is max(departures, returns due), NOT exact compensation), %d admitted, %d gave up "+
-			"after the entry queue; "+
-			"online at the end, MEASURED: %d of the %d ORIGINAL %s population + %d admitted from a reserve "+
-			"of %d = %d in total — ⚠️ the total holding steady is NOT the original composition "+
-			"holding steady",
+			"promised at their departure, offered UNCONDITIONALLY, %d newcomers making up "+
+			"max(departures − returns due, 0) — the rule of §5.9.2, decision 3.1(a): offers exceeded "+
+			"departures by %d over the run, and NOT exact compensation is claimed), %d admitted "+
+			"(%d returns, %d newcomers), %d gave up after the entry queue, %d still waiting at the "+
+			"end; online at the end, MEASURED: %d of the %d ORIGINAL %s population + %d admitted "+
+			"from a reserve of %d = %d in total — ⚠️ the total holding steady is NOT the original "+
+			"composition holding steady, and a change of the population is not a change of the "+
+			"routing (the recovery axis is read apart)",
 		r.DeparturesDecided, r.Config.Shape.nodes, r.DeparturesDecidedInReserve, r.ReserveSize,
 		r.Departed, r.ArrivalsOffered, r.ReturnsOffered,
-		r.NewcomersOffered, r.ArrivalsAdmitted, r.GaveUpJoining,
+		r.NewcomersOffered, r.OfferedSurplus, r.ArrivalsAdmitted, r.ReturnsAdmitted,
+		r.NewcomersAdmitted, r.GaveUpJoining, r.PendingAtEnd,
 		r.OnlineFromPopulation, r.Members, r.Config.Membership, r.OnlineFromReserve,
 		r.ReserveMeasured, final)
 	if r.ArrivalsNotOffered > 0 {
@@ -1043,7 +1208,13 @@ func (r m6ModelReport) String() string {
 	}
 	exchanges := ""
 	if r.Config.Branch.ExchangesRecords() {
-		exchanges = fmt.Sprintf("\n  exchanges: %d performed", r.ExchangesDone)
+		exchanges = fmt.Sprintf("\n  exchanges: %d served, %d refused by the responder's interval "+
+			"(a frame paid, no record)", r.ExchangesDone, r.ExchangesRefused)
+		if r.Config.LocalRepeatFilter {
+			exchanges += fmt.Sprintf("; %d repeats of held records filtered at the owner before a "+
+				"probe (CONTROL 3.2(c): received and counted, not paid, nothing confirmed)",
+				r.RepeatsFiltered)
+		}
 	}
 	return fmt.Sprintf(
 		"%s\n  phases played:\n%s\n  at the churn moment: %s\n  coverage (final):    %s\n  "+

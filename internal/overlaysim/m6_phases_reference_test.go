@@ -369,13 +369,15 @@ func TestM6EachEarlyStopHasItsOwnReason(t *testing.T) {
 // window for every C, the refreshes counted INSIDE it, and the count ordered by
 // the cadence — ∞ gives none, the shorter cadence gives more than the longer.
 //
-// ⚠️ And the finding this fixture makes visible: WITHOUT replayed boundaries the
-// three runs do not share a scenario. F1 stops on its own data, the refresh
-// competes with filling for the ceiling R, so a short cadence can move the end
-// of F1 — and the shock is drawn on the tick it lands on, so a moved onset is a
-// different set of departed nodes. The same seed is not enough; the boundaries
-// of the base run are replayed onto the sweep, and the scenario traces then
-// agree tick for tick.
+// ⚠️ The sweep plays its OWN boundaries (decision 3.3(в), review package §4).
+// F1 stops on its own data and the refresh competes with filling for the
+// ceiling R, so a short cadence can move the end of F1 — and the churn is
+// drawn on τ = tick − onset, so a moved onset is the SAME shock on a later
+// tick: the scenario traces agree τ for τ without any replay. Replay stays
+// the ‘from scratch’ control's instrument (its emptied deficit would end F3
+// early), not the sweep's. Before the decision the shock was drawn on the
+// absolute tick and this fixture had to replay the base run's boundaries onto
+// the sweep to hold the scenario still.
 func TestM6TheCommonWindowCountsRefreshesPerCadence(t *testing.T) {
 	t.Parallel()
 
@@ -383,36 +385,34 @@ func TestM6TheCommonWindowCountsRefreshesPerCadence(t *testing.T) {
 	base.Cadence = 8
 	base.Phases = &m6PhasePlan{FillTicks: 40, IdleTicks: 4, RecoveryTicks: 20, CadenceTicks: 32}
 	reference := runM6Model(t, base)
+	referenceEvents := relativeScenario(t, reference)
 
 	refreshes := map[int]int{}
+	onsets := map[int]int{}
 	for _, cadence := range []int{0, 8, 16} {
 		config := base
 		config.Cadence = cadence
-		config.ReplayPhases = reference.PhaseBoundaries()
 		report := runM6Model(t, config)
 
 		window := phaseNamed(t, report.Phases, phaseCadence)
-		if window.Ticks() != base.Phases.CadenceTicks {
-			t.Fatalf("C=%d: F4 lasted %d ticks, want the common window of %d",
-				cadence, window.Ticks(), base.Phases.CadenceTicks)
+		if window.Ticks() != base.Phases.CadenceTicks || window.Stop != stopWindowEnd {
+			t.Fatalf("C=%d: F4 lasted %d ticks and stopped for %q, want the common window of %d "+
+				"ended by its own rule", cadence, window.Ticks(), window.Stop, base.Phases.CadenceTicks)
 		}
 		refreshes[cadence] = window.Refreshes
+		onsets[cadence] = report.Trace.OnsetTick
 
-		// The replayed boundaries hold the scenario still: same onset, same
-		// departures, same everything exogenous.
-		if tick, why, differs := firstScenarioDivergence(reference.Trace.Scenario,
-			report.Trace.Scenario); differs {
-			t.Fatalf("C=%d: the scenario differs from the base run's at tick %d: %s",
-				cadence, tick, why)
+		// The same shock at the same τ, whatever tick F1 ended on: the draws
+		// agree by the key, and — no arrivals before a shock — so do the
+		// realised departures.
+		events := relativeScenario(t, report)
+		taus := requireSameDraws(t, referenceEvents, events)
+		if tau, what, differ := firstRealisedDifference(referenceEvents, events, taus); differ {
+			t.Fatalf("C=%d: %s differ from the base run's at τ=%d", cadence, what, tau)
 		}
-		for index, phase := range report.Phases {
-			if phase.boundary() != reference.Phases[index].boundary() {
-				t.Fatalf("C=%d: %s played %d–%d, the base run %d–%d", cadence, phase.Phase,
-					phase.From, phase.To, reference.Phases[index].From, reference.Phases[index].To)
-			}
-			if phase.Stop != stopReplayed {
-				t.Fatalf("C=%d: %s stopped for %q, a replayed run stops only on the pinned boundary",
-					cadence, phase.Phase, phase.Stop)
+		for _, phase := range report.Phases {
+			if phase.Stop == stopReplayed {
+				t.Fatalf("C=%d: %s was replayed; the sweep decides its own boundaries", cadence, phase.Phase)
 			}
 		}
 	}
@@ -424,8 +424,9 @@ func TestM6TheCommonWindowCountsRefreshesPerCadence(t *testing.T) {
 		t.Errorf("refreshes inside the common window: C=8 gave %d, C=16 gave %d — the shorter "+
 			"cadence must refresh more, and both must refresh at all", refreshes[8], refreshes[16])
 	}
-	t.Logf("refreshes inside the %d-tick window: C=∞ %d, C=8 %d, C=16 %d",
-		base.Phases.CadenceTicks, refreshes[0], refreshes[8], refreshes[16])
+	t.Logf("refreshes inside the %d-tick window: C=∞ %d, C=8 %d, C=16 %d; onsets C=∞ %d, C=8 %d, C=16 %d",
+		base.Phases.CadenceTicks, refreshes[0], refreshes[8], refreshes[16],
+		onsets[0], onsets[8], onsets[16])
 }
 
 // TestM6TheFromScratchControlKeepsTheScenario is decision 3б of the run

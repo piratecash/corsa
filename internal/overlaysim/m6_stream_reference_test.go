@@ -463,7 +463,7 @@ func TestM6DifferentRespondersAreJudgedByReachability(t *testing.T) {
 
 	// Both responders connected in both worlds: the choice is the asker's.
 	worlds := m6WorldPair{main: snapshotWorldOf(main), control: snapshotWorldOf(control)}
-	cause, detail := classifyDivergence(main, control, worlds, owner, asked(first, 7), asked(second, 9))
+	cause, detail := classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, asked(first, 7), asked(second, 9))
 	if cause != causeLocalMemory {
 		t.Fatalf("with both responders reachable in both worlds the cause is %s: %s", cause, detail)
 	}
@@ -474,7 +474,7 @@ func TestM6DifferentRespondersAreJudgedByReachability(t *testing.T) {
 	delete(main.held[owner], second)
 	delete(main.held[second], owner)
 	worlds = m6WorldPair{main: snapshotWorldOf(main), control: snapshotWorldOf(control)}
-	cause, detail = classifyDivergence(main, control, worlds, owner, asked(first, 7), asked(second, 9))
+	cause, detail = classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, asked(first, 7), asked(second, 9))
 	if cause != causeNetworkState {
 		t.Fatalf("with the control's responder unreachable in the main run's world the cause is %s: %s",
 			cause, detail)
@@ -485,7 +485,7 @@ func TestM6DifferentRespondersAreJudgedByReachability(t *testing.T) {
 
 	// And the SAME responder handing over different records is the
 	// responder's table — content, which only that case is about.
-	cause, _ = classifyDivergence(main, control, worlds, owner, asked(first, 7), asked(first, 9))
+	cause, _ = classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, asked(first, 7), asked(first, 9))
 	if cause != causeResponderTable {
 		t.Fatalf("the same responder handing over different records is attributed to %s", cause)
 	}
@@ -508,7 +508,7 @@ func TestM6DifferentRespondersAreJudgedByReachability(t *testing.T) {
 		{"different levels, both empty", addressed(7), addressed(6), causeLocalMemory, "choice of level"},
 		{"same level, different records", addressed(7, 11), addressed(7, 12), causeResponderTable, "same question"},
 	} {
-		cause, detail := classifyDivergence(main, control, worlds, owner, levels.left, levels.right)
+		cause, detail := classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, levels.left, levels.right)
 		if cause != levels.wantCause || !strings.Contains(detail, levels.wantMentions) {
 			t.Errorf("%s: attributed to %s (%s), want %s", levels.name, cause, detail, levels.wantCause)
 		}
@@ -641,7 +641,7 @@ func TestM6AnAdmittedNewcomerIsInTheWorldTheOffersWereMadeAgainst(t *testing.T) 
 		worlds := worldsBeforeServing(main, control)
 		offer := &m6OfferEntry{Tick: tick, Owner: host, Source: offerAcquaintance,
 			Level: levelOf(main.ids[host], main.ids[newcomer], config.Shape.degree), Peer: newcomer}
-		cause, detail := classifyDivergence(main, control, worlds, host, offer, nil)
+		cause, detail := classifyDivergence(main, control, worlds, sourcePairingOf(main, control), host, offer, nil)
 		if cause != causeLocalMemory {
 			t.Fatalf("tick %d: host %d offering the newcomer %d in one run only is attributed to %s: %s",
 				tick, host, newcomer, cause, detail)
@@ -683,11 +683,11 @@ func TestM6AQueueChoiceIsNotAResponderTable(t *testing.T) {
 	control.states[owner].Offered = []int32{a, b}
 	worlds := worldsBeforeServing(main, control)
 
-	cause, detail := classifyDivergence(main, control, worlds, owner, queued(3, a), queued(5, b))
+	cause, detail := classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, queued(3, a), queued(5, b))
 	if cause != causeLocalMemory || !strings.Contains(detail, "level") {
 		t.Fatalf("a different level served from identical queues is attributed to %s: %s", cause, detail)
 	}
-	cause, detail = classifyDivergence(main, control, worlds, owner, queued(3, a), queued(3, b))
+	cause, detail = classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, queued(3, a), queued(3, b))
 	if cause != causeLocalMemory || !strings.Contains(detail, "tried-set") {
 		t.Fatalf("a different pick from identical queues at the same level is attributed to %s: %s",
 			cause, detail)
@@ -699,7 +699,7 @@ func TestM6AQueueChoiceIsNotAResponderTable(t *testing.T) {
 	main.states[owner].Offered = []int32{a, b}
 	control.states[owner].Offered = []int32{b, a}
 	worlds = worldsBeforeServing(main, control)
-	cause, detail = classifyDivergence(main, control, worlds, owner, queued(3, a), queued(3, b))
+	cause, detail = classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, queued(3, a), queued(3, b))
 	if cause != causeUndetermined || !strings.Contains(detail, "another order: true") {
 		t.Fatalf("reordered queues with the same local state are attributed to %s: %s", cause, detail)
 	}
@@ -709,7 +709,7 @@ func TestM6AQueueChoiceIsNotAResponderTable(t *testing.T) {
 	control.states[owner].Offered = []int32{a, b}
 	main.states[owner].Offered = []int32{a}
 	worlds = worldsBeforeServing(main, control)
-	cause, detail = classifyDivergence(main, control, worlds, owner, queued(3, a), queued(3, b))
+	cause, detail = classifyDivergence(main, control, worlds, sourcePairingOf(main, control), owner, queued(3, a), queued(3, b))
 	if cause != causeUndetermined {
 		t.Fatalf("a pick absent from the other run's queue is attributed to %s: %s", cause, detail)
 	}
@@ -789,12 +789,81 @@ func TestM6TheRecordedStreamClaimIsJudgedOnBothHalves(t *testing.T) {
 		}
 	})
 
+	// ⚠️ Owner's P2 (round 31): the claim was refused for a mixed or different
+	// pair, but the CLASSIFIER still explained every divergence of queue/pool
+	// candidates as "both halves read one recording, the owner's memory let a
+	// different one through" — a verdict that is false when the inputs differ,
+	// and it landed in Divergence and FirstByCause. The two cases below have
+	// the SAME memory in both halves and different inputs; the cause must say
+	// so, and "local memory" must not appear anywhere in the verdict.
+	t.Run("same memory, two recordings whose first available candidate differs: the cause is the inputs", func(t *testing.T) {
+		t.Parallel()
+		altered := &m6RecordedStream{
+			Branch: stream.Branch, Omniscient: stream.Omniscient, IDs: stream.IDs,
+			Members: stream.Members, Exchanges: stream.Exchanges, Answers: stream.Answers,
+			ByOwner: map[int32][]m6StreamEntry{},
+		}
+		// One owner's FIRST entry names another node of the SAME level, one the
+		// recording never offers it: the first candidate the owner is offered
+		// for that level differs, the memory does not.
+		var victim int32 = -1
+		for owner, entries := range stream.ByOwner {
+			copied := append([]m6StreamEntry(nil), entries...)
+			if victim < 0 && len(copied) > 0 {
+				original := copied[0].Candidate
+				level := levelOf(stream.IDs[owner], stream.IDs[original], config.Shape.degree)
+				offered := map[int32]struct{}{}
+				for _, entry := range copied {
+					offered[entry.Candidate] = struct{}{}
+				}
+				for node := int32(0); int(node) < config.Shape.nodes; node++ {
+					_, already := offered[node]
+					if node == owner || already ||
+						levelOf(stream.IDs[owner], stream.IDs[node], config.Shape.degree) != level {
+						continue
+					}
+					copied[0].Candidate = node
+					victim = owner
+					break
+				}
+			}
+			altered.ByOwner[owner] = copied
+		}
+		if victim < 0 || stream.fingerprint() == altered.fingerprint() {
+			t.Fatal("the fixture could not build a recording that differs in a first candidate")
+		}
+		left := config
+		left.Stream = stream
+		right := config
+		right.Stream = altered // memory KEPT in both halves
+		verdict, err := compareM6Runs(prepare("main", left), prepare("control", right))
+		if err != nil {
+			t.Fatalf("comparing: %v", err)
+		}
+		if verdict.Holds(claimSameRecordedStream) {
+			t.Fatalf("two different recordings kept the recorded-stream claim:\n%s", verdict)
+		}
+		if verdict.Divergence == nil {
+			t.Fatalf("the two halves never diverged although owner %d is offered different candidates first", victim)
+		}
+		if verdict.Divergence.Cause != causeDifferentInputs {
+			t.Fatalf("the first divergence (owner %d) is blamed on %s; the halves read DIFFERENT recordings "+
+				"and the memory is the same, so the cause is the inputs:\n%s", verdict.Divergence.Owner,
+				verdict.Divergence.Cause, verdict.Divergence)
+		}
+		if first := verdict.FirstByCause[causeLocalMemory]; first != nil {
+			t.Fatalf("a divergence was attributed to LOCAL MEMORY between two different recordings: %s", first)
+		}
+		if !strings.Contains(verdict.String(), "DIFFERENT INPUTS") {
+			t.Fatalf("the verdict does not name the different inputs:\n%s", verdict)
+		}
+	})
+
 	t.Run("a replay against an adaptive run, both orders", func(t *testing.T) {
 		t.Parallel()
 		replayed := config
 		replayed.Stream = stream
-		adaptive := config
-		adaptive.StartEmpty = true
+		adaptive := config // the same memory mode: the difference is the source alone
 		for _, order := range []struct {
 			name        string
 			left, right m6ModelConfig
@@ -810,6 +879,19 @@ func TestM6TheRecordedStreamClaimIsJudgedOnBothHalves(t *testing.T) {
 			if verdict.claim(claimSameRecordedStream).Status != claimFails {
 				t.Errorf("%s: the recorded-stream claim is %s, want a failure that names the mixed "+
 					"pair", order.name, verdict.claim(claimSameRecordedStream).Status)
+			}
+			if verdict.Divergence == nil {
+				t.Fatalf("%s: a replay and an adaptive run never diverged", order.name)
+			}
+			if verdict.Divergence.Cause != causeDifferentInputs {
+				t.Errorf("%s: the first divergence is blamed on %s; a mixed pair reads different sources "+
+					"and no cause but the inputs is provable:\n%s", order.name, verdict.Divergence.Cause,
+					verdict.Divergence)
+			}
+			for cause, first := range verdict.FirstByCause {
+				if cause != causeDifferentInputs {
+					t.Errorf("%s: a divergence of a mixed pair was attributed to %s: %s", order.name, cause, first)
+				}
 			}
 		}
 	})
@@ -2028,4 +2110,115 @@ func TestM6TheReplayExposureAppliesTheMeasurementFilter(t *testing.T) {
 		return
 	}
 	t.Fatal("no entry of the measured owner could be planted as held")
+}
+
+// TestM6ADifferentResponderUnderAnExhaustedQuotaIsLoadNotMemory is the
+// owner's P2 (round 32): the owner's memory and contacts [v, w] are the same
+// in both halves; in one half an earlier asker of the tick has used up v's
+// quota (r_node), so the owner is answered by w; in the other, by v. The
+// start-of-tick snapshot cannot see this — the quota counters are reset every
+// tick and move during serving — so the classifier blamed LOCAL MEMORY. The
+// cause is the load on the responder: network state.
+//
+// ⚠️ Both orders of the halves, and the verdict is read where the report reads
+// it — Divergence and FirstByCause — not only from classifyDivergence.
+//
+// ⚠️ Mutations that must break it: judging an addressed responder by the
+// held edge alone; not recording the responders skipped for quota; recording
+// them but ignoring them in the classifier.
+func TestM6ADifferentResponderUnderAnExhaustedQuotaIsLoadNotMemory(t *testing.T) {
+	t.Parallel()
+
+	config := m6PairBase(branchC, false)
+	config.RateNode = 1 // one answer per responder per tick: the second asker is refused
+	g := buildGraph(config.Shape, config.Seed, config.Quota, config.Policy)
+
+	prepare := func() *m6Network {
+		t.Helper()
+		network, err := newM6Network(g, config, everybody)
+		if err != nil {
+			t.Fatalf("preparing: %v", err)
+		}
+		return network
+	}
+	// An owner with two known responders that hold a record on the level asked:
+	// v first in the contact order, w after it.
+	const owner = int32(0)
+	probe := prepare()
+	state := probe.states[owner]
+	known := probe.knownTo(owner, state)
+	if len(known) < 2 {
+		t.Fatalf("owner %d knows %d nodes, the fixture needs two responders", owner, len(known))
+	}
+	v, w := known[0], known[1]
+	level := config.NearFrom // a near level: the addressed request is allowed there
+
+	// serve makes the owner's addressed request in `n` at tick 0 and returns
+	// the offer entry it produced.
+	serve := func(n *m6Network, quotaSpentOn int32) *m6OfferEntry {
+		t.Helper()
+		n.tick = 0
+		if quotaSpentOn >= 0 {
+			// An earlier asker of this tick already took v's one answer: the
+			// same thing addressedRequest would leave behind, written as state.
+			n.answersByNode[quotaSpentOn] = config.RateNode
+		}
+		before := len(n.trace.Offers)
+		n.addressedRequest(owner, n.states[owner], level)
+		offers := n.trace.Offers[before:]
+		for index := range offers {
+			if offers[index].Source == offerAddressed {
+				return &offers[index]
+			}
+		}
+		t.Fatalf("no addressed request was made in this half (offers: %v)", offers)
+		return nil
+	}
+
+	for _, order := range []struct {
+		name             string
+		mainSpent        int32 // whose quota an earlier asker used up in the main half
+		controlSpent     int32
+		mainResponder    int32
+		controlResponder int32
+	}{
+		{"v exhausted in the control", -1, v, v, w},
+		{"v exhausted in the main run", v, -1, w, v},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
+			main, control := prepare(), prepare()
+			worlds := worldsBeforeServing(main, control) // taken BEFORE serving, as the comparator does
+			mainOffer := serve(main, order.mainSpent)
+			controlOffer := serve(control, order.controlSpent)
+			if mainOffer.Peer != order.mainResponder || controlOffer.Peer != order.controlResponder {
+				t.Fatalf("the fixture asked %d / %d, want %d / %d — the quota did not steer the choice",
+					mainOffer.Peer, controlOffer.Peer, order.mainResponder, order.controlResponder)
+			}
+
+			comparison := newM6Comparison()
+			comparison.Pairing = sourcePairingOf(main, control)
+			comparison.checkOffers(main, control, worlds, 0, []m6OfferEntry{*mainOffer}, []m6OfferEntry{*controlOffer})
+			if comparison.Divergence == nil {
+				t.Fatal("no divergence recorded although the responders differ")
+			}
+			if comparison.Divergence.Cause == causeLocalMemory {
+				t.Fatalf("the same memory and the same contacts, a different responder only because an earlier "+
+					"asker used up a quota — and the verdict blames LOCAL MEMORY: %s", comparison.Divergence)
+			}
+			if comparison.Divergence.Cause != causeNetworkState {
+				t.Fatalf("the cause is %s, want the load on the responder (network state): %s",
+					comparison.Divergence.Cause, comparison.Divergence)
+			}
+			if !strings.Contains(comparison.Divergence.Detail, "quota") {
+				t.Errorf("the detail does not name the quota: %s", comparison.Divergence.Detail)
+			}
+			if first := comparison.FirstByCause[causeLocalMemory]; first != nil {
+				t.Fatalf("FirstByCause attributes it to memory: %s", first)
+			}
+			if first := comparison.FirstByCause[causeNetworkState]; first == nil {
+				t.Fatal("FirstByCause has no entry for the network state")
+			}
+		})
+	}
 }

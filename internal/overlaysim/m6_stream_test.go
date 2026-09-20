@@ -101,9 +101,43 @@ type m6RecordedStream struct {
 	Exchanges, Answers int
 }
 
+// newM6RecordedStream is an empty recording pinned to a run's identifiers.
+func newM6RecordedStream(branch m6Branch, omniscient bool, ids []nodeID, members []bool) *m6RecordedStream {
+	return &m6RecordedStream{
+		Branch:     branch,
+		Omniscient: omniscient,
+		IDs:        append([]nodeID(nil), ids...),
+		Members:    append([]bool(nil), members...),
+		ByOwner:    map[int32][]m6StreamEntry{},
+	}
+}
+
+// appendOffer writes one offer's entries: a POOL offer is one entry naming
+// the candidate, a HANDED offer (exchange, addressed) one entry per record
+// handed; refresh and shelf offers are the owner's memory and are not part
+// of the stream. ⚠️ The ONE writer for both ways of recording — from a trace
+// after the run (recordStream) and directly during it (RecordStream) — so
+// the two cannot disagree on what an offer contributes.
+func (s *m6RecordedStream) appendOffer(tick int, owner int32, source m6OfferSource, peer int32, handed []int32) {
+	if !source.streamed() {
+		return
+	}
+	if source.poolSemantics() {
+		s.ByOwner[owner] = append(s.ByOwner[owner],
+			m6StreamEntry{Tick: int32(tick), Source: source, Candidate: peer})
+		return
+	}
+	for _, record := range handed {
+		s.ByOwner[owner] = append(s.ByOwner[owner],
+			m6StreamEntry{Tick: int32(tick), Source: source, Candidate: record})
+	}
+}
+
 // recordStream derives the stream from a run's offer trace. The run has to
 // have been an ADAPTIVE one with the trace on: a replay of a replay would
-// record the replay's consumption, not a source.
+// record the replay's consumption, not a source. ⚠️ The direct recording
+// (config.RecordStream, report.Recording) is the same stream without the
+// trace — for the scale where the trace does not fit (decision 3.4).
 func recordStream(report *m6ModelReport) (*m6RecordedStream, error) {
 	if !report.Config.TraceOffers {
 		return nil, fmt.Errorf("the run kept no offer trace, so there is no stream to record")
@@ -115,28 +149,11 @@ func recordStream(report *m6ModelReport) (*m6RecordedStream, error) {
 	if report.Trace.IDs == nil {
 		return nil, fmt.Errorf("the run's trace carries no identifiers, so its indices cannot be pinned")
 	}
-	stream := &m6RecordedStream{
-		Branch:     report.Config.Branch,
-		Omniscient: report.Config.OmniscientControl,
-		IDs:        append([]nodeID(nil), report.Trace.IDs...),
-		Members:    append([]bool(nil), report.Trace.Members...),
-		ByOwner:    map[int32][]m6StreamEntry{},
-		Exchanges:  report.ExchangesDone,
-		Answers:    report.AddressedAnswers,
-	}
+	stream := newM6RecordedStream(report.Config.Branch, report.Config.OmniscientControl,
+		report.Trace.IDs, report.Trace.Members)
+	stream.Exchanges, stream.Answers = report.ExchangesDone, report.AddressedAnswers
 	for _, offer := range report.Trace.Offers {
-		if !offer.Source.streamed() {
-			continue
-		}
-		if offer.Source.poolSemantics() {
-			stream.ByOwner[offer.Owner] = append(stream.ByOwner[offer.Owner],
-				m6StreamEntry{Tick: int32(offer.Tick), Source: offer.Source, Candidate: offer.Peer})
-			continue
-		}
-		for _, handed := range offer.Handed {
-			stream.ByOwner[offer.Owner] = append(stream.ByOwner[offer.Owner],
-				m6StreamEntry{Tick: int32(offer.Tick), Source: offer.Source, Candidate: handed})
-		}
+		stream.appendOffer(offer.Tick, offer.Owner, offer.Source, offer.Peer, offer.Handed)
 	}
 	return stream, nil
 }
