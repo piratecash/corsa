@@ -192,7 +192,7 @@ const (
 // contracts — including backgroundWg tracking — are unchanged outside
 // Run.
 func (s *Service) dispatchGossipSend(job func()) {
-	switch s.tryEnqueueGossipJob(s.gossipJobs, job) {
+	switch s.tryEnqueueGossipJob(&s.gossipJobs, job) {
 	case gossipQueueFull:
 		dropped := s.gossipSendsDropped.Add(1)
 		log.Debug().Uint64("dropped_total", dropped).Msg("gossip_dispatch_saturated_send_dropped")
@@ -209,7 +209,7 @@ func (s *Service) dispatchGossipSend(job func()) {
 // so an unbounded escape hatch would hand remote peers the goroutine
 // storm this file exists to prevent.
 func (s *Service) dispatchGossipNoticeSend(job func()) {
-	switch s.tryEnqueueGossipJob(s.gossipNoticeJobs, job) {
+	switch s.tryEnqueueGossipJob(&s.gossipNoticeJobs, job) {
 	case gossipQueueFull:
 		dropped := s.gossipNoticesDropped.Add(1)
 		log.Warn().Uint64("dropped_total", dropped).Msg("gossip_dispatch_notice_lane_saturated_send_dropped")
@@ -222,7 +222,14 @@ func (s *Service) dispatchGossipNoticeSend(job func()) {
 // goBackground fallback when the pool never started (unit tests,
 // partially-wired Services — historical per-send goroutine, tracked on
 // backgroundWg, reported as gossipEnqueued). Always non-blocking.
-func (s *Service) tryEnqueueGossipJob(lane chan func(), job func()) gossipEnqueueResult {
+//
+// lane is the ADDRESS of the lane field, dereferenced only after
+// gossipPoolUp.Load() returned true. startGossipDispatch assigns the
+// lanes and only then stores gossipPoolUp, so that load is the one
+// happens-before edge between the assignment and this read. Reading the
+// field at the call site instead — before the flag — raced Run's
+// start-up whenever a send was dispatched before the pool came up.
+func (s *Service) tryEnqueueGossipJob(lane *chan func(), job func()) gossipEnqueueResult {
 	if !s.gossipPoolUp.Load() {
 		// lifecycle: fire-and-forget by design. This is the fallback taken
 		// when the pool is not up: ONE queued closure, not a loop, run on
@@ -239,7 +246,7 @@ func (s *Service) tryEnqueueGossipJob(lane chan func(), job func()) gossipEnqueu
 		return gossipPoolShutdownDrop
 	}
 	select {
-	case lane <- job:
+	case *lane <- job:
 		return gossipEnqueued
 	default:
 		return gossipQueueFull

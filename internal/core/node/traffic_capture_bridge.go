@@ -82,11 +82,12 @@ func (r *serviceCaptureResolver) AllConnInfo() []capture.ConnInfo {
 // Service integration — init, accessor, lifecycle hooks
 // ---------------------------------------------------------------------------
 
-// initCaptureManager creates and stores the capture.Manager bound to the
-// service run context. Called from Service.Run().
-func (s *Service) initCaptureManager() {
+// newCaptureManager builds the capture.Manager bound to the Service
+// lifecycle context. Called once, from NewService, so the field it fills is
+// immutable before any reader exists; Run closes the manager on exit.
+func (s *Service) newCaptureManager() *capture.Manager {
 	baseDir := filepath.Join(s.cfg.EffectiveDataDir(), "debug", "traffic-captures")
-	s.captureManager = capture.NewManager(s.runCtx, capture.ManagerOpts{
+	return capture.NewManager(s.runCtx, capture.ManagerOpts{
 		BaseDir:      baseDir,
 		Clock:        time.Now,
 		ConnResolver: &serviceCaptureResolver{svc: s},
@@ -99,14 +100,15 @@ func (s *Service) initCaptureManager() {
 	})
 }
 
-// CaptureManager returns the capture manager (nil before Run).
+// CaptureManager returns the capture manager. It exists from NewService on,
+// so it is the same manager before, during and after Run.
 func (s *Service) CaptureManager() *capture.Manager {
 	return s.captureManager
 }
 
 // startConfiguredCapture starts recording all peer traffic at startup when
 // cfg.RecordAllTraffic is set (env: CORSA_RECORD_ALL_TRAFFIC, default off).
-// Called from Service.Run right after initCaptureManager. It goes through
+// Called from Service.Run at start-up. It goes through
 // StartCaptureAll — the same path as the recordAllPeerTraffic RPC command —
 // so the standing scope=all rule is installed (capturing every connection
 // established later) and ebus Started events are published identically.

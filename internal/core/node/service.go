@@ -682,6 +682,11 @@ type Service struct {
 	// dispatchGossipSend falls back to goBackground while the pool is
 	// down so unit tests and partially-wired Services keep the old
 	// per-send-goroutine semantics.
+	//
+	// Both lanes are assigned in Run and published by the gossipPoolUp
+	// store that follows: a reader outside the pool's own goroutines may
+	// read a lane only after gossipPoolUp.Load() returned true (see
+	// tryEnqueueGossipJob), never before.
 	gossipJobs chan func()
 	// gossipNoticeJobs is the dedicated lane for push_notice fan-out:
 	// notices have no retry path, so they must not share the lossy
@@ -778,10 +783,19 @@ type Service struct {
 	done                           chan struct{}                                // closed when Run() exits; drain goroutines check this to avoid work after shutdown
 	primeBootstrapOnRun            bool                                         // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
 
-	// runCtx is the context passed to Run(). Stored so that callbacks
-	// (e.g. onCMSessionEstablished) can start goroutines bound to the
-	// Service lifecycle instead of context.Background().
-	runCtx context.Context
+	// runCtx is the Service lifecycle context: callbacks (e.g.
+	// onCMSessionEstablished) and handlers bind their goroutines and sends
+	// to it instead of context.Background(). Minted by NewService and
+	// cancelled by runCancel when the caller's Run context ends or Run
+	// returns, whichever comes first.
+	//
+	// Immutable after NewService and therefore outside the domain mutexes
+	// (docs/locking.md). It must NOT be assigned in Run: the RPC server is
+	// serving before Run is called, so a handler reading this field while
+	// Run assigned it was a data race, and work that captured the
+	// pre-Run value held a context Run never cancelled.
+	runCtx    context.Context
+	runCancel context.CancelFunc
 
 	// Connection management subsystem (Stage 3 integration).
 	peerProvider *PeerProvider      // single source of dial candidates — replaces peers[] + peerDialCandidates()
@@ -1101,8 +1115,13 @@ type Service struct {
 
 	// Traffic capture subsystem — diagnostic feature for recording raw
 	// wire traffic of selected peer connections to disk (plan §4.1).
-	// Created by initCaptureManager() in Run(); nil before Run and in
-	// unit tests that do not need capture.
+	// Built by NewService (newCaptureManager) and closed by Run on exit;
+	// nil only in Service literals of unit tests that do not need capture.
+	//
+	// Immutable after NewService, synchronised by the manager's own mutex,
+	// and therefore outside the domain mutexes (docs/locking.md). It is
+	// NOT assigned in Run: capture RPCs and fetch_peer_health read it
+	// while Run is still starting.
 	captureManager *capture.Manager
 
 	// advertise-address convergence runtime state. Owned by Service
@@ -1772,15 +1791,17 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	pending := make(map[domain.PeerAddress][]pendingFrame)
 	relayRetry := make(map[string]relayAttempt)
 
+	// The lifecycle context exists from construction rather than from Run:
+	// handlers that run before Run (the RPC server is serving by then) and
+	// unit tests that never call Run read it, and Run must not publish a new
+	// value to readers it has no synchronisation with. Run cancels it.
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+
 	svc := &Service{
 		recordProtection: recordProtection,
-		// Default lifecycle context: replaced by Run(ctx) with the real
-		// cancellable ctx. The default prevents nil-deref in code paths
-		// (e.g. handleInboundPushMessage sender-key recovery) that derive
-		// a timeout from s.runCtx before Run() has been called — notably in
-		// unit tests that exercise handlers directly without Run().
-		runCtx:   context.Background(),
-		identity: id,
+		runCtx:           lifecycleCtx,
+		runCancel:        lifecycleCancel,
+		identity:         id,
 		// startedAt is captured at construction (not at Run()) so the
 		// uptime_seconds reported by getNodeStatus stays meaningful in
 		// unit tests that drive the Service without calling Run, and
@@ -2227,6 +2248,11 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		firstHopGuardsFromRows(peerState.FirstHopGuards, peerState.FirstHopGuardsOwner, domain.PeerIdentityFromWire(id.Address)),
 	)
 
+	// Built here and not in Run, for the same reason runCtx is: capture RPCs
+	// and fetch_peer_health may be served before Run reaches any point it
+	// could publish the manager from. Run closes it.
+	svc.captureManager = svc.newCaptureManager()
+
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter()
 	svc.announceLimiter = newAnnounceRateLimiter()
@@ -2367,8 +2393,8 @@ func (s *Service) stopRunLifecycle(cancel context.CancelFunc) {
 }
 
 func (s *Service) Run(ctx context.Context) error {
-	// The Service lifecycle context is DERIVED from the caller's and cancelled
-	// on ANY exit from Run, not only on the caller cancelling.
+	// The Service lifecycle context FOLLOWS the caller's and is cancelled on
+	// ANY exit from Run, not only on the caller cancelling.
 	//
 	// Storing the caller's context here made "the Service is running" and "the
 	// context is live" two different facts. Every error return — a listen that
@@ -2378,25 +2404,31 @@ func (s *Service) Run(ctx context.Context) error {
 	// is the case that bites: its outbound pump keeps writing to sockets, and a
 	// caller that has been given an error is entitled to close them.
 	//
-	// The two defers below are the FIRST ones registered, so they run LAST and
-	// no return path, and no panic, can skip them: cancel, then join the work
+	// The lifecycle context is NewService's s.runCtx, not one derived here:
+	// it is read by RPC handlers that may run before and during this
+	// function, so Run never assigns it — it only makes it follow the
+	// caller's context and cancels it. The caller's deadline and values do
+	// not carry over; its cancellation does, through AfterFunc.
+	//
+	// The defers below are the FIRST ones registered, so they run LAST and no
+	// return path, and no panic, can skip them: cancel, then join the work
 	// whose external effects must not outlive Run.
+	runCancel := s.runCancel
+	stopFollowingCaller := context.AfterFunc(ctx, runCancel)
+	defer stopFollowingCaller()
+	// The BACKSTOP, for a panic raised before the ordered shutdown sequence
+	// below is registered, and for the early return just below. It is
+	// idempotent, so on every ordinary path the sequence has already done it
+	// and this is a no-op.
+	defer runCancel()
+	ctx = s.runCtx
+
 	// A budget that cannot be honoured stops the node here. Starting with a
 	// silently disabled ceiling would be the worst of the two outcomes: the
 	// operator asked for a limit, and the node would run without one.
 	if s.connBudgetErr != nil {
 		return fmt.Errorf("connection budget: %w", s.connBudgetErr)
 	}
-
-	runCtx, runCancel := context.WithCancel(ctx)
-	// Store context so CM callbacks can start goroutines bound to the
-	// Service lifecycle (see onCMSessionEstablished).
-	s.runCtx = runCtx
-	// The BACKSTOP, for a panic raised before the ordered shutdown sequence
-	// below is registered. It is idempotent, so on every ordinary path the
-	// sequence has already done it and this is a no-op.
-	defer runCancel()
-	ctx = runCtx
 
 	log.Info().
 		Int("pid", os.Getpid()).
@@ -2411,8 +2443,8 @@ func (s *Service) Run(ctx context.Context) error {
 	// against a half-torn-down Service during shutdown.
 	defer close(s.done)
 
-	// Traffic capture manager — diagnostic feature (plan §4.5).
-	s.initCaptureManager()
+	// Traffic capture manager — diagnostic feature (plan §4.5). Built by
+	// NewService; Run owns its shutdown.
 	defer s.captureManager.Close()
 	// Startup traffic recording (env: CORSA_RECORD_ALL_TRAFFIC, default off).
 	s.startConfiguredCapture()

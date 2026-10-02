@@ -83,7 +83,8 @@ type ManagerOpts struct {
 
 // Manager owns active capture rules, capture sessions, and file writers.
 //
-// Lifecycle: created by node.Service in Run(), ctx-bound to Service.runCtx.
+// Lifecycle: created by node.Service in NewService, ctx-bound to the Service
+// lifecycle context (Service.runCtx), and closed when Service.Run returns.
 type Manager struct {
 	mu       sync.Mutex
 	ctx      context.Context
