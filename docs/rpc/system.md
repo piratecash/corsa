@@ -260,8 +260,7 @@ Field notes:
   per-bucket map overhead and every byte a stored value merely
   references (a signature, an opaque `Extra` blob, a nested slice).
   Measured retention runs roughly 2.0–2.65× the floor depending on the
-  container — see `docs/refactoring/dht/13-measurements.md` §8.2 for the
-  measured ratios. Do not expect these figures to add up to
+  container. Do not expect these figures to add up to
   `getResourceUsage`'s process numbers.
 - `dominant` — the subsystem with the largest floor. **Omitted** when
   the node holds nothing at all: on a freshly started node every
@@ -361,10 +360,7 @@ dominant term of that plane; step 14 established that nothing ever read
 those entries back and removed the retention, so the gauge went with it.
 It was NOT changed to report zero — a zero would read as "nothing is
 held here" rather than "there is nothing to hold", and any client that
-was charting it should drop the series rather than see it flat-line. The
-historical figures behind it are kept in
-`docs/refactoring/dht/13-measurements.md` §8.3 with a note saying what
-changed.
+was charting it should drop the series rather than see it flat-line.
 
 ---
 
@@ -631,8 +627,7 @@ challenge-и.
   вверх. **Это ПОЛ, а не измерение.** Не учитывает накладные расходы
   Go-шной map и все байты, на которые хранимое значение лишь ссылается
   (подпись, непрозрачный `Extra`, вложенный слайс). Измеренное удержание
-  идёт примерно ×2.0–2.65 от пола в зависимости от контейнера — замеры в
-  `docs/refactoring/dht/13-measurements.md` §8.2. Не ждите, что эти числа
+  идёт примерно ×2.0–2.65 от пола в зависимости от контейнера. Не ждите, что эти числа
   сойдутся с процессными числами `getResourceUsage`.
 - `dominant` — подсистема с наибольшим полом. **Опускается**, когда узел
   не держит вообще ничего: на свежезапущенном узле все подсистемы
@@ -733,6 +728,3 @@ Gauge, добавленные в работе по памяти relay в сен�
 ушёл и датчик. Он НЕ переведён в ноль: ноль читался бы как «здесь ничего
 не лежит», а не «показателя больше нет», и клиенту, который строил по
 нему график, надо убрать серию, а не смотреть на выровнявшуюся линию.
-Исторические числа сохранены в
-`docs/refactoring/dht/13-measurements.md` §8.3 с пояснением, что
-изменилось.

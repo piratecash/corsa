@@ -2,6 +2,7 @@ package datagram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -168,6 +169,13 @@ func (p *Pipeline) verifyRouted(
 	}
 	if !protocol.DatagramSignerMatchesSrc(frame) {
 		return Deadlines{}, droppedWithBan(DropFingerprint, nil), true
+	}
+	// Comparisons only, so before the token; and without a ban, because the
+	// key is the author's and the neighbour may be an older relay that had
+	// no rule to refuse it (DropSignerKey). Any other refusal of the auth
+	// block falls through to VerifyDatagramSignature and keeps its ban.
+	if _, err := protocol.ParseDatagramSignerKey(frame); errors.Is(err, protocol.ErrDatagramSignerKey) {
+		return Deadlines{}, dropped(DropSignerKey, err), true
 	}
 	// The BUDGET KEY, never arrival.peer. The two are the same neighbour on an
 	// accepted connection and a different thing entirely on an outbound session,

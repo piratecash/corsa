@@ -28,7 +28,7 @@ func TestInvalidSignatureDropped(t *testing.T) {
 	}
 
 	// Signature check with the real sender's key must fail — signed by wrong key.
-	if err := VerifyFileCommandSignature(frame.Nonce, frame.Signature, pub); err == nil {
+	if err := VerifyFileCommandSignature(frame.Nonce, frame.Signature, mustSigningKey(t, pub)); err == nil {
 		t.Error("signature verification should fail when signed by wrong key")
 	}
 }

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -165,15 +166,79 @@ func TestSessionDescriptorCost(t *testing.T) {
 		opened, connections, float64(opened)/float64(connections))
 }
 
+// descriptorDirectories are where platforms list a process's open
+// descriptors: /proc/self/fd on Linux, /dev/fd on macOS and the BSDs (on
+// Linux a link to the former).
+var descriptorDirectories = []string{"/proc/self/fd", "/dev/fd"}
+
+// errDescriptorListingStatic: the directory exists but does not follow the
+// process's descriptors — FreeBSD's /dev/fd without fdescfs lists 0–2
+// whatever is open. Counting it would report a number that is not a count.
+var errDescriptorListingStatic = errors.New("descriptor directory does not reflect open descriptors")
+
+// descriptorProbeAttempts bounds the retries of the probe: another goroutine
+// closing a descriptor between the two listings can hide the probe's one.
+const descriptorProbeAttempts = 3
+
 // openDescriptorCount reports how many descriptors this process holds, or why
-// it cannot be asked.
+// it cannot be asked. Each directory is TRIED, and only one that sees a
+// descriptor opened for the purpose is believed, so a platform is measured
+// rather than predicted from its name; the error names every refusal.
 func openDescriptorCount() (int, error) {
-	entries, err := os.ReadDir("/proc/self/fd")
+	var refusals []error
+	for _, dir := range descriptorDirectories {
+		count, err := descriptorCountIn(dir)
+		if err == nil {
+			return count, nil
+		}
+		refusals = append(refusals, err)
+	}
+	return 0, errors.Join(refusals...)
+}
+
+func descriptorCountIn(dir string) (int, error) {
+	for range descriptorProbeAttempts {
+		before, err := listedDescriptors(dir)
+		if err != nil {
+			return 0, err
+		}
+		during, err := listedDescriptorsWithProbe(dir)
+		if err != nil {
+			return 0, err
+		}
+		// The count reported is the listing WITHOUT the probe: the probe is
+		// closed before returning, so `during` would be one descriptor the
+		// process no longer holds. Either listing includes the handle
+		// ReadDir itself opened, so the figure is the process's count plus
+		// one; every reader of it takes a difference or a lower bound.
+		if during > before {
+			return before, nil
+		}
+	}
+	return 0, fmt.Errorf("%w: %s did not list a descriptor opened as a probe in %d attempts", errDescriptorListingStatic, dir, descriptorProbeAttempts)
+}
+
+// listedDescriptorsWithProbe lists dir while one more descriptor is open.
+func listedDescriptorsWithProbe(dir string) (int, error) {
+	probe, err := os.Open(os.DevNull)
+	if err != nil {
+		return 0, fmt.Errorf("open descriptor probe: %w", err)
+	}
+	count, listErr := listedDescriptors(dir)
+	if closeErr := probe.Close(); closeErr != nil {
+		return 0, errors.Join(listErr, fmt.Errorf("close descriptor probe: %w", closeErr))
+	}
+	return count, listErr
+}
+
+// listedDescriptors counts dir's entries. The handle opened to read the
+// directory is itself listed; it is closed by ReadDir before returning, and
+// two readings pay the same cost anyway.
+func listedDescriptors(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, err
 	}
-	// The directory handle opened to read this is itself counted; it is closed
-	// by ReadDir before returning, and both readings pay the same cost anyway.
 	return len(entries), nil
 }
 

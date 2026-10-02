@@ -290,6 +290,12 @@ Retrieves aggregated network traffic statistics for the entire node.
 | `peer_traffic[].bytes_received` | integer | Bytes received from this peer |
 | `peer_traffic[].total_traffic` | integer | Total traffic with this peer |
 | `peer_traffic[].connected` | boolean | Current connection state |
+| `key_hygiene` | object | Key material the node refused to use. Every one of these refusals is silent on the wire, so this block is the operator's only view of them. Absent from builds that predate it and from the lightweight `fetch_traffic_totals` reply |
+| `key_hygiene.refused_trusted_contacts` | integer | Trusted contacts whose signing key was refused at startup (small-order, non-canonical, or not certifying the address); the contact stays in the trust file, its keys are not used |
+| `key_hygiene.dropped_trusted_box_pairs` | integer | Trusted contacts whose signing key is good but whose stored box pair is not bound by it; the signing key is used, the box pair is not |
+| `key_hygiene.unattributed_non_dm_drops` | integer | Non-DM pushes refused because the author's key is unknown (no ban to the forwarder) |
+| `key_hygiene.non_dm_key_sync_passes` | integer | Key-sync passes those refusals started |
+| `key_hygiene.non_dm_key_sync_skipped` | integer | Key-sync triggers the non-DM budget turned away (see `realtime.md`) |
 
 The totals above are per-peer attribution (persisted health plus live verified connections) and can dip within one process — a session leaving the registry before its bytes reach health, an evicted health row. This answer carries **no** `transport` block: the monotonic socket-level byte counters are served by the in-process `fetch_traffic_totals` frame and, for other processes, by `fetchRouteSummary` → `transport_traffic` (see `docs/metrics.md`, "Transport totals").
 
@@ -750,6 +756,12 @@ graph TB
 | `peer_traffic[].bytes_received` | целое число | Получено байт от этого одноранговой узла |
 | `peer_traffic[].total_traffic` | целое число | Общий трафик с этим одноранговым узлом |
 | `peer_traffic[].connected` | логическое значение | Текущее состояние подключения |
+| `key_hygiene` | объект | Ключевой материал, который узел отказался использовать. Все эти отказы на проводе молчаливы, поэтому этот блок — единственный способ оператору их увидеть. Отсутствует у сборок, которые его не знают, и в облегчённом ответе `fetch_traffic_totals` |
+| `key_hygiene.refused_trusted_contacts` | целое число | Доверенные контакты, чей ключ подписи отвергнут при старте (малого порядка, неканонический или не удостоверяющий адрес); контакт остаётся в trust-файле, его ключи не используются |
+| `key_hygiene.dropped_trusted_box_pairs` | целое число | Доверенные контакты с годным ключом подписи, но с сохранённой box-парой, которую он не привязал; ключ подписи используется, box-пара — нет |
+| `key_hygiene.unattributed_non_dm_drops` | целое число | Не-DM-пуши, отвергнутые из-за неизвестного ключа автора (пересылающему бан не начисляется) |
+| `key_hygiene.non_dm_key_sync_passes` | целое число | Проходы синхронизации ключей, запущенные этими отказами |
+| `key_hygiene.non_dm_key_sync_skipped` | целое число | Поводы для синхронизации, отклонённые бюджетом не-DM (см. `realtime.md`) |
 
 Итоги выше — атрибуция по пирам (persisted health плюс живые проверенные соединения), и внутри одного процесса они могут проседать: сессия покидает реестр раньше, чем её байты попадают в health; вытесняется health-запись. Блока `transport` в этом ответе **нет**: монотонные счётчики байтов уровня сокета отдаёт кадр `fetch_traffic_totals` внутри процесса, а другим процессам — `fetchRouteSummary` → `transport_traffic` (см. `docs/metrics.md`, «Транспортные итоги»).
 

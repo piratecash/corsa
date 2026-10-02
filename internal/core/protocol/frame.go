@@ -344,6 +344,20 @@ type NetworkStatsFrame struct {
 	// are folded into health, or when a health row is evicted. nil means the
 	// answer was produced by a path that does not report it.
 	Transport *TransportTrafficFrame `json:"transport,omitempty"`
+	// KeyHygiene counts key material the node refused to use. Absent from
+	// replies of builds that predate it; see docs/protocol/peers.md.
+	KeyHygiene *KeyHygieneFrame `json:"key_hygiene,omitempty"`
+}
+
+// KeyHygieneFrame is the operator's view of signing/box keys the node refused
+// and of the key sync that unknown non-DM authors trigger. Every one of these
+// refusals is silent on the wire.
+type KeyHygieneFrame struct {
+	RefusedTrustedContacts int    `json:"refused_trusted_contacts"`
+	DroppedTrustedBoxPairs int    `json:"dropped_trusted_box_pairs"`
+	UnattributedNonDMDrops uint64 `json:"unattributed_non_dm_drops"`
+	NonDMKeySyncPasses     uint64 `json:"non_dm_key_sync_passes"`
+	NonDMKeySyncSkipped    uint64 `json:"non_dm_key_sync_skipped"`
 }
 
 // TransportTrafficFrame carries every byte read from or written to a peer

@@ -10,13 +10,10 @@ own key material — and of the discovery protocol built on top of the
 datagram transport plane (`docs/protocol/datagram.md`).
 
 Status of this revision: the record format, its verification, its merge
-contract, its storage and the identity backup are **implemented**. The
-discovery datagram types (`get_identity`, `post_identity`, `push_identity`)
-are specified by the design note `../refactoring/done/identity-discovery-lookup.md`
-and land in the next stage; their sections will be added here when they do.
+contract, its storage, the identity backup and the discovery datagram types
+(`get_identity`, `post_identity`, `push_identity`, §6) are **implemented**.
 
-Motivation, alternatives considered and the full design rationale live in
-the design note. This document states only the contract.
+This document states only the contract.
 
 ### 2. The signed record
 
@@ -81,7 +78,9 @@ Rules:
 - **Size caps, checked before everything else:** `body_bytes` ≤ **2048 B**
   (the authoritative budget — per-element maxima do not guarantee the total
   fits), the whole `{v, body, sig}` object ≤ **2900 B**.
-- **Verification order:** caps → `sig` against the `pubkey` inside the body
+- **Verification order:** caps → `pubkey` inside the body is an acceptable
+  signing key (`docs/encryption.md`; a refusal is silent and costs the
+  forwarder nothing) → `sig` against that `pubkey`
   → address is the fingerprint of `pubkey` → dm branch (box binding checked
   iff `dm` is true) → `address` equals the identity the caller expected
   (the lookup `dst`, the authenticated session identity of a push, the
@@ -748,14 +747,11 @@ by kind. See [../deeplinks.md](../deeplinks.md).
 и discovery-протокола поверх транспорта датаграмм
 (`docs/protocol/datagram.md`).
 
-Статус ревизии: формат записи, её верификация, merge-контракт, хранение и
-backup identity **реализованы**. Типы датаграмм discovery (`get_identity`,
-`post_identity`, `push_identity`) специфицированы рабочей заметкой
-`../refactoring/done/identity-discovery-lookup.md` и приходят следующим этапом;
-их разделы появятся здесь вместе с реализацией.
+Статус ревизии: формат записи, её верификация, merge-контракт, хранение,
+backup identity и типы датаграмм discovery (`get_identity`, `post_identity`,
+`push_identity`, §6) **реализованы**.
 
-Мотивация, отвергнутые альтернативы и полное обоснование — в рабочей
-заметке. Здесь — только контракт.
+Здесь — только контракт.
 
 ### 2. Подписанная запись
 
@@ -819,9 +815,10 @@ DM, `fetch_contacts`) в record-хранилище не попадают — о�
 - **Лимиты, проверяются до всего остального:** `body_bytes` ≤ **2048 Б**
   (авторитетный бюджет — поэлементные максимумы не гарантируют, что сумма
   влезет), объект `{v, body, sig}` целиком ≤ **2900 Б**.
-- **Порядок верификации:** cap-ы → `sig` ключом `pubkey` из body → адрес
-  есть отпечаток `pubkey` → ветвление по dm (binding проверяется только при
-  `dm: true`) → `address` совпадает с ожидаемой identity (dst lookup-а,
+- **Порядок верификации:** cap-ы → `pubkey` из body — допустимый ключ
+  подписи (`docs/encryption.md`; отказ молчаливый и переславшему ничего не
+  стоит) → `sig` этим ключом `pubkey` → адрес есть отпечаток `pubkey` →
+  ветвление по dm (binding проверяется только при `dm: true`) → `address` совпадает с ожидаемой identity (dst lookup-а,
   аутентифицированная identity сессии у push-а, адрес из `corsa:`-ссылки).
   Ожидаемая identity обязательна: запись, проверенная «ни против кого»,
   могла бы занять любой слот.

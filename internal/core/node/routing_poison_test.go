@@ -70,7 +70,7 @@ func TestSendRoutePoison_EmitsRawLineFrameWithSenderSig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("emitted sig is not valid base64: %v", err)
 		}
-		if !ed25519.Verify(id.PublicKey, parsed.CanonicalSenderSigBytes(), sigBytes) {
+		if !mustParseSigningKey(t, id.PublicKey).Verify(parsed.CanonicalSenderSigBytes(), sigBytes) {
 			t.Fatal("emitted sig does not verify against the local public key")
 		}
 	case <-time.After(100 * time.Millisecond):

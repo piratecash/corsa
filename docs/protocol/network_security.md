@@ -169,7 +169,7 @@ The sub-budgets **divide** the neighbour's budget and never extend it: a `push_m
 
 The arithmetic is the finding. One serialised contact is ~265 bytes on the wire (a 40-character address, two 44-character base64 keys, an 86-character base64url signature and the JSON around them), so `protocol.MaxResponseLine` (8 MiB) admits ~31 600 elements — about 1.6 s of one core, for a reply to a `fetch_contacts` this node itself sent. The §5a byte burst (16 MiB) admits two of those back to back, and a reconnect starts a fresh session with a full budget. A byte budget cannot close this: the price of a byte is not constant across frame types, and raising the byte budget's precision to cover the most expensive one would starve the file-transfer stream it was derived from.
 
-So the reply gets a second stage of its own, on the model the datagram layer already uses (`docs/refactoring/datagram-transport.md` §5): a **count cap read before the walk**, and a **work budget charged one token at a time, immediately before each signature check**.
+So the reply gets a second stage of its own, on the model the datagram layer already uses (`docs/protocol/datagram.md` §5): a **count cap read before the walk**, and a **work budget charged one token at a time, immediately before each signature check**.
 
 | Limit | Value | Rationale |
 |-------|-------|-----------|
@@ -523,7 +523,7 @@ Announce-плоскость использует `MaxFrameLine` независи
 
 Находка — в арифметике. Один сериализованный контакт — ~265 байт на проводе (адрес в 40 символов, два base64-ключа по 44 символа, base64url-подпись в 86 символов и JSON вокруг них), поэтому `protocol.MaxResponseLine` (8 MiB) пропускает ~31 600 элементов — около 1.6 с одного ядра, и это ответ на `fetch_contacts`, который узел отправил сам. Байтовый всплеск §5a (16 MiB) допускает два таких подряд, а реконнект начинает новую сессию с полным бюджетом. Байтовым бюджетом эту дыру не закрыть: цена байта не одинакова для разных типов кадров, а поднять точность байтового бюджета под самый дорогой тип — значит уморить поток файловой передачи, от которого этот бюджет и выведен.
 
-Поэтому у ответа появляется собственная вторая стадия — по модели, которую уже применяет слой датаграмм (`docs/refactoring/datagram-transport.md` §5): **предел числа записей, читаемый до обхода**, и **бюджет работы, списываемый по одному токену непосредственно перед каждой проверкой подписи**.
+Поэтому у ответа появляется собственная вторая стадия — по модели, которую уже применяет слой датаграмм (`docs/protocol/datagram.md` §5): **предел числа записей, читаемый до обхода**, и **бюджет работы, списываемый по одному токену непосредственно перед каждой проверкой подписи**.
 
 | Лимит | Значение | Обоснование |
 |-------|----------|-------------|

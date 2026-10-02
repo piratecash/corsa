@@ -23,6 +23,94 @@ Fingerprint address derivation:
 3. keep the first 20 bytes
 4. encode as hex
 
+#### Acceptable signing keys
+
+Every signing key that arrives from outside — in a `hello`, a frame, a record,
+a DM, a route announce, the knowledge store — is accepted through one function,
+`identity.ParsePublicKey`, and a peer's signature is checked only through the
+`identity.PublicKey` it returns. Calling `crypto/ed25519.Verify` anywhere else
+is forbidden and held by a source-level guard test
+(`internal/core/identity/publickey_guard_test.go`).
+
+The reason is that the stock verifier accepts keys of small order. Under the
+neutral element `0100…00` the signature `R = 0100…00, S = 0` verifies for
+EVERY message; under the order-4 key `0000…00` the same signature verifies for
+roughly a quarter of messages. Such a key needs no private key, so anybody
+could "sign" as the address that is its fingerprint.
+
+`ParsePublicKey` refuses:
+
+- a length other than 32 bytes;
+- a non-canonical `y`: the little-endian value with the sign bit cleared is
+  `≥ p = 2^255 − 19` (the stock decoder reduces it silently, so one point
+  would have several keys and several addresses);
+- the 14 encodings of a point of order 1, 2, 4 or 8, each checked by
+  `8·P = O`:
+
+```
+0100000000000000000000000000000000000000000000000000000000000000   neutral, order 1
+0100000000000000000000000000000000000000000000000000000000000080   neutral, x = -0
+ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f   order 2
+ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   order 2, x = -0
+0000000000000000000000000000000000000000000000000000000000000000   order 4
+0000000000000000000000000000000000000000000000000000000000000080   order 4
+26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05   order 8
+26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85   order 8
+c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a   order 8
+c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa   order 8
+edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f   y = p, order 4
+edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   y = p, order 4
+eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f   y = p + 1, order 1
+eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   y = p + 1, order 1
+```
+
+The edge of the canonical range: `y = p − 1` is the order-2 point (refused),
+`y = p − 2` has no point on the curve, and `y = p − 3`
+(`eaff…ff7f`) is the largest canonical `y` of a point not of small order —
+accepted. `y = p` is the first non-canonical value.
+
+Deliberately NOT refused:
+
+- **mixed-order keys** (a prime-order point plus a torsion component).
+  Detecting one needs `[L]·A = O`, a scalar multiplication the standard library
+  does not expose. Such a key harms only its own identity — the address is
+  bound to the exact key bytes — and every node verifies with the same
+  cofactorless Go verifier, so no two nodes disagree about a signature under it;
+- **an encoding with no point behind it.** Deciding that costs a field
+  exponentiation per key and buys nothing: the verifier decompresses the key
+  itself and refuses every signature under it.
+
+Honest keys are never refused: an honest key is a non-zero multiple of the base
+point in canonical encoding, so it falls into none of the cases above.
+
+**Penalties.** A refused key costs a ban (100 points) ONLY when it is the
+peer's own handshake key (`docs/protocol/handshake.md`, "Key Verification").
+Inside content the peer forwards — signed identity records, DM sender keys,
+`push_identity`, route-announce signers, lookup answers, a datagram's
+`auth.pubkey`, a file command's `src_pubkey` — the record is refused silently
+and the forwarder is not charged: it is not the author, and a relay on an older
+build has no rule that would have refused the key. A key of this kind found in
+the knowledge store reads as unknown.
+
+**Keys stored before the check.** At startup every trusted contact is checked
+again, in two halves. A signing key that `ParsePublicKey` refuses, or that does
+not certify the address, takes the whole contact out of use: it stays in the
+trust file (it is the user's record) but none of its keys enter the knowledge
+maps, so nothing of it is attached to outgoing frames or offered in
+`contacts`, and the local trusted-contact list omits it. A good signing key
+with a stored box pair it did not bind keeps the signing key — the contact's
+DMs still verify — and loses only the box pair, which is never encrypted to,
+attached or listed. Each refusal is logged with the address and counted in
+`fetch_network_stats` → `key_hygiene` (`refused_trusted_contacts`,
+`dropped_trusted_box_pairs`).
+
+**Non-DM messages are not signed by their author.** The receiver admits a
+non-DM message only when it already knows the author; an unknown author's
+message is dropped and not delivered later (no receipts, no retry for non-DM),
+so a new honest author is heard only by nodes that already hold its key — see
+`docs/protocol/realtime.md`, "Known degradation". Signing non-DM messages is
+the real remedy and a threat-model question outside this change.
+
 #### Private keys never leave the process
 
 Both private keys live in `identity.Identity`, and the type refuses every
@@ -342,6 +430,96 @@ flowchart LR
 2. считается `sha256(pubkey)`
 3. берутся первые 20 байт
 4. кодируются в hex
+
+#### Допустимые ключи подписи
+
+Любой ключ подписи, пришедший извне — в `hello`, кадре, записи, DM, маршрутном
+анонсе, из хранилища knowledge, — принимается одной функцией,
+`identity.ParsePublicKey`, а подпись пира проверяется только через
+возвращённый ею `identity.PublicKey`. Вызов `crypto/ed25519.Verify` где-либо
+ещё запрещён и удерживается тестом-сторожем по исходникам
+(`internal/core/identity/publickey_guard_test.go`).
+
+Причина в том, что штатный верификатор принимает ключи малого порядка. Под
+нейтральным элементом `0100…00` подпись `R = 0100…00, S = 0` верна для ЛЮБОГО
+сообщения; под ключом порядка 4 `0000…00` та же подпись верна примерно для
+четверти сообщений. Такому ключу не нужен приватный ключ, поэтому кто угодно
+мог бы «подписываться» адресом, являющимся его отпечатком.
+
+`ParsePublicKey` отвергает:
+
+- длину, отличную от 32 байт;
+- неканонический `y`: little-endian значение со сброшенным битом знака
+  `≥ p = 2^255 − 19` (штатный декодер молча его редуцирует, и у одной точки
+  оказалось бы несколько ключей и несколько адресов);
+- 14 кодировок точек порядка 1, 2, 4 или 8, каждая проверена расчётом
+  `8·P = O`:
+
+```
+0100000000000000000000000000000000000000000000000000000000000000   нейтральная, порядок 1
+0100000000000000000000000000000000000000000000000000000000000080   нейтральная, x = -0
+ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f   порядок 2
+ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   порядок 2, x = -0
+0000000000000000000000000000000000000000000000000000000000000000   порядок 4
+0000000000000000000000000000000000000000000000000000000000000080   порядок 4
+26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05   порядок 8
+26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85   порядок 8
+c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a   порядок 8
+c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa   порядок 8
+edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f   y = p, порядок 4
+edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   y = p, порядок 4
+eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f   y = p + 1, порядок 1
+eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff   y = p + 1, порядок 1
+```
+
+Граница канонического диапазона: `y = p − 1` — точка порядка 2 (отвергается),
+у `y = p − 2` нет точки на кривой, а `y = p − 3` (`eaff…ff7f`) — наибольший
+канонический `y` точки не малого порядка, он принимается. `y = p` — первое
+неканоническое значение.
+
+Намеренно НЕ отвергаются:
+
+- **ключи смешанного порядка** (точка простого порядка плюс торсионная
+  компонента). Для их распознавания нужно `[L]·A = O` — скалярное умножение,
+  которого стандартная библиотека не даёт. Такой ключ вредит только своей
+  identity — адрес привязан к точным байтам ключа, — а все узлы проверяют
+  подписи одним и тем же Go-верификатором без кофактора, так что расхождений
+  между узлами нет;
+- **кодировка, за которой нет точки.** Решение стоит возведения в степень в
+  поле на каждый ключ и ничего не даёт: верификатор сам распаковывает ключ и
+  отвергает под ним любую подпись.
+
+Честные ключи не отвергаются никогда: честный ключ — ненулевое кратное
+базовой точки в канонической кодировке и ни под один случай выше не попадает.
+
+**Штрафы.** Отвергнутый ключ стоит ban (100 очков) ТОЛЬКО если это
+собственный ключ пира в рукопожатии (`docs/protocol/handshake.md`,
+«Верификация ключей»). Внутри содержимого, которое пир пересылает, —
+подписанные записи identity, ключи отправителя DM, `push_identity`,
+подписанты маршрутных анонсов, ответы lookup, `auth.pubkey` датаграммы,
+`src_pubkey` файловой команды, — запись отвергается молча, и переславшему
+ничего не начисляется: он не автор, а у релея на старой сборке нет правила,
+которое бы такой ключ отвергло. Такой ключ, найденный в хранилище knowledge,
+читается как неизвестный.
+
+**Ключи, сохранённые до проверки.** При старте каждый доверенный контакт
+проверяется заново, по двум половинам. Ключ подписи, который `ParsePublicKey`
+отвергает или который не удостоверяет адрес, выводит из использования весь
+контакт: он остаётся в trust-файле (это запись пользователя), но ни один его
+ключ не попадает в карты knowledge, поэтому ничего из него не прикладывается к
+исходящим кадрам, не предлагается в `contacts`, и локальный список доверенных
+контактов его не выдаёт. Годный ключ подписи при сохранённой box-паре, которую
+он не привязал, сохраняет ключ подписи — DM контакта по-прежнему проверяются, —
+а теряет только box-пару: на неё не шифруют, её не прикладывают и не выдают.
+Каждый отказ логируется с адресом и считается в `fetch_network_stats` →
+`key_hygiene` (`refused_trusted_contacts`, `dropped_trusted_box_pairs`).
+
+**Не-DM-сообщения не подписаны автором.** Получатель принимает не-DM-сообщение,
+только если уже знает автора; сообщение неизвестного автора отбрасывается и
+позже не доставляется (у не-DM нет квитанций и повторов), поэтому нового
+честного автора слышат только узлы, уже знающие его ключ — см.
+`docs/protocol/realtime.md`, «Известная деградация». Подпись не-DM-сообщений —
+настоящее устранение и вопрос модели угроз вне этого изменения.
 
 #### Приватные ключи не покидают процесс
 

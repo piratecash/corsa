@@ -712,7 +712,8 @@ ceilings, swept on the same timer, and they stop when the sender stops offering.
 The table itself is left in place, empty, so that a rollback to a build between
 migrations 0006 and 0007 still finds the schema its ledger says exists.
 
-The full model is in `docs/refactoring/reactions-protocol.md`.
+How a deletion is replayed, and why no record of deleted ids is kept, is described in
+`docs/dm-commands.md` §"Replay after a deletion".
 
 
 The `metadata` column stores arbitrary JSON for fields that don't have their own
@@ -1843,7 +1844,8 @@ CREATE TABLE IF NOT EXISTS message_reactions (
 Сама таблица оставлена на месте пустой, чтобы откат на билд между миграциями
 0006 и 0007 нашёл схему, о наличии которой говорит его собственный журнал.
 
-Полная модель — в `docs/refactoring/reactions-protocol.md`.
+Как повторяется удаление и почему список удалённых id не хранится — в
+`docs/dm-commands.md` §«Повторная доставка после удаления».
 
 
 Столбец `metadata` хранит произвольный JSON для полей, у которых нет собственной

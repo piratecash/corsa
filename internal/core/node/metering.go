@@ -208,6 +208,9 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 	s.networkStatsAccessNanos.Store(time.Now().UnixNano())
 	snap := s.loadNetworkStatsSnapshot()
 	frame := snap.toFrame()
+	// Atomics and immutable fields only — the call stays lock-free.
+	hygiene := s.keyHygieneStats()
+	frame.NetworkStats.KeyHygiene = &hygiene
 	if snap != nil && frame.NetworkStats != nil {
 		log.Trace().
 			Int("connected", frame.NetworkStats.ConnectedPeers).

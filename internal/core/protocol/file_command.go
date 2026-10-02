@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 )
 
 // FileCommandFrameType is the type identifier used in the unified Frame
@@ -87,13 +88,15 @@ func SignFileCommand(nonce string, privateKey ed25519.PrivateKey) string {
 }
 
 // VerifyFileCommandSignature checks the ed25519 signature of the nonce
-// against the sender's public key.
-func VerifyFileCommandSignature(nonce, signatureHex string, publicKey ed25519.PublicKey) error {
+// against the sender's public key. The key arrives already parsed: a key no
+// honest node can hold is refused by identity.ParsePublicKey at the caller,
+// where it is still distinguishable from a bad signature.
+func VerifyFileCommandSignature(nonce, signatureHex string, publicKey identity.PublicKey) error {
 	sig, err := hex.DecodeString(signatureHex)
 	if err != nil {
 		return fmt.Errorf("decode file command signature: %w", err)
 	}
-	if !ed25519.Verify(publicKey, []byte(nonce), sig) {
+	if !publicKey.Verify([]byte(nonce), sig) {
 		return fmt.Errorf("invalid file command signature")
 	}
 	return nil

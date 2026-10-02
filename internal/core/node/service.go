@@ -727,6 +727,21 @@ type Service struct {
 	// the dedicated notice lane overflowed — only plausible under a
 	// notice flood. Logged at Warn (notices have no retry path).
 	gossipNoticesDropped atomic.Uint64
+	// unattributedNonDMDrops counts non-DM push_message frames refused
+	// because this node holds no key for the author (who is not the
+	// forwarding peer itself). The refusal is silent on the wire and costs
+	// the forwarder nothing, so this counter is the only trace of it.
+	// Observability only.
+	unattributedNonDMDrops atomic.Uint64
+	// nonDMKeySyncPasses / nonDMKeySyncSkipped count the key-sync passes the
+	// non-DM trigger started and the triggers its budget turned away
+	// (nondm_key_sync.go). Observability only.
+	nonDMKeySyncPasses  atomic.Uint64
+	nonDMKeySyncSkipped atomic.Uint64
+	// trustedKeysAtLoad is what NewService did with the trust store's keys
+	// (classifyContactKeys). Written once by NewService, immutable
+	// afterwards.
+	trustedKeysAtLoad trustedKeysLoadReport
 	// digestStats are cumulative observability counters for the route_sync
 	// digest-as-heartbeat exchange (docs/protocol/route_sync.md). They answer,
 	// without debug logging, whether periodic heartbeats are actually being
@@ -771,10 +786,11 @@ type Service struct {
 	probeRegistry                  *probeRegistry                               // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
 	queryRateLimit                 *queryRateLimit                              // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
 	queryIDCounter                 atomic.Uint64                                // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
-	senderKeySyncMu                sync.Mutex                                   // guards senderKeySyncInFlight + senderKeySyncHopInFlight + senderKeySyncLastRun (own tiny domain — never held across I/O)
+	senderKeySyncMu                sync.Mutex                                   // guards senderKeySyncInFlight + senderKeySyncHopInFlight + senderKeySyncLastRun + nonDMKeySync (own tiny domain — never held across I/O)
 	senderKeySyncInFlight          map[string]struct{}                          // single-flight set for background sender-key recovery passes, keyed by sender fingerprint; see triggerSenderKeySyncAsync
 	senderKeySyncHopInFlight       map[string]struct{}                          // per-previous-hop fairness slots (1 pass per hop, keyed by authenticated identity with address fallback) — a hostile hop cannot starve the global pass cap
 	senderKeySyncLastRun           map[string]time.Time                         // per-sender cooldown stamps for recovery passes (senderKeySyncCooldown)
+	nonDMKeySync                   *nonDMKeySyncLimiter                         // admission of key-sync passes triggered by non-DM messages — a pool apart from the DM recovery above; guarded by senderKeySyncMu (nondm_key_sync.go)
 	contactVerifyBudgets           contactVerifyRegistry                        // per-remote `contacts` verification budget, SHARED by the session and fresh-dial importers and persisted across connections (contact_verify_budget.go). Own leaf mutex, zero value is live — see docs/locking.md
 	relayShapingHint               atomic.Uint64                                // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
 	identitySessions               map[domain.PeerIdentity]int                  // peer identity → active session count (multi-session awareness)
@@ -1696,12 +1712,35 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		delete(boxSigs, address)
 	}
 	// Trusted contacts are PINNED: their key knowledge must survive
-	// transit-identity churn (see boundedKnownIdentities.pinned).
+	// transit-identity churn (see boundedKnownIdentities.pinned). A contact
+	// whose keys a current build refuses (stored before the signing-key
+	// check) stays in the trust file but never reaches the key maps — the
+	// maps are what gets attached to frames and offered in `contacts`.
+	keysAtLoad := trustedKeysLoadReport{droppedBoxPairs: map[string]storedBoxPair{}}
 	for address, contact := range trust.trustedContacts() {
+		verdict, err := classifyContactKeys(address, contact)
+		switch verdict {
+		case contactKeysRefused:
+			keysAtLoad.refused++
+			log.Warn().Err(err).Str("address", address).Str("source", contact.Source).Msg("trusted_contact_keys_refused_at_load")
+			continue
+		case contactKeysSigningOnly:
+			keysAtLoad.droppedBoxPairs[address] = storedBoxPair{boxKey: contact.BoxKey, boxSig: contact.BoxSignature}
+			log.Warn().Err(err).Str("address", address).Str("source", contact.Source).Msg("trusted_contact_box_pair_dropped_at_load")
+			known.Pin(address)
+			pubKeys[address] = contact.PubKey
+			continue
+		}
 		known.Pin(address)
 		boxKeys[address] = contact.BoxKey
 		pubKeys[address] = contact.PubKey
 		boxSigs[address] = contact.BoxSignature
+	}
+	if keysAtLoad.refused > 0 || len(keysAtLoad.droppedBoxPairs) > 0 {
+		log.Warn().
+			Int("refused_contacts", keysAtLoad.refused).
+			Int("dropped_box_pairs", len(keysAtLoad.droppedBoxPairs)).
+			Msg("trusted_contact_keys_at_load")
 	}
 	// Persisted signed records reseed the key maps too (they were verified
 	// at import and re-verified at load): without this a restart would
@@ -1818,23 +1857,25 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// unit tests that drive the Service without calling Run, and
 		// matches the moment the in-memory state machine first became
 		// live.
-		startedAt:      time.Now().UTC(),
-		cfg:            cfg,
-		eventBus:       eventBus,
-		selfBoxKey:     selfBoxKey,
-		selfBoxSig:     selfBoxSig,
-		trust:          trust,
-		peers:          peers,
-		peersStatePath: peersStatePath,
-		persistedMeta:  persistedByAddr,
-		known:          known,
-		boxKeys:        boxKeys,
-		pubKeys:        pubKeys,
-		boxSigs:        boxSigs,
-		topics:         topics,
-		receipts:       receipts,
-		notices:        make(map[string]gazeta.Notice),
-		emissionLane:   newEmissionLane(),
+		startedAt:         time.Now().UTC(),
+		cfg:               cfg,
+		eventBus:          eventBus,
+		selfBoxKey:        selfBoxKey,
+		selfBoxSig:        selfBoxSig,
+		trust:             trust,
+		peers:             peers,
+		peersStatePath:    peersStatePath,
+		persistedMeta:     persistedByAddr,
+		known:             known,
+		boxKeys:           boxKeys,
+		pubKeys:           pubKeys,
+		trustedKeysAtLoad: keysAtLoad,
+		nonDMKeySync:      newNonDMKeySyncLimiter(time.Now),
+		boxSigs:           boxSigs,
+		topics:            topics,
+		receipts:          receipts,
+		notices:           make(map[string]gazeta.Notice),
+		emissionLane:      newEmissionLane(),
 		// Buffered to ONE: the local-record repair pass is single-flight.
 		repairSlot:               make(chan struct{}, 1),
 		seen:                     seen,
@@ -5979,9 +6020,21 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 		if pubKey == "" {
 			pubKey = contact.PubKey
 		}
+		// The fallback above reads the trust file directly, so a key
+		// refused at load would come back through it. The check is the
+		// cheap half of classifyContactKeys — this list is polled — and
+		// the box pair it cannot afford to re-verify is withheld when the
+		// load already found it unbound.
+		if identity.VerifyPublicKeyFingerprint(address, pubKey) != nil {
+			continue
+		}
 		boxKey := keys[address].BoxKey
 		if boxKey == "" {
 			boxKey = contact.BoxKey
+		}
+		boxSig := contact.BoxSignature
+		if s.trustedKeysAtLoad.boxPairDropped(address, contact) {
+			boxKey, boxSig = "", ""
 		}
 		lastOnlineAt := ""
 		if !contact.LastOnlineAt.IsZero() {
@@ -5991,7 +6044,7 @@ func (s *Service) trustedContactsFrame() protocol.Frame {
 			Address:      address,
 			PubKey:       pubKey,
 			BoxKey:       boxKey,
-			BoxSig:       contact.BoxSignature,
+			BoxSig:       boxSig,
 			LastOnlineAt: lastOnlineAt,
 		})
 	}
@@ -9342,6 +9395,9 @@ func (s *Service) trustContact(address, pubKey, boxKey, boxSig, source string) {
 // and poisoning s.known. For DM messages, storeIncomingMessage enforces
 // VerifyEnvelope independently, so this gate targets non-DM topics only.
 func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerIdentity) bool {
+	// "Verified" here means KNOWN: a non-DM message carries no signature of
+	// its author, so this gate bounds who may enter the store, not who wrote
+	// the bytes.
 	if sender == s.identity.Address {
 		return true
 	}
@@ -9352,6 +9408,60 @@ func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerI
 	_, hasPubKey := s.pubKeys[sender]
 	s.knowledgeMu.RUnlock()
 	return hasPubKey
+}
+
+// nonDMAuthorAdmitted is the author gate of a pushed message, shared by the
+// inbound and the outbound-session receive paths. DM-class messages pass —
+// their envelope signature is checked at storage. A non-DM message carries no
+// signature of its author, so it is admitted only when the author is KNOWN
+// (isVerifiedSender); every arrival is recorded against the hop for the
+// key-sync budget, and an unknown author is refused (refuseUnattributedNonDM).
+// relay is the neighbour's identity as this node holds it: proven on an
+// accepted connection, only the welcome's claim on a session this node dialled.
+func (s *Service) nonDMAuthorAdmitted(msg incomingMessage, prevHop domain.PeerAddress, relay domain.PeerIdentity, ownedSession *peerSession) bool {
+	if protocol.IsDMTopic(msg.Topic) {
+		return true
+	}
+	hop := nonDMHopKey(relay, prevHop)
+	attributed := s.isVerifiedSender(msg.Sender, relay)
+	s.noteNonDMAttribution(hop, attributed)
+	if attributed {
+		return true
+	}
+	s.refuseUnattributedNonDM(msg, prevHop, ownedSession, hop)
+	return false
+}
+
+// refuseUnattributedNonDM drops a non-DM message whose author this node holds
+// no key for, and asks for that key within the non-DM budget.
+//
+// It never charges the forwarding peer. isVerifiedSender accepts a message
+// whose author is the neighbour's identity as this node holds it, so what
+// reaches here is either somebody else's message or — on a session THIS node
+// dialled, where that identity is only what the remote wrote into its welcome
+// until the v2 handshake proves it — a name the neighbour gave itself. Either
+// way what is missing is this node's knowledge, and knowledge differs between
+// nodes for honest reasons: LRU eviction, a contact sync that has not happened
+// yet, a key this build refuses and an older one accepted. A ban for it would
+// let anybody who can make two nodes know different things blacklist the
+// relay between them. The drop is counted because the wire says nothing about
+// it; the key sync is budgeted by triggerNonDMSenderKeySync, apart from the
+// keyless-DM recovery so that this trigger can never take its slots.
+func (s *Service) refuseUnattributedNonDM(msg incomingMessage, prevHop domain.PeerAddress, ownedSession *peerSession, hop string) {
+	dropped := s.unattributedNonDMDrops.Add(1)
+	log.Debug().
+		Str("node", s.identity.Address).
+		Str("peer", string(prevHop)).
+		Str("hop_key", hop).
+		Str("id", string(msg.ID)).
+		Str("sender", msg.Sender).
+		Str("topic", msg.Topic).
+		Uint64("unattributed_drops", dropped).
+		Msg("push_message_unattributed_non_dm_dropped")
+	if ownedSession == nil && prevHop != "" {
+		ownedSession, _ = s.activePeerSession(prevHop)
+	}
+	s.triggerNonDMSenderKeySync(prevHop, msg.Sender, ownedSession, hop)
 }
 
 // handleInboundPushMessage processes a push_message frame received on an
@@ -9368,8 +9478,13 @@ func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerI
 //     the private key.
 //   - Non-DM messages: the sender must be a verified identity — either
 //     the relay peer itself, this node, or a peer whose public key was
-//     previously exchanged through the identity protocol. Unverified
-//     senders are rejected and the relay peer's ban score is incremented.
+//     previously exchanged through the identity protocol. An unverified
+//     sender is refused silently (nonDMAuthorAdmitted): on this accepted
+//     connection the relay's identity is proven, so a message under its
+//     own name always passes and what is refused is somebody else's — the
+//     missing key is this node's knowledge gap, not the relay's fault. (On
+//     a session this node dialled the relay's identity is only its welcome
+//     claim until the v2 handshake; refuseUnattributedNonDM says so.)
 func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.Frame) {
 	if frame.Item == nil {
 		return
@@ -9407,16 +9522,7 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 	// (TopicControlDM) — have their own cryptographic verification in
 	// storeIncomingMessage (VerifyEnvelope), so this gate targets only
 	// topics where no per-message signature exists.
-	if msg.Topic != "dm" && msg.Topic != protocol.TopicControlDM && !s.isVerifiedSender(msg.Sender, peerIdentity) {
-		log.Warn().
-			Str("node", s.identity.Address).
-			Str("peer", string(peerAddr)).
-			Str("relay_identity", peerIdentity.String()).
-			Str("id", string(msg.ID)).
-			Str("sender", msg.Sender).
-			Str("topic", msg.Topic).
-			Msg("push_message rejected: non-DM sender identity not verified")
-		s.addBanScore(connID, banIncrementInvalidSig)
+	if !s.nonDMAuthorAdmitted(msg, peerAddr, peerIdentity, nil) {
 		return
 	}
 
@@ -9505,14 +9611,18 @@ func (s *Service) handleInboundPushDeliveryReceipt(connID domain.ConnID, frame p
 	// Identity gate: accept only receipts whose Recipient matches our own
 	// identity or an identity with an active inbound subscriber (full-node
 	// relay holding receipts for connected clients).
+	//
+	// The refusal is silent. Whether a subscriber is attached is THIS node's
+	// state, and it changes under the peer's feet: a client that unsubscribed
+	// between the peer's send and the receipt's arrival makes an honest
+	// receipt look unrelated, so the peer that relayed it is not charged.
 	if receipt.Recipient != s.identity.Address && !s.hasSubscriber(receipt.Recipient) {
-		log.Warn().
+		log.Debug().
 			Str("peer", string(peerAddr)).
 			Str("message_id", string(receipt.MessageID)).
 			Str("receipt_recipient", receipt.Recipient).
 			Str("local_identity", s.identity.Address).
-			Msg("push_delivery_receipt rejected: recipient does not match local identity or active subscriber")
-		s.addBanScore(connID, banIncrementInvalidSig)
+			Msg("push_delivery_receipt_unrouted_dropped")
 		return
 	}
 

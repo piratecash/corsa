@@ -3476,19 +3476,8 @@ func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender s
 	if key == "" {
 		key = "addr:" + string(prevHop)
 	}
-	// Fairness-slot key: authenticated identity when known, transport
-	// address otherwise. Resolved BEFORE taking senderKeySyncMu —
-	// viaIdentityForAddress touches peer-domain state under its own
-	// lock, and this mutex must never nest over other domains.
-	hopKey := ""
-	if prevHop != "" {
-		hopKey = "addr:" + string(prevHop)
-		if ownedSession != nil && !ownedSession.peerIdentity.IsZero() {
-			hopKey = "id:" + ownedSession.peerIdentity.String()
-		} else if id := s.viaIdentityForAddress(prevHop); !id.IsZero() {
-			hopKey = "id:" + id.String()
-		}
-	}
+	// Resolved BEFORE taking senderKeySyncMu — see senderKeySyncHopKey.
+	hopKey := s.senderKeySyncHopKey(prevHop, ownedSession)
 
 	s.senderKeySyncMu.Lock()
 	if s.senderKeySyncInFlight == nil {
@@ -3540,6 +3529,43 @@ func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender s
 	s.senderKeySyncInFlight[key] = struct{}{}
 	s.senderKeySyncMu.Unlock()
 
+	s.runSenderKeySyncPass(prevHop, sender, ownedSession, func() {
+		s.senderKeySyncMu.Lock()
+		delete(s.senderKeySyncInFlight, key)
+		if hopKey != "" {
+			delete(s.senderKeySyncHopInFlight, hopKey)
+		}
+		s.senderKeySyncLastRun[key] = time.Now()
+		s.pruneSenderKeySyncLastRunLocked()
+		s.senderKeySyncMu.Unlock()
+	})
+}
+
+// senderKeySyncHopKey names the previous hop for the per-hop slots: the
+// authenticated identity when known (owned session first, then the
+// via-identity map), the transport address otherwise. One identity holding
+// several connections under different addresses must occupy ONE slot. It
+// touches peer-domain state, so callers resolve it BEFORE taking
+// senderKeySyncMu — that mutex never nests over other domains.
+func (s *Service) senderKeySyncHopKey(prevHop domain.PeerAddress, ownedSession *peerSession) string {
+	if prevHop == "" {
+		return ""
+	}
+	if ownedSession != nil && !ownedSession.peerIdentity.IsZero() {
+		return "id:" + ownedSession.peerIdentity.String()
+	}
+	if id := s.viaIdentityForAddress(prevHop); !id.IsZero() {
+		return "id:" + id.String()
+	}
+	return "addr:" + string(prevHop)
+}
+
+// runSenderKeySyncPass runs ONE admitted recovery pass in the background:
+// the owned session to the previous hop first, then a fresh dial of the
+// previous hop, then the fan-out, stopping as soon as the sender's key
+// appears. release is called exactly once when the pass ends, whatever the
+// outcome — it returns the slot the caller's admission reserved.
+func (s *Service) runSenderKeySyncPass(prevHop domain.PeerAddress, sender string, ownedSession *peerSession, release func()) {
 	parent := s.runCtx
 	if parent == nil {
 		parent = context.Background()
@@ -3547,16 +3573,7 @@ func (s *Service) triggerSenderKeySyncAsync(prevHop domain.PeerAddress, sender s
 	// lifecycle: fire-and-forget. One sender-key sync exchange, bounded by the
 	// dial and handshake timeouts of the send it performs, not a loop.
 	s.goBackground(func() {
-		defer func() {
-			s.senderKeySyncMu.Lock()
-			delete(s.senderKeySyncInFlight, key)
-			if hopKey != "" {
-				delete(s.senderKeySyncHopInFlight, hopKey)
-			}
-			s.senderKeySyncLastRun[key] = time.Now()
-			s.pruneSenderKeySyncLastRunLocked()
-			s.senderKeySyncMu.Unlock()
-		}()
+		defer release()
 		// One overall budget for the whole pass (previous hop + fan-out);
 		// each syncSenderKeys call additionally clamps itself to
 		// syncRecoveryTimeout, so the total is min-bounded twice.
@@ -3867,14 +3884,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if session != nil {
 			peerID = session.peerIdentity
 		}
-		if !protocol.IsDMTopic(msg.Topic) && !s.isVerifiedSender(msg.Sender, peerID) {
-			log.Warn().
-				Str("node", s.identity.Address).
-				Str("peer", string(address)).
-				Str("id", string(msg.ID)).
-				Str("sender", msg.Sender).
-				Str("topic", msg.Topic).
-				Msg("push_message rejected: non-DM sender identity not verified (outbound)")
+		if !s.nonDMAuthorAdmitted(msg, address, peerID, session) {
 			return
 		}
 

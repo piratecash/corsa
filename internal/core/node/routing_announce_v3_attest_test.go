@@ -81,7 +81,7 @@ func TestSignOwnOriginV3Entries_SignsOnlyOwnIdentityWithEmptySig(t *testing.T) {
 	// CanonicalSigningBytes() — sanity check that signOwn / verify
 	// agree on the canonical-bytes contract.
 	v3e := protocol.RouteAnnounceV3Entry{Identity: id.Address, SeqNo: 7}
-	if !ed25519.Verify(id.PublicKey, v3e.CanonicalSigningBytes(), out[0].AttestedSig) {
+	if !mustParseSigningKey(t, id.PublicKey).Verify(v3e.CanonicalSigningBytes(), out[0].AttestedSig) {
 		t.Fatal("produced signature does not verify against own public key")
 	}
 }

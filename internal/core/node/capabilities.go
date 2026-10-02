@@ -1,11 +1,10 @@
 package node
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
 	"strings"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
 
@@ -433,29 +432,34 @@ func (s *Service) peerSupportsAttestedLinks(address domain.PeerAddress) bool {
 }
 
 // publicKeyForIdentity looks up the Ed25519 public key the knowledge
-// store holds for the given identity fingerprint and decodes it from the
-// stored base64 form. Returns (key, true) on a hit with a structurally
-// valid key; (nil, false) on miss, malformed base64, or wrong key
-// length. Used by the Phase 4 13.2-B route_announce_v3 verifier to
-// resolve the destination identity's pubkey for ed25519.Verify; on miss
-// the verifier treats the signature as unverified (Tier-2 lenient — see
+// store holds for the given identity fingerprint and parses it from the
+// stored base64 form. Returns (key, true) on a hit with a key
+// identity.ParsePublicKey accepts; (zero, false) on miss or on a stored
+// value it refuses. Used by the route_announce_v3 and route_poison
+// verifiers to resolve the signer's pubkey; on miss the verifier treats
+// the signature as unverified (Tier-2 lenient — see
 // docs/protocol/attested_links.md "Receive contract").
 //
-// Threading: takes knowledgeMu.RLock for the map read; the base64 decode
-// runs outside the lock since the stored string is immutable.
-func (s *Service) publicKeyForIdentity(identity domain.PeerIdentity) (ed25519.PublicKey, bool) {
-	if identity.IsZero() {
-		return nil, false
+// A refused stored key reads as a miss rather than as a reason to drop:
+// the ingest paths no longer admit such a key, so one found here predates
+// them, and under it a signature proves nothing — exactly the
+// "pubkey unknown" case, never a verified one.
+//
+// Threading: takes knowledgeMu.RLock for the map read; the parse runs
+// outside the lock since the stored string is immutable.
+func (s *Service) publicKeyForIdentity(peer domain.PeerIdentity) (identity.PublicKey, bool) {
+	if peer.IsZero() {
+		return identity.PublicKey{}, false
 	}
 	s.knowledgeMu.RLock()
-	encoded := s.pubKeys[identity.String()]
+	encoded := s.pubKeys[peer.String()]
 	s.knowledgeMu.RUnlock()
 	if encoded == "" {
-		return nil, false
+		return identity.PublicKey{}, false
 	}
-	raw, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, false
+	key, err := identity.ParsePublicKeyBase64(encoded)
+	if err != nil {
+		return identity.PublicKey{}, false
 	}
-	return ed25519.PublicKey(raw), true
+	return key, true
 }

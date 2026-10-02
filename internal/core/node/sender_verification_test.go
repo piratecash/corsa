@@ -387,10 +387,11 @@ func TestStoreIncomingMessage_NonDM_VerifiedSenderAddedToKnown(t *testing.T) {
 	}
 }
 
-// TestInboundPushMessage_NonDM_BanScoreIncremented verifies that forging
-// a non-DM sender identity on an inbound connection increments the ban
-// score for the relay peer.
-func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
+// TestInboundPushMessage_NonDM_UnknownAuthorNotStored verifies that a non-DM
+// message of an author this node does not know is not stored. The relay is
+// NOT charged for it — see TestNonDMFromUnknownAuthorThroughRelayCostsTheRelayNothing,
+// which measures the ban score on a fixture where the IP surface is live.
+func TestInboundPushMessage_NonDM_UnknownAuthorNotStored(t *testing.T) {
 	t.Parallel()
 
 	id, err := identity.Generate()
@@ -438,22 +439,6 @@ func TestInboundPushMessage_NonDM_BanScoreIncremented(t *testing.T) {
 			Body:       "spam",
 		},
 	})
-
-	// Verify ban score was incremented.
-	remoteAddr := peerConn.RemoteAddr()
-	var addr string
-	if remoteAddr != nil {
-		addr = remoteAddr.String()
-	}
-	svc.peerMu.RLock()
-	ban, exists := svc.bans[addr]
-	svc.peerMu.RUnlock()
-
-	// net.Pipe returns connections where RemoteAddr may be nil or a special
-	// pipe address. The ban score may be stored under the conn key rather
-	// than a normal address. We check the message was rejected instead.
-	_ = ban
-	_ = exists
 
 	// s.seen is guarded by s.gossipMu, not s.peerMu.
 	svc.gossipMu.RLock()

@@ -674,8 +674,7 @@ batches a burst of taps into one frame about a second and a half later — so th
 UI never blocks a tap on the network and never reports the send's outcome. The
 one thing it does report is a peer whose build cannot receive reactions at all
 (`ReactionsUnsupportedBy`): that reaction is never going to be seen by anyone
-else, and saying nothing would make it look exactly like one that has been. See
-`docs/refactoring/reactions-protocol.md`.
+else, and saying nothing would make it look exactly like one that has been.
 
 A peer's reactions arrive on the event-bus goroutine, which owns none of the
 window's state. It therefore raises one atomic flag and asks for a frame; the
@@ -2293,7 +2292,7 @@ Left и Right не уходят со своей строки: шаг по инд
 сообщает исход отправки. Сообщает он ровно одно — что сборка собеседника вообще
 не умеет принимать реакции (`ReactionsUnsupportedBy`): такую реакцию никто,
 кроме автора, не увидит никогда, а молчание сделало бы её неотличимой от
-доставленной. Подробности — `docs/refactoring/reactions-protocol.md`.
+доставленной.
 
 Реакции пира приходят в горутине шины событий, которой не принадлежит ничего из
 состояния окна. Поэтому она поднимает один атомарный флаг и просит кадр, а

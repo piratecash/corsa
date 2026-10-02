@@ -2,7 +2,6 @@ package filerouter
 
 import (
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -332,17 +331,19 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 			Msg("file_router: missing src_pubkey")
 		return
 	}
-	srcPubKey, err := base64.StdEncoding.DecodeString(frame.SrcPubKey)
-	if err != nil || len(srcPubKey) != ed25519.PublicKeySize {
+	// A key no honest node can hold (identity.ParsePublicKey) is dropped the
+	// same silent way as an undecodable one: the frame is SRC's, and the
+	// neighbour that relayed it may run a build that never refused it.
+	srcPubKey, err := identity.ParsePublicKeyBase64(frame.SrcPubKey)
+	if err != nil {
 		log.Debug().
 			Err(err).
 			Str("src", frame.SRC.String()).
 			Str("nonce", noncePrefix(frame.Nonce)).
-			Int("src_pubkey_len", len(srcPubKey)).
-			Msg("file_router: invalid src_pubkey encoding")
+			Msg("file_router: unacceptable src_pubkey")
 		return
 	}
-	if expected := identity.Fingerprint(ed25519.PublicKey(srcPubKey)); expected != frame.SRC.String() {
+	if expected := srcPubKey.Fingerprint(); expected != frame.SRC.String() {
 		log.Debug().
 			Str("src", frame.SRC.String()).
 			Str("expected_fingerprint", expected).
@@ -350,7 +351,7 @@ func (r *Router) HandleInbound(raw json.RawMessage, incomingPeer domain.PeerIden
 			Msg("file_router: src_pubkey fingerprint does not match SRC")
 		return
 	}
-	if err := protocol.VerifyFileCommandSignature(frame.Nonce, frame.Signature, ed25519.PublicKey(srcPubKey)); err != nil {
+	if err := protocol.VerifyFileCommandSignature(frame.Nonce, frame.Signature, srcPubKey); err != nil {
 		log.Debug().Err(err).Str("src", frame.SRC.String()).Str("nonce", noncePrefix(frame.Nonce)).Msg("file_router: signature verification failed")
 		return
 	}

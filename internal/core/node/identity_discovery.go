@@ -14,6 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -517,6 +518,14 @@ func (h *pushIdentityHandler) Handle(ctx context.Context, delivery datagram.Deli
 		return datagram.RejectDelivery(err)
 	}
 	body, err := protocol.VerifyIdentityRecord(push.Record, h.network, signedSrc)
+	if errors.Is(err, identity.ErrInvalidPublicKey) {
+		// The record's key is one no honest node holds. It is refused in
+		// silence: a penalty — and closing the session is one — is reserved
+		// for the peer's own handshake key, and the key inside a record is
+		// the record's, whoever handed it over.
+		log.Debug().Err(err).Str("peer", signedSrc.String()).Msg("push_identity_record_key_refused")
+		return datagram.RejectDelivery(err)
+	}
 	if err != nil {
 		// A frame that passed the authorizer but fails full verification is
 		// a validation error of the session's own making: close it — the

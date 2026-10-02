@@ -70,7 +70,7 @@ The handshake commands establish peer connections, negotiate protocol version co
 | `pubkey` | string | optional | Ed25519 public key in base64. Used for message signature verification |
 | `boxkey` | string | optional | X25519 public key in base64. Used for message encryption. Node-to-node hellos always include it even on a relay-only node (headless `corsa-node` without `CORSA_ACCEPT_DM=1`): responders issue the session-auth challenge only when all four identity fields (`address`, `pubkey`, `boxkey`, `boxsig`) are present. A relay-only node limits the key to this handshake plane — it never redistributes it via `fetch_contacts` — and drops any DM addressed to itself (see `docs/protocol/messaging.md` "DM Opt-Out") |
 | `boxsig` | string | optional | Ed25519 signature (base64url) of boxkey binding. Signature payload: `corsa-boxkey-v1|<address>|<boxkey-base64>` |
-| `dtypes` | array | optional | Datagram types this node handles as an endpoint (`docs/refactoring/datagram-transport.md` §6.1). The field IS the set: a non-empty array means exactly those names, an explicitly empty array `[]` means the envelope is understood and no type is handled, and an absent field names no type at all — nothing is implied on a silent peer's behalf. Order is insignificant, duplicates collapse, bounds are ≤ 64 names of `[a-z0-9_]{1,64}`, and a bounds breach drops the whole field back to the absent form WITHOUT tearing the handshake down. Fixed for the lifetime of the session. See [dtypes (datagram type set)](#dtypes-datagram-type-set) |
+| `dtypes` | array | optional | Datagram types this node handles as an endpoint (`docs/protocol/datagram.md` §6.1). The field IS the set: a non-empty array means exactly those names, an explicitly empty array `[]` means the envelope is understood and no type is handled, and an absent field names no type at all — nothing is implied on a silent peer's behalf. Order is insignificant, duplicates collapse, bounds are ≤ 64 names of `[a-z0-9_]{1,64}`, and a bounds breach drops the whole field back to the absent form WITHOUT tearing the handshake down. Fixed for the lifetime of the session. See [dtypes (datagram type set)](#dtypes-datagram-type-set) |
 
 ### welcome (responder → initiator)
 
@@ -255,12 +255,21 @@ When initiator's `client` is `"node"` or `"desktop"`:
 
 ### Key Verification
 
-When initiator sends `pubkey`, `boxkey`, and `boxsig`:
+When the initiator sends all four identity fields (`address`, `pubkey`, `boxkey`, `boxsig`), the responder checks them before it issues the `challenge`:
 
-1. Verify `boxsig` is a valid Ed25519 signature over: `corsa-boxkey-v1|<address>|<boxkey-base64>`
-2. If verification succeeds, store all three keys
-3. If verification fails, **discard the keys but keep the connection** (backward compatibility)
-4. If any fields are missing, accept connection as-is (for older peer versions)
+1. `pubkey` is an **acceptable signing key** (below) and its fingerprint equals `address`
+2. `boxkey` is a 32-byte X25519 key and `boxsig` is a valid Ed25519 signature by `pubkey` over `corsa-boxkey-v1|<address>|<boxkey-base64>`
+3. If every check passes, the keys are cached and the `welcome` carries the `challenge`
+4. If any check fails, the responder replies `error` with code `invalid-auth-signature`, adds **100 ban points** and closes the connection
+5. If any of the four fields is missing, no session authentication starts (older peer versions)
+
+#### Acceptable signing keys
+
+A signing key is accepted only if it is 32 bytes, its `y` coordinate is canonical (`y < p = 2^255 − 19`) and it is not one of the 14 encodings of a small-order point. Under a small-order key a signature exists without any private key — under the neutral key `0100…00` the signature `R = 0100…00, S = 0` verifies for every message — and the stock Ed25519 verifier accepts it. The full rule, including why mixed-order keys are not refused, is in `docs/encryption.md`, "Acceptable signing keys".
+
+**New behaviour on the wire.** A `hello` whose own `pubkey` is a small-order or non-canonical key used to pass both steps of the handshake: the universal signature verified the box binding and then the `auth_session` challenge, so the connection authenticated as an identity nobody holds a private key for. It is now refused at `hello` exactly like an invalid box binding — `invalid-auth-signature`, 100 ban points, close. Honest identities of every version are unaffected: an honest key is a non-zero multiple of the base point, encoded canonically, and never falls into a refused encoding.
+
+**A ban only for the peer's own key.** The 100 points are charged for the key in the peer's OWN `hello` — the identity it is authenticating as. The same kind of key inside content the peer merely forwards — a signed identity record, the sender key attached to a DM, a `push_identity` record, a route-announce signer, a lookup answer, a datagram's `auth.pubkey`, a file command's `src_pubkey` — is refused silently, with no penalty to the forwarder: it is not the author, and a relay on an older build has no rule that would have refused it.
 
 ### observed_address (NAT Detection)
 
@@ -616,7 +625,7 @@ stateDiagram-v2
 | `pubkey` | string | опционально | Ed25519 публичный ключ в base64. Используется для проверки подписей сообщений |
 | `boxkey` | string | опционально | X25519 публичный ключ в base64. Используется для шифрования сообщений. Node-to-node hello всегда включает его, даже на relay-only ноде (headless `corsa-node` без `CORSA_ACCEPT_DM=1`): ответчик выдаёт session-auth challenge только при наличии всех четырёх identity-полей (`address`, `pubkey`, `boxkey`, `boxsig`). Relay-only нода ограничивает ключ handshake-плоскостью — никогда не раздаёт его через `fetch_contacts` — и дропает любой DM, адресованный ей самой (см. `docs/protocol/messaging.md`, «Отказ от приёма DM») |
 | `boxsig` | string | опционально | Ed25519 подпись (base64url) связи boxkey. Полезная нагрузка подписи: `corsa-boxkey-v1|<address>|<boxkey-base64>` |
-| `dtypes` | array | опционально | Типы датаграмм, которые узел обрабатывает как конечная точка (`docs/refactoring/datagram-transport.md` §6.1). Поле И ЕСТЬ набор: непустой массив означает ровно перечисленные имена, явный пустой массив `[]` означает, что конверт понимается и ни один тип не обрабатывается, а отсутствие поля не называет ни одного типа — за молчащего пира ничего не домысливается. Порядок не значим, дубликаты схлопываются, границы — ≤ 64 имён вида `[a-z0-9_]{1,64}`, нарушение границ роняет поле целиком к отсутствующей форме и НЕ рвёт рукопожатие. Набор фиксирован на время сессии. См. «dtypes (набор типов датаграмм)» |
+| `dtypes` | array | опционально | Типы датаграмм, которые узел обрабатывает как конечная точка (`docs/protocol/datagram.md` §6.1). Поле И ЕСТЬ набор: непустой массив означает ровно перечисленные имена, явный пустой массив `[]` означает, что конверт понимается и ни один тип не обрабатывается, а отсутствие поля не называет ни одного типа — за молчащего пира ничего не домысливается. Порядок не значим, дубликаты схлопываются, границы — ≤ 64 имён вида `[a-z0-9_]{1,64}`, нарушение границ роняет поле целиком к отсутствующей форме и НЕ рвёт рукопожатие. Набор фиксирован на время сессии. См. «dtypes (набор типов датаграмм)» |
 
 ### welcome (ответчик → инициатор)
 
@@ -801,12 +810,21 @@ sequenceDiagram
 
 ### Верификация ключей
 
-Когда инициатор отправляет `pubkey`, `boxkey` и `boxsig`:
+Когда инициатор отправляет все четыре поля identity (`address`, `pubkey`, `boxkey`, `boxsig`), ответчик проверяет их до выдачи `challenge`:
 
-1. Проверить что `boxsig` — валидная Ed25519 подпись над: `corsa-boxkey-v1|<address>|<boxkey-base64>`
-2. Если проверка успешна, сохранить все три ключа
-3. Если проверка не удаётся, **отбросить ключи но сохранить соединение** (для обратной совместимости)
-4. Если какие-то поля отсутствуют, принять соединение как-есть (для старых версий пиров)
+1. `pubkey` — **допустимый ключ подписи** (ниже), и его отпечаток равен `address`
+2. `boxkey` — 32-байтовый ключ X25519, а `boxsig` — валидная Ed25519-подпись ключом `pubkey` над `corsa-boxkey-v1|<address>|<boxkey-base64>`
+3. Если все проверки прошли, ключи кешируются, а `welcome` несёт `challenge`
+4. Если любая проверка не прошла, ответчик отвечает `error` с кодом `invalid-auth-signature`, начисляет **100 ban points** и закрывает соединение
+5. Если какого-то из четырёх полей нет, аутентификация сессии не начинается (старые версии пиров)
+
+#### Допустимые ключи подписи
+
+Ключ подписи принимается, только если он длиной 32 байта, его координата `y` канонична (`y < p = 2^255 − 19`) и он не совпадает ни с одной из 14 кодировок точки малого порядка. Под ключом малого порядка подпись существует без всякого приватного ключа — под нейтральным ключом `0100…00` подпись `R = 0100…00, S = 0` верна для любого сообщения, — и штатный верификатор Ed25519 её принимает. Полное правило, в том числе почему ключи смешанного порядка не отвергаются, — в `docs/encryption.md`, «Допустимые ключи подписи».
+
+**Новое поведение на проводе.** `hello`, чей собственный `pubkey` — ключ малого порядка или неканонический, раньше проходил оба шага рукопожатия: универсальная подпись проверялась и в привязке box-ключа, и затем в challenge `auth_session`, то есть соединение аутентифицировалось как identity, приватного ключа которой нет ни у кого. Теперь такой `hello` отвергается так же, как неверная привязка box-ключа, — `invalid-auth-signature`, 100 ban points, закрытие. Честные identity любой версии не затронуты: честный ключ — ненулевое кратное базовой точки в канонической кодировке и ни в одну отвергаемую кодировку не попадает.
+
+**Ban — только за собственный ключ пира.** 100 очков начисляются за ключ в СОБСТВЕННОМ `hello` пира — за ту identity, которой он аутентифицируется. Такой же ключ внутри содержимого, которое пир лишь пересылает, — подписанной записи identity, ключа отправителя, приложенного к DM, записи `push_identity`, подписанта маршрутного анонса, ответа на lookup, `auth.pubkey` датаграммы, `src_pubkey` файловой команды, — отвергается молча, без штрафа переславшему: он не автор, а у релея на старой сборке нет правила, которое бы такой ключ отвергло.
 
 ### observed_address (обнаружение NAT)
 

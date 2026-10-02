@@ -9,9 +9,7 @@ that two implementations cannot disagree about it. It does **not** say the mecha
 function is adopted.
 
 - the mechanism (role separation on the anonymous search path) is **direction 2 of blocker O5**, taken
-  by the owner **for detailing and verification only** — see
-  [`../refactoring/dht/21-anonymity-transport.md`](../refactoring/dht/21-anonymity-transport.md) §0″
-  and §0‴;
+  by the owner **for detailing and verification only**;
 - **O5 is open and G2 is not closed.** No release may call the transport anonymous, and no node may
   announce a capability for it, until 21c has passed;
 - nothing in this page changes wire format, routing, or any network behaviour. The function has no
@@ -63,9 +61,7 @@ re-proving whenever the network size or bucket shape changed.
 ⚠️ **What the separate hash does NOT do.** It does not establish connectivity, reachability, or an
 even split of the population. Those are properties of the network, not of the function, and they are
 **measured**: connectivity and search length by M1/M2, targets without a `Q` neighbour by M5,
-population skew by M3 — see
-[`../refactoring/dht/21-anonymity-transport.md`](../refactoring/dht/21-anonymity-transport.md)
-§4.3.4″.6.
+population skew by M3.
 
 **Why SHA-256.** It is the only hash primitive in the tree (`sha256.Sum256`); introducing a second one
 for a single bit would have to be justified and cannot be.
@@ -172,12 +168,13 @@ elsewhere, and until then the guarantee is not promised.
 
 ### 8. References
 
-- [`../refactoring/dht/21-anonymity-transport.md`](../refactoring/dht/21-anonymity-transport.md) —
-  §0‴ (this decision), §4.3.4″.2 (the contract in context), §4.3.4″.7 (scenarios)
-- [`../refactoring/dht/06-overlay-responder.md`](../refactoring/dht/06-overlay-responder.md) §4.0 —
-  the admission gate of §5
-- [`../refactoring/dht/16-neighbour-selection.md`](../refactoring/dht/16-neighbour-selection.md)
-  §3.1′ — the `Q`-neighbour quota that depends on this classification
+- [`../encryption.md`](../encryption.md) — fingerprint address derivation, the rule condition 2 of §5
+  checks.
+
+The design work this contract serves — the anonymous search mechanism, the admission gate of §5 on a
+real connection, and a quota of `Q`-neighbours in neighbour selection that will consume this
+classification — is not published and not implemented. Everything needed to implement and check `Q`
+is on this page.
 
 ---
 
@@ -190,9 +187,7 @@ elsewhere, and until then the guarantee is not promised.
 принят.
 
 - механизм (разделение ролей на пути анонимного поиска) — это **направление 2 блокера O5**, взятое
-  владельцем **только в детализацию и проверку**, см.
-  [`../refactoring/dht/21-anonymity-transport.md`](../refactoring/dht/21-anonymity-transport.md) §0″
-  и §0‴;
+  владельцем **только в детализацию и проверку**;
 - **O5 открыт, G2 не закрыт.** Ни один выпуск не называется анонимным и ни один узел не объявляет
   соответствующую capability, пока не пройден 21c;
 - ничто на этой странице не меняет формат провода, маршрутизацию и вообще сетевое поведение. У функции
@@ -244,9 +239,7 @@ Q(NodeID) = младший бит SHA-256( "corsa/overlay/role/v1" ‖ NodeID )
 
 ⚠️ **Чего отдельный хеш НЕ делает.** Он не устанавливает связность, достижимость и равномерность
 разбиения популяции. Это свойства сети, а не функции, и они **измеряются**: связность и длина поиска —
-M1/M2, цели без `Q`-соседа — M5, перекос популяции — M3, см.
-[`../refactoring/dht/21-anonymity-transport.md`](../refactoring/dht/21-anonymity-transport.md)
-§4.3.4″.6.
+M1/M2, цели без `Q`-соседа — M5, перекос популяции — M3.
 
 **Почему SHA-256.** Это единственный хеш-примитив в дереве (`sha256.Sum256`); заводить второй ради
 одного бита пришлось бы обосновывать, а обосновать нечем.
@@ -353,9 +346,9 @@ NodeID(Vk) = первые 20 байт SHA-256( "corsa/overlay/role/v1/vector/" �
 
 ### 8. Ссылки
 
-- [`../refactoring/dht/21-anonymity-transport.md`](../refactoring/dht/21-anonymity-transport.md) —
-  §0‴ (это решение), §4.3.4″.2 (контракт в контексте), §4.3.4″.7 (сценарии)
-- [`../refactoring/dht/06-overlay-responder.md`](../refactoring/dht/06-overlay-responder.md) §4.0 —
-  гейт допуска из §5
-- [`../refactoring/dht/16-neighbour-selection.md`](../refactoring/dht/16-neighbour-selection.md)
-  §3.1′ — квота `Q`-соседей, зависящая от этой классификации
+- [`../encryption.md`](../encryption.md) — вывод fingerprint-адреса, то правило, которое проверяет
+  условие 2 из §5.
+
+Проектная работа, которой служит этот контракт, — механизм анонимного поиска, гейт допуска из §5 на
+реальном соединении и квота `Q`-соседей в выборе соседей, которая будет потреблять эту классификацию,
+— не опубликована и не реализована. Всё, что нужно для реализации и проверки `Q`, — на этой странице.

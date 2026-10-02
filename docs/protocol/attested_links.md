@@ -173,7 +173,10 @@ from the entry's verbatim fields).
     signatures mark `AttestedSigVerified = true`;
     present-but-invalid (pubkey known, verify failed) drop the
     entry; absent or pubkey-unknown sig pass through with
-    `AttestedSigVerified = false` (Tier-2 lenient). When the
+    `AttestedSigVerified = false` (Tier-2 lenient). A stored key
+    that `identity.ParsePublicKey` refuses (a small-order key or
+    one with a non-canonical `y`, `docs/encryption.md`) counts as unknown: no
+    signature under it is ever marked verified. When the
     sending session did NOT negotiate the cap, the verifier is
     skipped entirely — sig bytes flow through with
     `AttestedSigVerified = false`, no entry drop on invalid.
@@ -366,7 +369,10 @@ verbatim-полей entry).
     valid подписи помечают `AttestedSigVerified = true`;
     present-but-invalid (pubkey known, verify failed) дропают
     entry; absent или pubkey-unknown sig — passthrough с
-    `AttestedSigVerified = false` (Tier-2 lenient). Когда сессия
+    `AttestedSigVerified = false` (Tier-2 lenient). Сохранённый
+    ключ, который `identity.ParsePublicKey` отвергает (ключ малого
+    порядка или с неканоническим `y`, `docs/encryption.md`), считается
+    unknown: подпись под ним никогда не помечается verified. Когда сессия
     НЕ negotiated cap, verifier пропускается полностью — sig
     bytes форвардятся с `AttestedSigVerified = false`, никакого
     entry drop на invalid.

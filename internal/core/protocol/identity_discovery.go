@@ -298,12 +298,12 @@ func SignLookupRequester(owner *identity.Identity, network domain.NetworkID, att
 // itself carries no key material). Freshness is the caller's check: the
 // signature proves who and about which attempt, the window proves when.
 func VerifyLookupRequester(requesterPubKeyBase64 string, network domain.NetworkID, attemptID domain.PeerIdentity, payload GetIdentityPayload, dst domain.PeerIdentity) error {
-	pubKey, err := base64.StdEncoding.DecodeString(requesterPubKeyBase64)
-	if err != nil || len(pubKey) != ed25519.PublicKeySize {
-		return fmt.Errorf("%w: requester public key undecodable", ErrLookupProofInvalid)
+	pubKey, err := identity.ParsePublicKeyBase64(requesterPubKeyBase64)
+	if err != nil {
+		return fmt.Errorf("%w: requester public key: %w", ErrLookupProofInvalid, err)
 	}
 	transcript := LookupRequesterTranscript(network, attemptID, payload.RequesterIssuedAt, payload.Requester, dst)
-	if !ed25519.Verify(ed25519.PublicKey(pubKey), transcript, payload.RequesterSig) {
+	if !pubKey.Verify(transcript, payload.RequesterSig) {
 		return ErrLookupProofInvalid
 	}
 	return nil
@@ -430,12 +430,12 @@ func SignTargetProof(owner *identity.Identity, network domain.NetworkID, attempt
 // attempts, so the hash comes from the attempt entry, never recomputed
 // from current state.
 func VerifyTargetProof(proof []byte, body IdentityRecordBody, network domain.NetworkID, attemptID domain.PeerIdentity, requestPayloadHash [sha256.Size]byte, record SignedIdentityRecord) error {
-	pubKey, err := base64.StdEncoding.DecodeString(string(body.PubKey))
-	if err != nil || len(pubKey) != ed25519.PublicKeySize {
-		return fmt.Errorf("%w: record pubkey undecodable", ErrLookupProofInvalid)
+	pubKey, err := identity.ParsePublicKeyBase64(string(body.PubKey))
+	if err != nil {
+		return fmt.Errorf("%w: record public key: %w", ErrLookupProofInvalid, err)
 	}
 	transcript := TargetProofTranscript(network, attemptID, requestPayloadHash, record)
-	if !ed25519.Verify(ed25519.PublicKey(pubKey), transcript, proof) {
+	if !pubKey.Verify(transcript, proof) {
 		return ErrLookupProofInvalid
 	}
 	return nil

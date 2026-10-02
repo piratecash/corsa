@@ -13,7 +13,6 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
-	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -336,11 +335,20 @@ func TestLastOnlineIsLocalTrustedContactMetadata(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestService(t, config.NodeTypeFull)
-	peer := domaintest.ID("last-online-local-metadata")
+	// A real key pair: fetch_trusted_contacts withholds a contact whose
+	// signing key identity.ParsePublicKey refuses, so a placeholder string
+	// would make the contact vanish for a reason unrelated to this test.
+	owner, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	peer := domain.PeerIdentityFromWire(owner.Address)
+	pubKey := identity.PublicKeyBase64(owner.PublicKey)
+	boxKey := identity.BoxPublicKeyBase64(owner.BoxPublicKey)
 	if stored, err := svc.trust.remember(trustedContact{
 		Address: peer.String(),
-		PubKey:  "pubkey",
-		BoxKey:  "boxkey",
+		PubKey:  pubKey,
+		BoxKey:  boxKey,
 	}); err != nil || !stored {
 		t.Fatalf("remember peer: stored=%v err=%v", stored, err)
 	}
@@ -348,8 +356,8 @@ func TestLastOnlineIsLocalTrustedContactMetadata(t *testing.T) {
 	if updated, err := svc.trust.recordLastOnlineAt([]domain.PeerIdentity{peer}, want, 0); err != nil || updated != 1 {
 		t.Fatalf("record last online: updated=%d err=%v", updated, err)
 	}
-	svc.addKnownPubKey(peer.String(), "pubkey")
-	svc.addKnownBoxKey(peer.String(), "boxkey")
+	svc.addKnownPubKey(peer.String(), pubKey)
+	svc.addKnownBoxKey(peer.String(), boxKey)
 
 	var localLastOnline string
 	for _, contact := range svc.trustedContactsFrame().Contacts {

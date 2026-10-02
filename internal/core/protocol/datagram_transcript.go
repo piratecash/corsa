@@ -22,6 +22,13 @@ import (
 // verify against the public key it carries.
 var ErrDatagramSignature = errors.New("datagram: invalid signature")
 
+// ErrDatagramSignerKey marks a frame whose auth.pubkey is not an acceptable
+// signing key (identity.ParsePublicKey). It is kept apart from
+// ErrDatagramSignature on purpose: the key belongs to the frame's AUTHOR,
+// and a relay running an older build has no rule that refuses it, so the
+// neighbour that handed the frame over must not be charged for it.
+var ErrDatagramSignerKey = errors.New("datagram: unacceptable signer key")
+
 // datagramTranscriptDomain is the domain separation tag. It is followed by
 // a 0x00 byte so no other corsa signing context can ever share a prefix
 // with a datagram transcript.
@@ -124,14 +131,36 @@ func VerifyDatagramSignature(d DatagramFrame, network domain.NetworkID) error {
 	if len(d.Auth.Sig) != domain.DatagramSigBytes {
 		return fmt.Errorf("%w: sig %d bytes, want %d", ErrDatagramEncoding, len(d.Auth.Sig), domain.DatagramSigBytes)
 	}
+	signer, err := ParseDatagramSignerKey(d)
+	if err != nil {
+		return err
+	}
 	transcript, err := BuildDatagramTranscript(d, network)
 	if err != nil {
 		return err
 	}
-	if !ed25519.Verify(ed25519.PublicKey(d.Auth.PubKey), transcript, d.Auth.Sig) {
+	if !signer.Verify(transcript, d.Auth.Sig) {
 		return ErrDatagramSignature
 	}
 	return nil
+}
+
+// ParseDatagramSignerKey returns the frame's auth.pubkey as a signing key, or
+// ErrDatagramSignerKey (wrapping the identity error) when the key is one no
+// honest node can hold. It costs comparisons only, so the pipeline runs it
+// before charging a verification token.
+func ParseDatagramSignerKey(d DatagramFrame) (identity.PublicKey, error) {
+	if d.Auth == nil {
+		return identity.PublicKey{}, fmt.Errorf("%w: verification requires auth", ErrDatagramAuth)
+	}
+	if len(d.Auth.PubKey) != domain.DatagramPubKeyBytes {
+		return identity.PublicKey{}, fmt.Errorf("%w: pubkey %d bytes, want %d", ErrDatagramEncoding, len(d.Auth.PubKey), domain.DatagramPubKeyBytes)
+	}
+	signer, err := identity.ParsePublicKey(d.Auth.PubKey)
+	if err != nil {
+		return identity.PublicKey{}, fmt.Errorf("%w: %w", ErrDatagramSignerKey, err)
+	}
+	return signer, nil
 }
 
 // DatagramSignerMatchesSrc reports whether the carried public key

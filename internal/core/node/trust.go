@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
@@ -111,6 +112,66 @@ type trustStore struct {
 	// point.
 	saveMu   sync.Mutex
 	savedGen uint64
+}
+
+// contactKeyVerdict is what a stored contact's keys may still be used for.
+type contactKeyVerdict int
+
+const (
+	// contactKeysAccepted: the signing key and, when stored, the box pair.
+	contactKeysAccepted contactKeyVerdict = iota
+	// contactKeysSigningOnly: the signing key is good, the stored box pair
+	// is not bound by it — the box pair must not be used.
+	contactKeysSigningOnly
+	// contactKeysRefused: the signing key itself is unacceptable or does not
+	// certify the address — nothing of the contact may be used.
+	contactKeysRefused
+)
+
+// classifyContactKeys checks a stored contact's keys against what this build
+// accepts today: a signing key identity.ParsePublicKey accepts and that
+// certifies address, and — when a box pair is stored — a box binding that
+// verifies under it. The two halves are judged separately because they fail
+// separately: a good signing key with a broken box pair still verifies the
+// contact's DMs, and only the pair has to go. The store itself does not apply
+// the verdict — the file is the user's record and keeps what it holds; what is
+// refused is the USE of the keys (the knowledge maps, frames, `contacts`
+// replies). It costs a signature verification per contact, so it runs once,
+// at load.
+func classifyContactKeys(address string, contact trustedContact) (contactKeyVerdict, error) {
+	if err := identity.VerifyPublicKeyFingerprint(address, contact.PubKey); err != nil {
+		return contactKeysRefused, err
+	}
+	if contact.BoxKey == "" && contact.BoxSignature == "" {
+		return contactKeysAccepted, nil
+	}
+	if err := identity.VerifyBoxKeyBinding(address, contact.PubKey, contact.BoxKey, contact.BoxSignature); err != nil {
+		return contactKeysSigningOnly, err
+	}
+	return contactKeysAccepted, nil
+}
+
+// storedBoxPair is a box key with the signature stored next to it.
+type storedBoxPair struct {
+	boxKey string
+	boxSig string
+}
+
+// trustedKeysLoadReport is what NewService did with the trust store's keys:
+// how many contacts it refused outright, and which stored box pairs it
+// dropped. The dropped pairs are kept by value so the local trusted-contact
+// list can withhold exactly those bytes — a pair the contact later binds
+// properly is a different pair and is not affected.
+type trustedKeysLoadReport struct {
+	refused         int
+	droppedBoxPairs map[string]storedBoxPair
+}
+
+// boxPairDropped reports whether contact still carries the box pair that was
+// dropped for address at load.
+func (r trustedKeysLoadReport) boxPairDropped(address string, contact trustedContact) bool {
+	dropped, ok := r.droppedBoxPairs[address]
+	return ok && dropped == storedBoxPair{boxKey: contact.BoxKey, boxSig: contact.BoxSignature}
 }
 
 func loadTrustStore(path string, self trustedContact) (*trustStore, error) {

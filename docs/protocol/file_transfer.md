@@ -203,9 +203,9 @@ All other commands use this frame format:
 }
 ```
 
-`src_pubkey` is required: the receiver verifies
-`identity.Fingerprint(src_pubkey) == src` and then verifies the
-signature against `src_pubkey`. A frame without `src_pubkey` is dropped
+`src_pubkey` is required: the receiver checks that it is an acceptable
+signing key, verifies `identity.Fingerprint(src_pubkey) == src` and then
+verifies the signature against `src_pubkey`. A frame without `src_pubkey` is dropped
 at the missing-pubkey gate — see "Authenticity vs authorization" below
 for the rationale.
 
@@ -718,9 +718,13 @@ Every `file_command` carries `SrcPubKey` (base64 Ed25519 public key)
 alongside `SRC`. On every receive — both forward and local — the
 router checks:
 
-1. `identity.Fingerprint(SrcPubKey) == SRC` (the embedded pubkey
+1. `SrcPubKey` is an acceptable signing key (`identity.ParsePublicKey`:
+   not of small order, canonical — see `docs/encryption.md`). A refused
+   key drops the frame silently, with no penalty to the neighbour that
+   relayed it: the key is SRC's, not the relay's,
+2. `identity.Fingerprint(SrcPubKey) == SRC` (the embedded pubkey
    matches the claimed SRC),
-2. `ed25519.Verify(SrcPubKey, Nonce, Signature)` (the signature was
+3. the signature over `Nonce` verifies under `SrcPubKey` (it was
    produced by the holder of that pubkey).
 
 A relay running this check needs **no peer state at all** — it can
@@ -769,10 +773,14 @@ Boundary tests in `internal/core/service/filerouter/router_test.go`:
 рядом с `SRC`. На каждом приёме — и forward, и local — роутер
 проверяет:
 
-1. `identity.Fingerprint(SrcPubKey) == SRC` (вшитый pubkey
+1. `SrcPubKey` — допустимый ключ подписи (`identity.ParsePublicKey`:
+   не малого порядка, канонический — см. `docs/encryption.md`).
+   Отвергнутый ключ молча дропает кадр без штрафа соседу, который его
+   переслал: ключ принадлежит SRC, а не relay'ю,
+2. `identity.Fingerprint(SrcPubKey) == SRC` (вшитый pubkey
    соответствует заявленному SRC),
-2. `ed25519.Verify(SrcPubKey, Nonce, Signature)` (подпись произведена
-   владельцем этого pubkey).
+3. подпись над `Nonce` проверяется ключом `SrcPubKey` (подпись
+   произведена владельцем этого pubkey).
 
 Relay, выполняющий эту проверку, **не нуждается ни в каком peer
 state** — он может верифицировать кадр только из wire-байтов. Это и

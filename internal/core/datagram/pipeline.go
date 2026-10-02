@@ -278,8 +278,19 @@ const (
 	DropCryptoBudget
 	// DropFingerprint is Fingerprint(pubkey) != src. Ban-worthy.
 	DropFingerprint
-	// DropSignature is a signature that does not verify. Ban-worthy.
+	// DropSignature is a signature that does not verify. Ban-worthy even
+	// though the frame is somebody else's: every transit must verify the
+	// signature itself before forwarding (§4.1 step 8), under one equation
+	// all builds share, so handing over a forged frame is the neighbour's
+	// own omission.
 	DropSignature
+	// DropSignerKey is an auth.pubkey no honest node can hold — a small-order
+	// or non-canonical encoding (identity.ParsePublicKey). NOT ban-worthy,
+	// unlike its two neighbours: the key is the AUTHOR's, and a relay on an
+	// older build has no rule that refuses it — stdlib verifies the universal
+	// signature under such a key — so charging the neighbour would punish an
+	// honest relay for somebody else's frame.
+	DropSignerKey
 	// DropUnknownDType is a frame addressed here whose type this node does
 	// not implement: silent, live connection, no ban, no replay slot.
 	DropUnknownDType
@@ -426,6 +437,7 @@ var dropReasonNames = map[DropReason]string{
 	DropCryptoBudget:           "crypto_budget",
 	DropFingerprint:            "fingerprint_mismatch",
 	DropSignature:              "invalid_signature",
+	DropSignerKey:              "invalid_signer_key",
 	DropUnknownDType:           "unknown_dtype",
 	DropModeNotAllowedForType:  "mode_not_allowed_for_type",
 	DropClassNotAllowedForType: "class_not_allowed_for_type",

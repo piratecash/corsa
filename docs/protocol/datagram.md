@@ -416,9 +416,11 @@ be unable to talk at all.
 
 Two gates stay separate:
 
-- **Authenticity is self-contained:** `Fingerprint(pubkey) == src` and
-  `ed25519.Verify(pubkey, transcript, sig)`. Both are computable by **any**
-  node from the frame bytes alone, with no peer state whatsoever.
+- **Authenticity is self-contained:** `Fingerprint(pubkey) == src`, `pubkey`
+  is an acceptable signing key (`docs/encryption.md`, "Acceptable signing
+  keys": canonical and not of small order), and
+  `ed25519.Verify(pubkey, transcript, sig)`. All three are computable by
+  **any** node from the frame bytes alone, with no peer state whatsoever.
   `Fingerprint(k) = hex(sha256(k)[0:20])`.
 - **Authorization is the receiver's local policy** at `dst == self` (§7). An
   authentic frame from an untrusted `src` is dropped silently there, and that
@@ -885,9 +887,11 @@ addressed by `dst` but travels with an answer slot attached.
    know, and a stateless forwarder has no such memory.
 8. **Cheap checks, then cryptography, in this order:** `ttl ≤ auth.max_ttl` on
    the raw value → the timing rule of §3.4 → `Fingerprint(pubkey) == src` →
-   **charge one verification token** → `ed25519.Verify`. The token is charged
-   immediately before the verification and nowhere earlier, so anything sieved
-   out by the early replay check or by the cheap gates never spends one.
+   `pubkey` is an acceptable signing key (`invalid_signer_key`, no ban — see
+   "Ban points" below) → **charge one verification token** → `ed25519.Verify`.
+   The token is charged immediately before the verification and nowhere
+   earlier, so anything sieved out by the early replay check or by the cheap
+   gates never spends one.
 
    Where the frame ends is settled **here** and not at the fork below, because
    one timing verdict depends on it: `send_window_expired` refuses the SEND path
@@ -1030,6 +1034,22 @@ unknown header version (`v` or `av`), an unknown `dtype`, a refused
 authorization and an unproven sender are **never** ban-worthy: the layer
 explicitly allows an honest node to relay a type it cannot read, and an
 unimplemented version is the extension mechanism working as designed.
+**An `auth.pubkey` that is not an acceptable signing key is not ban-worthy
+either** (`invalid_signer_key`): a small-order or non-canonical key is the
+AUTHOR's, the frame is self-consistent — `src` is its fingerprint and the
+stock Ed25519 verifier accepts the universal signature under it — so a relay
+on a build without this check forwards it in good faith. The frame is refused
+and the neighbour is charged nothing; a ban for such a key belongs only to the
+peer's own handshake key (`handshake.md`, "Key Verification").
+**A bad signature, by contrast, IS ban-worthy although the frame is somebody
+else's, and normatively so:** every transit MUST verify `auth.sig` itself
+(step 8) before it forwards a frame — a node never carries a datagram it has not
+authenticated. A neighbour that hands over a frame whose signature fails has
+therefore skipped its own obligation, under a rule every build applies
+identically (the same cofactorless Ed25519 equation); the ban charges that
+omission, not the author's forgery. The signer-key refusal is the one auth
+check NOT in that common rule — older builds lack it — which is exactly why it
+alone stays unpunished.
 **A line past `MaxFrameLine` is not ban-worthy either.** It is counted as
 `frame_too_large` and dropped in silence, because it is a §2 verdict about the
 **line** and not a statement its sender made about the frame: the neighbour that
@@ -2462,10 +2482,11 @@ base64-текстом» транспорт не может и не должен.
 
 Два гейта остаются разделёнными:
 
-- **Подлинность самодостаточна:** `Fingerprint(pubkey) == src` и
-  `ed25519.Verify(pubkey, transcript, sig)`. Обе проверки выполнимы **любым**
-  узлом по одним лишь байтам кадра, без какого-либо состояния о пирах.
-  `Fingerprint(k) = hex(sha256(k)[0:20])`.
+- **Подлинность самодостаточна:** `Fingerprint(pubkey) == src`, `pubkey` —
+  допустимый ключ подписи (`docs/encryption.md`, «Допустимые ключи подписи»:
+  канонический и не малого порядка) и `ed25519.Verify(pubkey, transcript, sig)`.
+  Все три проверки выполнимы **любым** узлом по одним лишь байтам кадра, без
+  какого-либо состояния о пирах. `Fingerprint(k) = hex(sha256(k)[0:20])`.
 - **Авторизация — локальная политика получателя** при `dst == self` (§7).
   Аутентичный кадр от недоверенного `src` там молча дропается, и это не дело
   транзита.
@@ -2929,8 +2950,9 @@ send_until   = min(freshness_end − send_grace,
    таблице маршрутов, а у stateless-форвардера такой памяти нет.
 8. **Дешёвые проверки, затем криптография, в таком порядке:**
    `ttl ≤ auth.max_ttl` по сырому значению → правило времени §3.4 →
-   `Fingerprint(pubkey) == src` → **списание одного криптографического токена** →
-   `ed25519.Verify`. Токен списывается непосредственно перед проверкой и нигде
+   `Fingerprint(pubkey) == src` → `pubkey` — допустимый ключ подписи
+   (`invalid_signer_key`, без ban — см. «Ban-очки» ниже) →
+   **списание одного криптографического токена** → `ed25519.Verify`. Токен списывается непосредственно перед проверкой и нигде
    раньше, чтобы отсеянное ранней проверкой реплея и дешёвыми гейтами его не
    тратило.
 
@@ -3073,6 +3095,22 @@ reverse-состояние, бюджет probe и лимиты по соседу
 и недоказанный отправитель ban **никогда** не начисляют: слой прямо разрешает
 честному узлу пересылать тип, который он не умеет читать, а нереализованная
 версия — это работающий по замыслу механизм расширения.
+**`auth.pubkey`, не являющийся допустимым ключом подписи, тоже не ban-worthy**
+(`invalid_signer_key`): ключ малого порядка или неканонический принадлежит
+АВТОРУ, кадр самосогласован — `src` есть его отпечаток, а штатный верификатор
+Ed25519 принимает под ним универсальную подпись, — поэтому релей на сборке без
+этой проверки пересылает его добросовестно. Кадр отвергается, соседу ничего не
+начисляется; ban за такой ключ полагается только за собственный ключ пира в
+рукопожатии (`handshake.md`, «Верификация ключей»).
+**Подделанная подпись, напротив, ban-worthy, хотя кадр чужой, и это
+нормативно:** каждый транзит ОБЯЗАН сам проверить `auth.sig` (шаг 8) до
+пересылки — узел никогда не несёт датаграмму, которую не аутентифицировал.
+Сосед, передавший кадр с непроходящей подписью, значит, пропустил собственную
+обязанность по правилу, которое все сборки применяют одинаково (одно и то же
+уравнение Ed25519 без кофактора); ban начисляется за это упущение, а не за
+подделку автора. Отказ по ключу подписанта — единственная проверка `auth`, НЕ
+входящая в это общее правило (старых сборок её нет), поэтому только она и
+остаётся безнаказанной.
 **Строка сверх `MaxFrameLine` тоже не ban-worthy.** Она считается как
 `frame_too_large` и отбрасывается молча, потому что это вердикт §2 о
 **строке**, а не утверждение, которое её отправитель сделал о кадре: сосед,

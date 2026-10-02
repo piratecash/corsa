@@ -1367,7 +1367,7 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 			return
 		}
 		if pubkey, ok := s.publicKeyForIdentity(senderIdentity); ok {
-			if !ed25519.Verify(pubkey, frame.CanonicalSenderSigBytes(), sig) {
+			if !pubkey.Verify(frame.CanonicalSenderSigBytes(), sig) {
 				log.Warn().
 					Str("from", senderIdentity.String()).
 					Str("identity", frame.Identity).
@@ -1453,7 +1453,7 @@ func (s *Service) handleRoutePoisonV2(senderIdentity domain.PeerIdentity, frame 
 			return
 		}
 		if pubkey, ok := s.publicKeyForIdentity(senderIdentity); ok {
-			if !ed25519.Verify(pubkey, frame.CanonicalSenderSigBytes(), sig) {
+			if !pubkey.Verify(frame.CanonicalSenderSigBytes(), sig) {
 				log.Warn().Str("from", senderIdentity.String()).Msg("route_poison_v2_sig_invalid_drop")
 				return
 			}
@@ -2548,7 +2548,7 @@ func (s *Service) verifyRouteAnnounceV3Sigs(senderIdentity domain.PeerIdentity, 
 			SeqNo:    f.SeqNo,
 			Extra:    f.Extra,
 		}
-		if !ed25519.Verify(pubkey, v3e.CanonicalSigningBytes(), sig) {
+		if !pubkey.Verify(v3e.CanonicalSigningBytes(), sig) {
 			// Present-but-invalid signature — concrete malicious or
 			// corrupted claim. Drop the entry; do NOT pass to storage.
 			log.Warn().

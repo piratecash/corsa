@@ -71,18 +71,18 @@ func TestSignAndVerifyFileCommand(t *testing.T) {
 	nonce := "test-nonce-value-1234567890abcdef"
 	sig := SignFileCommand(nonce, priv)
 
-	if err := VerifyFileCommandSignature(nonce, sig, pub); err != nil {
+	if err := VerifyFileCommandSignature(nonce, sig, mustSigningKey(t, pub)); err != nil {
 		t.Fatalf("verify valid signature: %v", err)
 	}
 
 	// Wrong nonce should fail.
-	if err := VerifyFileCommandSignature("wrong-nonce", sig, pub); err == nil {
+	if err := VerifyFileCommandSignature("wrong-nonce", sig, mustSigningKey(t, pub)); err == nil {
 		t.Error("verify with wrong nonce should fail")
 	}
 
 	// Wrong key should fail.
 	pub2, _, _ := ed25519.GenerateKey(nil)
-	if err := VerifyFileCommandSignature(nonce, sig, pub2); err == nil {
+	if err := VerifyFileCommandSignature(nonce, sig, mustSigningKey(t, pub2)); err == nil {
 		t.Error("verify with wrong key should fail")
 	}
 }

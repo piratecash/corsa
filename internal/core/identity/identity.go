@@ -194,25 +194,30 @@ func SignPayload(id *Identity, payload []byte) string {
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(id.PrivateKey, payload))
 }
 
-// VerifyPublicKeyFingerprint checks that publicKeyBase64 decodes to a
-// well-formed Ed25519 public key whose fingerprint equals address. An
+// VerifyPublicKeyFingerprint checks that publicKeyBase64 is a signing key
+// ParsePublicKey accepts and whose fingerprint equals address. An
 // address IS the fingerprint of its signing key, so PUBLIC key material
 // carried inside transport frames is self-certifying: it can be
 // validated against the claimed sender address with no prior knowledge
 // of that sender. Only public data is involved — the private signing
 // key never appears on the wire.
 func VerifyPublicKeyFingerprint(address, publicKeyBase64 string) error {
-	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	_, err := parseAddressKey(address, publicKeyBase64)
+	return err
+}
+
+// parseAddressKey parses a base64 signing key and checks that it certifies
+// address. Errors from the key itself match ErrInvalidPublicKey; a well-formed
+// key of somebody else is a fingerprint mismatch, which does not.
+func parseAddressKey(address, publicKeyBase64 string) (PublicKey, error) {
+	publicKey, err := ParsePublicKeyBase64(publicKeyBase64)
 	if err != nil {
-		return fmt.Errorf("decode public key: %w", err)
+		return PublicKey{}, fmt.Errorf("public key: %w", err)
 	}
-	if len(publicKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid public key size: %d", len(publicKeyBytes))
+	if publicKey.Fingerprint() != address {
+		return PublicKey{}, fmt.Errorf("public key fingerprint mismatch")
 	}
-	if Fingerprint(ed25519.PublicKey(publicKeyBytes)) != address {
-		return fmt.Errorf("public key fingerprint mismatch")
-	}
-	return nil
+	return publicKey, nil
 }
 
 // boxPublicKeySize is the wire size of an X25519 public key (crypto/ecdh
@@ -225,17 +230,9 @@ func VerifyPublicKeyFingerprint(address, publicKeyBase64 string) error {
 const boxPublicKeySize = 32
 
 func VerifyBoxKeyBinding(address, publicKeyBase64, boxKeyBase64, signatureBase64 string) error {
-	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	publicKey, err := parseAddressKey(address, publicKeyBase64)
 	if err != nil {
-		return fmt.Errorf("decode public key: %w", err)
-	}
-	if len(publicKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid public key size: %d", len(publicKeyBytes))
-	}
-
-	publicKey := ed25519.PublicKey(publicKeyBytes)
-	if Fingerprint(publicKey) != address {
-		return fmt.Errorf("public key fingerprint mismatch")
+		return err
 	}
 
 	// Structural validation of the box key itself, BEFORE the signature
@@ -254,7 +251,7 @@ func VerifyBoxKeyBinding(address, publicKeyBase64, boxKeyBase64, signatureBase64
 		return fmt.Errorf("decode box key signature: %w", err)
 	}
 
-	if !ed25519.Verify(publicKey, boxKeyBindingPayload(address, boxKeyBase64), signature) {
+	if !publicKey.Verify(boxKeyBindingPayload(address, boxKeyBase64), signature) {
 		return fmt.Errorf("invalid box key signature")
 	}
 
@@ -262,24 +259,16 @@ func VerifyBoxKeyBinding(address, publicKeyBase64, boxKeyBase64, signatureBase64
 }
 
 func VerifyPayload(address, publicKeyBase64 string, payload []byte, signatureBase64 string) error {
-	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
+	publicKey, err := parseAddressKey(address, publicKeyBase64)
 	if err != nil {
-		return fmt.Errorf("decode public key: %w", err)
-	}
-	if len(publicKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid public key size: %d", len(publicKeyBytes))
-	}
-
-	publicKey := ed25519.PublicKey(publicKeyBytes)
-	if Fingerprint(publicKey) != address {
-		return fmt.Errorf("public key fingerprint mismatch")
+		return err
 	}
 
 	signature, err := base64.RawURLEncoding.DecodeString(signatureBase64)
 	if err != nil {
 		return fmt.Errorf("decode signature: %w", err)
 	}
-	if !ed25519.Verify(publicKey, payload, signature) {
+	if !publicKey.Verify(payload, signature) {
 		return fmt.Errorf("invalid signature")
 	}
 	return nil

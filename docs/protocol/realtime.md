@@ -111,6 +111,12 @@ sequenceDiagram
 
 **Independence:** Push and gossip operate independently. Push optimizes for low-latency delivery to connected subscribers, while gossip ensures mesh-wide propagation and redundancy.
 
+**Author check and penalties.** A DM-class push is verified by its envelope signature (an unknown sender key schedules a background key sync). A non-DM push carries no signature of its author, so the receiver admits it only when the author is the pushing peer itself, this node, or an identity whose key the receiver already holds. Any other author is refused **silently**: the message is not stored, the refusal is counted (`key_hygiene.unattributed_non_dm_drops` in `fetch_network_stats`), a key sync for that author may start within the non-DM budget below, and the pushing peer is **not** charged ban points. The author is never the pushing peer at that point, so the missing key is the receiver's knowledge gap — nodes legitimately know different identities (LRU eviction, a sync that has not happened yet, a key this build refuses and an older one accepted), and banning the relay for it would let anyone who can make two nodes know different things blacklist the relay between them. "Admitted" for a non-DM push means the author is KNOWN, not that the author signed the bytes.
+
+**Key-sync budget for unknown non-DM authors.** The author of a non-DM push is a name the pushing peer chose, so the key sync it triggers is budgeted apart from the keyless-DM recovery and never takes its slots: one pass at a time; at most one pass start per 10 s node-wide (≤ 6 passes, i.e. ≤ 24 `fetch_contacts` dials a minute, whatever the traffic); at most one per neighbour per 30 s; and a neighbour whose non-DM traffic in the last minute is mostly unknown authors (≥ 20 of them and more unknown than known) triggers none for 10 minutes. The node tracks at most 1 024 neighbours for this; while all of them are still live (inside their minute, cooldown or suppression), a new neighbour is not tracked and triggers no pass — a running suppression is never forgotten to make room. Every one of these refusals is silent and costs the neighbour nothing — the budget limits this node's own work. Skipped triggers are counted in `key_hygiene.non_dm_key_sync_skipped`.
+
+**Known degradation.** A non-DM message of an author the receiver does not know is dropped and is **not** delivered later: non-DM has no receipts and no retry, and the receiver does not forward what it refused. Until the author's key reaches a node — through a contact sync, a DM, a lookup — that node and everything behind it miss the author's non-DM messages; the sync above helps only the NEXT ones. A new honest author is therefore heard only by nodes that already know its key. The real remedy is a signature of the author on non-DM messages, which is a threat-model question outside this change.
+
 ### push_delivery_receipt
 
 **Format:**
@@ -140,6 +146,8 @@ sequenceDiagram
 **Delivery sources:**
 - Backlog replay when a recipient confirms delivery
 - Live delivery when a recipient sends a new delivery confirmation
+
+**Acceptance.** A receipt is stored only when `receipt.recipient` is this node or an identity with an active subscriber here. Anything else is dropped **silently, without ban points**: whether a subscriber is attached is the receiver's own state and changes under the sender's feet — a client that unsubscribed between the peer's send and the receipt's arrival makes an honest receipt look unrelated.
 
 ### ack_delete
 
@@ -455,6 +463,12 @@ sequenceDiagram
 
 **Независимость:** Push и gossip работают независимо. Push оптимизирует для низколатентной доставки подключенным подписчикам, в то время как gossip обеспечивает распространение по всей сети и избыточность.
 
+**Проверка автора и штрафы.** DM-пуш проверяется подписью конверта (неизвестный ключ отправителя запускает фоновую синхронизацию ключей). Не-DM-пуш подписи автора не несёт, поэтому получатель принимает его, только если автор — сам пушащий пир, этот узел или identity, чей ключ получатель уже знает. Любой другой автор отвергается **молча**: сообщение не сохраняется, отказ считается (`key_hygiene.unattributed_non_dm_drops` в `fetch_network_stats`), для автора может запуститься синхронизация ключей в пределах бюджета не-DM (ниже), а пушащему пиру ban-очки **не** начисляются. Автор в этой точке никогда не сам пир, поэтому недостающий ключ — пробел в знаниях получателя: узлы законно знают разные identity (вытеснение из LRU, ещё не прошедшая синхронизация, ключ, который эта сборка отвергает, а старая приняла), и бан релея за это позволил бы любому, кто умеет сделать знания двух узлов разными, заблокировать релей между ними. «Принят» для не-DM-пуша означает, что автор ИЗВЕСТЕН, а не что байты подписаны им.
+
+**Бюджет синхронизации ключей для неизвестных не-DM-авторов.** Автор не-DM-пуша — имя, которое выбрал пушащий пир, поэтому синхронизация, которую он запускает, учитывается отдельно от восстановления keyless-DM и никогда не занимает его слоты: один проход одновременно; не больше одного запуска на 10 с на весь узел (≤ 6 проходов, то есть ≤ 24 дозвонов `fetch_contacts` в минуту при любом трафике); не больше одного на соседа за 30 с; а сосед, чей не-DM-трафик за последнюю минуту в основном от неизвестных авторов (≥ 20 и неизвестных больше, чем известных), 10 минут не запускает ни одного. Узел отслеживает для этого не больше 1 024 соседей; пока все они живы (внутри своей минуты, паузы или подавления), новый сосед не отслеживается и прохода не запускает — действующее подавление ради места не забывается. Все эти отказы молчаливы и соседу ничего не стоят — бюджет ограничивает собственную работу узла. Отклонённые поводы считаются в `key_hygiene.non_dm_key_sync_skipped`.
+
+**Известная деградация.** Не-DM-сообщение автора, которого получатель не знает, отбрасывается и **не** доставляется позже: у не-DM нет квитанций и повторов, а отвергнутое получатель не пересылает. Пока ключ автора не дошёл до узла — через синхронизацию контактов, DM, lookup, — этот узел и всё за ним не получают его не-DM-сообщений; синхронизация выше помогает только СЛЕДУЮЩИМ. Нового честного автора поэтому слышат только узлы, уже знающие его ключ. Настоящее устранение — подпись автора на не-DM-сообщениях; это вопрос модели угроз вне этого изменения.
+
 ### push_delivery_receipt
 
 **Формат:**
@@ -484,6 +498,8 @@ sequenceDiagram
 **Источники доставки:**
 - Воспроизведение истории, когда получатель подтверждает доставку
 - Доставка в реальном времени, когда получатель отправляет новое подтверждение
+
+**Приём.** Квитанция сохраняется, только если `receipt.recipient` — этот узел или identity с активным подписчиком здесь. Всё остальное отбрасывается **молча, без ban-очков**: подключён ли подписчик — собственное состояние получателя, и оно меняется без ведома отправителя: клиент, отписавшийся между отправкой пира и приходом квитанции, делает честную квитанцию «посторонней».
 
 ### ack_delete
 

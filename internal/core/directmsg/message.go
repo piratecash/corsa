@@ -193,7 +193,7 @@ func verifyEnvelope(senderAddress, senderPublicKeyBase64, recipientAddress, enco
 		return sealedEnvelope{}, err
 	}
 
-	if !ed25519.Verify(senderPublicKey, unsignedBytes, signature) {
+	if !senderPublicKey.Verify(unsignedBytes, signature) {
 		return sealedEnvelope{}, fmt.Errorf("%w: invalid signature", ErrEnvelopeAuth)
 	}
 
@@ -214,20 +214,18 @@ func marshalUnsignedEnvelope(envelope sealedEnvelope) ([]byte, error) {
 	return payload, nil
 }
 
-func decodeSenderPublicKey(senderAddress, encoded string) (ed25519.PublicKey, error) {
-	raw, err := base64.StdEncoding.DecodeString(encoded)
+// decodeSenderPublicKey parses the sender's signing key and binds it to the
+// sender address. Its failures are authentication failures: the envelope
+// cannot be attributed to anybody, which is exactly what ErrEnvelopeAuth
+// tells the recovery machinery.
+func decodeSenderPublicKey(senderAddress, encoded string) (identity.PublicKey, error) {
+	publicKey, err := identity.ParsePublicKeyBase64(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("decode sender public key: %w", err)
+		return identity.PublicKey{}, fmt.Errorf("%w: sender public key: %w", ErrEnvelopeAuth, err)
 	}
-	if len(raw) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("invalid sender public key size: %d", len(raw))
+	if publicKey.Fingerprint() != senderAddress {
+		return identity.PublicKey{}, fmt.Errorf("%w: sender public key does not match sender address", ErrEnvelopeAuth)
 	}
-
-	publicKey := ed25519.PublicKey(raw)
-	if identity.Fingerprint(publicKey) != senderAddress {
-		return nil, fmt.Errorf("sender public key does not match sender address")
-	}
-
 	return publicKey, nil
 }
 

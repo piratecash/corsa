@@ -341,15 +341,14 @@ func VerifyIdentityRecord(record SignedIdentityRecord, network domain.NetworkID,
 		return IdentityRecordBody{}, err
 	}
 
-	pubKeyBytes, err := base64.StdEncoding.DecodeString(string(body.PubKey))
+	// The key error stays in the chain (%w twice): a record arrives through
+	// whoever forwarded it, and callers tell "the author's key is one no
+	// honest node holds" apart from a forwarder's own fault by it.
+	pubKey, err := identity.ParsePublicKeyBase64(string(body.PubKey))
 	if err != nil {
-		return IdentityRecordBody{}, fmt.Errorf("%w: decode pubkey: %v", ErrIdentityRecordMalformed, err)
+		return IdentityRecordBody{}, fmt.Errorf("%w: pubkey: %w", ErrIdentityRecordMalformed, err)
 	}
-	if len(pubKeyBytes) != ed25519.PublicKeySize {
-		return IdentityRecordBody{}, fmt.Errorf("%w: pubkey is %d bytes, want %d",
-			ErrIdentityRecordMalformed, len(pubKeyBytes), ed25519.PublicKeySize)
-	}
-	if !ed25519.Verify(ed25519.PublicKey(pubKeyBytes), identityRecordSignedBytes(network, record.Body), record.Sig) {
+	if !pubKey.Verify(identityRecordSignedBytes(network, record.Body), record.Sig) {
 		return IdentityRecordBody{}, ErrIdentityRecordSignature
 	}
 	if err := identity.VerifyPublicKeyFingerprint(body.Address.String(), string(body.PubKey)); err != nil {
