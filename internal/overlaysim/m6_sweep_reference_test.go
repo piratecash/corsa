@@ -553,47 +553,287 @@ func TestM6TheDeltaHalvesReadOneStream(t *testing.T) {
 	body := strings.Join(m6OutcomeBody(m6SweepConfig{
 		Variant: m6DeltaVariant(), Population: m6WholeNetwork, Shape: sh, Seed: 1,
 	}, outcomes), "\n")
-	for _, want := range []string{"kept.", "cleared.", "pair scenario_runs=2", "claim "} {
+	for _, want := range []string{"kept.", "cleared.", "pair scenario_runs=2",
+		"pair offers_compared kept=", "claim "} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the stored δ record does not carry %q", want)
 		}
 	}
 }
 
-// TestM6TheDeltaGateOnBigShapesIsNamedNotDropped: an unresolved point of the
-// registry is recorded as a refusal with its reason, so no ledger can report a
-// complete grid.
-func TestM6TheDeltaGateOnBigShapesIsNamedNotDropped(t *testing.T) {
+// TestM6TheEnumerationCarriesTheDeltaPairsOfBothShapes: the ten δ
+// configurations of the big shape are in the set the driver walks.
+//
+// ⚠️ What it does and does not say. It replaces the fixture of the δ shape gate,
+// which stood in for the open point of registry §5.2.2 — the comparison held
+// both halves' whole offer traces. That point is closed in the comparison
+// (TestM6TheComparisonKeepsOneTickOfOffersAndNotTheRun), and the gate is gone
+// from the driver, so there is no gate left to call: this fixture can only say
+// that the configurations the gate used to refuse are enumerated. That they RUN
+// is not a fixture's statement — a run of that shape is minutes — it is the
+// batch's, and its evidence is the journal.
+//
+// ⚠️ Mutation that must break it: dropping the δ variant from the big shape's
+// enumeration, which is how 520 would quietly become 500 again.
+func TestM6TheEnumerationCarriesTheDeltaPairsOfBothShapes(t *testing.T) {
 	t.Parallel()
 
-	small := m6SweepConfig{Variant: m6DeltaVariant(), Population: m6WholeNetwork,
-		Shape: sweepShapes[0], Seed: 1}
-	if gate := m6GateFor(small); gate != "" {
-		t.Errorf("δ on %s is gated: %s", small.Shape.name, gate)
+	configs := m6SweepEnumeration(m6SweepShapes(), sweepSeeds)
+	byShape := map[string]int{}
+	for _, config := range configs {
+		if config.Variant.Kind == m6DeltaPair {
+			byShape[config.Shape.name]++
+		}
+	}
+	// Ten of each: one δ configuration × 5 seeds × 2 populations, per shape.
+	for _, sh := range m6SweepShapes() {
+		if byShape[sh.name] != 10 {
+			t.Errorf("the enumeration holds %d δ configurations on %s, want 10", byShape[sh.name],
+				sh.name)
+		}
+	}
+}
+
+// TestM6TheComparisonKeepsOneTickOfOffersAndNotTheRun is the memory property δ
+// on the big shape rests on: the comparison holds the offers of the tick it is
+// judging and releases them, instead of accumulating both halves' traces.
+//
+// ⚠️ Mutation that must break it: indexing the traces (`trace.Offers[before:]`)
+// instead of taking them. The verdict would be identical — that is exactly why
+// this is a separate fixture — and the traces would hold every offer of the run,
+// which on 1k×8 measured 2.54 GiB peak and is what made the big shape
+// unrunnable.
+func TestM6TheComparisonKeepsOneTickOfOffersAndNotTheRun(t *testing.T) {
+	t.Parallel()
+
+	main, control, _ := m6DeltaHalvesForAFixture(t)
+	comparison, err := compareM6Runs(main, control)
+	if err != nil {
+		t.Fatalf("comparing: %v", err)
+	}
+	if comparison.OffersCompared[0] < 1000 || comparison.OffersCompared[1] < 1000 {
+		t.Fatalf("the halves made %d and %d offers: too few for this fixture to say anything about "+
+			"what is kept", comparison.OffersCompared[0], comparison.OffersCompared[1])
+	}
+	for name, network := range map[string]*m6Network{"kept": main, "cleared": control} {
+		if !network.trace.OffersWindowed {
+			t.Errorf("the %s half's trace is not marked windowed, so a reader cannot tell that "+
+				"what is left is one tick and not the run", name)
+		}
+		if held := len(network.trace.Offers); held != 0 {
+			t.Errorf("the %s half's trace holds %d offers after the comparison; the last tick's "+
+				"were judged and should have been released with the rest", name, held)
+		}
 	}
 
-	big := small
-	big.Shape = sweepShapes[1]
-	gate := m6GateFor(big)
-	if gate == "" {
-		t.Fatalf("δ on %s is not gated: the comparator needs the offer trace of BOTH replaying "+
-			"halves, ≈3 GB each, which registry §5.2.2 names as open", big.Shape.name)
+	// And a trace in that state may not be mistaken for a run: recording from it
+	// would produce a stream of one tick under the name of the whole.
+	//
+	// ⚠️ Asked of an ADAPTIVE pair, because a δ half replays and recordStream
+	// refuses a replay for that reason first — the fixture would then pass
+	// without the windowed guard existing at all.
+	adaptive := m6PairBase(branchAPrime, false)
+	g := buildGraph(adaptive.Shape, adaptive.Seed, adaptive.Quota, adaptive.Policy)
+	base := runM6ModelOn(t, g, adaptive, everybody)
+	_, left, _ := pairOnBoundaries(t, g, adaptive, base.PhaseBoundaries())
+	if _, err := recordStream(left.report); err == nil {
+		t.Error("recordStream accepted a trace a comparison had consumed: the stream it produced " +
+			"would be one tick of the run")
+	} else if !strings.Contains(err.Error(), "one tick") {
+		t.Errorf("recordStream refused the consumed trace for another reason, so the guard is "+
+			"untested: %v", err)
 	}
-	if !strings.Contains(gate, "5.2.2") || !strings.Contains(gate, "trace") {
-		t.Errorf("the gate does not name the open point it comes from: %q", gate)
+}
+
+// TestM6TheWindowedComparisonMatchesTheWholeTraceOne is the equivalence the
+// change to the comparison has to keep: releasing each tick's offers changes
+// WHAT IS KEPT and nothing about what is compared.
+//
+// It runs the two halves a second time on their own, with their whole traces
+// kept, and judges the offers from those traces INDEPENDENTLY — grouped by tick
+// and owner, compared position by position, exactly as §6.17 states the
+// comparison — then holds that verdict against the comparator's.
+//
+// ⚠️ The second pair is run APART rather than in lockstep, which is itself part
+// of the property: the two halves are independent networks and the lockstep is
+// only how one comparison sees both. A half whose trace depended on being
+// stepped beside the other would show up here as a different sequence.
+//
+// ⚠️ Mutation that must break it: releasing a tick's offers BEFORE judging them
+// (or judging only the first owner of a tick). The counts would fall short of
+// the traces and the first divergence would move.
+func TestM6TheWindowedComparisonMatchesTheWholeTraceOne(t *testing.T) {
+	t.Parallel()
+
+	main, control, halves := m6DeltaHalvesForAFixture(t)
+	comparison, err := compareM6Runs(main, control)
+	if err != nil {
+		t.Fatalf("comparing: %v", err)
 	}
 
-	// Nothing else is gated: a gate that caught grid runs would silently shrink
-	// the 400.
-	for _, variant := range append(m6GridVariants(), m6ControlVariants()...) {
-		for _, sh := range m6SweepShapes() {
-			config := m6SweepConfig{Variant: variant, Population: m6WholeNetwork, Shape: sh, Seed: 1}
-			if gate := m6GateFor(config); gate != "" {
-				t.Errorf("%s on %s is gated (%s): the grid and its controls are not cut by this "+
-					"driver", variant.Name, sh.name, gate)
+	whole := make([][]m6OfferEntry, 2)
+	for index, config := range halves {
+		network, prepareErr := newM6Network(main.g, config, everybody)
+		if prepareErr != nil {
+			t.Fatalf("preparing half %d again: %v", index, prepareErr)
+		}
+		if _, runErr := network.Run(); runErr != nil {
+			t.Fatalf("running half %d on its own: %v", index, runErr)
+		}
+		whole[index] = network.trace.Offers
+	}
+
+	for index, offers := range whole {
+		if len(offers) != comparison.OffersCompared[index] {
+			t.Fatalf("half %d made %d offers when run on its own and the comparison judged %d: "+
+				"the two do not describe the same run", index, len(offers),
+				comparison.OffersCompared[index])
+		}
+	}
+
+	independent, found := firstDivergenceByOwnerAndTick(whole[0], whole[1])
+	switch {
+	case found && comparison.Divergence == nil:
+		t.Fatalf("the whole traces part at %s and the comparison found no divergence", independent)
+	case !found && comparison.Divergence != nil:
+		t.Fatalf("the whole traces never part and the comparison reports %s", comparison.Divergence)
+	case !found:
+		t.Fatal("the two halves never part: this fixture cannot say whether the verdicts agree")
+	}
+	if independent.Tick != comparison.Divergence.Tick || independent.Owner != comparison.Divergence.Owner {
+		t.Fatalf("the whole traces part at tick %d owner %d, the comparison at tick %d owner %d",
+			independent.Tick, independent.Owner, comparison.Divergence.Tick, comparison.Divergence.Owner)
+	}
+	for name, pair := range map[string][2]*m6OfferEntry{
+		"main":    {independent.Main, comparison.Divergence.Main},
+		"control": {independent.Control, comparison.Divergence.Control},
+	} {
+		switch {
+		case (pair[0] == nil) != (pair[1] == nil):
+			t.Errorf("the %s side of the divergence is present in one verdict and absent in the "+
+				"other: %v against %v", name, pair[0], pair[1])
+		case pair[0] != nil && !pair[0].equal(*pair[1]):
+			t.Errorf("the %s side of the divergence differs: %s against %s", name, pair[0], pair[1])
+		}
+	}
+}
+
+// firstDivergenceByOwnerAndTick is the whole-trace reading of §6.17: group both
+// traces by tick and owner, compare each owner's entries of each tick position
+// by position, and name the earliest pair that differs.
+//
+// ⚠️ Written HERE, from the finished traces, and not shared with the comparator:
+// a reference that called the code it checks would check nothing.
+func firstDivergenceByOwnerAndTick(main, control []m6OfferEntry) (m6Divergence, bool) {
+	byTickAndOwner := func(offers []m6OfferEntry) map[int]map[int32][]m6OfferEntry {
+		grouped := map[int]map[int32][]m6OfferEntry{}
+		for _, offer := range offers {
+			if grouped[offer.Tick] == nil {
+				grouped[offer.Tick] = map[int32][]m6OfferEntry{}
+			}
+			grouped[offer.Tick][offer.Owner] = append(grouped[offer.Tick][offer.Owner], offer)
+		}
+		return grouped
+	}
+	left, right := byTickAndOwner(main), byTickAndOwner(control)
+
+	lastTick := 0
+	for _, grouped := range []map[int]map[int32][]m6OfferEntry{left, right} {
+		for tick := range grouped {
+			if tick > lastTick {
+				lastTick = tick
 			}
 		}
 	}
+	for tick := 0; tick <= lastTick; tick++ {
+		// The owners of this tick, in the order the main half served them and
+		// then the ones only the control served — the order the comparison
+		// walks, so "the earliest" means the same thing in both verdicts.
+		order := make([]int32, 0, len(left[tick])+len(right[tick]))
+		seen := map[int32]struct{}{}
+		for _, offer := range main {
+			if offer.Tick != tick {
+				continue
+			}
+			if _, already := seen[offer.Owner]; !already {
+				seen[offer.Owner] = struct{}{}
+				order = append(order, offer.Owner)
+			}
+		}
+		for _, offer := range control {
+			if offer.Tick != tick {
+				continue
+			}
+			if _, already := seen[offer.Owner]; !already {
+				seen[offer.Owner] = struct{}{}
+				order = append(order, offer.Owner)
+			}
+		}
+		for _, owner := range order {
+			one, other := left[tick][owner], right[tick][owner]
+			for index := 0; index < len(one) || index < len(other); index++ {
+				var mainOffer, controlOffer *m6OfferEntry
+				if index < len(one) {
+					mainOffer = &one[index]
+				}
+				if index < len(other) {
+					controlOffer = &other[index]
+				}
+				if mainOffer != nil && controlOffer != nil && mainOffer.equal(*controlOffer) {
+					continue
+				}
+				return m6Divergence{Tick: tick, Owner: owner, Main: mainOffer, Control: controlOffer}, true
+			}
+		}
+	}
+	return m6Divergence{}, false
+}
+
+// m6DeltaHalvesForAFixture prepares a δ pair on a short plan: the two fresh
+// halves for a comparison, and the configurations they were built from so a
+// fixture can build them again.
+func m6DeltaHalvesForAFixture(t *testing.T) (main, control *m6Network, halves [2]m6ModelConfig) {
+	t.Helper()
+
+	sh := sweepShapes[0]
+	model := m6GridBase(sh, 1)
+	model.Phases = &m6PhasePlan{FillTicks: 24, IdleTicks: 8, RecoveryTicks: 24, CadenceTicks: 8}
+	model.RecoveryWindow = 16
+	model.Membership = m6WholeNetwork.String()
+
+	g := buildGraph(sh, 1, m6GridQuota, policyCandidateC1)
+	border, rule, err := referencePool(g, model, everybody)
+	if err != nil {
+		t.Fatalf("deriving the border: %v", err)
+	}
+	model.NearFrom, model.NearFromRule = border, rule
+
+	recording := model
+	recording.RecordStream = true
+	recorder, err := newM6Network(g, recording, everybody)
+	if err != nil {
+		t.Fatalf("preparing the recording run: %v", err)
+	}
+	recorded, err := recorder.Run()
+	if err != nil {
+		t.Fatalf("the recording run: %v", err)
+	}
+
+	replay := model
+	replay.Stream = recorded.Recording
+	replay.TraceOffers = true
+	replay.ReplayPhases = recorded.PhaseBoundaries()
+	cleared := replay
+	cleared.StartEmpty = true
+
+	halves = [2]m6ModelConfig{replay, cleared}
+	if main, err = newM6Network(g, replay, everybody); err != nil {
+		t.Fatalf("preparing the half that keeps its memory: %v", err)
+	}
+	if control, err = newM6Network(g, cleared, everybody); err != nil {
+		t.Fatalf("preparing the half whose memory is cleared: %v", err)
+	}
+	return main, control, halves
 }
 
 // TestM6AStoredRunCarriesTheThreeAxesApart: coverage, cost and recovery are

@@ -22,6 +22,14 @@ package overlaysim
 // A comparison that folded them into one verdict would either fail on the
 // difference being measured (memory changes the offers — that is the point)
 // or pass on a difference nobody asked for.
+//
+// ⚠️ THE SEQUENCES ARE COMPARED WITHOUT BEING KEPT. Each tick's offers are
+// taken from the two traces and released as soon as they have been judged
+// (m6Trace.takeOffersOfTheTick), so the comparison holds one tick of each
+// half rather than two whole traces. Nothing about the comparison changes:
+// offers are still compared entry by entry, per owner, in order. What changes
+// is that δ on the big shape became runnable — the kept traces peaked at
+// 2.54 GiB on 1k×8, which is what the shape gate of the driver stood in for.
 
 import (
 	"fmt"
@@ -450,6 +458,12 @@ type m6Comparison struct {
 	// Pairing is what the two halves read (one source or not), decided once
 	// in prepareStreamClaims and read by the classifier.
 	Pairing m6SourcePairing
+	// OffersCompared is how many offers of each half were judged — main, then
+	// control. ⚠️ It is the count of what PASSED THROUGH the comparison, taken
+	// where the offers are handed over, and it is in the verdict because the
+	// halves' traces are released tick by tick: without it the record would say
+	// which claims held and not over how much.
+	OffersCompared [2]int
 }
 
 func (c *m6Comparison) claim(kind m6ClaimKind) *m6Claim {
@@ -574,7 +588,8 @@ func (c *m6Comparison) String() string {
 		}
 		onset = fmt.Sprintf("ONSET MISMATCH (main %s, control %s)", name(c.MainOnset), name(c.ControlOnset))
 	}
-	lines := []string{fmt.Sprintf("comparison over %d ticks, %s; sources: %s:", c.Ticks, onset, c.Pairing)}
+	lines := []string{fmt.Sprintf("comparison over %d ticks, %s; sources: %s; offers compared: "+
+		"%d main, %d control:", c.Ticks, onset, c.Pairing, c.OffersCompared[0], c.OffersCompared[1])}
 	for _, claim := range c.Claims {
 		lines = append(lines, "    "+claim.String())
 	}
@@ -642,8 +657,6 @@ func compareM6Runs(main, control *m6Network) (*m6Comparison, error) {
 
 	for tick := 0; ; tick++ {
 		main.tick, control.tick = tick, tick
-		offersBefore := len(main.trace.Offers)
-		controlOffersBefore := len(control.trace.Offers)
 
 		// ⚠️ The world is snapshotted AFTER the churn and the admissions of the
 		// tick and BEFORE anybody serves: that is the state every offer of the
@@ -665,8 +678,18 @@ func compareM6Runs(main, control *m6Network) (*m6Comparison, error) {
 		comparison.checkPhase(main, control, tick)
 		comparison.checkScenario(main, control, tick)
 		comparison.checkHeldEdges(main, control, tick)
-		comparison.checkOffers(main, control, worlds, tick,
-			main.trace.Offers[offersBefore:], control.trace.Offers[controlOffersBefore:])
+		// ⚠️ TAKEN, not indexed: the tick's offers are judged here and released
+		// there and then, so the comparison holds ONE TICK of each half instead
+		// of both whole traces. That is what the shape gate on δ used to stand
+		// in for — 2.54 GiB peak on 1k×8 with the traces kept, and the big shape
+		// is ten times the nodes. Nothing about WHAT is compared changes: the
+		// sequences are compared per owner, in order, tick by tick, exactly as
+		// before, and TestM6TheWindowedComparisonMatchesTheWholeTraceOne holds
+		// the two verdicts against each other.
+		mainOffers, controlOffers := main.trace.takeOffersOfTheTick(), control.trace.takeOffersOfTheTick()
+		comparison.OffersCompared[0] += len(mainOffers)
+		comparison.OffersCompared[1] += len(controlOffers)
+		comparison.checkOffers(main, control, worlds, tick, mainOffers, controlOffers)
 
 		if mainDone || controlDone {
 			if mainDone != controlDone {

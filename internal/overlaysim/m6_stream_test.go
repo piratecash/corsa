@@ -149,6 +149,13 @@ func recordStream(report *m6ModelReport) (*m6RecordedStream, error) {
 	if report.Trace.IDs == nil {
 		return nil, fmt.Errorf("the run's trace carries no identifiers, so its indices cannot be pinned")
 	}
+	// ⚠️ A trace a comparison consumed holds ONE TICK (m6Trace.OffersWindowed).
+	// Recording from it would produce a stream of the last tick and look like a
+	// recording of the run — the one failure mode the flag exists to prevent.
+	if report.Trace.OffersWindowed {
+		return nil, fmt.Errorf("the run's offer trace was consumed tick by tick by a comparison, " +
+			"so it holds one tick and not the run: there is no whole stream here to record")
+	}
 	stream := newM6RecordedStream(report.Config.Branch, report.Config.OmniscientControl,
 		report.Trace.IDs, report.Trace.Members)
 	stream.Exchanges, stream.Answers = report.ExchangesDone, report.AddressedAnswers

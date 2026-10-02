@@ -193,10 +193,36 @@ type m6Trace struct {
 	// measured; a recording carries it so a replay under another membership
 	// is refused.
 	Members []bool
+	// OffersWindowed marks a trace whose Offers no longer hold the run: a
+	// consumer that judges every tick as it is played (compareM6Runs) takes
+	// the tick's offers and releases them, so what is left is ONE TICK and
+	// the whole sequence exists only in the judgement that was made of it.
+	//
+	// ⚠️ It exists so that nothing can read the remainder as if it were the
+	// run. Keeping both halves' whole traces is what made δ unaffordable — 2.54
+	// GiB peak on 1k×8 and 27.3 GiB of address space on 10k×8, measured — and a
+	// flag is what makes dropping them safe rather than merely cheap.
+	OffersWindowed bool
 }
 
 func newM6Trace() *m6Trace {
 	return &m6Trace{ExposureAtOnset: map[int32]m6Exposure{}, OnsetTick: -1}
+}
+
+// takeOffersOfTheTick hands over every offer recorded since the previous call
+// and releases them from the trace.
+//
+// ⚠️ The caller RECEIVES the only reference: the trace keeps none, so what the
+// caller does not judge now is judged never. That is the contract compareM6Runs
+// meets by calling it once per tick, immediately before it compares — and the
+// reason the offers are handed over rather than indexed: an index into a slice
+// that is still growing is a window; this is a handover, and the remainder
+// cannot be mistaken for the run (OffersWindowed).
+func (t *m6Trace) takeOffersOfTheTick() []m6OfferEntry {
+	t.OffersWindowed = true
+	offers := t.Offers
+	t.Offers = nil
+	return offers
 }
 
 // m6StreamDivergence is where two offer traces first part, and why.

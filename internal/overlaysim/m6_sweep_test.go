@@ -471,16 +471,16 @@ func m6RunsByKind(configs []m6SweepConfig) map[m6VariantKind]int {
 
 // --- running one configuration ------------------------------------------------------
 
-// m6DeltaGateOnBigShapes is the open point of registry §5.2.2, enforced instead
-// of remembered.
-//
-// ⚠️ The comparator steps both halves and compares their OFFER SEQUENCES, so
-// both replaying halves need TraceOffers — an estimated ≈3 GB each on 10k×8. The
-// direct recording (decision 3.4) took the trace off the RECORDING run only.
-// Until there is either a comparison without a full trace or a memory gate, δ on
-// 10k×8 is not run — and it is NAMED here rather than dropped, because a sweep
-// that silently ran 500 of 520 would report a complete grid.
-const m6DeltaGateOnBigShapes = 2_000
+// ⚠️ NOTHING IS GATED HERE ANY MORE, and the absence is deliberate. δ on 10k×8
+// used to be refused by shape, standing in for the open point of registry
+// §5.2.2: the comparator held BOTH replaying halves' offer traces, which peaked
+// at 2.54 GiB on 1k×8. The comparison now releases each tick's offers as soon
+// as it has judged them (m6Trace.takeOffersOfTheTick), so the pair costs what a
+// pair of ordinary runs of that shape costs, and a refusal by shape would be a
+// refusal of something that runs. What a configuration this driver cannot run
+// would still look like is a failure with its reason — runSweep records the
+// callback's error exactly so, and the ledger then cannot report a complete
+// grid.
 
 // m6Outcomes is what one configuration produced: one report for an ordinary run,
 // two plus a comparison for a δ pair.
@@ -534,8 +534,9 @@ func runM6Configuration(
 // two runs this configuration books are the PAIR, exactly as §5.2.2 counts them.
 //
 // ⚠️ Both halves get TraceOffers: the comparison is over the offer sequences and
-// compareM6Runs refuses without it. That is the memory bound the gate above is
-// about.
+// compareM6Runs refuses without it. The trace is what it costs, and it is a
+// tick's worth at a time — the comparison takes each tick's offers and releases
+// them, which is what makes this affordable on 10k×8.
 func runM6DeltaPair(
 	g *graph, model m6ModelConfig, member func(nodeID) bool,
 ) (m6Outcomes, error) {
@@ -711,6 +712,12 @@ func m6OutcomeBody(config m6SweepConfig, outcomes m6Outcomes) []string {
 	lines = append(lines, m6RunBody("cleared.", outcomes.Reports[1])...)
 	lines = append(lines, "pair scenario_runs=2 — the halves are stepped in lockstep and compared; "+
 		"neither is a measurement on its own")
+	// ⚠️ HOW MUCH was compared, beside WHAT held. The comparison releases each
+	// tick's offers once it has judged them, so this count is the only place
+	// the size of the compared sequences survives — and a claim that held over
+	// nothing would otherwise read like a claim that held.
+	lines = append(lines, fmt.Sprintf("pair offers_compared kept=%d cleared=%d",
+		outcomes.Comparison.OffersCompared[0], outcomes.Comparison.OffersCompared[1]))
 	for _, claim := range outcomes.Comparison.Claims {
 		lines = append(lines, fmt.Sprintf("claim %s = %s%s", claim.Kind, claim.Status,
 			detailSuffix(claim)))
@@ -784,13 +791,6 @@ func TestM6BucketFillingAndRecoveryOnTheCandidate(t *testing.T) {
 
 	runSweep(t, selection, keys, &out, func(index int, _ runKey) ([]string, string, error) {
 		config := configs[index]
-		if gate := m6GateFor(config); gate != "" {
-			// ⚠️ NAMED, not dropped. A gate is recorded like a failure so the
-			// ledger cannot report a complete grid, and the reason travels with
-			// the record.
-			return nil, "", fmt.Errorf("%s", gate)
-		}
-
 		if want := graphCacheKey(config.Shape, config.Seed, policyCandidateC1); cachedFor != want {
 			cachedGraph = buildGraph(config.Shape, config.Seed, m6GridQuota, policyCandidateC1)
 			cachedFor = want
@@ -823,19 +823,6 @@ func TestM6BucketFillingAndRecoveryOnTheCandidate(t *testing.T) {
 		"constraints, not a mathematical upper bound over all possible mechanisms.\n")
 
 	t.Log(out.String())
-}
-
-// m6GateFor names a configuration this environment will not run, and why. ⚠️ An
-// empty string means "run it"; anything else is recorded as a refusal with its
-// reason, never as a silent skip.
-func m6GateFor(config m6SweepConfig) string {
-	if config.Variant.Kind == m6DeltaPair && config.Shape.nodes > m6DeltaGateOnBigShapes {
-		return fmt.Sprintf("gate: δ on %s needs the offer trace of BOTH replaying halves "+
-			"(compareM6Runs compares offer sequences), estimated ≈3 GB each — registry §5.2.2 "+
-			"names this open and unresolved: either a comparison without a full trace or a memory "+
-			"gate is needed first. Not run, and not counted as complete", config.Shape.name)
-	}
-	return ""
 }
 
 // pairingKey names the (shape, seed, population) a control is paired with.
