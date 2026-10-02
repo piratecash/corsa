@@ -123,6 +123,12 @@ Response:
       {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
     ],
     "routing_v3_triplet": {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
+  },
+  "transport_traffic": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512901233Z",
+    "bytes_sent": 48211934,
+    "bytes_received": 51027716
   }
 }
 ```
@@ -132,8 +138,8 @@ Response:
 > their own `read_at` (counters) and `updated_at` (the census); a rate or a window computed against
 > `snapshot_at` is wrong by however long the table stood still.
 >
-> **Three snapshots in one response are NOT one atomic snapshot.** `mode_selection`
-> and `session_outcomes` are cumulative counters read at slightly different
+> **Four snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
+> `session_outcomes` and `transport_traffic` are cumulative counters read at slightly different
 > instants; `neighbours` is a gauge with its own `updated_at`, refreshed in the
 > background. Arithmetic across them assumes a simultaneity these timestamps do
 > not support.
@@ -241,6 +247,11 @@ whole network is in".
 | `neighbours.capabilities` | array | One row per capability this build knows, INCLUDING zero rows — early in a rollout the zero row is the interesting one. Keys are release constants, never strings taken from the wire. |
 | `neighbours.capabilities[].capability` / `.connections` / `.peers` | string / int / int | Capability name, connections advertising it, distinct peers owning at least one such connection. |
 | `neighbours.routing_v3_triplet` | object | Connections advertising the COMPLETE v3 triplet on that ONE connection. **Not derivable from three `capabilities` rows:** intersecting them would claim a combination no single connection offered — a peer whose two sockets advertise different halves supports the triplet on neither. |
+| `transport_traffic` | object | **Transport bytes (metric 05).** Every byte this process read from or wrote to a peer socket — accepted connections, session dials and the one-shot recovery / notice dials; handshakes, heartbeats, retransmissions and relay/datagram frames included, because they all cross the socket. Measured at exactly one point (`netcore.MeteredConn`), so nothing is counted twice. Cumulative, in memory only, never reset by reading; not the same quantity as the per-peer totals of `fetch_network_stats`, which are attribution and can dip. Lock-free: the counters are atomics. |
+| `transport_traffic.started_at` | string\|null | RFC 3339 (nanoseconds) start of the period — the node's start. **A different `started_at` between two answers means the process restarted and the counters began again from zero: discard the pair.** |
+| `transport_traffic.read_at` | string\|null | RFC 3339 (nanoseconds) moment the counters were loaded. A rate is `Δbytes / Δread_at` over two readings by ONE sequential poller with the same `started_at` and `read_at₂ > read_at₁`; under that rule neither difference can be negative. |
+| `transport_traffic.bytes_sent` | uint64 | Bytes written to peer sockets. |
+| `transport_traffic.bytes_received` | uint64 | Bytes read from peer sockets. |
 
 ### fetchRouteLookup
 
@@ -582,6 +593,12 @@ corsa-cli fetchRouteSummary
       {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
     ],
     "routing_v3_triplet": {"capability": "mesh_routing_v3", "connections": 6, "peers": 5}
+  },
+  "transport_traffic": {
+    "started_at": "2026-09-06T09:00:00.104512Z",
+    "read_at": "2026-09-06T09:31:44.512901233Z",
+    "bytes_sent": 48211934,
+    "bytes_received": 51027716
   }
 }
 ```
@@ -591,8 +608,8 @@ corsa-cli fetchRouteSummary
 > (счётчики) и `updated_at` (перепись). Скорость или окно, посчитанные против `snapshot_at`, неверны
 > ровно на то время, что таблица простояла.
 >
-> **Три снимка в одном ответе — не один атомарный снимок.** `mode_selection` и
-> `session_outcomes` — накопительные счётчики, прочитанные в чуть разные моменты;
+> **Четыре снимка в одном ответе — не один атомарный снимок.** `mode_selection`,
+> `session_outcomes` и `transport_traffic` — накопительные счётчики, прочитанные в чуть разные моменты;
 > `neighbours` — гейдж с собственным `updated_at`, обновляемый фоново. Считать
 > арифметику между ними так, будто они сняты одновременно, эти отметки времени
 > не позволяют.
@@ -697,6 +714,11 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `neighbours.capabilities` | array | По строке на каждую известную сборке capability, ВКЛЮЧАЯ нулевые — в начале раскатки нулевая строка и есть интересная. Ключи — константы выпуска, а не строки с провода. |
 | `neighbours.capabilities[].capability` / `.connections` / `.peers` | string / int / int | Имя capability, число соединений, её объявивших, и число различных соседей, владеющих хотя бы одним таким соединением. |
 | `neighbours.routing_v3_triplet` | object | Соединения, объявившие ПОЛНУЮ v3-тройку на ОДНОМ этом соединении. **Не выводится пересечением трёх строк `capabilities`:** пересечение утверждало бы комбинацию, которой не предлагало ни одно соединение, — сосед, чьи два сокета объявляют разные половины, не поддерживает тройку ни на одном. |
+| `transport_traffic` | object | **Транспортные байты (метрика 05).** Каждый байт, прочитанный этим процессом из peer-сокета или записанный в него, — принятые соединения, дозвоны под сессию и одноразовые recovery/notice-дозвоны; рукопожатия, heartbeat-ы, повторные отправки и relay-/датаграммные кадры включены, потому что все они проходят через сокет. Учитывается ровно в одной точке (`netcore.MeteredConn`), поэтому ничего не считается дважды. Накопительно, только в памяти, чтением не сбрасывается; это не та же величина, что итоги по пирам в `fetch_network_stats` — те являются атрибуцией и могут проседать. Без блокировок: счётчики atomic. |
+| `transport_traffic.started_at` | string\|null | RFC 3339 (наносекунды) начало периода — старт узла. **Другой `started_at` между двумя ответами означает рестарт процесса, счётчики начались с нуля: такую пару отбрасывать.** |
+| `transport_traffic.read_at` | string\|null | RFC 3339 (наносекунды) момент загрузки счётчиков. Скорость — `Δбайт / Δread_at` по двум чтениям ОДНОГО последовательного опрашивающего с одинаковым `started_at` и `read_at₂ > read_at₁`; при этом правиле ни одна разность не бывает отрицательной. |
+| `transport_traffic.bytes_sent` | uint64 | Байты, записанные в peer-сокеты. |
+| `transport_traffic.bytes_received` | uint64 | Байты, прочитанные из peer-сокетов. |
 
 ### fetchRouteLookup
 

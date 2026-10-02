@@ -49,6 +49,7 @@ func newMockRoutingProvider(
 	m.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Maybe()
 	m.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Maybe()
 	m.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Maybe()
+	m.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Maybe()
 	// fetchRouteLookup reads HealthSnapshot (full per-pair tiers) for its
 	// Dead/cooldown filters + CompositeScore ranking, because the published
 	// Snapshot.Health now carries only the routing-relevant {Dead ∪ cooled}
@@ -420,6 +421,7 @@ func TestFetchRouteSummary_OverloadEngagedCyclesSurfaced(t *testing.T) {
 	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
 	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
+	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -481,6 +483,7 @@ func TestFetchRouteSummary_DigestStatsSurfaced(t *testing.T) {
 	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
 	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
+	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -538,6 +541,7 @@ func TestFetchRouteSummary_JournalChurnSurfaced(t *testing.T) {
 	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
 	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
+	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -1307,6 +1311,10 @@ func TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps(t *testing.
 		Ready:     true,
 		UpdatedAt: now,
 	}).Once()
+	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{
+		StartedAt: started,
+		ReadAt:    now,
+	}).Once()
 
 	table := rpc.NewCommandTable()
 	rpc.RegisterRoutingCommands(table, provider)
@@ -1326,6 +1334,7 @@ func TestFetchRouteSummaryKeepsSubSecondPrecisionOnRolloutTimestamps(t *testing.
 		{"mode_selection", "read_at"},
 		{"session_outcomes", "read_at"},
 		{"neighbours", "updated_at"},
+		{"transport_traffic", "read_at"},
 	} {
 		section, ok := result[probe.section].(map[string]interface{})
 		if !ok {

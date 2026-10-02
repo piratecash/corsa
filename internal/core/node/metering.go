@@ -236,6 +236,11 @@ func (s *Service) networkStatsFrame() protocol.Frame {
 //
 // The reply reuses the network_stats frame shape so the collector reads
 // TotalBytesSent / TotalBytesReceived unchanged; the per-peer fields stay zero.
+//
+// Transport carries the monotonic socket-level totals next to them. They are
+// read without peerMu and are a different quantity, not a corrected version
+// of the three totals: those keep their meaning (attribution to verified
+// peers, persisted across restarts) for the consumers that already read them.
 func (s *Service) trafficTotalsFrame() protocol.Frame {
 	s.peerMu.RLock()
 	sent, received := s.sumLiveTrafficLocked()
@@ -251,6 +256,7 @@ func (s *Service) trafficTotalsFrame() protocol.Frame {
 			TotalBytesSent:     sent,
 			TotalBytesReceived: received,
 			TotalTraffic:       sent + received,
+			Transport:          transportTrafficFrame(s.TransportTrafficStats()),
 		},
 	}
 }

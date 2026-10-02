@@ -195,6 +195,16 @@ type RoutingProvider interface {
 	// immutable value.
 	NeighbourComposition() domain.NeighbourComposition
 
+	// TransportTrafficStats returns every byte read from or written to a peer
+	// socket since the process started, with the period it covers. It rides
+	// the rollout command because measurements are taken from a SEPARATE
+	// process, which cannot send the in-process fetch_traffic_totals frame;
+	// fetch_network_stats is not used because polling it re-arms the per-peer
+	// snapshot rebuild and would perturb the node being measured. Lock-free —
+	// the counters are atomics. See docs/refactoring/dht/05-rollout-metrics.md
+	// §5.3.
+	TransportTrafficStats() domain.TransportTrafficStats
+
 	// HealthSnapshot returns a deep copy of every tracked
 	// RouteHealthState (Phase 2). Used by the fetchRouteHealth RPC and,
 	// since Snapshot.Health was narrowed to the Dead∪cooled subset, by

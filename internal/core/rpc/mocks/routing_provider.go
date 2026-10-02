@@ -498,3 +498,47 @@ func (_c *MockRoutingProvider_SessionOutcomeStats_Call) RunAndReturn(run func() 
 	_c.Call.Return(run)
 	return _c
 }
+
+// TransportTrafficStats provides a mock function for the type MockRoutingProvider
+func (_mock *MockRoutingProvider) TransportTrafficStats() domain.TransportTrafficStats {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for TransportTrafficStats")
+	}
+
+	var r0 domain.TransportTrafficStats
+	if returnFunc, ok := ret.Get(0).(func() domain.TransportTrafficStats); ok {
+		r0 = returnFunc()
+	} else {
+		r0 = ret.Get(0).(domain.TransportTrafficStats)
+	}
+	return r0
+}
+
+// MockRoutingProvider_TransportTrafficStats_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'TransportTrafficStats'
+type MockRoutingProvider_TransportTrafficStats_Call struct {
+	*mock.Call
+}
+
+// TransportTrafficStats is a helper method to define mock.On call
+func (_e *MockRoutingProvider_Expecter) TransportTrafficStats() *MockRoutingProvider_TransportTrafficStats_Call {
+	return &MockRoutingProvider_TransportTrafficStats_Call{Call: _e.mock.On("TransportTrafficStats")}
+}
+
+func (_c *MockRoutingProvider_TransportTrafficStats_Call) Run(run func()) *MockRoutingProvider_TransportTrafficStats_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockRoutingProvider_TransportTrafficStats_Call) Return(transportTrafficStats domain.TransportTrafficStats) *MockRoutingProvider_TransportTrafficStats_Call {
+	_c.Call.Return(transportTrafficStats)
+	return _c
+}
+
+func (_c *MockRoutingProvider_TransportTrafficStats_Call) RunAndReturn(run func() domain.TransportTrafficStats) *MockRoutingProvider_TransportTrafficStats_Call {
+	_c.Call.Return(run)
+	return _c
+}

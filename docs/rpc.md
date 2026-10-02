@@ -98,7 +98,7 @@ graph TB
 ```
 *Diagram 1 — Overall architecture.*
 
-Core Node layer is always present and includes CommandTable, NodeProvider, MetricsProvider, and HTTP wrapper. Desktop Providers (ChatlogProvider, DMRouterProvider, CaptureProvider) are optional — on standalone node they are nil, their commands return 503 and are hidden from help. MetricsProvider (metrics.Collector) collects traffic samples from node.Service via the lightweight local `fetch_traffic_totals` frame (totals only — it does not arm the full `fetch_network_stats` snapshot rebuild) and stores them in a ring buffer for `fetchTrafficHistory`. CaptureProvider (CaptureManager) manages per-connection wire traffic recording via three tap points in the network I/O path (see [debug.md](debug.md) for the capture architecture diagram).
+Core Node layer is always present and includes CommandTable, NodeProvider, MetricsProvider, and HTTP wrapper. Desktop Providers (ChatlogProvider, DMRouterProvider, CaptureProvider) are optional — on standalone node they are nil, their commands return 503 and are hidden from help. MetricsProvider (metrics.Collector) collects traffic samples from node.Service via the lightweight local `fetch_traffic_totals` frame (totals only — it does not arm the full `fetch_network_stats` snapshot rebuild; the same answer also carries the monotonic socket-level `transport` block, see [metrics.md](metrics.md) "Transport totals") and stores them in a ring buffer for `fetchTrafficHistory`. CaptureProvider (CaptureManager) manages per-connection wire traffic recording via three tap points in the network I/O path (see [debug.md](debug.md) for the capture architecture diagram).
 
 #### Request Processing Flow
 
@@ -595,7 +595,7 @@ graph TB
 ```
 *Диаграмма 1 — Общая архитектура.*
 
-Слой ядра ноды всегда присутствует и включает CommandTable, NodeProvider, MetricsProvider и HTTP-обёртку. Desktop-провайдеры (ChatlogProvider, DMRouterProvider, CaptureProvider) опциональны — на standalone-ноде они равны nil, их команды возвращают 503 и скрыты из help. MetricsProvider (metrics.Collector) собирает сэмплы трафика от node.Service через лёгкий локальный фрейм `fetch_traffic_totals` (только итоги — он не взводит rebuild полного `fetch_network_stats`-snapshot) и хранит их в кольцевом буфере для `fetchTrafficHistory`. CaptureProvider (CaptureManager) управляет записью wire-трафика по соединениям через три tap-точки в сетевом I/O (подробности — [debug.md](debug.md)).
+Слой ядра ноды всегда присутствует и включает CommandTable, NodeProvider, MetricsProvider и HTTP-обёртку. Desktop-провайдеры (ChatlogProvider, DMRouterProvider, CaptureProvider) опциональны — на standalone-ноде они равны nil, их команды возвращают 503 и скрыты из help. MetricsProvider (metrics.Collector) собирает сэмплы трафика от node.Service через лёгкий локальный фрейм `fetch_traffic_totals` (только итоги — он не взводит rebuild полного `fetch_network_stats`-snapshot; тот же ответ несёт монотонный блок `transport` с байтами уровня сокета, см. [metrics.md](metrics.md) «Транспортные итоги») и хранит их в кольцевом буфере для `fetchTrafficHistory`. CaptureProvider (CaptureManager) управляет записью wire-трафика по соединениям через три tap-точки в сетевом I/O (подробности — [debug.md](debug.md)).
 
 #### Поток обработки запроса
 

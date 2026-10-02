@@ -275,7 +275,11 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", errPeerDialTransport, err)
 	}
-	conn := netcore.NewMeteredConn(rawConn)
+	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
+	if err != nil {
+		_ = rawConn.Close()
+		return false, fmt.Errorf("meter peer session socket %s: %w", address, err)
+	}
 	var session *peerSession
 	defer func() {
 		s.accumulateSessionTraffic(address, conn)
@@ -1006,7 +1010,14 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		// separate "never reached them" from a handshake refusal by type.
 		return nil, fmt.Errorf("%w: %w", errPeerDialTransport, err)
 	}
-	conn := netcore.NewMeteredConn(rawConn)
+	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
+	if err != nil {
+		// Unreachable while transportTotals is a field of *Service. If it ever
+		// becomes reachable, it is a local fault: onCMDialFailed must not charge
+		// it to the peer as a failed dial.
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("meter peer session socket %s: %w", address, err)
+	}
 
 	// Guard goroutine: close the connection if the parent context is cancelled
 	// during the handshake phase, or if we signal abort via closeConn.

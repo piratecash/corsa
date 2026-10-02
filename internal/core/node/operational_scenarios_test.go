@@ -59,7 +59,7 @@ func newScenarioSession(
 	s := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: netcore.NewMeteredConn(local),
+		metered: newTestMeteredConn(t, local, &netcore.TransportTotals{}),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),

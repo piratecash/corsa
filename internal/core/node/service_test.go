@@ -2294,23 +2294,18 @@ func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Ident
 	return startTestService(t, ctx, cancel, svc)
 }
 
+// startTestService runs svc for an ordinary test: every failure
+// runServiceForTest reports becomes t.Fatal, except an unfinished background
+// drain, which has only ever been worth a log line.
 func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFunc, svc *Service) (*Service, func()) {
 	t.Helper()
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- svc.Run(ctx)
-	}()
+	running := runServiceForTest(ctx, svc)
 
-	if svc.cfg.EffectiveListenerEnabled() {
-		waitForCondition(t, 3*time.Second, func() bool {
-			conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 200*time.Millisecond)
-			if err == nil {
-				_ = conn.Close()
-				return true
-			}
-			return false
-		})
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer readyCancel()
+	if err := running.AwaitReady(readyCtx); err != nil {
+		t.Fatalf("node did not become ready: %v", err)
 	}
 
 	stop := func() {
@@ -2325,26 +2320,18 @@ func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFu
 		// body itself passed. 5 s is well above observed shutdown
 		// latencies on CI while still catching genuine shutdown hangs
 		// quickly enough to keep the suite fast.
-		select {
-		case err := <-errCh:
-			if err != nil {
-				t.Fatalf("node stopped with error: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for node shutdown")
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		if err := running.Stop(stopCtx); err != nil {
+			t.Fatalf("node shutdown: %v", err)
 		}
 		// Wait for fire-and-forget goroutines (trust store writes,
 		// gossip fan-outs, etc.) to finish so TempDir cleanup does not
 		// race with async disk writes.
-		bgDone := make(chan struct{})
-		go func() {
-			svc.WaitBackground()
-			close(bgDone)
-		}()
-		select {
-		case <-bgDone:
-		case <-time.After(3 * time.Second):
-			t.Logf("WaitBackground timed out — some background goroutines may still be running")
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer drainCancel()
+		if err := running.DrainBackground(drainCtx); err != nil {
+			t.Logf("%v — some background goroutines may still be running", err)
 		}
 	}
 
@@ -6829,7 +6816,9 @@ func TestAddPeerAddressWithoutNodeTypeKeepsTypeUnknown(t *testing.T) {
 	if pm := svc.persistedMeta[domain.PeerAddress("6.6.6.6:64646")]; pm != nil && pm.NodeType != domain.NodeTypeUnknown {
 		t.Fatalf("persistedMeta node type = %s, want unknown", pm.NodeType)
 	}
-	if got := svc.peerTypeForAddress(domain.PeerAddress("6.6.6.6:64646")); got != domain.NodeTypeUnknown {
+	// The Locked variant: peerMu is already held above, and a nested RLock
+	// deadlocks as soon as a writer queues between the two acquisitions.
+	if got := svc.peerTypeForAddressLocked(domain.PeerAddress("6.6.6.6:64646")); got != domain.NodeTypeUnknown {
 		t.Fatalf("peerTypeForAddress = %s, want unknown", got)
 	}
 }

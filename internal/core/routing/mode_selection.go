@@ -329,8 +329,10 @@ func (c *ModeSelectionCounters) Snapshot() ModeSelectionStats {
 	if c == nil {
 		return ModeSelectionStats{}
 	}
-	// Stamped BEFORE the loads, so the window a reader computes can only be
-	// slightly too wide — never too narrow, which would over-state a rate.
+	// The stamp and the loads are not one atomic step; their order only moves
+	// the period's closing edge by the nanoseconds the loads take. Rates stay
+	// honest through the pairing rule instead: two readings by one sequential
+	// poller, same StartedAt, ReadAt₂ > ReadAt₁.
 	stats := ModeSelectionStats{StartedAt: c.startedAt, ReadAt: time.Now().UTC()}
 	for op := AnnounceOperation(0); op < announceOperationSlots; op++ {
 		for mode := AnnounceMode(0); mode < announceModeSlots; mode++ {

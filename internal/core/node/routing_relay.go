@@ -36,6 +36,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -1173,8 +1174,17 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// exists, so it draws on the same ceiling. Refused means the notice is
 	// not delivered by this path — a notice is not worth exceeding the limit,
 	// and the peer will learn the same fact from the next live connection.
-	conn, err := s.dialAddressWithBudget(address, syncHandshakeTimeout)
+	rawConn, err := s.dialAddressWithBudget(address, syncHandshakeTimeout)
 	if err != nil {
+		return
+	}
+	// Metered for the node-wide transport totals only, like syncPeer: a
+	// one-shot dial outside the per-peer health totals, but still bytes on
+	// the wire.
+	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
+	if err != nil {
+		_ = rawConn.Close()
+		log.Error().Err(err).Str("peer", string(address)).Msg("send_notice_meter_failed")
 		return
 	}
 	defer func() { _ = conn.Close() }()

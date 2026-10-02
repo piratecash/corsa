@@ -337,6 +337,25 @@ type NetworkStatsFrame struct {
 	ConnectedPeers     int                `json:"connected_peers"`
 	KnownPeers         int                `json:"known_peers"`
 	PeerTraffic        []PeerTrafficFrame `json:"peer_traffic"`
+	// Transport is the monotonic transport byte count, filled only by the
+	// local fetch_traffic_totals answer. It is a separate block rather than a
+	// new meaning for the totals above: those are per-peer attribution summed
+	// up, and they can dip when a session leaves the registry before its bytes
+	// are folded into health, or when a health row is evicted. nil means the
+	// answer was produced by a path that does not report it.
+	Transport *TransportTrafficFrame `json:"transport,omitempty"`
+}
+
+// TransportTrafficFrame carries every byte read from or written to a peer
+// socket since StartedAt. The counters never decrease while StartedAt stays
+// the same; a new StartedAt marks a process restart, after which they start
+// from zero again. A rate is a difference of two readings with the same
+// StartedAt over the difference of their ReadAt.
+type TransportTrafficFrame struct {
+	StartedAt     time.Time `json:"started_at"`
+	ReadAt        time.Time `json:"read_at"`
+	BytesSent     uint64    `json:"bytes_sent"`
+	BytesReceived uint64    `json:"bytes_received"`
 }
 
 // PeerTrafficFrame holds per-peer traffic counters.

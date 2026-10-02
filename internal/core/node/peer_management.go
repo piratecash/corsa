@@ -1347,9 +1347,18 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// ceiling like any other. A refusal here means the sync does not happen —
 	// which is the point: recovering a sender key is worth a connection, but
 	// not worth exceeding the node's own limit (conn_budget_dial.go).
-	conn, err := s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
+	rawConn, err := s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_dial_failed")
+		return 0
+	}
+	// Metered for the node-wide transport totals only. This dial never becomes
+	// a session, so its bytes stay out of the per-peer health totals, exactly
+	// as before; what it must not do is cross the wire uncounted.
+	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
+	if err != nil {
+		_ = rawConn.Close()
+		log.Error().Err(err).Str("peer", string(address)).Msg("sync_peer_meter_failed")
 		return 0
 	}
 

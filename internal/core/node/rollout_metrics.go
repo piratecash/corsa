@@ -105,9 +105,10 @@ func (c *sessionOutcomeCounters) snapshot() domain.SessionOutcomeStats {
 	// is the trade a reader can actually work with.
 	stats := domain.SessionOutcomeStats{
 		StartedAt: c.startedAt,
-		// Stamped before the loads for the same reason the mode counters are:
-		// a window that is slightly too wide under-states a rate, and a metric
-		// that errs towards "quieter than reality" is the safer of the two.
+		// The stamp and the loads are not one atomic step; their order only
+		// moves the period's closing edge by the nanoseconds the loads take.
+		// Rates stay honest through the pairing rule instead: two readings
+		// by one sequential poller, same StartedAt, ReadAt₂ > ReadAt₁.
 		ReadAt:        time.Now().UTC(),
 		Succeeded:     c.succeeded.Load(),
 		ErrorsConnect: c.errorsConnect.Load(),

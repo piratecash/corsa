@@ -344,10 +344,11 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 		// existing keys: they answer a different question (what the fleet
 		// around this node runs) and are read together or not at all.
 		//
-		// Three snapshots, and they are deliberately NOT presented as one
-		// atomic view: mode_selection and session_outcomes are cumulative
-		// counters read at slightly different instants, neighbours is a gauge
-		// refreshed on a background cadence with its own updated_at. Pretending
+		// Four snapshots, and they are deliberately NOT presented as one
+		// atomic view: mode_selection, session_outcomes and transport_traffic
+		// are cumulative counters read at slightly different instants,
+		// neighbours is a gauge refreshed on a background cadence with its own
+		// updated_at. Pretending
 		// otherwise would invite arithmetic across them that the timestamps do
 		// not support.
 		modeSelection := rp.ModeSelectionStats()
@@ -402,6 +403,17 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"routing_v3_triplet": capabilityUsageJSON(composition.RoutingV3Triplet),
 		}
 
+		// Transport bytes (metric 05, §5.3): cumulative since started_at,
+		// never reset by reading. A different started_at between two answers
+		// means the node restarted and the pair must be discarded.
+		transport := rp.TransportTrafficStats()
+		transportTraffic := map[string]interface{}{
+			"started_at":     formatOptionalTime(transport.StartedAt),
+			"read_at":        formatOptionalTime(transport.ReadAt),
+			"bytes_sent":     transport.BytesSent,
+			"bytes_received": transport.BytesReceived,
+		}
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -417,6 +429,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"mode_selection":       modeSelectionStats,
 			"session_outcomes":     sessionOutcomes,
 			"neighbours":           neighbours,
+			"transport_traffic":    transportTraffic,
 		})
 	}
 }

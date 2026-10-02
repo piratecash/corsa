@@ -156,6 +156,17 @@ type Service struct {
 	// Immutable after construction — no synchronisation required.
 	startedAt time.Time
 
+	// transportTotals counts every byte that crossed a peer socket of this
+	// process, advanced only inside netcore.MeteredConn (transport_traffic.go,
+	// docs/refactoring/dht/05-rollout-metrics.md §5.3). Deliberately OUTSIDE
+	// the seven-domain mutex scheme: the counters are atomics advanced on the
+	// read and write path of every connection, and putting that path behind
+	// a domain mutex would serialise the network for a statistic. Held BY
+	// VALUE and never replaced, so its zero value is live in struct-literal
+	// test fixtures too, and every MeteredConn can hold a stable pointer to
+	// it. Its period starts at startedAt. See docs/locking.md.
+	transportTotals netcore.TransportTotals
+
 	// datagramMetrics counts every decision the datagram ingress makes
 	// (docs/refactoring/datagram-transport.md §10). Deliberately OUTSIDE
 	// the seven-domain mutex scheme: the pointer is assigned once by
@@ -2818,7 +2829,12 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		_ = conn.Close()
 		return
 	}
-	metered := netcore.NewMeteredConn(conn)
+	metered, err := netcore.NewMeteredConn(conn, &s.transportTotals)
+	if err != nil {
+		log.Error().Err(err).Str("addr", conn.RemoteAddr().String()).Msg("reject connection: meter failed")
+		_ = conn.Close()
+		return
+	}
 	if !s.registerInboundConn(metered, reservation) {
 		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections").Msg("reject connection")
 		_ = conn.Close()
@@ -4190,7 +4206,8 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	case "fetch_traffic_totals":
 		// Lightweight totals for the metrics collector's per-second traffic
 		// sampling — no per-peer / map / slice allocations (only the returned
-		// frame value escapes). Deliberately does NOT arm the
+		// frame value and its *NetworkStatsFrame / *TransportTrafficFrame
+		// escape). Deliberately does NOT arm the
 		// network_stats rebuild-gate (see trafficTotalsFrame). Local-only —
 		// not exposed on the wire/HTTP command tables.
 		return s.trafficTotalsFrame()

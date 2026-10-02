@@ -100,7 +100,7 @@ func TestSyncPeerSession_RequestPeersTrue(t *testing.T) {
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: netcore.NewMeteredConn(local),
+		metered: newTestMeteredConn(t, local, &netcore.TransportTotals{}),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
@@ -174,7 +174,7 @@ func TestSyncPeerSession_RequestPeersFalse(t *testing.T) {
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: netcore.NewMeteredConn(local),
+		metered: newTestMeteredConn(t, local, &netcore.TransportTotals{}),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
@@ -246,7 +246,7 @@ func TestSyncPeerSession_SkipDoesNotEmitNewPeersDiscovered(t *testing.T) {
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: netcore.NewMeteredConn(local),
+		metered: newTestMeteredConn(t, local, &netcore.TransportTotals{}),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
@@ -310,7 +310,7 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 	session := &peerSession{
 		address: peerAddr,
 		conn:    local,
-		metered: netcore.NewMeteredConn(local),
+		metered: newTestMeteredConn(t, local, &netcore.TransportTotals{}),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
@@ -393,7 +393,7 @@ func TestSyncPeerSession_SkipsContactSyncForDiscoveryPeer(t *testing.T) {
 	session := &peerSession{
 		address: domain.PeerAddress("10.0.0.60:9000"),
 		conn:    local,
-		metered: netcore.NewMeteredConn(local),
+		metered: newTestMeteredConn(t, local, &netcore.TransportTotals{}),
 		inboxCh: make(chan protocol.Frame, 16),
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
@@ -438,7 +438,7 @@ func TestSyncPeerSession_KeepsContactSyncWithoutDiscovery(t *testing.T) {
 			session := &peerSession{
 				address:      domain.PeerAddress("10.0.0.61:9000"),
 				conn:         local,
-				metered:      netcore.NewMeteredConn(local),
+				metered:      newTestMeteredConn(t, local, &netcore.TransportTotals{}),
 				inboxCh:      make(chan protocol.Frame, 16),
 				errCh:        make(chan error, 1),
 				sendCh:       make(chan peerSendItem, 16),

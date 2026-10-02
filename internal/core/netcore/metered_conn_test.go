@@ -15,7 +15,7 @@ func TestMeteredConnRead(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	metered := NewMeteredConn(client)
+	metered := mustMeteredConn(t, client, &TransportTotals{})
 
 	payload := []byte("hello world")
 	go func() {
@@ -43,7 +43,7 @@ func TestMeteredConnWrite(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	metered := NewMeteredConn(client)
+	metered := mustMeteredConn(t, client, &TransportTotals{})
 
 	payload := []byte("test message")
 	go func() {
@@ -71,7 +71,7 @@ func TestMeteredConnBidirectional(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	metered := NewMeteredConn(client)
+	metered := mustMeteredConn(t, client, &TransportTotals{})
 
 	outgoing := []byte("request data")
 	incoming := []byte("response data from server")
@@ -115,7 +115,7 @@ func TestMeteredConnMultipleOperations(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	metered := NewMeteredConn(client)
+	metered := mustMeteredConn(t, client, &TransportTotals{})
 
 	messages := []string{"first", "second", "third"}
 	var totalWritten int
@@ -147,7 +147,7 @@ func TestMeteredConnMultipleOperations(t *testing.T) {
 func TestMeteredConnEOFCountsCorrectly(t *testing.T) {
 	server, client := net.Pipe()
 
-	metered := NewMeteredConn(client)
+	metered := mustMeteredConn(t, client, &TransportTotals{})
 
 	payload := []byte("data before close")
 	go func() {
@@ -179,7 +179,7 @@ func TestMeteredConnConcurrentAccess(t *testing.T) {
 	defer func() { _ = server.Close() }()
 	defer func() { _ = client.Close() }()
 
-	metered := NewMeteredConn(client)
+	metered := mustMeteredConn(t, client, &TransportTotals{})
 
 	go func() {
 		buf := make([]byte, 1024)

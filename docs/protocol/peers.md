@@ -291,6 +291,8 @@ Retrieves aggregated network traffic statistics for the entire node.
 | `peer_traffic[].total_traffic` | integer | Total traffic with this peer |
 | `peer_traffic[].connected` | boolean | Current connection state |
 
+The totals above are per-peer attribution (persisted health plus live verified connections) and can dip within one process — a session leaving the registry before its bytes reach health, an evicted health row. This answer carries **no** `transport` block: the monotonic socket-level byte counters are served by the in-process `fetch_traffic_totals` frame and, for other processes, by `fetchRouteSummary` → `transport_traffic` (see `docs/metrics.md`, "Transport totals").
+
 ### fetch_traffic_history
 
 Retrieves rolling per-second traffic history collected by the metrics layer. The ring buffer holds up to 3600 samples (1 hour). Samples are returned in chronological order (oldest first).
@@ -748,6 +750,8 @@ graph TB
 | `peer_traffic[].bytes_received` | целое число | Получено байт от этого одноранговой узла |
 | `peer_traffic[].total_traffic` | целое число | Общий трафик с этим одноранговым узлом |
 | `peer_traffic[].connected` | логическое значение | Текущее состояние подключения |
+
+Итоги выше — атрибуция по пирам (persisted health плюс живые проверенные соединения), и внутри одного процесса они могут проседать: сессия покидает реестр раньше, чем её байты попадают в health; вытесняется health-запись. Блока `transport` в этом ответе **нет**: монотонные счётчики байтов уровня сокета отдаёт кадр `fetch_traffic_totals` внутри процесса, а другим процессам — `fetchRouteSummary` → `transport_traffic` (см. `docs/metrics.md`, «Транспортные итоги»).
 
 ### fetch_traffic_history
 

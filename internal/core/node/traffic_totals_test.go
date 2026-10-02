@@ -233,7 +233,7 @@ func TestTrafficTotalsInboundConnsMatchSnapshot(t *testing.T) {
 func registerInboundMeteredConn(t *testing.T, svc *Service, id uint64, addr domain.PeerAddress, written int, auth *connauth.State) {
 	t.Helper()
 	local, remote := net.Pipe()
-	m := netcore.NewMeteredConn(local)
+	m := newTestMeteredConn(t, local, &netcore.TransportTotals{})
 	go func() { _, _ = io.Copy(io.Discard, remote) }()
 	if written > 0 {
 		if _, err := m.Write(make([]byte, written)); err != nil {
@@ -261,7 +261,7 @@ func registerInboundMeteredConn(t *testing.T, svc *Service, id uint64, addr doma
 func newMeteredWithWrittenBytes(t *testing.T, n int) *netcore.MeteredConn {
 	t.Helper()
 	local, remote := net.Pipe()
-	m := netcore.NewMeteredConn(local)
+	m := newTestMeteredConn(t, local, &netcore.TransportTotals{})
 	go func() { _, _ = io.Copy(io.Discard, remote) }()
 	if _, err := m.Write(make([]byte, n)); err != nil {
 		t.Fatalf("seed metered write: %v", err)
