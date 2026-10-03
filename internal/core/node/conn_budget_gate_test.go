@@ -34,11 +34,16 @@ func TestRawDialCallSitesAreAClosedSet(t *testing.T) {
 			"dialPeerWithBudget":    "the budgeted wrapper itself",
 			"dialAddressWithBudget": "the budgeted wrapper itself",
 		},
-		"peer_sessions.go": {
-			// Paid for by the connection manager's slot reservation, taken
-			// before the dial starts (slot.reservation). Budgeting it here
-			// too would charge one connection twice and halve the ceiling.
-			"openPeerSessionForCM": "already covered by the CM slot reservation",
+		"session_secure.go": {
+			// openPeerSessionForCM's dial, moved here when the v2 session
+			// arrived: reached only through dialPeerTransportForCM, which only
+			// openPeerSessionForCM calls. Paid for by the connection manager's
+			// slot reservation, taken before the dial starts
+			// (slot.reservation); budgeting it here too would charge one
+			// connection twice and halve the ceiling. The v1 redial after a
+			// v2 attempt answered without TLS replaces that socket, it does
+			// not add one: the first is closed before the second is dialled.
+			"dialPeerRawForCM": "already covered by the CM slot reservation",
 		},
 		"socks5.go": {
 			"dialPeer": "the transport primitive the wrappers build on",

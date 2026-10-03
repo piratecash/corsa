@@ -276,6 +276,26 @@ type Options struct {
 	Declarations *HandshakeDeclarations
 }
 
+// MeteredOf finds the MeteredConn a connection is built on: the connection
+// itself, or the socket under a wrapper that exposes it through NetConn() —
+// crypto/tls does, and so does every wrapper the secure session puts between
+// TLS and the socket. On a v2 session the connection is TLS over the metered
+// socket, and a plain type assertion would bill its traffic to nobody.
+func MeteredOf(conn net.Conn) *MeteredConn {
+	const maxWrappers = 8
+	for range maxWrappers {
+		if metered, ok := conn.(*MeteredConn); ok {
+			return metered
+		}
+		wrapper, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return nil
+		}
+		conn = wrapper.NetConn()
+	}
+	return nil
+}
+
 // HandshakeDeclarations is the peer's RAW, self-declared handshake state:
 // the part of hello/welcome that the compile-time typed capability set
 // cannot represent. Both fields carry a closed wire contract from
@@ -318,7 +338,7 @@ func (d HandshakeDeclarations) Clone() HandshakeDeclarations {
 // Caps and Networks are cloned so the caller cannot mutate NetCore state
 // through the original references.
 func New(id ConnID, rawConn net.Conn, dir Direction, opts Options) *NetCore {
-	metered, _ := rawConn.(*MeteredConn)
+	metered := MeteredOf(rawConn)
 
 	// Resolve the remote address string once. Guard against a nil net.Addr
 	// (some conn implementations return nil before the peer is known) so the

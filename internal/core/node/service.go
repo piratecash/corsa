@@ -648,6 +648,16 @@ type Service struct {
 	// that file touches this map directly. Lifecycle entry points:
 	// registerInboundConnLocked, attachOutboundCoreLocked, unregisterConnLocked.
 	conns map[netcore.ConnID]*connEntry
+	// inboundClosed is set under peerMu by closeAllInboundConns at shutdown
+	// and never cleared (Run is single-shot). registerInboundConn refuses
+	// once it is set: a connection still between its first byte and its
+	// registration when the drain ran would otherwise register after it,
+	// unseen, and hold connWg until its read timeout.
+	inboundClosed bool
+	// inboundBeforeRegister is a test hook run by handleConn between the
+	// session handshake and registration; nil in production, set only
+	// before Run.
+	inboundBeforeRegister func()
 	// connIDByNetConn is a secondary index that lets net.Conn-first helpers
 	// resolve their input into the primary ConnID key. It is kept strictly
 	// in lock-step with `conns` by the lifecycle helpers in conn_registry.go;
@@ -798,6 +808,7 @@ type Service struct {
 	sessionTransitionSeq           uint64                                       // monotonic number of every 0→1 / 1→0 session transition, minted under peerMu at the transition itself; presence orders a close against a reconnect by THIS and never by a clock (see nextSessionTransitionLocked)
 	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
 	presenceClock                  func() time.Time                             // source for identity presence transition timestamps; immutable after construction, overridden only by tests
+	secureSessions                 *secureSessions                              // v2 session state (session_secure.go): set once in NewService, never replaced; its parts are immutable or own their sync, so no domain mutex guards it
 	deliveryClock                  func() time.Time                             // source for the instant an emission claim is taken and read at; immutable after construction, overridden only by tests
 	peerQuarantine                 map[domain.PeerIdentity]routeQuarantineEntry // per-peer route quarantine: peer in quarantine has inbound routing announcements dropped and is skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
 	peerDisconnectHistory          map[domain.PeerIdentity][]time.Time          // sliding window of disconnect timestamps per peer, drives quarantine trigger detection. Guarded by peerMu.
@@ -2304,6 +2315,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	// and fetch_peer_health may be served before Run reaches any point it
 	// could publish the manager from. Run closes it.
 	svc.captureManager = svc.newCaptureManager()
+	svc.secureSessions = newSecureSessions(id, secureSessionStorePath(cfg), time.Now)
 
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter()
@@ -2876,9 +2888,23 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		_ = conn.Close()
 		return
 	}
-	if !s.registerInboundConn(metered, reservation) {
-		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections").Msg("reject connection")
-		_ = conn.Close()
+	// The session kind is decided, and a v2 handshake completed, before the
+	// connection is registered anywhere (session_secure.go): a peer that
+	// fails its proof leaves no trace in the registry, NetCore or the auth
+	// state. wire is what the session's frames travel on — TLS for v2, the
+	// metered socket itself for v1.
+	wire, reader, proven, err := s.openInboundTransport(metered)
+	if err != nil {
+		log.Info().Err(err).Str("addr", conn.RemoteAddr().String()).Msg("reject connection: session handshake failed")
+		_ = metered.Close()
+		return
+	}
+	if s.inboundBeforeRegister != nil {
+		s.inboundBeforeRegister()
+	}
+	if !s.registerInboundConn(wire, reservation) {
+		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections-or-shutdown").Msg("reject connection")
+		_ = wire.Close()
 		return
 	}
 	// Resolve ConnID once at the entry boundary — after a successful
@@ -2887,7 +2913,7 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	// helpers reach the connection state through the netcore.Network
 	// registry (RemoteAddr, SendFrame, Close) instead of holding a
 	// *netcore.NetCore handle.
-	connID, _ := s.connIDFor(metered)
+	connID, _ := s.connIDFor(wire)
 	var peerOfflineEvidence *peerOfflineEvidence
 
 	// Capture lifecycle hook: notify manager about the new inbound
@@ -2910,15 +2936,18 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		// 30-second deadline and unregisterInboundConn would hang waiting
 		// for writerDone. Closing the socket unblocks conn.Write with an
 		// error, letting the writer exit promptly.
-		_ = metered.Close()
-		s.unregisterInboundConn(metered)
+		_ = wire.Close()
+		s.unregisterInboundConn(wire)
 		s.removeSubscriberConnID(connID)
 		s.clearConnAuth(connID)
 	}()
 
 	log.Info().Str("addr", conn.RemoteAddr().String()).Msg("incoming connection")
 	enableTCPKeepAlive(conn)
-	conn = metered
+	conn = wire
+	if proven != nil && !s.acceptProvenInbound(connID, *proven, conn.RemoteAddr().String()) {
+		return
+	}
 
 	var heartbeatStop chan struct{}
 	// The heartbeat is joined to THIS handler, and closing its stop channel is
@@ -2937,7 +2966,6 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 		heartbeatDone.Wait()
 	}()
 
-	reader := bufio.NewReader(conn)
 	connKey := conn.RemoteAddr().String()
 	defer s.cmdLimiter.removeConn(connKey)
 	for {
@@ -3511,6 +3539,15 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 				s.emitPeerBannedNoticeByID(connID, time.Time{}, protocol.PeerBannedReasonSelfIdentity)
 				return false
 			}
+			// An identity that proved v2 is never served over v1: this hello
+			// may be a man in the middle who stripped TLS to collect a
+			// relayable v1 proof. Refused without a penalty — the claim is
+			// unproven, so it may not be the named peer at all.
+			if err := s.refuseLegacyIdentity(frame.Address); err != nil {
+				accepted = false
+				log.Warn().Err(err).Uint64("conn_id", uint64(connID)).Str("addr", addr).Msg("inbound_v1_refused_identity_pinned_to_v2")
+				return false
+			}
 			authState, err := connauth.PrepareAuth(frame)
 			if err != nil {
 				accepted = false
@@ -3616,62 +3653,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			// buffer would be wasted work the peer never reads.
 			return true
 		}
-		// Mandatory initial push_identity (identity-discovery layer), ordered
-		// behind auth_ok for the same reason as the backlog below. The proven
-		// inbound identity is the push's addressee; the send path skips peers
-		// without the plane and closes the connection on an enqueue fault.
-		if pushPeer := s.provenInboundPeerIdentity(connID); !pushPeer.IsZero() {
-			// A fresh session re-declares what the peer can receive, so what we
-			// believed about its build is now stale — see forgetDMControlRefusal
-			// — and it is the moment this conversation's own reactions are
-			// offered again, which is where their delivery guarantee lives.
-			s.forgetDMControlRefusal(pushPeer)
-			// lifecycle: joined by backgroundWg (WaitBackground).
-			s.goBackground(func() { s.reofferReactions(s.runCtx, pushPeer) })
-			// lifecycle: joined by backgroundWg (WaitBackground). One bounded
-			// SendLocal enqueue; the close callback is a NetCore close, not a
-			// goroutine.
-			s.goBackground(func() {
-				s.sendInitialIdentityPush(s.runCtx, pushPeer, func() { _ = s.Network().Close(s.runCtx, connID) })
-			})
-		}
-		// Auto-subscribe backlog replay — strictly AFTER auth_ok has been
-		// enqueued into the writer (sendHandshakeReplyViaNetwork returned nil),
-		// so push_message/push_delivery_receipt frames are ordered behind
-		// auth_ok on the connection. Fire-and-forget.
-		if backlogSub != nil {
-			s.goBackground(func() { s.pushBacklogToSubscriber(backlogSub) })
-		}
-		// The held-delivery kick belongs HERE and not in trackInboundConnect,
-		// where the direct route was actually added: that runs before auth_ok
-		// is written, and a retry tick woken there could put a push_message on
-		// the connection ahead of the handshake reply the peer is still
-		// waiting for. Same boundary, same reason, as the backlog above.
-		// Self-checked inside the kick, so an inbound peer that is not a
-		// usable delivery target is a no-op.
-		if kickPeer := s.provenInboundPeerIdentity(connID); !kickPeer.IsZero() {
-			s.goBackground(func() {
-				s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{kickPeer: {}})
-				s.wakeOverdueForReturningPeer(kickPeer, time.Now().UTC())
-			})
-		}
-		// The connect-time route table, ordered behind auth_ok for the same
-		// reason and by the same rule: the dialler counts a capability as
-		// negotiated only once auth_ok has landed, so a full sync that
-		// overtakes it is a full sync the peer refuses and never asks for
-		// again until its own periodic sweep.
-		if fullSync.due {
-			// s.runCtx bounds the write so that shutdown can abort a
-			// half-flushed inbound send instead of waiting out the full
-			// syncFlushTimeout on a stuck hairpin socket.
-			s.goBackground(func() {
-				// The crash report the original spawn carried: goBackground
-				// does not recover, and a panic in a full sync is a crash the
-				// operator has to be able to read afterwards.
-				defer crashlog.DeferRecover()
-				s.sendFullTableSyncToInbound(s.runCtx, connID, fullSync.peer)
-			})
-		}
+		s.startInboundSessionDelivery(connID, backlogSub, fullSync)
 		return true
 
 	default:
@@ -5023,6 +5005,17 @@ func (s *Service) handleAuthSession(
 		return reply, true, nil, connectFullSync{}
 	}
 
+	backlogSub, fullSync = s.completeInboundAuth(id, verified)
+	return reply, true, backlogSub, fullSync
+}
+
+// completeInboundAuth is everything an inbound session gets once its peer's
+// identity is proven — by auth_session on v1 (handleAuthSession) or by
+// session_proof on v2 (acceptProvenInbound). It commits the auth state,
+// learns the peer, registers its hello route, announces it and mirrors the
+// identity into NetCore. The caller starts delivery (backlog, initial push,
+// full sync) once the session may carry it.
+func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State) (backlogSub *subscriber, fullSync connectFullSync) {
 	s.setConnAuthStateByID(id, verified)
 
 	// Resolve the remote address through the Network surface. RemoteAddr
@@ -5113,7 +5106,71 @@ func (s *Service) handleAuthSession(
 	}
 
 	log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_end")
-	return reply, true, backlogSub, fullSync
+	return backlogSub, fullSync
+}
+
+// startInboundSessionDelivery starts what an authenticated inbound session
+// carries: the initial push_identity, the backlog replay, the held-delivery
+// kick and the connect-time full sync. On v1 it runs strictly after auth_ok
+// is enqueued, so none of it overtakes the handshake reply the dialler waits
+// for; on v2 there is no auth_ok and it runs once the proof verified.
+func (s *Service) startInboundSessionDelivery(connID domain.ConnID, backlogSub *subscriber, fullSync connectFullSync) {
+	// Mandatory initial push_identity (identity-discovery layer), ordered
+	// behind auth_ok for the same reason as the backlog below. The proven
+	// inbound identity is the push's addressee; the send path skips peers
+	// without the plane and closes the connection on an enqueue fault.
+	if pushPeer := s.provenInboundPeerIdentity(connID); !pushPeer.IsZero() {
+		// A fresh session re-declares what the peer can receive, so what we
+		// believed about its build is now stale — see forgetDMControlRefusal
+		// — and it is the moment this conversation's own reactions are
+		// offered again, which is where their delivery guarantee lives.
+		s.forgetDMControlRefusal(pushPeer)
+		// lifecycle: joined by backgroundWg (WaitBackground).
+		s.goBackground(func() { s.reofferReactions(s.runCtx, pushPeer) })
+		// lifecycle: joined by backgroundWg (WaitBackground). One bounded
+		// SendLocal enqueue; the close callback is a NetCore close, not a
+		// goroutine.
+		s.goBackground(func() {
+			s.sendInitialIdentityPush(s.runCtx, pushPeer, func() { _ = s.Network().Close(s.runCtx, connID) })
+		})
+	}
+	// Auto-subscribe backlog replay — strictly AFTER auth_ok has been
+	// enqueued into the writer (sendHandshakeReplyViaNetwork returned nil),
+	// so push_message/push_delivery_receipt frames are ordered behind
+	// auth_ok on the connection. Fire-and-forget.
+	if backlogSub != nil {
+		s.goBackground(func() { s.pushBacklogToSubscriber(backlogSub) })
+	}
+	// The held-delivery kick belongs HERE and not in trackInboundConnect,
+	// where the direct route was actually added: that runs before auth_ok
+	// is written, and a retry tick woken there could put a push_message on
+	// the connection ahead of the handshake reply the peer is still
+	// waiting for. Same boundary, same reason, as the backlog above.
+	// Self-checked inside the kick, so an inbound peer that is not a
+	// usable delivery target is a no-op.
+	if kickPeer := s.provenInboundPeerIdentity(connID); !kickPeer.IsZero() {
+		s.goBackground(func() {
+			s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{kickPeer: {}})
+			s.wakeOverdueForReturningPeer(kickPeer, time.Now().UTC())
+		})
+	}
+	// The connect-time route table, ordered behind auth_ok for the same
+	// reason and by the same rule: the dialler counts a capability as
+	// negotiated only once auth_ok has landed, so a full sync that
+	// overtakes it is a full sync the peer refuses and never asks for
+	// again until its own periodic sweep.
+	if fullSync.due {
+		// s.runCtx bounds the write so that shutdown can abort a
+		// half-flushed inbound send instead of waiting out the full
+		// syncFlushTimeout on a stuck hairpin socket.
+		s.goBackground(func() {
+			// The crash report the original spawn carried: goBackground
+			// does not recover, and a panic in a full sync is a crash the
+			// operator has to be able to read afterwards.
+			defer crashlog.DeferRecover()
+			s.sendFullTableSyncToInbound(s.runCtx, connID, fullSync.peer)
+		})
+	}
 }
 
 // authenticatedAddressForConn returns the verified hello frame for a
@@ -8397,6 +8454,9 @@ func (s *Service) countInboundConnsLocked() int {
 // releases it on unregister. On failure the caller's deferred Release covers
 // it — and since Release is idempotent, the two paths cannot double-free.
 func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Reservation) bool {
+	// conn is what the session's frames travel on; on a v2 session that is
+	// TLS over the metered socket, which MeteredOf finds underneath.
+	metered := netcore.MeteredOf(conn)
 	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_held").Msg("peer_mu_writer")
@@ -8405,6 +8465,9 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 		log.Trace().Str("site", "registerInboundConn").Str("phase", "lock_released").Msg("peer_mu_writer")
 	}()
 
+	if s.inboundClosed {
+		return false
+	}
 	limit := s.cfg.EffectiveMaxIncomingPeers()
 	if limit > 0 && s.countInboundConnsLocked() >= limit {
 		return false
@@ -8416,11 +8479,7 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 		pc.SetLocal(true)
 	}
 
-	var mc *netcore.MeteredConn
-	if metered, ok := conn.(*netcore.MeteredConn); ok {
-		mc = metered
-	}
-	s.registerInboundConnLocked(conn, pc, mc, reservation)
+	s.registerInboundConnLocked(conn, pc, metered, reservation)
 	return true
 }
 
@@ -8520,6 +8579,11 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 func (s *Service) closeAllInboundConns() {
 	ctx := context.Background()
 	network := s.Network()
+
+	// From here on no connection registers: the set closed below is final.
+	s.peerMu.Lock()
+	s.inboundClosed = true
+	s.peerMu.Unlock()
 
 	ids := make([]domain.ConnID, 0)
 	network.Enumerate(ctx, netcore.Inbound, func(id domain.ConnID) bool {
@@ -8797,6 +8861,16 @@ func (s *Service) fetchNoticesFrame() protocol.Frame {
 // nodeHelloJSONLine builds the marshalled hello line this node opens a session
 // with.
 func (s *Service) nodeHelloJSONLine() string {
+	line, err := protocol.MarshalFrameLine(s.nodeHelloFrame())
+	if err != nil {
+		return ""
+	}
+	return line
+}
+
+// nodeHelloFrame is the hello this node opens a session with: sent as a JSON
+// line on a v1 session, and as the intro inside TLS on a v2 one.
+func (s *Service) nodeHelloFrame() protocol.Frame {
 	// v12 cleanup: hello no longer carries the local advertise host in
 	// Listen — host is no longer a wire concept and is learned by the
 	// receiver from the inbound TCP RemoteAddr. The Listener flag still
@@ -8812,7 +8886,7 @@ func (s *Service) nodeHelloJSONLine() string {
 	datagrams := s.localDatagramAdvertise()
 	// reachableGroups is startup-immutable (see ipStateMu field doc); the
 	// read is intentionally lock-free.
-	line, err := protocol.MarshalFrameLine(protocol.Frame{
+	return protocol.Frame{
 		Type:          "hello",
 		Version:       config.ProtocolVersion,
 		Client:        "node",
@@ -8829,11 +8903,7 @@ func (s *Service) nodeHelloJSONLine() string {
 		BoxSig:        s.selfBoxSig,
 		Capabilities:  localHandshakeCapabilityStrings(s.localHandshakeCapabilityNames()),
 		DTypes:        s.localDTypeStrings(datagrams),
-	})
-	if err != nil {
-		return ""
 	}
-	return line
 }
 
 // listenerEnabledFromFrame returns true ONLY when the frame explicitly

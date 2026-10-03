@@ -18,6 +18,7 @@ Related documentation:
 - [encryption.md](../encryption.md) — cryptographic primitives
 - [mesh.md](../mesh.md) — mesh network topology, peer scoring, gossip
 - [presence.md](presence.md) — per-contact presence: the four states, what each rests on, the liveness probe, the first-hop guard set, and the `fetch_presence` / `fetch_first_hop_guards` commands
+- [session_v2.md](session_v2.md) — the secure session v2: TLS 1.3 plus an Ed25519 identity proof over the connection's exporter, which stops a relayed `auth_session` proof. Used between nodes from protocol version 31; an old node is served over v1
 - [overlay_role.md](overlay_role.md) — the overlay role classification `Q(NodeID)`: hash, canonical input, extracted bit and test vectors. ⚠️ Contract only — the mechanism using it is **not accepted**, and computing `Q` is classification, never authentication
 - [debug.md](../debug.md) — log levels and protocol tracing
 
@@ -106,6 +107,7 @@ Environment variables:
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated bootstrap list (overrides `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — path to identity key file
 - `CORSA_TRUST_STORE_PATH` — path to trust store
+- `CORSA_SECURE_SESSION_STORE_PATH` — downgrade protection of the secure session v2 (identities that proved v2, endpoints reached over it); default `secure-sessions-<port>.json` next to the peers file ([session_v2.md](session_v2.md))
 - `CORSA_PEERS_PATH` — path to persisted peer list
 - `CORSA_PROXY` — SOCKS5 proxy for Tor/overlay networks
 - `CORSA_NODE_TYPE` — `full` (relay) or `client` (no relay)
@@ -184,6 +186,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 - [encryption.md](../encryption.md) — криптографические примитивы
 - [mesh.md](../mesh.md) — топология mesh-сети, scoring пиров, gossip
 - [presence.md](presence.md) — присутствие контакта: четыре состояния, на чём каждое стоит, liveness-проба, набор guard-ов первого хопа и команды `fetch_presence` / `fetch_first_hop_guards`
+- [session_v2.md](session_v2.md) — защищённая сессия v2: TLS 1.3 и доказательство identity Ed25519 над экспортёром соединения, которое не даёт переслать доказательство `auth_session`. Узлы используют её с версии протокола 31; со старым узлом — v1
 - [overlay_role.md](overlay_role.md) — классификация ролей оверлея `Q(NodeID)`: хеш, каноническая форма входа, извлекаемый бит и тестовые векторы. ⚠️ Только контракт — механизм, который её использует, **не принят**, а вычисление `Q` есть классификация, а не аутентификация
 - [debug.md](../debug.md) — уровни логирования и трассировка протокола
 
@@ -272,6 +275,7 @@ Push and gossip are independent mechanisms that run in parallel. Push optimises 
 - `CORSA_BOOTSTRAP_PEERS` — список через запятую (имеет приоритет над `CORSA_BOOTSTRAP_PEER`)
 - `CORSA_IDENTITY_PATH` — путь к файлу identity key
 - `CORSA_TRUST_STORE_PATH` — путь к trust store
+- `CORSA_SECURE_SESSION_STORE_PATH` — защита от понижения защищённой сессии v2 (identity, доказавшие v2, и адреса, достигнутые по ней); по умолчанию `secure-sessions-<port>.json` рядом с файлом пиров ([session_v2.md](session_v2.md))
 - `CORSA_PEERS_PATH` — путь к персистированному списку пиров
 - `CORSA_PROXY` — SOCKS5-прокси для Tor/overlay сетей
 - `CORSA_NODE_TYPE` — `full` (relay) или `client` (без relay)

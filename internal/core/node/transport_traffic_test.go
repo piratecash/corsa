@@ -390,6 +390,7 @@ func TestTransportTrafficCountsNoticeFallbackDial(t *testing.T) {
 	peerDone := make(chan error, 1)
 	go func() { peerDone <- serveNoticeWithoutAuth(ln) }()
 
+	markOldNode(svc, domain.PeerAddress(raw.Addr().String()))
 	svc.sendNoticeToPeer(domain.PeerAddress(raw.Addr().String()), time.Minute, "transport-ciphertext")
 
 	select {

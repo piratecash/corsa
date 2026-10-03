@@ -617,6 +617,7 @@ func TestSyncPeer_RecordsOutboundSuccess(t *testing.T) {
 	defer cancel()
 	// requestPeers=false mirrors the sender-key recovery call site —
 	// the production caller that exercises the auth_ok branch.
+	markOldNode(svc, peerAddr)
 	svc.syncPeer(ctx, peerAddr, false)
 
 	select {
@@ -896,6 +897,7 @@ func TestSyncPeer_AuthReply_SkipsInterleavedFrames(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	markOldNode(svc, domain.PeerAddress(ln.Addr().String()))
 	imported := svc.syncPeer(ctx, domain.PeerAddress(ln.Addr().String()), false)
 
 	_ = ln.Close()

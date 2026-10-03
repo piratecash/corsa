@@ -6,6 +6,8 @@
 
 The handshake commands establish peer connections, negotiate protocol version compatibility, authenticate peers, and maintain liveness. All frames are plain JSON-over-TCP. Authentication confirms peer identity but does not change the transport layer.
 
+> ⚠️ **The `auth_session` proof can be relayed.** It signs `corsa-session-auth-v1|<challenge>|<own address>`, which names neither the verifier nor the connection: a man in the middle that holds a connection to each of two peers can carry one peer's signature to the other and be taken for it. The fix is the secure session v2 — TLS 1.3 with an identity proof over the connection's exporter, [session_v2.md](session_v2.md). From protocol version 31 two new nodes use it instead of this handshake on every connection; this handshake remains for old nodes, and is refused for an identity or endpoint that already proved v2.
+
 **Commands:**
 - `hello` — initiator announces capabilities and requests connection
 - `welcome` — responder confirms compatibility and provides challenge (on mutual v2+)
@@ -560,6 +562,8 @@ stateDiagram-v2
 ### Обзор
 
 Команды handshake устанавливают peer-соединения, согласуют совместимость версий протокола, аутентифицируют пиры и поддерживают liveness. Все фреймы передаются по plain JSON-over-TCP. Аутентификация подтверждает identity пира, но не изменяет транспортный уровень.
+
+> ⚠️ **Доказательство `auth_session` можно переслать.** Оно подписывает `corsa-session-auth-v1|<challenge>|<свой адрес>`, где не названы ни проверяющий, ни соединение: посредник с соединением к каждому из двух пиров переносит подпись одного к другому, и его принимают за первого. Исправление — защищённая сессия v2: TLS 1.3 и доказательство identity над экспортёром соединения, [session_v2.md](session_v2.md). С версии протокола 31 два новых узла используют её вместо этого рукопожатия на всех соединениях; это рукопожатие остаётся для старых узлов и отвергается для identity или адреса, уже доказавших v2.
 
 **Команды:**
 - `hello` — инициатор объявляет возможности и запрашивает соединение

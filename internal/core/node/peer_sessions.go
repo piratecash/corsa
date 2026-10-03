@@ -704,6 +704,16 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 	if reply.Type != "auth_ok" {
 		return protocol.ErrAuthRequired
 	}
+	s.completeOutboundAuth(session)
+	return nil
+}
+
+// completeOutboundAuth is everything an outbound session gets once its peer
+// is proven — by auth_ok on v1 (authenticatePeerSession) or by session_proof
+// on v2 (openPeerSessionForCM): the negotiated welcome comes into force, the
+// success is recorded, and the initial push_identity and reaction re-offer
+// start.
+func (s *Service) completeOutboundAuth(session *peerSession) {
 	s.markSessionHandshakeComplete(session)
 	var remoteAddr string
 	if session.netCore != nil {
@@ -736,7 +746,6 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 			s.sendInitialIdentityPush(s.runCtx, peerID, func() { _ = session.Close() })
 		})
 	}
-	return nil
 }
 
 // markSessionHandshakeComplete records that auth_ok arrived: everything the
@@ -1003,21 +1012,14 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 // ensures a stale dial (generation mismatch) is discarded with zero
 // externally visible mutations.
 func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerAddress) (*peerSession, error) {
-	rawConn, err := s.dialPeer(ctx, address, dialTimeout)
+	// v2 first, v1 for an old node (session_secure.go). A transport error
+	// comes back wrapped in errPeerDialTransport, so rollout telemetry still
+	// separates "never reached them" from a handshake refusal by type.
+	transport, err := s.dialPeerTransportForCM(ctx, address)
 	if err != nil {
-		// Wrapped, not replaced: the transport error keeps travelling for every
-		// caller that inspects it, and the sentinel lets rollout telemetry
-		// separate "never reached them" from a handshake refusal by type.
-		return nil, fmt.Errorf("%w: %w", errPeerDialTransport, err)
+		return nil, err
 	}
-	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
-	if err != nil {
-		// Unreachable while transportTotals is a field of *Service. If it ever
-		// becomes reachable, it is a local fault: onCMDialFailed must not charge
-		// it to the peer as a failed dial.
-		_ = rawConn.Close()
-		return nil, fmt.Errorf("meter peer session socket %s: %w", address, err)
-	}
+	rawConn, metered, conn := transport.raw, transport.metered, transport.wire
 
 	// Guard goroutine: close the connection if the parent context is cancelled
 	// during the handshake phase, or if we signal abort via closeConn.
@@ -1049,7 +1051,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		peerIdentity: domain.PeerIdentity{},
 		connID:       cid,
 		conn:         conn,
-		metered:      conn,
+		metered:      metered,
 		sendCh:       make(chan peerSendItem, peerSessionSendBuffer),
 		inboxCh:      make(chan protocol.Frame, peerSessionInboxBuffer),
 		errCh:        make(chan error, 1),
@@ -1070,9 +1072,17 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 
 	go s.readPeerSession(reader, session)
 
-	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
-	if err != nil {
+	// v1 asks for the welcome; v2 already holds it, verified, inside the
+	// proven session — the listener's intro.
+	var welcome protocol.Frame
+	if transport.proven != nil {
+		welcome = transport.proven.Intro
+	} else if welcome, err = s.peerSessionRequest(session, protocol.Frame{}, "welcome", true); err != nil {
 		closeOnError()
+		return nil, err
+	} else if err := s.refuseLegacyIdentity(welcome.Address); err != nil {
+		closeOnError()
+		log.Warn().Err(err).Str("peer", string(address)).Msg("outbound_v1_refused_identity_pinned_to_v2")
 		return nil, err
 	}
 	if err := validateProtocolHandshake(welcome); err != nil {
@@ -1125,7 +1135,10 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		observedAddress: welcome.ObservedAddress,
 	}
 
-	if err := s.authenticatePeerSession(session, welcome); err != nil {
+	if transport.proven != nil {
+		// The identity is proven by session_proof: no auth_session round.
+		s.completeOutboundAuth(session)
+	} else if err := s.authenticatePeerSession(session, welcome); err != nil {
 		closeOnError()
 		return nil, err
 	}

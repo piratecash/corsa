@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -36,7 +37,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
-	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -1174,24 +1174,57 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// exists, so it draws on the same ceiling. Refused means the notice is
 	// not delivered by this path — a notice is not worth exceeding the limit,
 	// and the peer will learn the same fact from the next live connection.
-	rawConn, err := s.dialAddressWithBudget(address, syncHandshakeTimeout)
+	//
+	// The session kind follows the transport policy of every dial
+	// (dialPeerTransport): v2 first, and no v1 for an endpoint bound to v2,
+	// so this fallback cannot become the side door that still hands out a
+	// relayable v1 proof. Metered for the node-wide transport totals only,
+	// like syncPeer: a one-shot dial outside the per-peer health totals, but
+	// still bytes on the wire.
+	ctx, cancel := context.WithTimeout(s.runCtx, syncHandshakeTimeout)
+	defer cancel()
+	transport, err := s.dialPeerTransport(ctx, address, func(context.Context) (net.Conn, error) {
+		return s.dialAddressWithBudget(address, syncHandshakeTimeout)
+	})
 	if err != nil {
 		return
 	}
-	// Metered for the node-wide transport totals only, like syncPeer: a
-	// one-shot dial outside the per-peer health totals, but still bytes on
-	// the wire.
-	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
-	if err != nil {
-		_ = rawConn.Close()
-		log.Error().Err(err).Str("peer", string(address)).Msg("send_notice_meter_failed")
-		return
-	}
+	conn := transport.wire
 	defer func() { _ = conn.Close() }()
 
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
 
+	var welcome protocol.Frame
+	if transport.proven != nil {
+		// Proven by session_proof: no hello, welcome or auth_session round.
+		welcome = transport.proven.Intro
+		s.recordOutboundAuthSuccess(address, remoteAddrString(conn.RemoteAddr()))
+	} else if welcome, err = s.noticeLegacyHandshake(conn, reader, address); err != nil {
+		return
+	}
+
+	if welcome.Type == "error" {
+		return
+	}
+
+	line, err := protocol.MarshalFrameLine(frame)
+	if err != nil {
+		return
+	}
+	// netcore-migration: §4.4 bootstrap exception (see sentinel above).
+	_, _ = io.WriteString(conn, line)
+	_, _ = readFrameLine(reader, maxResponseLineBytes)
+}
+
+// errNoticeDialEnded is a v1 notice dial that ended on purpose: a notice in
+// place of a welcome, our own identity, or a refused auth.
+var errNoticeDialEnded = errors.New("notice dial ended before auth_ok")
+
+// noticeLegacyHandshake is the v1 handshake of the notice dial: hello,
+// welcome, auth_session, auth_ok. It returns the welcome once auth_ok came,
+// or an error once the dial is over.
+func (s *Service) noticeLegacyHandshake(conn noticeConn, reader *bufio.Reader, address domain.PeerAddress) (protocol.Frame, error) {
 	// netcore-migration: §4.4 bootstrap exception. This raw write pre-dates
 	// the NetCore managed-write path and is pending architectural review of
 	// the inbound-absent dial fallback itself. A repository-wide forbidden-
@@ -1201,15 +1234,15 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 	// write triggers the gate. Same applies to the two writes below in
 	// this function body.
 	if _, err := io.WriteString(conn, s.nodeHelloJSONLine()); err != nil {
-		return
+		return protocol.Frame{}, err
 	}
 	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
 	if err != nil {
-		return
+		return protocol.Frame{}, err
 	}
 	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
 	if err != nil {
-		return
+		return protocol.Frame{}, err
 	}
 	// Bootstrap fan-out path: the inbound side may respond with a
 	// connection_notice (currently only peer-banned) instead of welcome,
@@ -1235,7 +1268,14 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		if errors.Is(protocol.NoticeErrorFromFrame(welcome), protocol.ErrSelfIdentity) {
 			s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
 		}
-		return
+		return protocol.Frame{}, errNoticeDialEnded
+	}
+	// An identity that proved v2 is never answered over v1: this welcome may
+	// come from a man in the middle who stripped TLS to collect a relayable
+	// v1 proof, so nothing is signed for it.
+	if err := s.refuseLegacyIdentity(welcome.Address); err != nil {
+		log.Warn().Err(err).Str("peer", string(address)).Msg("send_notice_v1_refused_identity_pinned_to_v2")
+		return protocol.Frame{}, err
 	}
 	// Local self-loopback guard on the same dial: an alternate alias
 	// may reach a responder that does not emit the peer-banned notice
@@ -1253,7 +1293,7 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 			Str("welcome_listen", welcome.Listen).
 			Msg("send_notice_self_identity_rejected")
 		s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
-		return
+		return protocol.Frame{}, errNoticeDialEnded
 	}
 	if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
@@ -1262,19 +1302,19 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 			Signature: identity.SignPayload(s.identity, connauth.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
 		})
 		if err != nil {
-			return
+			return protocol.Frame{}, err
 		}
 		// netcore-migration: §4.4 bootstrap exception (see sentinel above).
 		if _, err := io.WriteString(conn, authLine); err != nil {
-			return
+			return protocol.Frame{}, err
 		}
 		reply, err := readFrameLine(reader, maxResponseLineBytes)
 		if err != nil {
-			return
+			return protocol.Frame{}, err
 		}
 		authReply, err := protocol.ParseFrameLine(strings.TrimSpace(reply))
 		if err != nil || authReply.Type != "auth_ok" {
-			return
+			return protocol.Frame{}, errNoticeDialEnded
 		}
 		// Outbound convergence success hook: auth_ok on this raw/
 		// bootstrap path is the same evidence of a reachable dialable
@@ -1289,21 +1329,21 @@ func (s *Service) sendNoticeToPeer(address domain.PeerAddress, ttl time.Duration
 		// inline — routing_relay.go is already in the §2.9 net-import
 		// whitelist for exactly these bootstrap edges. The defensive empty-
 		// string fallthrough keeps the contract with the helper.
-		var remoteAddr string
-		if ra := conn.RemoteAddr(); ra != nil {
-			remoteAddr = ra.String()
-		}
-		s.recordOutboundAuthSuccess(address, remoteAddr)
+		s.recordOutboundAuthSuccess(address, remoteAddrString(conn.RemoteAddr()))
 	}
-	if welcome.Type == "error" {
-		return
-	}
+	return welcome, nil
+}
 
-	line, err := protocol.MarshalFrameLine(frame)
-	if err != nil {
-		return
+// noticeConn is what the notice dial's v1 handshake needs of its socket.
+type noticeConn interface {
+	io.Writer
+	RemoteAddr() net.Addr
+}
+
+// remoteAddrString is the host:port form of addr, or "" when there is none.
+func remoteAddrString(addr net.Addr) string {
+	if addr == nil {
+		return ""
 	}
-	// netcore-migration: §4.4 bootstrap exception (see sentinel above).
-	_, _ = io.WriteString(conn, line)
-	_, _ = readFrameLine(reader, maxResponseLineBytes)
+	return addr.String()
 }

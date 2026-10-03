@@ -1342,25 +1342,58 @@ func readSyncReply(ctx context.Context, reader *bufio.Reader, wantType string, b
 // get_identity datagram lookup, kept as the epidemic bridge for peers
 // without the layer. TODO(fetch-contacts-floor): remove the leg when
 // nothing is left to bridge — see docs/protocol/identity-lookup.md.
+// syncPeerWelcome is the welcome of a sync dial: the proven listener's intro
+// on v2; on v1 the reply to our hello — refused when it names an identity
+// that proved v2, before anything is signed for it.
+func (s *Service) syncPeerWelcome(pc *netcore.NetCore, reader *bufio.Reader, address domain.PeerAddress, transport *dialledTransport) (protocol.Frame, bool) {
+	if transport.proven != nil {
+		return transport.proven.Intro, true
+	}
+	if st := pc.SendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != netcore.SendOK {
+		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_hello_write_failed")
+		return protocol.Frame{}, false
+	}
+	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_read_failed")
+		return protocol.Frame{}, false
+	}
+	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
+	if err != nil {
+		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_parse_failed")
+		return protocol.Frame{}, false
+	}
+	if welcome.Type != protocol.FrameTypeConnectionNotice {
+		if err := s.refuseLegacyIdentity(welcome.Address); err != nil {
+			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_v1_refused_identity_pinned_to_v2")
+			return protocol.Frame{}, false
+		}
+	}
+	return welcome, true
+}
+
 func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requestPeers bool) int {
 	// Budgeted: this is a real outbound socket and counts against the shared
 	// ceiling like any other. A refusal here means the sync does not happen —
 	// which is the point: recovering a sender key is worth a connection, but
 	// not worth exceeding the node's own limit (conn_budget_dial.go).
-	rawConn, err := s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
+	//
+	// The session kind follows the same transport policy as every other dial
+	// (dialPeerTransport): v2 first, and no v1 for an endpoint bound to v2 —
+	// a recovery dial must not become the side door that still hands a
+	// relayable v1 proof to whoever stands on the path.
+	//
+	// Metered for the node-wide transport totals only. This dial never becomes
+	// a session, so its bytes stay out of the per-peer health totals, exactly
+	// as before; what it must not do is cross the wire uncounted.
+	transport, err := s.dialPeerTransport(ctx, address, func(ctx context.Context) (net.Conn, error) {
+		return s.dialPeerWithBudget(ctx, address, syncHandshakeTimeout)
+	})
 	if err != nil {
 		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_dial_failed")
 		return 0
 	}
-	// Metered for the node-wide transport totals only. This dial never becomes
-	// a session, so its bytes stay out of the per-peer health totals, exactly
-	// as before; what it must not do is cross the wire uncounted.
-	conn, err := netcore.NewMeteredConn(rawConn, &s.transportTotals)
-	if err != nil {
-		_ = rawConn.Close()
-		log.Error().Err(err).Str("peer", string(address)).Msg("sync_peer_meter_failed")
-		return 0
-	}
+	conn := transport.wire
 
 	_ = conn.SetDeadline(time.Now().Add(syncHandshakeTimeout))
 	reader := bufio.NewReader(conn)
@@ -1404,18 +1437,8 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 	// dial as a routable node connection (do not install the node-route
 	// subscriber / flush pending for it) — which needs both ends
 	// updated and rides the ProtocolVersion 27 floor raise.
-	if st := pc.SendRawSyncBlocking([]byte(s.nodeHelloJSONLine())); st != netcore.SendOK {
-		log.Warn().Str("peer", string(address)).Str("status", st.String()).Msg("sync_peer_hello_write_failed")
-		return 0
-	}
-	welcomeLine, err := readFrameLine(reader, maxResponseLineBytes)
-	if err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_read_failed")
-		return 0
-	}
-	welcome, err := protocol.ParseFrameLine(strings.TrimSpace(welcomeLine))
-	if err != nil {
-		log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_welcome_parse_failed")
+	welcome, ok := s.syncPeerWelcome(pc, reader, address, transport)
+	if !ok {
 		return 0
 	}
 	// Advertise convergence: peer closed the dial with a connection_notice
@@ -1469,7 +1492,10 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		s.applySelfIdentityCooldown(address, s.newSelfIdentityError(address, welcome.Listen))
 		return 0
 	}
-	if strings.TrimSpace(welcome.Challenge) != "" {
+	if transport.proven != nil {
+		// Proven by session_proof: no auth_session round on v2.
+		s.recordOutboundAuthSuccess(address, pc.RemoteAddr())
+	} else if strings.TrimSpace(welcome.Challenge) != "" {
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
 			Address:   s.identity.Address,

@@ -758,6 +758,12 @@ func TestTheInboundDrainRunsBeforeTheLifecycleJoin(t *testing.T) {
 
 	client := dialWhenListening(t, address)
 	t.Cleanup(func() { _ = client.Close() })
+	// The node decides v1 or v2 by the first byte and registers nothing
+	// before it. One "{" without a newline makes this a v1 connection that is
+	// registered and sits in its read loop, still without a hello.
+	if _, err := client.Write([]byte("{")); err != nil {
+		t.Fatalf("write the first byte: %v", err)
+	}
 	waitForConditionMsg(t, 5*time.Second, "the node never registered the inbound connection", func() bool {
 		return inboundConnCount(svc) > 0
 	})

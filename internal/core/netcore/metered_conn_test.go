@@ -224,3 +224,29 @@ func TestMeteredConnConcurrentAccess(t *testing.T) {
 		t.Fatalf("expected at least 50 bytes read, got %d", metered.BytesRead())
 	}
 }
+
+// netConnWrapper stands for tls.Conn: a connection over another that exposes
+// it through NetConn().
+type netConnWrapper struct{ net.Conn }
+
+func (w netConnWrapper) NetConn() net.Conn { return w.Conn }
+
+// A v2 session registers TLS over the metered socket. New must find the
+// socket under the wrapper, or the connection's traffic reads as zero.
+func TestNewBillsTheMeteredSocketUnderAWrapper(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = a.Close(); _ = b.Close() }()
+	var totals TransportTotals
+	metered, err := NewMeteredConn(a, &totals)
+	if err != nil {
+		t.Fatalf("meter: %v", err)
+	}
+	opaque := struct{ net.Conn }{metered} // hides the socket: nothing to unwrap
+	if got := New(1, opaque, Outbound, Options{}).Metered(); got != nil {
+		t.Fatalf("an opaque wrapper was billed to %p, want none", got)
+	}
+	twice := netConnWrapper{netConnWrapper{metered}} // TLS over a peeked-byte wrapper
+	if got := New(2, twice, Outbound, Options{}).Metered(); got != metered {
+		t.Fatalf("Metered() = %p, want the socket under the wrappers (%p)", got, metered)
+	}
+}

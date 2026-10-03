@@ -489,6 +489,7 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 	// The NetCore Address points at the mock listener so the recovery dial
 	// inside handleInboundPushMessage lands on our observable server.
 	relayAddr := domain.PeerAddress(ln.Addr().String())
+	markOldNode(svc, relayAddr)
 	svc.peerMu.Lock()
 	pc := netcore.New(netcore.ConnID(17), peerConn, netcore.Inbound, netcore.Options{
 		Address:  relayAddr,

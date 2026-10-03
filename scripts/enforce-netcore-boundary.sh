@@ -236,6 +236,9 @@ expect_count "legacy inboundConnKey(*netcore.NetCore) helper" 0 -- \
 #   socks5.go            — §5.3.2 sub-NetCore handshake
 #   peer_provider.go     — net.IP / net.ParseCIDR for peer-address policy
 #   netgroup.go          — net.IP grouping helpers for reachability
+#   session_secure.go    — session-kind choice: the first byte of an
+#                          accepted socket and the TLS wrapping of the v2
+#                          session, both before the connection is registered
 # Any new file in internal/core/node that imports `net` is a boundary
 # violation and must either move the functionality into netcore or be
 # added explicitly to this whitelist with review.
@@ -253,6 +256,7 @@ internal/core/node/peer_management.go
 internal/core/node/peer_provider.go
 internal/core/node/routing_relay.go
 internal/core/node/service.go
+internal/core/node/session_secure.go
 internal/core/node/socks5.go
 EOF
     )

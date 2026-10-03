@@ -54,6 +54,11 @@ type Node struct {
 	IdentityIntentsPath string
 	PeersStatePath      string
 	ChatLogDir          string // directory for chatlog/state files
+	// SecureSessionStorePath is the downgrade-protection store of the
+	// secure session v2 (env: CORSA_SECURE_SESSION_STORE_PATH): the
+	// identities that proved v2 and the endpoints reached over it. Empty —
+	// the default — puts secure-sessions-<port>.json next to the peers file.
+	SecureSessionStorePath string
 
 	// StateDBPath overrides the location of the shared SQLite state
 	// database (env: CORSA_STATE_DB_PATH). Empty — the default — keeps the
@@ -541,8 +546,23 @@ const (
 	// hop-ack, so the sender read the refusal as a dead uplink. Advertising
 	// 30 is what tells the network this node carries an old DM like any
 	// other, which is what lets the sender-side re-stamp below be retired.
-	ProtocolVersion        = 30
-	MinimumProtocolVersion = 26
+	// v31: the secure session v2 (docs/protocol/session_v2.md). A node
+	// opens a session with TLS 1.3 and proves its identity over the
+	// connection's exporter, so a proof can no longer be relayed from one
+	// connection into another; an old node is still served over v1.
+	ProtocolVersion = 31
+	// MinimumProtocolVersion 28: the deployed nodes all run v28 or later,
+	// so pre-v28 builds are no longer served.
+	MinimumProtocolVersion = 28
+	// ProtocolVersionSecureSession is the version from which a node speaks
+	// the secure session v2 (docs/protocol/session_v2.md). The session mode
+	// of a build is derived from it and the two constants above
+	// (sessionv2.ModeFor): below it on ProtocolVersion — v1 only; at or
+	// above it — v2 first, legacy only for peers that never proved v2; once
+	// MinimumProtocolVersion reaches it — v2 only, the legacy path off. So
+	// the transition is the two version bumps and nothing else to remember;
+	// a node test refuses a bump whose mode the node paths do not implement.
+	ProtocolVersionSecureSession = 31
 	// ProtocolVersionNoTransitAgeCeiling is the version from which a relay
 	// forwards a transit DM regardless of the date inside it. Nodes below it
 	// still drop anything older than their own ceiling, and a sender cannot
@@ -606,6 +626,7 @@ func Default() Config {
 	trustStorePath := resolveStartupPath(envOrDefault("CORSA_TRUST_STORE_PATH", defaultTrustStorePath(listenAddress)))
 	identityIntentsPath := resolveStartupPath(envOrDefault("CORSA_IDENTITY_INTENTS_PATH", defaultIdentityIntentsPath(listenAddress)))
 	peersStatePath := resolveStartupPath(envOrDefault("CORSA_PEERS_PATH", defaultPeersStatePath(listenAddress)))
+	secureSessionStorePath := resolveStartupPath(envOrDefault("CORSA_SECURE_SESSION_STORE_PATH", ""))
 	chatLogDir := resolveStartupPath(envOrDefault("CORSA_CHATLOG_DIR", defaultChatLogDir()))
 	stateDBPath := resolveStartupPath(envOrDefault("CORSA_STATE_DB_PATH", ""))
 	downloadDir := resolveStartupPath(envOrDefault("CORSA_DOWNLOAD_DIR", ""))
@@ -651,6 +672,7 @@ func Default() Config {
 			IdentityIntentsPath:        identityIntentsPath,
 			IdentityLookupBGAttempts:   identityLookupBGAttemptsFromEnv(),
 			PeersStatePath:             peersStatePath,
+			SecureSessionStorePath:     secureSessionStorePath,
 			ChatLogDir:                 chatLogDir,
 			StateDBPath:                stateDBPath,
 			DownloadDir:                downloadDir,
