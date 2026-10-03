@@ -221,7 +221,8 @@ func (s *Service) dispatchGossipNoticeSend(job func()) {
 // tryEnqueueGossipJob hands job to the given lane, or to the pre-pool
 // goBackground fallback when the pool never started (unit tests,
 // partially-wired Services — historical per-send goroutine, tracked on
-// backgroundWg, reported as gossipEnqueued). Always non-blocking.
+// backgroundWg, reported as gossipEnqueued; gossipPoolShutdownDrop once
+// Run has returned and goBackground refuses it). Always non-blocking.
 //
 // lane is the ADDRESS of the lane field, dereferenced only after
 // gossipPoolUp.Load() returned true. startGossipDispatch assigns the
@@ -233,8 +234,12 @@ func (s *Service) tryEnqueueGossipJob(lane *chan func(), job func()) gossipEnque
 	if !s.gossipPoolUp.Load() {
 		// lifecycle: fire-and-forget by design. This is the fallback taken
 		// when the pool is not up: ONE queued closure, not a loop, run on
-		// backgroundWg exactly as it would have been inside a worker.
-		s.goBackground(job)
+		// backgroundWg exactly as it would have been inside a worker. Refused
+		// once Run has returned, which is the same verdict as a pool that is
+		// shutting down: the job is dropped, not run late.
+		if !s.goBackgroundOp(backgroundOpGossipSend, job) {
+			return gossipPoolShutdownDrop
+		}
 		return gossipEnqueued
 	}
 	// RLock pairs with the supervisor's Lock: enqueues are excluded

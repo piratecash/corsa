@@ -101,12 +101,19 @@ func TestRunServiceForTestDrainReportsUnfinishedBackgroundAsError(t *testing.T) 
 
 	svc := newHarnessProbeService(t, domain.NodeTypeClient)
 	running := runServiceForTest(context.Background(), svc)
+	if err := running.AwaitReady(withBudget(t, harnessGenerousBudget)); err != nil {
+		t.Fatalf("AwaitReady = %v, want nil", err)
+	}
+
+	// Admitted while Run is still running: once Run has returned goBackground
+	// refuses new work, so a job that outlives Run is one accepted before it.
+	release := make(chan struct{})
+	if !svc.goBackground(func() { <-release }) {
+		t.Fatal("goBackground refused a job while Run was still running")
+	}
 	if err := running.Stop(withBudget(t, harnessGenerousBudget)); err != nil {
 		t.Fatalf("Stop = %v, want nil", err)
 	}
-
-	release := make(chan struct{})
-	svc.goBackground(func() { <-release })
 
 	err := running.DrainBackground(withBudget(t, harnessExpiredBudget))
 	requireStopStage(t, err, stopStageBackgroundDrain)

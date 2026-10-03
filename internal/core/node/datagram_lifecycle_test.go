@@ -541,10 +541,10 @@ func TestTheLifecycleTeardownReleasesAHungMaintenancePass(t *testing.T) {
 //
 // It parks a loop through the SAME wrapper the four real loops now use, which
 // is the mechanism under test; that each of them actually goes through that
-// wrapper is what TestRunStartsNoUnjoinedGoroutine enforces. Blocking each real
-// loop inside its own call would mean adding seams to internal/core/routing and
-// to files this change does not own, and would test those packages' internals
-// rather than Run's contract.
+// wrapper is what TestNoLongLivedGoroutineEscapesTheLifecycleGroup enforces.
+// Blocking each real loop inside its own call would mean adding seams to
+// internal/core/routing and to files this change does not own, and would test
+// those packages' internals rather than Run's contract.
 //
 // The mutation this kills: starting a lifecycle loop outside runLoopsWg, or
 // dropping the runLoopsWg wait from stopRunLifecycle.

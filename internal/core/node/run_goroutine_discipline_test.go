@@ -49,14 +49,19 @@ const maxFollowDepth = 2
 //
 // Each entry is a verdict, not a suppression: it says which lifetime owns the
 // goroutine. A new one appearing in these functions still has to be added here
-// deliberately, and anywhere else in the package still fails.
+// deliberately, and anywhere else in the package still fails. The ONE entry
+// that is not a verdict is "openPeerSession": nothing joins its goroutines,
+// and it is listed as a known exception (docs/locking.md), not as owned.
 var otherLifecycles = map[string]string{
-	// A per-CONNECTION watcher: it waits on the SESSION's context, not Run's,
-	// and closing the socket is what ends it. Run joins the session teardown
-	// through connWg and the ConnectionManager, so putting these on runLoopsWg
-	// would give one goroutine two owners.
-	"openPeerSession":      "per-session context; ends with the session's own teardown",
-	"openPeerSessionForCM": "per-session context; ends with the session's own teardown",
+	// The LEGACY session path (ensurePeerSessions → runPeerSession →
+	// openPeerSession): its context watcher and its session reader are NOT
+	// joined by Run. The path is inert while the ConnectionManager is wired,
+	// and its callers are not on runLoopsWg, so moving the two goroutines onto
+	// that group could raise its counter from zero under stopRunLifecycle's
+	// Wait. A known exception, listed in docs/locking.md — not a verdict that
+	// something joins them. openPeerSessionForCM is deliberately absent: its
+	// goroutines are on runLoopsWg.
+	"openPeerSession": "legacy path, inert under the CM; NOT joined by Run (known exception)",
 
 	// The ConnectionManager's dial goroutines. cm.dialWg tracks every one of
 	// them and cm.shutdown() waits on it, so they have a join — the CM's, not
@@ -74,11 +79,11 @@ var otherLifecycles = map[string]string{
 	// hot_reads_refresh.go:113-133.
 	"hotReadsRefreshLoop": "local WaitGroup the loop waits on; the loop is on runLoopsWg",
 
-	// The per-session serve goroutine and the pending-drain it spawns: both
-	// belong to the SESSION, whose teardown Run joins through connWg and the
-	// ConnectionManager.
-	"onCMSessionEstablished": "per-session goroutine; ends with the session",
-	"servePeerSession":       "one-shot pending drain for a session that just became reachable",
+	// The one-shot pending drain the serve loop spawns for a session that just
+	// became reachable. The serve goroutine itself needs no verdict: the CM
+	// only closes a session's socket at shutdown and never waits for the
+	// goroutine serving it, so that goroutine is on runLoopsWg.
+	"servePeerSession": "one-shot pending drain for a session that just became reachable",
 
 	// The relay state TTL ticker, started by relayStates.start() and stopped by
 	// relayStates.stop() — a defer Run registers before the plane, so it runs
@@ -247,10 +252,12 @@ func unjoinedGoroutine(
 		return resolveGoStatement(typed.Call, functions), typed.Pos(), true
 	case *ast.CallExpr:
 		selector, ok := typed.Fun.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "goBackground" || len(typed.Args) != 1 {
+		if !ok || !isBackgroundSpawner(selector.Sel.Name) || len(typed.Args) == 0 {
 			return goroutineTarget{}, token.NoPos, false
 		}
-		switch argument := typed.Args[0].(type) {
+		// The job is the LAST argument: goBackgroundOp names the operation
+		// first.
+		switch argument := typed.Args[len(typed.Args)-1].(type) {
 		case *ast.FuncLit:
 			return goroutineTarget{
 				body: argument.Body,
@@ -270,6 +277,12 @@ func unjoinedGoroutine(
 		}, typed.Pos(), true
 	}
 	return goroutineTarget{}, token.NoPos, false
+}
+
+// isBackgroundSpawner reports whether a method starts a fire-and-forget job on
+// backgroundWg — the group Run does not join.
+func isBackgroundSpawner(name string) bool {
+	return name == "goBackground" || name == "goBackgroundOp"
 }
 
 // longLived reports whether a goroutine WAITS — the property that separates a

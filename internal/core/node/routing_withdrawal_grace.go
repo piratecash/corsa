@@ -111,6 +111,11 @@ func (s *Service) effectiveWithdrawalGracePeriod() time.Duration {
 // Idempotent on repeat close: if a timer already exists for this
 // identity it is NOT reset — the first close starts the clock and
 // subsequent close events from the same identity reuse it.
+//
+// Once Run's teardown has cancelled the pending withdrawals
+// (withdrawalsShutDown), both paths drop the withdrawal instead: the timed
+// path arms no timer, and the body itself (executeDeferredWithdrawal) refuses
+// to run — which covers the inline path and a timer that fired too late.
 func (s *Service) maybeScheduleDeferredWithdrawal(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
 	s.maybeScheduleDeferredWithdrawalWithAttribution(peerIdentity, caps, s.observePeerOffline())
 }
@@ -132,6 +137,16 @@ func (s *Service) maybeScheduleDeferredWithdrawalWithAttribution(peerIdentity do
 	}
 
 	s.peerMu.Lock()
+	if s.withdrawalsShutDown {
+		// Run's teardown has disarmed the pending timers; a timer armed now
+		// would be one nobody cancels, firing after Run returned. Checked
+		// under the peerMu the timer is armed under, so no cancel can slip
+		// between the check and the arming.
+		s.peerMu.Unlock()
+		log.Debug().Str("peer", peerIdentity.String()).
+			Msg("routing_withdrawal_refused_after_shutdown")
+		return
+	}
 	if s.pendingWithdrawals == nil {
 		s.pendingWithdrawals = make(map[domain.PeerIdentity]*pendingWithdrawal)
 	}
@@ -263,15 +278,17 @@ func (s *Service) tryCancelPendingWithdrawal(peerIdentity domain.PeerIdentity) b
 	return true
 }
 
-// cancelAllPendingWithdrawalsForShutdown stops every pending timer
-// and clears the map. Called from Service shutdown so timers do not
-// fire against a stopped Service. The withdrawals that would have
+// cancelAllPendingWithdrawalsForShutdown stops every pending timer,
+// clears the map and refuses every later withdrawal. Called from Service
+// shutdown, after the inbound drain and before the lifecycle join, so timers
+// do not fire against a stopped Service. The withdrawals that would have
 // fired are NOT executed — clean shutdown owns its own broadcast
 // path (closeAllInboundConns / etc) and these probation entries
 // are discarded as part of shutdown.
 func (s *Service) cancelAllPendingWithdrawalsForShutdown() {
 	s.peerMu.Lock()
 	defer s.peerMu.Unlock()
+	s.withdrawalsShutDown = true
 	for peer, entry := range s.pendingWithdrawals {
 		entry.timer.Stop()
 		delete(s.pendingWithdrawals, peer)
@@ -335,6 +352,20 @@ func (s *Service) executeDeferredWithdrawal(peerIdentity domain.PeerIdentity, ca
 		log.Info().
 			Str("peer", peerIdentity.String()).
 			Msg("routing_withdrawal_aborted_peer_reconnected")
+		return
+	}
+
+	// Run's teardown has discarded the pending withdrawals, and this one is
+	// dropped with them: on a stopped node there is no announce plane to fan
+	// it out to. Checked here, under the same peerMu as the mutation below,
+	// so it covers every way the body is reached — the inline path (grace
+	// disabled), and a timer that claimed its entry before the cancel but
+	// gets here after it — with no window between check and mutation.
+	if s.withdrawalsShutDown {
+		s.peerMu.Unlock()
+		log.Debug().
+			Str("peer", peerIdentity.String()).
+			Msg("routing_withdrawal_refused_after_shutdown")
 		return
 	}
 

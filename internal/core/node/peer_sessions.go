@@ -1025,8 +1025,13 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	// during the handshake phase, or if we signal abort via closeConn.
 	// On success we close the abort channel WITHOUT closing conn — the CM
 	// event loop takes ownership.
+	//
+	// Both goroutines this function starts are on runLoopsWg, and the Add is
+	// legal while stopRunLifecycle waits: this function runs only as the CM's
+	// DialFn, on a dial worker that the CM event loop — itself a member —
+	// joins (cm.dialWg) before it returns, so the counter is never zero here.
 	abort := make(chan struct{})
-	go func() {
+	s.goRunLoop(func() {
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
@@ -1034,7 +1039,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 			// Handshake completed (success or handled error).
 			// Do NOT close conn — caller manages lifetime.
 		}
-	}()
+	})
 
 	enableTCPKeepAlive(rawConn)
 
@@ -1070,7 +1075,15 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		close(abort)
 	}
 
-	go s.readPeerSession(reader, session)
+	// The reader outlives this function: it serves the session for its whole
+	// life, and it does work of its own off the serve loop — file_command
+	// frames go straight to the file router, datagrams to the datagram plane.
+	// Run must therefore not return, nor stop the file-transfer subsystem,
+	// while it can still be inside one of those. It ends when the socket does,
+	// and every outbound session socket is closed by the time the join waits:
+	// the CM closes the sessions of its slots and of the dial results it
+	// discards in its own shutdown, and every error path above closes its own.
+	s.goRunLoop(func() { s.readPeerSession(reader, session) })
 
 	// v1 asks for the welcome; v2 already holds it, verified, inside the
 	// proven session — the listener's intro.
@@ -1216,9 +1229,17 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// Launch the session goroutine. All blocking I/O (subscribe, sync,
 	// serve loop) runs here, never in the CM event loop.
 	savedGen := info.SlotGeneration
-	go func() {
-		defer crashlog.DeferRecover()
-
+	// Joined by runLoopsWg (stopRunLifecycle). The goroutine serves
+	// frames — storing messages, scheduling receipts and key syncs on
+	// goBackground — until its session closes, and Run must not return while
+	// it still does: a bare `go` here let it keep working on a node whose
+	// caller had already been told it stopped. It ends on the lifecycle
+	// context (servePeerSession) and on the socket the ConnectionManager
+	// closes in its own shutdown, so the join is bounded. Adding to runLoopsWg
+	// from here is legal even while stopRunLifecycle waits: this callback runs
+	// on the CM event loop, which is itself on runLoopsWg, so the counter is
+	// never zero at this Add.
+	s.goRunLoop(func() {
 		// --- Phase 1: application-level setup (blocking I/O) ---
 		if err := s.initPeerSession(session); err != nil {
 			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("cm_session_setup_failed")
@@ -1386,7 +1407,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			WasHealthy:     true,
 			SlotGeneration: savedGen,
 		})
-	}()
+	})
 }
 
 // onCMSessionTeardown is called by ConnectionManager when an active slot

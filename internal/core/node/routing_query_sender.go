@@ -729,9 +729,19 @@ func (s *Service) triggerRouteQueryAsync(target domain.PeerIdentity) {
 	if !s.queryRateLimit.TryReserveInFlight(target) {
 		return
 	}
-	go func() {
+	// On backgroundWg rather than a bare `go`: the query fans out to peer
+	// sessions, and once Run has returned it must neither start nor be left
+	// running past the caller's WaitBackground.
+	admitted := s.goBackgroundOp(backgroundOpRouteQuery, func() {
 		defer crashlog.DeferRecover()
 		defer s.queryRateLimit.releaseInFlight(target)
 		s.SendRouteQuery(target)
-	}()
+	})
+	if !admitted {
+		// Refused because Run has returned: the job never runs, so neither
+		// does its deferred release. Released here instead — otherwise the
+		// target's in-flight slot would stay taken and no later trigger could
+		// ever query it. The refusal itself is logged by goBackgroundOp.
+		s.queryRateLimit.releaseInFlight(target)
+	}
 }

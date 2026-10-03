@@ -977,10 +977,12 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 		s.deliveryMu.Unlock()
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "ensurePeerSessions_register").Str("phase", "lock_released").Str("address", string(candidate.address)).Msg("peer_mu_writer")
-		// lifecycle: per-DIAL goroutine, owned by the session it opens. It ends
-		// when that session's serve loop ends, and Run joins those through
-		// connWg and the ConnectionManager's own dial group — one goroutine,
-		// one owner.
+		// lifecycle: NOT joined by Run — a known exception, listed in
+		// docs/locking.md. This is the legacy session path, inert while the
+		// ConnectionManager is wired; neither connWg nor the CM's dial group
+		// tracks it, and the caller is not on runLoopsWg, so it cannot be
+		// moved there without raising that group's counter from zero under
+		// stopRunLifecycle's Wait.
 		go func(c peerDialCandidate) {
 			defer func() {
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_wait").Str("address", string(c.address)).Msg("peer_mu_writer")
@@ -3598,7 +3600,7 @@ func (s *Service) runSenderKeySyncPass(prevHop domain.PeerAddress, sender string
 	}
 	// lifecycle: fire-and-forget. One sender-key sync exchange, bounded by the
 	// dial and handshake timeouts of the send it performs, not a loop.
-	s.goBackground(func() {
+	admitted := s.goBackgroundOp(backgroundOpSenderKeySyncPass, func() {
 		defer release()
 		// One overall budget for the whole pass (previous hop + fan-out);
 		// each syncSenderKeys call additionally clamps itself to
@@ -3644,6 +3646,14 @@ func (s *Service) runSenderKeySyncPass(prevHop domain.PeerAddress, sender string
 			log.Warn().Str("sender", sender).Int("candidates", len(candidates)).Msg("sender_key_sync_async_exhausted")
 		}
 	})
+	if !admitted {
+		// Refused because Run has returned: the job never runs, so neither
+		// does its deferred release. The slot the caller's admission reserved
+		// is returned here instead — otherwise the in-flight marks would pin
+		// the sender and the previous hop for good. The refusal itself is
+		// already logged by goBackgroundOp.
+		release()
+	}
 }
 
 // requestOwnedContactSync asks a session's OWNER loop (servePeerSession)

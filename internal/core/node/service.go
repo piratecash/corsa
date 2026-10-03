@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -293,9 +294,20 @@ type Service struct {
 	// runLoopsWg tracks EVERY loop Run starts that stops on the lifecycle
 	// context — the ConnectionManager event loop, bootstrapLoop,
 	// hotReadsRefreshLoop, the announce loop, the routing TTL ticker, the probe
-	// sender, the listener closer, the gossip dispatch pool AND the datagram
-	// plane's four schedules. A wait group rather than done-channels because
-	// a group is correct for a loop that was NEVER STARTED — a panic during
+	// sender, the listener closer, the gossip dispatch pool, the datagram
+	// plane's four schedules AND the three goroutines of every outbound CM
+	// session: the handshake guard and the session reader started by
+	// openPeerSessionForCM, and the serve goroutine started by
+	// onCMSessionEstablished. They end on the same context or on the socket
+	// the CM closes at shutdown. Their Add never raises the counter from zero
+	// under stopRunLifecycle's Wait, but for two different reasons: the serve
+	// goroutine is started ON the CM event loop, itself a member; the guard
+	// and the reader are started on a CM dial worker, which is NOT a member —
+	// they rely on the CM event loop waiting for cm.dialWg before it returns,
+	// so a member is alive for as long as any dial worker is.
+	//
+	// A wait group rather than done-channels because a group is correct for
+	// a loop that was NEVER STARTED — a panic during
 	// startup leaves the counter where it was, while a channel nobody will ever
 	// close makes the teardown wait for ever. That difference is what lets the
 	// whole lifecycle teardown be armed once, before any of them exists.
@@ -640,7 +652,21 @@ type Service struct {
 	// loses nothing. Guarded by peerMu.
 	lastMetaOrphanSweep time.Time
 	connWg              sync.WaitGroup // tracks active handleConn goroutines for graceful shutdown
-	backgroundWg        sync.WaitGroup // tracks fire-and-forget goroutines (receipts, gossip) for clean test shutdown
+	// backgroundWg tracks fire-and-forget goroutines (receipts, gossip,
+	// durable stamps). It is raised ONLY by goBackground, under
+	// backgroundMu, and only while backgroundClosed is false.
+	backgroundWg sync.WaitGroup
+	// backgroundMu / backgroundClosed are the admission gate in front of
+	// backgroundWg. Run closes the gate as the very last step of its
+	// teardown; from then on goBackground refuses new work. Without the gate
+	// a goroutine that outlived Run could raise backgroundWg from zero while
+	// the caller was already inside WaitBackground — a WaitGroup misuse the
+	// race detector reports, and a job started on a node whose stores are
+	// about to be closed. Outside the seven-domain split: backgroundMu is a
+	// leaf that guards only backgroundClosed and the Add it orders, and no
+	// other lock is taken under it.
+	backgroundMu     sync.Mutex
+	backgroundClosed bool
 	// conns is the single source of truth for live connection state (core,
 	// metered counters, tracked flag). It is keyed by netcore.ConnID so the
 	// key is a domain identifier, not a raw net.Conn handle. All reads and
@@ -807,6 +833,7 @@ type Service struct {
 	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
 	sessionTransitionSeq           uint64                                       // monotonic number of every 0→1 / 1→0 session transition, minted under peerMu at the transition itself; presence orders a close against a reconnect by THIS and never by a clock (see nextSessionTransitionLocked)
 	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
+	withdrawalsShutDown            bool                                         // one-way, set by cancelAllPendingWithdrawalsForShutdown: from then on a withdrawal is dropped on BOTH paths — maybeScheduleDeferredWithdrawal arms no timer, and executeDeferredWithdrawal (inline path, late timer) does not run its body. Guarded by peerMu.
 	presenceClock                  func() time.Time                             // source for identity presence transition timestamps; immutable after construction, overridden only by tests
 	secureSessions                 *secureSessions                              // v2 session state (session_secure.go): set once in NewService, never replaced; its parts are immutable or own their sync, so no domain mutex guards it
 	deliveryClock                  func() time.Time                             // source for the instant an emission claim is taken and read at; immutable after construction, overridden only by tests
@@ -2375,7 +2402,12 @@ func (s *Service) RegisterMessageStore(store MessageStore) {
 
 // goRunLoop starts one of the loops that live for the whole of Run and stop on
 // the lifecycle context, tracked by runLoopsWg so stopRunLifecycle can wait for
-// it whether or not it ever got as far as being started.
+// it whether or not it ever got as far as being started. The outbound session
+// goroutines are the shorter-lived members: they end on the same context or
+// on the socket the CM closes at shutdown, so the same join covers them. They
+// are started either on the CM event loop (a member) or on a CM dial worker
+// (not a member, but joined by the CM event loop through cm.dialWg before it
+// returns), so none of them raises the counter from zero under the Wait.
 //
 // # It is the ONLY way Run may start a long-lived goroutine
 //
@@ -2384,11 +2416,12 @@ func (s *Service) RegisterMessageStore(store MessageStore) {
 // returns, and Run returning is what the runtime treats as permission to close
 // the stores and sockets underneath it. Four lifecycle findings in four rounds
 // were all this same gap in a different place, so the rule is no longer a
-// convention: TestRunStartsNoUnjoinedGoroutine parses this file, walks Run's
-// body for `go` statements and fails on any that is not carrying an explicit
-// `lifecycle:` justification. A future loop added with a bare `go` turns red
-// with a message naming this function; it cannot be forgotten, only refused on
-// purpose and in writing.
+// convention: TestNoLongLivedGoroutineEscapesTheLifecycleGroup parses every
+// non-test file of this package, classifies every `go` statement and every
+// goBackground/goBackgroundOp job, and fails on any that waits without being
+// joined and without an explicit `lifecycle:` justification. A future loop
+// added with a bare `go` turns red with a message naming this function; it
+// cannot be forgotten, only refused on purpose and in writing.
 func (s *Service) goRunLoop(fn func()) {
 	s.runLoopsWg.Add(1)
 	go func() {
@@ -2445,7 +2478,10 @@ func (s *Service) goRunLoop(fn func()) {
 //     leaves producers running against consumers joined a moment earlier;
 //   - the drain must in any case precede
 //     `cancelAllPendingWithdrawalsForShutdown`, whose defer sits between the
-//     two, so it cannot be moved below this one on its own.
+//     two, so it cannot be moved below this one on its own. The cancel runs
+//     BEFORE this join on purpose: a timer still pending would otherwise fire
+//     inside it, and the withdrawals the sessions unwinding here report
+//     afterwards are refused by the flag the cancel sets.
 //
 // One group and one wait, not a sequence of per-subsystem joins: every loop is
 // asked to stop by the same cancel, so `wait(A); wait(B)` and `wait(A ∪ B)`
@@ -2477,6 +2513,16 @@ func (s *Service) Run(ctx context.Context) error {
 	// The defers below are the FIRST ones registered, so they run LAST and no
 	// return path, and no panic, can skip them: cancel, then join the work
 	// whose external effects must not outlive Run.
+	//
+	// The admission gate of goBackground is closed by the very FIRST defer,
+	// so it runs after every other one: after the inbound drain, after
+	// stopRunLifecycle has joined every lifecycle loop and outbound session
+	// goroutine, after the subsystem teardowns and close(s.done). Work that
+	// teardown itself schedules is therefore still admitted, and joined by
+	// WaitBackground; anything asked for once Run has returned is refused.
+	// Nothing inside Run waits on backgroundWg, so no Add admitted here can
+	// race a Wait — callers reach WaitBackground only after Run returns.
+	defer s.closeBackgroundAdmission()
 	runCancel := s.runCancel
 	stopFollowingCaller := context.AfterFunc(ctx, runCancel)
 	defer stopFollowingCaller()
@@ -2567,17 +2613,26 @@ func (s *Service) Run(ctx context.Context) error {
 	// MarkProbeFailure. Honours the Phase 0 overload gate.
 	s.goRunLoop(func() { s.probeLoop(routingCtx) })
 
-	// On shutdown: cancel any pending route-withdrawal probation
-	// timers AFTER the closeAllInboundConns + connWg.Wait deferred
-	// below has completed (defers run LIFO, so this one runs LAST).
-	// Ordering rationale: while inbound goroutines are still alive
-	// they can call onPeerSessionClosed which schedules new pending
-	// timers via maybeScheduleDeferredWithdrawal. If we cancelled
-	// here too early, those late schedules would leak and could
-	// fire against a Service whose routing-layer state is already
-	// being torn down by the CM defer below. Running cancel as the
-	// LAST defer guarantees no new timers can be scheduled after we
-	// stop them.  See routing_withdrawal_grace.go.
+	// On shutdown: disarm every pending route-withdrawal timer and refuse to
+	// arm new ones. Registered between the lifecycle join (above) and the
+	// inbound drain (below), so LIFO runs it AFTER the drain and BEFORE the
+	// join.
+	//
+	//   - After the drain: the inbound handlers report session closes until
+	//     they have exited, and every withdrawal they arm meanwhile is pending
+	//     when this runs, so it is cancelled with the rest.
+	//   - Before the join: the join waits for the outbound session goroutines
+	//     to unwind, which lasts as long as their sockets take to close. A
+	//     timer still pending at that point would fire somewhere inside it and
+	//     tear a direct route out while the loops that consume the withdrawal
+	//     are being stopped.
+	//   - Arming during or after the join: the outbound sessions unwinding in
+	//     it, and any caller that outlives Run, report their closes AFTER this
+	//     cancel. The flag it sets (withdrawalsShutDown) refuses those instead
+	//     of arming a timer nobody would cancel — routing_withdrawal_grace.go.
+	//
+	// Pinned by TestAWithdrawalArmedBeforeShutdownDoesNotFireInsideTheJoin and
+	// TestAWithdrawalAskedForAfterRunReturnedIsNotArmed.
 	defer s.cancelAllPendingWithdrawalsForShutdown()
 
 	// On shutdown: close all inbound connections so handleConn goroutines
@@ -2799,10 +2854,40 @@ func (s *Service) Address() string {
 // during the very teardown Run is performing, so joining it from inside Run
 // would trade a use-after-teardown for a shutdown deadlock. This function is
 // the one place callers see both.
+//
+// PRECONDITION: Run is not executing — it either returned or was never called.
+// While Run executes, its goroutines may admit new jobs at any moment, and an
+// Add that raises a WaitGroup counter from zero concurrently with its Wait is
+// a misuse the race detector reports. After Run has returned no job can be
+// admitted any more (goBackground), so the set this waits for is closed; on a
+// Service that was never run the caller owns every goroutine that schedules
+// work, which is how unit tests use this as a barrier.
+//
+// WaitBackground does NOT close goBackground's admission gate — Run's exit
+// does. Unit tests call it on a Service that was never run and keep
+// scheduling work afterwards.
 func (s *Service) WaitBackground() {
 	s.backgroundWg.Wait()
 	s.runLoopsWg.Wait()
 }
+
+// backgroundOp names a fire-and-forget operation in the refusal log, for the
+// call sites where the file and line alone would not say what was refused:
+// a closure handed through a helper, or a refusal the caller has to act on.
+type backgroundOp string
+
+const (
+	// backgroundOpUnnamed marks a job started through goBackground; its call
+	// site, logged next to it, is what identifies it.
+	backgroundOpUnnamed backgroundOp = "unnamed"
+	// backgroundOpGossipSend is the pre-pool fallback of tryEnqueueGossipJob.
+	backgroundOpGossipSend backgroundOp = "gossip_send_fallback"
+	// backgroundOpSenderKeySyncPass is one sender-key recovery pass.
+	backgroundOpSenderKeySyncPass backgroundOp = "sender_key_sync_pass"
+	// backgroundOpRouteQuery is one route_query_v1 fan-out started by
+	// triggerRouteQueryAsync.
+	backgroundOpRouteQuery backgroundOp = "route_query"
+)
 
 // goBackground runs fn in a new goroutine that is tracked by
 // backgroundWg, so WaitBackground observes it on shutdown. Use this
@@ -2811,15 +2896,86 @@ func (s *Service) WaitBackground() {
 // writes), so the work cannot race with TempDir cleanup in tests or with
 // process exit in production.
 //
-// Add(1) is called on the caller's goroutine before the spawn so
-// WaitBackground cannot observe the zero counter between spawn
-// request and goroutine start.
-func (s *Service) goBackground(fn func()) {
-	s.backgroundWg.Add(1)
+// It reports whether fn was admitted. Once Run has returned the node is
+// stopped for good, so new work is refused rather than started against
+// stores and sockets its owner is entitled to close: fn is then never run,
+// and a caller that handed fn a resource to release must release it itself.
+//
+// The refusal makes no exception for a CONTINUATION — a job that a job
+// admitted before Run returned asks for afterwards (pushBacklogToSubscriber →
+// confirmEnvelopesDurably, writePushFrame → confirmEnvelopeOnWire → the
+// durable confirmation). It is refused like any other: its effect is what a
+// crash at that instant would leave, and it is recovered the way a crash is —
+// by the delivery retries and the durable journals on the next start.
+//
+// Add(1) is called on the caller's goroutine, under the admission gate,
+// before the spawn: WaitBackground cannot observe the zero counter between
+// spawn request and goroutine start, and an Add can never land after the gate
+// closed.
+func (s *Service) goBackground(fn func()) bool {
+	return s.startBackgroundJob(backgroundOpUnnamed, fn)
+}
+
+// goBackgroundOp is goBackground for a job whose refusal has to be told apart
+// from the call site alone; op names it in the refusal log.
+func (s *Service) goBackgroundOp(op backgroundOp, fn func()) bool {
+	return s.startBackgroundJob(op, fn)
+}
+
+// startBackgroundJob is the one body of goBackground and goBackgroundOp. Both
+// wrappers call it directly, so the frame two levels up is always the call
+// site that asked for the job.
+func (s *Service) startBackgroundJob(op backgroundOp, fn func()) bool {
+	if !s.admitBackgroundJob() {
+		s.logBackgroundRefusal(op)
+		return false
+	}
 	go func() {
 		defer s.backgroundWg.Done()
 		fn()
 	}()
+	return true
+}
+
+// logBackgroundRefusal records a job that did not run because Run had already
+// returned. A refused closure has no identity of its own, so the entry carries
+// the node, the operation and the call site that asked for it.
+func (s *Service) logBackgroundRefusal(op backgroundOp) {
+	// Three frames up: logBackgroundRefusal ← startBackgroundJob ← the
+	// goBackground/goBackgroundOp wrapper ← the call site.
+	_, file, line, _ := runtime.Caller(3)
+	node := ""
+	// A Service built as a struct literal in tests carries no identity.
+	if s.identity != nil {
+		node = s.identity.Address
+	}
+	log.Debug().
+		Str("node", node).
+		Str("op", string(op)).
+		Str("caller", fmt.Sprintf("%s:%d", filepath.Base(file), line)).
+		Msg("background_job_refused_after_run_returned")
+}
+
+// admitBackgroundJob raises backgroundWg for one job unless Run has already
+// returned. The check and the Add share backgroundMu with
+// closeBackgroundAdmission, so every Add either happens before the gate
+// closes or not at all.
+func (s *Service) admitBackgroundJob() bool {
+	s.backgroundMu.Lock()
+	defer s.backgroundMu.Unlock()
+	if s.backgroundClosed {
+		return false
+	}
+	s.backgroundWg.Add(1)
+	return true
+}
+
+// closeBackgroundAdmission makes every later goBackground a refusal. Called
+// once, as the last step of Run's teardown; idempotent regardless.
+func (s *Service) closeBackgroundAdmission() {
+	s.backgroundMu.Lock()
+	s.backgroundClosed = true
+	s.backgroundMu.Unlock()
 }
 
 func (s *Service) SubscriberCount(recipient string) int {

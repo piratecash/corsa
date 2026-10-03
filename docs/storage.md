@@ -657,7 +657,13 @@ shutdown hook, the SDK inside `Runtime.Close`:
 3. cancel the node and wait for `Service.Run` to return;
 4. wait for `Service.WaitBackground`: the node's fire-and-forget jobs are its
    last WRITERS, and they publish as they finish — so they are joined while the
-   bus and the router are still there to receive it;
+   bus and the router are still there to receive it. The set is closed by then:
+   `Run` refuses new fire-and-forget jobs on its way out, so this waits only for
+   work admitted while the node was still running. A follow-up such a job asks
+   for after that point — the durable confirmation a backlog push or a push
+   frame schedules — is refused too: it is lost the way a crash at that instant
+   would lose it, and recovered the same way, by the delivery retries and the
+   durable journals on the next start;
 5. drain the event bus, then the router's remaining in-flight work;
 6. `Database.Close()` once.
 
@@ -1370,7 +1376,14 @@ root-а идут одним порядком — `desktop.Run` через сво
 3. отменить ноду и дождаться возврата `Service.Run`;
 4. дождаться `Service.WaitBackground`: fire-and-forget задачи ноды — её
    последние ПИСАТЕЛИ, и по завершении они публикуют результат, поэтому
-   присоединяются, пока шина и роутер ещё на месте и способны его принять;
+   присоединяются, пока шина и роутер ещё на месте и способны его принять. К
+   этому моменту набор закрыт: `Run` на выходе перестаёт принимать новые
+   fire-and-forget задачи, поэтому здесь ждётся только работа, принятая, пока
+   нода ещё работала. Продолжение, которое такая задача запрашивает уже после
+   этого — долговременное подтверждение после пуша бэклога или push-фрейма, —
+   тоже отклоняется: оно теряется так же, как при краше в этот момент, и
+   восстанавливается так же — ретраями доставки и долговременными журналами
+   при следующем старте;
 5. дренировать event bus, затем оставшуюся работу роутера;
 6. один раз вызвать `Database.Close()`.
 

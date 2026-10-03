@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
+	"testing"
 	"time"
 )
 
@@ -272,4 +274,35 @@ func awaitWithinBudget(ctx context.Context, stage stopStage, join func()) error 
 	case <-ctx.Done():
 		return &stopStageTimeoutError{Stage: stage, Cause: ctx.Err()}
 	}
+}
+
+// goroutineDumpLimit caps the dump logGoroutinesOnStopOverrun writes. A -race
+// run of a multi-node test holds thousands of goroutines; past this size the
+// dump stops being something anyone reads, and the goroutine that holds the
+// join is near the top in practice (runtime.Stack lists the caller first,
+// then the rest in creation order).
+const goroutineDumpLimit = 4 << 20
+
+// logGoroutinesOnStopOverrun writes the stack of every goroutine to the test
+// log when a stop ran out of its budget while Run was still running. That is
+// the one moment the goroutine holding Run's teardown open can still be seen:
+// once it lets go, nothing is left to say what it was waiting for.
+func logGoroutinesOnStopOverrun(t testing.TB, err error) {
+	t.Helper()
+
+	var stageErr *stopStageTimeoutError
+	if !errors.As(err, &stageErr) || stageErr.Stage != stopStageRunExit {
+		return
+	}
+	buf := make([]byte, goroutineDumpLimit)
+	n := runtime.Stack(buf, true)
+	t.Logf("Run still running after the stop budget; all goroutines (%d bytes%s):\n%s",
+		n, truncationNote(n, len(buf)), buf[:n])
+}
+
+func truncationNote(written, capacity int) string {
+	if written == capacity {
+		return ", truncated"
+	}
+	return ""
 }

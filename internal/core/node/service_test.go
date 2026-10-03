@@ -2323,6 +2323,7 @@ func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFu
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stopCancel()
 		if err := running.Stop(stopCtx); err != nil {
+			logGoroutinesOnStopOverrun(t, err)
 			t.Fatalf("node shutdown: %v", err)
 		}
 		// Wait for fire-and-forget goroutines (trust store writes,
