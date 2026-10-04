@@ -1383,6 +1383,47 @@ func (s *routeStore) InvalidateTransitVia(uplink PeerIdentity, now time.Time) (i
 	return invalidated, affected, exposed
 }
 
+// ForgetVia is the storage half of Table.ForgetUplink. It REMOVES — no
+// tombstone, no TTL — every claim learned through uplink, live or withdrawn,
+// except a live direct claim to the uplink itself, which is this node's own
+// fact about its neighbour. Removing rather than tombstoning is the point: the
+// claims being forgotten may carry a SeqNo the real uplink never sent, and a
+// tombstone at that SeqNo would keep refusing the real uplink's own
+// announcements until it expired.
+//
+// Returns how many claims were removed and every identity whose bucket
+// changed. Caller contract: t.mu held (writer).
+func (s *routeStore) ForgetVia(uplink PeerIdentity) (int, []PeerIdentity) {
+	removed := 0
+	var affected []PeerIdentity
+	for identity, bucket := range s.buckets {
+		n := 0
+		for i := range bucket {
+			c := bucket[i]
+			keep := c.Uplink != uplink || (c.Source == RouteSourceDirect && !c.IsWithdrawn())
+			if !keep {
+				s.noteClaimDroppedLocked(identity, c.Uplink)
+				continue
+			}
+			bucket[n] = c
+			n++
+		}
+		if n == len(bucket) {
+			continue
+		}
+		removed += len(bucket) - n
+		affected = append(affected, identity)
+		if n == 0 {
+			delete(s.buckets, identity)
+			delete(s.identityHex, identity)
+			continue
+		}
+		clear(bucket[n:])
+		s.buckets[identity] = bucket[:n]
+	}
+	return removed, affected
+}
+
 // CompactExpired is the storage half of Table.TickTTL. It removes expired
 // claims from every bucket (including own-origin tombstones whose TTL elapsed);
 // identities whose bucket fully drains are dropped from the store.

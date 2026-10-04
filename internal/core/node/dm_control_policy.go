@@ -1,10 +1,14 @@
 package node
 
 import (
+	"time"
+
 	"github.com/rs/zerolog/log"
 
+	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
+	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
 // dm_control_policy.go is what this node BELIEVES about a peer's build, and the
@@ -26,17 +30,68 @@ type refusalKey struct {
 	command domain.DMControlCommand
 }
 
-// ReactionsUnsupportedBy reports whether this peer is known to run a build that
-// cannot receive conversation-control commands.
+// ReactionsSupportOf is what this node currently knows about whether peer can
+// receive reactions — the answer the UI needs to stop promising that a
+// reaction was seen, and to stop claiming it was refused when nothing is known.
 //
-// This is the answer the UI needs to stop promising that a reaction was seen.
-// It is deliberately a "known to be", not a "not known to be": a peer we have
-// never sent to answers false, and the honest state then is simply "sent".
-func (s *Service) ReactionsUnsupportedBy(peer domain.PeerIdentity) bool {
-	if s == nil || s.dmControl == nil {
-		return false
+//   - ReactionsSupportAbsent: confirmed. Either the peer's own SIGNED answer
+//     that its build does not know reactions, or every live connection a send
+//     to it would use declared no dm_control dtype in its handshake.
+//   - ReactionsSupportDeclared: a live connection a send would use declares
+//     the dtype.
+//   - ReactionsSupportUnknown: no current information — no live connection a
+//     send would use to read a declaration from, and no signed answer. It does
+//     NOT mean the peer is offline (it may be reachable through routes), and
+//     it says nothing about the outbox. A declaration of a connection that
+//     has since closed is NOT carried over: it was about that connection.
+//
+// For an identity that requires v2 (pinned, or with a live v2 connection) only
+// its v2 connections count: a legacy connection that merely names it cannot
+// make it "unable to receive reactions" (docs/refactoring/n1-legacy-residual.md
+// §3). The caller must hold no domain mutex.
+func (s *Service) ReactionsSupportOf(peer domain.PeerIdentity) domain.ReactionsSupport {
+	if s == nil || peer.IsZero() {
+		return domain.ReactionsSupportUnknown
 	}
-	return s.dmControl.cannotTakeReactions(peer)
+	if s.dmControl != nil && s.dmControl.cannotTakeReactions(peer) {
+		return domain.ReactionsSupportAbsent
+	}
+	return s.dmControlDTypeSupport(peer)
+}
+
+// dmControlDTypeSupport reads what the live connections a send to peer would
+// use declared about the dm_control dtype.
+func (s *Service) dmControlDTypeSupport(peer domain.PeerIdentity) domain.ReactionsSupport {
+	provenOnly := s.identityRequiresV2(peer)
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	counted := 0
+	for _, conn := range s.peerSendableConnectionsLocked(peer, domain.CapMeshDatagramV1, time.Now()) {
+		if provenOnly && !conn.proven {
+			continue
+		}
+		counted++
+		if s.sendableDeclarationsLocked(conn).Supports(domain.DTypeDMControl) {
+			return domain.ReactionsSupportDeclared
+		}
+	}
+	if counted == 0 {
+		return domain.ReactionsSupportUnknown
+	}
+	return domain.ReactionsSupportAbsent
+}
+
+// sendableDeclarationsLocked is the dtype set a sendable connection declared
+// at handshake. Caller must hold peerMu.
+func (s *Service) sendableDeclarationsLocked(conn peerSendableConnection) datagram.DeclaredDTypes {
+	if conn.outbound != nil {
+		return datagramDeclaredDTypes(conn.outbound.declarations)
+	}
+	core := s.coreForIDLocked(conn.inboundID)
+	if core == nil {
+		return datagramDeclaredDTypes(netcore.HandshakeDeclarations{})
+	}
+	return datagramDeclaredDTypes(core.Declarations())
 }
 
 // answerCommandUnsupported queues the refusal of a command this build does not
@@ -172,8 +227,8 @@ func (s *Service) forgetDMControlRefusal(peer domain.PeerIdentity) {
 			}
 		}
 	}
-	if _, held := d.refusedTypeAt[peer]; held {
-		delete(d.refusedTypeAt, peer)
+	if _, shown := d.typeRefusalShown[peer]; shown {
+		delete(d.typeRefusalShown, peer)
 		had = true
 	}
 	// And what was waiting ON THAT BELIEF becomes due now. This is the half the
@@ -215,20 +270,15 @@ func (d *dmControlSender) refusesLocked(peer domain.PeerIdentity, command domain
 	return ok && d.clock().Sub(at) < dmControlUnsupportedTTL
 }
 
-// refusesType reports an OUTER refusal: the transport's gate said the peer does
-// not declare the dm_control dtype, so no command in it can arrive.
-func (d *dmControlSender) refusesTypeLocked(peer domain.PeerIdentity) bool {
-	at, ok := d.refusedTypeAt[peer]
-	// Checked, not swept — see refusesLocked.
-	return ok && d.clock().Sub(at) < dmControlUnsupportedTTL
-}
-
-// cannotTakeReactions is the union the UI asks about: either the peer's build
-// has no dm_control at all, or it has one that does not know reactions.
+// cannotTakeReactions reports the peer's own signed answer that its build does
+// not know reactions. It is the only belief about the peer that holds
+// reactions back: it is the peer's own statement, signed by it. Whether a
+// connection declares the dm_control dtype at all is not believed here — it
+// is a property of the connection, read live (Service.ReactionsSupportOf).
 func (d *dmControlSender) cannotTakeReactions(peer domain.PeerIdentity) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.refusesTypeLocked(peer) || d.refusesLocked(peer, domain.DMControlReactions)
+	return d.refusesLocked(peer, domain.DMControlReactions)
 }
 
 func (d *dmControlSender) markRefused(peer domain.PeerIdentity, command domain.DMControlCommand) {
@@ -243,7 +293,10 @@ func (d *dmControlSender) markRefused(peer domain.PeerIdentity, command domain.D
 		d.mu.Unlock()
 		return
 	}
-	before := d.blockedLocked(peer)
+	// The UI already shows the notice if a connection's missing dtype was
+	// announced; the peer's own refusal then changes nothing it draws.
+	_, shown := d.typeRefusalShown[peer]
+	before := d.blockedLocked(peer) || shown
 	d.refusedAt[refusalKey{peer: peer, command: command}] = d.clock()
 	learned := !before && d.blockedLocked(peer)
 	d.mu.Unlock()
@@ -251,10 +304,10 @@ func (d *dmControlSender) markRefused(peer domain.PeerIdentity, command domain.D
 	d.announceRefusal(peer, learned)
 }
 
-// blockedLocked is the answer ReactionsUnsupportedBy gives, read under a lock
-// the caller already holds. Caller must hold d.mu.
+// blockedLocked is cannotTakeReactions under a lock the caller already holds.
+// Caller must hold d.mu.
 func (d *dmControlSender) blockedLocked(peer domain.PeerIdentity) bool {
-	return d.refusesTypeLocked(peer) || d.refusesLocked(peer, domain.DMControlReactions)
+	return d.refusesLocked(peer, domain.DMControlReactions)
 }
 
 // announceRefusal tells the UI that this peer has just turned out to be unable
@@ -298,9 +351,10 @@ func (d *dmControlSender) announceRefusalChanged(peer domain.PeerIdentity, chang
 	d.svc.eventBus.Publish(ebus.TopicReactionsChanged, peer)
 }
 
-// markTypeRefused records the transport gate's answer, which is about the dtype
-// and says nothing about which command was inside.
-func (d *dmControlSender) markTypeRefused(peer domain.PeerIdentity) {
+// noteTypeRefused tells the UI that the connection a send to peer would use
+// does not take the dm_control dtype — once, until the peer's connections
+// change. It records nothing that holds reactions back.
+func (d *dmControlSender) noteTypeRefused(peer domain.PeerIdentity) {
 	d.mu.Lock()
 	if d.forgottenRecentlyLocked(peer) {
 		// About a frame sent before the removal — see markRefused.
@@ -309,10 +363,25 @@ func (d *dmControlSender) markTypeRefused(peer domain.PeerIdentity) {
 		d.mu.Unlock()
 		return
 	}
-	before := d.blockedLocked(peer)
-	d.refusedTypeAt[peer] = d.clock()
-	learned := !before
+	_, shown := d.typeRefusalShown[peer]
+	d.typeRefusalShown[peer] = struct{}{}
 	d.mu.Unlock()
 
-	d.announceRefusal(peer, learned)
+	d.announceRefusal(peer, !shown)
+}
+
+// noteDMControlConnectionsChanged is called when a connection of peer closes: what its
+// connections declare may have changed, so a UI told that they take no
+// dm_control is told to look again. Nothing is believed or cleared besides the
+// record that the UI was told.
+func (s *Service) noteDMControlConnectionsChanged(peer domain.PeerIdentity) {
+	if s == nil || s.dmControl == nil || peer.IsZero() {
+		return
+	}
+	d := s.dmControl
+	d.mu.Lock()
+	_, shown := d.typeRefusalShown[peer]
+	delete(d.typeRefusalShown, peer)
+	d.mu.Unlock()
+	d.announceRefusalChanged(peer, shown)
 }

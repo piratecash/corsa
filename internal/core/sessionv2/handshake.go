@@ -418,7 +418,7 @@ func receiveProvenPeer(conn *tls.Conn, local Local, role Role, expect ExpectedPe
 	if expect.named && peerID != expect.identity {
 		return Peer{}, fmt.Errorf("%w: proved %s", ErrPeerMismatch, peerID)
 	}
-	return Peer{Identity: peerID, PublicKey: key, Intro: intro}, nil
+	return Peer{Identity: peerID, PublicKey: key, Intro: intro, proof: ProvenIdentity{id: peerID}}, nil
 }
 
 // checkIntro verifies the v2 intro on its own: the right frame type, no v1

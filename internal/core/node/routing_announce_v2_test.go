@@ -43,7 +43,7 @@ func TestHandleRequestResync_MarksInvalidAndTriggersUpdate(t *testing.T) {
 		t.Fatalf("precondition: trigger channel must be empty before handler call")
 	}
 
-	svc.handleRequestResync(idPeerB)
+	svc.handleRequestResync(provenRoutingSender(idPeerB))
 
 	if !state.View().NeedsFullResync {
 		t.Fatalf("handleRequestResync must MarkInvalid (NeedsFullResync=true)")
@@ -88,10 +88,10 @@ func TestHandleRequestResync_QuarantinedSender_DropsSilently(t *testing.T) {
 
 	// Arm quarantine for idPeerB.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(idPeerB, "test", time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(idPeerB), "test", time.Now())
 	svc.peerMu.Unlock()
 
-	svc.handleRequestResync(idPeerB)
+	svc.handleRequestResync(provenRoutingSender(idPeerB))
 
 	if state.View().NeedsFullResync {
 		t.Fatal("quarantined peer's request_resync was honoured: NeedsFullResync flipped (MarkInvalid leaked)")
@@ -124,7 +124,7 @@ func TestHandleRequestResync_DebouncesRepeatedRequests(t *testing.T) {
 	state.RecordFullSyncSuccess(0, time.Now())
 
 	// First request: accepted.
-	svc.handleRequestResync(idPeerB)
+	svc.handleRequestResync(provenRoutingSender(idPeerB))
 	if !state.View().NeedsFullResync {
 		t.Fatal("first request_resync must be honoured (MarkInvalid)")
 	}
@@ -138,16 +138,16 @@ func TestHandleRequestResync_DebouncesRepeatedRequests(t *testing.T) {
 	// token is still pending; the no-trigger side of the debounce is
 	// covered by the fresh-service test below.)
 	state.RecordFullSyncSuccess(0, time.Now())
-	svc.handleRequestResync(idPeerB)
+	svc.handleRequestResync(provenRoutingSender(idPeerB))
 	if state.View().NeedsFullResync {
 		t.Fatal("repeat request_resync inside the debounce window must NOT MarkInvalid")
 	}
 
 	// Age the acceptance stamp past the debounce window: honoured again.
 	svc.peerMu.Lock()
-	svc.lastResyncAccepted[idPeerB] = time.Now().Add(-requestResyncAcceptDebounce - time.Second)
+	svc.lastResyncAccepted[provenIdentitySubject(idPeerB)] = time.Now().Add(-requestResyncAcceptDebounce - time.Second)
 	svc.peerMu.Unlock()
-	svc.handleRequestResync(idPeerB)
+	svc.handleRequestResync(provenRoutingSender(idPeerB))
 	if !state.View().NeedsFullResync {
 		t.Fatal("request_resync after the debounce window must be honoured again")
 	}
@@ -178,12 +178,12 @@ func TestHandleRequestResync_DebouncedRequestDoesNotTrigger(t *testing.T) {
 	// rejects the request.
 	svc.peerMu.Lock()
 	if svc.lastResyncAccepted == nil {
-		svc.lastResyncAccepted = make(map[domain.PeerIdentity]time.Time)
+		svc.lastResyncAccepted = make(map[penaltySubject]time.Time)
 	}
-	svc.lastResyncAccepted[idPeerB] = time.Now()
+	svc.lastResyncAccepted[provenIdentitySubject(idPeerB)] = time.Now()
 	svc.peerMu.Unlock()
 
-	svc.handleRequestResync(idPeerB)
+	svc.handleRequestResync(provenRoutingSender(idPeerB))
 
 	if state.View().NeedsFullResync {
 		t.Fatal("debounced request_resync must NOT MarkInvalid")
@@ -223,7 +223,7 @@ func TestHandleRequestResync_MalformedSenderIsRejected(t *testing.T) {
 	// fails identity.IsValidAddress. (Under byte-identity semantics any
 	// domaintest.ID label renders as a valid 40-char hex address, so the
 	// empty identity is the only way to exercise the rejection guard.)
-	svc.handleRequestResync(domain.PeerIdentity{})
+	svc.handleRequestResync(provenRoutingSender(domain.PeerIdentity{}))
 
 	if state.View().NeedsFullResync {
 		t.Fatalf("malformed sender must NOT mutate per-peer state")
@@ -274,7 +274,7 @@ func TestHandleRoutesUpdate_BeforeBaseline_EmitsRequestResync(t *testing.T) {
 		},
 	}
 
-	svc.handleRoutesUpdate(idPeerB, senderAddr, frame)
+	svc.handleRoutesUpdate(provenRoutingSender(idPeerB), senderAddr, frame)
 
 	// Delta must NOT have been applied — table stays empty.
 	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
@@ -329,7 +329,7 @@ func TestHandleRoutesUpdate_AfterBaseline_AppliesEntries(t *testing.T) {
 		},
 	}
 
-	svc.handleRoutesUpdate(idPeerB, senderAddr, frame)
+	svc.handleRoutesUpdate(provenRoutingSender(idPeerB), senderAddr, frame)
 
 	// Route must be in the table at hops=2 (wire 1 + receiver +1).
 	got := svc.routingTable.Lookup(idTargetX)
@@ -374,7 +374,7 @@ func TestHandleAnnounceRoutes_LegacyEmptyFrame_StillFlipsBaseline(t *testing.T) 
 		Type:           "announce_routes",
 		AnnounceRoutes: nil,
 	}
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	if !state.HasReceivedBaseline() {
 		t.Fatalf("legacy announce_routes (even empty) must flip baseline to true")
@@ -401,7 +401,7 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 	// invariant we will assert after the call (state must not be
 	// created by the handler when the sender is quarantined).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(idPeerB, "test", time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(idPeerB), "test", time.Now())
 	svc.peerMu.Unlock()
 
 	// Wire a session so a SendRequestResync, if it slipped through,
@@ -427,7 +427,7 @@ func TestHandleRoutesUpdate_QuarantinedSender_DropsSilentlyNoResync(t *testing.T
 		},
 	}
 
-	svc.handleRoutesUpdate(idPeerB, senderAddr, frame)
+	svc.handleRoutesUpdate(provenRoutingSender(idPeerB), senderAddr, frame)
 
 	// 1. Delta must NOT have been applied — table stays empty.
 	if got := svc.routingTable.Lookup(idTargetX); len(got) > 0 {
@@ -469,7 +469,7 @@ func TestHandleRoutesUpdate_BeforeBaseline_NoSenderAddress_DropsSilently(t *test
 	}
 
 	// Empty senderAddress — the handler must short-circuit without crashing.
-	svc.handleRoutesUpdate(idPeerB, domain.PeerAddress(""), frame)
+	svc.handleRoutesUpdate(provenRoutingSender(idPeerB), domain.PeerAddress(""), frame)
 
 	// Delta still must not have been applied — the gate is the dominant
 	// decision, not the address.

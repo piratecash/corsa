@@ -14,6 +14,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2/sessionv2test"
 )
 
 // datagram_layer_test.go covers the wiring of the layer into node.Service:
@@ -243,7 +244,7 @@ func TestDatagramIngressUnchangedWithFlagOff(t *testing.T) {
 	result := svc.handleDatagramFrame(
 		context.Background(),
 		line,
-		provenDatagramNeighbour(domain.PeerIdentityFromWire(datagramTestDstHex), datagramInbound),
+		acceptedLegacyDatagramNeighbour(domain.PeerIdentityFromWire(datagramTestDstHex), datagramInbound),
 	)
 	if !result.Accepted() {
 		t.Fatalf("flag-off ingress refused a well-formed datagram: %v", result.Err())
@@ -278,8 +279,8 @@ func TestDatagramLayerBuiltWithFlagOn(t *testing.T) {
 		t.Fatalf("localDatagramAdvertise() = %+v with the fixture kit, want endpoint and transit", advertise)
 	}
 	// The exemption is asked of an AUTHENTICATED connection: it is a swap for
-	// the layer's §5 budget, and that budget is charged on the identity the
-	// neighbour proved (see datagram_command_budget_test.go for the boundary).
+	// the layer's §5 budget, and that budget is charged on what the connection
+	// is billed to (see datagram_command_budget_test.go for the boundary).
 	authenticated := registerDatagramCommandConn(t, svc, domain.ConnID(8811), true)
 	if !svc.frameLineExemptFromCommandLimit(authenticated, mustDatagramLine(t, newNodeDatagram(t, nil))) {
 		t.Fatal("datagram not exempted from the command limiter although the layer charges its own budget")
@@ -713,9 +714,10 @@ func TestForgetDatagramPeerReleasesOnlyASettledBucket(t *testing.T) {
 
 	svc := newDatagramLayerService(t, true)
 	admission := svc.datagramLayer().admission
-	peer := domain.PeerIdentityFromWire(datagramTestDstHex)
+	proven, _ := sessionv2test.NewProvenPeer(t)
+	peer := proven.Identity
 
-	if !admission.Admit(datagram.ProvenIdentityKey(peer), 64) {
+	if !admission.Admit(datagram.ProvenIdentityKey(sessionv2test.Proof(t, proven)), 64) {
 		t.Fatal("the first frame of a fresh session must be admitted")
 	}
 	if got := admission.TrackedPeers(); got != 1 {

@@ -166,7 +166,7 @@ func sealedControlDelivery(
 		// A control command normally reaches its destination through relays, so
 		// the neighbour that handed it over is deliberately somebody else: the
 		// handler must not be reading authorship from the session.
-		IncomingPeer:  datagram.ProvenIngress(datagram.NetworkChannel(domain.ConnID(11)), domain.PeerIdentityFromWire(svc.identity.Address)),
+		IncomingPeer:  datagram.ClaimedIngress(datagram.NetworkChannel(domain.ConnID(11)), datagram.AcceptedConnectionKey(domain.ConnID(11)), domain.PeerIdentityFromWire(svc.identity.Address)),
 		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	})
 	if err != nil {
@@ -291,20 +291,20 @@ func TestAPeersRefusalIsRemembered(t *testing.T) {
 	delivery, sealed := sealedControlDelivery(t, svc, peer, plain)
 
 	signer := domain.PeerIdentityFromWire(peer.Address)
-	if svc.ReactionsUnsupportedBy(signer) {
+	if svc.ReactionsSupportOf(signer) == domain.ReactionsSupportAbsent {
 		t.Fatal("a peer nothing was sent to already counts as unable")
 	}
 	if result := (&dmControlHandler{svc: svc}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 		t.Fatalf("a refusal was not accepted: %v", result.Err())
 	}
-	if !svc.ReactionsUnsupportedBy(signer) {
+	if svc.ReactionsSupportOf(signer) != domain.ReactionsSupportAbsent {
 		t.Fatal("the peer's refusal was not remembered")
 	}
 
 	// A new session re-declares what the peer can receive, so what we believe
 	// about their build is stale from that moment.
 	svc.forgetDMControlRefusal(signer)
-	if svc.ReactionsUnsupportedBy(signer) {
+	if svc.ReactionsSupportOf(signer) == domain.ReactionsSupportAbsent {
 		t.Fatal("a fresh session did not clear the refusal")
 	}
 }
@@ -426,7 +426,7 @@ func TestAReceivedReactionClearsWhatWeBelievedAboutTheirBuild(t *testing.T) {
 	sender := controlTestPeer("e7")
 
 	svc.noteCommandRefused(sender, domain.DMControlReactions)
-	if !svc.ReactionsUnsupportedBy(sender) {
+	if svc.ReactionsSupportOf(sender) != domain.ReactionsSupportAbsent {
 		t.Fatal("the fixture did not record the refusal it is about to clear")
 	}
 
@@ -439,7 +439,7 @@ func TestAReceivedReactionClearsWhatWeBelievedAboutTheirBuild(t *testing.T) {
 		}},
 	})
 
-	if svc.ReactionsUnsupportedBy(sender) {
+	if svc.ReactionsSupportOf(sender) == domain.ReactionsSupportAbsent {
 		t.Fatal("a reaction from the peer left the belief that they cannot receive one")
 	}
 }
@@ -482,7 +482,7 @@ func TestAStrangersCommandLeavesNothingBehind(t *testing.T) {
 			if outbox := queuedFor(svc.dmControl, stranger); outbox != nil {
 				t.Fatalf("a stranger made this node queue %#v", outbox)
 			}
-			if svc.ReactionsUnsupportedBy(stranger) {
+			if svc.ReactionsSupportOf(stranger) == domain.ReactionsSupportAbsent {
 				t.Fatal("a stranger made this node keep a note about their build")
 			}
 		})
@@ -500,7 +500,7 @@ func TestAStrangersCommandLeavesNothingBehind(t *testing.T) {
 	if result := (&dmControlHandler{svc: unreadable}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 		t.Fatalf("the frame was refused rather than ignored: %v", result.Err())
 	}
-	if unreadable.ReactionsUnsupportedBy(stranger) {
+	if unreadable.ReactionsSupportOf(stranger) == domain.ReactionsSupportAbsent {
 		t.Fatal("a failed read let a sender leave a note about their build")
 	}
 
@@ -514,7 +514,7 @@ func TestAStrangersCommandLeavesNothingBehind(t *testing.T) {
 	if result := (&dmControlHandler{svc: svc}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 		t.Fatalf("a refusal from a known peer was not accepted: %v", result.Err())
 	}
-	if !svc.ReactionsUnsupportedBy(domain.PeerIdentityFromWire(known.Address)) {
+	if svc.ReactionsSupportOf(domain.PeerIdentityFromWire(known.Address)) != domain.ReactionsSupportAbsent {
 		t.Fatal("a refusal from a peer we talk to was ignored")
 	}
 }
@@ -563,7 +563,7 @@ func TestALateAnswerIsBelievedAfterTheThreadIsWiped(t *testing.T) {
 	if result := (&dmControlHandler{svc: svc}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 		t.Fatalf("the answer was refused: %v", result.Err())
 	}
-	if !svc.ReactionsUnsupportedBy(peer) {
+	if svc.ReactionsSupportOf(peer) != domain.ReactionsSupportAbsent {
 		t.Fatal("the answer to a reaction we had just sent was ignored because the thread was wiped")
 	}
 
@@ -576,7 +576,7 @@ func TestALateAnswerIsBelievedAfterTheThreadIsWiped(t *testing.T) {
 	if result := (&dmControlHandler{svc: svc}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 		t.Fatalf("the late answer was refused rather than ignored: %v", result.Err())
 	}
-	if svc.ReactionsUnsupportedBy(peer) {
+	if svc.ReactionsSupportOf(peer) == domain.ReactionsSupportAbsent {
 		t.Fatal("an answer arriving long after anything we sent was still believed")
 	}
 	// And the record of having spoken to them is swept rather than kept: it is a
@@ -645,7 +645,7 @@ func TestSpeakingToAPeerAdmitsOnlyTheirAnswer(t *testing.T) {
 		if result := (&dmControlHandler{svc: svc}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 			t.Fatalf("the frame was refused rather than ignored: %v", result.Err())
 		}
-		if svc.ReactionsUnsupportedBy(peer) {
+		if svc.ReactionsSupportOf(peer) == domain.ReactionsSupportAbsent {
 			t.Fatal("a removed contact's answer was still believed")
 		}
 
@@ -669,7 +669,7 @@ func TestSpeakingToAPeerAdmitsOnlyTheirAnswer(t *testing.T) {
 		if result := (&dmControlHandler{svc: svc}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 			t.Fatalf("the frame was refused: %v", result.Err())
 		}
-		if !svc.ReactionsUnsupportedBy(peer) {
+		if svc.ReactionsSupportOf(peer) != domain.ReactionsSupportAbsent {
 			t.Fatal("a wipe threw away the admission its own contract depends on")
 		}
 	})
@@ -680,7 +680,7 @@ func TestSpeakingToAPeerAdmitsOnlyTheirAnswer(t *testing.T) {
 		if result := (&dmControlHandler{svc: svc}).Handle(context.Background(), delivery, sealed); result.Outcome() != datagram.HandlerAccepted {
 			t.Fatalf("the frame was refused rather than ignored: %v", result.Err())
 		}
-		if svc.ReactionsUnsupportedBy(peer) {
+		if svc.ReactionsSupportOf(peer) == domain.ReactionsSupportAbsent {
 			t.Fatal("an answer was believed although nothing of ours ever reached the plane")
 		}
 	})
@@ -730,7 +730,7 @@ func TestARejectedReactionsFrameLeavesTheBeliefAlone(t *testing.T) {
 			svc.RegisterConversationControlStore(&recordingControlStore{})
 			svc.dmControl.setDraining(true)
 			svc.noteCommandRefused(sender, domain.DMControlReactions)
-			if !svc.ReactionsUnsupportedBy(sender) {
+			if svc.ReactionsSupportOf(sender) != domain.ReactionsSupportAbsent {
 				t.Fatal("the fixture did not record the belief the frame must not clear")
 			}
 
@@ -738,7 +738,7 @@ func TestARejectedReactionsFrameLeavesTheBeliefAlone(t *testing.T) {
 			if result.Outcome() == datagram.HandlerAccepted {
 				t.Fatal("the frame was accepted; this test is about a rejected one")
 			}
-			if !svc.ReactionsUnsupportedBy(sender) {
+			if svc.ReactionsSupportOf(sender) != domain.ReactionsSupportAbsent {
 				t.Fatal("a rejected frame cleared what this node believed about the peer's build")
 			}
 		})

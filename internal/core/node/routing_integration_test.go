@@ -55,7 +55,7 @@ func TestHandleAnnounceRoutesAddsHop(t *testing.T) {
 		},
 	}
 
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) == 0 {
@@ -83,7 +83,7 @@ func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
@@ -97,7 +97,7 @@ func TestHandleAnnounceRoutesWithdrawal(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 16, SeqNo: 2},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, withdrawal)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), withdrawal)
 
 	routes = svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 0 {
@@ -115,7 +115,7 @@ func TestHandleAnnounceRoutesSkipsSelf(t *testing.T) {
 			{Identity: idNodeA.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	routes := svc.routingTable.Lookup(idNodeA)
 	// Lookup returns the synthetic local self-route (RouteSourceLocal) but
@@ -166,7 +166,7 @@ func TestMultiSessionAwareness_CloseOneSessionRouteRemains(t *testing.T) {
 	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // 2 sessions
 
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // close 1, 1 remains
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1}) // close 1, 1 remains
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -181,7 +181,7 @@ func TestMultiSessionAwareness_CloseLastSessionWithdrawsRoute(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 
 	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // last session
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1}) // last session
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -330,7 +330,7 @@ func TestMixedCap_RelayClosedLegacyRemainsWithdrawsRoute(t *testing.T) {
 	}
 
 	// Close the relay-capable session — route should be withdrawn.
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 
 	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -359,7 +359,7 @@ func TestMixedCap_TwoRelaySessionsOneCloseRouteRemains(t *testing.T) {
 	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1}) // one relay remains
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1}) // one relay remains
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 {
@@ -380,7 +380,7 @@ func TestMixedCap_LegacyCloseDoesNotWithdrawRelayRoute(t *testing.T) {
 	svc.onPeerSessionEstablished(idPeerB, nil)                                        // legacy session
 
 	// Close the legacy session.
-	svc.onPeerSessionClosed(idPeerB, nil)
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), nil)
 
 	routes := svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 1 || routes[0].Source != routing.RouteSourceDirect {
@@ -421,7 +421,7 @@ func TestRoutingOnlyPeerDisconnectInvalidatesTransitRoutes(t *testing.T) {
 	_ = svc.announceLoop.PendingTrigger()
 
 	// Close the routing-only peer's session.
-	svc.onPeerSessionClosed(idPeerB, nil)
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), nil)
 
 	// Transit route should be invalidated. Lookup() filters withdrawn entries,
 	// so use Snapshot() to inspect the raw table state.
@@ -466,7 +466,7 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	_ = svc.announceLoop.PendingTrigger()
 
 	// Close one session — transit route should remain, no trigger.
-	svc.onPeerSessionClosed(idPeerB, nil)
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), nil)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 || routes[0].IsWithdrawn() {
@@ -477,7 +477,7 @@ func TestRoutingOnlyPeerNonLastSessionNoInvalidation(t *testing.T) {
 	}
 
 	// Close last session — now transit route should be invalidated with trigger.
-	svc.onPeerSessionClosed(idPeerB, nil)
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), nil)
 
 	// Lookup() filters withdrawn entries — use Snapshot() for raw state.
 	snap := svc.routingTable.Snapshot()
@@ -822,7 +822,7 @@ func TestRouteSessionBinding_DirectRouteWithdrawnOnWire(t *testing.T) {
 	}
 
 	// Disconnect peer-B → should produce wire withdrawal.
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 
 	routes = svc.routingTable.Lookup(idPeerB)
 	if len(routes) != 0 {
@@ -861,7 +861,7 @@ func TestRouteSessionBinding_TransitRouteLocallyInvalidated(t *testing.T) {
 	}
 
 	// Disconnect peer-B → transit route should be locally invalidated.
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 
 	// Transit route should no longer be active.
 	routes := svc.routingTable.Lookup(idTargetX)
@@ -914,7 +914,7 @@ func TestRouteSessionBinding_MixedDirectAndTransit(t *testing.T) {
 	}
 
 	// Disconnect peer-B.
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 
 	// Both the direct route to peer-B and the transit route via peer-B
 	// should be gone from active lookups.
@@ -1257,7 +1257,7 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOrigin(t *testing.T) {
 		},
 	}
 
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 0 {
@@ -1290,7 +1290,7 @@ func TestHandleAnnounceRoutesRejectsForgedOwnOriginWithdrawal(t *testing.T) {
 		},
 	}
 
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	// The direct route must still be alive.
 	routes := svc.routingTable.Lookup(idTargetX)
@@ -1312,7 +1312,7 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 2, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
@@ -1328,7 +1328,7 @@ func TestHandleAnnounceRoutesRejectsTransitWithdrawal(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 16, SeqNo: 2},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, withdrawal)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), withdrawal)
 
 	// Route must survive — only origin-C may withdraw it.
 	routes = svc.routingTable.Lookup(idTargetX)
@@ -1350,7 +1350,7 @@ func TestHandleAnnounceRoutesAcceptsOriginWithdrawal(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idOriginC, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idOriginC), frame)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
@@ -1364,7 +1364,7 @@ func TestHandleAnnounceRoutesAcceptsOriginWithdrawal(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 16, SeqNo: 2},
 		},
 	}
-	svc.handleAnnounceRoutes(idOriginC, withdrawal)
+	svc.handleAnnounceRoutes(provenRoutingSender(idOriginC), withdrawal)
 
 	routes = svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 0 {
@@ -2245,7 +2245,7 @@ func TestHandleAnnounceRoutesUsesTableConfiguredTTL(t *testing.T) {
 		},
 	}
 
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
@@ -2272,7 +2272,7 @@ func TestHandleAnnounceRoutesDefaultTTLWithoutConfig(t *testing.T) {
 		},
 	}
 
-	svc.handleAnnounceRoutes(idPeerB, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), frame)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
@@ -3278,7 +3278,7 @@ func TestHandleAnnounceRoutes_DrainsPendingForAcceptedIdentities(t *testing.T) {
 	wg.Add(1)
 	svc.drainDone = wg.Done
 
-	svc.handleAnnounceRoutes(idPeerB, announceFrame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), announceFrame)
 	wg.Wait()
 
 	// Pending queue should be drained.
@@ -3328,7 +3328,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idOriginC, primaryAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idOriginC), primaryAnnounce)
 
 	backupAnnounce := protocol.Frame{
 		Type: "announce_routes",
@@ -3336,7 +3336,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerC), backupAnnounce)
 
 	// Verify two routes exist.
 	routes := svc.routingTable.Lookup(idTargetX)
@@ -3375,7 +3375,7 @@ func TestHandleAnnounceRoutes_WithdrawalWithBackupTriggersDrain(t *testing.T) {
 	wg.Add(1)
 	svc.drainDone = wg.Done
 
-	svc.handleAnnounceRoutes(idOriginC, withdrawalFrame)
+	svc.handleAnnounceRoutes(provenRoutingSender(idOriginC), withdrawalFrame)
 	wg.Wait()
 
 	// Pending queue should be drained via the backup route through peer-C.
@@ -3463,7 +3463,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idOriginC.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idOriginC, primaryAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idOriginC), primaryAnnounce)
 
 	backupAnnounce := protocol.Frame{
 		Type: "announce_routes",
@@ -3471,7 +3471,7 @@ func TestTTLExpiryExposesBackupAndTriggersDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerC.String(), Hops: 2, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerC), backupAnnounce)
 
 	// Both routes should be present.
 	routes := svc.routingTable.Lookup(idTargetX)
@@ -3672,7 +3672,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, primaryAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), primaryAnnounce)
 
 	// Backup route to idTargetX via peer-C.
 	backupAnnounce := protocol.Frame{
@@ -3681,7 +3681,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerC.String(), Hops: 2, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerC, backupAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerC), backupAnnounce)
 
 	// Verify both routes present.
 	routes := svc.routingTable.Lookup(idTargetX)
@@ -3714,7 +3714,7 @@ func TestDisconnectWithBackupTriggersDrain(t *testing.T) {
 	wg.Add(1)
 	svc.drainDone = wg.Done
 
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 	wg.Wait()
 
 	// Pending queue should be drained.
@@ -3767,7 +3767,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, announce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), announce)
 
 	// Queue a pending send_message.
 	addrStale := domain.PeerAddress("10.0.0.99:9000")
@@ -3789,7 +3789,7 @@ func TestDisconnectNoBackupNoDrain(t *testing.T) {
 
 	// Disconnect peer-B. No backup → no drain should fire.
 	// Don't set drainDone — if drain fires unexpectedly it won't block.
-	svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 
 	// Pending should be untouched.
 	svc.deliveryMu.RLock()
@@ -3829,7 +3829,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(idPeerB, firstAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), firstAnnounce)
 
 	// Queue a pending send_message for idTargetX on a stale address
 	// (simulates a frame that arrived while no route was available).
@@ -3857,7 +3857,7 @@ func TestHandleAnnounceRoutes_UnchangedRouteTriggersDrain(t *testing.T) {
 	wg.Add(1)
 	svc.drainDone = wg.Done
 
-	svc.handleAnnounceRoutes(idPeerB, firstAnnounce)
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), firstAnnounce)
 	wg.Wait()
 
 	// Pending queue should be drained.
@@ -3903,7 +3903,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	svc.onPeerSessionEstablished(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
 
 	// First announce: route with SeqNo=5.
-	svc.handleAnnounceRoutes(idPeerB, protocol.Frame{
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
 			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 5},
@@ -3938,7 +3938,7 @@ func TestHandleAnnounceRoutes_RejectedRouteNoDrain(t *testing.T) {
 	}
 
 	// Stale announce: lower SeqNo=3 — rejected, not unchanged.
-	svc.handleAnnounceRoutes(idPeerB, protocol.Frame{
+	svc.handleAnnounceRoutes(provenRoutingSender(idPeerB), protocol.Frame{
 		Type: "announce_routes",
 		AnnounceRoutes: []protocol.AnnounceRouteFrame{
 			{Identity: idTargetX.String(), Origin: idPeerB.String(), Hops: 1, SeqNo: 3},

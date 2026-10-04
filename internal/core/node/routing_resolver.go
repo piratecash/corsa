@@ -72,7 +72,7 @@ func inboundConnKeyFromInfo(info connInfo) domain.PeerAddress {
 //
 // Checks both outbound sessions and inbound connections. For inbound-only
 // peers, the returned address is an "inbound:" prefixed key that must be
-// handled by sendFrameToAddress (not enqueuePeerFrame directly).
+// handled by sendFrameToAddressVia (not enqueuePeerFrame directly).
 func (s *Service) resolveRoutableAddress(peerIdentity domain.PeerIdentity) domain.PeerAddress {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
@@ -180,12 +180,19 @@ func sessionHasBothCaps(caps []domain.Capability, a, b domain.Capability) bool {
 // (conn.RemoteAddr().String()). The returned value is the peer's Ed25519
 // identity fingerprint.
 func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIdentity {
+	return s.resolvePeerSender(address).identity
+}
+
+// resolvePeerSender is resolvePeerIdentity with the penalty subject of the
+// connection the address names, so a caller attributing a hop signal can tell
+// a v2 session of the identity from a legacy connection that merely names it.
+func (s *Service) resolvePeerSender(address domain.PeerAddress) routingSender {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
 
 	// Outbound session: address is the session map key.
 	if session := s.sessions[address]; session != nil {
-		return session.peerIdentity
+		return sessionRoutingSender(session)
 	}
 
 	// Inbound connection: match on the connection's transport
@@ -209,10 +216,13 @@ func (s *Service) resolvePeerIdentity(address domain.PeerAddress) domain.PeerIde
 	// Outbound NetCores are resolved via s.sessions above, so skip them
 	// here — a pre-activation outbound entry must not answer identity
 	// lookups before the session is installed.
-	var result domain.PeerIdentity
+	var result routingSender
 	s.forEachInboundConnLocked(func(info connInfo) bool {
 		if info.remoteAddr == remoteAddr {
-			result = info.identity
+			result = routingSender{
+				identity: info.identity,
+				penalty:  penaltySubjectOfCore(info.id, s.coreForIDLocked(info.id)),
+			}
 			return false // Stop iteration
 		}
 		return true

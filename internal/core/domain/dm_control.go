@@ -77,3 +77,36 @@ func ResolveConversation(kind ConversationKind, sender PeerIdentity) (ReactionSc
 		return "", fmt.Errorf("domain: unknown conversation kind %q", kind)
 	}
 }
+
+// ReactionsSupport is what a node currently knows about whether a peer can
+// receive reactions. Three states, because "nothing is known now" and "it is
+// known not to" are different answers to show a user: only the second may say
+// a reaction will not arrive.
+type ReactionsSupport uint8
+
+const (
+	// ReactionsSupportUnknown: no current information — no live connection
+	// whose handshake declarations can be read, and no signed answer from the
+	// peer. The zero value, so a value nobody set claims nothing.
+	ReactionsSupportUnknown ReactionsSupport = iota
+	// ReactionsSupportDeclared: a live connection a send would use declares
+	// the dm_control dtype.
+	ReactionsSupportDeclared
+	// ReactionsSupportAbsent: confirmed — the peer's own signed answer, or
+	// every live connection a send would use declared no dm_control.
+	ReactionsSupportAbsent
+)
+
+var reactionsSupportNames = map[ReactionsSupport]string{
+	ReactionsSupportUnknown:  "unknown",
+	ReactionsSupportDeclared: "declared",
+	ReactionsSupportAbsent:   "absent",
+}
+
+// String returns the log label of the state.
+func (r ReactionsSupport) String() string {
+	if name, ok := reactionsSupportNames[r]; ok {
+		return name
+	}
+	return fmt.Sprintf("reactions_support(%d)", uint8(r))
+}

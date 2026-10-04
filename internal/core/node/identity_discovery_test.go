@@ -109,7 +109,8 @@ func (s *Service) knownBoxKeyForTest(address string) (string, bool) {
 }
 
 // newGetIdentityDelivery builds the DeliveryContext of a get_identity frame
-// addressed to svc, arriving from a proven neighbour.
+// addressed to svc, arriving from a neighbour on an accepted legacy
+// connection — the handler reads the channel, never the level of proof.
 func newGetIdentityDelivery(t *testing.T, svc *Service, label domain.PeerIdentity, neighbour domain.PeerIdentity) datagram.DeliveryContext {
 	t.Helper()
 	frame := protocol.DatagramFrame{
@@ -129,7 +130,7 @@ func newGetIdentityDelivery(t *testing.T, svc *Service, label domain.PeerIdentit
 	}
 	delivery, err := datagram.NewDeliveryContext(datagram.DeliveryContextOpts{
 		Header:        header,
-		IncomingPeer:  datagram.ProvenIngress(datagram.NetworkChannel(domain.ConnID(7)), neighbour),
+		IncomingPeer:  datagram.ClaimedIngress(datagram.NetworkChannel(domain.ConnID(7)), datagram.AcceptedConnectionKey(domain.ConnID(7)), neighbour),
 		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	})
 	if err != nil {
@@ -261,7 +262,7 @@ func newPushDelivery(t *testing.T, svc *Service, signer *identity.Identity, pres
 	}
 	delivery, err := datagram.NewDeliveryContext(datagram.DeliveryContextOpts{
 		Header:        header,
-		IncomingPeer:  datagram.ProvenIngress(datagram.NetworkChannel(domain.ConnID(9)), presented),
+		IncomingPeer:  datagram.ClaimedIngress(datagram.NetworkChannel(domain.ConnID(9)), datagram.AcceptedConnectionKey(domain.ConnID(9)), presented),
 		LocalIdentity: domain.PeerIdentityFromWire(svc.identity.Address),
 	})
 	if err != nil {

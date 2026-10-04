@@ -62,12 +62,12 @@ func TestQuarantine_TableRouterSkipsTransitViaQuarantinedNextHop(t *testing.T) {
 	}
 
 	svc := &Service{
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 	// Put peer-B in quarantine.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(domaintest.ID("peer-B")), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
@@ -106,11 +106,11 @@ func TestQuarantine_TableRouterDirectRouteToQuarantinedPeerStillReachable(t *tes
 	}
 
 	svc := &Service{
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domaintest.ID("peer-Q"), quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(domaintest.ID("peer-Q")), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
@@ -160,11 +160,11 @@ func TestQuarantine_TableRouterFallsBackWhenOnlyTransitIsQuarantined(t *testing.
 	}
 
 	svc := &Service{
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(domaintest.ID("peer-B")), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	tr := &TableRouter{
@@ -204,13 +204,13 @@ func TestQuarantine_ApplyAnnounceEntriesDropsQuarantinedSender(t *testing.T) {
 	svc := &Service{
 		routingTable:          table,
 		identity:              &identity.Identity{Address: "ff00000000000000000000000000000000000001"},
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 	sender := domain.PeerIdentityFromWire("bb00000000000000000000000000000000000099")
 	target := "aa00000000000000000000000000000000000088"
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(sender, "test", time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(sender), "test", time.Now())
 	svc.peerMu.Unlock()
 
 	wireRoutes := []protocol.AnnounceRouteFrame{
@@ -220,7 +220,7 @@ func TestQuarantine_ApplyAnnounceEntriesDropsQuarantinedSender(t *testing.T) {
 	// Quarantine gate is at the very top of applyAnnounceEntries —
 	// the routing-table mutation path is never reached, so we do
 	// not need the full Service fixture (announceLoop, etc).
-	svc.applyAnnounceEntries(sender, wireRoutes, nil, nil, announceReceiveLegacy)
+	svc.applyAnnounceEntries(provenRoutingSender(sender), wireRoutes, nil, nil, announceReceiveLegacy)
 
 	// Verify nothing was added to the table.
 	got := table.Lookup(domain.PeerIdentityFromWire(target))
@@ -245,7 +245,7 @@ func TestQuarantine_ApplyAnnounceEntriesDropsQuarantinedSender(t *testing.T) {
 // call-site (tryForwardViaRoutingTable and TableRouter.Route) routes
 // through this single helper. Testing it directly covers BOTH gates
 // regardless of the call-site fixture surface, which would otherwise
-// require full Network()/sendFrameToAddress wiring to drive
+// require full Network()/sendFrameToAddressVia wiring to drive
 // tryForwardViaRoutingTable end-to-end.
 // ---------------------------------------------------------------------------
 
@@ -253,8 +253,8 @@ func TestRouteIsBlockedByQuarantine_DirectPasses(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			domaintest.ID("peer-Q"): {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
+		peerQuarantine: map[penaltySubject]routeQuarantineEntry{
+			provenIdentitySubject(domaintest.ID("peer-Q")): {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
 		},
 	}
 	if svc.routeIsBlockedByQuarantine(domaintest.ID("peer-Q"), 1) {
@@ -266,8 +266,8 @@ func TestRouteIsBlockedByQuarantine_TransitBlocked(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			domaintest.ID("peer-Q"): {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
+		peerQuarantine: map[penaltySubject]routeQuarantineEntry{
+			provenIdentitySubject(domaintest.ID("peer-Q")): {Until: time.Now().Add(time.Hour), Reason: quarantineReasonDisconnectStorm, LastArmed: time.Now(), Strikes: 1},
 		},
 	}
 	if !svc.routeIsBlockedByQuarantine(domaintest.ID("peer-Q"), 2) {
@@ -282,7 +282,7 @@ func TestRouteIsBlockedByQuarantine_NonQuarantinedPasses(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{},
+		peerQuarantine: map[penaltySubject]routeQuarantineEntry{},
 	}
 	if svc.routeIsBlockedByQuarantine(domaintest.ID("peer-clean"), 1) {
 		t.Fatal("non-quarantined peer (direct) must pass")
@@ -297,8 +297,8 @@ func TestRouteIsBlockedByQuarantine_ExpiredQuarantinePasses(t *testing.T) {
 
 	// Quarantine entry exists but Until is in the past.
 	svc := &Service{
-		peerQuarantine: map[domain.PeerIdentity]routeQuarantineEntry{
-			domaintest.ID("peer-was-bad"): {Until: time.Now().Add(-time.Hour), Reason: "test", LastArmed: time.Now().Add(-2 * time.Hour), Strikes: 1},
+		peerQuarantine: map[penaltySubject]routeQuarantineEntry{
+			provenIdentitySubject(domaintest.ID("peer-was-bad")): {Until: time.Now().Add(-time.Hour), Reason: "test", LastArmed: time.Now().Add(-2 * time.Hour), Strikes: 1},
 		},
 	}
 	if svc.routeIsBlockedByQuarantine(domaintest.ID("peer-was-bad"), 2) {
@@ -331,8 +331,8 @@ func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T
 		sessions:              map[domain.PeerAddress]*peerSession{},
 		peerIDs:               map[domain.PeerAddress]domain.PeerIdentity{},
 		health:                map[domain.PeerAddress]*peerHealth{},
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 	svc.sessions[quarantinedAddr] = &peerSession{
 		peerIdentity: quarantinedID,
@@ -348,7 +348,7 @@ func TestQuarantine_RoutingTargetsForMessageDropsQuarantinedTransit(t *testing.T
 	svc.health[cleanAddr] = &peerHealth{Address: cleanAddr, Connected: true}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(quarantinedID, quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(quarantinedID), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	targets := svc.routingTargetsForMessage(protocol.Envelope{
@@ -389,8 +389,8 @@ func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *
 		sessions:              map[domain.PeerAddress]*peerSession{},
 		peerIDs:               map[domain.PeerAddress]domain.PeerIdentity{},
 		health:                map[domain.PeerAddress]*peerHealth{},
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 	svc.sessions[quarantinedAddr] = &peerSession{
 		peerIdentity: quarantinedID,
@@ -400,7 +400,7 @@ func TestQuarantine_RoutingTargetsForMessageAllowsRecipientEvenIfQuarantined(t *
 	svc.health[quarantinedAddr] = &peerHealth{Address: quarantinedAddr, Connected: true}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(quarantinedID, quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(quarantinedID), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	// Message recipient is the quarantined peer itself.
@@ -436,8 +436,8 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 
 	svc := &Service{
 		setupFailures:         map[domain.PeerAddress]*setupFailureEntry{},
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 	addr := mustAddr("10.0.0.42:64646")
 	identity := domain.PeerIdentityFromWire("ee00000000000000000000000000000000000055")
@@ -461,13 +461,13 @@ func TestQuarantine_SetupFailureCycleArmsQuarantine(t *testing.T) {
 		svc.peerMu.Unlock()
 		t.Fatal("threshold should be reported as exceeded after Nth failure")
 	}
-	svc.armRouteQuarantineLocked(identity, quarantineReasonSetupFailureCycle, now)
+	svc.armRouteQuarantineLocked(provenIdentitySubject(identity), quarantineReasonSetupFailureCycle, now)
 	// Same controlled `now` for the check — see
 	// TestQuarantine_NoTriggerBelowThreshold for why the public
 	// IsPeerInRouteQuarantine helper would silently start to fail
 	// here once wall-clock time crossed armTime + quarantineBaseDuration.
-	banned := svc.isPeerInRouteQuarantineLocked(identity, now.Add(time.Second))
-	entry := svc.peerQuarantine[identity]
+	banned := svc.isSubjectInRouteQuarantineLocked(provenIdentitySubject(identity), now.Add(time.Second))
+	entry := svc.peerQuarantine[provenIdentitySubject(identity)]
 	svc.peerMu.Unlock()
 
 	if !banned {
@@ -518,8 +518,8 @@ func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 
 	svc := &Service{
 		routingTable:          table,
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 
 	// disconnect_storm (a session-instability reason) is what arms
@@ -527,7 +527,7 @@ func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 	// A chatty_routes arm deliberately leaves transit in place (covered
 	// by routing_route_quarantine_transit_test.go).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(domaintest.ID("peer-B")), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	// Transit claim via the quarantined peer must be gone from the
@@ -547,7 +547,7 @@ func TestQuarantine_ArmInvalidatesTransitRoutes(t *testing.T) {
 	// dropped during quarantine, so there is nothing new to
 	// invalidate.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domaintest.ID("peer-B"), quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(domaintest.ID("peer-B")), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 	if got := table.Lookup(domaintest.ID("peer-B")); len(got) == 0 {
 		t.Fatal("re-arm during active quarantine must not touch the direct route")

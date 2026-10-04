@@ -150,7 +150,7 @@ func TestFireAndForgetBufferFullDoesNotFeedDisconnectHistory(t *testing.T) {
 	}
 
 	svc.peerMu.RLock()
-	histLen := len(svc.peerDisconnectHistory[peerID])
+	histLen := len(svc.peerDisconnectHistory[provenIdentitySubject(peerID)])
 	svc.peerMu.RUnlock()
 	if histLen != 0 {
 		t.Fatalf("disconnect history has %d entries after frame drops, want 0", histLen)

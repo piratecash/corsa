@@ -68,6 +68,16 @@ import (
 // for now". This is the principal departure from the pre-quarantine
 // world, where instability triggered disconnect/reconnect cycles
 // that themselves became the next instability signal.
+//
+// WHO is quarantined is a penaltySubject (penalty_subject.go), not the
+// identity a session names. A v2 session proved its identity, so its
+// quarantine follows that identity to every connection it opens and
+// blocks transit through it. A legacy session proved nothing — its
+// welcome or hello names any identity it likes — so its quarantine is
+// charged to what this node observed of the connection (the address it
+// dialled, the source IP, or the connection for loopback): the flapping
+// or chatty connection is muted, and the identity it named, whose real
+// owner may be connected elsewhere, is left alone.
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -198,7 +208,7 @@ const (
 //
 // chatty_routes is deliberately excluded: there the session is ALIVE
 // and the peer is merely over-talkative on the announce plane. Muting
-// its (untrusted) opinions via the IsPeerInRouteQuarantine gate is
+// its (untrusted) opinions via the isSubjectInRouteQuarantine gate is
 // sufficient. Tearing down every transit route behind a still-
 // connected, often high-degree hub on a chatty signal is what
 // collapses normal multi-hop delivery mesh-wide — and because the
@@ -217,7 +227,7 @@ func quarantineReasonInvalidatesTransit(reason string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// State types (stored on Service, all guarded by s.peerMu)
+// State types (stored on Service keyed by penaltySubject, all guarded by s.peerMu)
 // ---------------------------------------------------------------------------
 
 // routeQuarantineEntry is the per-peer record for an active or
@@ -247,27 +257,25 @@ type routeQuarantineEntry struct {
 // Public API (called from receive-path and relay-forward gates)
 // ---------------------------------------------------------------------------
 
-// IsPeerInRouteQuarantine reports whether the peer's routing
-// announcements are currently being dropped. Safe for concurrent
-// readers — takes the peer-domain read lock.
+// isSubjectInRouteQuarantine reports whether the routing frames charged to
+// subject are currently being dropped. Takes the peer-domain read lock.
 //
-// Callers:
-//   - applyAnnounceEntries (drop inbound routing snapshots)
-//   - tryForwardViaRoutingTable (skip quarantined peers as next-hop)
-//   - applyRoutesUpdate / similar receive-path entry points
-func (s *Service) IsPeerInRouteQuarantine(peer domain.PeerIdentity) bool {
-	if peer.IsZero() {
+// Callers are the routing-plane receive handlers, which ask about the
+// subject of the connection the frame arrived on — never about the
+// identity that connection names (penalty_subject.go).
+func (s *Service) isSubjectInRouteQuarantine(subject penaltySubject) bool {
+	if subject.IsZero() {
 		return false
 	}
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
-	return s.isPeerInRouteQuarantineLocked(peer, time.Now())
+	return s.isSubjectInRouteQuarantineLocked(subject, time.Now())
 }
 
-// isPeerInRouteQuarantineLocked is the lock-already-held variant.
-// Used internally by helpers that already own peerMu.
-func (s *Service) isPeerInRouteQuarantineLocked(peer domain.PeerIdentity, now time.Time) bool {
-	entry, ok := s.peerQuarantine[peer]
+// isSubjectInRouteQuarantineLocked is the lock-already-held variant.
+// Caller must hold s.peerMu (read or write).
+func (s *Service) isSubjectInRouteQuarantineLocked(subject penaltySubject, now time.Time) bool {
+	entry, ok := s.peerQuarantine[subject]
 	if !ok {
 		return false
 	}
@@ -279,16 +287,22 @@ func (s *Service) isPeerInRouteQuarantineLocked(peer domain.PeerIdentity, now ti
 
 // IsPeerTransitQuarantined reports whether the peer must be excluded
 // from DATA-PLANE transit selection (relay next-hop / gossip
-// fallback). This is the reason-aware companion to
-// IsPeerInRouteQuarantine: a peer is transit-blocked only when it is
-// quarantined for a session-instability reason
+// fallback). A peer is transit-blocked only when a quarantine charged to
+// its PROVEN identity is active for a session-instability reason
 // (quarantineReasonInvalidatesTransit) — disconnect_storm /
 // setup_failure_cycle — where the transport itself is unreliable and
 // forwarding through it would drop traffic.
 //
+// Only the proven namespace is read. A quarantine charged to a legacy
+// subject (dialled address, source IP, connection) mutes that subject's
+// announcements, so no new transit is learned through it, but it never
+// blocks the identity the legacy session named: that identity was not
+// proven, and blocking it would hand any legacy peer a switch that turns
+// off transit through somebody else.
+//
 // chatty_routes is deliberately NOT transit-blocked: the session is
 // alive and only the peer's announce-plane VERBOSITY is the problem.
-// We mute its routing opinions (IsPeerInRouteQuarantine still drops
+// We mute its routing opinions (isSubjectInRouteQuarantine still drops
 // its inbound announcements) but keep using it to carry data. Blocking
 // a still-connected, often high-degree hub from transit on a chatty
 // signal — for 60s up to the 30m cap — is what collapsed normal
@@ -308,11 +322,11 @@ func (s *Service) IsPeerTransitQuarantined(peer domain.PeerIdentity) bool {
 // filters) that already hold peerMu.RLock — peerMu is not recursive,
 // so they must not call the public RLock-taking variant.
 func (s *Service) isPeerTransitQuarantinedLocked(peer domain.PeerIdentity, now time.Time) bool {
-	if !s.isPeerInRouteQuarantineLocked(peer, now) {
+	subject := provenIdentitySubject(peer)
+	if !s.isSubjectInRouteQuarantineLocked(subject, now) {
 		return false
 	}
-	entry := s.peerQuarantine[peer]
-	return quarantineReasonInvalidatesTransit(entry.Reason)
+	return quarantineReasonInvalidatesTransit(s.peerQuarantine[subject].Reason)
 }
 
 // routeIsBlockedByQuarantine is the shared gate used by every relay
@@ -344,19 +358,19 @@ func (s *Service) routeIsBlockedByQuarantine(nextHop domain.PeerIdentity, hops i
 // ---------------------------------------------------------------------------
 
 // recordPeerDisconnectLocked appends a disconnect timestamp to the
-// peer's sliding-window history and prunes entries older than
+// subject's sliding-window history and prunes entries older than
 // quarantineDisconnectWindow. Caller must hold s.peerMu.
 //
 // Lazy-allocates the history map and per-peer slice on first use.
-func (s *Service) recordPeerDisconnectLocked(peer domain.PeerIdentity, now time.Time) {
-	if peer.IsZero() {
+func (s *Service) recordPeerDisconnectLocked(subject penaltySubject, now time.Time) {
+	if subject.IsZero() {
 		return
 	}
 	if s.peerDisconnectHistory == nil {
-		s.peerDisconnectHistory = make(map[domain.PeerIdentity][]time.Time)
+		s.peerDisconnectHistory = make(map[penaltySubject][]time.Time)
 	}
 	cutoff := now.Add(-quarantineDisconnectWindow)
-	hist := s.peerDisconnectHistory[peer]
+	hist := s.peerDisconnectHistory[subject]
 	pruned := hist[:0]
 	for _, ts := range hist {
 		if ts.After(cutoff) {
@@ -364,17 +378,17 @@ func (s *Service) recordPeerDisconnectLocked(peer domain.PeerIdentity, now time.
 		}
 	}
 	pruned = append(pruned, now)
-	s.peerDisconnectHistory[peer] = pruned
+	s.peerDisconnectHistory[subject] = pruned
 }
 
-// disconnectRateExceedsLocked returns true when the per-peer
+// disconnectRateExceedsLocked returns true when the subject's
 // sliding window contains at least quarantineDisconnectThreshold
 // events. Caller must hold s.peerMu.
-func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time.Time) bool {
-	if peer.IsZero() {
+func (s *Service) disconnectRateExceedsLocked(subject penaltySubject, now time.Time) bool {
+	if subject.IsZero() {
 		return false
 	}
-	hist := s.peerDisconnectHistory[peer]
+	hist := s.peerDisconnectHistory[subject]
 	if len(hist) < quarantineDisconnectThreshold {
 		return false
 	}
@@ -389,7 +403,7 @@ func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time
 	return count >= quarantineDisconnectThreshold
 }
 
-// armRouteQuarantineLocked places the peer into quarantine for a
+// armRouteQuarantineLocked places the subject into quarantine for a
 // cooldown duration computed by computeQuarantineDuration. Caller
 // must hold s.peerMu.
 //
@@ -401,6 +415,12 @@ func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time
 // Transit invalidation fires on the transition INTO a transit-blocking
 // quarantine (invalidateTransitOnQuarantineLocked), so the peer's
 // pre-quarantine transit claims cannot outlive the cooldown via TTL.
+// It fires for a PROVEN subject only. The routing table keys transit
+// claims by next-hop identity, so tombstoning on a legacy subject would
+// tombstone the claims of every connection that names the same identity
+// — the real owner's included. A legacy subject needs no tombstone of
+// its own: its announcements are dropped while the quarantine lasts, and
+// the routes of a session that closed are withdrawn by the close path.
 // "Into a transit-blocking quarantine" means EITHER:
 //   - first arm from "not quarantined" with a transit-blocking reason
 //     (disconnect_storm / setup_failure_cycle), OR
@@ -425,12 +445,12 @@ func (s *Service) disconnectRateExceedsLocked(peer domain.PeerIdentity, now time
 // turns chatty keeps its transit-blocking reason. Otherwise a chatty
 // re-arm of a disconnect_storm peer would silently un-block transit
 // through a still-flapping next-hop.
-func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason string, now time.Time) {
-	if peer.IsZero() {
+func (s *Service) armRouteQuarantineLocked(subject penaltySubject, reason string, now time.Time) {
+	if subject.IsZero() {
 		return
 	}
 	if s.peerQuarantine == nil {
-		s.peerQuarantine = make(map[domain.PeerIdentity]routeQuarantineEntry)
+		s.peerQuarantine = make(map[penaltySubject]routeQuarantineEntry)
 	}
 
 	// Capture the PRIOR active reason before we overwrite it. An
@@ -438,8 +458,8 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 	// transit-blocking), which collapses the first-arm case into the
 	// same transition test below.
 	prevReason := ""
-	if s.isPeerInRouteQuarantineLocked(peer, now) {
-		prevReason = s.peerQuarantine[peer].Reason
+	if s.isSubjectInRouteQuarantineLocked(subject, now) {
+		prevReason = s.peerQuarantine[subject].Reason
 	}
 
 	// No-downgrade: keep the stronger (transit-blocking) reason if an
@@ -451,16 +471,16 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 		effectiveReason = prevReason
 	}
 
-	entry := s.peerQuarantine[peer]
+	entry := s.peerQuarantine[subject]
 	entry.Strikes = nextStrikeCount(entry, now)
 	dur := computeQuarantineDuration(entry.Strikes)
 	entry.Until = now.Add(dur)
 	entry.LastArmed = now
 	entry.Reason = effectiveReason
-	s.peerQuarantine[peer] = entry
+	s.peerQuarantine[subject] = entry
 
 	log.Warn().
-		Str("peer", peer.String()).
+		Str("penalty_subject", subject.String()).
 		Str("reason", effectiveReason).
 		Dur("duration", dur).
 		Int("strikes", entry.Strikes).
@@ -468,7 +488,8 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 
 	// Invalidate on the transition into a transit-blocking state:
 	// new reason blocks transit AND the prior active reason did not.
-	if quarantineReasonInvalidatesTransit(effectiveReason) &&
+	peer, proven := subject.provenIdentity()
+	if proven && quarantineReasonInvalidatesTransit(effectiveReason) &&
 		!quarantineReasonInvalidatesTransit(prevReason) {
 		s.invalidateTransitOnQuarantineLocked(peer)
 	}
@@ -479,7 +500,7 @@ func (s *Service) armRouteQuarantineLocked(peer domain.PeerIdentity, reason stri
 // s.peerMu (lock order peerMu → routingTable.mu is the canonical
 // one — see executeDeferredWithdrawal).
 //
-// Why this exists: the quarantine gate in isPeerInRouteQuarantineLocked
+// Why this exists: the quarantine gate in isSubjectInRouteQuarantineLocked
 // only blocks while now < Until, but the route TTL (route claim
 // lifetime, 120s) is longer than the base cooldown (60s). Without
 // local invalidation, claims learned BEFORE the quarantine — stale
@@ -565,15 +586,19 @@ func computeQuarantineDuration(strikes int) time.Duration {
 // disconnect, checks the rate, and arms quarantine if exceeded.
 // Caller must hold s.peerMu (the existing close-path already does).
 //
+// subject is the closing session's own (penaltySubject), not the identity
+// it named: a flapping legacy peer that names somebody else counts against
+// its own address.
+//
 // The caller invokes this ONLY for peer-initiated teardowns
 // (sessionClosePeerInitiated): local evictions (inbox overflow, CM
 // slot replacement) are excluded upstream because they are not
 // evidence of peer instability — see sessionCloseCause in
 // routing_session.go.
-func (s *Service) maybeArmRouteQuarantineOnCloseLocked(peer domain.PeerIdentity, now time.Time) {
-	s.recordPeerDisconnectLocked(peer, now)
-	if s.disconnectRateExceedsLocked(peer, now) {
-		s.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, now)
+func (s *Service) maybeArmRouteQuarantineOnCloseLocked(subject penaltySubject, now time.Time) {
+	s.recordPeerDisconnectLocked(subject, now)
+	if s.disconnectRateExceedsLocked(subject, now) {
+		s.armRouteQuarantineLocked(subject, quarantineReasonDisconnectStorm, now)
 	}
 }
 
@@ -639,15 +664,15 @@ func (s *Service) chattyThresholdLocked() int {
 // Symmetric to recordPeerDisconnectLocked but with the explicit
 // upper bound — disconnect events are naturally rate-limited by
 // session lifecycle so the same bound was not required there.
-func (s *Service) recordPeerAnnounceLocked(peer domain.PeerIdentity, now time.Time) {
-	if peer.IsZero() {
+func (s *Service) recordPeerAnnounceLocked(subject penaltySubject, now time.Time) {
+	if subject.IsZero() {
 		return
 	}
 	if s.peerAnnounceHistory == nil {
-		s.peerAnnounceHistory = make(map[domain.PeerIdentity][]time.Time)
+		s.peerAnnounceHistory = make(map[penaltySubject][]time.Time)
 	}
 	cutoff := now.Add(-chattyAnnounceWindow)
-	hist := s.peerAnnounceHistory[peer]
+	hist := s.peerAnnounceHistory[subject]
 
 	// Front-trim ageouts. Monotonic-time invariant lets us scan
 	// the prefix only.
@@ -675,19 +700,19 @@ func (s *Service) recordPeerAnnounceLocked(peer domain.PeerIdentity, now time.Ti
 		hist = hist[:chattyAnnounceThresholdCap]
 	}
 
-	s.peerAnnounceHistory[peer] = hist
+	s.peerAnnounceHistory[subject] = hist
 }
 
 // announceRateExceedsLocked returns true when the per-peer sliding
 // window contains at least the EFFECTIVE chatty threshold
 // (chattyThresholdLocked) of in-window events. Caller must hold
 // s.peerMu.
-func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.Time) bool {
-	if peer.IsZero() {
+func (s *Service) announceRateExceedsLocked(subject penaltySubject, now time.Time) bool {
+	if subject.IsZero() {
 		return false
 	}
 	threshold := s.chattyThresholdLocked()
-	hist := s.peerAnnounceHistory[peer]
+	hist := s.peerAnnounceHistory[subject]
 	if len(hist) < threshold {
 		return false
 	}
@@ -704,7 +729,8 @@ func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.T
 // recordInboundAnnounceAndMaybeArm is the receive-handler entry
 // point for the chatty_routes quarantine trigger. Called only for
 // DELTA frames — handleRoutesUpdate (v2 delta) and handleRouteAnnounceV3
-// when frame.Kind == "delta" — from a known sender. Full baselines
+// when frame.Kind == "delta" — charged to the penalty subject of the
+// connection the frame arrived on. Full baselines
 // (handleAnnounceRoutes, v3 kind="full") and the request_resync
 // control frame deliberately do NOT call it:
 //   - The trigger targets DELTA churn, which cascades work (UpdateRoute
@@ -743,14 +769,14 @@ func (s *Service) announceRateExceedsLocked(peer domain.PeerIdentity, now time.T
 // chattyReArmDebounce); skip otherwise. A peer that stays chatty
 // continues to escalate Strikes, just paced to once per debounce
 // window.
-func (s *Service) recordInboundAnnounceAndMaybeArm(peer domain.PeerIdentity, now time.Time) {
-	if peer.IsZero() {
+func (s *Service) recordInboundAnnounceAndMaybeArm(subject penaltySubject, now time.Time) {
+	if subject.IsZero() {
 		return
 	}
 	s.peerMu.Lock()
-	s.recordPeerAnnounceLocked(peer, now)
-	if s.shouldArmChattyLocked(peer, now) {
-		s.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, now)
+	s.recordPeerAnnounceLocked(subject, now)
+	if s.shouldArmChattyLocked(subject, now) {
+		s.armRouteQuarantineLocked(subject, quarantineReasonChattyRoutes, now)
 	}
 	s.peerMu.Unlock()
 }
@@ -781,11 +807,11 @@ func (s *Service) recordInboundAnnounceAndMaybeArm(peer domain.PeerIdentity, now
 // peer is already quarantined, and a second arm-pass over the
 // same fresh state would only bump Strikes for no signal benefit.
 // Caller must hold s.peerMu.
-func (s *Service) shouldArmChattyLocked(peer domain.PeerIdentity, now time.Time) bool {
-	if !s.announceRateExceedsLocked(peer, now) {
+func (s *Service) shouldArmChattyLocked(subject penaltySubject, now time.Time) bool {
+	if !s.announceRateExceedsLocked(subject, now) {
 		return false
 	}
-	entry, exists := s.peerQuarantine[peer]
+	entry, exists := s.peerQuarantine[subject]
 	if !exists {
 		return true
 	}
@@ -804,7 +830,7 @@ func (s *Service) purgePeerAnnounceHistoryLocked(now time.Time) {
 		return
 	}
 	cutoff := now.Add(-chattyAnnounceWindow)
-	for peer, hist := range s.peerAnnounceHistory {
+	for subject, hist := range s.peerAnnounceHistory {
 		stillRelevant := false
 		for _, ts := range hist {
 			if ts.After(cutoff) {
@@ -813,7 +839,7 @@ func (s *Service) purgePeerAnnounceHistoryLocked(now time.Time) {
 			}
 		}
 		if !stillRelevant {
-			delete(s.peerAnnounceHistory, peer)
+			delete(s.peerAnnounceHistory, subject)
 		}
 	}
 }
@@ -835,12 +861,12 @@ func (s *Service) purgeExpiredQuarantineLocked(now time.Time) {
 	if s.peerQuarantine == nil {
 		return
 	}
-	for peer, entry := range s.peerQuarantine {
+	for subject, entry := range s.peerQuarantine {
 		untilElapsed := entry.Until.IsZero() || now.After(entry.Until)
 		recidivismCold := entry.LastArmed.IsZero() ||
 			now.Sub(entry.LastArmed) > quarantineRecidivismWindow
 		if untilElapsed && recidivismCold {
-			delete(s.peerQuarantine, peer)
+			delete(s.peerQuarantine, subject)
 		}
 	}
 }
@@ -855,7 +881,7 @@ func (s *Service) purgePeerDisconnectHistoryLocked(now time.Time) {
 		return
 	}
 	cutoff := now.Add(-quarantineDisconnectWindow)
-	for peer, hist := range s.peerDisconnectHistory {
+	for subject, hist := range s.peerDisconnectHistory {
 		stillRelevant := false
 		for _, ts := range hist {
 			if ts.After(cutoff) {
@@ -864,7 +890,7 @@ func (s *Service) purgePeerDisconnectHistoryLocked(now time.Time) {
 			}
 		}
 		if !stillRelevant {
-			delete(s.peerDisconnectHistory, peer)
+			delete(s.peerDisconnectHistory, subject)
 		}
 	}
 }
@@ -876,9 +902,9 @@ func (s *Service) purgeLastResyncAcceptedLocked(now time.Time) {
 	if s.lastResyncAccepted == nil {
 		return
 	}
-	for peer, last := range s.lastResyncAccepted {
+	for subject, last := range s.lastResyncAccepted {
 		if now.Sub(last) >= requestResyncAcceptDebounce {
-			delete(s.lastResyncAccepted, peer)
+			delete(s.lastResyncAccepted, subject)
 		}
 	}
 }

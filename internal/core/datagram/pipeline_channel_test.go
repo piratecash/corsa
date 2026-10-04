@@ -42,7 +42,7 @@ func borrowedName(t *testing.T) (victim domain.PeerIdentity, victimChannel, atta
 // The mutations this kills:
 //
 //   - keying ReverseReserveOpts.Upstream on the arrival's IDENTITY again
-//     (ChannelUpstream(..., ProvenIdentityKey(arrival.peer), ...)): the
+//     (ChannelUpstream(..., provenIdentityKey(arrival.peer), ...)): the
 //     attacker's record then lands in the victim's bucket, and the per-upstream
 //     tally (byUpstream) holds 3 against one of them and 0 against the other;
 //   - addressing the answer with nextHopEgress(arrival.peer) instead of

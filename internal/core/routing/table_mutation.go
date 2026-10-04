@@ -638,6 +638,48 @@ func (t *Table) InvalidateTransitRoutes(peerIdentity PeerIdentity) (int, []PeerI
 	return invalidated, exposed
 }
 
+// ForgetUplink forgets, locally and without a word on the wire, everything
+// this table learned through uplink: every claim via it (live or tombstoned,
+// except a live direct claim to the uplink itself), the health of every pair
+// through it — black-hole cooldowns included — and its flap history.
+//
+// It exists for one moment (docs/refactoring/n1-legacy-residual.md §2): an
+// identity has just proved itself over v2, and before that a legacy
+// connection that merely NAMED it may have written claims, withdrawals with an
+// arbitrary SeqNo, cooldowns and flaps against it. None of that came from the
+// identity, so none of it may stand in the way of what the identity says next.
+// Unlike InvalidateTransitRoutes nothing is tombstoned; the identity's own
+// connect-time full sync repopulates the table. Neighbours simply stop seeing
+// the forgotten routes refreshed in our announcements (journalled per identity
+// so cursor-mode peers get a targeted delta).
+//
+// Returns the number of claims removed.
+func (t *Table) ForgetUplink(uplink PeerIdentity) int {
+	if uplink.IsZero() {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	removed, affected := t.store.ForgetVia(uplink)
+	if t.health != nil {
+		t.health.evictUplinkEverywhereLocked(uplink)
+	}
+	if t.flap != nil {
+		t.flap.forgetLocked(uplink)
+	}
+	if removed > 0 {
+		t.dirty.Store(true)
+		t.markSnapshotFullDirtyLocked()
+		// PeerRemove is the existing cause for "every route via a lost
+		// uplink went away"; the purge is that, without the tombstones.
+		for _, identity := range affected {
+			t.markRouteChangedLocked(identity, JournalCausePeerRemove)
+		}
+	}
+	return removed
+}
+
 // RefreshRoutesVia renews the TTL of every live route learned through `via`,
 // as if `via` had just re-announced them. It is the receiver half of the
 // digest-as-heartbeat freshness mechanism: when an inbound

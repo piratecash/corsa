@@ -37,9 +37,9 @@ func seedChattyHistoryNearThreshold(svc *Service, peer domain.PeerIdentity) {
 	}
 	svc.peerMu.Lock()
 	if svc.peerAnnounceHistory == nil {
-		svc.peerAnnounceHistory = make(map[domain.PeerIdentity][]time.Time)
+		svc.peerAnnounceHistory = make(map[penaltySubject][]time.Time)
 	}
-	svc.peerAnnounceHistory[peer] = hist
+	svc.peerAnnounceHistory[provenIdentitySubject(peer)] = hist
 	svc.peerMu.Unlock()
 }
 
@@ -55,12 +55,12 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleAnnounceRoutes(peer, protocol.Frame{
+		svc.handleAnnounceRoutes(provenRoutingSender(peer), protocol.Frame{
 			Type:           "announce_routes",
 			AnnounceRoutes: buildAnnounceRouteFrames(1),
 		})
 
-		if svc.IsPeerInRouteQuarantine(peer) {
+		if svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
 			t.Fatal("full baseline (announce_routes) must NOT count toward chatty_routes")
 		}
 	})
@@ -72,14 +72,14 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRouteAnnounceV3(peer, domain.PeerAddress("addr-peerB"),
+		svc.handleRouteAnnounceV3(provenRoutingSender(peer), domain.PeerAddress("addr-peerB"),
 			protocol.RouteAnnounceV3Frame{
 				Kind:    protocol.RouteAnnounceV3KindFull,
 				Epoch:   1,
 				Entries: buildRouteAnnounceV3Entries(1),
 			})
 
-		if svc.IsPeerInRouteQuarantine(peer) {
+		if svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
 			t.Fatal("v3 kind=full must NOT count toward chatty_routes")
 		}
 	})
@@ -93,12 +93,12 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRoutesUpdate(peer, domain.PeerAddress("addr-peerB"), protocol.Frame{
+		svc.handleRoutesUpdate(provenRoutingSender(peer), domain.PeerAddress("addr-peerB"), protocol.Frame{
 			Type:           "routes_update",
 			AnnounceRoutes: buildAnnounceRouteFrames(1),
 		})
 
-		if !svc.IsPeerInRouteQuarantine(peer) {
+		if !svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
 			t.Fatal("v2 delta (routes_update) MUST count toward chatty_routes")
 		}
 	})
@@ -110,14 +110,14 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV3})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRouteAnnounceV3(peer, domain.PeerAddress("addr-peerB"),
+		svc.handleRouteAnnounceV3(provenRoutingSender(peer), domain.PeerAddress("addr-peerB"),
 			protocol.RouteAnnounceV3Frame{
 				Kind:    protocol.RouteAnnounceV3KindDelta,
 				Epoch:   1,
 				Entries: buildRouteAnnounceV3Entries(1),
 			})
 
-		if !svc.IsPeerInRouteQuarantine(peer) {
+		if !svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
 			t.Fatal("v3 kind=delta MUST count toward chatty_routes")
 		}
 	})
@@ -131,9 +131,9 @@ func TestChattyWiring_OnlyDeltaFramesArmQuarantine(t *testing.T) {
 			[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})
 		seedChattyHistoryNearThreshold(svc, peer)
 
-		svc.handleRequestResync(peer)
+		svc.handleRequestResync(provenRoutingSender(peer))
 
-		if svc.IsPeerInRouteQuarantine(peer) {
+		if svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
 			t.Fatal("request_resync (control frame) must NOT count toward chatty_routes")
 		}
 	})

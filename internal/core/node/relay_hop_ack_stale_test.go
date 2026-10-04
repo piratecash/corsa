@@ -40,7 +40,7 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	})
 
 	// Late ack from the superseded downstream A.
-	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), protocol.Frame{
+	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), sessionRoutingSender(svc.sessions["addr-A"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-table", Status: "forwarded",
 	})
 	if observedHopAck(t, svc, "m-stale-table") {
@@ -48,7 +48,7 @@ func TestHandleRelayHopAck_StaleTableRoutedSenderDoesNotSuppressTimer(t *testing
 	}
 
 	// Ack from the current downstream B.
-	svc.handleRelayHopAck(domain.PeerAddress("addr-B"), protocol.Frame{
+	svc.handleRelayHopAck(domain.PeerAddress("addr-B"), sessionRoutingSender(svc.sessions["addr-B"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-table", Status: "forwarded",
 	})
 	if !observedHopAck(t, svc, "m-stale-table") {
@@ -81,7 +81,7 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	})
 
 	// Late ack from the abandoned next-hop A.
-	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), protocol.Frame{
+	svc.handleRelayHopAck(domain.PeerAddress("addr-A"), sessionRoutingSender(svc.sessions["addr-A"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-gossip", Status: "forwarded",
 	})
 	if observedHopAck(t, svc, "m-stale-gossip") {
@@ -89,7 +89,7 @@ func TestHandleRelayHopAck_StaleGossipFallbackSenderDoesNotSuppressTimer(t *test
 	}
 
 	// Ack from the current gossip target G.
-	svc.handleRelayHopAck(domain.PeerAddress("addr-G"), protocol.Frame{
+	svc.handleRelayHopAck(domain.PeerAddress("addr-G"), sessionRoutingSender(svc.sessions["addr-G"]), protocol.Frame{
 		Type: "relay_hop_ack", ID: "m-stale-gossip", Status: "forwarded",
 	})
 	if !observedHopAck(t, svc, "m-stale-gossip") {

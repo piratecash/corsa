@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/routing"
 )
@@ -96,15 +95,15 @@ func TestChattyQuarantineDoesNotInvalidateTransit(t *testing.T) {
 
 	svc := &Service{
 		routingTable:          table,
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonChattyRoutes, time.Now())
 	svc.peerMu.Unlock()
 
-	if !svc.isPeerInRouteQuarantineLocked(peer, time.Now().Add(time.Second)) {
+	if !svc.isSubjectInRouteQuarantineLocked(provenIdentitySubject(peer), time.Now().Add(time.Second)) {
 		t.Fatal("peer should be quarantined after chatty arm")
 	}
 	if !transitLive(table, peer) {
@@ -124,12 +123,12 @@ func TestDisconnectStormQuarantineInvalidatesTransit(t *testing.T) {
 
 	svc := &Service{
 		routingTable:          table,
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	if transitLive(table, peer) {
@@ -149,16 +148,16 @@ func TestChattyQuarantineKeepsPeerUsableAsTransit(t *testing.T) {
 
 	peer := domaintest.ID("peer-B")
 	svc := &Service{
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonChattyRoutes, time.Now())
 	svc.peerMu.Unlock()
 
 	// Announce-plane: opinions still muted.
-	if !svc.IsPeerInRouteQuarantine(peer) {
+	if !svc.isSubjectInRouteQuarantine(provenIdentitySubject(peer)) {
 		t.Fatal("chatty peer must still be route-quarantined (inbound announcements dropped)")
 	}
 	// Data-plane: NOT transit-blocked.
@@ -179,12 +178,12 @@ func TestDisconnectStormQuarantineBlocksTransitSelection(t *testing.T) {
 
 	peer := domaintest.ID("peer-B")
 	svc := &Service{
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	if !svc.IsPeerTransitQuarantined(peer) {
@@ -212,13 +211,13 @@ func TestChattyToInstabilityEscalationInvalidatesTransit(t *testing.T) {
 
 	svc := &Service{
 		routingTable:          table,
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 
 	// 1) chatty arm: transit must survive.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonChattyRoutes, time.Now())
 	svc.peerMu.Unlock()
 	if !transitLive(table, peer) {
 		t.Fatal("precondition: chatty arm must leave transit live")
@@ -226,7 +225,7 @@ func TestChattyToInstabilityEscalationInvalidatesTransit(t *testing.T) {
 
 	// 2) escalate to disconnect_storm: transit must now be invalidated.
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 	if transitLive(table, peer) {
 		t.Fatal("escalation chatty_routes→disconnect_storm must tombstone stale transit")
@@ -244,15 +243,15 @@ func TestInstabilityReasonNotDowngradedByChattyRearm(t *testing.T) {
 
 	peer := domaintest.ID("peer-B")
 	svc := &Service{
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerDisconnectHistory: map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerDisconnectHistory: map[penaltySubject][]time.Time{},
 	}
 
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(peer, quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonDisconnectStorm, time.Now())
 	// Re-arm with the weaker chatty reason while still active.
-	svc.armRouteQuarantineLocked(peer, quarantineReasonChattyRoutes, time.Now())
-	entry := svc.peerQuarantine[peer]
+	svc.armRouteQuarantineLocked(provenIdentitySubject(peer), quarantineReasonChattyRoutes, time.Now())
+	entry := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.Unlock()
 
 	if entry.Reason != quarantineReasonDisconnectStorm {

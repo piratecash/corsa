@@ -116,7 +116,7 @@ func TestHandleRouteAnnounceV3_StoresAttestedSigOnClaim(t *testing.T) {
 			{Identity: idTargetX.String(), Hops: 1, SeqNo: 1, Sig: base64.StdEncoding.EncodeToString(sig)},
 		},
 	}
-	svc.handleRouteAnnounceV3(idPeerB, domain.PeerAddress("addr-peerB"), frame)
+	svc.handleRouteAnnounceV3(provenRoutingSender(idPeerB), domain.PeerAddress("addr-peerB"), frame)
 
 	// Pull the stored route back through the boundary and assert the
 	// signature survived storage round-trip.

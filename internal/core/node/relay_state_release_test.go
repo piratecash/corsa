@@ -186,7 +186,7 @@ func TestLateHopAckKeepsPayloadOfInFlightFailover(t *testing.T) {
 
 	// 3. The failover sends its snapshot through another uplink and
 	//    re-arms the budget for it.
-	if !rs.recordFailoverRetry("msg-race", domain.PeerAddress("peer-c"), fired[0].FrameLine) {
+	if !rs.recordFailoverRetry("msg-race", domain.PeerAddress("peer-c"), routingSender{}, fired[0].FrameLine) {
 		t.Fatal("recordFailoverRetry returned false for a live state")
 	}
 

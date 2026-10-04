@@ -179,15 +179,14 @@ type dmControlSender struct {
 	// from an inner `unsupported` answer that names it. Swept against
 	// dmControlUnsupportedTTL.
 	refusedAt map[refusalKey]time.Time
-	// refusedTypeAt remembers that a peer does not declare the dm_control dtype
-	// at all, learned from the transport's own `unsupported_dtype` gate.
-	//
-	// Separate from refusedAt, and the separation is the point: the gate answers
-	// about the TYPE and cannot see inside the sealed payload, so reading a
-	// command out of it is an inference the signal does not support. It would
-	// also be the wrong shape — a peer that declares no dm_control refuses every
-	// command in it, not the one that happened to be in the frame.
-	refusedTypeAt map[domain.PeerIdentity]time.Time
+	// typeRefusalShown names the peers the UI was told cannot take the
+	// dm_control dtype, because the connection a send would have used declared
+	// none. It is NOT a belief and holds nothing back: what a connection
+	// declared is a property of that connection, re-read on every send and gone
+	// with it (docs/refactoring/n1-legacy-residual.md §3). It only remembers
+	// that the UI was told, so a change of the peer's connections tells it
+	// again (noteDMControlConnectionsChanged) and a refusal per frame does not.
+	typeRefusalShown map[domain.PeerIdentity]struct{}
 	// forgot names the conversations whose queue was thrown away, and when.
 	// Entries are swept against dmControlForgetGrace and by nothing else: a new
 	// fact for the peer deliberately does NOT clear one, because the answer to
@@ -285,17 +284,17 @@ type dmControlFrame struct {
 
 func newDMControlSender(svc *Service) *dmControlSender {
 	sender := &dmControlSender{
-		svc:           svc,
-		pending:       map[domain.PeerIdentity]*dmControlOutbox{},
-		refusedAt:     map[refusalKey]time.Time{},
-		refusedTypeAt: map[domain.PeerIdentity]time.Time{},
-		forgot:        map[domain.PeerIdentity]dmControlForget{},
-		inflight:      map[domain.PeerIdentity]*dmControlOutbox{},
-		framesOut:     map[domain.PeerIdentity]int{},
-		paused:        map[domain.PeerIdentity]int{},
-		sentAt:        map[domain.PeerIdentity]time.Time{},
-		pauseGen:      map[domain.PeerIdentity]uint64{},
-		clock:         func() time.Time { return time.Now().UTC() },
+		svc:              svc,
+		pending:          map[domain.PeerIdentity]*dmControlOutbox{},
+		refusedAt:        map[refusalKey]time.Time{},
+		typeRefusalShown: map[domain.PeerIdentity]struct{}{},
+		forgot:           map[domain.PeerIdentity]dmControlForget{},
+		inflight:         map[domain.PeerIdentity]*dmControlOutbox{},
+		framesOut:        map[domain.PeerIdentity]int{},
+		paused:           map[domain.PeerIdentity]int{},
+		sentAt:           map[domain.PeerIdentity]time.Time{},
+		pauseGen:         map[domain.PeerIdentity]uint64{},
+		clock:            func() time.Time { return time.Now().UTC() },
 		jitter: func() time.Duration {
 			return time.Duration(rand.Int64N(int64(dmControlDebounceJitter)))
 		},
@@ -719,17 +718,20 @@ func (d *dmControlSender) sendOne(ctx context.Context, peer domain.PeerIdentity,
 		return sendDelivered
 	case datagram.SendRejected:
 		if outcome.rejection == datagram.RejectionUnsupportedDType {
-			// The destination declared its dtypes at handshake and dm_control
-			// was not among them. That is a property of their build, and it is
-			// what lets the UI stop claiming the reaction was seen.
+			// The connection this send would have used declared its dtypes at
+			// handshake and dm_control was not among them. That is a property
+			// of THAT connection, re-read on every send: the batch waits for
+			// the retry (sendPeerCannot), and the next pass goes out as soon as
+			// the send would use a connection or route that takes the type. No
+			// belief about the identity is recorded — a legacy connection that
+			// merely names the identity must not be able to forbid it reactions,
+			// and an hour-long belief would outlive the connection it was about
+			// (docs/refactoring/n1-legacy-residual.md §3).
 			//
-			// Recorded against the TYPE and not against frame.command. The gate
-			// answers before anything is opened, so it cannot know which command
-			// was inside — reading one out of it would be an inference the
-			// signal does not support, and the wrong shape besides: a peer with
-			// no dm_control refuses every command in it, not the one that
-			// happened to be in this frame.
-			d.markTypeRefused(peer)
+			// About the TYPE and not about frame.command: the gate answers
+			// before anything is opened, so it cannot know which command was
+			// inside.
+			d.noteTypeRefused(peer)
 			log.Debug().Str("peer", peer.String()).Str("command", frame.command.String()).
 				Msg("dm_control_dtype_unsupported_by_peer")
 			return sendPeerCannot

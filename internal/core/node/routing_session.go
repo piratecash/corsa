@@ -283,8 +283,8 @@ const (
 // On disconnect, own-origin direct routes are withdrawn on the wire
 // (returned as wire-ready AnnounceEntry items) and transit routes
 // learned through this peer are silently invalidated locally.
-func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []domain.Capability) {
-	s.onPeerSessionClosedWithCause(peerIdentity, caps, sessionClosePeerInitiated)
+func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, penalty penaltySubject, caps []domain.Capability) {
+	s.onPeerSessionClosedWithCause(peerIdentity, penalty, caps, sessionClosePeerInitiated)
 }
 
 // onPeerSessionClosedWithCause is onPeerSessionClosed with an explicit
@@ -292,25 +292,26 @@ func (s *Service) onPeerSessionClosed(peerIdentity domain.PeerIdentity, caps []d
 // quarantine accounting. For explicit callers it also carries presence
 // evidence: a peer-initiated close may update last_online_at, while a local
 // eviction may not.
-func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity, caps []domain.Capability, cause sessionCloseCause) {
+func (s *Service) onPeerSessionClosedWithCause(peerIdentity domain.PeerIdentity, penalty penaltySubject, caps []domain.Capability, cause sessionCloseCause) {
 	var presenceEvidence *peerOfflineEvidence
 	if cause == sessionClosePeerInitiated {
 		presenceEvidence = s.observePeerOffline()
 	}
-	s.onPeerSessionClosedWithAttribution(peerIdentity, caps, cause, presenceEvidence)
+	s.onPeerSessionClosedWithAttribution(peerIdentity, penalty, caps, cause, presenceEvidence)
 }
 
 // onPeerSessionClosedWithError keeps disconnect-storm classification and
 // durable presence attribution separate. A timeout is still useful quarantine
 // evidence, but only a confirmed clean remote EOF proves an
 // identity-scoped offline transition.
-func (s *Service) onPeerSessionClosedWithError(peerIdentity domain.PeerIdentity, caps []domain.Capability, err error) {
+func (s *Service) onPeerSessionClosedWithError(peerIdentity domain.PeerIdentity, penalty penaltySubject, caps []domain.Capability, err error) {
 	var presenceEvidence *peerOfflineEvidence
 	if sessionCloseProvidesPeerOfflineEvidence(err) {
 		presenceEvidence = s.observePeerOffline()
 	}
 	s.onPeerSessionClosedWithAttribution(
 		peerIdentity,
+		penalty,
 		caps,
 		sessionCloseCauseFromError(err),
 		presenceEvidence,
@@ -392,6 +393,7 @@ func (s *Service) presenceNow() presenceInstant {
 
 func (s *Service) onPeerSessionClosedWithAttribution(
 	peerIdentity domain.PeerIdentity,
+	penalty penaltySubject,
 	caps []domain.Capability,
 	cause sessionCloseCause,
 	presenceEvidence *peerOfflineEvidence,
@@ -401,6 +403,14 @@ func (s *Service) onPeerSessionClosedWithAttribution(
 	}
 
 	hadRelayCap := sessionHasCap(caps, domain.CapMeshRelayV1)
+
+	// The close of a session that did not prove peerIdentity writes routing
+	// state in that identity's name below (flap history, the deferred
+	// withdrawal). It is a legacy write like any routing frame, so it leaves
+	// the same mark: the identity's first v2 proof must purge what it left.
+	if _, proven := penalty.provenIdentity(); !proven {
+		s.unprovenRouting.note(peerIdentity, time.Now())
+	}
 
 	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_wait").Str("peer_identity", peerIdentity.String()).Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -445,15 +455,24 @@ func (s *Service) onPeerSessionClosedWithAttribution(
 	// the threshold. The quarantine map and history are guarded by
 	// the same peerMu we already hold.  See routing_route_quarantine.go.
 	//
+	// The disconnect is charged to the CLOSING session's penalty subject,
+	// not to peerIdentity: a legacy session that named somebody else and
+	// keeps dropping counts against its own address (penalty_subject.go).
+	//
 	// Local evictions are excluded: a teardown the local node chose
 	// itself is not evidence of peer instability, and counting it
 	// let a backpressured local node quarantine healthy neighbours
 	// (see sessionCloseCause).
 	if lastRelay && cause == sessionClosePeerInitiated {
-		s.maybeArmRouteQuarantineOnCloseLocked(peerIdentity, time.Now())
+		s.maybeArmRouteQuarantineOnCloseLocked(penalty, time.Now())
 	}
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onPeerSessionClosed").Str("phase", "lock_released").Str("peer_identity", peerIdentity.String()).Bool("last_total", isLastTotal).Bool("last_relay", lastRelay).Msg("peer_mu_writer")
+
+	// What the closed connection declared about the dm_control dtype was about
+	// that connection; a UI told it cannot take reactions is told to look
+	// again. Outside every domain mutex: it publishes on the bus.
+	s.noteDMControlConnectionsChanged(peerIdentity)
 
 	// Phase 3 PR 12.5 — record the per-peer digest snapshot BEFORE
 	// any storage-mutating cleanup below (RemoveDirectPeer /

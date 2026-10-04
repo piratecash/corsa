@@ -176,7 +176,7 @@ func refusalCount(d *dmControlSender) int {
 func typeRefusedFor(d *dmControlSender, peer domain.PeerIdentity) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, held := d.refusedTypeAt[peer]
+	_, held := d.typeRefusalShown[peer]
 	return held
 }
 
@@ -512,18 +512,19 @@ func controlSenderWithKey(t *testing.T, now *time.Time, peer *identity.Identity)
 	return sender
 }
 
-// The destination declared its dtypes at handshake and dm_control was not among
-// them. Three things follow, and the third is the one an earlier cut got wrong.
+// The connection the send would use declared its dtypes at handshake and
+// dm_control was not among them. Three things follow
+// (docs/refactoring/n1-legacy-residual.md §3):
 //
-//  1. It is remembered against the TYPE, not against whichever command was in
-//     the frame: the gate answers before anything is opened, so it cannot know
-//     what was inside, and a peer with no dm_control refuses every command in it.
+//  1. It is about the TYPE, not about whichever command was in the frame — and
+//     it is not a belief about the identity at all: the peer's reactions are
+//     not held back by it (TestADTypeRefusalHoldsOnlyTheBatchItCameFrom).
 //  2. The rest of the batch is not attempted — every further frame fails
 //     identically right now.
 //  3. The facts COME BACK. Not attempting is not discarding: this transport has
-//     no retry of its own, so a peer that upgrades would otherwise never receive
-//     what was made while it was old.
-func TestAnUnsupportedDTypeIsRememberedAgainstTheType(t *testing.T) {
+//     no retry of its own, so a peer reachable over a capable connection later
+//     would otherwise never receive what was made meanwhile.
+func TestAnUnsupportedDTypeHoldsTheBatchAndNothingElse(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	peerID, err := identity.Generate()
@@ -555,54 +556,41 @@ func TestAnUnsupportedDTypeIsRememberedAgainstTheType(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("the batch kept going after unsupported_dtype: %d frames attempted", attempts)
 	}
-	if !sender.cannotTakeReactions(peer) {
-		t.Fatal("the transport's refusal of the type was not remembered")
+	if sender.cannotTakeReactions(peer) {
+		t.Fatal("a connection's missing dtype was turned into a belief about the identity")
 	}
 	if sender.refuses(peer, domain.DMControlReactions) {
 		t.Fatal("a gate refusal about the TYPE was recorded as an inner refusal of a command")
+	}
+	if !typeRefusedFor(sender, peer) {
+		t.Fatal("the UI was not told that the connection takes no dm_control")
 	}
 
 	// Everything is back in the outbox, waiting, and nothing was dropped.
 	outbox := queuedFor(sender, peer)
 	if outbox == nil {
-		t.Fatal("the facts were discarded when the peer refused the type")
+		t.Fatal("the facts were discarded when the connection refused the type")
 	}
 	if len(outbox.entries) != len(facts) {
 		t.Fatalf("%d of %d facts came back", len(outbox.entries), len(facts))
 	}
 
-	// While the peer refuses, they wait rather than being sealed and signed for
-	// a certainty.
-	attempts = 0
-	sender.flushDue(context.Background(), now.Add(dmControlOutboxMaxAge/2))
-	if attempts != 0 {
-		t.Fatalf("%d frames were built for a peer known to refuse the type", attempts)
-	}
-	if got := len(queuedFor(sender, peer).entries); got != len(facts) {
-		t.Fatalf("%d facts survived the pass that offered nothing", got)
-	}
-
-	// The peer's next session says the answer may have changed: the belief is
-	// cleared, the batch becomes due, and what was waiting finally goes out.
+	// A capable candidate later: everything goes out, with no session event
+	// needed to lift anything.
 	sender.dispatch = func(context.Context, protocol.DatagramFrame) dmControlDispatch {
 		attempts++
 		return dmControlDispatch{kind: datagram.SendQueued, summary: "queued"}
 	}
-	sender.svc.forgetDMControlRefusal(peer)
-	sender.flushDue(context.Background(), now.Add(dmControlOutboxMaxAge/2))
-
+	attempts = 0
+	sender.flushDue(context.Background(), now.Add(2*dmControlDebounceFloor+dmControlRetryDelay+time.Second))
 	if attempts != len(built) {
-		t.Fatalf("after the peer upgraded %d of %d frames went out", attempts, len(built))
+		t.Fatalf("with a capable candidate %d of %d frames went out", attempts, len(built))
 	}
 	if queuedPeers(sender) != 0 {
 		t.Fatalf("facts stayed queued after they were delivered: %#v", queuedFor(sender, peer))
 	}
 }
 
-// A batch that has been waiting longer than the outbox allows is dropped, with
-// a bound stated rather than hidden. The queue lives in memory and the facts are
-// already stored; a peer unreachable this long is one the digest reconciliation
-// of §6.3 is meant to repair.
 func TestTheOutboxGivesUpEventually(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
@@ -912,7 +900,7 @@ func TestForgettingAPeerEmptiesWhatWeWereGoingToSayToThem(t *testing.T) {
 		}
 	}
 	svc.noteCommandRefused(peer, domain.DMControlReactions)
-	sender.markTypeRefused(peer)
+	sender.noteTypeRefused(peer)
 
 	svc.ForgetPeerReactions(peer)
 
@@ -1023,7 +1011,7 @@ func TestAnAnswerArrivingAfterARemovalIsNotRemembered(t *testing.T) {
 
 	svc.ForgetPeerReactions(peer)
 	svc.noteCommandRefused(peer, domain.DMControlReactions)
-	sender.markTypeRefused(peer)
+	sender.noteTypeRefused(peer)
 
 	if refusalHeld(sender, refusalKey{peer: peer, command: domain.DMControlReactions}) {
 		t.Fatal("a refusal about a removed conversation was remembered")
@@ -1231,7 +1219,7 @@ func TestLearningAPeerCannotReceiveReactionsIsAnnounced(t *testing.T) {
 	})
 
 	peer := controlTestPeer("d1")
-	sender.markTypeRefused(peer)
+	sender.noteTypeRefused(peer)
 	select {
 	case got := <-announced:
 		if got != peer {
@@ -1243,7 +1231,7 @@ func TestLearningAPeerCannotReceiveReactionsIsAnnounced(t *testing.T) {
 
 	// Said once. The answer has not changed, and every later refusal from the
 	// same peer would otherwise reload their conversation for nothing.
-	sender.markTypeRefused(peer)
+	sender.noteTypeRefused(peer)
 	sender.svc.noteCommandRefused(peer, domain.DMControlReactions)
 	select {
 	case got := <-announced:
@@ -1411,7 +1399,7 @@ func TestWipingAThreadKeepsWhatWeKnowAboutThePeersBuild(t *testing.T) {
 	if queuedFor(sender, peer) != nil {
 		t.Fatal("the wiped thread still has reactions waiting to be sent")
 	}
-	if !svc.ReactionsUnsupportedBy(peer) {
+	if svc.ReactionsSupportOf(peer) != domain.ReactionsSupportAbsent {
 		t.Fatal("a thread wipe threw away what we know about the contact's build")
 	}
 	// And a FRESH answer still counts: no refusing window was opened.
@@ -1422,7 +1410,7 @@ func TestWipingAThreadKeepsWhatWeKnowAboutThePeersBuild(t *testing.T) {
 
 	// Removing the CONTACT is the other case and takes everything.
 	svc.ForgetPeerReactions(peer)
-	if svc.ReactionsUnsupportedBy(peer) {
+	if svc.ReactionsSupportOf(peer) == domain.ReactionsSupportAbsent {
 		t.Fatal("removing the contact kept what we knew about their build")
 	}
 }
@@ -1445,7 +1433,7 @@ func TestAPeerThatCanReceiveReactionsAgainIsAnnounced(t *testing.T) {
 	})
 
 	peer := controlTestPeer("f7")
-	sender.markTypeRefused(peer)
+	sender.noteTypeRefused(peer)
 	select {
 	case <-announced:
 	case <-time.After(2 * time.Second):
@@ -1473,10 +1461,8 @@ func TestAPeerThatCanReceiveReactionsAgainIsAnnounced(t *testing.T) {
 	}
 }
 
-// A belief that expires is a peer that becomes able to receive reactions again,
-// as far as anything here can tell — and the UI drew a notice saying the
-// opposite. Nothing else reports it: a session after the sweep clears an entry
-// that is already gone and therefore announces nothing.
+// The peer's own refusal expires after its TTL, and the pass that sweeps it
+// is the one that tells the UI — once.
 func TestABeliefThatExpiresIsAnnouncedLikeAnUpgrade(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
@@ -1491,7 +1477,7 @@ func TestABeliefThatExpiresIsAnnouncedLikeAnUpgrade(t *testing.T) {
 	})
 
 	peer := controlTestPeer("f9")
-	sender.markTypeRefused(peer)
+	sender.svc.noteCommandRefused(peer, domain.DMControlReactions)
 	select {
 	case <-announced:
 	case <-time.After(2 * time.Second):
@@ -1517,7 +1503,7 @@ func TestABeliefThatExpiresIsAnnouncedLikeAnUpgrade(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a belief that expired was never announced")
 	}
-	if sender.svc.ReactionsUnsupportedBy(peer) {
+	if sender.svc.ReactionsSupportOf(peer) == domain.ReactionsSupportAbsent {
 		t.Fatal("the belief outlived its TTL")
 	}
 
@@ -1529,30 +1515,50 @@ func TestABeliefThatExpiresIsAnnouncedLikeAnUpgrade(t *testing.T) {
 		t.Fatalf("the expiry was announced again for %s", got)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
 
-	// One belief expiring while the OTHER still stands is not news: the answer
-	// the UI asks for is the union of the two, and it has not changed.
-	other := controlTestPeer("fa")
-	sender.markTypeRefused(other)
+// What a connection declared is not a belief with a TTL: it neither expires
+// into an announcement nor holds reactions back. It goes with the connection
+// (noteDMControlConnectionsChanged).
+func TestAConnectionsMissingDTypeIsNotABeliefThatExpires(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	sender := controlSenderAt(t, &now, 0)
+	bus := ebus.New()
+	t.Cleanup(bus.Shutdown)
+	sender.svc.eventBus = bus
+	announced := make(chan domain.PeerIdentity, 8)
+	bus.Subscribe(ebus.TopicReactionsChanged, func(peer domain.PeerIdentity) {
+		announced <- peer
+	})
+
+	peer := controlTestPeer("fa")
+	sender.noteTypeRefused(peer)
 	select {
 	case <-announced:
 	case <-time.After(2 * time.Second):
-		t.Fatal("learning the type refusal was never announced")
+		t.Fatal("the connection's missing dtype was never announced")
 	}
-	now = now.Add(dmControlUnsupportedTTL / 2)
-	sender.svc.noteCommandRefused(other, domain.DMControlReactions)
+	if sender.cannotTakeReactions(peer) {
+		t.Fatal("a connection's missing dtype holds the identity's reactions back")
+	}
 
-	// The older of the two — the type refusal — expires here; the command one
-	// has half a TTL left.
-	now = now.Add(dmControlUnsupportedTTL/2 + time.Second)
+	now = now.Add(2 * dmControlUnsupportedTTL)
 	sender.flushDue(context.Background(), now)
 	select {
 	case got := <-announced:
-		t.Fatalf("a peer still held back by another belief was announced as clear: %s", got)
+		t.Fatalf("a connection's declaration was swept like a belief and announced for %s", got)
 	case <-time.After(200 * time.Millisecond):
 	}
-	if !sender.svc.ReactionsUnsupportedBy(other) {
-		t.Fatal("the surviving belief was swept with the expired one")
+
+	sender.svc.noteDMControlConnectionsChanged(peer)
+	select {
+	case got := <-announced:
+		if got != peer {
+			t.Fatalf("the announcement named %s, want %s", got, peer)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the UI was not told to look again when the peer's connections changed")
 	}
 }
 
@@ -1574,7 +1580,7 @@ func TestASessionInsideTheExpiryWindowStillAnnouncesTheChange(t *testing.T) {
 	})
 
 	peer := controlTestPeer("fb")
-	sender.markTypeRefused(peer)
+	sender.svc.noteCommandRefused(peer, domain.DMControlReactions)
 	select {
 	case <-announced:
 	case <-time.After(2 * time.Second):

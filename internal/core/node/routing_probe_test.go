@@ -134,7 +134,7 @@ func TestHandleRouteProbeAck_DoesNotPanicOnReachable(t *testing.T) {
 		RTTMs:     25,
 	}
 
-	svc.handleRouteProbeAck(idPeerB, ack)
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerB), ack)
 
 	// No health entries should have been created — the
 	// no-registry branch short-circuits before MarkProbeAck.
@@ -154,7 +154,7 @@ func TestHandleRouteProbeAck_DoesNotPanicOnUnreachable(t *testing.T) {
 		Reachable: false,
 	}
 
-	svc.handleRouteProbeAck(idPeerB, ack)
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerB), ack)
 }
 
 // TestP2PWireCommands_IncludesRouteProbeTypes — the auth gate in

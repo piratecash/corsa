@@ -29,14 +29,14 @@ func TestQuarantine_LocalEvictionClosesDoNotFeedDisconnectStorm(t *testing.T) {
 
 	for i := 0; i < quarantineDisconnectThreshold+1; i++ {
 		svc.onPeerSessionEstablished(idPeerB, caps)
-		svc.onPeerSessionClosedWithCause(idPeerB, caps, sessionCloseLocalEviction)
+		svc.onPeerSessionClosedWithCause(idPeerB, provenIdentitySubject(idPeerB), caps, sessionCloseLocalEviction)
 	}
 
-	if svc.IsPeerInRouteQuarantine(idPeerB) {
+	if svc.isSubjectInRouteQuarantine(provenIdentitySubject(idPeerB)) {
 		t.Fatal("local-eviction closes must not arm disconnect_storm quarantine")
 	}
 	svc.peerMu.RLock()
-	histLen := len(svc.peerDisconnectHistory[idPeerB])
+	histLen := len(svc.peerDisconnectHistory[provenIdentitySubject(idPeerB)])
 	svc.peerMu.RUnlock()
 	if histLen != 0 {
 		t.Fatalf("disconnect history has %d entries, want 0 for local evictions", histLen)
@@ -53,10 +53,10 @@ func TestQuarantine_PeerInitiatedClosesStillArm(t *testing.T) {
 
 	for i := 0; i < quarantineDisconnectThreshold; i++ {
 		svc.onPeerSessionEstablished(idPeerB, caps)
-		svc.onPeerSessionClosed(idPeerB, caps)
+		svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), caps)
 	}
 
-	if !svc.IsPeerInRouteQuarantine(idPeerB) {
+	if !svc.isSubjectInRouteQuarantine(provenIdentitySubject(idPeerB)) {
 		t.Fatalf("peer-initiated close storm (%d closes) must arm quarantine",
 			quarantineDisconnectThreshold)
 	}

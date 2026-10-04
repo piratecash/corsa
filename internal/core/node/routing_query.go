@@ -170,7 +170,13 @@ func (s *Service) handleRouteQuery(connID domain.ConnID, senderIdentity domain.P
 //   - Hops+1 wrap to 16 (HopsInfinity) is treated as a withdrawal
 //     by UpdateRoute, which is the correct semantic for a hops=15
 //     transit query — no special case needed.
-func (s *Service) handleRouteQueryResponse(senderIdentity domain.PeerIdentity, resp protocol.RouteQueryResponseFrame) {
+func (s *Service) handleRouteQueryResponse(sender routingSender, resp protocol.RouteQueryResponseFrame) {
+	senderIdentity := sender.identity
+	release, admitted := s.admitRoutingInput(sender, protocol.RouteQueryResponseFrameType)
+	if !admitted {
+		return
+	}
+	defer release()
 	if !resp.Found {
 		log.Debug().
 			Uint64("query_id", resp.QueryID).

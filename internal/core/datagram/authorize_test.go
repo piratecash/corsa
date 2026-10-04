@@ -63,7 +63,7 @@ func TestDeliveryContextCarriesTheContextFields(t *testing.T) {
 	peer := domaintest.ID("neighbour")
 	delivery, err := NewDeliveryContext(DeliveryContextOpts{
 		Header:        header,
-		IncomingPeer:  ProvenIngress(testChannel("neighbour"), peer),
+		IncomingPeer:  provenIngress(testChannel("neighbour"), peer),
 		LocalIdentity: domaintest.ID("me"),
 	})
 	if err != nil {

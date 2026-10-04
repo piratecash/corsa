@@ -231,20 +231,19 @@ func (l *nonDMKeySyncLimiter) pruneHopsLocked(now time.Time) {
 	l.nextPruneAt = earliest
 }
 
-// nonDMHopKey names the neighbour a non-DM push came through, in the same
-// form senderKeySyncHopKey uses: the identity when one is attached to the
-// connection, the transport address otherwise. On an OUTBOUND session the
-// identity is only what the remote wrote into its welcome — the key is a
-// bucket for this node's own budget, not a proof of who the neighbour is.
-func nonDMHopKey(peer domain.PeerIdentity, address domain.PeerAddress) string {
-	switch {
-	case !peer.IsZero():
-		return "id:" + peer.String()
-	case address != "":
-		return "addr:" + string(address)
-	default:
+// nonDMHopKey names the neighbour a non-DM push came through by its
+// penaltySubject: the identity when a v2 session proved it, so one identity
+// holding several connections is one hop; otherwise what this node observed
+// of the connection — the address it dialled, the source IP, or the
+// connection itself. Never the identity a legacy session merely names: the
+// suppression below is a verdict this node keeps for ten minutes, and keyed
+// by a welcome's claim it was a verdict any legacy peer could hand to
+// somebody else.
+func nonDMHopKey(subject penaltySubject) string {
+	if subject.IsZero() {
 		return ""
 	}
+	return subject.String()
 }
 
 // nonDMKeySyncLocked returns the limiter, creating it for struct-literal test

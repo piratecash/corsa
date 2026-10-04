@@ -883,7 +883,7 @@ type inboundFrame struct {
 // can answer "was anything proven" is the one place that answers it.
 func (f inboundFrame) ingress() IngressPeer {
 	if f.authority().Proven() {
-		return ProvenIngress(f.channel, f.peer)
+		return provenIngress(f.channel, f.peer)
 	}
 	return ClaimedIngress(f.channel, f.budgetKey, f.peer)
 }
@@ -891,10 +891,13 @@ func (f inboundFrame) ingress() IngressPeer {
 // authority is the ONE derivation of "has anybody proved who this neighbour
 // is", and it reads the ADMISSION KEY rather than a flag of its own.
 //
-// The key already carries the fact. Its namespace is exactly the two
-// directions' standing claims about the peer — proven identity or dialled
-// host:port (AdmissionKeySpace) — and that discriminator was introduced
-// precisely so a call site has to say what it knows. A second field beside it
+// The key already carries the fact. Its namespace is exactly what the receive
+// path knows about the peer — an identity a v2 session proved, or what this
+// node observed of a legacy socket: the host:port it dialled, the source host
+// or the connection it accepted (AdmissionKeySpace) — and that discriminator was
+// introduced precisely so a call site has to say what it knows. The proven
+// namespace can only be entered with a v2 handshake's result
+// (ProvenIdentityKey), so the derivation cannot be talked into "proven". A second field beside it
 // would be a second opinion about one question, and two opinions drift.
 //
 // The test is EQUALITY with the key the proven constructor would have produced
@@ -904,7 +907,7 @@ func (f inboundFrame) ingress() IngressPeer {
 // read as claiming, never as proving. That also makes the rule checkable in one
 // expression instead of an invariant nobody runs.
 func (f inboundFrame) authority() IngressAuthority {
-	if f.budgetKey == ProvenIdentityKey(f.peer) {
+	if f.budgetKey == provenIdentityKey(f.peer) {
 		return AuthorityProven
 	}
 	return AuthorityClaimed

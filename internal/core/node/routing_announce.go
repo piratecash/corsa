@@ -1288,7 +1288,8 @@ func (s *Service) SendRoutePoisonBatch(ctx context.Context, peerAddress domain.P
 // surface a withdrawal does NOT work for transit routes, because
 // AnnounceProjectionFor only emits own-direct tombstones; transit
 // tombstones from InvalidateUplinkClaim are filtered out.
-func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame protocol.RoutePoisonFrame) {
+func (s *Service) handleRoutePoison(sender routingSender, frame protocol.RoutePoisonFrame) {
+	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("route_poison_malformed_sender")
 		return
@@ -1307,9 +1308,10 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 	// during the cooldown. Position is BEFORE the announceLimiter
 	// charge AND BEFORE the ed25519.Verify path so a hostile
 	// quarantined peer cannot soak CPU on signature work either.
-	if s.IsPeerInRouteQuarantine(senderIdentity) {
+	if s.isSubjectInRouteQuarantine(sender.penalty) {
 		log.Debug().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "route_poison_v1").
 			Str("identity", frame.Identity).
 			Str("reason", frame.Reason).
@@ -1330,15 +1332,21 @@ func (s *Service) handleRoutePoison(senderIdentity domain.PeerIdentity, frame pr
 	// not an entry-batch — sharing the bucket with announce frames
 	// at unit cost (Round-10) means a poison flood still consumes
 	// announce capacity but doesn't get artificially inflated.
-	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, 1) {
+	if s.announceLimiter != nil && !s.announceLimiter.allow(sender.penalty, 1) {
 		log.Warn().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "route_poison_v1").
 			Str("identity", frame.Identity).
 			Str("reason", frame.Reason).
 			Msg("announce_rate_limit_drop")
 		return
 	}
+	release, admitted := s.admitRoutingInput(sender, "route_poison_v1")
+	if !admitted {
+		return
+	}
+	defer release()
 	if !identity.IsValidAddress(frame.Identity) {
 		log.Warn().
 			Str("from", senderIdentity.String()).
@@ -1427,13 +1435,14 @@ func (s *Service) applyRoutePoisonForIdentity(senderIdentity, target domain.Peer
 // applies the poison to every listed identity via the shared core. Zeroed-out
 // targets are collected and cascaded ONCE via poisonReverseToOtherPeers (which
 // batches per peer), so the propagation hop does not re-explode into singletons.
-func (s *Service) handleRoutePoisonV2(senderIdentity domain.PeerIdentity, frame protocol.RoutePoisonV2Frame) {
+func (s *Service) handleRoutePoisonV2(sender routingSender, frame protocol.RoutePoisonV2Frame) {
+	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("route_poison_v2_malformed_sender")
 		return
 	}
-	if s.IsPeerInRouteQuarantine(senderIdentity) {
-		log.Debug().Str("from", senderIdentity.String()).Str("frame_type", "route_poison_v2").Int("identities", len(frame.Identities)).Msg("routing_announce_drop_quarantined_sender")
+	if s.isSubjectInRouteQuarantine(sender.penalty) {
+		log.Debug().Str("from", senderIdentity.String()).Str("penalty_subject", sender.penalty.String()).Str("frame_type", "route_poison_v2").Int("identities", len(frame.Identities)).Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
 	// Charge ONE token per identity, not one per frame: the batch does the
@@ -1441,10 +1450,15 @@ func (s *Service) handleRoutePoisonV2(senderIdentity domain.PeerIdentity, frame 
 	// of 1 would let an authenticated peer get an N× multiplicative bypass of
 	// the announce-plane rate limit relative to v1. Cost == len(identities)
 	// keeps v2 cost-equivalent to the v1 fan-out it replaces.
-	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, len(frame.Identities)) {
-		log.Warn().Str("from", senderIdentity.String()).Str("frame_type", "route_poison_v2").Int("identities", len(frame.Identities)).Msg("announce_rate_limit_drop")
+	if s.announceLimiter != nil && !s.announceLimiter.allow(sender.penalty, len(frame.Identities)) {
+		log.Warn().Str("from", senderIdentity.String()).Str("penalty_subject", sender.penalty.String()).Str("frame_type", "route_poison_v2").Int("identities", len(frame.Identities)).Msg("announce_rate_limit_drop")
 		return
 	}
+	release, admitted := s.admitRoutingInput(sender, "route_poison_v2")
+	if !admitted {
+		return
+	}
+	defer release()
 	// Tier-2-lenient signature check over the batch canonical bytes, once.
 	if frame.SenderSig != "" {
 		sig, err := base64.StdEncoding.DecodeString(frame.SenderSig)
@@ -2035,7 +2049,8 @@ func (s *Service) sendConnectTimeFullSync(ctx context.Context, peerIdentity doma
 // set so subsequent routes_update deltas from the peer are safe to apply
 // against the known-good first-sync snapshot. See docs/routing.md
 // "First-sync wire-frame invariant" for the protocol-level contract.
-func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame protocol.Frame) {
+func (s *Service) handleAnnounceRoutes(sender routingSender, frame protocol.Frame) {
+	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("announce_routes_malformed_sender")
 		return
@@ -2060,14 +2075,20 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 	// drains the bucket proportional to its real work, instead of
 	// being silently truncated past the previous 30-frame burst —
 	// see announceBurstRoutesPerPeer doc for the new sizing.
-	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.AnnounceRoutes))) {
+	if s.announceLimiter != nil && !s.announceLimiter.allow(sender.penalty, announceCostForEntries(len(frame.AnnounceRoutes))) {
 		log.Warn().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "announce_routes").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Msg("announce_rate_limit_drop")
 		return
 	}
+	release, admitted := s.admitRoutingInput(sender, "announce_routes")
+	if !admitted {
+		return
+	}
+	defer release()
 	// Phase 4 13.5 receive-side cap: drop the whole frame when its
 	// entry count exceeds maxRoutesPerAnnounceFrame. Our own chunker
 	// never produces such a frame; receiving one means the peer is
@@ -2084,7 +2105,7 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 			Msg("announce_routes_entry_count_cap_exceeded")
 		return
 	}
-	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, nil, nil, announceReceiveLegacy)
+	s.applyAnnounceEntries(sender, frame.AnnounceRoutes, nil, nil, announceReceiveLegacy)
 }
 
 // handleRoutesUpdate processes an incoming routes_update frame (v2 wire
@@ -2098,7 +2119,8 @@ func (s *Service) handleAnnounceRoutes(senderIdentity domain.PeerIdentity, frame
 //
 // senderAddress is the peer's routing-key address (outbound session or
 // "inbound:" prefix) used to dispatch the request_resync reply.
-func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderAddress domain.PeerAddress, frame protocol.Frame) {
+func (s *Service) handleRoutesUpdate(sender routingSender, senderAddress domain.PeerAddress, frame protocol.Frame) {
+	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("routes_update_malformed_sender")
 		return
@@ -2109,15 +2131,16 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 	// the trigger targets. Full baselines (announce_routes, v3
 	// kind="full") and the request_resync control frame are excluded —
 	// see handleAnnounceRoutes for the baseline-vs-delta rationale.
-	s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
+	s.recordInboundAnnounceAndMaybeArm(sender.penalty, time.Now())
 	// Phase 4 13.7: shared per-peer announce rate limit. v2 delta
 	// frames count against the same budget as legacy / v3 frames so
 	// a peer flipping between wire generations cannot reset its
 	// throttle. Round-10 fix: charge by route-entry count — see
 	// the matching comment in handleAnnounceRoutes.
-	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.AnnounceRoutes))) {
+	if s.announceLimiter != nil && !s.announceLimiter.allow(sender.penalty, announceCostForEntries(len(frame.AnnounceRoutes))) {
 		log.Warn().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "routes_update").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Msg("announce_rate_limit_drop")
@@ -2149,14 +2172,20 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 	// design doc explicitly forbids. Drop the frame and DO NOT
 	// create AnnouncePeerState for the peer either, so quarantine
 	// produces a clean "as if peer was never heard from" state.
-	if s.IsPeerInRouteQuarantine(senderIdentity) {
+	if s.isSubjectInRouteQuarantine(sender.penalty) {
 		log.Debug().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "routes_update").
 			Int("entries", len(frame.AnnounceRoutes)).
 			Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
+	release, admitted := s.admitRoutingInput(sender, "routes_update")
+	if !admitted {
+		return
+	}
+	defer release()
 
 	peerState := s.announceLoop.StateRegistry().GetOrCreate(senderIdentity)
 	if !peerState.HasReceivedBaseline() {
@@ -2184,7 +2213,7 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 		return
 	}
 
-	s.applyAnnounceEntries(senderIdentity, frame.AnnounceRoutes, nil, nil, announceReceiveV2)
+	s.applyAnnounceEntries(sender, frame.AnnounceRoutes, nil, nil, announceReceiveV2)
 }
 
 // handleRequestResync processes an incoming request_resync frame. The peer
@@ -2199,7 +2228,8 @@ func (s *Service) handleRoutesUpdate(senderIdentity domain.PeerIdentity, senderA
 // SendRouteAnnounceV3 with kind="full" for peers that negotiated the v3
 // triplet. Either way the recovery frame is a self-contained baseline,
 // never a delta.
-func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
+func (s *Service) handleRequestResync(sender routingSender) {
+	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("request_resync_malformed_sender")
 		return
@@ -2229,22 +2259,29 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	// Position is BEFORE the announceLimiter charge so a
 	// quarantined peer's frames do not consume the per-peer
 	// announce token budget either.
-	if s.IsPeerInRouteQuarantine(senderIdentity) {
+	if s.isSubjectInRouteQuarantine(sender.penalty) {
 		log.Debug().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "request_resync").
 			Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
 	// Phase 4 13.7: shared per-peer announce rate limit. Cost 1 —
 	// control frame, not entry-bearing.
-	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, 1) {
+	if s.announceLimiter != nil && !s.announceLimiter.allow(sender.penalty, 1) {
 		log.Warn().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "request_resync").
 			Msg("announce_rate_limit_drop")
 		return
 	}
+	release, admitted := s.admitRoutingInput(sender, "request_resync")
+	if !admitted {
+		return
+	}
+	defer release()
 	// Dedicated accept-side debounce. The limiters above are generic
 	// frame-rate brakes (cmdLimiter 30/s at the dispatcher, announce
 	// limiter cost 1 here) — a peer sending request_resync at e.g.
@@ -2258,9 +2295,10 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 	// is an optimisation, not a correctness requirement — see
 	// handleRouteAnnounceV3's baseline-gate notes). Excess requests
 	// are dropped without touching the state registry.
-	if !s.acceptRequestResyncDebounced(senderIdentity, time.Now()) {
+	if !s.acceptRequestResyncDebounced(sender.penalty, time.Now()) {
 		log.Debug().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "request_resync").
 			Msg("request_resync_debounced_drop")
 		return
@@ -2280,26 +2318,28 @@ func (s *Service) handleRequestResync(senderIdentity domain.PeerIdentity) {
 const requestResyncAcceptDebounce = 30 * time.Second
 
 // acceptRequestResyncDebounced records and gates request_resync
-// acceptance per peer: returns true (and stamps the acceptance) when
-// no resync was accepted for the peer within
-// requestResyncAcceptDebounce, false otherwise. Guarded by peerMu —
-// same domain as the quarantine bookkeeping that shares the
-// handler's hot path. Stale entries are purged by
-// purgeRouteQuarantineState alongside the other per-peer sliding
-// windows.
-func (s *Service) acceptRequestResyncDebounced(peer domain.PeerIdentity, now time.Time) bool {
-	if peer.IsZero() {
+// acceptance per penalty subject (penalty_subject.go): returns true (and
+// stamps the acceptance) when no resync was accepted for the subject within
+// requestResyncAcceptDebounce, false otherwise. Keyed by the subject and not
+// by the identity the frame's session names: a legacy session that named
+// somebody else would otherwise stamp THEIR debounce, and their own request
+// for the baseline they are missing would be dropped for the whole window.
+// Guarded by peerMu — same domain as the quarantine bookkeeping that shares
+// the handler's hot path. Stale entries are purged by
+// purgeRouteQuarantineState alongside the other per-peer sliding windows.
+func (s *Service) acceptRequestResyncDebounced(subject penaltySubject, now time.Time) bool {
+	if subject.IsZero() {
 		return false
 	}
 	s.peerMu.Lock()
 	defer s.peerMu.Unlock()
-	if last, ok := s.lastResyncAccepted[peer]; ok && now.Sub(last) < requestResyncAcceptDebounce {
+	if last, ok := s.lastResyncAccepted[subject]; ok && now.Sub(last) < requestResyncAcceptDebounce {
 		return false
 	}
 	if s.lastResyncAccepted == nil {
-		s.lastResyncAccepted = make(map[domain.PeerIdentity]time.Time)
+		s.lastResyncAccepted = make(map[penaltySubject]time.Time)
 	}
-	s.lastResyncAccepted[peer] = now
+	s.lastResyncAccepted[subject] = now
 	return true
 }
 
@@ -2341,7 +2381,8 @@ func (s *Service) acceptRequestResyncDebounced(peer domain.PeerIdentity, now tim
 // cycle, which re-baselines without any signal — request_resync is an
 // optimisation, not a correctness requirement. kind="full" is
 // self-contained and establishes the baseline.
-func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, senderAddress domain.PeerAddress, frame protocol.RouteAnnounceV3Frame) {
+func (s *Service) handleRouteAnnounceV3(sender routingSender, senderAddress domain.PeerAddress, frame protocol.RouteAnnounceV3Frame) {
+	senderIdentity := sender.identity
 	if !identity.IsValidAddress(senderIdentity.String()) {
 		log.Warn().Str("sender", senderIdentity.String()).Msg("route_announce_v3_malformed_sender")
 		return
@@ -2355,7 +2396,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	// (request_resync, a control frame, is likewise excluded — see
 	// handleRequestResync.)
 	if frame.Kind == protocol.RouteAnnounceV3KindDelta {
-		s.recordInboundAnnounceAndMaybeArm(senderIdentity, time.Now())
+		s.recordInboundAnnounceAndMaybeArm(sender.penalty, time.Now())
 	}
 	// Phase 4 13.7: shared per-peer announce rate limit across all
 	// announce-plane wire generations (legacy v1, v2 delta, v3
@@ -2367,9 +2408,10 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	// the legitimate full-sync of N routes consumes N tokens
 	// instead of getting silently truncated at the previous
 	// 30-frame burst.
-	if s.announceLimiter != nil && !s.announceLimiter.allow(senderIdentity, announceCostForEntries(len(frame.Entries))) {
+	if s.announceLimiter != nil && !s.announceLimiter.allow(sender.penalty, announceCostForEntries(len(frame.Entries))) {
 		log.Warn().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "route_announce_v3").
 			Str("kind", frame.Kind).
 			Int("entries", len(frame.Entries)).
@@ -2400,15 +2442,21 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 	// NOT touch AnnouncePeerState (no GetOrCreate, no ObserveV3Epoch)
 	// so the quarantine window leaves no per-peer routing state
 	// residue.
-	if s.IsPeerInRouteQuarantine(senderIdentity) {
+	if s.isSubjectInRouteQuarantine(sender.penalty) {
 		log.Debug().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Str("frame_type", "route_announce_v3").
 			Str("kind", frame.Kind).
 			Int("entries", len(frame.Entries)).
 			Msg("routing_announce_drop_quarantined_sender")
 		return
 	}
+	release, admitted := s.admitRoutingInput(sender, "route_announce_v3")
+	if !admitted {
+		return
+	}
+	defer release()
 
 	peerState := s.announceLoop.StateRegistry().GetOrCreate(senderIdentity)
 
@@ -2477,7 +2525,7 @@ func (s *Service) handleRouteAnnounceV3(senderIdentity domain.PeerIdentity, send
 		// based on locally-unverified sigs.
 		verified = make([]bool, len(frames))
 	}
-	s.applyAnnounceEntries(senderIdentity, frames, sigs, verified, mode)
+	s.applyAnnounceEntries(sender, frames, sigs, verified, mode)
 }
 
 // verifyRouteAnnounceV3Sigs filters frames+sigs by ed25519 signature
@@ -2704,7 +2752,8 @@ func (m announceReceiveMode) wireTypeLabel() string {
 // RouteEntry.AttestedSigVerified → UplinkClaim.AttestedSigVerified so
 // CompositeScore can apply the trust-score bonus at rank time without
 // re-verifying.
-func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireRoutes []protocol.AnnounceRouteFrame, attestedSigs [][]byte, attestedVerified []bool, mode announceReceiveMode) {
+func (s *Service) applyAnnounceEntries(sender routingSender, wireRoutes []protocol.AnnounceRouteFrame, attestedSigs [][]byte, attestedVerified []bool, mode announceReceiveMode) {
+	senderIdentity := sender.identity
 	if senderIdentity.IsZero() {
 		log.Warn().Msg("announce_routes_no_sender_identity")
 		return
@@ -2716,9 +2765,10 @@ func (s *Service) applyAnnounceEntries(senderIdentity domain.PeerIdentity, wireR
 	// a direct peer in our table (push/relay to the sender still
 	// works), we just do not trust their view of the network until
 	// the quarantine window elapses. See routing_route_quarantine.go.
-	if s.IsPeerInRouteQuarantine(senderIdentity) {
+	if s.isSubjectInRouteQuarantine(sender.penalty) {
 		log.Debug().
 			Str("from", senderIdentity.String()).
+			Str("penalty_subject", sender.penalty.String()).
 			Int("entries", len(wireRoutes)).
 			Msg("announce_routes_dropped_quarantined_peer")
 		return

@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // replay_cache.go holds the vocabulary of the layer's ONE memory: who an
@@ -124,9 +125,19 @@ func LocalIngress() IngressPeer {
 }
 
 // ProvenIngress is the incoming_peer of a datagram received on a channel whose
-// neighbour PROVED its identity to this node: it signed a challenge this node
-// generated with a key whose fingerprint is the identity it presents
-// (connauth.VerifyAuthSession, on an accepted connection).
+// neighbour PROVED its identity to this node over a secure session v2. It
+// takes the handshake's own result, so a caller holding a mere name — or a v1
+// auth_session, whose signature can be relayed — cannot make one.
+func ProvenIngress(channel ChannelID, proof sessionv2.ProvenIdentity) IngressPeer {
+	id, ok := proof.Identity()
+	if !ok {
+		return IngressPeer{channel: channel, authority: AuthorityClaimed}
+	}
+	return provenIngress(channel, id)
+}
+
+// provenIngress is the package's derivation of the proven ingress from an
+// arrival whose key already IS the proven key of id (inboundFrame.ingress).
 //
 // The owner is not a parameter here and that is not an omission: in the PROVEN
 // namespace the budget key IS the identity (AdmissionKeySpaceProvenIdentity), so
@@ -134,24 +145,26 @@ func LocalIngress() IngressPeer {
 // drift. It is the same derivation inboundFrame.authority already makes in the
 // other direction: an arrival is proven exactly when its budget key equals the
 // key this constructor mints.
-func ProvenIngress(channel ChannelID, id domain.PeerIdentity) IngressPeer {
+func provenIngress(channel ChannelID, id domain.PeerIdentity) IngressPeer {
 	return IngressPeer{
 		channel:   channel,
-		billedTo:  ProvenIdentityKey(id),
+		billedTo:  provenIdentityKey(id),
 		identity:  id,
 		authority: AuthorityProven,
 	}
 }
 
 // ClaimedIngress is the incoming_peer of a datagram received on a channel whose
-// neighbour proved NOTHING — a session this node dialled, where the welcome
-// address is the remote's own claim. The channel is still exact; only the name
-// is not.
+// neighbour proved NOTHING — a legacy session, where the name is the remote's
+// own claim: the welcome of a session this node dialled, or the hello of an
+// accepted one whose auth_session could have been relayed. The channel is
+// still exact; only the name is not.
 //
-// The owner IS a parameter here, and it is mandatory: on this direction the only
-// defensible bucket is the host:port THIS node dialled (AdmissionKeySpace), which
-// is nowhere in the rest of the value and cannot be recovered from a name the
-// remote chose. The three arguments have pairwise distinct types, so the compiler
+// The owner IS a parameter here, and it is mandatory: on these channels the only
+// defensible bucket is what THIS node observed of the socket — the host:port it
+// dialled, the source host or the connection it accepted (AdmissionKeySpace) —
+// which is nowhere in the rest of the value and cannot be recovered from a name
+// the remote chose. The three arguments have pairwise distinct types, so the compiler
 // checks the order.
 func ClaimedIngress(channel ChannelID, owner AdmissionKey, id domain.PeerIdentity) IngressPeer {
 	return IngressPeer{

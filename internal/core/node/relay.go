@@ -59,10 +59,17 @@ const (
 // node. Each node knows only its own previous_hop and forwarded_to —
 // no single message reveals the full path.
 type relayForwardState struct {
-	MessageID            string
-	PreviousHop          domain.PeerAddress   // who sent this relay to me (transport address)
-	ReceiptForwardTo     domain.PeerAddress   // = PreviousHop (where to send receipt back)
-	ForwardedTo          domain.PeerAddress   // who I forwarded to (for loop detection)
+	MessageID        string
+	PreviousHop      domain.PeerAddress // who sent this relay to me (transport address)
+	ReceiptForwardTo domain.PeerAddress // = PreviousHop (where to send receipt back)
+	ForwardedTo      domain.PeerAddress // who I forwarded to (for loop detection)
+	// ForwardedVia is the connection the current attempt to ForwardedTo was
+	// handed to, as it stood WHEN the attempt was made: its identity and its
+	// penalty subject (proven only for a v2 session). The hop-ack timeout
+	// charges this and never re-resolves the address, which may by then be
+	// held by another connection. Zero when no connection held the address
+	// (the frame was queued locally): such an attempt is charged to nobody.
+	ForwardedVia         routingSender
 	AbandonedForwardedTo []domain.PeerAddress // old ForwardedTo values from reroutes (stale ack rejection)
 	Recipient            domain.PeerIdentity  // final recipient identity (for hop_ack route confirmation)
 	RouteOrigin          domain.PeerIdentity  // route origin from routing decision (retained for plumbing-stability; IGNORED by hop_ack promotion post-Phase-A — see routing_hop_ack.go)
@@ -340,6 +347,7 @@ func (rs *relayStateStore) store(state *relayForwardState) bool {
 			existing.HopAckObserved = state.HopAckObserved
 		}
 		existing.ForwardedTo = state.ForwardedTo
+		existing.ForwardedVia = state.ForwardedVia
 		existing.RouteOrigin = state.RouteOrigin
 		existing.RemainingTTL = state.RemainingTTL
 		// Phase 3 PR 12.3 — FrameLine is the wire payload kept for
@@ -579,7 +587,7 @@ func (rs *relayStateStore) frameLineBytes() int {
 // routing_relay.go is the only production caller — see
 // onRelayHopAckTimeout's doc-comment for the lock-ordering contract
 // against routing.Table.mu (rs.mu released BEFORE Table reads).
-func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress domain.PeerAddress, frameLine string) bool {
+func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress domain.PeerAddress, via routingSender, frameLine string) bool {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	state, ok := rs.states[messageID]
@@ -593,6 +601,7 @@ func (rs *relayStateStore) recordFailoverRetry(messageID string, newAddress doma
 		state.FrameLine = frameLine
 	}
 	state.ForwardedTo = newAddress
+	state.ForwardedVia = via
 	state.RouteOrigin = domain.PeerIdentity{}
 	state.RetryAttempt++
 	state.HopAckRemainingTicks = defaultHopAckBudgetSeconds
@@ -829,7 +838,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	// Try direct peer first — is the recipient directly connected?
 	// A recipient identity may have multiple session addresses (reconnects,
 	// address changes), so we try all matching sessions until one succeeds.
-	forwardedTo := s.tryForwardToDirectPeer(domain.PeerIdentityFromWire(recipient), forwardFrame)
+	forwardedTo, forwardedVia := s.tryForwardToDirectPeer(domain.PeerIdentityFromWire(recipient), forwardFrame)
 
 	// Table-directed relay (Phase 1.2): if no direct peer, consult the
 	// routing table for a next-hop. This enables multi-hop relay chains
@@ -840,12 +849,13 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 	if forwardedTo == "" {
 		result := s.tryForwardViaRoutingTable(s.runCtx, domain.PeerIdentityFromWire(recipient), forwardFrame, domain.PeerIdentityFromWire(frame.PreviousHop))
 		forwardedTo = result.Address
+		forwardedVia = result.Via
 		tableRouteOrigin = result.RouteOrigin
 	}
 
 	// If no direct peer and no table route, gossip to capable peers.
 	if forwardedTo == "" {
-		forwardedTo = s.relayViaGossip(forwardFrame, senderAddress)
+		forwardedTo, forwardedVia = s.relayViaGossip(forwardFrame, senderAddress)
 	}
 
 	if forwardedTo == "" {
@@ -939,6 +949,7 @@ func (s *Service) handleRelayMessage(senderAddress domain.PeerAddress, syncSessi
 		PreviousHop:          senderAddress,
 		ReceiptForwardTo:     senderAddress,
 		ForwardedTo:          forwardedTo,
+		ForwardedVia:         forwardedVia,
 		Recipient:            domain.PeerIdentityFromWire(recipient),
 		RouteOrigin:          tableRouteOrigin,
 		HopCount:             newHopCount,
@@ -1098,7 +1109,7 @@ func (s *Service) sendRelayHopAck(peerAddress domain.PeerAddress, messageID, sta
 // and resets ConsecutiveFailures (PR 12.1 contract). That is the
 // documented recovery path — positive evidence overrides the black-hole
 // signal.
-func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, frame protocol.Frame) {
+func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, sender routingSender, frame protocol.Frame) {
 	log.Debug().
 		Str("id", frame.ID).
 		Str("from", string(senderAddress)).
@@ -1113,7 +1124,23 @@ func (s *Service) handleRelayHopAck(senderAddress domain.PeerAddress, frame prot
 		return
 	}
 	routeOrigin := s.relayStates.lookupRouteOrigin(frame.ID)
-	ackIdentity := s.resolvePeerIdentity(senderAddress)
+	// sender is the connection the ack ARRIVED on, handed over by the
+	// dispatcher. A connection that names no identity cannot vouch for any
+	// attempt; resolving the address instead would credit whoever holds it
+	// by now, which is exactly the misattribution this parameter removes.
+	ackIdentity := sender.identity
+	if ackIdentity.IsZero() {
+		log.Debug().Str("id", frame.ID).Str("from", string(senderAddress)).Msg("relay_hop_ack_from_unnamed_connection_ignored")
+		return
+	}
+	// An ack from a legacy connection merely naming an identity proven over
+	// v2 neither suppresses the attempt's timer nor confirms a route in the
+	// identity's name.
+	release, admitted := s.admitRoutingInput(sender, "relay_hop_ack")
+	if !admitted {
+		return
+	}
+	defer release()
 
 	// Stale-ack guard — applied to the SUPPRESSION decision, not only to
 	// route confirmation. A stale ack must not reset the current
@@ -1189,7 +1216,7 @@ func (s *Service) isStaleHopAckSender(messageID string, ackIdentity domain.PeerI
 // and tries to enqueue the frame. Returns the address of the first session
 // that accepted the frame, or "" if none did. This avoids the problem where
 // a random non-capable or non-writable session shadows a healthy direct path.
-func (s *Service) tryForwardToDirectPeer(recipient domain.PeerIdentity, frame protocol.Frame) domain.PeerAddress {
+func (s *Service) tryForwardToDirectPeer(recipient domain.PeerIdentity, frame protocol.Frame) (domain.PeerAddress, routingSender) {
 	s.peerMu.RLock()
 	var candidates []domain.PeerAddress
 	for address, session := range s.sessions {
@@ -1203,11 +1230,11 @@ func (s *Service) tryForwardToDirectPeer(recipient domain.PeerIdentity, frame pr
 		if !s.sendTargetHasCapability(address, domain.CapMeshRelayV1) {
 			continue
 		}
-		if s.enqueuePeerFrame(address, frame) {
-			return address
+		if via, queued := s.enqueuePeerSendItemVia(address, legacyPeerSendItem(frame)); queued {
+			return address, via
 		}
 	}
-	return domain.PeerAddress("")
+	return domain.PeerAddress(""), routingSender{}
 }
 
 // relayViaGossip forwards a relay_message to the top-scored peers that
@@ -1225,9 +1252,10 @@ func (s *Service) tryForwardToDirectPeer(recipient domain.PeerIdentity, frame pr
 // transit was quarantined, but relayViaGossip then forwards the same
 // relay_message back to the same quarantined full node as a gossip
 // target, using P as transit for someone else's recipient.
-func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.PeerAddress) domain.PeerAddress {
+func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.PeerAddress) (domain.PeerAddress, routingSender) {
 	targets := s.routingTargetsForRecipient(string(frame.Recipient))
 	var forwardedTo domain.PeerAddress
+	var forwardedVia routingSender
 	for _, address := range targets {
 		if address == "" || s.isSelfAddress(address) {
 			continue
@@ -1247,13 +1275,14 @@ func (s *Service) relayViaGossip(frame protocol.Frame, excludeAddress domain.Pee
 			continue
 		}
 		frame.PreviousHop = s.identity.Address
-		if s.enqueuePeerFrame(address, frame) {
+		if via, queued := s.enqueuePeerSendItemVia(address, legacyPeerSendItem(frame)); queued {
 			if forwardedTo == "" {
 				forwardedTo = address
+				forwardedVia = via
 			}
 		}
 	}
-	return forwardedTo
+	return forwardedTo, forwardedVia
 }
 
 // handleRelayReceipt processes a delivery receipt that may need to be
@@ -1492,7 +1521,8 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
 	outcome := relaySendRefused
-	if s.enqueuePeerSendItem(address, deliveryPeerSendItem(frame, msg, dispatchedAt)) {
+	via, queued := s.enqueuePeerSendItemVia(address, deliveryPeerSendItem(frame, msg, dispatchedAt))
+	if queued {
 		outcome = relaySendQueuedForSession
 	} else if s.queuePeerFrame(address, frame) {
 		outcome = relaySendQueuedLocally
@@ -1543,6 +1573,7 @@ func (s *Service) sendRelayMessage(address domain.PeerAddress, msg protocol.Enve
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          address,
+		ForwardedVia:         via,
 		Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
 		HopCount:             1,
 		RemainingTTL:         relayStateTTLSeconds,
@@ -1584,7 +1615,8 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 	s.attachKnownSenderKeys(&frame, msg.Topic, msg.Sender)
 
 	outcome := relaySendRefused
-	if s.enqueuePeerSendItem(address, deliveryPeerSendItem(frame, msg, dispatchedAt)) {
+	via, queued := s.enqueuePeerSendItemVia(address, deliveryPeerSendItem(frame, msg, dispatchedAt))
+	if queued {
 		outcome = relaySendQueuedForSession
 	} else if s.queuePeerFrame(address, frame) {
 		outcome = relaySendQueuedLocally
@@ -1627,6 +1659,7 @@ func (s *Service) sendRelayMessageWithOrigin(address domain.PeerAddress, msg pro
 		PreviousHop:          "",
 		ReceiptForwardTo:     "",
 		ForwardedTo:          address,
+		ForwardedVia:         via,
 		Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
 		RouteOrigin:          routeOrigin,
 		HopCount:             1,

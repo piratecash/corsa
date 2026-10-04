@@ -405,7 +405,7 @@ func (r *DMRouter) MessageReactions(ctx context.Context, peer domain.PeerIdentit
 // model is built to survive.
 //
 // Queueing a fact the peer cannot use is not an error the caller sees. Whether
-// the peer's build understands reactions is answered by ReactionsUnsupportedBy,
+// the peer's build understands reactions is answered by ReactionsSupportOf,
 // separately and later, because the send is deliberately asynchronous.
 func (r *DMRouter) ToggleReaction(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID, emoji string, now time.Time) (domain.ReactionFact, error) {
 	store := r.reactions()
@@ -448,16 +448,16 @@ func (r *DMRouter) ToggleReaction(ctx context.Context, peer domain.PeerIdentity,
 	return fact, nil
 }
 
-// ReactionsUnsupportedBy reports whether the peer is known to run a build that
-// cannot receive reactions.
-//
-// "Known to be", not "not known to be": a peer nothing has been sent to yet
-// answers false, and the honest state then is that the reaction is on its way.
-func (r *DMRouter) ReactionsUnsupportedBy(peer domain.PeerIdentity) bool {
+// ReactionsSupportOf reports what is currently known about whether the peer
+// can receive reactions (see DesktopClient.ReactionsSupportOf). Only
+// ReactionsSupportAbsent may be shown as "cannot receive"; Unknown is not a
+// refusal and not "offline" — it claims nothing. Whether a reaction is still
+// queued is the outbox's answer (QueuedReactionsFor), not this one's.
+func (r *DMRouter) ReactionsSupportOf(peer domain.PeerIdentity) domain.ReactionsSupport {
 	if r == nil || r.client == nil {
-		return false
+		return domain.ReactionsSupportUnknown
 	}
-	return r.client.ReactionsUnsupportedBy(peer)
+	return r.client.ReactionsSupportOf(peer)
 }
 
 // toggleReactionWith is the decision itself, apart from the router that carries

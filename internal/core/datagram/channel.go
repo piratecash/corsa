@@ -101,8 +101,10 @@ type IngressAuthority uint8
 
 const (
 	// AuthorityClaimed means nothing about the neighbour is proven: the
-	// identity is the welcome address of a session this node DIALLED, which the
-	// remote chose for itself, and a fingerprint is public.
+	// identity is what a legacy (v1) session said — the welcome address of a
+	// session this node DIALLED, or the hello of an accepted one whose
+	// auth_session signature could have been relayed — and a fingerprint is
+	// public.
 	//
 	// It is the ZERO VALUE deliberately, and that is the opposite of a zero
 	// value standing in for a business signal: there are exactly two states, the
@@ -110,10 +112,11 @@ const (
 	// nothing. Making `proven` the zero would hand the strongest verdict to
 	// every uninitialised struct.
 	AuthorityClaimed IngressAuthority = iota
-	// AuthorityProven means the neighbour signed a challenge THIS node
-	// generated, with a key whose fingerprint is the identity it presents
-	// (connauth.VerifyAuthSession, on an accepted connection). Nobody else can
-	// present that identity on that connection.
+	// AuthorityProven means the neighbour proved the identity it presents over
+	// THIS connection with a secure session v2 — session_proof over the
+	// connection's TLS exporter, in either direction. Nobody else can present
+	// that identity on that connection. A v1 auth_session does not qualify:
+	// it signs a challenge that names neither the verifier nor the connection.
 	AuthorityProven
 )
 

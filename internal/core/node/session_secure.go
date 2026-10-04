@@ -81,14 +81,13 @@ func newSecureSessions(id *identity.Identity, storePath string, clock func() tim
 }
 
 // refuseLegacyIdentity reports errLegacyRefusedPinned for a v1 session whose
-// hello or welcome names an identity that proved v2 — on accept and on dial
-// alike. A v1-only build pins nothing and refuses nothing.
+// hello or welcome names an identity that requires v2 — pinned, or with a
+// live v2 connection (identityRequiresV2) — on accept and on dial alike. A
+// v1-only build pins nothing and refuses nothing. The caller must hold no
+// domain mutex.
 func (s *Service) refuseLegacyIdentity(address string) error {
-	if s.sessionMode() == sessionv2.ModeLegacyOnly {
-		return nil
-	}
 	id := domain.PeerIdentityFromWire(address)
-	if !id.IsZero() && s.secureSessions.store.identityPinned(id) {
+	if s.identityRequiresV2(id) {
 		return fmt.Errorf("%w: %s", errLegacyRefusedPinned, id)
 	}
 	return nil
@@ -161,6 +160,12 @@ func (s *Service) openInboundTransport(metered *netcore.MeteredConn) (net.Conn, 
 		_ = conn.Close()
 		return nil, nil, nil, err
 	}
+	if proof, proven := peer.Proof(); proven {
+		if err := s.onIdentityProvenV2(s.runCtx, proof); err != nil {
+			_ = conn.Close()
+			return nil, nil, nil, err
+		}
+	}
 	return conn, bufio.NewReader(conn), &peer, nil
 }
 
@@ -187,8 +192,15 @@ func (s *Service) acceptProvenInbound(connID domain.ConnID, peer sessionv2.Peer,
 		log.Warn().Err(err).Uint64("conn_id", uint64(connID)).Str("addr", remoteAddr).Msg("secure_session_inbound_version_refused")
 		return false
 	}
+	proof, proven := peer.Proof()
+	if !proven {
+		// Only the handshake mints a proof; a peer without one did not come
+		// from it, and admitting it here would make it count as proven.
+		log.Error().Uint64("conn_id", uint64(connID)).Str("addr", remoteAddr).Msg("secure_session_inbound_without_proof")
+		return false
+	}
 	advertiseResult := validateAdvertisedAddress(remoteAddr, hello)
-	verified := &connauth.State{Hello: hello, Verified: true}
+	verified := connauth.ProvenBySessionV2(hello, proof)
 	// The auth state goes in before the address bookkeeping, as on the v1
 	// path, so a second hello on this connection meets the re-hello guard.
 	s.setConnAuthStateByID(connID, verified)
@@ -253,7 +265,7 @@ func (s *Service) dialPeerTransport(ctx context.Context, address domain.PeerAddr
 	session, err := sessionv2.Dial(ctx, transport.metered, s.secureSessions.local, s.nodeHelloFrame(), sessionv2.AnyPeer(), sessionv2.DefaultTimeouts)
 	switch {
 	case err == nil:
-		return s.provenTransport(transport, session, address)
+		return s.provenTransport(ctx, transport, session, address)
 	case !errors.Is(err, sessionv2.ErrPeerSpeaksV1):
 		return nil, err
 	case mode == sessionv2.ModeV2Only:
@@ -287,7 +299,10 @@ func (s *Service) dialPeerRawForCM(ctx context.Context, address domain.PeerAddre
 // earned: the peer's identity is pinned and the dialled endpoint bound —
 // protected when the peer is one of this node's contacts. A protection that
 // could not be written fails the dial: the session is not established on it.
-func (s *Service) provenTransport(transport *dialledTransport, session sessionv2.ProvenSession, address domain.PeerAddress) (*dialledTransport, error) {
+// Once it is written, the legacy connections naming the same identity are
+// closed and their routing residue forgotten (onIdentityProvenV2), before this
+// session is registered.
+func (s *Service) provenTransport(ctx context.Context, transport *dialledTransport, session sessionv2.ProvenSession, address domain.PeerAddress) (*dialledTransport, error) {
 	wire, err := session.Conn()
 	if err != nil {
 		return nil, err
@@ -300,6 +315,12 @@ func (s *Service) provenTransport(transport *dialledTransport, session sessionv2
 	if err := s.secureSessions.store.noteProvenOutbound(address, peer.Identity, protected); err != nil {
 		_ = wire.Close()
 		return nil, err
+	}
+	if proof, proven := peer.Proof(); proven {
+		if err := s.onIdentityProvenV2(ctx, proof); err != nil {
+			_ = wire.Close()
+			return nil, err
+		}
 	}
 	transport.wire, transport.proven = wire, &peer
 	return transport, nil

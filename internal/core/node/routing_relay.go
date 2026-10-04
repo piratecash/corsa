@@ -1,6 +1,6 @@
 // routing_relay.go hosts the relay forwarding and gossip dispatch paths:
 // tryForwardViaRoutingTable / sendTableDirectedRelay / sendRelayToAddress
-// for table-directed relay forwarding; sendFrameToAddress as the unified
+// for table-directed relay forwarding; sendFrameToAddressVia as the unified
 // inbound/outbound send dispatch; executeGossipTargets / routingTargets*
 // for gossip fanout target selection; sendGossipFrameToPeer / gossipNotice /
 // sendNoticeToPeer for push_message and push_notice delivery;
@@ -33,7 +33,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -71,6 +70,10 @@ type tableForwardResult struct {
 	// on (Identity, NextHop) only because the routing table no longer keys
 	// on Origin. See routing_hop_ack.go for the migration note.
 	RouteOrigin domain.PeerIdentity
+
+	// Via is the connection the frame was handed to (see
+	// relayForwardState.ForwardedVia).
+	Via routingSender
 }
 
 // onRelayHopAckTimeout is the Phase 3 PR 12.2 callback fired by the
@@ -132,26 +135,43 @@ func (s *Service) onRelayHopAckTimeout(state relayForwardState) {
 		return
 	}
 
-	nextHopIdentity := s.resolvePeerIdentity(state.ForwardedTo)
-	if nextHopIdentity.IsZero() {
-		// Session may have closed between forward and timeout —
-		// resolvePeerIdentity returned "". Treat the address as
-		// the identity directly only when it parses as one; the
-		// "inbound:..." form would fail MarkHopFailure's empty
-		// check anyway. We log either way so the operator sees a
-		// "we timed out but couldn't blame anyone" trail.
-		nextHopIdentity = domain.PeerIdentityFromWire(string(state.ForwardedTo))
-		if nextHopIdentity.IsZero() {
-			log.Debug().
-				Str("id", state.MessageID).
-				Str("recipient", state.Recipient.String()).
-				Str("forwarded_to", string(state.ForwardedTo)).
-				Msg("relay_hop_ack_timeout_unresolved_uplink")
-			return
+	// The failure belongs to the connection the ATTEMPT went over, recorded
+	// when it was made (relayForwardState.ForwardedVia) — never to whatever
+	// connection holds the address now: a v2 session that replaced a legacy
+	// one at the same address must not inherit the legacy attempt's failure.
+	via := state.ForwardedVia
+	if via.identity.IsZero() {
+		// No connection was known when the attempt was made (the frame was
+		// queued locally) or the state predates the stamp: nothing is
+		// charged. The current holder of the address is resolved only to
+		// steer the failover away from it.
+		failoverFrom := s.resolvePeerIdentity(state.ForwardedTo)
+		if failoverFrom.IsZero() {
+			failoverFrom = domain.PeerIdentityFromWire(string(state.ForwardedTo))
 		}
+		log.Debug().
+			Str("id", state.MessageID).
+			Str("recipient", state.Recipient.String()).
+			Str("forwarded_to", string(state.ForwardedTo)).
+			Msg("relay_hop_ack_timeout_unattributed")
+		if !failoverFrom.IsZero() {
+			s.tryFailoverRelay(state, failoverFrom)
+		}
+		return
 	}
+	nextHopIdentity := via.identity
 
+	// An attempt that left over a legacy connection merely naming an
+	// identity proven over v2 failed on that connection, not on the identity:
+	// the failure is not charged to the identity's routes. Failover still
+	// runs — the message still needs a path.
+	release, admitted := s.admitRoutingInput(via, "relay_hop_ack_timeout")
+	if !admitted {
+		s.tryFailoverRelay(state, nextHopIdentity)
+		return
+	}
 	s.routingTable.MarkHopFailure(state.Recipient, nextHopIdentity)
+	release()
 
 	log.Debug().
 		Str("id", state.MessageID).
@@ -321,14 +341,15 @@ func (s *Service) tryFailoverRelay(state relayForwardState, failedUplink domain.
 		if address == "" {
 			continue
 		}
-		if !s.sendFrameToAddress(s.runCtx, address, frame) {
+		via, sent := s.sendFrameToAddressVia(s.runCtx, address, frame)
+		if !sent {
 			continue
 		}
 		// The frame we just sent is re-stamped with the retry so the
 		// re-armed hop-ack budget has something to resend or gossip
 		// when it elapses — a late ack for the abandoned uplink may
 		// have released the stored copy while we were sending.
-		if !s.relayStates.recordFailoverRetry(state.MessageID, address, state.FrameLine) {
+		if !s.relayStates.recordFailoverRetry(state.MessageID, address, via, state.FrameLine) {
 			// TTL evicted between send and bookkeeping. The
 			// frame is already on the wire; the receiver will
 			// dedupe by ID if the original arrived too.
@@ -410,7 +431,7 @@ func (s *Service) failoverGossipFallback(state relayForwardState, failedUplink d
 	if excludeAddr == "" {
 		excludeAddr = state.ForwardedTo
 	}
-	forwardedTo := s.relayViaGossip(frame, excludeAddr)
+	forwardedTo, _ := s.relayViaGossip(frame, excludeAddr)
 	if forwardedTo == "" {
 		log.Debug().
 			Str("id", state.MessageID).
@@ -437,7 +458,7 @@ func (s *Service) failoverGossipFallback(state relayForwardState, failedUplink d
 // we must not send back to them (split horizon on relay path).
 //
 // ctx is the caller's request/cycle context. It is threaded into
-// sendFrameToAddress so that a pre-cancelled or mid-flight cancelled ctx
+// sendFrameToAddressVia so that a pre-cancelled or mid-flight cancelled ctx
 // aborts the inbound sync-flush wait instead of letting the NetCore writer
 // burn the full syncFlushTimeout. Outbound enqueue is non-blocking and
 // does not observe ctx beyond the pre-entry check.
@@ -480,7 +501,7 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 		if address == "" {
 			continue
 		}
-		if s.sendFrameToAddress(ctx, address, frame) {
+		if via, sent := s.sendFrameToAddressVia(ctx, address, frame); sent {
 			log.Debug().
 				Str("id", frame.ID).
 				Str("recipient", recipient.String()).
@@ -506,7 +527,7 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 			if health, tracked := s.routingTable.HealthFor(recipient, route.NextHop); tracked && health == routing.HealthBad {
 				s.triggerRouteQueryAsync(recipient)
 			}
-			return tableForwardResult{Address: address, RouteOrigin: route.Origin}
+			return tableForwardResult{Address: address, RouteOrigin: route.Origin, Via: via}
 		}
 	}
 
@@ -517,7 +538,7 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 	return tableForwardResult{}
 }
 
-// sendFrameToAddress sends a protocol frame to the given address, handling
+// sendFrameToAddressVia sends a protocol frame to the given address, handling
 // both outbound sessions (plain address) and inbound connections ("inbound:"
 // prefixed key). This is the unified send dispatch for all table-directed
 // relay and forwarding paths.
@@ -534,33 +555,40 @@ func (s *Service) tryForwardViaRoutingTable(ctx context.Context, recipient domai
 // relayStates is not cleared when a message is withdrawn — so an ungated
 // write here re-sent a frame whose author had already recalled it, minutes
 // after the fact, with nothing left to recall it a second time.
-func (s *Service) sendFrameToAddress(ctx context.Context, address domain.PeerAddress, frame protocol.Frame) bool {
-	if strings.HasPrefix(string(address), "inbound:") {
-		connID, remoteAddr, found := s.resolveInboundConn(address)
-		if !found {
-			return false
+//
+// It also names the connection the frame was handed to — the inbound
+// connection it was written to, or the outbound session it was enqueued into —
+// so the relay hop-ack timeout charges that connection rather than
+// re-resolving the address once the connection there may have changed.
+func (s *Service) sendFrameToAddressVia(ctx context.Context, address domain.PeerAddress, frame protocol.Frame) (routingSender, bool) {
+	if !strings.HasPrefix(string(address), "inbound:") {
+		return s.enqueuePeerSendItemVia(address, legacyPeerSendItem(frame))
+	}
+	connID, remoteAddr, found := s.resolveInboundConn(address)
+	if !found {
+		return routingSender{}, false
+	}
+	ref := s.deliveryRefForFrame(frame, time.Now().UTC())
+	if ref.Envelope.ID != "" {
+		if !s.clearedToWrite(ref, ref.DispatchedAt) {
+			log.Info().Str("message_id", string(ref.Envelope.ID)).Str("peer", string(address)).
+				Msg("inbound_write_withheld_by_delivery_gate")
+			return routingSender{}, false
 		}
-		ref := s.deliveryRefForFrame(frame, time.Now().UTC())
-		if ref.Envelope.ID != "" {
-			if !s.clearedToWrite(ref, ref.DispatchedAt) {
-				log.Info().Str("message_id", string(ref.Envelope.ID)).Str("peer", string(address)).
-					Msg("inbound_write_withheld_by_delivery_gate")
-				return false
-			}
-		}
-		err := s.writeFrameToInboundConnErr(ctx, connID, remoteAddr, frame)
-		if ref.Envelope.ID == "" {
-			return err == nil
-		}
+	}
+	err := s.writeFrameToInboundConnErr(ctx, connID, remoteAddr, frame)
+	if ref.Envelope.ID != "" {
 		if err == nil {
 			s.confirmEnvelopeOnWire(ref.Envelope, ref.DispatchedAt)
 		} else {
 			log.Debug().Str("message_id", string(ref.Envelope.ID)).Err(err).
 				Msg("delivery_inbound_write_unconfirmed")
 		}
-		return err == nil
 	}
-	return s.enqueuePeerFrame(address, frame)
+	if err != nil {
+		return routingSender{}, false
+	}
+	return s.inboundRoutingSender(connID), true
 }
 
 // sendTableDirectedRelay sends a relay_message to the table-selected next-hop.
@@ -758,6 +786,7 @@ func (s *Service) sendRelayToAddress(ctx context.Context, address domain.PeerAdd
 			PreviousHop:          "",
 			ReceiptForwardTo:     "",
 			ForwardedTo:          address,
+			ForwardedVia:         s.inboundRoutingSender(connID),
 			Recipient:            domain.PeerIdentityFromWire(msg.Recipient),
 			RouteOrigin:          routeOrigin,
 			HopCount:             1,
@@ -949,7 +978,7 @@ func (s *Service) routingTargetsForRecipient(recipient string) []domain.PeerAddr
 // passed in so callbacks can reuse the same wall-clock anchor the
 // scoring loop uses (consistency) and so callers don't have to
 // reach back into Service for time. Use the *Locked variants of any
-// helper the callback needs (e.g. isPeerInRouteQuarantineLocked).
+// helper the callback needs (e.g. isPeerTransitQuarantinedLocked).
 func (s *Service) routingTargetsFiltered(allow func(address domain.PeerAddress, peerType domain.NodeType, peerID domain.PeerIdentity, now time.Time) bool) []domain.PeerAddress {
 	s.peerMu.RLock()
 	now := time.Now().UTC()
@@ -1299,7 +1328,7 @@ func (s *Service) noticeLegacyHandshake(conn noticeConn, reader *bufio.Reader, a
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
 			Address:   s.identity.Address,
-			Signature: identity.SignPayload(s.identity, connauth.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
+			Signature: identity.SignPayload(s.identity, protocol.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
 		})
 		if err != nil {
 			return protocol.Frame{}, err

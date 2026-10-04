@@ -172,7 +172,7 @@ func TestReview_v3_P2_3_HandleRouteQueryResponse_RejectsMissingRelayCap(t *testi
 		capabilities: []domain.Capability{domain.CapMeshRouteQueryV1},
 	}
 
-	svc.handleRouteQueryResponse(idPeerB, protocol.RouteQueryResponseFrame{
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), protocol.RouteQueryResponseFrame{
 		Type:           protocol.RouteQueryResponseFrameType,
 		QueryID:        1,
 		TargetIdentity: idTargetX,
@@ -202,7 +202,7 @@ func TestReview_v3_P2_3_HandleRouteQueryResponse_AcceptsFromTripletCapable(t *te
 		},
 	}
 
-	svc.handleRouteQueryResponse(idPeerB, protocol.RouteQueryResponseFrame{
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), protocol.RouteQueryResponseFrame{
 		Type:           protocol.RouteQueryResponseFrameType,
 		QueryID:        1,
 		TargetIdentity: idTargetX,

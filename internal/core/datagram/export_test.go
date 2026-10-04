@@ -1,5 +1,7 @@
 package datagram
 
+import "github.com/piratecash/corsa/internal/core/domain"
+
 // export_test.go is the ONLY way the external datagram_test package reaches
 // internal state, and it exists so that "a test needs to see this" never turns
 // into "the production API has an accessor nobody calls".
@@ -73,4 +75,12 @@ func (m *Metrics) ReverseCount(event ReverseEvent) uint64 {
 		return 0
 	}
 	return m.reverse[event].Load()
+}
+
+// ProvenIngressForTest is the proven ingress of an arbitrary identity for the
+// external tests of the replay cache, which exercise ownership and fairness
+// and have no v2 handshake to take a proof from. Production code reaches the
+// proven namespace only through ProvenIngress, with a sessionv2.ProvenIdentity.
+func ProvenIngressForTest(channel ChannelID, id domain.PeerIdentity) IngressPeer {
+	return provenIngress(channel, id)
 }

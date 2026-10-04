@@ -277,7 +277,7 @@ func TestOnPeerSessionClosed_FanoutIsParallel(t *testing.T) {
 	fx := setupFanoutFixture(t, idPeerB, targets)
 
 	start := time.Now()
-	fx.svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	fx.svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 	elapsed := time.Since(start)
 
 	if elapsed > stuckDelay+slack {
@@ -316,7 +316,7 @@ func TestOnPeerSessionClosed_FanoutRespectsRunCtx(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		fx.svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+		fx.svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 	}()
 
 	time.Sleep(cancelAt)
@@ -340,7 +340,7 @@ func TestOnPeerSessionClosed_NoPanicOnZeroPeers(t *testing.T) {
 	fx := setupFanoutFixture(t, idPeerB, nil)
 
 	// Sanity: no targets, so SendFrameSync must never be reached.
-	fx.svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	fx.svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 
 	if got := fx.net.closeCount(); got != 0 {
 		t.Fatalf("unexpected Close calls with zero fanout targets: %d", got)
@@ -369,7 +369,7 @@ func TestOnPeerSessionClosed_CollectsSentAndDroppedCounters(t *testing.T) {
 	}
 	fx := setupFanoutFixture(t, idPeerB, targets)
 
-	fx.svc.onPeerSessionClosed(idPeerB, []domain.Capability{domain.CapMeshRelayV1})
+	fx.svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), []domain.Capability{domain.CapMeshRelayV1})
 
 	// All four peers must have received exactly one SendFrameSync.
 	for i, id := range fx.connIDs {

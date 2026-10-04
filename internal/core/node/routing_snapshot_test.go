@@ -749,7 +749,7 @@ func TestRemoteEOFDirectDisconnectPersistsLastOnlineOnTotalCollapse(t *testing.T
 		observed = append(observed, change)
 	}, ebus.WithSync())
 
-	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+	svc.onPeerSessionClosedWithError(peer, provenIdentitySubject(peer), []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
 	// The later snapshot owns ReachableIDs but must not publish the same direct
 	// offline transition a second time.
 	svc.lastRoutingSnapAtNanos.Store(0)
@@ -790,7 +790,7 @@ func TestRemoteEOFDirectDisconnectPersistsSessionCloseTimeAcrossGrace(t *testing
 	want := time.Date(2026, time.August, 21, 17, 31, 47, 155000000, time.UTC)
 	svc.presenceClock = func() time.Time { return want }
 
-	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+	svc.onPeerSessionClosedWithError(peer, provenIdentitySubject(peer), []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
 
 	deadline := time.Now().Add(3 * time.Second)
 	var got time.Time
@@ -832,7 +832,7 @@ func TestAmbiguousDirectTransportFailureDoesNotPersistPeerPresence(t *testing.T)
 	// disconnect-storm classification, but is not identity-scoped offline
 	// evidence and therefore must not become durable last_online_at.
 	svc.onPeerSessionClosedWithError(
-		peer,
+		peer, provenIdentitySubject(peer),
 		[]domain.Capability{domain.CapMeshRelayV1},
 		errors.New("read tcp: i/o timeout"),
 	)
@@ -893,7 +893,7 @@ func TestAmbiguousDirectThenTransitLossIsSnapshotGenerationIndependent(t *testin
 			// reachable. Snapshot must own the combined transition regardless of
 			// whether a rebuild lands between the two route losses.
 			svc.onPeerSessionClosedWithError(
-				peer,
+				peer, provenIdentitySubject(peer),
 				[]domain.Capability{domain.CapMeshRelayV1},
 				errors.New("read tcp: i/o timeout"),
 			)
@@ -931,7 +931,7 @@ func TestLocalDirectTeardownDoesNotPersistPeerPresence(t *testing.T) {
 	svc.identitySessions[peer] = 1
 	svc.identityRelaySessions[peer] = 1
 
-	svc.onPeerSessionClosedWithCause(peer, []domain.Capability{domain.CapMeshRelayV1}, sessionCloseLocalEviction)
+	svc.onPeerSessionClosedWithCause(peer, provenIdentitySubject(peer), []domain.Capability{domain.CapMeshRelayV1}, sessionCloseLocalEviction)
 	svc.WaitBackground()
 
 	if got := svc.trust.trustedContacts()[peer.String()].LastOnlineAt; !got.IsZero() {
@@ -963,9 +963,9 @@ func TestAmbiguousDirectFailureAfterReconnectIsNotAttributedBySnapshot(t *testin
 		observed = append(observed, change)
 	}, ebus.WithSync())
 
-	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+	svc.onPeerSessionClosedWithError(peer, provenIdentitySubject(peer), []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
 	svc.onPeerSessionEstablished(peer, []domain.Capability{domain.CapMeshRelayV1})
-	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, errors.New("read tcp: i/o timeout"))
+	svc.onPeerSessionClosedWithError(peer, provenIdentitySubject(peer), []domain.Capability{domain.CapMeshRelayV1}, errors.New("read tcp: i/o timeout"))
 	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 
@@ -1011,7 +1011,7 @@ func TestTransitLossAfterDirectFallbackUsesSnapshotPresence(t *testing.T) {
 
 	// The direct route disappears, but the transit fallback keeps the identity
 	// reachable, so neither lifecycle nor snapshot should emit offline yet.
-	svc.onPeerSessionClosedWithError(peer, []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
+	svc.onPeerSessionClosedWithError(peer, provenIdentitySubject(peer), []domain.Capability{domain.CapMeshRelayV1}, io.EOF)
 	svc.lastRoutingSnapAtNanos.Store(0)
 	svc.rebuildRoutingSnapshot()
 	if len(observed) != 0 {

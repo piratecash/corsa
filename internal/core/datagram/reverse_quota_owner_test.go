@@ -74,7 +74,7 @@ func (f *quotaFixture) live(seed string) bool {
 // it and survive a reconnect.
 func provenNeighbour(name, session string) Upstream {
 	id := domaintest.ID(name)
-	return ChannelUpstream(testChannel(name+"/"+session), ProvenIdentityKey(id), id)
+	return ChannelUpstream(testChannel(name+"/"+session), provenIdentityKey(id), id)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +330,7 @@ func TestTheReturnChannelIsNotDerivedFromTheQuotaOwner(t *testing.T) {
 		t.Fatal("q1 vanished")
 	}
 	owner, billed := record.Upstream().Owner()
-	if !billed || owner != ProvenIdentityKey(domaintest.ID("neighbour")) {
+	if !billed || owner != provenIdentityKey(domaintest.ID("neighbour")) {
 		t.Fatalf("the record is billed to %v (%t), want the neighbour's proven key", owner, billed)
 	}
 	if _, billed := LocalUpstream().Owner(); billed {
@@ -368,13 +368,13 @@ func TestARemoteUpstreamNeedsBothOfItsAnswers(t *testing.T) {
 	name := domaintest.ID("neighbour")
 	channel := testChannel("neighbour/session-1")
 
-	if !ChannelUpstream(NoChannel(), ProvenIdentityKey(name), name).IsZero() {
+	if !ChannelUpstream(NoChannel(), provenIdentityKey(name), name).IsZero() {
 		t.Fatal("an upstream with no channel has no return path and must read as unset")
 	}
 	if !ChannelUpstream(channel, AdmissionKey{}, name).IsZero() {
 		t.Fatal("an upstream with no owner has no quota bucket and must read as unset")
 	}
-	if ChannelUpstream(channel, ProvenIdentityKey(name), name).IsZero() {
+	if ChannelUpstream(channel, provenIdentityKey(name), name).IsZero() {
 		t.Fatal("an upstream naming both facts must read as set")
 	}
 	if LocalUpstream().IsZero() {
@@ -431,7 +431,7 @@ func TestTransitedAnswerReturnsOnTheArrivalChannel(t *testing.T) {
 
 	// The slot was charged to the ORIGIN's bucket, which any channel of the
 	// origin reads — that is the value that must NOT have addressed the answer.
-	billed := ChannelUpstream(testChannel(origin.id.String()), ProvenIdentityKey(origin.id), origin.id)
+	billed := ChannelUpstream(testChannel(origin.id.String()), provenIdentityKey(origin.id), origin.id)
 	if load := upstreamLoad(relay.reverse, billed); load != 1 {
 		t.Fatalf("the origin's bucket holds %d records, want 1: the quota follows the neighbour", load)
 	}

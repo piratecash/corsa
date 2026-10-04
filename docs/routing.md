@@ -688,6 +688,17 @@ Capability requirements for a table-directed relay next-hop depend on the role o
 
 A directly connected relay-only peer (no `mesh_routing_v1`) is still usable as a destination via table-directed delivery. Requiring both capabilities for all next-hops would drop direct delivery to relay-only peers and unnecessarily degrade to blind gossip. `resolveRouteNextHopAddress` in `node/routing_relay.go` enforces this distinction.
 
+### Legacy claims of an identity that proved v2
+
+The table keys every claim and its health by the uplink IDENTITY; it has no notion of a connection. A legacy (v1) connection proves nothing about the identity it names, so once that identity has proved itself over v2 to this node — it is pinned, or has a live v2 connection — such a connection has no say about routes via it (docs/refactoring/n1-legacy-residual.md §2, docs/protocol/network_security.md §13):
+
+- every routing-plane receive path drops its input after charging the connection's own penalty subject: `announce_routes` (an empty baseline included), withdrawals, `routes_update`, `route_announce_v3` before its epoch is observed, `route_poison` v1/v2 before the signature tier, `request_resync`, `route_sync_digest_v1` (no TTL refresh) and `route_sync_summary_v1`, `route_query_response_v1`, and `route_probe_ack_v1` before the probe registry is consulted (`admitRoutingInput`). The check and the write are one admission: the handler is counted in flight BEFORE it re-reads "requires v2", and the proof waits for every handler counted before the pin to finish its write before it purges — so a legacy write that passed the check cannot land after the purge. A proof whose context ends first (a dial timeout) does not drop the purge: the last of those handlers runs it on release, and the cancelled attempt is not established;
+- a relay hop-ack timeout of an attempt that went over such a connection is not charged to `(recipient, identity)` — failover still runs — and a `relay_hop_ack` that arrived over it neither suppresses the attempt's timer nor confirms a route. Both are attributed to the connection of the ATTEMPT, never to whoever holds the address when the outcome is known: `relayForwardState.ForwardedVia` records the connection the frame was handed to (the session it was enqueued into, or the inbound connection it was written to) at the moment of the send, and the ack is attributed to the connection it arrived on, handed over by the dispatcher. An attempt only queued locally carried by no connection is charged to nobody — a v2 session that later takes the address does not inherit it;
+- the connection is closed at the proof and its reconnects are refused, so it is not a next hop after that;
+- input it wrote before the proof is forgotten by `Table.ForgetUplink(identity)`: every claim via the identity, live or tombstoned, is REMOVED (not tombstoned — a tombstone with an impostor's SeqNo would refuse the identity's own announcements), except a live direct claim to the identity; the health of every pair through it (black-hole cooldowns included) and its flap history go too; affected identities are journalled as `peer_remove`. No wire withdrawal is sent; the announce state of the identity is reset as at a session boundary, and the v2 session's connect-time full sync repopulates the routes. It runs only if a legacy connection actually wrote routing input for the identity since the last purge (a routing frame, or the close of a legacy session, which writes flap history and the withdrawal in the identity's name), and not while a live v2 connection of the identity vouches for its routes — an ordinary v2 reconnect forgets nothing. The record of "wrote input" is never evicted before its TTL (the longest of the route TTL, the hold-down and the black-hole cooldown): a full record store instead makes every proof purge for one TTL, because a lost record would read as "nothing to purge".
+
+`peerSendableConnectionsLocked` orders a peer's v2-proven connections before every other, keeping the tier order within each part. An identity no session proved over v2 keeps the full legacy routing rights. Hold-downs keyed by a destination (SeqNo flap, bad hops) are armed by any announcer of that destination and are outside this rule.
+
 ### Announce delta mode selection
 
 For each routing-capable peer, every announce cycle derives the delta wire frame at cycle start. The classifier reads two capability snapshots that are reconciled at cycle entry:
@@ -846,7 +857,7 @@ internal/core/node/
                                    handleRequestResync does MarkInvalid + TriggerUpdate so next
                                    cycle re-delivers baseline; fanoutAnnounceRoutes,
                                    triggerDrainForExposed, routingCapablePeers discovery
-    routing_relay.go             — relay-plane forwarding: table-directed relay, sendFrameToAddress,
+    routing_relay.go             — relay-plane forwarding: table-directed relay, sendFrameToAddressVia,
                                    sendTableDirectedRelay / sendRelayToAddress, next-hop address
                                    resolution, gossip target computation (routingTargets*,
                                    routingTargetsFiltered, executeGossipTargets), sendMessageToPeer /
@@ -1459,6 +1470,17 @@ Phase 3 cluster-mesh плана надстраивает поверх Phase 2 he
 
 **RPC-наблюдаемость.** `fetchRouteReputation` surface'ит reputation-поля как structured snapshot — те же shape conventions, что у `fetchRouteHealth`, так что UI может join'ить два по `(identity, uplink)`. Pure read; никогда не triggers probe, digest, MarkHopFailure или любой другой side effect. См. `docs/rpc/routing.md` за wire schema.
 
+### Legacy-заявки identity, доказавшей v2
+
+Таблица ключует каждый claim и его здоровье по IDENTITY аплинка; понятия соединения у неё нет. Legacy-соединение (v1) ничего не доказывает о названной identity, поэтому, когда эта identity доказала себя по v2 этому узлу — прошита или имеет живое v2-соединение, — такое соединение не влияет на маршруты через неё (docs/refactoring/n1-legacy-residual.md §2, docs/protocol/network_security.md §13):
+
+- каждый путь приёма маршрутной плоскости отбрасывает его вход после списания с собственного субъекта штрафа соединения: `announce_routes` (включая пустой baseline), отзывы, `routes_update`, `route_announce_v3` до учёта epoch, `route_poison` v1/v2 до проверки подписи, `request_resync`, `route_sync_digest_v1` (без продления TTL) и `route_sync_summary_v1`, `route_query_response_v1` и `route_probe_ack_v1` до обращения к реестру проб (`admitRoutingInput`). Проверка и запись — один допуск: обработчик учитывается как выполняющийся ДО повторного чтения «требует v2», а доказательство перед очисткой ждёт, пока каждый обработчик, учтённый до pin, закончит запись, — поэтому legacy-запись, прошедшая проверку, не ляжет после очистки. Доказательство, чей контекст закончился раньше (таймаут dial), очистку не теряет: её выполняет при освобождении последний из этих обработчиков, а отменённая попытка не устанавливается;
+- таймаут hop-ack попытки, ушедшей через такое соединение, не записывается на `(получатель, identity)` — failover при этом выполняется, — а `relay_hop_ack`, пришедший по нему, не гасит таймер попытки и не подтверждает маршрут. Оба приписываются соединению ПОПЫТКИ, а не тому, кто держит адрес, когда исход стал известен: `relayForwardState.ForwardedVia` фиксирует соединение, которому кадр был передан (сессию, в очередь которой он поставлен, или входящее соединение, в которое он записан), в момент отправки, а ack приписывается соединению, по которому он пришёл, — его передаёт диспетчер. Попытка, лишь поставленная в локальную очередь и не переданная ни одному соединению, не списывается ни с кого — v2-сессия, позже занявшая адрес, её не наследует;
+- соединение закрывается в момент доказательства, а его переподключения отвергаются, поэтому следующим hop оно после этого не бывает;
+- вход, записанный им до доказательства, забывает `Table.ForgetUplink(identity)`: каждый claim через identity, живой или tombstone, УДАЛЯЕТСЯ (не tombstone — tombstone с SeqNo самозванца отвергал бы собственные анонсы identity), кроме живого прямого claim-а к ней; уходят и здоровье всех пар через неё (включая black-hole cooldown), и её flap-история; затронутые identity журналируются как `peer_remove`. Отзыв на провод не отправляется; состояние анонсов identity сбрасывается как на границе сессии, а маршруты заново заполняет полная синхронизация v2-сессии при подключении. Очистка выполняется, только если legacy-соединение действительно записало маршрутный вход для identity после прошлой очистки (маршрутный кадр или закрытие legacy-сессии, которое пишет историю флапов и отзыв от имени identity), и не выполняется, пока маршруты подтверждает живое v2-соединение identity, — обычное переподключение v2 ничего не забывает. Запись «вход был» не вытесняется до своего TTL (наибольшего из TTL маршрута, hold-down и black-hole cooldown): при заполненном хранилище каждое доказательство на один TTL выполняет очистку, потому что потерянная запись читалась бы как «очищать нечего».
+
+`peerSendableConnectionsLocked` ставит v2-доказанные соединения пира перед всеми остальными, сохраняя порядок уровней внутри каждой части. identity, которую ни одна сессия не доказала по v2, сохраняет все legacy-права маршрутизации. Hold-down по адресату (SeqNo flap, bad hops) взводит любой анонсирующий этого адресата, и это правило его не касается.
+
 ### Выбор режима для announce delta
 
 Для каждого routing-capable peer'а каждый announce-цикл выводит wire-фрейм delta на старте цикла. Классификатор читает два capability-снапшота, реконсилируемых на входе в цикл:
@@ -1621,7 +1643,7 @@ internal/core/node/
                                    так что следующий цикл повторно доставит baseline;
                                    fanoutAnnounceRoutes, triggerDrainForExposed, обнаружение
                                    routing-capable peer'ов (routingCapablePeers)
-    routing_relay.go             — Relay-плоскость: table-directed relay, sendFrameToAddress,
+    routing_relay.go             — Relay-плоскость: table-directed relay, sendFrameToAddressVia,
                                    sendTableDirectedRelay / sendRelayToAddress, resolve next-hop
                                    address, вычисление gossip-таргетов (routingTargets*,
                                    routingTargetsFiltered, executeGossipTargets), sendMessageToPeer /

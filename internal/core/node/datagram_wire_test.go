@@ -244,13 +244,14 @@ func newDatagramOutboundFixture(t *testing.T, caps ...domain.Capability) (*Servi
 	return svc, address, session
 }
 
-// provenDatagramNeighbour is the ingress view of a neighbour whose identity
-// this node PROVED — the accepted-connection shape — for the tests that drive
+// acceptedLegacyDatagramNeighbour is the ingress view of a neighbour on an
+// accepted legacy connection — it presents peer, which its relayable
+// auth_session admitted but did not prove — for the tests that drive
 // handleDatagramFrame directly instead of through a dispatcher.
-func provenDatagramNeighbour(peer domain.PeerIdentity, direction datagramDirection) datagramNeighbour {
+func acceptedLegacyDatagramNeighbour(peer domain.PeerIdentity, direction datagramDirection) datagramNeighbour {
 	return datagramNeighbour{
 		direction: direction,
-		budgetKey: datagram.ProvenIdentityKey(peer),
+		budgetKey: datagram.AcceptedConnectionKey(domain.ConnID(7201)),
 		// One channel per fixture neighbour: the ingress requires one, and a
 		// shared constant would make two neighbours indistinguishable to every
 		// channel-relative decision behind it.

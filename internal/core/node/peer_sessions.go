@@ -36,7 +36,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
@@ -212,7 +211,7 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			// s.sessions and no other goroutine mutates session.capabilities
 			// after applyWelcomeMetadata.
 			if closedSession != nil && !closedSession.peerIdentity.IsZero() {
-				s.onPeerSessionClosedWithError(closedSession.peerIdentity, closedSession.capabilities, err)
+				s.onPeerSessionClosedWithError(closedSession.peerIdentity, closedSession.penaltySubject(), closedSession.capabilities, err)
 			}
 			// Self-identity short-circuit — must run BEFORE the generic
 			// markPeerDisconnected penalty. openPeerSession surfaces the
@@ -696,7 +695,7 @@ func (s *Service) authenticatePeerSession(session *peerSession, welcome protocol
 	reply, err := s.peerSessionRequest(session, protocol.Frame{
 		Type:      "auth_session",
 		Address:   s.identity.Address,
-		Signature: identity.SignPayload(s.identity, connauth.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
+		Signature: identity.SignPayload(s.identity, protocol.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
 	}, "auth_ok", false)
 	if err != nil {
 		return err
@@ -1055,6 +1054,7 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		address:      address,
 		peerIdentity: domain.PeerIdentity{},
 		connID:       cid,
+		proven:       transport.proven,
 		conn:         conn,
 		metered:      metered,
 		sendCh:       make(chan peerSendItem, peerSessionSendBuffer),
@@ -1261,7 +1261,11 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			// Setup-failure quarantine trigger: when the per-address
 			// failure threshold is crossed AND we know the peer's
 			// identity (auth completed before initPeerSession failed),
-			// arm route quarantine on the identity. B1 already mutes
+			// arm route quarantine on the session's penalty subject —
+			// the identity only when a v2 session proved it, the dialled
+			// address otherwise: the welcome of the threshold-crossing
+			// dial names whatever identity the dialled peer chose (see
+			// penalty_subject.go). B1 already mutes
 			// outbound dial attempts to the address; quarantine
 			// additionally mutes inbound routing-snapshot trust and
 			// transit usage for the same peer. Two complementary
@@ -1269,7 +1273,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 			// routing_route_quarantine.go and
 			// docs/refactoring/route-withdrawal-grace-period.md.
 			if !session.peerIdentity.IsZero() && s.setupFailureExceedsThresholdLocked(slotAddress) {
-				s.armRouteQuarantineLocked(session.peerIdentity, quarantineReasonSetupFailureCycle, now)
+				s.armRouteQuarantineLocked(session.penaltySubject(), quarantineReasonSetupFailureCycle, now)
 			}
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
@@ -1321,6 +1325,20 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+
+		// The welcome was checked against the pin during the dial; the
+		// identity may have proved itself over v2 since, and the sweep that
+		// closes legacy sessions (v2_identity_claims.go) only sees sessions
+		// already registered. Checking AFTER registering leaves no window: a
+		// proof that came first is seen here, one that comes later sweeps
+		// this session. A refused session is closed and its serve loop ends
+		// on the closed socket through the ordinary teardown.
+		if _, proven := session.provenIdentity(); !proven {
+			if err := s.refuseLegacyIdentity(session.peerIdentity.String()); err != nil {
+				log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("outbound_v1_refused_identity_proved_v2_during_setup")
+				_ = session.Close()
+			}
+		}
 
 		s.markPeerConnected(dialAddress, peerDirectionOutbound)
 		s.flushPendingPeerFrames(dialAddress)
@@ -1388,7 +1406,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		// Routing table: deregister direct peer only if this goroutine
 		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
 		if ownedCleanup && !session.peerIdentity.IsZero() {
-			s.onPeerSessionClosedWithError(session.peerIdentity, session.capabilities, err)
+			s.onPeerSessionClosedWithError(session.peerIdentity, session.penaltySubject(), session.capabilities, err)
 		}
 
 		// Accumulate traffic metrics from the metered connection.
@@ -1478,7 +1496,7 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// close from the actual session error, so this branch never
 	// shadows a genuine peer-side flap.
 	if ownedCleanup && !info.Identity.IsZero() {
-		s.onPeerSessionClosedWithCause(info.Identity, info.Capabilities, sessionCloseLocalEviction)
+		s.onPeerSessionClosedWithCause(info.Identity, info.Session.penaltySubject(), info.Capabilities, sessionCloseLocalEviction)
 	}
 }
 

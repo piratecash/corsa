@@ -33,8 +33,11 @@ import (
 //     lasts 30 days from the last v2 session on it (owner's decision С-15).
 //     A protected binding is never lowered or removed automatically (С-16).
 //
-// The store never drops live protection to make room: at its bound a new pin
-// or binding is refused and logged, and what is already there stays.
+// The store never drops live protection to make room: at its bound a new
+// binding is refused and logged, and what is already there stays. A NEW
+// identity at the pin bound fails its session with errPinStoreFull: a v2
+// session whose mandatory pin is not stored is not established, and the
+// dialler does not fall back to v1 in that attempt.
 //
 // A change that could not be written is reported to the caller — a session
 // whose protection is not on disk is not established — and stays pending:
@@ -63,6 +66,11 @@ const (
 
 // errLegacyRefusedPinned is a v1 session naming an identity that proved v2.
 var errLegacyRefusedPinned = errors.New("secure session: v1 refused for an identity that proved v2")
+
+// errPinStoreFull is a v2 session of an identity not pinned yet, refused
+// because the store is at its bound and the mandatory pin cannot be stored.
+// Its text is the diagnostic code operators search for.
+var errPinStoreFull = errors.New("pin_store_full")
 
 type endpointBinding struct {
 	Identity  domain.PeerIdentity `json:"identity"`
@@ -94,6 +102,8 @@ type secureSessionStore struct {
 	// changes counts every change, written the count the last successful
 	// write covered: a gap is protection that is in memory only.
 	changes, written uint64
+	// pinRefusals counts sessions refused with errPinStoreFull.
+	pinRefusals uint64
 
 	writeMu sync.Mutex
 	// writeFile puts the encoded store on disk; writeToDisk outside tests.
@@ -183,6 +193,21 @@ func (s *secureSessionStore) load() error {
 	return nil
 }
 
+// stats is the store's state for diagnostics. Takes mu, a leaf held for
+// map reads only.
+func (s *secureSessionStore) stats() domain.SecureSessionStoreStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return domain.SecureSessionStoreStats{
+		ReadAt:               s.clock(),
+		PinnedIdentities:     len(s.identities),
+		PinCapacity:          maxPinnedIdentities,
+		Full:                 len(s.identities) >= maxPinnedIdentities,
+		PinRefusalsStoreFull: s.pinRefusals,
+		Unreadable:           s.unreadable,
+	}
+}
+
 // identityPinned reports whether a v1 session naming id must be refused.
 func (s *secureSessionStore) identityPinned(id domain.PeerIdentity) bool {
 	s.mu.Lock()
@@ -206,21 +231,42 @@ func (s *secureSessionStore) endpointRequiresV2(address domain.PeerAddress) bool
 }
 
 // noteProvenInbound pins a peer proven on an accepted connection. An error
-// means the protection is in memory only: the caller must not establish the
+// means the protection is not stored — errPinStoreFull for a new identity at
+// the bound, or a write failure — and the caller must not establish the
 // session on it.
 func (s *secureSessionStore) noteProvenInbound(id domain.PeerIdentity) error {
-	return s.update(func(now time.Time) bool { return s.pinLocked(id, now) })
+	var refused error
+	err := s.update(func(now time.Time) bool {
+		pinned, pinErr := s.pinLocked(id, now)
+		refused = pinErr
+		return pinned
+	})
+	if refused != nil {
+		return refused
+	}
+	return err
 }
 
 // noteProvenOutbound pins the peer and binds the endpoint this node dialled;
 // protected marks a binding to one of this node's contacts. An error means
-// the protection is in memory only.
+// the protection is not stored and the session must not be established. A
+// session refused with errPinStoreFull leaves no endpoint binding either: it
+// was not established, so nothing it earned is recorded.
 func (s *secureSessionStore) noteProvenOutbound(address domain.PeerAddress, id domain.PeerIdentity, protected bool) error {
-	return s.update(func(now time.Time) bool {
-		pinned := s.pinLocked(id, now)
+	var refused error
+	err := s.update(func(now time.Time) bool {
+		pinned, pinErr := s.pinLocked(id, now)
+		if pinErr != nil {
+			refused = pinErr
+			return false
+		}
 		bound := s.bindLocked(address, id, protected, now)
 		return pinned || bound
 	})
+	if refused != nil {
+		return refused
+	}
+	return err
 }
 
 // update runs change under mu, then writes the store when the change — or an
@@ -244,17 +290,26 @@ func (s *secureSessionStore) update(change func(now time.Time) bool) error {
 	return s.persist()
 }
 
-// pinLocked pins id unless the bound is reached. Caller holds mu.
-func (s *secureSessionStore) pinLocked(id domain.PeerIdentity, now time.Time) bool {
+// pinLocked pins id and reports whether that changed the store. An identity
+// already pinned is served as before; a NEW identity at the bound is refused
+// with errPinStoreFull — never by evicting an existing pin (owner's decision
+// on С-5: existing protection is guaranteed, new pins are not promised).
+// Caller holds mu.
+func (s *secureSessionStore) pinLocked(id domain.PeerIdentity, now time.Time) (bool, error) {
 	if _, pinned := s.identities[id]; pinned {
-		return false
+		return false, nil
 	}
 	if len(s.identities) >= maxPinnedIdentities {
-		log.Warn().Str("peer", id.String()).Msg("secure_session_pin_refused_store_full")
-		return false
+		s.pinRefusals++
+		log.Warn().
+			Str("peer", id.String()).
+			Str("reason", errPinStoreFull.Error()).
+			Int("pinned", len(s.identities)).
+			Msg("secure_session_refused_pin_store_full")
+		return false, errPinStoreFull
 	}
 	s.identities[id] = now
-	return true
+	return true, nil
 }
 
 // bindLocked binds address to id, renews a live binding, and reports whether
@@ -374,4 +429,13 @@ func (s *secureSessionStore) writeToDisk(raw []byte) error {
 	}
 	defer func() { _ = dir.Close() }()
 	return dir.Write(s.name, raw)
+}
+
+// SecureSessionStoreStats is the v2 downgrade-protection store as diagnostics
+// see it; a node without v2 state reports the zero value.
+func (s *Service) SecureSessionStoreStats() domain.SecureSessionStoreStats {
+	if s.secureSessions == nil || s.secureSessions.store == nil {
+		return domain.SecureSessionStoreStats{}
+	}
+	return s.secureSessions.store.stats()
 }

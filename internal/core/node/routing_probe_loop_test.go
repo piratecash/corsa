@@ -282,7 +282,7 @@ func TestHandleRouteProbeAck_ResolvedAckUpdatesHealth(t *testing.T) {
 		// and Resolve.
 		RTTMs: 9999,
 	}
-	svc.handleRouteProbeAck(idPeerB, ack)
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerB), ack)
 
 	snap := svc.routingTable.HealthSnapshot()
 	if len(snap) != 1 {
@@ -312,7 +312,7 @@ func TestHandleRouteProbeAck_StrayAckDropped(t *testing.T) {
 		ProbeID:   42,
 		Reachable: true,
 	}
-	svc.handleRouteProbeAck(idPeerB, ack)
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerB), ack)
 
 	if snap := svc.routingTable.HealthSnapshot(); snap != nil {
 		t.Fatalf("stray ack altered health state: %v", snap)
@@ -342,7 +342,7 @@ func TestHandleRouteProbeAck_UplinkMismatchDropped(t *testing.T) {
 		Reachable: true,
 	}
 	// Note: sender identity is idPeerC, NOT idPeerB.
-	svc.handleRouteProbeAck(idPeerC, ack)
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerC), ack)
 
 	if snap := svc.routingTable.HealthSnapshot(); snap != nil {
 		t.Fatalf("uplink-mismatch ack altered health state: %v", snap)
@@ -365,7 +365,7 @@ func TestHandleRouteProbeAck_NoRegistryIsNoop(t *testing.T) {
 		ProbeID:   42,
 		Reachable: true,
 	}
-	svc.handleRouteProbeAck(idPeerB, ack)
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerB), ack)
 
 	if snap := svc.routingTable.HealthSnapshot(); snap != nil {
 		t.Fatalf("no-registry path created health state: %v", snap)

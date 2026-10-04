@@ -1,12 +1,16 @@
 package datagram
 
 import (
+	"cmp"
+	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 )
 
 // admission.go implements the TWO-STAGE per-neighbour admission of §4.1
@@ -68,10 +72,14 @@ const (
 	// others.
 	AdmissionKeySpaceUnset AdmissionKeySpace = iota
 	// AdmissionKeySpaceProvenIdentity is an identity the REMOTE side proved to
-	// this node — it signed a challenge this node generated, with a key whose
-	// fingerprint is that identity (connauth.VerifyAuthSession). Nobody else
-	// can present it, so nobody else can spend its budget, and the same
-	// neighbour reconnecting lands on the same bucket.
+	// this node over a secure session v2 — session_proof over that
+	// connection's TLS exporter, in either direction. Nobody else can present
+	// it, so nobody else can spend its budget, and the same neighbour
+	// reconnecting lands on the same bucket. A v1 auth_session never reaches
+	// this namespace: its signature names neither the verifier nor the
+	// connection and can be relayed, so a key built on it would let the relay
+	// spend the real owner's budget. ProvenIdentityKey takes the handshake's
+	// own result (sessionv2.ProvenIdentity) for exactly that reason.
 	AdmissionKeySpaceProvenIdentity
 	// AdmissionKeySpaceDialedAddress is the host:port THIS node dialled. It is
 	// the only trusted key of a direction where the remote proves nothing: on
@@ -83,12 +91,26 @@ const (
 	// argument the v12 wire contract already settled for the overlay key
 	// (see applyWelcomeMetadata).
 	AdmissionKeySpaceDialedAddress
+	// AdmissionKeySpaceAcceptedHost is the TCP source IP of a legacy (v1)
+	// connection this node accepted from an external address. It is what
+	// this node observed of the socket, not what the peer claimed. The port
+	// is dropped because it changes on every reconnect; so neighbours behind
+	// one NAT share the bucket, and a reconnect does not refill it.
+	AdmissionKeySpaceAcceptedHost
+	// AdmissionKeySpaceAcceptedConnection is a legacy connection accepted
+	// from loopback — every onion peer arrives from 127.0.0.1, so the host
+	// would let one of them spend every other's budget — or from an address
+	// that does not parse. The bucket lives and dies with the connection: a
+	// reconnect gets a fresh one, bounded by how fast the listener accepts.
+	AdmissionKeySpaceAcceptedConnection
 )
 
 var admissionKeySpaceNames = map[AdmissionKeySpace]string{
-	AdmissionKeySpaceUnset:          "unset",
-	AdmissionKeySpaceProvenIdentity: "proven_identity",
-	AdmissionKeySpaceDialedAddress:  "dialed_address",
+	AdmissionKeySpaceUnset:              "unset",
+	AdmissionKeySpaceProvenIdentity:     "proven_identity",
+	AdmissionKeySpaceDialedAddress:      "dialed_address",
+	AdmissionKeySpaceAcceptedHost:       "accepted_host",
+	AdmissionKeySpaceAcceptedConnection: "accepted_connection",
 }
 
 // String returns the log label of the namespace.
@@ -101,23 +123,59 @@ func (s AdmissionKeySpace) String() string {
 
 // AdmissionKey is WHO a per-neighbour budget is charged to.
 //
-// The fields are unexported and the only way in is one of the two
-// constructors, because the whole value of the type is that a call site cannot
-// produce a key without stating what it knows about the peer.
+// The fields are unexported and the only way in is one of the constructors,
+// because the whole value of the type is that a call site cannot produce a key
+// without stating what it knows about the peer. The proven namespace is the
+// strictest of them: its exported constructor takes only a v2 handshake's
+// result, so no caller holding a mere name can mint one.
 type AdmissionKey struct {
 	address  domain.PeerAddress
 	identity domain.PeerIdentity
+	host     netip.Addr
+	conn     domain.ConnID
 	space    AdmissionKeySpace
 }
 
-// ProvenIdentityKey keys a budget on an identity the remote side PROVED.
-// A zero identity yields the zero key: absence is modelled by the type, not by
-// a bucket that stands for "somebody".
-func ProvenIdentityKey(peer domain.PeerIdentity) AdmissionKey {
+// ProvenIdentityKey keys a budget on an identity a v2 session proved. The
+// zero proof yields the zero key: absence is modelled by the type, not by a
+// bucket that stands for "somebody".
+func ProvenIdentityKey(proof sessionv2.ProvenIdentity) AdmissionKey {
+	id, ok := proof.Identity()
+	if !ok {
+		return AdmissionKey{}
+	}
+	return provenIdentityKey(id)
+}
+
+// provenIdentityKey is the proven-namespace key of an identity. It is the
+// package's own comparison and lookup form — authority() asks "is this the
+// key the proof would have produced?", and ProvenIngress derives an owner —
+// never a way for a caller outside the package to claim a proof.
+func provenIdentityKey(peer domain.PeerIdentity) AdmissionKey {
 	if peer.IsZero() {
 		return AdmissionKey{}
 	}
 	return AdmissionKey{space: AdmissionKeySpaceProvenIdentity, identity: peer}
+}
+
+// AcceptedHostKey keys a budget on the source IP of a legacy connection this
+// node accepted from an external address. An invalid address yields the zero
+// key.
+func AcceptedHostKey(host netip.Addr) AdmissionKey {
+	if !host.IsValid() {
+		return AdmissionKey{}
+	}
+	return AdmissionKey{space: AdmissionKeySpaceAcceptedHost, host: host.Unmap()}
+}
+
+// AcceptedConnectionKey keys a budget on one legacy connection this node
+// accepted (loopback, or an address that does not parse). The zero ConnID
+// yields the zero key.
+func AcceptedConnectionKey(conn domain.ConnID) AdmissionKey {
+	if conn == 0 {
+		return AdmissionKey{}
+	}
+	return AdmissionKey{space: AdmissionKeySpaceAcceptedConnection, conn: conn}
 }
 
 // DialedAddressKey keys a budget on the host:port THIS node dialled.
@@ -143,6 +201,10 @@ func (k AdmissionKey) String() string {
 		return k.space.String() + ":" + k.identity.String()
 	case AdmissionKeySpaceDialedAddress:
 		return k.space.String() + ":" + string(k.address)
+	case AdmissionKeySpaceAcceptedHost:
+		return k.space.String() + ":" + k.host.String()
+	case AdmissionKeySpaceAcceptedConnection:
+		return k.space.String() + ":" + strconv.FormatUint(uint64(k.conn), 10)
 	default:
 		return k.space.String()
 	}
@@ -160,7 +222,13 @@ func (k AdmissionKey) compare(other AdmissionKey) int {
 	if ordered := k.identity.Compare(other.identity); ordered != 0 {
 		return ordered
 	}
-	return strings.Compare(string(k.address), string(other.address))
+	if ordered := strings.Compare(string(k.address), string(other.address)); ordered != 0 {
+		return ordered
+	}
+	if ordered := k.host.Compare(other.host); ordered != 0 {
+		return ordered
+	}
+	return cmp.Compare(k.conn, other.conn)
 }
 
 // AdmissionConfig wires the controller. Everything it needs is here, so a
@@ -378,6 +446,14 @@ func (a *PeerAdmission) Forget(key AdmissionKey) {
 	if !known || a.forgettableLocked(buckets, now) {
 		delete(a.peers, key)
 	}
+}
+
+// ForgetProvenIdentity is Forget for the bucket of a proven identity, for the
+// caller that learns a neighbour is gone by its name alone (the last session
+// of the identity closed). It only ever RELEASES an idle, refilled bucket —
+// it cannot open or charge one — so it needs no proof.
+func (a *PeerAdmission) ForgetProvenIdentity(peer domain.PeerIdentity) {
+	a.Forget(provenIdentityKey(peer))
 }
 
 // TrackedPeers returns the number of live buckets.

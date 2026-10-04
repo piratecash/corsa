@@ -106,7 +106,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -746,10 +745,10 @@ func (s *Service) sessionDatagramPaysItsOwnBudget(session *peerSession, line str
 	if !isDatagramWireLine(line) {
 		return false
 	}
-	// The dialled address is this direction's billable key, and handing it to
-	// the shared predicate is what keeps the two directions from drifting: the
-	// exemption holds exactly where the §5 budget has somebody to charge.
-	return s.datagramCarriesOwnBudget(protocol.DatagramFrameType, datagram.DialedAddressKey(session.address))
+	// The session's own billable key, and handing it to the shared predicate
+	// is what keeps the two directions from drifting: the exemption holds
+	// exactly where the §5 budget has somebody to charge.
+	return s.datagramCarriesOwnBudget(protocol.DatagramFrameType, sessionDatagramAdmissionKey(session))
 }
 
 // sessionFileCommandIsAdmissible reports whether ONE fully-read line is a file
@@ -850,7 +849,7 @@ func (s *Service) refuseOverBudgetSessionLine(
 	read frameLineRead,
 	claimed string,
 ) error {
-	budgetKey := datagram.DialedAddressKey(session.address)
+	budgetKey := sessionDatagramAdmissionKey(session)
 	discardLimit := maxResponseLineBytes
 	if claimed == protocol.DatagramFrameType {
 		// A datagram is MaxFrameLine at most (§2.3), so one frame of slack is

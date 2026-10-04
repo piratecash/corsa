@@ -17,7 +17,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/crashlog"
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -123,6 +122,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 				// fresh bucket each time).
 				s.announceLimiter.cleanup(announceLimiterCleanupAge)
 			}
+			s.unprovenRouting.cleanup(time.Now())
 			s.maybeSavePeerState()
 			s.refreshAggregateStatus()
 			s.emitTrafficDeltas()
@@ -1501,7 +1501,7 @@ func (s *Service) syncPeer(ctx context.Context, address domain.PeerAddress, requ
 		authLine, err := protocol.MarshalFrameLine(protocol.Frame{
 			Type:      "auth_session",
 			Address:   s.identity.Address,
-			Signature: identity.SignPayload(s.identity, connauth.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
+			Signature: identity.SignPayload(s.identity, protocol.SessionAuthPayload(welcome.Challenge, s.identity.Address)),
 		})
 		if err != nil {
 			log.Warn().Err(err).Str("peer", string(address)).Msg("sync_peer_auth_marshal_failed")
@@ -2827,7 +2827,7 @@ func (s *Service) refuseUnadmissibleFrameLine(session *peerSession, line string)
 		// assigned in the struct literal and never written again, while
 		// peerIdentity is written by the handshake goroutine after this loop has
 		// already started.
-		s.dropAmbiguousFrameLine(datagram.DialedAddressKey(session.address), string(session.address), line)
+		s.dropAmbiguousFrameLine(sessionDatagramAdmissionKey(session), string(session.address), line)
 		return true, sessionAdmissionFatal(s.punishSessionAdmission(session, "frame_line_ambiguous", claimed, wireLineBudget(line)))
 	case preParseRefuseOverBudget:
 		s.dropOversizeFrameLine(session.address, oversizeRefusalAttribution(claimed, line), line)
@@ -3917,10 +3917,12 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// in storeIncomingMessage (VerifyEnvelope); this gate targets
 		// only topics where no per-message signature exists.
 		peerID := domain.PeerIdentity{}
+		hopSubject := dialledAddressSubject(address)
 		if session != nil {
 			peerID = session.peerIdentity
+			hopSubject = session.penaltySubject()
 		}
-		if !s.nonDMAuthorAdmitted(msg, address, peerID, session) {
+		if !s.nonDMAuthorAdmitted(msg, address, peerID, hopSubject, session) {
 			return
 		}
 
@@ -4101,7 +4103,11 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		if admit := admitRelayFrame(s.sessionHasCapability(session, domain.CapMeshRelayV1), len(frame.Body)); admit != relayAdmitOK {
 			return
 		}
-		s.handleRelayHopAck(domain.PeerAddress(address), frame)
+		var sender routingSender
+		if session != nil {
+			sender = sessionRoutingSender(session)
+		}
+		s.handleRelayHopAck(domain.PeerAddress(address), sender, frame)
 	case "announce_routes":
 		if !s.sessionHasCapability(session, domain.CapMeshRoutingV1) {
 			return
@@ -4112,7 +4118,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			return
 		}
 		if session != nil {
-			s.handleAnnounceRoutes(session.peerIdentity, frame)
+			s.handleAnnounceRoutes(sessionRoutingSender(session), frame)
 		}
 	case "routes_update":
 		// v2 wire path on the outbound session. Capability gates mirror the
@@ -4131,7 +4137,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			return
 		}
 		if session != nil {
-			s.handleRoutesUpdate(session.peerIdentity, address, frame)
+			s.handleRoutesUpdate(sessionRoutingSender(session), address, frame)
 		}
 	case "request_resync":
 		// v2-only control frame — see inbound dispatcher for contract.
@@ -4156,7 +4162,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("outbound_session: control frame cmd rate limit exceeded")
 			return
 		}
-		s.handleRequestResync(session.peerIdentity)
+		s.handleRequestResync(sessionRoutingSender(session))
 	case "route_sync_digest_v1":
 		// Phase 3 PR 12.5 — incremental-sync digest arriving on an
 		// outbound session. sendFrameToIdentity prefers outbound
@@ -4189,7 +4195,14 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 		// shared with the inbound path via compareInboundDigest so this
 		// outbound arrival is no longer second-class (it previously
 		// skipped both the receiver-side TTL refresh and the counters).
+		release, admitted := s.admitRoutingInput(sessionRoutingSender(session), protocol.RouteSyncDigestFrameType)
+		if !admitted {
+			return
+		}
 		localDigest, localCount, match := s.compareInboundDigest(session.peerIdentity, digestFrame.Digest, digestFrame.Entries)
+		// Released at once: the compare is the only write (see
+		// handleRouteSyncDigest).
+		release()
 		summary := protocol.RouteSyncSummaryFrame{
 			Type:           protocol.RouteSyncSummaryFrameType,
 			Digest:         digestFrame.Digest,
@@ -4233,7 +4246,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			return
 		}
 		if session != nil {
-			s.handleRouteSyncSummary(session.peerIdentity, summaryFrame)
+			s.handleRouteSyncSummary(sessionRoutingSender(session), summaryFrame)
 		}
 	case "route_poison_v1":
 		// Phase 4 single-hop poison-reverse arriving on an outbound
@@ -4270,7 +4283,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 				Msg("peer_session: route_poison_v1 parse failed")
 			return
 		}
-		s.handleRoutePoison(session.peerIdentity, poison)
+		s.handleRoutePoison(sessionRoutingSender(session), poison)
 	case "route_poison_v2":
 		// Batched poison-reverse on an outbound session. Same cap pair as v1
 		// but with mesh_poison_reverse_v2, same per-session cmd-rate gate.
@@ -4292,7 +4305,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			log.Debug().Err(err).Str("peer", string(address)).Msg("peer_session: route_poison_v2 parse failed")
 			return
 		}
-		s.handleRoutePoisonV2(session.peerIdentity, poisonBatch)
+		s.handleRoutePoisonV2(sessionRoutingSender(session), poisonBatch)
 	case "route_announce_v3":
 		// Phase 4 compact announce arriving on an outbound session. Same
 		// capability triplet as the inbound dispatcher (v1 + v3 + relay)
@@ -4315,7 +4328,7 @@ func (s *Service) dispatchPeerSessionFrame(address domain.PeerAddress, session *
 			return
 		}
 		if session != nil {
-			s.handleRouteAnnounceV3(session.peerIdentity, address, v3)
+			s.handleRouteAnnounceV3(sessionRoutingSender(session), address, v3)
 		}
 	case "datagram":
 		// UNREACHABLE, and kept as the assertion of that fact. readPeerSession
@@ -5378,11 +5391,24 @@ func (s *Service) enqueuePeerFrame(address domain.PeerAddress, frame protocol.Fr
 // already holds the session must go straight to enqueueSessionSendItem — see
 // the contract there for why.
 func (s *Service) enqueuePeerSendItem(address domain.PeerAddress, item peerSendItem) bool {
+	_, ok := s.enqueuePeerSendItemVia(address, item)
+	return ok
+}
+
+// enqueuePeerSendItemVia is enqueuePeerSendItem that also names the session
+// the item was handed to. The session is resolved and enqueued into in one
+// step, so a caller that later attributes the attempt's outcome (the relay
+// hop-ack timeout) charges the connection that carried it — not whichever
+// connection holds the address by the time the outcome is known.
+func (s *Service) enqueuePeerSendItemVia(address domain.PeerAddress, item peerSendItem) (routingSender, bool) {
 	session, ok := s.activePeerSession(address)
 	if !ok || session == nil {
-		return false
+		return routingSender{}, false
 	}
-	return s.enqueueSessionSendItem(session, item)
+	if !s.enqueueSessionSendItem(session, item) {
+		return routingSender{}, false
+	}
+	return sessionRoutingSender(session), true
 }
 
 // enqueueSessionSendItem is the admission into the upper outbound queue of ONE

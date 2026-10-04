@@ -128,7 +128,7 @@ func TestHandleRouteQueryResponse_IngestsAsAnnouncement(t *testing.T) {
 		BestHops:       2,
 		BestSeqNo:      42,
 	}
-	svc.handleRouteQueryResponse(idPeerB, resp)
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), resp)
 
 	routes := svc.routingTable.Lookup(idTargetX)
 	if len(routes) != 1 {
@@ -161,7 +161,7 @@ func TestHandleRouteQueryResponse_FoundFalseIsNoop(t *testing.T) {
 		TargetIdentity: idTargetX,
 		Found:          false,
 	}
-	svc.handleRouteQueryResponse(idPeerB, resp)
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), resp)
 
 	if routes := svc.routingTable.Lookup(idTargetX); len(routes) != 0 {
 		t.Fatalf("Found=false response caused ingest: %v", routes)
@@ -185,7 +185,7 @@ func TestHandleRouteQueryResponse_DropsZeroHops(t *testing.T) {
 		BestHops:       0,
 		BestSeqNo:      42,
 	}
-	svc.handleRouteQueryResponse(idPeerB, resp)
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), resp)
 
 	if routes := svc.routingTable.Lookup(idTargetX); len(routes) != 0 {
 		t.Fatalf("Hops=0 response caused ingest: %v", routes)
@@ -208,7 +208,7 @@ func TestHandleRouteQueryResponse_DropsSelfTarget(t *testing.T) {
 		BestHops:       2,
 		BestSeqNo:      42,
 	}
-	svc.handleRouteQueryResponse(idPeerB, resp)
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), resp)
 
 	if routes := svc.routingTable.Lookup(idPeerB); len(routes) != 0 {
 		t.Fatalf("self-target response caused ingest: %v", routes)
@@ -244,7 +244,7 @@ func TestHandleRouteQueryResponse_DropsTargetEqualsLocalIdentity(t *testing.T) {
 		BestHops:       2,
 		BestSeqNo:      42,
 	}
-	svc.handleRouteQueryResponse(idPeerB, resp)
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), resp)
 
 	if routes := svc.routingTable.Lookup(idNodeA); len(routes) != 0 {
 		// Lookup returns the synthetic self-route (RouteSourceLocal,
@@ -279,7 +279,7 @@ func TestHandleRouteQueryResponse_IngestRespectsAdmission(t *testing.T) {
 	installTripletCapableUplinkForQueryTest(svc, idPeerB)
 
 	// Initial ingest at SeqNo=42, Hops=3 (BestHops=2+1).
-	svc.handleRouteQueryResponse(idPeerB, protocol.RouteQueryResponseFrame{
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), protocol.RouteQueryResponseFrame{
 		Type:           protocol.RouteQueryResponseFrameType,
 		QueryID:        100,
 		TargetIdentity: idTargetX,
@@ -290,7 +290,7 @@ func TestHandleRouteQueryResponse_IngestRespectsAdmission(t *testing.T) {
 	})
 
 	// Second ingest at lower SeqNo=10 — must be rejected.
-	svc.handleRouteQueryResponse(idPeerB, protocol.RouteQueryResponseFrame{
+	svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), protocol.RouteQueryResponseFrame{
 		Type:           protocol.RouteQueryResponseFrameType,
 		QueryID:        101,
 		TargetIdentity: idTargetX,

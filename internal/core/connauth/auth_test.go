@@ -93,7 +93,7 @@ func TestHasIdentityFields(t *testing.T) {
 func TestSessionAuthPayload(t *testing.T) {
 	t.Parallel()
 
-	payload := SessionAuthPayload("challenge123", "address456")
+	payload := protocol.SessionAuthPayload("challenge123", "address456")
 	expected := []byte("corsa-session-auth-v1|challenge123|address456")
 	if string(payload) != string(expected) {
 		t.Errorf("SessionAuthPayload = %q, want %q", payload, expected)
@@ -103,8 +103,8 @@ func TestSessionAuthPayload(t *testing.T) {
 func TestSessionAuthPayload_Deterministic(t *testing.T) {
 	t.Parallel()
 
-	a := SessionAuthPayload("c", "a")
-	b := SessionAuthPayload("c", "a")
+	a := protocol.SessionAuthPayload("c", "a")
+	b := protocol.SessionAuthPayload("c", "a")
 	if string(a) != string(b) {
 		t.Errorf("SessionAuthPayload is not deterministic: %q != %q", a, b)
 	}
@@ -290,7 +290,7 @@ func TestVerifyAuthSession_FullHandshake(t *testing.T) {
 	}
 
 	// Step 2: Sign the challenge (simulating client)
-	signature := identity.SignPayload(id, SessionAuthPayload(state.Challenge, id.Address))
+	signature := identity.SignPayload(id, protocol.SessionAuthPayload(state.Challenge, id.Address))
 
 	// Step 3: VerifyAuthSession
 	frame := protocol.Frame{
@@ -336,7 +336,7 @@ func TestVerifyAuthSession_WrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attacker identity: %v", err)
 	}
-	signature := identity.SignPayload(attacker, SessionAuthPayload(state.Challenge, hello.Address))
+	signature := identity.SignPayload(attacker, protocol.SessionAuthPayload(state.Challenge, hello.Address))
 
 	frame := protocol.Frame{
 		Type:      "auth_session",

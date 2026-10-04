@@ -628,14 +628,16 @@ func (c *DesktopClient) forgetReactionState(peer domain.PeerIdentity, contactGon
 	c.localNode.DropQueuedReactions(peer)
 }
 
-// ReactionsUnsupportedBy reports whether this peer runs a build that cannot
-// receive reactions at all — as opposed to being merely offline. Telling those
-// two apart is what the datagram transport buys, and the UI has to say so.
-func (c *DesktopClient) ReactionsUnsupportedBy(peer domain.PeerIdentity) bool {
+// ReactionsSupportOf reports what is currently known about whether this peer
+// can receive reactions: confirmed absent (its signed answer, or every live
+// connection declares no dm_control), declared, or unknown — no current
+// information, which does not mean offline. Telling "cannot" from "not known
+// now" is what the UI has to say (node.Service.ReactionsSupportOf).
+func (c *DesktopClient) ReactionsSupportOf(peer domain.PeerIdentity) domain.ReactionsSupport {
 	if c == nil || c.localNode == nil {
-		return false
+		return domain.ReactionsSupportUnknown
 	}
-	return c.localNode.ReactionsUnsupportedBy(peer)
+	return c.localNode.ReactionsSupportOf(peer)
 }
 
 // ---------------------------------------------------------------------------

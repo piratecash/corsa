@@ -265,7 +265,7 @@ func TestReview_v2_P2_3_HandleRouteProbeAck_MismatchDoesNotConsume(t *testing.T)
 	}
 
 	// Mismatched ack — sender identity != registered uplink.
-	svc.handleRouteProbeAck(idPeerC, protocol.RouteProbeAckFrame{
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerC), protocol.RouteProbeAckFrame{
 		Type:      protocol.RouteProbeAckFrameType,
 		ProbeID:   id,
 		Reachable: true,
@@ -280,7 +280,7 @@ func TestReview_v2_P2_3_HandleRouteProbeAck_MismatchDoesNotConsume(t *testing.T)
 	}
 
 	// Now the legitimate ack arrives and is processed normally.
-	svc.handleRouteProbeAck(idPeerB, protocol.RouteProbeAckFrame{
+	svc.handleRouteProbeAck(provenRoutingSender(idPeerB), protocol.RouteProbeAckFrame{
 		Type:      protocol.RouteProbeAckFrameType,
 		ProbeID:   id,
 		Reachable: true,
@@ -309,7 +309,7 @@ func TestReview_v2_P2_4_HandleRouteQueryResponse_DropsInvalidTarget(t *testing.T
 		"abc123abc123abc1", // wrong length / non-hex tail
 	}
 	for _, junk := range junkTargets {
-		svc.handleRouteQueryResponse(idPeerB, protocol.RouteQueryResponseFrame{
+		svc.handleRouteQueryResponse(provenRoutingSender(idPeerB), protocol.RouteQueryResponseFrame{
 			Type:           protocol.RouteQueryResponseFrameType,
 			QueryID:        100,
 			TargetIdentity: domain.PeerIdentityFromWire(junk),

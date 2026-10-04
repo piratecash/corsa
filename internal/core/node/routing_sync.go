@@ -308,7 +308,8 @@ func (s *Service) compareInboundDigest(peer domain.PeerIdentity, theirDigest str
 // log and the reply is dropped — the sender will time out
 // waiting for the summary and proceed with its normal full sync,
 // which is the safe degradation path.
-func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity domain.PeerIdentity, frame protocol.RouteSyncDigestFrame) {
+func (s *Service) handleRouteSyncDigest(connID domain.ConnID, sender routingSender, frame protocol.RouteSyncDigestFrame) {
+	senderIdentity := sender.identity
 	if senderIdentity.IsZero() {
 		// Sender identity not yet resolved (race against auth
 		// completion). The frame can't be answered meaningfully
@@ -320,7 +321,17 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 		return
 	}
 
+	// A digest refreshes the TTL of the routes via the sender; from a
+	// connection that merely names an identity proven over v2 it would keep
+	// stale routes alive in that identity's name.
+	release, admitted := s.admitRoutingInput(sender, protocol.RouteSyncDigestFrameType)
+	if !admitted {
+		return
+	}
 	localDigest, localCount, match := s.compareInboundDigest(senderIdentity, frame.Digest, frame.Entries)
+	// Released at once: the compare is the only write; the summary sent
+	// below must not hold a v2 proof of the identity waiting on the wire.
+	release()
 
 	summary := protocol.RouteSyncSummaryFrame{
 		Type:           protocol.RouteSyncSummaryFrameType,
@@ -378,7 +389,8 @@ func (s *Service) handleRouteSyncDigest(connID domain.ConnID, senderIdentity dom
 // suppression elapses re-confirms the snapshot. No trust is
 // transferred through this exchange — the announce plane
 // remains the source of truth for routing state.
-func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, frame protocol.RouteSyncSummaryFrame) {
+func (s *Service) handleRouteSyncSummary(sender routingSender, frame protocol.RouteSyncSummaryFrame) {
+	senderIdentity := sender.identity
 	if senderIdentity.IsZero() {
 		log.Debug().
 			Str("digest", frame.Digest).
@@ -408,6 +420,14 @@ func (s *Service) handleRouteSyncSummary(senderIdentity domain.PeerIdentity, fra
 			Msg("route_sync_summary_dropped_no_announce_loop")
 		return
 	}
+	// A summary decides whether our full sync to the identity is suppressed;
+	// one from a connection that merely names an identity proven over v2
+	// would decide it for the identity's own session.
+	release, admitted := s.admitRoutingInput(sender, protocol.RouteSyncSummaryFrameType)
+	if !admitted {
+		return
+	}
+	defer release()
 	now := time.Now().UTC()
 	if !frame.Match {
 		// Mismatch — the digests diverged, so the receiver needs a fresh full

@@ -638,7 +638,7 @@ func TestPresenceFollowsTheLastSessionNotTheLastRelaySession(t *testing.T) {
 			peer := domain.PeerIdentityFromWire(contactID.Address)
 
 			tc.setUp(svc, peer)
-			svc.onPeerSessionClosedWithCause(peer, tc.close, sessionClosePeerInitiated)
+			svc.onPeerSessionClosedWithCause(peer, provenIdentitySubject(peer), tc.close, sessionClosePeerInitiated)
 			svc.WaitBackground()
 
 			if got := presenceCloseWasRecorded(t, svc, peer); got != tc.want {
@@ -681,7 +681,7 @@ func TestAnyReconnectSpendsTheRecordedClose(t *testing.T) {
 	peer := domain.PeerIdentityFromWire(contactID.Address)
 
 	svc.onPeerSessionEstablished(peer, nil)
-	svc.onPeerSessionClosedWithCause(peer, nil, sessionClosePeerInitiated)
+	svc.onPeerSessionClosedWithCause(peer, provenIdentitySubject(peer), nil, sessionClosePeerInitiated)
 	svc.WaitBackground()
 	if !presenceCloseWasRecorded(t, svc, peer) {
 		t.Fatal("precondition: the close was not recorded, so this proves nothing")
@@ -736,7 +736,7 @@ func TestACloseCarriesTheTimeItWasObservedNotTheTimeItWasWritten(t *testing.T) {
 	// on its way here.
 	svc.presenceProjector.noteProof(peer, observed.Add(time.Second), presenceAliveValidity)
 
-	svc.onPeerSessionClosedWithAttribution(peer, nil, sessionClosePeerInitiated,
+	svc.onPeerSessionClosedWithAttribution(peer, provenIdentitySubject(peer), nil, sessionClosePeerInitiated,
 		&peerOfflineEvidence{observedAt: observed})
 	svc.WaitBackground()
 
@@ -817,7 +817,7 @@ func TestSessionOrderingDoesNotDependOnTheClock(t *testing.T) {
 	svc.onPeerSessionEstablished(peer, nil)
 
 	closing = true
-	svc.onPeerSessionClosedWithCause(peer, nil, sessionClosePeerInitiated)
+	svc.onPeerSessionClosedWithCause(peer, provenIdentitySubject(peer), nil, sessionClosePeerInitiated)
 	svc.WaitBackground()
 	closing = false
 	if !presenceCloseWasRecorded(t, svc, peer) {

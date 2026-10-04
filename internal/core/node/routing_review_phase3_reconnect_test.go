@@ -87,7 +87,7 @@ func TestHandleRouteSyncSummary_MismatchClearsPendingSuppression(t *testing.T) {
 		Match:          false,
 		ExpectFullSync: true,
 	}
-	svc.handleRouteSyncSummary(idPeerA, summary)
+	svc.handleRouteSyncSummary(provenRoutingSender(idPeerA), summary)
 
 	if svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerA, time.Now().UTC()) {
 		t.Fatal("mismatch summary did not clear pending suppression")

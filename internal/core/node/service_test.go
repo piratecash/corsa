@@ -20,7 +20,6 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
@@ -2277,6 +2276,13 @@ func startTestNodeWithSetup(t *testing.T, cfg config.Node, setup func(*Service))
 
 func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Identity) (*Service, func()) {
 	t.Helper()
+	return startTestNodeWithIdentityAndSetup(t, cfg, id, nil)
+}
+
+// startTestNodeWithIdentityAndSetup is startTestNodeWithIdentity with the
+// same pre-Run `setup` window startTestNodeWithSetup gives.
+func startTestNodeWithIdentityAndSetup(t *testing.T, cfg config.Node, id *identity.Identity, setup func(*Service)) (*Service, func()) {
+	t.Helper()
 
 	// Isolate peer state so tests never load leftover files from a
 	// previous run that happened to bind the same port.
@@ -2291,6 +2297,9 @@ func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Ident
 	svc := NewService(cfg, id, nil)
 	svc.disableRateLimiting = true
 	svc.markPeerStateIntervalTest = -1
+	if setup != nil {
+		setup(svc)
+	}
 	return startTestService(t, ctx, cancel, svc)
 }
 
@@ -6454,7 +6463,7 @@ func TestProtocolTraceLogging(t *testing.T) {
 		writeJSONFrame(t, conn, protocol.Frame{
 			Type:      "auth_session",
 			Address:   id.Address,
-			Signature: identity.SignPayload(id, connauth.SessionAuthPayload(welcome.Challenge, id.Address)),
+			Signature: identity.SignPayload(id, protocol.SessionAuthPayload(welcome.Challenge, id.Address)),
 		})
 		authOK := readJSONTestFrame(t, reader)
 		if authOK.Type != "auth_ok" {
@@ -7438,7 +7447,7 @@ func TestConcurrentWriteJSONFrameAndPush(t *testing.T) {
 	writeJSONFrame(t, senderConn, protocol.Frame{
 		Type:      "auth_session",
 		Address:   senderID.Address,
-		Signature: identity.SignPayload(senderID, connauth.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
+		Signature: identity.SignPayload(senderID, protocol.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
 	})
 	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
 		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
@@ -8402,7 +8411,7 @@ func TestTransitDMLiveInboxRoute(t *testing.T) {
 	writeJSONFrame(t, senderConn, protocol.Frame{
 		Type:      "auth_session",
 		Address:   senderID.Address,
-		Signature: identity.SignPayload(senderID, connauth.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
+		Signature: identity.SignPayload(senderID, protocol.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
 	})
 	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
 		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
@@ -8577,7 +8586,7 @@ func TestTransitDMNotReplayedFromBacklog(t *testing.T) {
 	writeJSONFrame(t, senderConn, protocol.Frame{
 		Type:      "auth_session",
 		Address:   senderID.Address,
-		Signature: identity.SignPayload(senderID, connauth.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
+		Signature: identity.SignPayload(senderID, protocol.SessionAuthPayload(senderWelcome.Challenge, senderID.Address)),
 	})
 	if f := readJSONTestFrame(t, senderReader); f.Type != "auth_ok" {
 		t.Fatalf("sender expected auth_ok, got %s: %s", f.Type, f.Error)
@@ -8808,7 +8817,7 @@ func TestMixedVersionLegacyPeerExchange(t *testing.T) {
 	writeJSONFrame(t, conn, protocol.Frame{
 		Type:      "auth_session",
 		Address:   legacyID.Address,
-		Signature: identity.SignPayload(legacyID, connauth.SessionAuthPayload(welcome.Challenge, legacyID.Address)),
+		Signature: identity.SignPayload(legacyID, protocol.SessionAuthPayload(welcome.Challenge, legacyID.Address)),
 	})
 	authReply := readJSONTestFrame(t, reader)
 	if authReply.Type != "auth_ok" {

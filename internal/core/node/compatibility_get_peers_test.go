@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -242,7 +241,7 @@ func TestCompatibility_LegacyInitiatorRespondedPeersShape(t *testing.T) {
 	writeJSONFrame(t, conn, protocol.Frame{
 		Type:      "auth_session",
 		Address:   legacyID.Address,
-		Signature: identity.SignPayload(legacyID, connauth.SessionAuthPayload(welcome.Challenge, legacyID.Address)),
+		Signature: identity.SignPayload(legacyID, protocol.SessionAuthPayload(welcome.Challenge, legacyID.Address)),
 	})
 	authReply := readJSONTestFrame(t, reader)
 	if authReply.Type != "auth_ok" {

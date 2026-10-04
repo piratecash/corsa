@@ -102,7 +102,7 @@ func TestTransitRefusalsAreNotAttributedByDType(t *testing.T) {
 	table := NewReverseTable(ReverseTableConfig{
 		Limits: tightReverseCaps{global: 64, perUpstream: quota},
 	})
-	upstream := ChannelUpstream(NetworkChannel(11), ProvenIdentityKey(domain.PeerIdentity{7}), domain.PeerIdentity{7})
+	upstream := ChannelUpstream(NetworkChannel(11), provenIdentityKey(domain.PeerIdentity{7}), domain.PeerIdentity{7})
 
 	reserve := func(label byte, dtype domain.DType) ReverseReserveResult {
 		return table.Reserve(ReverseReserveOpts{

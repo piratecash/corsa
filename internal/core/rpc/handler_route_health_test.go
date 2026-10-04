@@ -32,6 +32,7 @@ type stubRoutingProvider struct {
 	modes        routing.ModeSelectionStats
 	outcomes     domain.SessionOutcomeStats
 	neighbours   domain.NeighbourComposition
+	pinStore     domain.SecureSessionStoreStats
 	transport    domain.TransportTrafficStats
 	reputation   []routing.RouteReputationState
 	journalChurn map[string]uint64
@@ -63,6 +64,10 @@ func (s *stubRoutingProvider) ModeSelectionStats() routing.ModeSelectionStats {
 
 func (s *stubRoutingProvider) SessionOutcomeStats() domain.SessionOutcomeStats {
 	return s.outcomes
+}
+
+func (s *stubRoutingProvider) SecureSessionStoreStats() domain.SecureSessionStoreStats {
+	return s.pinStore
 }
 
 func (s *stubRoutingProvider) NeighbourComposition() domain.NeighbourComposition {

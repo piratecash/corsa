@@ -129,6 +129,14 @@ Response:
     "read_at": "2026-09-06T09:31:44.512901233Z",
     "bytes_sent": 48211934,
     "bytes_received": 51027716
+  },
+  "secure_sessions": {
+    "read_at": "2026-09-06T09:31:44.512903117Z",
+    "pinned_identities": 812,
+    "pin_capacity": 20000,
+    "pin_store_full": false,
+    "pin_refusals_pin_store_full": 0,
+    "store_unreadable": false
   }
 }
 ```
@@ -138,8 +146,8 @@ Response:
 > their own `read_at` (counters) and `updated_at` (the census); a rate or a window computed against
 > `snapshot_at` is wrong by however long the table stood still.
 >
-> **Four snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
-> `session_outcomes` and `transport_traffic` are cumulative counters read at slightly different
+> **Five snapshots in one response are NOT one atomic snapshot.** `mode_selection`,
+> `session_outcomes`, `transport_traffic` and `secure_sessions` are counters read at slightly different
 > instants; `neighbours` is a gauge with its own `updated_at`, refreshed in the
 > background. Arithmetic across them assumes a simultaneity these timestamps do
 > not support.
@@ -242,7 +250,7 @@ whole network is in".
 | `neighbours.updated_at` | string\|null | RFC 3339 time the census was taken — the moment the numbers were true, which is not the moment the RPC answered. `null` while `ready=false`. |
 | `neighbours.connections` | int | Every live neighbour connection, both directions, BEFORE any capability filter. Neighbours advertising nothing we recognise are counted here: they are what a rollout is waiting for. |
 | `neighbours.peers` | int | Distinct identities behind those connections. **Both counts are published because they diverge exactly when it matters:** two sockets of one neighbour are two connections and one peer. |
-| `neighbours.identity_unproven` | int | Connections whose remote identity is claimed but not proven to us. The handshake proves the DIALLER to the LISTENER, so on a session this node dialled the welcome address is a name the remote picked. An advertised capability there is a hint, never authority. |
+| `neighbours.identity_unproven` | int | Connections whose remote identity is claimed but not proven to us. Only a secure session v2 proves an identity, in either direction. A legacy (v1) connection proves nothing attributable: on a session this node dialled the welcome address is a name the remote picked, and on an accepted one the `auth_session` signature can be relayed. An advertised capability there is a hint, never authority. |
 | `neighbours.identity_unknown` | int | Live connections with no identity yet (handshake incomplete). Counted so the parts add up. |
 | `neighbours.capabilities` | array | One row per capability this build knows, INCLUDING zero rows — early in a rollout the zero row is the interesting one. Keys are release constants, never strings taken from the wire. |
 | `neighbours.capabilities[].capability` / `.connections` / `.peers` | string / int / int | Capability name, connections advertising it, distinct peers owning at least one such connection. |
@@ -252,6 +260,13 @@ whole network is in".
 | `transport_traffic.read_at` | string\|null | RFC 3339 (nanoseconds) moment the counters were loaded. A rate is `Δbytes / Δread_at` over two readings by ONE sequential poller with the same `started_at` and `read_at₂ > read_at₁`; under that rule neither difference can be negative. |
 | `transport_traffic.bytes_sent` | uint64 | Bytes written to peer sockets. |
 | `transport_traffic.bytes_received` | uint64 | Bytes read from peer sockets. |
+| `secure_sessions` | object | **The v2 downgrade-protection store** ([session_v2.md](../protocol/session_v2.md)). Read under the store's own leaf mutex; no domain mutex. |
+| `secure_sessions.read_at` | string\|null | RFC 3339 (nanoseconds) moment the figures were read. |
+| `secure_sessions.pinned_identities` | int | Identities pinned to v2. |
+| `secure_sessions.pin_capacity` | int | The bound on pinned identities. |
+| `secure_sessions.pin_store_full` | bool | `true` when no NEW identity can be pinned: a v2 session of an identity not pinned yet is then refused with `pin_store_full` (no v1 fallback in that attempt). Pinned identities keep being served; existing pins are never dropped to make room. |
+| `secure_sessions.pin_refusals_pin_store_full` | uint64 | v2 sessions refused with `pin_store_full`, both directions, since the process started (in memory, reset on restart). |
+| `secure_sessions.store_unreadable` | bool | The store file exists but could not be read: every peer is treated as pinned, v1 is refused, v2 keeps working until an operator repairs the file. |
 
 ### fetchRouteLookup
 
@@ -599,6 +614,14 @@ corsa-cli fetchRouteSummary
     "read_at": "2026-09-06T09:31:44.512901233Z",
     "bytes_sent": 48211934,
     "bytes_received": 51027716
+  },
+  "secure_sessions": {
+    "read_at": "2026-09-06T09:31:44.512903117Z",
+    "pinned_identities": 812,
+    "pin_capacity": 20000,
+    "pin_store_full": false,
+    "pin_refusals_pin_store_full": 0,
+    "store_unreadable": false
   }
 }
 ```
@@ -608,8 +631,8 @@ corsa-cli fetchRouteSummary
 > (счётчики) и `updated_at` (перепись). Скорость или окно, посчитанные против `snapshot_at`, неверны
 > ровно на то время, что таблица простояла.
 >
-> **Четыре снимка в одном ответе — не один атомарный снимок.** `mode_selection`,
-> `session_outcomes` и `transport_traffic` — накопительные счётчики, прочитанные в чуть разные моменты;
+> **Пять снимков в одном ответе — не один атомарный снимок.** `mode_selection`,
+> `session_outcomes`, `transport_traffic` и `secure_sessions` — счётчики, прочитанные в чуть разные моменты;
 > `neighbours` — гейдж с собственным `updated_at`, обновляемый фоново. Считать
 > арифметику между ними так, будто они сняты одновременно, эти отметки времени
 > не позволяют.
@@ -709,7 +732,7 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `neighbours.updated_at` | string\|null | RFC 3339 момент снятия переписи — момент, когда числа были верны, а не когда ответил RPC. `null`, пока `ready=false`. |
 | `neighbours.connections` | int | Все живые соединения с соседями, в обе стороны, ДО любой фильтрации по capability. Соседи, не объявившие ничего знакомого, считаются здесь: именно их раскатка и ждёт. |
 | `neighbours.peers` | int | Различные identity за этими соединениями. **Публикуются оба числа, потому что расходятся они ровно тогда, когда это важно:** два сокета одного соседа — это два соединения и один сосед. |
-| `neighbours.identity_unproven` | int | Соединения, где identity удалённого заявлена, но нам не доказана. Рукопожатие доказывает ДИАЛЛЕРА СЛУШАТЕЛЮ, поэтому на сессии, которую набрали мы, адрес из welcome — имя, выбранное удалённым. Объявленная там capability — подсказка, но не полномочие. |
+| `neighbours.identity_unproven` | int | Соединения, где identity удалённого заявлена, но нам не доказана. identity доказывает только защищённая сессия v2, в любом направлении. Legacy-соединение (v1) не доказывает ничего, что можно на неё записать: на сессии, которую набрали мы, адрес из welcome — имя, выбранное удалённым, а на принятом подпись `auth_session` можно переслать. Объявленная там capability — подсказка, но не полномочие. |
 | `neighbours.identity_unknown` | int | Живые соединения без identity (рукопожатие не завершено). Считаются, чтобы части складывались. |
 | `neighbours.capabilities` | array | По строке на каждую известную сборке capability, ВКЛЮЧАЯ нулевые — в начале раскатки нулевая строка и есть интересная. Ключи — константы выпуска, а не строки с провода. |
 | `neighbours.capabilities[].capability` / `.connections` / `.peers` | string / int / int | Имя capability, число соединений, её объявивших, и число различных соседей, владеющих хотя бы одним таким соединением. |
@@ -719,6 +742,13 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `transport_traffic.read_at` | string\|null | RFC 3339 (наносекунды) момент загрузки счётчиков. Скорость — `Δбайт / Δread_at` по двум чтениям ОДНОГО последовательного опрашивающего с одинаковым `started_at` и `read_at₂ > read_at₁`; при этом правиле ни одна разность не бывает отрицательной. |
 | `transport_traffic.bytes_sent` | uint64 | Байты, записанные в peer-сокеты. |
 | `transport_traffic.bytes_received` | uint64 | Байты, прочитанные из peer-сокетов. |
+| `secure_sessions` | object | **Хранилище защиты от понижения v2** ([session_v2.md](../protocol/session_v2.md)). Читается под собственным листовым мьютексом хранилища, без доменных мьютексов. |
+| `secure_sessions.read_at` | string\|null | RFC 3339 (наносекунды) момент чтения. |
+| `secure_sessions.pinned_identities` | int | Identity, закреплённые за v2. |
+| `secure_sessions.pin_capacity` | int | Предел закреплённых identity. |
+| `secure_sessions.pin_store_full` | bool | `true`, когда НОВУЮ identity закрепить нельзя: сессия v2 ещё не закреплённой identity тогда отклоняется с `pin_store_full` (без отката на v1 в этой попытке). Закреплённые identity продолжают обслуживаться; существующие pin ради места не удаляются. |
+| `secure_sessions.pin_refusals_pin_store_full` | uint64 | Сессии v2, отклонённые с `pin_store_full`, в обоих направлениях, с запуска процесса (в памяти, сбрасывается при перезапуске). |
+| `secure_sessions.store_unreadable` | bool | Файл хранилища есть, но не читается: все пиры считаются закреплёнными, v1 отвергается, v2 работает, пока оператор не исправит файл. |
 
 ### fetchRouteLookup
 

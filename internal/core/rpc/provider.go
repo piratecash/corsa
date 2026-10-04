@@ -188,6 +188,13 @@ type RoutingProvider interface {
 	// one failure counter hides exactly the signal a rollout needs. Lock-free.
 	SessionOutcomeStats() domain.SessionOutcomeStats
 
+	// SecureSessionStoreStats returns the v2 downgrade-protection store as
+	// diagnostics see it: how many identities are pinned against the bound,
+	// whether the store is full — a new identity's v2 session is then refused
+	// with pin_store_full while pinned identities keep being served — and how
+	// many sessions were refused so. Takes only the store's own leaf mutex.
+	SecureSessionStoreStats() domain.SecureSessionStoreStats
+
 	// NeighbourComposition returns the latest census of live neighbours by
 	// advertised capability. A GAUGE, refreshed in the background: it reports
 	// Ready=false before the first refresh so "not measured yet" is never read

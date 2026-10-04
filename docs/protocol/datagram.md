@@ -202,9 +202,10 @@ Consequences worth stating explicitly:
   for the same reason, covers `file_command`.
   **The exemption is a SWAP, so it lasts exactly as long as the budget that
   replaces it has somebody to bill.** The §5 budget is charged per neighbour —
-  on the identity proved on an accepted connection, on the address this node
-  dialled on an outbound session — and on an accepted connection before
-  `auth_ok` there is no such identity: the inbound dispatcher answers
+  on the identity a secure session v2 proved, and for a legacy (v1) connection
+  on what this node observed of it: the address it dialled, the source host it
+  accepted from, or the connection itself for loopback — and on an accepted
+  connection before `auth_ok` there is no such key: the inbound dispatcher answers
   `auth_required` above the ingress, so the line is charged neither budget. Such
   a line therefore keeps paying the command bucket, and an unauthenticated
   socket cannot repeat it at line rate for free. A neighbour past `auth_ok`
@@ -287,8 +288,9 @@ all. The boundaries of that property, stated honestly:
 - **the target learns the initiator only if the initiator chose so** — through
   an optional signed pair inside the payload;
 - **rate limiting is unaffected**: it is charged to the neighbour's typed
-  admission key — a proven identity on an accepted connection, the host:port
-  this node dialled on an outbound session — and never to `src`.
+  admission key — an identity a v2 session proved, or for a legacy connection
+  the host:port this node dialled, the source host it accepted from or the
+  loopback connection itself — and never to `src`.
 
 The price is explicit: an endpoint **must not** base authorization on the
 `src` of a request. A type that needs an authentic sender puts a signature in
@@ -1619,11 +1621,13 @@ telemetry that does not exist yet.
 - **One budget per neighbour; classes divide it, they do not extend it.** The
   class is a field the sender writes, so a per-class budget would be a budget
   the sender can double by alternating the field.
-- **`incoming_peer` is authenticated only on the direction whose handshake
-  authenticated it.** The handshake proves the INITIATOR's identity to the
-  RESPONDER, so on a session this node DIALLED the address in the `welcome` is a
-  name the remote picked for itself — and a fingerprint is public, so a hook that
-  trusted one would admit anybody willing to write it down. The layer therefore
+- **`incoming_peer` is authenticated only where a secure session v2 proved
+  it**, in either direction. A legacy (v1) session proves nothing this layer may
+  rely on: on a session this node DIALLED the address in the `welcome` is a name
+  the remote picked for itself, and on one it ACCEPTED the `auth_session`
+  signature names neither the verifier nor the connection, so it can be relayed —
+  and a fingerprint is public, so a hook that trusted one would admit anybody
+  willing to write it down. The layer therefore
   does not hand such a name to a type that depends on it, and does not hand it a
   blank one either. WHICH types depend on it is DECLARED and never inferred:
   a registration states `sender_proof`, and the value a registration that says
@@ -1649,17 +1653,36 @@ telemetry that does not exist yet.
 - **Everything is charged to a key the RECEIVER can defend**, never to `src`
   from the header and never to what the neighbour said about itself. `src`
   means nothing until a signature check that is itself paid for out of this
-  budget. The key has two namespaces and they do not meet: on an ACCEPTED
-  connection it is the identity the remote side proved by signing our challenge;
-  on an OUTBOUND session it is the host:port THIS node dialled, because the
-  challenge travels the other way there and the address in the `welcome` has
-  exactly the standing of `src` — a claim. **Both stages are charged to that one
-  key**, which is why it travels with the frame: keying stage two on the
-  neighbour's claim let a dialled peer burn the verification tokens of any node
-  whose fingerprint it named, and reset its own budget by reconnecting under a
-  new name. A budget is therefore per (neighbour × direction), not per
-  neighbour: the same peer on both directions holds two buckets, because the
-  two are two different things the receiver can prove.
+  budget. The key is typed, its namespaces do not meet, and the level of proof
+  is derived from it — never a second, separately settable flag:
+  - `proven_identity` — an identity a secure session v2 proved over this
+    connection, in either direction. The only way into this namespace is the v2
+    handshake's own result (`ProvenIdentityKey` takes a
+    `sessionv2.ProvenIdentity`, which nothing else can mint), and it is the only
+    namespace that reads as proven;
+  - `dialed_address` — the host:port THIS node dialled for a legacy session,
+    because the challenge travels the other way there and the address in the
+    `welcome` has exactly the standing of `src` — a claim;
+  - `accepted_host` — the source IP of a legacy connection this node accepted
+    from an external address. Its `auth_session` admits the connection but can be
+    relayed, so it is not charged to the identity it names. Neighbours behind
+    one NAT share this budget, and a reconnect from the same host does not
+    refill it;
+  - `accepted_connection` — a legacy connection accepted from loopback (every
+    onion peer arrives from 127.0.0.1, so the host would let one of them spend
+    every other's budget) or from an address that does not parse. A reconnect
+    gets a new budget; what bounds that is how fast the listener accepts
+    connections, which still holds for the node as a whole.
+
+  **Both stages are charged to that one key**, which is why it travels with the
+  frame: keying stage two on the neighbour's claim let a dialled peer burn the
+  verification tokens of any node whose fingerprint it named, and reset its own
+  budget by reconnecting under a new name. The same holds for the replay-cache
+  fairness owner and the per-upstream reverse quota (§4.3): a legacy connection
+  that names identity X never spends X's v2 budget, replay share or reverse
+  quota. No registered type currently declares `requires_proven_peer`, so
+  reading legacy connections as unproven makes no type unavailable to old
+  nodes (docs/refactoring/n1-legacy-residual.md §1).
 - **A weighted queue, not strict priority.** `control` is served before `bulk`
   *within its own share*, and `bulk` keeps a guaranteed minimum share of the
   dispatched bytes (a quarter to start with). Strict priority would mean that a
@@ -1921,8 +1944,8 @@ Authorize(ctx, header, decoded_payload) -> accept | reject
 
 ctx = {
   incoming_peer:  <the neighbour's identity as the session established it —
-                   PROVEN on an accepted connection, merely PRESENTED on a
-                   session this node dialled — or the local marker for a frame
+                   PROVEN on a secure session v2 (either direction), merely
+                   PRESENTED on a legacy one — or the local marker for a frame
                    created here>,
   local_identity: <our own address>,
 }
@@ -2268,9 +2291,10 @@ than `av = 1`; and the identity-record `dtypes` list with its freshness rules
   же освобождение и по той же причине действует для `file_command`.
   **Освобождение — это ОБМЕН, поэтому оно действует ровно до тех пор, пока
   замещающему бюджету есть с кого списывать.** Бюджет §5 списывается по соседу —
-  по личности, доказанной на принятом соединении, и по адресу, который узел
-  набрал сам, на исходящей сессии, — а на принятом соединении до `auth_ok` такой
-  личности нет: входящий диспетчер отвечает `auth_required` выше ingress-а,
+  по identity, которую доказала защищённая сессия v2, а для legacy-соединения
+  (v1) — по тому, что узел наблюдал сам: набранному адресу, хосту источника
+  принятого соединения или самому соединению для loopback, — а на принятом
+  соединении до `auth_ok` такого ключа нет: входящий диспетчер отвечает `auth_required` выше ingress-а,
   поэтому строка не списывается ни с одного бюджета. Такая строка продолжает
   платить командному ведру, и неаутентифицированный сокет не может повторять её
   на скорости линии бесплатно. Сосед после `auth_ok` платит §5 и только §5,
@@ -2352,8 +2376,9 @@ reverse-состояния: едет в `src` туда и возвращаетс
 - **цель узнаёт инициатора, только если он сам захотел** — через опциональную
   подписанную пару внутри payload;
 - **rate-limit не страдает**: он считается по типизированному ключу учёта
-  соседа — доказанной identity на принятом соединении, набранному нами host:port
-  на исходящей сессии — и никогда по `src`.
+  соседа — identity, доказанной сессией v2, а для legacy-соединения набранному
+  нами host:port, хосту источника или самому loopback-соединению — и никогда по
+  `src`.
 
 Плата явная: конечный узел **не может** строить авторизацию на `src` запроса.
 Тип, которому нужен аутентичный отправитель, кладёт подпись в payload. Точно
@@ -3663,11 +3688,13 @@ misconfig или попытка захвата трафика. Это кап, а
 - **Бюджет один на соседа; классы его делят, а не расширяют.** Класс — поле,
   которое пишет отправитель, поэтому побуквенно классовый бюджет был бы
   бюджетом, который отправитель удваивает чередованием поля.
-- **`incoming_peer` аутентифицирован только на том направлении, чьё рукопожатие
-  его аутентифицировало.** Рукопожатие доказывает identity ИНИЦИАТОРА
-  ОТВЕТЧИКУ, поэтому на сессии, которую этот узел НАБРАЛ, адрес из `welcome` —
-  имя, выбранное удалённой стороной, а отпечаток публичен: хук, доверяющий ему,
-  впустил бы любого, кто готов его вписать. Поэтому слой не передаёт такое имя
+- **`incoming_peer` аутентифицирован только там, где его доказала защищённая
+  сессия v2**, в любом направлении. Legacy-сессия (v1) не доказывает ничего, на
+  что слой может опереться: на сессии, которую этот узел НАБРАЛ, адрес из
+  `welcome` — имя, выбранное удалённой стороной, а на ПРИНЯТОЙ подпись
+  `auth_session` не называет ни проверяющего, ни соединение и пересылается; а
+  отпечаток публичен: хук, доверяющий ему, впустил бы любого, кто готов его
+  вписать. Поэтому слой не передаёт такое имя
   §7-хуку авторизации и не передаёт вместо него пустое: кадр, который дошёл бы
   до локального обработчика типа, ЗАВИСЯЩЕГО от этого имени, дропается ДО
   обработчика, до анти-реплея и до бюджета проверок подписи, с собственной
@@ -3692,17 +3719,37 @@ misconfig или попытка захвата трафика. Это кап, а
   после рестарта тоже: кэш стартует пустым и корректен с первого кадра.
 - **Всё списывается с ключа, который может защитить ПРИНИМАЮЩИЙ**, а не с `src`
   из заголовка и не с того, что сосед о себе сообщил. `src` ничего не значит до
-  проверки подписи, которая сама оплачивается из этого бюджета. У ключа два
-  пространства имён, и они не пересекаются: на ПРИНЯТОМ соединении это identity,
-  которую удалённая сторона доказала подписью нашего challenge; на ИСХОДЯЩЕЙ
-  сессии — host:port, который набрал ЭТОТ узел, потому что challenge там идёт в
-  обратную сторону и адрес из `welcome` имеет ровно тот же статус, что `src`, —
-  это заявка. **Обе стадии списываются с этого одного ключа**, ради чего он и
-  едет вместе с кадром: ключевание стадии 2 на заявке соседа позволяло набранному
-  пиру сжигать verify-токены любого узла, чей фингерпринт он назвал, и обнулять
-  собственный бюджет реконнектом под новым именем. Поэтому бюджет — на (сосед ×
-  направление), а не на соседа: один и тот же пир на двух направлениях держит две
-  корзины, потому что это две разные вещи, которые принимающий может доказать.
+  проверки подписи, которая сама оплачивается из этого бюджета. Ключ
+  типизирован, его пространства имён не пересекаются, а уровень доказательства
+  выводится из него — второго, отдельно выставляемого флага нет:
+  - `proven_identity` — identity, которую защищённая сессия v2 доказала на этом
+    соединении, в любом направлении. Войти в это пространство можно только с
+    результатом самого v2-рукопожатия (`ProvenIdentityKey` принимает
+    `sessionv2.ProvenIdentity`, которую больше ничто не выпускает), и только оно
+    читается как доказанное;
+  - `dialed_address` — host:port, который ЭТОТ узел набрал для legacy-сессии:
+    challenge там идёт в обратную сторону, и адрес из `welcome` имеет ровно тот
+    же статус, что `src`, — это заявка;
+  - `accepted_host` — IP источника legacy-соединения, принятого с внешнего
+    адреса. Его `auth_session` допускает соединение, но пересылается, поэтому на
+    названную им identity не списывается. Узлы за одним NAT делят этот бюджет, а
+    переподключение с того же хоста его не пополняет;
+  - `accepted_connection` — legacy-соединение, принятое с loopback (весь onion
+    приходит с 127.0.0.1, и хост позволил бы одному тратить бюджет всех
+    остальных) или с адреса, который не разбирается. Переподключение получает
+    новый бюджет; ограничивает это скорость приёма соединений, которая
+    по-прежнему действует на узел целиком.
+
+  **Обе стадии списываются с этого одного ключа**, ради чего он и едет вместе с
+  кадром: ключевание стадии 2 на заявке соседа позволяло набранному пиру сжигать
+  verify-токены любого узла, чей фингерпринт он назвал, и обнулять собственный
+  бюджет реконнектом под новым именем. То же относится к владельцу справедливой
+  доли кеша повторов и к квоте обратных записей на upstream (§4.3):
+  legacy-соединение, назвавшееся identity X, никогда не тратит v2-бюджет X, её
+  долю кеша и её квоту. Ни один зарегистрированный тип сейчас не объявляет
+  `requires_proven_peer`, поэтому чтение legacy-соединений как недоказанных не
+  делает недоступным для старых узлов ни один тип
+  (docs/refactoring/n1-legacy-residual.md §1).
 - **Взвешенная очередь, а не строгий приоритет.** `control` обслуживается раньше
   `bulk` *в пределах своей доли*, а за `bulk` закреплена гарантированная
   минимальная доля отправляемых байтов (стартово — четверть). Строгий приоритет
@@ -3963,9 +4010,9 @@ Authorize(ctx, header, decoded_payload) -> accept | reject
 
 ctx = {
   incoming_peer:  <identity соседа в том виде, в каком её установила сессия:
-                   ДОКАЗАННАЯ на принятом соединении и лишь ПРЕДЪЯВЛЕННАЯ на
-                   сессии, которую набрал этот узел, либо локальный маркер для
-                   кадра, созданного здесь>,
+                   ДОКАЗАННАЯ защищённой сессией v2 (в любом направлении) и
+                   лишь ПРЕДЪЯВЛЕННАЯ на legacy-сессии, либо локальный маркер
+                   для кадра, созданного здесь>,
   local_identity: <наш адрес>,
 }
 ```

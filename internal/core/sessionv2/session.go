@@ -39,6 +39,34 @@ type Peer struct {
 	// verified field by field and NOT applied to anything yet: the caller
 	// applies its metadata only now, after the proof.
 	Intro protocol.Frame
+	// proof is set by receiveProvenPeer once session_proof verified, and
+	// nowhere else. The exported fields describe a peer; only this one says
+	// a handshake proved it, so a Peer built by hand carries no proof.
+	proof ProvenIdentity
+}
+
+// Proof is the proof this peer's identity was verified over its own
+// connection; ok is false for a Peer no handshake produced.
+func (p Peer) Proof() (ProvenIdentity, bool) {
+	_, ok := p.proof.Identity()
+	return p.proof, ok
+}
+
+// ProvenIdentity is an identity a v2 handshake proved over one connection
+// (session_proof over that connection's TLS exporter). Its field is
+// unexported and only receiveProvenPeer sets it, so holding one IS holding
+// the result of that verification: anything that may be charged to, trusted
+// as or keyed by a proven identity takes this type rather than a bare
+// domain.PeerIdentity, and the compiler refuses a caller that has only a
+// name. A v1 auth_session never yields one — its signature names neither the
+// verifier nor the connection and can be relayed.
+type ProvenIdentity struct {
+	id domain.PeerIdentity
+}
+
+// Identity is the proven identity; ok is false for the zero value.
+func (p ProvenIdentity) Identity() (domain.PeerIdentity, bool) {
+	return p.id, !p.id.IsZero()
 }
 
 // ProvenSession is a v2 session whose peer proved its identity over this

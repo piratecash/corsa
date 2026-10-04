@@ -47,7 +47,7 @@ func makeRelayFrameLine(t *testing.T, messageID string, recipient domain.PeerIde
 
 // installRelayCapableSession registers a session whose peerIdentity
 // matches, with mesh_relay_v1 + mesh_routing_v1 capabilities and a
-// buffered sendCh so sendFrameToAddress can enqueue without blocking.
+// buffered sendCh so sendFrameToAddressVia can enqueue without blocking.
 // A peerHealth entry with Connected=true is required for the address
 // resolver to count the session as reachable, and the session must carry
 // the address it is registered under: the queue admission asks the peer
@@ -209,7 +209,7 @@ func TestFailoverRelay_SkipsQuarantinedTransitNextHop(t *testing.T) {
 	// what blocks transit; chatty_routes deliberately would not (see
 	// isPeerTransitQuarantinedLocked).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(idPeerD, quarantineReasonDisconnectStorm, time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(idPeerD), quarantineReasonDisconnectStorm, time.Now())
 	svc.peerMu.Unlock()
 
 	line := makeRelayFrameLine(t, "msg-failover-q", idTargetX)

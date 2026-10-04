@@ -59,7 +59,7 @@ func newTransitFixture(t *testing.T, transit bool) *transitFixture {
 func (f *transitFixture) settleKeyOf(t *testing.T, frame protocol.DatagramFrame) {
 	t.Helper()
 	settleReplayKey(t, f.relay.replay, replayKeyOf(t, frame),
-		ProvenIngress(testChannel(f.sender.id.String()), f.sender.id),
+		provenIngress(testChannel(f.sender.id.String()), f.sender.id),
 		f.relay.clock().Add(time.Minute))
 }
 
@@ -114,7 +114,7 @@ func TestUnbillableArrivalIsRefusedBeforeParsingAndBeforeCrypto(t *testing.T) {
 		Line:      []byte("{not even json\n"),
 		Peer:      domaintest.ID("noisy"),
 		Channel:   testChannel("noisy"),
-		BudgetKey: ProvenIdentityKey(domaintest.ID("noisy")),
+		BudgetKey: provenIdentityKey(domaintest.ID("noisy")),
 	})
 	requireDrop(t, parsed, DropMalformed)
 	if !parsed.BanWorthy() {
@@ -145,7 +145,7 @@ func TestOversizeLineIsADropAndNeverABan(t *testing.T) {
 		Line:      []byte(line),
 		Peer:      peer,
 		Channel:   testChannel("wide"),
-		BudgetKey: ProvenIdentityKey(peer),
+		BudgetKey: provenIdentityKey(peer),
 	})
 	requireDrop(t, result, DropFrameTooLarge)
 	if result.BanWorthy() {
@@ -655,7 +655,7 @@ func TestBranchBeforeReserveDoesNotStripAParallelReservation(t *testing.T) {
 		frame:     frame,
 		peer:      fixture.sender.id,
 		channel:   testChannel(fixture.sender.id.String()),
-		budgetKey: ProvenIdentityKey(fixture.sender.id),
+		budgetKey: provenIdentityKey(fixture.sender.id),
 	}.ingress()
 	if kind := parallel.owner().kind(); kind != ingressOwnerBilled {
 		t.Fatalf("the parallel instance was staged in the %s bucket: the receive path bills every "+

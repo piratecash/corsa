@@ -243,7 +243,7 @@ func TestHandleRoutePoisonV2_CascadeBatchedDownstream(t *testing.T) {
 	downCh := peerSessionFixture(t, svc, "addr-down", downstreamID,
 		[]domain.Capability{domain.CapMeshRoutingV1, domain.CapMeshPoisonReverseV1, domain.CapMeshPoisonReverseV2, domain.CapMeshRelayV1})
 
-	svc.handleRoutePoisonV2(senderA, protocol.RoutePoisonV2Frame{
+	svc.handleRoutePoisonV2(provenRoutingSender(senderA), protocol.RoutePoisonV2Frame{
 		Type:       protocol.RoutePoisonV2FrameType,
 		Identities: []string{tX.String(), tY.String()},
 		Reason:     protocol.RoutePoisonReasonUplinkLost,

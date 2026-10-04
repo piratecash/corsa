@@ -3,16 +3,19 @@ package node
 import (
 	"sync"
 	"time"
-
-	"github.com/piratecash/corsa/internal/core/domain"
 )
 
 // announceRateLimiter enforces per-peer rate limits on RECEIVED
 // announce-plane frames (Phase 4 13.7, phase-4-compact-wire-signed.md
 // §3.7). Mirrors relayRateLimiter (ratelimit.go) but is sized for
-// announce traffic and keyed by peer IDENTITY (not transport address)
-// so a misbehaving peer cannot reset its bucket by reconnecting on a
-// fresh port.
+// announce traffic and keyed by penaltySubject (penalty_subject.go): the
+// identity a v2 session proved, or — for a legacy session — the address
+// this node dialled, the source IP, or the connection for loopback. None
+// of these changes when a peer reconnects on a fresh source port, so a
+// misbehaving peer cannot reset its bucket that way. The identity a legacy
+// session merely NAMES is never the key: a bucket shared by every session
+// claiming one identity let any legacy peer that named it spend the real
+// owner's budget and get the owner's announcements dropped.
 //
 // Protected frames:
 //   - announce_routes (legacy v1) / routes_update (v2) /
@@ -50,7 +53,7 @@ import (
 // current bucket state. Storage is not touched; no event is published.
 type announceRateLimiter struct {
 	mu      sync.Mutex
-	buckets map[domain.PeerIdentity]*tokenBucket
+	buckets map[penaltySubject]*tokenBucket
 }
 
 // announceBurstRoutesPerPeer is the maximum number of route entries
@@ -89,12 +92,12 @@ const announceLimiterCleanupAge = 30 * time.Minute
 
 func newAnnounceRateLimiter() *announceRateLimiter {
 	return &announceRateLimiter{
-		buckets: make(map[domain.PeerIdentity]*tokenBucket),
+		buckets: make(map[penaltySubject]*tokenBucket),
 	}
 }
 
-// allow checks whether an incoming announce-plane frame from the
-// given peer identity should be accepted. cost is the per-frame token
+// allow checks whether an incoming announce-plane frame charged to the
+// given penalty subject should be accepted. cost is the per-frame token
 // charge expressed in route-entry units: announce-plane frames pass
 // max(1, len(entries)) so a single large full-sync frame correctly
 // drains proportional to its work; request_resync / route_poison_v1 and
@@ -110,9 +113,9 @@ func newAnnounceRateLimiter() *announceRateLimiter {
 // is NOT partially drained on rejection (an all-or-nothing reservation
 // avoids a slow attacker draining the bucket without ever fitting a
 // full frame).
-func (rl *announceRateLimiter) allow(identity domain.PeerIdentity, cost int) bool {
-	if identity.IsZero() {
-		// No identity to key the bucket on (sentinel — receive
+func (rl *announceRateLimiter) allow(subject penaltySubject, cost int) bool {
+	if subject.IsZero() {
+		// No subject to key the bucket on (sentinel — receive
 		// handlers reject empty senders anyway, but the rate limit
 		// is defence-in-depth). Accept rather than block, so a
 		// validation gate downstream surfaces the malformed-input
@@ -130,14 +133,14 @@ func (rl *announceRateLimiter) allow(identity domain.PeerIdentity, cost int) boo
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	b, ok := rl.buckets[identity]
+	b, ok := rl.buckets[subject]
 	now := time.Now()
 	if !ok {
 		b = &tokenBucket{
 			tokens:     announceBurstRoutesPerPeer,
 			lastRefill: now,
 		}
-		rl.buckets[identity] = b
+		rl.buckets[subject] = b
 	}
 
 	elapsed := now.Sub(b.lastRefill).Seconds()
@@ -163,9 +166,9 @@ func (rl *announceRateLimiter) cleanup(maxAge time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	cutoff := time.Now().Add(-maxAge)
-	for id, b := range rl.buckets {
+	for subject, b := range rl.buckets {
 		if b.lastRefill.Before(cutoff) {
-			delete(rl.buckets, id)
+			delete(rl.buckets, subject)
 		}
 	}
 }

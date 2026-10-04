@@ -124,7 +124,7 @@ func TestAProvenKeyThatNamesAnotherNeighbourIsNotProof(t *testing.T) {
 	registerType(t, node, registration)
 
 	requireDrop(t, node.deliverBilledTo(
-		t, trusted, ProvenIdentityKey(stranger), askFor(t, node, "mismatched", dtypeQuery),
+		t, trusted, provenIdentityKey(stranger), askFor(t, node, "mismatched", dtypeQuery),
 	), DropUnprovenSender)
 	if handler.callCount() != 0 {
 		t.Fatalf("a self-contradicting arrival reached the handler: %d calls", handler.callCount())

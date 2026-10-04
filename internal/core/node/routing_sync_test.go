@@ -44,7 +44,7 @@ func TestHandleRouteSyncSummary_MatchArmsAnnounceSuppression(t *testing.T) {
 		Match:          true,
 		ExpectFullSync: false,
 	}
-	svc.handleRouteSyncSummary(idPeerA, summary)
+	svc.handleRouteSyncSummary(provenRoutingSender(idPeerA), summary)
 
 	if !svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerA, time.Now().UTC()) {
 		t.Fatal("correlated Match=true summary did not arm suppression")
@@ -69,7 +69,7 @@ func TestHandleRouteSyncSummary_UncorrelatedMatchIgnored(t *testing.T) {
 		Digest: "abcd",
 		Match:  true,
 	}
-	svc.handleRouteSyncSummary(idPeerA, summary)
+	svc.handleRouteSyncSummary(provenRoutingSender(idPeerA), summary)
 
 	if svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerA, time.Now().UTC()) {
 		t.Fatal("uncorrelated Match=true summary armed suppression")
@@ -95,7 +95,7 @@ func TestHandleRouteSyncSummary_EmptyDigestIgnored(t *testing.T) {
 		Digest: "",
 		Match:  true,
 	}
-	svc.handleRouteSyncSummary(idPeerA, summary)
+	svc.handleRouteSyncSummary(provenRoutingSender(idPeerA), summary)
 
 	// The original pending window is untouched (still active now), proving
 	// the empty-echo summary was a no-op rather than a re-arm or clear.
@@ -122,7 +122,7 @@ func TestHandleRouteSyncSummary_MismatchIsNoop(t *testing.T) {
 		Match:          false,
 		ExpectFullSync: true,
 	}
-	svc.handleRouteSyncSummary(idPeerA, summary)
+	svc.handleRouteSyncSummary(provenRoutingSender(idPeerA), summary)
 
 	if svc.announceLoop.IsDigestSuppressionActiveForTest(idPeerA, time.Now().UTC()) {
 		t.Fatal("Match=false summary armed suppression; gate should stay inactive")
@@ -146,7 +146,7 @@ func TestHandleRouteSyncSummary_EmptySenderIsNoop(t *testing.T) {
 		Digest: "abcd",
 		Match:  true,
 	}
-	svc.handleRouteSyncSummary(domain.PeerIdentity{}, summary)
+	svc.handleRouteSyncSummary(provenRoutingSender(domain.PeerIdentity{}), summary)
 
 	if svc.announceLoop.IsDigestSuppressionActiveForTest(domain.PeerIdentity{}, time.Now().UTC()) {
 		t.Fatal("empty sender armed suppression for empty key")
@@ -166,7 +166,7 @@ func TestHandleRouteSyncSummary_NoAnnounceLoopIsNoop(t *testing.T) {
 		Match:  true,
 	}
 	// Must not panic.
-	svc.handleRouteSyncSummary(idPeerA, summary)
+	svc.handleRouteSyncSummary(provenRoutingSender(idPeerA), summary)
 }
 
 // TestRecordPeerDigestOnSessionClose_CachedAndConsumable —

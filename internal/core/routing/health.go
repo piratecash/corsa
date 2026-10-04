@@ -952,6 +952,18 @@ func (s *healthStore) evictUplinkLocked(identity, uplink domain.PeerIdentity) {
 	delete(s.states, healthKey{Identity: identity, Uplink: uplink})
 }
 
+// evictUplinkEverywhereLocked drops the state of every pair whose uplink is
+// uplink — the health half of Table.ForgetUplink, which also forgets pairs
+// whose claim is already gone (a cooldown outlives its claim). Callers must
+// hold t.mu in W mode.
+func (s *healthStore) evictUplinkEverywhereLocked(uplink domain.PeerIdentity) {
+	for k := range s.states {
+		if k.Uplink == uplink {
+			delete(s.states, k)
+		}
+	}
+}
+
 // evictIdentityLocked drops every state for the given identity.
 // Invoked when the routeStore drops the identity entirely (last
 // uplink withdrew). Iterates the full map; the operation is rare

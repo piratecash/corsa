@@ -23,12 +23,6 @@ func HasIdentityFields(frame protocol.Frame) bool {
 		strings.TrimSpace(frame.BoxSig) != ""
 }
 
-// SessionAuthPayload constructs the byte payload that the peer signs
-// with its Ed25519 key during the auth_session handshake.
-func SessionAuthPayload(challenge, address string) []byte {
-	return []byte("corsa-session-auth-v1|" + challenge + "|" + address)
-}
-
 // PrepareAuth validates the hello identity fields (box key binding)
 // and generates a random challenge string for the auth_session handshake.
 // On success the caller must store the returned State via AuthStore.SetConnAuthState.
@@ -83,7 +77,7 @@ func VerifyAuthSession(state *State, frame protocol.Frame) (*State, protocol.Fra
 	if err := identity.VerifyPayload(
 		state.Hello.Address,
 		state.Hello.PubKey,
-		SessionAuthPayload(state.Challenge, state.Hello.Address),
+		protocol.SessionAuthPayload(state.Challenge, state.Hello.Address),
 		frame.Signature,
 	); err != nil {
 		return nil, protocol.Frame{

@@ -514,7 +514,7 @@ func TestWithdrawalGrace_ReconnectClearsBlackHoleCooldown(t *testing.T) {
 	}
 
 	// Session down → deferred withdrawal armed, route stays in table.
-	svc.onPeerSessionClosed(idPeerB, caps)
+	svc.onPeerSessionClosed(idPeerB, provenIdentitySubject(idPeerB), caps)
 	if !peerInPendingMap(svc, idPeerB) {
 		t.Fatal("withdrawal grace timer should be armed after close")
 	}

@@ -166,7 +166,8 @@ func filterSplitHorizon(routes []routing.RouteEntry, excludeVia domain.PeerIdent
 // also dropped: a peer can only acknowledge probes we sent to it.
 // This is the receive-side zero-trust guard that prevents one peer
 // from spoofing acks for another peer's probes.
-func (s *Service) handleRouteProbeAck(senderIdentity domain.PeerIdentity, ack protocol.RouteProbeAckFrame) {
+func (s *Service) handleRouteProbeAck(sender routingSender, ack protocol.RouteProbeAckFrame) {
+	senderIdentity := sender.identity
 	if s.probeRegistry == nil {
 		// Service initialised without probe registry (legacy test
 		// fixtures pre-PR-11.3c). Defensive no-op.
@@ -184,6 +185,13 @@ func (s *Service) handleRouteProbeAck(senderIdentity domain.PeerIdentity, ack pr
 	// attacker who guesses a monotonic probe_id and tries to
 	// consume someone else's outstanding probe — the real
 	// uplink's ack (or timeout) still fires unchanged.
+	// Before the registry is consulted, so a refused ack does not consume
+	// the probe the identity's own session is still expected to answer.
+	release, admitted := s.admitRoutingInput(sender, protocol.RouteProbeAckFrameType)
+	if !admitted {
+		return
+	}
+	defer release()
 	target, rtt, ok := s.probeRegistry.ResolveMatching(ack.ProbeID, senderIdentity)
 	if !ok {
 		// Two failure modes collapse into one log line because

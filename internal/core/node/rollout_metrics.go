@@ -235,12 +235,13 @@ func (s *Service) collectNeighbourComposition() domain.NeighbourComposition {
 
 	// count folds ONE connection into the tallies.
 	//
-	// proven says whether the remote identity was proved to this node. Only an
-	// accepted connection carries that proof: the handshake authenticates the
-	// dialler to the listener, so on a session WE dialled the welcome address
-	// is a name the remote picked (datagram.AuthorityClaimed is the zero value
-	// for exactly this reason). The census reports the split instead of
-	// pretending the two are the same kind of evidence.
+	// proven says whether the remote identity was proved to this node, which
+	// only a secure session v2 does — in either direction. A legacy session
+	// proves nothing attributable: on a session WE dialled the welcome address
+	// is a name the remote picked, and on an accepted one the auth_session
+	// signature can be relayed. It is the same rule the budgets and penalties
+	// apply (penaltySubject, inboundDatagramBudgetKey), so the census reports
+	// the evidence those decisions actually use.
 	count := func(identity domain.PeerIdentity, advertised []domain.CapabilityName, proven bool) {
 		connections++
 		switch {
@@ -276,16 +277,16 @@ func (s *Service) collectNeighbourComposition() domain.NeighbourComposition {
 
 	s.peerMu.RLock()
 	for _, session := range s.sessions {
-		// Outbound: we proved ourselves to them, they proved nothing to us.
-		count(session.peerIdentity, advertisedNamesOf(session.declarations), false)
+		_, proven := session.provenIdentity()
+		count(session.peerIdentity, advertisedNamesOf(session.declarations), proven)
 	}
 	for id, entry := range s.conns {
 		info, ok := snapshotEntryLocked(id, entry)
 		if !ok || info.dir != netcore.Inbound || !info.tracked {
 			continue
 		}
-		// Inbound: the remote signed our challenge, so its identity is proven.
-		count(info.identity, advertisedNamesOf(entry.core.Declarations()), true)
+		_, proven := entry.core.Auth().ProvenIdentity()
+		count(info.identity, advertisedNamesOf(entry.core.Declarations()), proven)
 	}
 	s.peerMu.RUnlock()
 

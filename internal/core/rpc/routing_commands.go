@@ -414,6 +414,20 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"bytes_received": transport.BytesReceived,
 		}
 
+		// The v2 downgrade-protection store (docs/protocol/session_v2.md):
+		// when it is full, a v2 session of an identity not pinned yet is
+		// refused with pin_store_full — pinned identities keep being served —
+		// and this is where an operator sees it without reading logs.
+		pinStore := rp.SecureSessionStoreStats()
+		secureSessions := map[string]interface{}{
+			"read_at":                     formatOptionalTime(pinStore.ReadAt),
+			"pinned_identities":           pinStore.PinnedIdentities,
+			"pin_capacity":                pinStore.PinCapacity,
+			"pin_store_full":              pinStore.Full,
+			"pin_refusals_pin_store_full": pinStore.PinRefusalsStoreFull,
+			"store_unreadable":            pinStore.Unreadable,
+		}
+
 		return jsonResponse(map[string]interface{}{
 			"snapshot_at":          snapTime.UTC().Format(time.RFC3339),
 			"total_entries":        snap.TotalEntries,
@@ -430,6 +444,7 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"session_outcomes":     sessionOutcomes,
 			"neighbours":           neighbours,
 			"transport_traffic":    transportTraffic,
+			"secure_sessions":      secureSessions,
 		})
 	}
 }

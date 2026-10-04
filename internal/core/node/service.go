@@ -36,6 +36,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/routing"
 	"github.com/piratecash/corsa/internal/core/service/filerouter"
 	"github.com/piratecash/corsa/internal/core/service/filetransfer"
+	"github.com/piratecash/corsa/internal/core/sessionv2"
 	"github.com/piratecash/corsa/internal/core/transport"
 )
 
@@ -684,6 +685,11 @@ type Service struct {
 	// session handshake and registration; nil in production, set only
 	// before Run.
 	inboundBeforeRegister func()
+	// routingInputAdmittedHook is a test hook run right after legacy routing
+	// input is admitted and before it is applied (v2_identity_claims.go): the
+	// window a v2 proof of the same identity must not be able to slip
+	// through. Set only before the code under test runs; nil in production.
+	routingInputAdmittedHook func(sender routingSender, frameType string)
 	// connIDByNetConn is a secondary index that lets net.Conn-first helpers
 	// resolve their input into the primary ConnID key. It is kept strictly
 	// in lock-step with `conns` by the lifecycle helpers in conn_registry.go;
@@ -809,44 +815,56 @@ type Service struct {
 	// as an immutable value. atomic.Pointer keeps the fetchRouteSummary read
 	// lock-free; nil means "never refreshed", which the reader reports as
 	// not-ready rather than as an empty neighbourhood.
-	neighbourComposition           atomic.Pointer[domain.NeighbourComposition]
-	relayStates                    *relayStateStore                             // hop-by-hop relay forwarding state (Iteration 1)
-	relayLimiter                   *relayRateLimiter                            // per-peer token bucket for relay fan-out
-	announceLimiter                *announceRateLimiter                         // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
-	connLimiter                    *connRateLimiter                             // per-IP connection rate limiter at accept level
-	cmdLimiter                     *commandRateLimiter                          // per-connection command rate limiter for non-relay frames
-	inboundByIP                    map[string]int                               // IP → active inbound connection count (per-IP cap)
-	routingTable                   *routing.Table                               // distance-vector routing table (Phase 1.2)
-	announceLoop                   *routing.AnnounceLoop                        // periodic + triggered announce_routes sender (Phase 1.2)
-	overloadMonitor                *overloadMonitor                             // CPU/backlog backpressure gate for the announce loop (Phase 0)
-	probeRegistry                  *probeRegistry                               // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
-	queryRateLimit                 *queryRateLimit                              // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
-	queryIDCounter                 atomic.Uint64                                // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
-	senderKeySyncMu                sync.Mutex                                   // guards senderKeySyncInFlight + senderKeySyncHopInFlight + senderKeySyncLastRun + nonDMKeySync (own tiny domain — never held across I/O)
-	senderKeySyncInFlight          map[string]struct{}                          // single-flight set for background sender-key recovery passes, keyed by sender fingerprint; see triggerSenderKeySyncAsync
-	senderKeySyncHopInFlight       map[string]struct{}                          // per-previous-hop fairness slots (1 pass per hop, keyed by authenticated identity with address fallback) — a hostile hop cannot starve the global pass cap
-	senderKeySyncLastRun           map[string]time.Time                         // per-sender cooldown stamps for recovery passes (senderKeySyncCooldown)
-	nonDMKeySync                   *nonDMKeySyncLimiter                         // admission of key-sync passes triggered by non-DM messages — a pool apart from the DM recovery above; guarded by senderKeySyncMu (nondm_key_sync.go)
-	contactVerifyBudgets           contactVerifyRegistry                        // per-remote `contacts` verification budget, SHARED by the session and fresh-dial importers and persisted across connections (contact_verify_budget.go). Own leaf mutex, zero value is live — see docs/locking.md
-	relayShapingHint               atomic.Uint64                                // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
-	identitySessions               map[domain.PeerIdentity]int                  // peer identity → active session count (multi-session awareness)
-	identityRelaySessions          map[domain.PeerIdentity]int                  // peer identity → relay-capable session count (direct-route lifecycle)
-	sessionTransitionSeq           uint64                                       // monotonic number of every 0→1 / 1→0 session transition, minted under peerMu at the transition itself; presence orders a close against a reconnect by THIS and never by a clock (see nextSessionTransitionLocked)
-	pendingWithdrawals             map[domain.PeerIdentity]*pendingWithdrawal   // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
-	withdrawalsShutDown            bool                                         // one-way, set by cancelAllPendingWithdrawalsForShutdown: from then on a withdrawal is dropped on BOTH paths — maybeScheduleDeferredWithdrawal arms no timer, and executeDeferredWithdrawal (inline path, late timer) does not run its body. Guarded by peerMu.
-	presenceClock                  func() time.Time                             // source for identity presence transition timestamps; immutable after construction, overridden only by tests
-	secureSessions                 *secureSessions                              // v2 session state (session_secure.go): set once in NewService, never replaced; its parts are immutable or own their sync, so no domain mutex guards it
-	deliveryClock                  func() time.Time                             // source for the instant an emission claim is taken and read at; immutable after construction, overridden only by tests
-	peerQuarantine                 map[domain.PeerIdentity]routeQuarantineEntry // per-peer route quarantine: peer in quarantine has inbound routing announcements dropped and is skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
-	peerDisconnectHistory          map[domain.PeerIdentity][]time.Time          // sliding window of disconnect timestamps per peer, drives quarantine trigger detection. Guarded by peerMu.
-	peerAnnounceHistory            map[domain.PeerIdentity][]time.Time          // sliding window of inbound DELTA announce-frame arrival timestamps per peer (routes_update / v3 kind="delta" only; baselines and request_resync excluded), drives chatty_routes quarantine trigger. Guarded by peerMu. See recordInboundAnnounceAndMaybeArm.
-	lastResyncAccepted             map[domain.PeerIdentity]time.Time            // last ACCEPTED request_resync per peer — debounces forced full-sync cycles below the cmd/announce limiter thresholds; see handleRequestResync. Guarded by peerMu.
-	disableRateLimiting            bool                                         // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
-	markPeerStateIntervalTest      time.Duration                                // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
-	routeWithdrawalGracePeriodTest time.Duration                                // test hook: override routeWithdrawalGracePeriod (negative = disable grace, run withdrawals synchronously like the pre-grace legacy path; zero = use production default)
-	drainDone                      func()                                       // test hook: called after drainPendingForIdentities completes; nil in production
-	done                           chan struct{}                                // closed when Run() exits; drain goroutines check this to avoid work after shutdown
-	primeBootstrapOnRun            bool                                         // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
+	neighbourComposition     atomic.Pointer[domain.NeighbourComposition]
+	relayStates              *relayStateStore                           // hop-by-hop relay forwarding state (Iteration 1)
+	relayLimiter             *relayRateLimiter                          // per-peer token bucket for relay fan-out
+	announceLimiter          *announceRateLimiter                       // per-peer token bucket for received announce-plane frames (Phase 4 13.7)
+	connLimiter              *connRateLimiter                           // per-IP connection rate limiter at accept level
+	cmdLimiter               *commandRateLimiter                        // per-connection command rate limiter for non-relay frames
+	inboundByIP              map[string]int                             // IP → active inbound connection count (per-IP cap)
+	routingTable             *routing.Table                             // distance-vector routing table (Phase 1.2)
+	announceLoop             *routing.AnnounceLoop                      // periodic + triggered announce_routes sender (Phase 1.2)
+	overloadMonitor          *overloadMonitor                           // CPU/backlog backpressure gate for the announce loop (Phase 0)
+	probeRegistry            *probeRegistry                             // Phase 2 outstanding probes (route_probe_v1/route_probe_ack_v1); see routing_probe_loop.go
+	queryRateLimit           *queryRateLimit                            // Phase 2 per-target rate limit for route_query_v1; see routing_query_sender.go
+	queryIDCounter           atomic.Uint64                              // Phase 2 monotonic counter for route_query_v1 IDs (non-zero on the wire)
+	senderKeySyncMu          sync.Mutex                                 // guards senderKeySyncInFlight + senderKeySyncHopInFlight + senderKeySyncLastRun + nonDMKeySync (own tiny domain — never held across I/O)
+	senderKeySyncInFlight    map[string]struct{}                        // single-flight set for background sender-key recovery passes, keyed by sender fingerprint; see triggerSenderKeySyncAsync
+	senderKeySyncHopInFlight map[string]struct{}                        // per-previous-hop fairness slots (1 pass per hop, keyed by authenticated identity with address fallback) — a hostile hop cannot starve the global pass cap
+	senderKeySyncLastRun     map[string]time.Time                       // per-sender cooldown stamps for recovery passes (senderKeySyncCooldown)
+	nonDMKeySync             *nonDMKeySyncLimiter                       // admission of key-sync passes triggered by non-DM messages — a pool apart from the DM recovery above; guarded by senderKeySyncMu (nondm_key_sync.go)
+	contactVerifyBudgets     contactVerifyRegistry                      // per-remote `contacts` verification budget, SHARED by the session and fresh-dial importers and persisted across connections (contact_verify_budget.go). Own leaf mutex, zero value is live — see docs/locking.md
+	relayShapingHint         atomic.Uint64                              // Phase 3 PR 12.6 monotonic hint feeding routing.Table.LookupForRelay; rotation cadence is the counter modulo routing.ShapingProbeRatio
+	identitySessions         map[domain.PeerIdentity]int                // peer identity → active session count (multi-session awareness)
+	identityRelaySessions    map[domain.PeerIdentity]int                // peer identity → relay-capable session count (direct-route lifecycle)
+	sessionTransitionSeq     uint64                                     // monotonic number of every 0→1 / 1→0 session transition, minted under peerMu at the transition itself; presence orders a close against a reconnect by THIS and never by a clock (see nextSessionTransitionLocked)
+	pendingWithdrawals       map[domain.PeerIdentity]*pendingWithdrawal // route withdrawal grace period: pending RemoveDirectPeer timers keyed by peer identity. Guarded by peerMu. See routing_withdrawal_grace.go.
+	withdrawalsShutDown      bool                                       // one-way, set by cancelAllPendingWithdrawalsForShutdown: from then on a withdrawal is dropped on BOTH paths — maybeScheduleDeferredWithdrawal arms no timer, and executeDeferredWithdrawal (inline path, late timer) does not run its body. Guarded by peerMu.
+	presenceClock            func() time.Time                           // source for identity presence transition timestamps; immutable after construction, overridden only by tests
+	secureSessions           *secureSessions                            // v2 session state (session_secure.go): set once in NewService, never replaced; its parts are immutable or own their sync, so no domain mutex guards it
+	deliveryClock            func() time.Time                           // source for the instant an emission claim is taken and read at; immutable after construction, overridden only by tests
+	// The four records below are keyed by penaltySubject, never by the
+	// identity a session names: an identity is a key only when a v2 session
+	// proved it, and a legacy session is charged by its dialled address,
+	// source IP or connection (penalty_subject.go). Otherwise a legacy peer
+	// that named somebody else's identity quarantined, debounced and
+	// rate-limited the real owner of it.
+	peerQuarantine        map[penaltySubject]routeQuarantineEntry // route quarantine: a quarantined subject's inbound routing frames are dropped; a quarantined PROVEN identity is also skipped as next-hop for transit relay. Guarded by peerMu. See routing_route_quarantine.go.
+	peerDisconnectHistory map[penaltySubject][]time.Time          // sliding window of disconnect timestamps per subject, drives quarantine trigger detection. Guarded by peerMu.
+	peerAnnounceHistory   map[penaltySubject][]time.Time          // sliding window of inbound DELTA announce-frame arrival timestamps per subject (routes_update / v3 kind="delta" only; baselines and request_resync excluded), drives chatty_routes quarantine trigger. Guarded by peerMu. See recordInboundAnnounceAndMaybeArm.
+	lastResyncAccepted    map[penaltySubject]time.Time            // last ACCEPTED request_resync per subject — debounces forced full-sync cycles below the cmd/announce limiter thresholds; see handleRequestResync. Guarded by peerMu.
+	// unprovenRouting tracks legacy connections writing routing state in an
+	// identity's name — the marks a later v2 proof purges by, and the input
+	// still in flight the proof waits for (v2_identity_claims.go). Outside
+	// the domain split: it owns a leaf mutex, touched once per legacy routing
+	// frame where peerMu is hottest.
+	unprovenRouting                unprovenRoutingWriters
+	disableRateLimiting            bool          // test hook: skip per-IP rate limiting, connection caps, and blacklist checks
+	markPeerStateIntervalTest      time.Duration // test hook: override markPeerStateInterval; -1 = always recompute (0 = use default)
+	routeWithdrawalGracePeriodTest time.Duration // test hook: override routeWithdrawalGracePeriod (negative = disable grace, run withdrawals synchronously like the pre-grace legacy path; zero = use production default)
+	drainDone                      func()        // test hook: called after drainPendingForIdentities completes; nil in production
+	done                           chan struct{} // closed when Run() exits; drain goroutines check this to avoid work after shutdown
+	primeBootstrapOnRun            bool          // startup hook: apply compiled bootstrap peers via add_peer once CM is ready
 
 	// runCtx is the Service lifecycle context: callbacks (e.g.
 	// onCMSessionEstablished) and handlers bind their goroutines and sends
@@ -1300,8 +1318,14 @@ type peerSession struct {
 	address      domain.PeerAddress
 	peerIdentity domain.PeerIdentity // peer's Ed25519 identity fingerprint from welcome.Address
 	connID       domain.ConnID       // monotonic connection ID for diagnostics
-	conn         net.Conn
-	metered      *netcore.MeteredConn // tracks bytes for this session; nil when conn is not metered
+	// proven is the v2 peer that proved its identity over THIS connection,
+	// or nil for a legacy session, whose welcome identity nobody proved. It
+	// decides who per-peer punitive and budget state is charged to
+	// (penaltySubject). Set in the struct literal and never written again,
+	// so it needs no lock.
+	proven  *sessionv2.Peer
+	conn    net.Conn
+	metered *netcore.MeteredConn // tracks bytes for this session; nil when conn is not metered
 
 	// sendCh is the UPPER of the two outbound queues: producers put frames
 	// here and the servePeerSession loop moves them into the NetCore writer
@@ -1953,10 +1977,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		presenceClock:            time.Now,
 		presenceProjector:        newPresenceProjector(),
 		deliveryClock:            time.Now,
-		peerQuarantine:           make(map[domain.PeerIdentity]routeQuarantineEntry),
-		peerDisconnectHistory:    make(map[domain.PeerIdentity][]time.Time),
-		peerAnnounceHistory:      make(map[domain.PeerIdentity][]time.Time),
-		lastResyncAccepted:       make(map[domain.PeerIdentity]time.Time),
+		peerQuarantine:           make(map[penaltySubject]routeQuarantineEntry),
+		peerDisconnectHistory:    make(map[penaltySubject][]time.Time),
+		peerAnnounceHistory:      make(map[penaltySubject][]time.Time),
+		lastResyncAccepted:       make(map[penaltySubject]time.Time),
 		bannedIPSet:              make(map[string]domain.BannedIPEntry),
 		remoteBannedIPs:          make(map[string]remoteIPBanEntry),
 		remoteIPBanOffenders:     make(map[string]map[domain.PeerAddress]time.Time),
@@ -3979,7 +4003,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		}
 		senderAddr := s.inboundPeerAddress(connID)
 		if senderAddr != "" {
-			s.handleRelayHopAck(domain.PeerAddress(senderAddr), frame)
+			s.handleRelayHopAck(domain.PeerAddress(senderAddr), s.inboundRoutingSender(connID), frame)
 		}
 		return true
 	case "announce_routes":
@@ -3996,8 +4020,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		senderIdentity := s.inboundPeerIdentity(connID)
-		s.handleAnnounceRoutes(senderIdentity, frame)
+		s.handleAnnounceRoutes(s.inboundRoutingSender(connID), frame)
 		return true
 	case "routes_update":
 		// Auth gate enforced above. v2 delta frame requires BOTH routing
@@ -4021,9 +4044,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		senderIdentity := s.inboundPeerIdentity(connID)
-		senderAddress := s.inboundConnKeyForID(connID)
-		s.handleRoutesUpdate(senderIdentity, senderAddress, frame)
+		s.handleRoutesUpdate(s.inboundRoutingSender(connID), s.inboundConnKeyForID(connID), frame)
 		return true
 	case "request_resync":
 		// Auth gate enforced above. request_resync is a v2-only control
@@ -4036,8 +4057,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		senderIdentity := s.inboundPeerIdentity(connID)
-		s.handleRequestResync(senderIdentity)
+		s.handleRequestResync(s.inboundRoutingSender(connID))
 		return true
 	case "file_command":
 		// Auth gate enforced above. Capability check: file_transfer_v1 must
@@ -4089,7 +4109,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		s.handleRouteProbeAck(s.inboundPeerIdentity(connID), ack)
+		s.handleRouteProbeAck(s.inboundRoutingSender(connID), ack)
 		return true
 	case "route_query_v1":
 		// Auth gate enforced above. Phase 2 targeted route query
@@ -4121,7 +4141,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		s.handleRouteQueryResponse(s.inboundPeerIdentity(connID), resp)
+		s.handleRouteQueryResponse(s.inboundRoutingSender(connID), resp)
 		return true
 	case "route_sync_digest_v1":
 		// Auth gate enforced above. Phase 3 PR 12.5 incremental-
@@ -4144,7 +4164,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		s.handleRouteSyncDigest(connID, s.inboundPeerIdentity(connID), digestFrame)
+		s.handleRouteSyncDigest(connID, s.inboundRoutingSender(connID), digestFrame)
 		return true
 	case "route_sync_summary_v1":
 		// Auth gate enforced above. Same capability gate as the
@@ -4158,7 +4178,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		s.handleRouteSyncSummary(s.inboundPeerIdentity(connID), summaryFrame)
+		s.handleRouteSyncSummary(s.inboundRoutingSender(connID), summaryFrame)
 		return true
 	case "route_poison_v1":
 		// Auth gate enforced above. Phase 4 single-hop poison-reverse
@@ -4182,7 +4202,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		s.handleRoutePoison(s.inboundPeerIdentity(connID), poison)
+		s.handleRoutePoison(s.inboundRoutingSender(connID), poison)
 		return true
 	case "route_poison_v2":
 		// Auth gate enforced above. Batched poison-reverse, gated by
@@ -4202,7 +4222,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		s.handleRoutePoisonV2(s.inboundPeerIdentity(connID), poisonBatch)
+		s.handleRoutePoisonV2(s.inboundRoutingSender(connID), poisonBatch)
 		return true
 	case "route_announce_v3":
 		// Auth gate enforced above. Phase 4 compact announce gated by the
@@ -4230,7 +4250,7 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 			accepted = false
 			return true
 		}
-		s.handleRouteAnnounceV3(s.inboundPeerIdentity(connID), s.inboundConnKeyForID(connID), v3)
+		s.handleRouteAnnounceV3(s.inboundRoutingSender(connID), s.inboundConnKeyForID(connID), v3)
 		return true
 	case "datagram":
 		// UNREACHABLE, and kept as the assertion of that fact — and as the
@@ -4638,6 +4658,9 @@ type peerSendableConnection struct {
 	protocolVersion domain.ProtocolVersion
 	outbound        *peerSession
 	inboundID       domain.ConnID
+	// proven reports that the identity proved itself over v2 on this
+	// connection; such connections are tried before every legacy one.
+	proven bool
 }
 
 // peerSendableConnectionsLocked returns the ordered list of connections
@@ -4649,7 +4672,10 @@ type peerSendableConnection struct {
 // direction, so they cannot disagree about "which connection bytes
 // will use first".
 //
-// Order:
+// Order — v2-proven connections first, then the rest, each part in the
+// order below. A legacy connection names the identity without proving it,
+// so it is never chosen over one on which the identity proved itself
+// (docs/refactoring/n1-legacy-residual.md §3):
 //  1. Outbound sessions (preferred tier), sorted by:
 //     a. oldest LastConnectedAt first — empirically the most stable
 //     socket carries the least retry risk;
@@ -4705,10 +4731,12 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 		if !s.peerHealthAcceptsOutboundFramesLocked(health, now) {
 			continue
 		}
+		_, proven := sess.provenIdentity()
 		outbound = append(outbound, peerSendableConnection{
 			connectedAt:     health.LastConnectedAt,
 			protocolVersion: domain.ProtocolVersion(sess.version),
 			outbound:        sess,
+			proven:          proven,
 		})
 	}
 
@@ -4733,6 +4761,7 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 			connectedAt:     health.LastConnectedAt,
 			protocolVersion: info.protocolVersion,
 			inboundID:       info.id,
+			proven:          s.connProvenLocked(info.id),
 		})
 		return true
 	})
@@ -4749,13 +4778,13 @@ func (s *Service) peerSendableConnectionsLocked(peer domain.PeerIdentity, requir
 		return peerSendableConnectionLess(inbound[i], inbound[j])
 	})
 
-	if len(outbound) == 0 {
-		return inbound
-	}
-	if len(inbound) == 0 {
-		return outbound
-	}
-	return append(outbound, inbound...)
+	ordered := append(outbound, inbound...)
+	// Stable: within the proven part and within the rest the tier order and
+	// the sort above stand.
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].proven && !ordered[j].proven
+	})
+	return ordered
 }
 
 // peerSendableConnectionLess is the within-tier comparator. Outbound
@@ -4788,7 +4817,7 @@ func peerSendableConnectionLess(a, b peerSendableConnection) bool {
 // sendFrameToIdentity sends a protocol frame to the peer identified by its
 // Ed25519 identity fingerprint. It searches outbound sessions first, then
 // inbound connections, checking that the matched connection has the required
-// capability. This is the identity-based counterpart of sendFrameToAddress.
+// capability. This is the identity-based counterpart of sendFrameToAddressVia.
 //
 // Returns true if the frame was accepted into the peer's write queue.
 func (s *Service) sendFrameToIdentity(dst domain.PeerIdentity, frame protocol.Frame, requiredCap domain.Capability) bool {
@@ -5160,6 +5189,15 @@ func (s *Service) handleAuthSession(
 		log.Trace().Uint64("conn_id", uint64(id)).Msg("handle_auth_session_idempotent")
 		return reply, true, nil, connectFullSync{}
 	}
+	// The hello was checked against the pin before the challenge went out;
+	// the identity may have proved itself over v2 in between, and the sweep
+	// that closes legacy connections then may have run before this one was
+	// recognisable. Checking again here, as the last step before the session
+	// counts, leaves no window (v2_identity_claims.go).
+	if err := s.refuseLegacyIdentity(verified.Hello.Address); err != nil {
+		log.Warn().Err(err).Uint64("conn_id", uint64(id)).Msg("inbound_v1_refused_identity_proved_v2_during_auth")
+		return protocol.Frame{Type: "error", Code: protocol.ErrCodeAuthRequired, Error: "identity requires a secure session"}, false, nil, connectFullSync{}
+	}
 
 	backlogSub, fullSync = s.completeInboundAuth(id, verified)
 	return reply, true, backlogSub, fullSync
@@ -5275,7 +5313,7 @@ func (s *Service) startInboundSessionDelivery(connID domain.ConnID, backlogSub *
 	// behind auth_ok for the same reason as the backlog below. The proven
 	// inbound identity is the push's addressee; the send path skips peers
 	// without the plane and closes the connection on an enqueue fault.
-	if pushPeer := s.provenInboundPeerIdentity(connID); !pushPeer.IsZero() {
+	if pushPeer := s.authenticatedInboundPeerIdentity(connID); !pushPeer.IsZero() {
 		// A fresh session re-declares what the peer can receive, so what we
 		// believed about its build is now stale — see forgetDMControlRefusal
 		// — and it is the moment this conversation's own reactions are
@@ -5304,7 +5342,7 @@ func (s *Service) startInboundSessionDelivery(connID domain.ConnID, backlogSub *
 	// waiting for. Same boundary, same reason, as the backlog above.
 	// Self-checked inside the kick, so an inbound peer that is not a
 	// usable delivery target is a no-op.
-	if kickPeer := s.provenInboundPeerIdentity(connID); !kickPeer.IsZero() {
+	if kickPeer := s.authenticatedInboundPeerIdentity(connID); !kickPeer.IsZero() {
 		s.goBackground(func() {
 			s.kickDeliveryRetriesForReachable(map[domain.PeerIdentity]struct{}{kickPeer: {}})
 			s.wakeOverdueForReturningPeer(kickPeer, time.Now().UTC())
@@ -5707,6 +5745,7 @@ func (s *Service) trackInboundDisconnectWithPresenceEvidence(id domain.ConnID, a
 	if wasTracked {
 		s.onPeerSessionClosedWithAttribution(
 			peerIdentity,
+			penaltySubjectOfCore(id, core),
 			s.connCapabilitiesForID(id),
 			sessionClosePeerInitiated,
 			presenceEvidence,
@@ -9644,11 +9683,14 @@ func (s *Service) isVerifiedSender(sender string, relayPeerIdentity domain.PeerI
 // key-sync budget, and an unknown author is refused (refuseUnattributedNonDM).
 // relay is the neighbour's identity as this node holds it: proven on an
 // accepted connection, only the welcome's claim on a session this node dialled.
-func (s *Service) nonDMAuthorAdmitted(msg incomingMessage, prevHop domain.PeerAddress, relay domain.PeerIdentity, ownedSession *peerSession) bool {
+// hopSubject is who the arrival is recorded against — the connection's
+// penaltySubject, never relay, so a legacy neighbour that named somebody else
+// cannot get that somebody's hop suppressed.
+func (s *Service) nonDMAuthorAdmitted(msg incomingMessage, prevHop domain.PeerAddress, relay domain.PeerIdentity, hopSubject penaltySubject, ownedSession *peerSession) bool {
 	if protocol.IsDMTopic(msg.Topic) {
 		return true
 	}
-	hop := nonDMHopKey(relay, prevHop)
+	hop := nonDMHopKey(hopSubject)
 	attributed := s.isVerifiedSender(msg.Sender, relay)
 	s.noteNonDMAttribution(hop, attributed)
 	if attributed {
@@ -9748,7 +9790,7 @@ func (s *Service) handleInboundPushMessage(connID domain.ConnID, frame protocol.
 	// (TopicControlDM) — have their own cryptographic verification in
 	// storeIncomingMessage (VerifyEnvelope), so this gate targets only
 	// topics where no per-message signature exists.
-	if !s.nonDMAuthorAdmitted(msg, peerAddr, peerIdentity, nil) {
+	if !s.nonDMAuthorAdmitted(msg, peerAddr, peerIdentity, s.connPenaltySubject(connID), nil) {
 		return
 	}
 

@@ -48,7 +48,7 @@ import (
 type reactionRouter interface {
 	MessageReactions(ctx context.Context, peer domain.PeerIdentity) (map[domain.MessageID][]domain.Reaction, error)
 	ToggleReaction(ctx context.Context, peer domain.PeerIdentity, messageID domain.MessageID, emoji string, now time.Time) (domain.ReactionFact, error)
-	ReactionsUnsupportedBy(peer domain.PeerIdentity) bool
+	ReactionsSupportOf(peer domain.PeerIdentity) domain.ReactionsSupport
 	// SetSendStatusIfCurrent replaces the status line only while it still says
 	// what the caller expects, so a message that has become false can be taken
 	// back without wiping whatever was written since.
@@ -320,7 +320,14 @@ func (w *Window) announceReactionsAreLocalOnly() {
 		w.takeBackLocalOnlyNotice(router)
 		return
 	}
-	if !router.ReactionsUnsupportedBy(peer) {
+	// Only a CONFIRMED absence may say the reaction stays local. "Unknown" —
+	// no live connection whose declaration could be read, and no signed answer
+	// — is not a refusal and says nothing else either: not that the contact is
+	// offline (it may be reachable through routes), and not that the reaction
+	// is queued (whether it is, is the queue's to say). Claiming it cannot
+	// arrive would be the false statement the old hour-long belief made after a
+	// disconnect (docs/refactoring/n1-legacy-residual.md §3).
+	if router.ReactionsSupportOf(peer) != domain.ReactionsSupportAbsent {
 		// Not (or no longer) refused, so the notice goes — WITHOUT asking
 		// whether it was this conversation that put it there. The status line is
 		// one line for the whole window: a notice raised in a chat that cannot

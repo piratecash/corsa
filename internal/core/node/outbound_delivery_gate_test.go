@@ -83,7 +83,7 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		// only remaining door into writeFrameToInbound, and every frame it
 		// carries is routing state — announce_routes, route sync, probes.
 		// A user message reaching an inbound connection goes through
-		// writeDeliveryFrameToInbound or sendFrameToAddress instead.
+		// writeDeliveryFrameToInbound or sendFrameToAddressVia instead.
 		"sendAnnouncePlaneFrame":                    "announce plane only",
 		"writeFrameToInbound":                       "ungated wrapper — its callers are what this test checks",
 		"dispatchInboundAnnouncePlaneFrameWithCaps": "announce plane, capability-bound to one connID",
@@ -102,7 +102,7 @@ func TestEveryInboundWriteGoesThroughTheDeliveryGate(t *testing.T) {
 		"sendSessionFrameViaNetwork":   {},
 		// The UNGATED wrappers count as raw senders too. Watching only the
 		// direct callers of the helpers above missed a whole call graph:
-		// tryFailoverRelay → sendFrameToAddress → writeFrameToInbound
+		// tryFailoverRelay → sendFrameToAddressVia → writeFrameToInbound
 		// re-sent a relay frame with no gate at all, and every function in
 		// that chain looked innocent because none of them touched a raw
 		// helper by name.

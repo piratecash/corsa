@@ -326,6 +326,56 @@ Now, only frame types registered in `CommandTable` are accepted. Unknown types r
 |--------|-------|
 | Unknown types → `HandleLocalFrame` (trusted path) | Unknown types → HTTP 400 "unknown frame type" |
 
+### 13. Penalty Attribution: an Identity Only When a v2 Session Proved It
+
+**Files**: `internal/core/node/penalty_subject.go`, `internal/core/node/routing_route_quarantine.go`, `internal/core/node/announce_ratelimit.go`, `internal/core/node/routing_announce.go`, `internal/core/node/nondm_key_sync.go`, `internal/core/connauth/state.go`
+
+A legacy (v1) session proves nothing about its identity that this node may attribute. On a session this node dialled, the identity is whatever the `welcome` says: the challenge travels the other way. On a connection this node accepted, `auth_session` signs a challenge that names neither the verifier nor the connection, so it can be relayed ([handshake.md](handshake.md)). Punitive and budget state keyed by that identity let any legacy peer that named an unpinned identity raise state against the identity's real owner: quarantine its routing input, spend its announce budget, debounce its resync requests and suppress it as a key-sync hop.
+
+Each such record is charged to a **penalty subject**, never to the identity a session names:
+
+| Connection | Penalty subject |
+|---|---|
+| secure session v2, either direction | the proven identity |
+| legacy, dialled by this node | the `host:port` this node dialled |
+| legacy, accepted from an external address | the TCP source IP (the port is dropped: it changes on every reconnect) |
+| legacy, accepted from loopback (onion) | the connection itself |
+
+The auth state of an accepted connection records what proved it (`connauth.Proof`): `ProofRelayableChallenge` for `auth_session`, `ProofSessionV2` for `session_proof`. Only the latter makes the identity a subject.
+
+| Record | Raised by | Effect while raised |
+|---|---|---|
+| route quarantine (`peerQuarantine`) | `disconnect_storm`, `setup_failure_cycle`, `chatty_routes` | routing-plane frames arriving on a connection of that subject are dropped |
+| disconnect history (`peerDisconnectHistory`) | peer-initiated close of the identity's last relay session | arms `disconnect_storm` |
+| delta-announce history (`peerAnnounceHistory`) | `routes_update`, `route_announce_v3` `kind="delta"` | arms `chatty_routes` |
+| announce-plane token bucket (`announceLimiter`) | every announce-plane frame | frames over budget are dropped |
+| `request_resync` accept debounce (`lastResyncAccepted`) | an accepted `request_resync` | another one inside 30 s is dropped |
+| non-DM key-sync hop suppression (`nonDMKeySync`) | mostly unknown authors from one hop | that hop buys no key sync for 10 min |
+
+**What a legacy subject's quarantine does NOT do.** It does not block transit through the identity the session named, and it does not tombstone that identity's transit claims when armed: the routing table keys transit claims by next-hop identity, so both would hit the identity's real owner. Transit blocking and arm-time tombstoning read only a quarantine charged to a proven identity. The quarantined legacy connection still cannot add transit: its announcements are dropped for the whole cooldown, and the routes of a session that closed are withdrawn by the close path.
+
+**Legacy rights are unchanged.** A legacy session still announces routes under the identity it names, receives deliveries and is a routing next hop; only attribution moved.
+
+**Behaviour changes.**
+
+- A v2-proven identity keeps every protection it had: its quarantine and budget follow it to any connection it opens.
+- A legacy peer reconnecting from the same IP, or redialled at the same address, meets the same records — a flap does not reset them. Legacy peers behind one NAT share one subject.
+- An onion (loopback) legacy peer is charged per connection: one onion peer can no longer mute all of them, but its disconnect history does not accumulate across reconnects.
+
+**Once an identity has proved itself over v2** to this node — it is pinned, or it has a live v2 connection — a legacy connection that names it gets nothing in its name ([session_v2.md](session_v2.md), docs/refactoring/n1-legacy-residual.md §2):
+
+- a new legacy connection naming it is refused (at `hello`, at `welcome`, again at `auth_session`, and again right after an outbound legacy session is registered, so no proof can slip between the check and the registration);
+- a legacy connection that predates the proof is **closed at the proof**, before the v2 connection is registered — it is not left as a path to the identity, also after the last v2 session of the identity closes, because the pin stays;
+- routing-plane frames still in flight from such a connection (announcements including an empty baseline and withdrawals, `routes_update`, `route_announce_v3` and its epoch, `route_poison` v1/v2, `request_resync`, `route_sync_digest_v1` / `route_sync_summary_v1`, `route_query_response_v1`, `route_probe_ack_v1`) are dropped after they are charged to the connection's own subject — and a frame admitted just before the proof finishes its write before the proof purges, so it cannot land after the purge; if the proof's attempt is cancelled first, the purge is still run, by the last such writer, and the cancelled attempt is not established — and hop-ack timeouts of attempts that went over it, and acks that arrived over it, are not charged to the identity's routes: an attempt is attributed to the connection it was handed to at the send, never to the connection holding the address when the timer fires;
+- what such connections wrote BEFORE the proof — claims and tombstones via the identity, black-hole cooldowns, its flap history, its v3 epoch — is forgotten locally at the proof (no wire withdrawal, no tombstone), unless a live v2 connection of the identity already vouches for the routes; the identity's connect-time full sync repopulates them. Recovery is expected within about one exchange, not guaranteed;
+- a send to the identity tries its v2 connections before any other.
+
+**Datagram budgets** are keyed the same way (`AdmissionKey`, [datagram.md](datagram.md) §5): an identity only for a v2 session, the dialled address, the source host or the loopback connection for a legacy one. The level of proof is derived from the typed key, and the proven key can only be built from the v2 handshake's own result. No registered dtype requires a proven neighbour, so none becomes unavailable to old nodes.
+
+**`dm_control` support** is a property of a connection, not of an identity: a connection that declared no `dm_control` holds back only the batch that would have left over it, for as long as it lives; reactions to the identity are not forbidden for an hour, and a send over another capable candidate is not suppressed. The UI distinguishes "confirmed absent" (the peer's signed answer, or every live connection a send would use declared none — for a v2 identity only its v2 connections count) from "no current information".
+
+**Not in scope** — identity-agnostic or not about a named identity: hold-downs keyed by a destination (SeqNo flap, bad hops) are armed by any announcer of that destination under its own identity. The general legacy mode for other old nodes is kept; none of this declares A1 closed for the network.
+
 ### Protocol-Level Security Diagram
 
 ```mermaid
@@ -675,6 +725,56 @@ HTTP-эндпоинт `/rpc/v1/frame` принимает произвольны�
 | До | После |
 |----|-------|
 | Неизвестные типы → `HandleLocalFrame` (доверенный путь) | Неизвестные типы → HTTP 400 "unknown frame type" |
+
+### 13. Кому начисляется штраф: identity — только если её доказала v2-сессия
+
+**Файлы**: `internal/core/node/penalty_subject.go`, `internal/core/node/routing_route_quarantine.go`, `internal/core/node/announce_ratelimit.go`, `internal/core/node/routing_announce.go`, `internal/core/node/nondm_key_sync.go`, `internal/core/connauth/state.go`
+
+Legacy-сессия (v1) не доказывает свою identity так, чтобы этот узел мог что-то на неё записать. На сессии, которую набрал этот узел, identity — это то, что написано в `welcome`: challenge идёт в обратную сторону. На принятом соединении `auth_session` подписывает challenge, в котором не названы ни проверяющий, ни соединение, поэтому подпись можно переслать ([handshake.md](handshake.md)). Карательное и бюджетное состояние с ключом по такой identity позволяло любому legacy-пиру, назвавшемуся чужой непрошитой identity, взводить состояние против её настоящего владельца: ставить его маршрутный вход в карантин, тратить его бюджет announce, гасить дебаунсом его запросы resync и подавлять его как hop синхронизации ключей.
+
+Каждая такая запись начисляется **субъекту штрафа**, а не identity, которую называет сессия:
+
+| Соединение | Субъект штрафа |
+|---|---|
+| защищённая сессия v2, любое направление | доказанная identity |
+| legacy, набранное этим узлом | `host:port`, который набрал этот узел |
+| legacy, принятое с внешнего адреса | TCP-IP источника (порт отбрасывается: он меняется при каждом переподключении) |
+| legacy, принятое с loopback (onion) | само соединение |
+
+Auth-состояние принятого соединения хранит, что его доказало (`connauth.Proof`): `ProofRelayableChallenge` для `auth_session`, `ProofSessionV2` для `session_proof`. Субъектом identity делает только второе.
+
+| Запись | Чем взводится | Действие, пока взведена |
+|---|---|---|
+| карантин маршрутов (`peerQuarantine`) | `disconnect_storm`, `setup_failure_cycle`, `chatty_routes` | кадры маршрутной плоскости с соединения этого субъекта отбрасываются |
+| история разрывов (`peerDisconnectHistory`) | разрыв по инициативе пира последней relay-сессии identity | взводит `disconnect_storm` |
+| история delta-анонсов (`peerAnnounceHistory`) | `routes_update`, `route_announce_v3` `kind="delta"` | взводит `chatty_routes` |
+| token bucket announce-плоскости (`announceLimiter`) | каждый кадр announce-плоскости | кадры сверх бюджета отбрасываются |
+| дебаунс приёма `request_resync` (`lastResyncAccepted`) | принятый `request_resync` | следующий в пределах 30 с отбрасывается |
+| подавление hop синхронизации ключей для не-DM (`nonDMKeySync`) | в основном неизвестные авторы через один hop | этот hop не получает синхронизацию ключей 10 мин |
+
+**Чего НЕ делает карантин legacy-субъекта.** Он не блокирует транзит через identity, которую назвала сессия, и при взведении не ставит tombstone на её транзитные claim-ы: таблица маршрутов ключует транзитные claim-ы по identity следующего hop, поэтому и то и другое ударило бы по настоящему владельцу. Блокировку транзита и tombstone при взведении читает только карантин доказанной identity. Добавить транзит соединение в карантине всё равно не может: его анонсы отбрасываются весь срок, а маршруты закрытой сессии снимает путь закрытия.
+
+**Права legacy не меняются.** Legacy-сессия по-прежнему анонсирует маршруты под названной identity, получает доставку и служит следующим hop маршрутизации; переехала только атрибуция.
+
+**Изменения поведения.**
+
+- Identity, доказанная v2, сохраняет все прежние защиты: её карантин и бюджет следуют за ней на любое её соединение.
+- Legacy-пир, переподключившийся с того же IP или повторно набранный по тому же адресу, попадает на те же записи — переподключение их не сбрасывает. Legacy-пиры за одним NAT делят один субъект.
+- Onion-пир (loopback) в legacy начисляется по соединению: один onion-пир больше не может заглушить всех остальных, но его история разрывов между переподключениями не накапливается.
+
+**Когда identity доказала себя по v2** этому узлу — она прошита или у неё есть живое v2-соединение, — legacy-соединение, которое её называет, ничего от её имени не получает ([session_v2.md](session_v2.md), docs/refactoring/n1-legacy-residual.md §2):
+
+- новое legacy-соединение с этой identity отвергается (на `hello`, на `welcome`, повторно на `auth_session` и повторно сразу после регистрации исходящей legacy-сессии, так что доказательство не проскочит между проверкой и регистрацией);
+- legacy-соединение, открытое до доказательства, **закрывается в момент доказательства**, до регистрации v2-соединения, — путём к identity оно не остаётся, и после закрытия её последней v2-сессии тоже, потому что pin сохраняется;
+- маршрутные кадры, ещё идущие по такому соединению (анонсы, включая пустой baseline и отзывы, `routes_update`, `route_announce_v3` и его epoch, `route_poison` v1/v2, `request_resync`, `route_sync_digest_v1` / `route_sync_summary_v1`, `route_query_response_v1`, `route_probe_ack_v1`), отбрасываются после списания с собственного субъекта соединения — а кадр, допущенный перед самым доказательством, заканчивает запись до очистки, поэтому после неё не ляжет; если попытку доказательства отменили раньше, очистку всё равно выполнит последний такой писатель, а отменённая попытка не устанавливается, — а таймауты hop-ack попыток, ушедших через него, и подтверждения, пришедшие по нему, не записываются на маршруты identity: попытка приписывается соединению, которому была передана при отправке, а не тому, кто держит адрес в момент срабатывания таймера;
+- то, что такие соединения записали ДО доказательства — claim-ы и tombstone через identity, black-hole cooldown, её flap-историю, её v3 epoch, — забывается локально в момент доказательства (без отзыва на проводе и без tombstone), если только живое v2-соединение identity уже не подтверждает маршруты; их заново заполняет полная синхронизация при подключении. Восстановление ожидается примерно за один обмен, но не гарантируется;
+- отправка к identity сначала пробует её v2-соединения.
+
+**Бюджеты датаграмм** ключуются так же (`AdmissionKey`, [datagram.md](datagram.md) §5): identity — только для v2-сессии; для legacy — набранный адрес, хост источника или loopback-соединение. Уровень доказательства выводится из типизированного ключа, а доказанный ключ можно построить только из результата самого v2-рукопожатия. Ни один зарегистрированный dtype не требует доказанного соседа, поэтому для старых узлов ничего не становится недоступным.
+
+**Поддержка `dm_control`** — свойство соединения, а не identity: соединение, не объявившее `dm_control`, задерживает только пачку, которая ушла бы через него, и только пока оно живо; реакции к identity не запрещаются на час, и отправка через другой подходящий кандидат не подавляется. UI различает «подтверждено отсутствие» (подписанный ответ пира или ни одно живое соединение, через которое пошла бы отправка, не объявило тип; для v2-identity учитываются только её v2-соединения) и «нет актуальных сведений».
+
+**Вне объёма** — то, что не про названную identity: hold-down по адресату (SeqNo flap, bad hops) взводит любой анонсирующий этого адресата под собственной identity. Общий legacy-режим для остальных старых узлов сохраняется; A1 для сети этим закрытой не объявляется.
 
 ### Диаграмма безопасности на уровне протокола
 

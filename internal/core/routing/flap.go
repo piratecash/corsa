@@ -307,6 +307,13 @@ func (f *FlapDetector) recordWithdrawalLocked(peer PeerIdentity, now time.Time) 
 	}
 }
 
+// forgetLocked drops peer's withdrawal history and hold-down outright — the
+// flap half of Table.ForgetUplink. Caller must hold the owning Table's t.mu
+// (writer).
+func (f *FlapDetector) forgetLocked(peer PeerIdentity) {
+	delete(f.state, peer)
+}
+
 // clearStableLocked clears the consecutive-flap counter for a peer
 // that has demonstrated stability. withdrawTimes is intentionally
 // left untouched so a single successful add does not erase the

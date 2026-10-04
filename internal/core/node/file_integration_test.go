@@ -71,7 +71,7 @@ func announceRouteVia(svc *Service, nextHopID domain.PeerIdentity, targetID doma
 			{Identity: targetID.String(), Origin: nextHopID.String(), Hops: hops, SeqNo: 1},
 		},
 	}
-	svc.handleAnnounceRoutes(nextHopID, frame)
+	svc.handleAnnounceRoutes(provenRoutingSender(nextHopID), frame)
 }
 
 // TestIsPeerReachable_RouteViaFileCapableNextHop verifies that a routed peer

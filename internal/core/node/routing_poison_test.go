@@ -150,7 +150,7 @@ func TestHandleRoutePoison_InvalidatesOnlySenderUplinkClaim(t *testing.T) {
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
 		IssuedAt: "2026-05-28T12:00:00Z",
 	}
-	svc.handleRoutePoison(idPeerB, frame)
+	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
 
 	// Lookup filters withdrawn / expired entries (see table_lookup.go),
 	// so the invalidated claim disappears from the result: post must
@@ -206,7 +206,7 @@ func TestHandleRoutePoison_InvalidSenderSigDropsFrame(t *testing.T) {
 	goodSig := ed25519.Sign(peer.PrivateKey, frame.CanonicalSenderSigBytes())
 	goodSig[0] ^= 0xff // corrupt
 	frame.SenderSig = base64.StdEncoding.EncodeToString(goodSig)
-	svc.handleRoutePoison(domain.PeerIdentityFromWire(peer.Address), frame)
+	svc.handleRoutePoison(provenRoutingSender(domain.PeerIdentityFromWire(peer.Address)), frame)
 
 	// The claim must NOT have been invalidated: Lookup still returns
 	// a live entry for (idTargetX, peer.Address).
@@ -258,7 +258,7 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 	// — this test is about handleRoutePoison's gate, not the
 	// announce-ingest one).
 	svc.peerMu.Lock()
-	svc.armRouteQuarantineLocked(domain.PeerIdentityFromWire(peer.Address), "test", time.Now())
+	svc.armRouteQuarantineLocked(provenIdentitySubject(domain.PeerIdentityFromWire(peer.Address)), "test", time.Now())
 	svc.peerMu.Unlock()
 
 	// Seed a transit claim through the sender so the poison frame
@@ -301,7 +301,7 @@ func TestHandleRoutePoison_QuarantinedSender_DropsSilently(t *testing.T) {
 	sig := ed25519.Sign(peer.PrivateKey, frame.CanonicalSenderSigBytes())
 	frame.SenderSig = base64.StdEncoding.EncodeToString(sig)
 
-	svc.handleRoutePoison(domain.PeerIdentityFromWire(peer.Address), frame)
+	svc.handleRoutePoison(provenRoutingSender(domain.PeerIdentityFromWire(peer.Address)), frame)
 
 	// The claim must still be live — quarantine gate fired before
 	// InvalidateUplinkClaim.
@@ -343,7 +343,7 @@ func TestHandleRoutePoison_AbsentSigAccepted(t *testing.T) {
 		t.Fatalf("precondition: target must be reachable via idPeerB before poison")
 	}
 
-	svc.handleRoutePoison(idPeerB, protocol.RoutePoisonFrame{
+	svc.handleRoutePoison(provenRoutingSender(idPeerB), protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
 		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonLoopDetected,
@@ -399,7 +399,7 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 	// First poison: live claim → withdraw → tombstone at SeqNo=6
 	// (seededSeqNo + 1, the strictly-newer SeqNo InvalidateUplinkClaim
 	// synthesises against the live claim).
-	svc.handleRoutePoison(idPeerB, frame)
+	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
 	first := svc.routingTable.InspectTriple(routing.RouteTriple{
 		Identity: idTargetX,
 		Origin:   idPeerB,
@@ -417,7 +417,7 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 
 	// Second poison for the same (identity, sender): the live-claim
 	// gate makes this a clean no-op — tombstone SeqNo must NOT move.
-	svc.handleRoutePoison(idPeerB, frame)
+	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
 	second := svc.routingTable.InspectTriple(routing.RouteTriple{
 		Identity: idTargetX,
 		Origin:   idPeerB,
@@ -431,7 +431,7 @@ func TestHandleRoutePoison_RepeatedPoisonIsIdempotent(t *testing.T) {
 	}
 
 	// Third poison drives the point home: still the same SeqNo.
-	svc.handleRoutePoison(idPeerB, frame)
+	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
 	third := svc.routingTable.InspectTriple(routing.RouteTriple{
 		Identity: idTargetX,
 		Origin:   idPeerB,
@@ -486,17 +486,17 @@ func TestHandleRoutePoison_RateLimited(t *testing.T) {
 	// per-route budgeting — one call with cost=burst drops the
 	// bucket to exactly zero, which is what we want for the
 	// "next allow must fail" precondition).
-	if !svc.announceLimiter.allow(idPeerB, announceBurstRoutesPerPeer) {
+	if !svc.announceLimiter.allow(provenIdentitySubject(idPeerB), announceBurstRoutesPerPeer) {
 		t.Fatalf("precondition: full-burst allow against fresh bucket must pass")
 	}
-	if svc.announceLimiter.allow(idPeerB, 1) {
+	if svc.announceLimiter.allow(provenIdentitySubject(idPeerB), 1) {
 		t.Fatalf("precondition: bucket should be exhausted after burst drain")
 	}
 	// Re-seed exactly zero tokens to remove any micro-refill that
 	// elapsed between the drain and this point. After this the next
 	// poison allow (cost=1) is precisely the one that should fail.
 	svc.announceLimiter.mu.Lock()
-	svc.announceLimiter.buckets[idPeerB].tokens = 0
+	svc.announceLimiter.buckets[provenIdentitySubject(idPeerB)].tokens = 0
 	svc.announceLimiter.mu.Unlock()
 
 	frame := protocol.RoutePoisonFrame{
@@ -508,7 +508,7 @@ func TestHandleRoutePoison_RateLimited(t *testing.T) {
 		// is gated behind the rate-limit), but absence keeps the test
 		// focused on the limiter and avoids per-test key plumbing.
 	}
-	svc.handleRoutePoison(idPeerB, frame)
+	svc.handleRoutePoison(provenRoutingSender(idPeerB), frame)
 
 	// Storage must not have been touched: the live transit claim
 	// stays in Lookup.
@@ -582,7 +582,7 @@ func TestHandleRoutePoison_FansOutWhenNoBackupUplink(t *testing.T) {
 	}
 done:
 
-	svc.handleRoutePoison(senderID, protocol.RoutePoisonFrame{
+	svc.handleRoutePoison(provenRoutingSender(senderID), protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
 		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
@@ -662,7 +662,7 @@ func TestHandleRoutePoison_NoFanOutWhenBackupUplinkSurvives(t *testing.T) {
 	}
 done:
 
-	svc.handleRoutePoison(senderID, protocol.RoutePoisonFrame{
+	svc.handleRoutePoison(provenRoutingSender(senderID), protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
 		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,
@@ -687,7 +687,7 @@ func TestHandleRoutePoison_NoClaimShortCircuits(t *testing.T) {
 	svc, _ := newTestServiceWithIdentity(t)
 	svc.eventBus = newStormBus(t)
 
-	svc.handleRoutePoison(idPeerB, protocol.RoutePoisonFrame{
+	svc.handleRoutePoison(provenRoutingSender(idPeerB), protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,
 		Identity: idTargetX.String(),
 		Reason:   protocol.RoutePoisonReasonUplinkLost,

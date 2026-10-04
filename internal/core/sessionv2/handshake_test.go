@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -252,9 +251,9 @@ func TestARelayedDialerProofIsRefusedWhereV1AcceptedIt(t *testing.T) {
 
 	// The same relay under v1: B's challenge, signed by X for M, verifies at B.
 	challengeFromB := "challenge-issued-by-B"
-	signedByX := identity.SignPayload(x.id, connauth.SessionAuthPayload(challengeFromB, x.id.Address))
+	signedByX := identity.SignPayload(x.id, protocol.SessionAuthPayload(challengeFromB, x.id.Address))
 	if err := identity.VerifyPayload(x.id.Address, identity.PublicKeyBase64(x.id.PublicKey),
-		connauth.SessionAuthPayload(challengeFromB, x.id.Address), signedByX); err != nil {
+		protocol.SessionAuthPayload(challengeFromB, x.id.Address), signedByX); err != nil {
 		t.Fatalf("the v1 contrast no longer holds (%v): the test no longer shows what v2 fixes", err)
 	}
 }

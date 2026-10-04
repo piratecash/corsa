@@ -432,7 +432,7 @@ func (s *Service) forgetPeerReactions(peer domain.PeerIdentity, beliefs bool) {
 				delete(d.refusedAt, key)
 			}
 		}
-		delete(d.refusedTypeAt, peer)
+		delete(d.typeRefusalShown, peer)
 		// And the record of having spoken to them, which is an admission in its
 		// own right: left behind, it lets a REMOVED contact keep sending — an
 		// answer of theirs would still be believed, and what it writes would
@@ -537,19 +537,9 @@ func (d *dmControlSender) takeDue(now time.Time) (
 			expired[key.peer] = struct{}{}
 		}
 	}
-	for peer, at := range d.refusedTypeAt {
-		if now.Sub(at) >= dmControlUnsupportedTTL {
-			delete(d.refusedTypeAt, peer)
-			expired[peer] = struct{}{}
-		}
-	}
-	// Only the peers left with NO reason to be held back: one belief can expire
-	// while the other still stands, and the answer the UI asks for is the union.
+	// Only the peers left with no signed refusal still standing.
 	var cleared []domain.PeerIdentity
 	for peer := range expired {
-		if _, held := d.refusedTypeAt[peer]; held {
-			continue
-		}
 		if _, held := d.refusedAt[refusalKey{peer: peer, command: domain.DMControlReactions}]; held {
 			continue
 		}

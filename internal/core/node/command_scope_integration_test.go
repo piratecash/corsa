@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -53,7 +52,7 @@ func authenticatedConn(t *testing.T, svc *Service) (net.Conn, *bufio.Reader, *id
 	writeJSONFrame(t, conn, protocol.Frame{
 		Type:      "auth_session",
 		Address:   id.Address,
-		Signature: identity.SignPayload(id, connauth.SessionAuthPayload(welcome.Challenge, id.Address)),
+		Signature: identity.SignPayload(id, protocol.SessionAuthPayload(welcome.Challenge, id.Address)),
 	})
 	authOK := readJSONTestFrame(t, reader)
 	if authOK.Type != "auth_ok" {
@@ -607,7 +606,7 @@ func TestGAP0_MobileClientWithIdentityGetsChallenge(t *testing.T) {
 	writeJSONFrame(t, conn, protocol.Frame{
 		Type:      "auth_session",
 		Address:   id.Address,
-		Signature: identity.SignPayload(id, connauth.SessionAuthPayload(welcome.Challenge, id.Address)),
+		Signature: identity.SignPayload(id, protocol.SessionAuthPayload(welcome.Challenge, id.Address)),
 	})
 	authOK := readJSONTestFrame(t, reader)
 	if authOK.Type != "auth_ok" {

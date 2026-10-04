@@ -28,7 +28,7 @@ func peerIdentity(seed byte) domain.PeerIdentity {
 // ClaimedIngress demands one), so a record bucketed by a bare NAME is a record
 // no receive path produces.
 func remoteArrival(id domain.PeerIdentity) datagram.IngressPeer {
-	return datagram.ProvenIngress(replayChannel(id.String()), id)
+	return datagram.ProvenIngressForTest(replayChannel(id.String()), id)
 }
 
 func newBaseCache(t *testing.T, clock *manualClock, capacity int) *datagram.BaseReplayCache {

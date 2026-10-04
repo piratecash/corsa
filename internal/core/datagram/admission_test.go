@@ -62,11 +62,11 @@ func TestAdmissionCryptoBudgetRunsOutBeforeBytes(t *testing.T) {
 
 	admitted, verified := 0, 0
 	for i := 0; i < budget.FrameBurst; i++ {
-		if !admission.Admit(ProvenIdentityKey(peer), smallSignedFrame) {
+		if !admission.Admit(provenIdentityKey(peer), smallSignedFrame) {
 			break
 		}
 		admitted++
-		if !admission.ChargeVerifyFor(ProvenIdentityKey(peer)) {
+		if !admission.ChargeVerifyFor(provenIdentityKey(peer)) {
 			break
 		}
 		verified++
@@ -96,7 +96,7 @@ func TestAdmissionCryptoBudgetRunsOutBeforeBytes(t *testing.T) {
 	}
 	// And the byte budget is genuinely still usable: a full-size bulk frame
 	// still fits.
-	if !admission.Admit(ProvenIdentityKey(peer), MaxFrameBytes(domain.DatagramClassBulk)) {
+	if !admission.Admit(provenIdentityKey(peer), MaxFrameBytes(domain.DatagramClassBulk)) {
 		t.Fatal("the byte budget was exhausted after all")
 	}
 }
@@ -120,16 +120,16 @@ func TestAdmissionClassDoesNotWidenThePeerBudget(t *testing.T) {
 	// Spend the whole frame burst on control-sized frames.
 	const controlBytes = 500
 	for i := 0; i < limits.Peer.FrameBurst; i++ {
-		if !admission.Admit(ProvenIdentityKey(peer), controlBytes) {
+		if !admission.Admit(provenIdentityKey(peer), controlBytes) {
 			t.Fatalf("control frame %d refused inside the burst", i)
 		}
 	}
 	// A bulk frame now finds the SAME empty bucket. Its size is irrelevant:
 	// nothing in the controller reads the class at all.
-	if admission.Admit(ProvenIdentityKey(peer), MaxFrameBytes(domain.DatagramClassBulk)) {
+	if admission.Admit(provenIdentityKey(peer), MaxFrameBytes(domain.DatagramClassBulk)) {
 		t.Fatal("a bulk frame was admitted on an exhausted per-neighbour budget: the class widened it")
 	}
-	if admission.Admit(ProvenIdentityKey(peer), controlBytes) {
+	if admission.Admit(provenIdentityKey(peer), controlBytes) {
 		t.Fatal("a second control frame was admitted on an exhausted budget")
 	}
 
@@ -137,10 +137,10 @@ func TestAdmissionClassDoesNotWidenThePeerBudget(t *testing.T) {
 	// leave control traffic a private allowance either.
 	clock.advance(time.Hour)
 	other := domaintest.ID("bulk-then-control")
-	for admission.Admit(ProvenIdentityKey(other), 2_000) {
+	for admission.Admit(provenIdentityKey(other), 2_000) {
 		// Drain the byte bucket; the frame bucket is deeper in bytes terms.
 	}
-	if admission.Admit(ProvenIdentityKey(other), controlBytes) {
+	if admission.Admit(provenIdentityKey(other), controlBytes) {
 		t.Fatal("a control frame was admitted after bulk drained the shared budget")
 	}
 }
@@ -156,17 +156,17 @@ func TestAdmissionBudgetIsPerAuthenticatedIdentity(t *testing.T) {
 	loud, quiet := domaintest.ID("loud"), domaintest.ID("quiet")
 
 	for i := 0; i < limits.Peer.FrameBurst; i++ {
-		if !admission.Admit(ProvenIdentityKey(loud), 100) {
+		if !admission.Admit(provenIdentityKey(loud), 100) {
 			t.Fatalf("frame %d of the burst refused", i)
 		}
 	}
-	if admission.Admit(ProvenIdentityKey(loud), 100) {
+	if admission.Admit(provenIdentityKey(loud), 100) {
 		t.Fatal("the loud neighbour kept spending past its burst")
 	}
-	if !admission.Admit(ProvenIdentityKey(quiet), 100) {
+	if !admission.Admit(provenIdentityKey(quiet), 100) {
 		t.Fatal("the quiet neighbour was charged for its neighbour's flood")
 	}
-	if !admission.ChargeVerifyFor(ProvenIdentityKey(quiet)) {
+	if !admission.ChargeVerifyFor(provenIdentityKey(quiet)) {
 		t.Fatal("the quiet neighbour lost its verification budget too")
 	}
 }
@@ -187,27 +187,27 @@ func TestAdmissionBucketsRefillAndCapAtTheBurst(t *testing.T) {
 	peer := domaintest.ID("patient")
 
 	for i := 0; i < 2; i++ {
-		if !admission.Admit(ProvenIdentityKey(peer), 10) {
+		if !admission.Admit(provenIdentityKey(peer), 10) {
 			t.Fatalf("frame %d refused inside the burst", i)
 		}
 	}
-	if admission.Admit(ProvenIdentityKey(peer), 10) {
+	if admission.Admit(provenIdentityKey(peer), 10) {
 		t.Fatal("the burst did not end")
 	}
 
 	clock.advance(time.Second)
-	if !admission.Admit(ProvenIdentityKey(peer), 10) {
+	if !admission.Admit(provenIdentityKey(peer), 10) {
 		t.Fatal("a second of silence bought no frames back")
 	}
 
 	// An hour of silence must not bank an hour of frames.
 	clock.advance(time.Hour)
 	for i := 0; i < 2; i++ {
-		if !admission.Admit(ProvenIdentityKey(peer), 10) {
+		if !admission.Admit(provenIdentityKey(peer), 10) {
 			t.Fatalf("refill %d refused", i)
 		}
 	}
-	if admission.Admit(ProvenIdentityKey(peer), 10) {
+	if admission.Admit(provenIdentityKey(peer), 10) {
 		t.Fatal("the bucket banked more than its burst while idle")
 	}
 }
@@ -221,14 +221,14 @@ func TestAdmissionSurvivesABackwardClock(t *testing.T) {
 	admission := NewPeerAdmission(AdmissionConfig{Clock: clock.Now, Budget: DefaultLimits().Peer})
 	peer := domaintest.ID("time-traveller")
 
-	if !admission.Admit(ProvenIdentityKey(peer), 100) {
+	if !admission.Admit(provenIdentityKey(peer), 100) {
 		t.Fatal("the first frame was refused")
 	}
 	clock.advance(-time.Hour)
-	if !admission.Admit(ProvenIdentityKey(peer), 100) {
+	if !admission.Admit(provenIdentityKey(peer), 100) {
 		t.Fatal("a backward clock refused a frame")
 	}
-	if !admission.ChargeVerifyFor(ProvenIdentityKey(peer)) {
+	if !admission.ChargeVerifyFor(provenIdentityKey(peer)) {
 		t.Fatal("a backward clock refused a verification")
 	}
 }
@@ -248,11 +248,11 @@ func TestAdmissionRefusalChargesNothing(t *testing.T) {
 	admission := NewPeerAdmission(AdmissionConfig{Clock: clock.Now, Budget: limits.Peer})
 	peer := domaintest.ID("refused")
 
-	if !admission.Admit(ProvenIdentityKey(peer), 1_000) {
+	if !admission.Admit(provenIdentityKey(peer), 1_000) {
 		t.Fatal("the first frame was refused")
 	}
 	for i := 0; i < 5; i++ {
-		if admission.Admit(ProvenIdentityKey(peer), 1_000) {
+		if admission.Admit(provenIdentityKey(peer), 1_000) {
 			t.Fatalf("frame %d passed an empty frame bucket", i)
 		}
 	}
@@ -260,7 +260,7 @@ func TestAdmissionRefusalChargesNothing(t *testing.T) {
 	// one frame's worth of budget is back, and the byte bucket still holds
 	// the 9 000 bytes the refusals never spent.
 	clock.advance(time.Second)
-	if !admission.Admit(ProvenIdentityKey(peer), 9_000) {
+	if !admission.Admit(provenIdentityKey(peer), 9_000) {
 		t.Fatal("the refused frames were charged bytes anyway")
 	}
 
@@ -289,15 +289,15 @@ func TestAdmissionBoundsTheBucketMap(t *testing.T) {
 	admission := NewPeerAdmission(AdmissionConfig{Clock: clock.Now, Budget: limits.Peer})
 
 	for i := 0; i < 64; i++ {
-		admission.Admit(ProvenIdentityKey(domaintest.ID(string(rune('a'+i%26))+string(rune('0'+i/26)))), 10)
+		admission.Admit(provenIdentityKey(domaintest.ID(string(rune('a'+i%26))+string(rune('0'+i/26)))), 10)
 	}
 	if tracked := admission.TrackedPeers(); tracked > limits.Peer.TrackedPeers {
 		t.Fatalf("tracked %d buckets, cap is %d", tracked, limits.Peer.TrackedPeers)
 	}
 
 	// Forget is the session-close path and must be safe for an unknown peer.
-	admission.Forget(ProvenIdentityKey(domaintest.ID("never-seen")))
-	admission.Forget(ProvenIdentityKey(domaintest.ID("a0")))
+	admission.Forget(provenIdentityKey(domaintest.ID("never-seen")))
+	admission.Forget(provenIdentityKey(domaintest.ID("a0")))
 	// And for a key that names nobody at all.
 	admission.Forget(AdmissionKey{})
 }
@@ -317,7 +317,7 @@ func TestAdmissionKeyNamespacesDoNotCollide(t *testing.T) {
 	admission := NewPeerAdmission(AdmissionConfig{Clock: clock.Now, Budget: limits.Peer})
 
 	dialed := DialedAddressKey(domain.PeerAddress("10.0.0.9:64646"))
-	proven := ProvenIdentityKey(domaintest.ID("10.0.0.9:64646"))
+	proven := provenIdentityKey(domaintest.ID("10.0.0.9:64646"))
 
 	for i := 0; i < limits.Peer.FrameBurst; i++ {
 		if !admission.Admit(dialed, 100) {
@@ -356,7 +356,7 @@ func TestAdmissionRefusesTheZeroKey(t *testing.T) {
 	if admission.ChargeVerifyFor(AdmissionKey{}) {
 		t.Fatal("the zero key bought a verification")
 	}
-	if admission.Admit(ProvenIdentityKey(domain.PeerIdentity{}), 100) {
+	if admission.Admit(provenIdentityKey(domain.PeerIdentity{}), 100) {
 		t.Fatal("a zero identity produced a usable key")
 	}
 	if admission.Admit(DialedAddressKey(domain.PeerAddress("   ")), 100) {
@@ -381,7 +381,7 @@ func TestAdmissionRefusesTheZeroKey(t *testing.T) {
 	// The negative control: a real key on the same controller still works, so
 	// the assertions above cannot pass because the controller refuses
 	// everything.
-	if !admission.Admit(ProvenIdentityKey(domaintest.ID("real")), 100) {
+	if !admission.Admit(provenIdentityKey(domaintest.ID("real")), 100) {
 		t.Fatal("a well-formed key was refused")
 	}
 }
@@ -431,7 +431,7 @@ func TestAdmissionServesBothStagesFromOneBucket(t *testing.T) {
 	admission := NewPeerAdmission(AdmissionConfig{Budget: limits.Peer})
 	var crypto cryptoBudget = admission
 
-	key := ProvenIdentityKey(domaintest.ID("seams"))
+	key := provenIdentityKey(domaintest.ID("seams"))
 	if !admission.Admit(key, 100) {
 		t.Fatal("Admit refused the first frame")
 	}
@@ -477,7 +477,7 @@ func TestPipelineRefusesSignedFloodOnTheCryptoBudget(t *testing.T) {
 	// controller and the SAME key, which is what makes the AdmittedBytes
 	// assertion at the end an assertion about one neighbour's budget.
 	receiver.pipeline.crypto = admission
-	key := ProvenIdentityKey(sender)
+	key := provenIdentityKey(sender)
 
 	var frameBytes int
 	delivered, refused := 0, 0
@@ -546,7 +546,7 @@ func TestPipelineRefusesSignedFloodOnTheCryptoBudget(t *testing.T) {
 //
 // The mutation this kills: restoring `p.chargeVerify(arrival.peer)` in
 // verifyRouted, or deriving the key inside chargeVerify. Either one puts both
-// batches below on ProvenIdentityKey(owner), and the owner's batch — the
+// batches below on provenIdentityKey(owner), and the owner's batch — the
 // positive control — is then refused in full.
 func TestVerifyBudgetIsChargedToTheKeyAndNotToTheClaimedIdentity(t *testing.T) {
 	t.Parallel()
@@ -581,7 +581,7 @@ func TestVerifyBudgetIsChargedToTheKeyAndNotToTheClaimedIdentity(t *testing.T) {
 	// Neighbour one: an ACCEPTED connection, identity proven by the handshake.
 	// This is the node whose budget must not be spendable by anybody else.
 	owner := domaintest.ID("proven-owner")
-	ownerKey := ProvenIdentityKey(owner)
+	ownerKey := provenIdentityKey(owner)
 	// Neighbour two: a session THIS node dialled, which proves nothing about
 	// the remote — so it is billed to the host:port we dialled — and which
 	// claims to be `owner` in its welcome.
@@ -667,7 +667,7 @@ func TestForgetDoesNotForgiveSpentBudget(t *testing.T) {
 	peer := domaintest.ID("reconnecting-peer")
 
 	spent := 0
-	for admission.Admit(ProvenIdentityKey(peer), budget.ByteBurst/8) {
+	for admission.Admit(provenIdentityKey(peer), budget.ByteBurst/8) {
 		spent++
 		if spent > budget.FrameBurst*4 {
 			t.Fatal("the byte budget never ran out")
@@ -675,22 +675,22 @@ func TestForgetDoesNotForgiveSpentBudget(t *testing.T) {
 	}
 
 	// The session ends and comes straight back — the attacker's own timing.
-	admission.Forget(ProvenIdentityKey(peer))
-	if admission.Admit(ProvenIdentityKey(peer), budget.ByteBurst/8) {
+	admission.Forget(provenIdentityKey(peer))
+	if admission.Admit(provenIdentityKey(peer), budget.ByteBurst/8) {
 		t.Fatal("a reconnect handed the neighbour its spent byte budget back")
 	}
 
 	// The debt is a rate limit, not a life sentence: once the bucket has
 	// refilled on its own the peer is admitted again.
 	clock.advance(time.Duration(budget.ByteBurst/budget.BytesPerSecond+1) * time.Second)
-	if !admission.Admit(ProvenIdentityKey(peer), budget.ByteBurst/8) {
+	if !admission.Admit(provenIdentityKey(peer), budget.ByteBurst/8) {
 		t.Fatal("a refilled bucket must admit again")
 	}
 
 	// A bucket that is idle AND completely refilled costs nothing to forget,
 	// so Forget still frees the memory in the ordinary case.
 	clock.advance(budget.IdleRetention + time.Second)
-	admission.Forget(ProvenIdentityKey(peer))
+	admission.Forget(provenIdentityKey(peer))
 	if admission.TrackedPeers() != 0 {
 		t.Fatalf("a fully refilled idle bucket must be dropped, tracked = %d", admission.TrackedPeers())
 	}

@@ -43,7 +43,7 @@ func replayChannel(name string) datagram.ChannelID {
 // socket the frames arrive on — which is the whole reason a bucket keyed on it
 // survives a reconnect.
 func provenArrival(id domain.PeerIdentity, session string) datagram.IngressPeer {
-	return datagram.ProvenIngress(replayChannel(id.String()+"/"+session), id)
+	return datagram.ProvenIngressForTest(replayChannel(id.String()+"/"+session), id)
 }
 
 // reserveCommitted takes a key and settles it, which is the only state a record

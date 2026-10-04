@@ -472,5 +472,5 @@ func (s *Service) forgetDatagramPeer(peer domain.PeerIdentity) {
 	if layer == nil {
 		return
 	}
-	layer.admission.Forget(datagram.ProvenIdentityKey(peer))
+	layer.admission.ForgetProvenIdentity(peer)
 }

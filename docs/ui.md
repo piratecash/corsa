@@ -672,9 +672,18 @@ The decision is stored first and only then handed to the peer, over the
 `dm_control` datagram type. The send is deliberately asynchronous — the node
 batches a burst of taps into one frame about a second and a half later — so the
 UI never blocks a tap on the network and never reports the send's outcome. The
-one thing it does report is a peer whose build cannot receive reactions at all
-(`ReactionsUnsupportedBy`): that reaction is never going to be seen by anyone
-else, and saying nothing would make it look exactly like one that has been.
+one thing it does report is a peer CONFIRMED unable to receive reactions
+(`ReactionsSupportOf` → `absent`): the peer's own signed answer, or every live
+connection a send would use declared no `dm_control` — that reaction is never
+going to be seen by anyone else, and saying nothing would make it look exactly
+like one that has been. "No current information" (`unknown`: no live connection
+whose declaration can be read, and no signed answer) is a different answer and
+is NOT shown as a refusal — nor as "offline", which it does not mean: the contact
+may be reachable through routes. Availability and the outbox are separate
+questions: "reaction queued" may only be said when a reaction actually is in the
+queue (`QueuedReactionsFor`), never derived from availability. A connection's
+missing declaration is not remembered past that connection, so the notice is
+taken back when it closes (docs/refactoring/n1-legacy-residual.md §3).
 
 A peer's reactions arrive on the event-bus goroutine, which owns none of the
 window's state. It therefore raises one atomic flag and asks for a frame; the
@@ -2289,10 +2298,19 @@ Left и Right не уходят со своей строки: шаг по инд
 Решение сначала сохраняется и только потом уходит пиру — типом датаграмм
 `dm_control`. Отправка намеренно асинхронна: узел собирает пачку тапов в один
 кадр примерно через полторы секунды, поэтому UI не блокирует тап на сети и не
-сообщает исход отправки. Сообщает он ровно одно — что сборка собеседника вообще
-не умеет принимать реакции (`ReactionsUnsupportedBy`): такую реакцию никто,
-кроме автора, не увидит никогда, а молчание сделало бы её неотличимой от
-доставленной.
+сообщает исход отправки. Сообщает он ровно одно — что ПОДТВЕРЖДЕНО: собеседник
+не может принимать реакции (`ReactionsSupportOf` → `absent`): его собственный
+подписанный ответ или то, что ни одно живое соединение, через которое пошла бы
+отправка, не объявило `dm_control`. Такую реакцию никто, кроме автора, не
+увидит никогда, а молчание сделало бы её неотличимой от доставленной. «Нет
+актуальных сведений» (`unknown`: нет живого соединения, чьё объявление можно
+прочитать, и нет подписанного ответа) — другой ответ, и отказом он НЕ
+показывается — как и «офлайн», которого он не означает: собеседник может быть
+достижим через маршруты. Доступность и очередь — разные вопросы: «реакция в
+очереди» можно говорить только когда реакция действительно стоит в очереди
+(`QueuedReactionsFor`), а не выводить из доступности. Отсутствие объявления у
+соединения не помнится дольше самого соединения, поэтому надпись снимается,
+когда оно закрывается (docs/refactoring/n1-legacy-residual.md §3).
 
 Реакции пира приходят в горутине шины событий, которой не принадлежит ничего из
 состояния окна. Поэтому она поднимает один атомарный флаг и просит кадр, а

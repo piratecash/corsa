@@ -23,8 +23,8 @@ import (
 // and the "already-allocated" branches.
 func newQuarantineFixture() *Service {
 	return &Service{
-		peerQuarantine:        make(map[domain.PeerIdentity]routeQuarantineEntry),
-		peerDisconnectHistory: make(map[domain.PeerIdentity][]time.Time),
+		peerQuarantine:        make(map[penaltySubject]routeQuarantineEntry),
+		peerDisconnectHistory: make(map[penaltySubject][]time.Time),
 	}
 }
 
@@ -39,7 +39,7 @@ func TestQuarantine_NoTriggerBelowThreshold(t *testing.T) {
 
 	svc.peerMu.Lock()
 	for i := 0; i < quarantineDisconnectThreshold-1; i++ {
-		svc.maybeArmRouteQuarantineOnCloseLocked(peer, now.Add(time.Duration(i)*time.Second))
+		svc.maybeArmRouteQuarantineOnCloseLocked(provenIdentitySubject(peer), now.Add(time.Duration(i)*time.Second))
 	}
 	// Use the *Locked variant with the SAME controlled `now` we
 	// armed with so the test stays deterministic: the public
@@ -47,7 +47,7 @@ func TestQuarantine_NoTriggerBelowThreshold(t *testing.T) {
 	// silently start failing in any test that armed with a fixed
 	// past date once wall-clock time crossed
 	// armTime + quarantineBaseDuration.
-	banned := svc.isPeerInRouteQuarantineLocked(peer, now.Add(time.Second))
+	banned := svc.isSubjectInRouteQuarantineLocked(provenIdentitySubject(peer), now.Add(time.Second))
 	svc.peerMu.Unlock()
 
 	if banned {
@@ -67,11 +67,11 @@ func TestQuarantine_TriggersOnDisconnectRate(t *testing.T) {
 
 	svc.peerMu.Lock()
 	for i := 0; i < quarantineDisconnectThreshold; i++ {
-		svc.maybeArmRouteQuarantineOnCloseLocked(peer, now.Add(time.Duration(i)*time.Second))
+		svc.maybeArmRouteQuarantineOnCloseLocked(provenIdentitySubject(peer), now.Add(time.Duration(i)*time.Second))
 	}
 	// Controlled now (see TestQuarantine_NoTriggerBelowThreshold for
 	// the rationale on using *Locked instead of the public helper).
-	banned := svc.isPeerInRouteQuarantineLocked(peer, now.Add(time.Second))
+	banned := svc.isSubjectInRouteQuarantineLocked(provenIdentitySubject(peer), now.Add(time.Second))
 	svc.peerMu.Unlock()
 
 	if !banned {
@@ -79,7 +79,7 @@ func TestQuarantine_TriggersOnDisconnectRate(t *testing.T) {
 	}
 
 	svc.peerMu.RLock()
-	entry := svc.peerQuarantine[peer]
+	entry := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 	if entry.Reason != "disconnect_storm" {
 		t.Fatalf("entry.Reason = %q, want disconnect_storm", entry.Reason)
@@ -102,7 +102,7 @@ func TestQuarantine_EventsOutsideWindowDoNotCount(t *testing.T) {
 	// Three old events (outside the window).
 	svc.peerMu.Lock()
 	for i := 0; i < 3; i++ {
-		svc.recordPeerDisconnectLocked(peer, t0.Add(time.Duration(i)*time.Second))
+		svc.recordPeerDisconnectLocked(provenIdentitySubject(peer), t0.Add(time.Duration(i)*time.Second))
 	}
 	svc.peerMu.Unlock()
 
@@ -110,7 +110,7 @@ func TestQuarantine_EventsOutsideWindowDoNotCount(t *testing.T) {
 	later := t0.Add(quarantineDisconnectWindow + time.Minute)
 
 	svc.peerMu.Lock()
-	if svc.disconnectRateExceedsLocked(peer, later) {
+	if svc.disconnectRateExceedsLocked(provenIdentitySubject(peer), later) {
 		svc.peerMu.Unlock()
 		t.Fatal("expected old events to be excluded by sliding window")
 	}
@@ -129,15 +129,15 @@ func TestQuarantine_ExpiryRestoresNormalProcessing(t *testing.T) {
 
 	svc.peerMu.Lock()
 	for i := 0; i < quarantineDisconnectThreshold; i++ {
-		svc.maybeArmRouteQuarantineOnCloseLocked(peer, now.Add(time.Duration(i)*time.Second))
+		svc.maybeArmRouteQuarantineOnCloseLocked(provenIdentitySubject(peer), now.Add(time.Duration(i)*time.Second))
 	}
-	armedEntry := svc.peerQuarantine[peer]
+	armedEntry := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.Unlock()
 
 	afterCooldown := armedEntry.Until.Add(time.Second)
 
 	svc.peerMu.RLock()
-	stillBanned := svc.isPeerInRouteQuarantineLocked(peer, afterCooldown)
+	stillBanned := svc.isSubjectInRouteQuarantineLocked(provenIdentitySubject(peer), afterCooldown)
 	svc.peerMu.RUnlock()
 	if stillBanned {
 		t.Fatal("peer still in quarantine after Until elapsed")
@@ -157,9 +157,9 @@ func TestQuarantine_RecidivismDoubles(t *testing.T) {
 		svc.peerMu.Lock()
 		defer svc.peerMu.Unlock()
 		for i := 0; i < quarantineDisconnectThreshold; i++ {
-			svc.maybeArmRouteQuarantineOnCloseLocked(peer, at.Add(time.Duration(i)*time.Second))
+			svc.maybeArmRouteQuarantineOnCloseLocked(provenIdentitySubject(peer), at.Add(time.Duration(i)*time.Second))
 		}
-		return svc.peerQuarantine[peer]
+		return svc.peerQuarantine[provenIdentitySubject(peer)]
 	}
 
 	first := armCycle(now)
@@ -192,7 +192,7 @@ func TestQuarantine_RecidivismResetsAfterQuietPeriod(t *testing.T) {
 
 	svc.peerMu.Lock()
 	for i := 0; i < quarantineDisconnectThreshold; i++ {
-		svc.maybeArmRouteQuarantineOnCloseLocked(peer, now.Add(time.Duration(i)*time.Second))
+		svc.maybeArmRouteQuarantineOnCloseLocked(provenIdentitySubject(peer), now.Add(time.Duration(i)*time.Second))
 	}
 	svc.peerMu.Unlock()
 
@@ -201,9 +201,9 @@ func TestQuarantine_RecidivismResetsAfterQuietPeriod(t *testing.T) {
 
 	svc.peerMu.Lock()
 	for i := 0; i < quarantineDisconnectThreshold; i++ {
-		svc.maybeArmRouteQuarantineOnCloseLocked(peer, later.Add(time.Duration(i)*time.Second))
+		svc.maybeArmRouteQuarantineOnCloseLocked(provenIdentitySubject(peer), later.Add(time.Duration(i)*time.Second))
 	}
-	entry := svc.peerQuarantine[peer]
+	entry := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.Unlock()
 
 	if entry.Strikes != 1 {
@@ -228,7 +228,7 @@ func TestQuarantine_IsPeerInRouteQuarantineEmptyIdentity(t *testing.T) {
 	t.Parallel()
 
 	svc := newQuarantineFixture()
-	if svc.IsPeerInRouteQuarantine(domain.PeerIdentity{}) {
+	if svc.isSubjectInRouteQuarantine(provenIdentitySubject(domain.PeerIdentity{})) {
 		t.Fatal("empty identity should not be reported as quarantined")
 	}
 }
@@ -247,14 +247,14 @@ func TestQuarantine_PurgeRemovesStaleEntries(t *testing.T) {
 
 	svc.peerMu.Lock()
 	// "Old": LastArmed long ago, Until long elapsed.
-	svc.peerQuarantine[old] = routeQuarantineEntry{
+	svc.peerQuarantine[provenIdentitySubject(old)] = routeQuarantineEntry{
 		Until:     now.Add(-time.Hour),
 		LastArmed: now.Add(-2 * time.Hour),
 		Strikes:   3,
 		Reason:    "disconnect_storm",
 	}
 	// "Recent": Until just elapsed, LastArmed still recent.
-	svc.peerQuarantine[recent] = routeQuarantineEntry{
+	svc.peerQuarantine[provenIdentitySubject(recent)] = routeQuarantineEntry{
 		Until:     now.Add(-time.Second),
 		LastArmed: now.Add(-time.Minute),
 		Strikes:   2,
@@ -264,8 +264,8 @@ func TestQuarantine_PurgeRemovesStaleEntries(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	svc.peerMu.RLock()
-	_, oldPresent := svc.peerQuarantine[old]
-	_, recentPresent := svc.peerQuarantine[recent]
+	_, oldPresent := svc.peerQuarantine[provenIdentitySubject(old)]
+	_, recentPresent := svc.peerQuarantine[provenIdentitySubject(recent)]
 	svc.peerMu.RUnlock()
 
 	if oldPresent {
@@ -315,9 +315,9 @@ func TestNextStrikeCount(t *testing.T) {
 // can exercise both arming and "already-allocated" branches.
 func newChattyFixture() *Service {
 	return &Service{
-		peerQuarantine:        make(map[domain.PeerIdentity]routeQuarantineEntry),
-		peerDisconnectHistory: make(map[domain.PeerIdentity][]time.Time),
-		peerAnnounceHistory:   make(map[domain.PeerIdentity][]time.Time),
+		peerQuarantine:        make(map[penaltySubject]routeQuarantineEntry),
+		peerDisconnectHistory: make(map[penaltySubject][]time.Time),
+		peerAnnounceHistory:   make(map[penaltySubject][]time.Time),
 	}
 }
 
@@ -333,10 +333,10 @@ func TestChattyRoutes_NoTriggerBelowThreshold(t *testing.T) {
 
 	svc.peerMu.Lock()
 	for i := 0; i < chattyAnnounceThreshold-1; i++ {
-		svc.recordPeerAnnounceLocked(peer, now.Add(time.Duration(i)*time.Millisecond))
+		svc.recordPeerAnnounceLocked(provenIdentitySubject(peer), now.Add(time.Duration(i)*time.Millisecond))
 	}
-	exceeds := svc.announceRateExceedsLocked(peer, now)
-	banned := svc.isPeerInRouteQuarantineLocked(peer, now.Add(time.Second))
+	exceeds := svc.announceRateExceedsLocked(provenIdentitySubject(peer), now)
+	banned := svc.isSubjectInRouteQuarantineLocked(provenIdentitySubject(peer), now.Add(time.Second))
 	svc.peerMu.Unlock()
 
 	if exceeds {
@@ -362,11 +362,11 @@ func TestChattyRoutes_TriggersAtThreshold(t *testing.T) {
 	// handlers. Use a tight inter-arrival to fit inside the
 	// chattyAnnounceWindow trivially.
 	for i := 0; i < chattyAnnounceThreshold; i++ {
-		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*time.Millisecond))
+		svc.recordInboundAnnounceAndMaybeArm(provenIdentitySubject(peer), base.Add(time.Duration(i)*time.Millisecond))
 	}
 
 	svc.peerMu.RLock()
-	entry, ok := svc.peerQuarantine[peer]
+	entry, ok := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 
 	if !ok {
@@ -397,10 +397,10 @@ func TestChattyRoutes_EventsOutsideWindowDoNotCount(t *testing.T) {
 	farPast := base.Add(-chattyAnnounceWindow - time.Hour)
 	svc.peerMu.Lock()
 	for i := 0; i < chattyAnnounceThreshold-1; i++ {
-		svc.recordPeerAnnounceLocked(peer, farPast.Add(time.Duration(i)*time.Millisecond))
+		svc.recordPeerAnnounceLocked(provenIdentitySubject(peer), farPast.Add(time.Duration(i)*time.Millisecond))
 	}
-	svc.recordPeerAnnounceLocked(peer, base)
-	exceeds := svc.announceRateExceedsLocked(peer, base)
+	svc.recordPeerAnnounceLocked(provenIdentitySubject(peer), base)
+	exceeds := svc.announceRateExceedsLocked(provenIdentitySubject(peer), base)
 	svc.peerMu.Unlock()
 
 	if exceeds {
@@ -424,10 +424,10 @@ func TestChattyRoutes_ReArmsOngoingQuarantineAfterDebounce(t *testing.T) {
 	// First flood — arms quarantine. Spread events tightly so the
 	// whole burst fits well inside chattyAnnounceWindow.
 	for i := 0; i < chattyAnnounceThreshold; i++ {
-		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*time.Millisecond))
+		svc.recordInboundAnnounceAndMaybeArm(provenIdentitySubject(peer), base.Add(time.Duration(i)*time.Millisecond))
 	}
 	svc.peerMu.RLock()
-	first := svc.peerQuarantine[peer]
+	first := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 	if first.Strikes != 1 {
 		t.Fatalf("first arm strikes = %d, want 1 (per-frame re-arm leaked)", first.Strikes)
@@ -439,10 +439,10 @@ func TestChattyRoutes_ReArmsOngoingQuarantineAfterDebounce(t *testing.T) {
 	// allows exactly one re-arm.
 	later := base.Add(chattyReArmDebounce + time.Second)
 	for i := 0; i < chattyAnnounceThreshold; i++ {
-		svc.recordInboundAnnounceAndMaybeArm(peer, later.Add(time.Duration(i)*time.Millisecond))
+		svc.recordInboundAnnounceAndMaybeArm(provenIdentitySubject(peer), later.Add(time.Duration(i)*time.Millisecond))
 	}
 	svc.peerMu.RLock()
-	second := svc.peerQuarantine[peer]
+	second := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 
 	if second.Strikes != first.Strikes+1 {
@@ -484,11 +484,11 @@ func TestChattyRoutes_SustainedFloodDoesNotBumpStrikesPerFrame(t *testing.T) {
 	}
 
 	for i := 0; i < floodFrames; i++ {
-		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*step))
+		svc.recordInboundAnnounceAndMaybeArm(provenIdentitySubject(peer), base.Add(time.Duration(i)*step))
 	}
 
 	svc.peerMu.RLock()
-	entry, ok := svc.peerQuarantine[peer]
+	entry, ok := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 
 	if !ok {
@@ -536,12 +536,12 @@ func TestChattyRoutes_HistoryBoundedAtThreshold(t *testing.T) {
 		step = time.Microsecond
 	}
 	for i := 0; i < floodFrames; i++ {
-		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*step))
+		svc.recordInboundAnnounceAndMaybeArm(provenIdentitySubject(peer), base.Add(time.Duration(i)*step))
 	}
 
 	svc.peerMu.RLock()
-	histLen := len(svc.peerAnnounceHistory[peer])
-	entry, ok := svc.peerQuarantine[peer]
+	histLen := len(svc.peerAnnounceHistory[provenIdentitySubject(peer)])
+	entry, ok := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 
 	if histLen > chattyAnnounceThresholdCap {
@@ -570,8 +570,8 @@ func TestChattyThreshold_ScalesWithRelayDegree(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		peerQuarantine:        map[domain.PeerIdentity]routeQuarantineEntry{},
-		peerAnnounceHistory:   map[domain.PeerIdentity][]time.Time{},
+		peerQuarantine:        map[penaltySubject]routeQuarantineEntry{},
+		peerAnnounceHistory:   map[penaltySubject][]time.Time{},
 		identityRelaySessions: map[domain.PeerIdentity]int{},
 	}
 
@@ -601,10 +601,10 @@ func TestChattyThreshold_ScalesWithRelayDegree(t *testing.T) {
 	// A burst sized to the BASE must NOT arm on the hub (below the
 	// raised effective threshold).
 	for i := 0; i < chattyAnnounceThreshold; i++ {
-		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*time.Millisecond))
+		svc.recordInboundAnnounceAndMaybeArm(provenIdentitySubject(peer), base.Add(time.Duration(i)*time.Millisecond))
 	}
 	svc.peerMu.RLock()
-	_, armedAtBase := svc.peerQuarantine[peer]
+	_, armedAtBase := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 	if armedAtBase {
 		t.Fatal("base-sized delta burst armed chatty on a hub whose effective threshold is higher")
@@ -612,10 +612,10 @@ func TestChattyThreshold_ScalesWithRelayDegree(t *testing.T) {
 
 	// Crossing the raised effective threshold DOES arm.
 	for i := chattyAnnounceThreshold; i < wantEff; i++ {
-		svc.recordInboundAnnounceAndMaybeArm(peer, base.Add(time.Duration(i)*time.Millisecond))
+		svc.recordInboundAnnounceAndMaybeArm(provenIdentitySubject(peer), base.Add(time.Duration(i)*time.Millisecond))
 	}
 	svc.peerMu.RLock()
-	_, armedAtEff := svc.peerQuarantine[peer]
+	_, armedAtEff := svc.peerQuarantine[provenIdentitySubject(peer)]
 	svc.peerMu.RUnlock()
 	if !armedAtEff {
 		t.Fatal("crossing the raised effective threshold must arm chatty on a hub")
@@ -637,9 +637,9 @@ func TestChattyRoutes_AgeoutFrontTrimsSlice(t *testing.T) {
 	// Phase 1: fill the window with threshold events.
 	svc.peerMu.Lock()
 	for i := 0; i < chattyAnnounceThreshold; i++ {
-		svc.recordPeerAnnounceLocked(peer, base.Add(time.Duration(i)*time.Millisecond))
+		svc.recordPeerAnnounceLocked(provenIdentitySubject(peer), base.Add(time.Duration(i)*time.Millisecond))
 	}
-	full := len(svc.peerAnnounceHistory[peer])
+	full := len(svc.peerAnnounceHistory[provenIdentitySubject(peer)])
 	svc.peerMu.Unlock()
 
 	if full != chattyAnnounceThreshold {
@@ -651,9 +651,9 @@ func TestChattyRoutes_AgeoutFrontTrimsSlice(t *testing.T) {
 	// fresh one.
 	later := base.Add(chattyAnnounceWindow + time.Hour)
 	svc.peerMu.Lock()
-	svc.recordPeerAnnounceLocked(peer, later)
-	afterAgeOut := len(svc.peerAnnounceHistory[peer])
-	exceeds := svc.announceRateExceedsLocked(peer, later)
+	svc.recordPeerAnnounceLocked(provenIdentitySubject(peer), later)
+	afterAgeOut := len(svc.peerAnnounceHistory[provenIdentitySubject(peer)])
+	exceeds := svc.announceRateExceedsLocked(provenIdentitySubject(peer), later)
 	svc.peerMu.Unlock()
 
 	if afterAgeOut != 1 {
@@ -678,15 +678,15 @@ func TestChattyRoutes_ShouldArmDebouncesUnderActiveQuarantine(t *testing.T) {
 	// recently. The gate must return false.
 	svc.peerMu.Lock()
 	for i := 0; i < chattyAnnounceThreshold; i++ {
-		svc.recordPeerAnnounceLocked(peer, now.Add(time.Duration(-i)*time.Millisecond))
+		svc.recordPeerAnnounceLocked(provenIdentitySubject(peer), now.Add(time.Duration(-i)*time.Millisecond))
 	}
-	svc.peerQuarantine[peer] = routeQuarantineEntry{
+	svc.peerQuarantine[provenIdentitySubject(peer)] = routeQuarantineEntry{
 		Until:     now.Add(quarantineBaseDuration),
 		LastArmed: now.Add(-time.Second), // very fresh
 		Strikes:   1,
 		Reason:    "chatty_routes",
 	}
-	skip := svc.shouldArmChattyLocked(peer, now)
+	skip := svc.shouldArmChattyLocked(provenIdentitySubject(peer), now)
 	svc.peerMu.Unlock()
 
 	if skip {
@@ -695,10 +695,10 @@ func TestChattyRoutes_ShouldArmDebouncesUnderActiveQuarantine(t *testing.T) {
 
 	// Move LastArmed past the debounce and re-test — must allow.
 	svc.peerMu.Lock()
-	entry := svc.peerQuarantine[peer]
+	entry := svc.peerQuarantine[provenIdentitySubject(peer)]
 	entry.LastArmed = now.Add(-chattyReArmDebounce - time.Second)
-	svc.peerQuarantine[peer] = entry
-	allow := svc.shouldArmChattyLocked(peer, now)
+	svc.peerQuarantine[provenIdentitySubject(peer)] = entry
+	allow := svc.shouldArmChattyLocked(provenIdentitySubject(peer), now)
 	svc.peerMu.Unlock()
 
 	if !allow {
@@ -722,15 +722,15 @@ func TestChattyRoutes_PurgeRemovesStaleHistory(t *testing.T) {
 	live := domaintest.ID("still-chatty")
 
 	svc.peerMu.Lock()
-	svc.peerAnnounceHistory[silent] = []time.Time{
+	svc.peerAnnounceHistory[provenIdentitySubject(silent)] = []time.Time{
 		now.Add(-chattyAnnounceWindow - time.Minute),
 	}
-	svc.peerAnnounceHistory[live] = []time.Time{
+	svc.peerAnnounceHistory[provenIdentitySubject(live)] = []time.Time{
 		now.Add(-time.Second),
 	}
 	svc.purgePeerAnnounceHistoryLocked(now)
-	_, silentPresent := svc.peerAnnounceHistory[silent]
-	_, livePresent := svc.peerAnnounceHistory[live]
+	_, silentPresent := svc.peerAnnounceHistory[provenIdentitySubject(silent)]
+	_, livePresent := svc.peerAnnounceHistory[provenIdentitySubject(live)]
 	svc.peerMu.Unlock()
 
 	if silentPresent {

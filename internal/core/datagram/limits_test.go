@@ -265,8 +265,8 @@ func TestLimitsReplayOverflowRefusesTheNoisiestNeighbour(t *testing.T) {
 	limits := Limits{Replay: ReplayCaps{Capacity: 4}}
 	cache := NewBaseReplayCache(limits.BaseReplayCacheConfig(clock.Now))
 
-	noisy := ProvenIngress(testChannel("noisy"), domaintest.ID("noisy"))
-	quiet := ProvenIngress(testChannel("quiet"), domaintest.ID("quiet"))
+	noisy := provenIngress(testChannel("noisy"), domaintest.ID("noisy"))
+	quiet := provenIngress(testChannel("quiet"), domaintest.ID("quiet"))
 	until := clock.Now().Add(time.Minute)
 
 	// The noisy neighbour fills the cache. Every record is committed, which

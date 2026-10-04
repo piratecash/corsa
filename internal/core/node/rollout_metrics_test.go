@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
+	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/sessionv2/sessionv2test"
 )
 
 // newCompositionFixture builds the smallest Service the census walk needs: it
@@ -337,5 +340,45 @@ func TestSessionOutcomeSnapshotStampsItsOwnReadTime(t *testing.T) {
 	}
 	if !stats.StartedAt.Equal(started) {
 		t.Fatalf("started_at = %v, want %v", stats.StartedAt, started)
+	}
+}
+
+// TestNeighbourCompositionCountsOnlyV2AsProven pins the census to the same
+// rule the budgets use (docs/refactoring/n1-legacy-residual.md §1): an
+// identity is proven only by a v2 session, in either direction. An accepted v1
+// connection is authenticated by an auth_session that can be relayed, so its
+// identity is a claim; a dialled v2 session proved its identity to us.
+func TestNeighbourCompositionCountsOnlyV2AsProven(t *testing.T) {
+	svc := newCompositionFixture(t)
+	svc.conns = make(map[netcore.ConnID]*connEntry)
+	svc.connIDByNetConn = make(map[net.Conn]netcore.ConnID)
+	dialled, _ := sessionv2test.NewProvenPeer(t)
+	accepted, _ := sessionv2test.NewProvenPeer(t)
+	relayed := peerIdentityFromLabel("relayed")
+
+	provenSession := declaringSession(dialled.Identity, capsRoutingV3()...)
+	provenSession.proven = &dialled
+	svc.sessions = map[domain.PeerAddress]*peerSession{"proven:1": provenSession}
+
+	addTrackedInbound := func(id netcore.ConnID, claimed domain.PeerIdentity, auth *connauth.State) {
+		local, remote := net.Pipe()
+		t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
+		core := netcore.New(id, local, netcore.Inbound, netcore.Options{Identity: claimed})
+		t.Cleanup(core.Close)
+		core.SetAuth(auth)
+		svc.peerMu.Lock()
+		svc.setTestConnEntryLocked(local, &connEntry{core: core, tracked: true})
+		svc.peerMu.Unlock()
+	}
+	addTrackedInbound(1, relayed, &connauth.State{Verified: true, Hello: protocol.Frame{Address: relayed.String()}})
+	addTrackedInbound(2, accepted.Identity, provenInboundAuth(t, accepted))
+	addTrackedInbound(3, relayed, &connauth.State{Verified: true, Hello: protocol.Frame{Address: relayed.String()}})
+
+	composition := svc.collectNeighbourComposition()
+	if composition.Connections != 4 {
+		t.Fatalf("connections = %d, want 4", composition.Connections)
+	}
+	if composition.IdentityUnproven != 2 {
+		t.Fatalf("identity_unproven = %d, want 2: exactly the two accepted v1 connections proved nothing", composition.IdentityUnproven)
 	}
 }

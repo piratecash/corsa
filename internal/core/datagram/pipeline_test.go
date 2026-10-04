@@ -163,7 +163,7 @@ func (e nodeEmitter) EmitTo(ctx context.Context, out OutboundFrame) bool {
 		Line:      out.Line,
 		Peer:      e.from,
 		Channel:   testChannel(e.from.String()),
-		BudgetKey: ProvenIdentityKey(e.from),
+		BudgetKey: provenIdentityKey(e.from),
 	})
 	target.recordInbound(result)
 	return true
@@ -717,7 +717,7 @@ func testChannel(name string) ChannelID {
 // (reverse_quota_owner_test.go), which is the only way to state "one neighbour,
 // two channels" at all.
 func testUpstream(id domain.PeerIdentity) Upstream {
-	return ChannelUpstream(testChannel(id.String()), ProvenIdentityKey(id), id)
+	return ChannelUpstream(testChannel(id.String()), provenIdentityKey(id), id)
 }
 
 // testDownstream is the other end of the same convention: the channel a request
@@ -748,7 +748,7 @@ type ingressOpts struct {
 // can produce.
 func (o ingressOpts) budgetKey() AdmissionKey {
 	if o.authority.Proven() {
-		return ProvenIdentityKey(o.peer)
+		return provenIdentityKey(o.peer)
 	}
 	return DialedAddressKey(domain.PeerAddress("dialed:" + o.channel.String()))
 }
@@ -779,7 +779,7 @@ func (n *pipelineNode) deliverBilledTo(
 ) InboundResult {
 	t.Helper()
 	channel := testChannel(from.String())
-	if key != ProvenIdentityKey(from) {
+	if key != provenIdentityKey(from) {
 		channel = testChannel("dialed:" + key.String())
 	}
 	return n.deliverLine(t, InboundOpts{Peer: from, Channel: channel, BudgetKey: key}, frame)

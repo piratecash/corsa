@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/piratecash/corsa/internal/core/connauth"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
+	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
 // proof_test.go pins the session_proof bytes against the published vectors
@@ -96,7 +96,7 @@ func TestProofRefusesTheNegativeVectors(t *testing.T) {
 	listenerProof := ed25519.Sign(listenerPrivate, proofPayload(vectorNetwork, RoleListener, exporter))
 
 	otherExporter := byteRun(0x56, ExporterLength)
-	v1Signature := ed25519.Sign(listenerPrivate, connauth.SessionAuthPayload(base64.RawURLEncoding.EncodeToString(exporter), listenerPublic.Fingerprint()))
+	v1Signature := ed25519.Sign(listenerPrivate, protocol.SessionAuthPayload(base64.RawURLEncoding.EncodeToString(exporter), listenerPublic.Fingerprint()))
 
 	cases := map[string]bool{
 		"N1 another exporter":           verifyProof(listenerPublic, vectorNetwork, RoleListener, otherExporter, listenerProof),

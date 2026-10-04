@@ -477,11 +477,11 @@ func TestRecordProtectionFollowsSessionsAndLookups(t *testing.T) {
 	// A second session for the same identity is a second holder: the first
 	// one closing must not release the protection.
 	svc.onPeerSessionEstablished(session, nil)
-	svc.onPeerSessionClosed(session, nil)
+	svc.onPeerSessionClosed(session, provenIdentitySubject(session), nil)
 	if !svc.recordProtection.contains(session.String()) {
 		t.Error("protection released while another session for the identity is live")
 	}
-	svc.onPeerSessionClosed(session, nil)
+	svc.onPeerSessionClosed(session, provenIdentitySubject(session), nil)
 	if svc.recordProtection.contains(session.String()) {
 		t.Error("protection outlived the last session")
 	}

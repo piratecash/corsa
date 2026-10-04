@@ -34,6 +34,7 @@ func TestFetchRouteSummaryReportsTransportTraffic(t *testing.T) {
 	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
 	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
+	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{}).Once()
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{
 		StartedAt:     started,
 		ReadAt:        now,
@@ -85,4 +86,63 @@ func TestFetchRouteSummaryReportsTransportTraffic(t *testing.T) {
 func jsonUint(value uint64) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+// TestFetchRouteSummaryReportsThePinStore pins the diagnostics of a full pin
+// store: a v2 session of a new identity is then refused with pin_store_full,
+// and the operator has to be able to see that — the bound, how full it is and
+// how many sessions it refused — without reading logs.
+func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	provider := rpcmocks.NewMockRoutingProvider(t)
+	provider.On("RoutingSnapshot").Return(routing.Snapshot{
+		TakenAt: now.Add(-time.Minute),
+		Routes:  map[routing.PeerIdentity][]routing.RouteEntry{},
+	}).Once()
+	provider.On("OverloadStats").Return(routing.OverloadStats{}).Once()
+	provider.On("DigestHeartbeatStats").Return(routing.DigestHeartbeatStats{}).Once()
+	provider.On("JournalCauseStats").Return(map[string]uint64(nil)).Once()
+	provider.On("ModeSelectionStats").Return(routing.ModeSelectionStats{}).Once()
+	provider.On("SessionOutcomeStats").Return(domain.SessionOutcomeStats{}).Once()
+	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
+	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
+	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{
+		ReadAt:               now,
+		PinnedIdentities:     20000,
+		PinCapacity:          20000,
+		Full:                 true,
+		PinRefusalsStoreFull: 7,
+	}).Once()
+
+	table := rpc.NewCommandTable()
+	rpc.RegisterRoutingCommands(table, provider)
+	resp := table.Execute(rpc.CommandRequest{Name: "fetchRouteSummary"})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(resp.Data))
+	decoder.UseNumber()
+	var result map[string]interface{}
+	if err := decoder.Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	section, ok := result["secure_sessions"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("secure_sessions is not a JSON object: %T (%v)", result["secure_sessions"], result["secure_sessions"])
+	}
+	if section["pin_store_full"] != true || section["store_unreadable"] != false {
+		t.Fatalf("flags = full %v, unreadable %v", section["pin_store_full"], section["store_unreadable"])
+	}
+	for field, want := range map[string]string{
+		"pinned_identities":           "20000",
+		"pin_capacity":                "20000",
+		"pin_refusals_pin_store_full": "7",
+	} {
+		if got, _ := section[field].(json.Number); got.String() != want {
+			t.Fatalf("secure_sessions.%s = %v, want %s", field, section[field], want)
+		}
+	}
+	if got, _ := section["read_at"].(string); got != now.Format(time.RFC3339Nano) {
+		t.Fatalf("secure_sessions.read_at = %v", section["read_at"])
+	}
 }

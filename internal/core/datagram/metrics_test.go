@@ -199,7 +199,7 @@ func TestMetricsDiagnosticsAssembleFromWhatIsWired(t *testing.T) {
 	}
 
 	queue.Enqueue(queuedFrame(domain.DatagramClassBulk, 128, time.Time{}))
-	admission.Admit(ProvenIdentityKey(domain.PeerIdentity{1}), 64)
+	admission.Admit(provenIdentityKey(domain.PeerIdentity{1}), 64)
 
 	// One settled record, so the replay block reports a live occupancy AND a
 	// live counter — the pair the §5 refusals have to be read against.

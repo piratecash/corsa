@@ -549,15 +549,19 @@ func (s *Service) reportDatagramResidueUnreachable(direction, peer string) {
 // The two identifiers are separate fields because they are separate facts, and
 // keeping them apart is the whole point:
 //
-//   - budgetKey is WHO PAYS. It is either an identity the remote PROVED to
-//     this node or the host:port THIS node dialled — never a string the
-//     neighbour chose, because a budget keyed on the sender's own claim is
-//     reset by the sender at will (see AdmissionKeySpace);
-//   - identity is the NAME the neighbour presents, and on an outbound session it
-//     is an unproven claim: the challenge of that handshake travels the other way
-//     (authenticatePeerSession signs OURS, nothing signs theirs), so the
-//     welcome's address is a label. It is not proof of WHO the neighbour is, and
-//     since this round it is not what channel-relative state keys on either;
+//   - budgetKey is WHO PAYS. It is an identity the remote PROVED to this node
+//     over a v2 session, or what this node observed of a legacy socket — the
+//     host:port it dialled, the source host or the connection it accepted —
+//     never a string the neighbour chose, because a budget keyed on the
+//     sender's own claim is reset by the sender at will, and one keyed on a
+//     relayable v1 auth_session is spent by whoever relays it (see
+//     AdmissionKeySpace and docs/refactoring/n1-legacy-residual.md §1);
+//   - identity is the NAME the neighbour presents, and on a legacy session it
+//     is an unproven claim: on a dialled one the challenge travels the other way
+//     (authenticatePeerSession signs OURS, nothing signs theirs), and on an
+//     accepted one the auth_session signature can be relayed. It is a label —
+//     kept for exclude_via and the push_identity session rule — not proof of WHO
+//     the neighbour is, and it is not what channel-relative state keys on;
 //   - channel is WHICH SOCKET, and it is a third field for the reason the first
 //     two are two. A PeerIdentity names a NODE, so keying reverse records, their
 //     per-upstream quota and the return path of an answer on it let a neighbour
@@ -568,13 +572,14 @@ func (s *Service) reportDatagramResidueUnreachable(direction, peer string) {
 //     sends can change it.
 //
 // The layer derives the LEVEL of proof from the first two rather than being told
-// it a fourth time: an arrival whose budgetKey is
-// datagram.ProvenIdentityKey(identity) is the only one it reads as proven, so
-// the two fields BOTH have to name the same neighbour in the proven namespace
-// before a type that DECLARED it needs a proven neighbour is delivered to
-// (datagram.Pipeline.senderProofGate). A dialled session cannot produce that
-// pair, which is the whole point: nothing on that direction is proven, so naming
-// a stranger in the welcome buys the sender nothing.
+// it a fourth time: an arrival whose budgetKey is the proven key of identity is
+// the only one it reads as proven, so the two fields BOTH have to name the same
+// neighbour in the proven namespace before a type that DECLARED it needs a
+// proven neighbour is delivered to (datagram.Pipeline.senderProofGate). Only a
+// v2 handshake's result enters that namespace (datagram.ProvenIdentityKey takes
+// a sessionv2.ProvenIdentity), so a legacy session cannot produce the pair:
+// naming a stranger in a welcome or relaying a stranger's auth_session buys the
+// sender nothing.
 //
 // speaksPlane is the negotiated set of THIS connection, not of the address:
 // during a reconnect the address holds a different connection with a different
@@ -592,21 +597,16 @@ type datagramNeighbour struct {
 
 // sessionDatagramNeighbour resolves the neighbour behind an OUTBOUND session.
 //
-// The budget key is the dial address and nothing else. session.address is
-// assigned in the session's struct literal and never written again, so unlike
-// peerIdentity it needs no lock and cannot be observed half-written by a read
-// loop that started before the handshake finished.
-//
 // The CHANNEL is session.connID and deliberately NOT the address: the address
 // survives a reconnect and the connection does not, while channel-relative state
 // belongs to one socket — a reverse record whose upstream outlived the session it
 // was taken on would return its answer over a connection the question never
-// arrived on. connID is assigned in the same struct literal as address and never
-// rewritten, so it needs no lock for the same reason.
+// arrived on. connID is assigned in the session's struct literal and never
+// rewritten, so it needs no lock.
 func (s *Service) sessionDatagramNeighbour(session *peerSession) datagramNeighbour {
 	return datagramNeighbour{
 		direction: datagramOutboundSession,
-		budgetKey: datagram.DialedAddressKey(session.address),
+		budgetKey: sessionDatagramAdmissionKey(session),
 		channel:   datagram.NetworkChannel(session.connID),
 		// Read through the accessor for the ordering reason sessionPeerIdentity
 		// documents: the read loop is running before the handshake writes it.
@@ -616,22 +616,38 @@ func (s *Service) sessionDatagramNeighbour(session *peerSession) datagramNeighbo
 	}
 }
 
+// sessionDatagramAdmissionKey is who a dialled session's datagram bytes are
+// billed to: the identity its v2 handshake proved, or — on a legacy session,
+// where the welcome is the remote's own claim — the address this node dialled.
+// It is the ONE derivation for this direction; the pre-parse refusals of the
+// session reader bill through it too, so one session never has two budgets.
+// It reads only session.proven and session.address, both assigned in the
+// struct literal and never written again, so it needs no lock and cannot see a
+// half-written handshake.
+func sessionDatagramAdmissionKey(session *peerSession) datagram.AdmissionKey {
+	if proof, ok := session.provenIdentity(); ok {
+		return datagram.ProvenIdentityKey(proof)
+	}
+	return datagram.DialedAddressKey(session.address)
+}
+
 // inboundDatagramNeighbour resolves the neighbour behind an ACCEPTED
-// connection, where the identity IS proven: connauth.VerifyAuthSession checked
-// an Ed25519 signature over a challenge this node generated, made with a key
-// whose fingerprint is that very identity, so the budget key and the conveyor's
-// identity are the same fact.
+// connection. The budget key and the presented identity are two facts here as
+// on the other direction: the key is the v2 proof when there is one and the
+// observed socket otherwise (inboundDatagramBudgetKey); the identity is the
+// authenticated hello's name (authenticatedInboundPeerIdentity), which a v1
+// auth_session admits but does not prove.
 //
 // It reads the verified auth state rather than the NetCore identity mirror
 // because the mirror is written on one branch of handleAuthSession only (the
-// one that also resolved an overlay address); the auth state is where the proof
-// lives, and a neighbour must not become unbillable because its address was not
-// resolvable.
+// one that also resolved an overlay address); the auth state is where the
+// admission lives, and a neighbour must not become unbillable because its
+// address was not resolvable.
 func (s *Service) inboundDatagramNeighbour(connID domain.ConnID) datagramNeighbour {
-	identity := s.provenInboundPeerIdentity(connID)
+	identity := s.authenticatedInboundPeerIdentity(connID)
 	return datagramNeighbour{
 		direction:   datagramInbound,
-		budgetKey:   datagram.ProvenIdentityKey(identity),
+		budgetKey:   s.inboundDatagramBudgetKey(connID),
 		channel:     datagram.NetworkChannel(connID),
 		identity:    identity,
 		label:       identity.String(),
@@ -639,9 +655,13 @@ func (s *Service) inboundDatagramNeighbour(connID domain.ConnID) datagramNeighbo
 	}
 }
 
-// provenInboundPeerIdentity returns the identity an accepted connection PROVED
-// during auth, or the zero identity when nothing was proven.
-func (s *Service) provenInboundPeerIdentity(connID domain.ConnID) domain.PeerIdentity {
+// authenticatedInboundPeerIdentity returns the identity an accepted connection
+// authenticated as — by a v2 proof or by a v1 auth_session — or the zero
+// identity before authentication. It ADMITS the connection to the
+// authenticated command set; it is not a proof that may be charged to the
+// identity (a v1 signature can be relayed), so nothing keyed by identity is
+// derived from it.
+func (s *Service) authenticatedInboundPeerIdentity(connID domain.ConnID) domain.PeerIdentity {
 	hello, verified := s.authenticatedAddressForConn(connID)
 	if !verified {
 		return domain.PeerIdentity{}
@@ -650,11 +670,36 @@ func (s *Service) provenInboundPeerIdentity(connID domain.ConnID) domain.PeerIde
 }
 
 // inboundDatagramBudgetKey is the neighbour an accepted connection's datagram
-// bytes are billed to. It exists so the pre-parse refusals of the inbound
-// reader bill the same key the ingress does — two keys for one connection is
+// bytes are billed to:
+//
+//   - the identity a v2 session proved on this connection;
+//   - for a legacy connection — authenticated by an auth_session that can be
+//     relayed — what this node observed of the socket: the source host for an
+//     external address (neighbours behind one NAT share it, a reconnect does
+//     not refill it), the connection itself for loopback and for an address
+//     that does not parse (every onion peer arrives from 127.0.0.1);
+//   - nobody before authentication: the zero key, so an unauthenticated
+//     socket is never billable and never exempt from the command limiter.
+//
+// It is the ONE derivation for this direction: the pre-parse refusals of the
+// inbound reader bill through it too, because two keys for one connection is
 // two budgets, and a neighbour would spend both.
 func (s *Service) inboundDatagramBudgetKey(connID domain.ConnID) datagram.AdmissionKey {
-	return datagram.ProvenIdentityKey(s.provenInboundPeerIdentity(connID))
+	core := s.netCoreForID(connID)
+	if core == nil {
+		return datagram.AdmissionKey{}
+	}
+	auth := core.Auth()
+	if auth == nil || !auth.Verified {
+		return datagram.AdmissionKey{}
+	}
+	if proof, ok := auth.ProvenIdentity(); ok {
+		return datagram.ProvenIdentityKey(proof)
+	}
+	if host, ok := acceptedExternalHost(core.RemoteAddr()); ok {
+		return datagram.AcceptedHostKey(host)
+	}
+	return datagram.AcceptedConnectionKey(connID)
 }
 
 // dispatchSessionDatagramLine hands ONE raw datagram line arriving on an

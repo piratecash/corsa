@@ -564,7 +564,7 @@ func (f *schedFixture) transit(
 		Line:       []byte(line),
 		Peer:       via,
 		Channel:    testChannel(via.String()),
-		BudgetKey:  ProvenIdentityKey(via),
+		BudgetKey:  provenIdentityKey(via),
 		ReceivedAt: f.clock(),
 	})
 }

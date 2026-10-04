@@ -1007,7 +1007,10 @@ type recordingReactionRouter struct {
 	// cannot take reactions" is a property of a peer and the window has to keep
 	// them apart when the user switches chats.
 	unsupportedPeers map[domain.PeerIdentity]bool
-	statuses         []string
+	// unknownPeers answer "no current information" — which is neither a
+	// refusal nor a statement that the contact is offline.
+	unknownPeers map[domain.PeerIdentity]bool
+	statuses     []string
 }
 
 func (r *recordingReactionRouter) MessageReactions(context.Context, domain.PeerIdentity) (map[domain.MessageID][]domain.Reaction, error) {
@@ -1021,8 +1024,14 @@ func (r *recordingReactionRouter) ToggleReaction(
 	return domain.ReactionFact{}, nil
 }
 
-func (r *recordingReactionRouter) ReactionsUnsupportedBy(peer domain.PeerIdentity) bool {
-	return r.unsupported || r.unsupportedPeers[peer]
+func (r *recordingReactionRouter) ReactionsSupportOf(peer domain.PeerIdentity) domain.ReactionsSupport {
+	if r.unsupported || r.unsupportedPeers[peer] {
+		return domain.ReactionsSupportAbsent
+	}
+	if r.unknownPeers[peer] {
+		return domain.ReactionsSupportUnknown
+	}
+	return domain.ReactionsSupportDeclared
 }
 
 func (r *recordingReactionRouter) SetSendStatus(status string) {
@@ -1587,5 +1596,49 @@ func TestATapSurvivesTheWholeOverlayBeingDeferred(t *testing.T) {
 
 	if len(router.toggled) != 1 || router.toggled[0] != "m1 "+defaultQuickReactions[0] {
 		t.Fatalf("the tap was reported as %v, want one toggle of %s", router.toggled, defaultQuickReactions[0])
+	}
+}
+
+// "Unknown" is not "cannot": a contact the node has no current information
+// about must not be shown as one whose app cannot receive reactions — nor as
+// offline, which no information does not mean — and a notice raised while the
+// contact's connection said so is taken back once that connection is gone
+// (docs/refactoring/n1-legacy-residual.md §3, owner decisions L-DC-1 and of
+// 2026-10-03).
+func TestNoCurrentInformationIsNotShownAsCannotReceive(t *testing.T) {
+	router := &recordingReactionRouter{
+		unsupportedPeers: map[domain.PeerIdentity]bool{},
+		unknownPeers:     map[domain.PeerIdentity]bool{},
+	}
+	w := &Window{theme: newAppTheme(), language: "en", reactionRouter: router}
+	peer := domain.PeerIdentityFromWire(strings.Repeat("ab", 20))
+	w.snap.ActivePeer = peer
+	notice := w.t("status.reaction_local_only")
+
+	router.unknownPeers[peer] = true
+	w.noteReactionsChanged()
+	w.reloadStaleReactions()
+	for _, status := range router.statuses {
+		if status == notice {
+			t.Fatal("a contact nothing is currently known about was shown as unable to receive reactions")
+		}
+	}
+
+	// A live connection confirms the absence: now it may be said.
+	delete(router.unknownPeers, peer)
+	router.unsupportedPeers[peer] = true
+	w.noteReactionsChanged()
+	w.reloadStaleReactions()
+	if last := router.statuses[len(router.statuses)-1]; last != notice {
+		t.Fatalf("a confirmed absence was not shown: the status line says %q", last)
+	}
+
+	// That connection is gone: nothing is known again, and the claim goes.
+	delete(router.unsupportedPeers, peer)
+	router.unknownPeers[peer] = true
+	w.noteReactionsChanged()
+	w.reloadStaleReactions()
+	if last := router.statuses[len(router.statuses)-1]; last == notice {
+		t.Fatal("the notice outlived the connection whose declaration it was about")
 	}
 }
