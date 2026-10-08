@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/appdata"
+
 	"github.com/rs/zerolog/log"
 )
 
@@ -41,8 +43,15 @@ const (
 	maxConsoleEntries             = 100
 	maxConsoleEntriesDisplayBytes = 2 * 1024 * 1024
 
+	// consoleOverflowDirName is the overflow root inside the data dir. Not
+	// os.TempDir(): a full output can carry message bodies and contact
+	// keys, and the system temp dir sits outside a data dir the user keeps
+	// in an encrypted volume.
+	consoleOverflowDirName = "console-tmp"
+
 	// consoleOverflowDirPrefix names the per-process overflow directories
-	// under os.TempDir(); the pid suffix keeps concurrent instances apart.
+	// under the overflow root; the pid suffix keeps concurrent instances
+	// apart.
 	consoleOverflowDirPrefix = "corsa-console-"
 
 	// consoleOverflowOrphanAge is how old an overflow directory must be
@@ -65,9 +74,21 @@ type consoleOverflowStore struct {
 	closed bool
 }
 
-func newConsoleOverflowStore() *consoleOverflowStore {
+// consoleOverflowRoot is where this process keeps its overflow directory.
+func consoleOverflowRoot() string {
+	return filepath.Join(appdata.DefaultDir(), consoleOverflowDirName)
+}
+
+// legacyConsoleOverflowRoot is where earlier builds kept overflow
+// directories. Still swept at start so a crash leftover there — plaintext
+// output outside the data dir — does not outlive the move.
+func legacyConsoleOverflowRoot() string {
+	return os.TempDir()
+}
+
+func newConsoleOverflowStore(root string) *consoleOverflowStore {
 	return &consoleOverflowStore{
-		dir: filepath.Join(os.TempDir(), fmt.Sprintf("%s%d", consoleOverflowDirPrefix, os.Getpid())),
+		dir: filepath.Join(root, fmt.Sprintf("%s%d", consoleOverflowDirPrefix, os.Getpid())),
 	}
 }
 
@@ -120,10 +141,10 @@ func (s *consoleOverflowStore) removeAll() {
 }
 
 // cleanupOrphanedConsoleOverflow sweeps overflow directories left behind by
-// crashed processes: any corsa-console-* directory untouched for longer
-// than the orphan age. Called once at app start, best effort.
-func cleanupOrphanedConsoleOverflow(now time.Time) {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), consoleOverflowDirPrefix+"*"))
+// crashed processes: any corsa-console-* directory under root untouched for
+// longer than the orphan age. Called once at app start, best effort.
+func cleanupOrphanedConsoleOverflow(root string, now time.Time) {
+	matches, err := filepath.Glob(filepath.Join(root, consoleOverflowDirPrefix+"*"))
 	if err != nil {
 		return
 	}

@@ -369,7 +369,7 @@ func newConsoleModal(parent *Window) *consoleModal {
 		suggestButtons:      make(map[string]*widget.Clickable),
 		selectedSuggest:     -1,
 		donateEntries:       newConsoleDonateEntries(),
-		overflow:            newConsoleOverflowStore(),
+		overflow:            newConsoleOverflowStore(consoleOverflowRoot()),
 	}
 	console.consoleEditor.SingleLine = true
 	console.donateLink.SetText(consoleDonateURL)

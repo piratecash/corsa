@@ -26,6 +26,7 @@ Main docs:
 - architecture: [docs/architecture.md](docs/architecture.md)
 - protocol: [docs/protocol.md](docs/protocol.md)
 - encryption: [docs/encryption.md](docs/encryption.md)
+- **privacy: [docs/privacy.md](docs/privacy.md)** — keeping your keys and history off an unencrypted disk: `CORSA_DATA_DIR` and encrypted containers, swap, hibernation
 - donate: [docs/donate.md](docs/donate.md)
 
 Desktop localization:
@@ -111,6 +112,7 @@ For public or VPS nodes, the practical network settings are:
 - `CORSA_LISTENER` — explicit inbound listener override: `1` enables listen, `0` disables it
 - `CORSA_ADVERTISE_PORT` — self-reported listening port placed into `hello.advertise_port` / `welcome.advertise_port` and used on the receive side as the authoritative listening-port source when building an announce candidate from the observed TCP IP. Accepts an integer in the inclusive `1..65535` range; empty, non-numeric, or out-of-range values fall back to `64646`. Set this explicitly **whenever the externally dialable port is not `64646`** — the runtime never derives `advertise_port` from `CORSA_LISTEN_ADDRESS`, so a node bound to `:64647` (with no NAT in the loop) still advertises `64646` and is undialable until `CORSA_ADVERTISE_PORT=64647` is set. The same rule covers the NAT / port-forward / reverse-proxy case where the public dial port differs from the local bind port. The inbound TCP source port is NEVER reused as a listening port. There is no `CORSA_ADVERTISE_ADDRESS` env knob in this build: the host component of the local node's external endpoint is no longer wire-published. Each peer announces other peers using the **observed TCP source host** plus that peer's `advertise_port`, so the local node never has to declare its own external IP — neighbours learn it from the packets that actually arrive (see `docs/protocol/handshake.md` → "Advertise Convergence")
 - `CORSA_BOOTSTRAP_PEERS` — comma-separated seed list
+- `CORSA_DATA_DIR` — directory for all node-local files (identity keys, history, contacts, downloads, crash logs). Must already exist: the node refuses to start rather than create it, so a directory inside an unmounted encrypted container is never recreated on the plain disk. See [docs/privacy.md](docs/privacy.md)
 - `CORSA_TRUST_STORE_PATH` — local pinned-contact trust database
 - `CORSA_SECURE_SESSION_STORE_PATH` — downgrade protection of the secure session v2; default `secure-sessions-<port>.json` next to the peers file
 - `CORSA_NODE_TYPE` — `full` or `client`
@@ -248,6 +250,7 @@ Source: [pirate.cash/en/donate](https://pirate.cash/en/donate/)
 - архитектура: [docs/architecture.md](docs/architecture.md)
 - протокол: [docs/protocol.md](docs/protocol.md)
 - шифрование: [docs/encryption.md](docs/encryption.md)
+- **приватность: [docs/privacy.md](docs/privacy.md)** — как не держать ключи и историю на незашифрованном диске: `CORSA_DATA_DIR` и зашифрованные контейнеры, подкачка, гибернация
 - донаты: [docs/donate.md](docs/donate.md)
 
 Локализация desktop-клиента:
@@ -329,6 +332,7 @@ CORSA_LISTEN_ADDRESS=127.0.0.1:64647 CORSA_ADVERTISE_PORT=64647 CORSA_BOOTSTRAP_
 - `CORSA_LISTENER` — явное переопределение входящего listener: `1` включает прослушивание, `0` выключает
 - `CORSA_ADVERTISE_PORT` — self-reported слушающий порт, помещаемый в `hello.advertise_port` / `welcome.advertise_port` и используемый приёмной стороной как авторитетный источник listening-порта при построении announce-кандидата из observed TCP IP. Принимает целое число в диапазоне `1..65535` включительно; пустые, нечисловые или вне диапазона значения фолбэчат к `64646`. Задавайте явно **всегда, когда внешне-дайлабельный порт не равен `64646`** — runtime никогда не выводит `advertise_port` из `CORSA_LISTEN_ADDRESS`, поэтому нода с bind-ом на `:64647` (без NAT в цепочке) всё равно анонсирует `64646` и остаётся недостижимой, пока не выставлено `CORSA_ADVERTISE_PORT=64647`. То же правило покрывает NAT / port-forward / reverse-proxy случаи, когда публичный dial-порт отличается от локального bind-порта. Входящий TCP source port НИКОГДА не переиспользуется как listening-порт. В этом билде нет `CORSA_ADVERTISE_ADDRESS`: host-часть внешнего endpoint'а локальной ноды больше не публикуется на проводе. Каждый пир анонсирует других пиров парой **наблюдаемый TCP source host** + `advertise_port` этого пира, так что локальной ноде вообще не приходится сообщать свой внешний IP — соседи учат его из пакетов, которые реально приходят (см. `docs/protocol/handshake.md` → «Advertise Convergence»)
 - `CORSA_BOOTSTRAP_PEERS` — список seed-нод через запятую
+- `CORSA_DATA_DIR` — папка для всех локальных файлов узла (ключи identity, история, контакты, загрузки, crash-логи). Должна уже существовать: узел скорее откажется запускаться, чем создаст её, — так папка внутри несмонтированного зашифрованного контейнера никогда не пересоздаётся на открытом диске. См. [docs/privacy.md](docs/privacy.md)
 - `CORSA_TRUST_STORE_PATH` — локальная база pinned-контактов
 - `CORSA_SECURE_SESSION_STORE_PATH` — защита от понижения защищённой сессии v2; по умолчанию `secure-sessions-<port>.json` рядом с файлом пиров
 - `CORSA_NODE_TYPE` — `full` или `client`

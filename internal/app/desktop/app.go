@@ -93,7 +93,8 @@ func Run() error {
 	// Sweep console overflow directories orphaned by crashed processes
 	// (console_output.go) — same moment, same reasoning: no console window
 	// exists yet, so nothing can reference them.
-	cleanupOrphanedConsoleOverflow(time.Now())
+	cleanupOrphanedConsoleOverflow(consoleOverflowRoot(), time.Now())
+	cleanupOrphanedConsoleOverflow(legacyConsoleOverflowRoot(), time.Now())
 
 	id, err := identity.LoadOrCreate(cfg.Node.IdentityPath)
 	if err != nil {

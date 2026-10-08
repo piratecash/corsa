@@ -18,7 +18,8 @@ func RunningUnderGoTest() bool {
 }
 
 // baseDirOverride, when non-empty, wins over all platform detection in
-// DefaultDir. Mobile entry points set it at startup. On Android the
+// DefaultDir. Desktop and node entry points set it through Anchor
+// (CORSA_DATA_DIR); the Android entry point sets it directly. On Android the
 // default branch below does resolve (Gio sets HOME=filesDir before
 // calling main), but to $HOME/.corsacore — inside the directory Android
 // Auto Backup copies, which must never hold identity keys or the chat

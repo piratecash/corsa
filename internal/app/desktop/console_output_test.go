@@ -13,7 +13,7 @@ func newOverflowTestConsole(t *testing.T) *consoleModal {
 	t.Helper()
 	c := &consoleModal{
 		parent:   &Window{},
-		overflow: newConsoleOverflowStore(),
+		overflow: newConsoleOverflowStore(t.TempDir()),
 	}
 	t.Cleanup(c.overflow.removeAll)
 	return c
@@ -154,25 +154,44 @@ func TestConsoleEntriesByteEviction(t *testing.T) {
 // crashed run is removed at startup; a fresh one (possibly another live
 // instance) is left alone.
 func TestConsoleOverflowOrphanSweep(t *testing.T) {
-	stale := filepath.Join(os.TempDir(), consoleOverflowDirPrefix+"test-stale")
-	fresh := filepath.Join(os.TempDir(), consoleOverflowDirPrefix+"test-fresh")
+	root := t.TempDir()
+	stale := filepath.Join(root, consoleOverflowDirPrefix+"test-stale")
+	fresh := filepath.Join(root, consoleOverflowDirPrefix+"test-fresh")
 	for _, dir := range []string{stale, fresh} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(stale); _ = os.RemoveAll(fresh) })
 	old := time.Now().Add(-consoleOverflowOrphanAge - time.Hour)
 	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
 
-	cleanupOrphanedConsoleOverflow(time.Now())
+	cleanupOrphanedConsoleOverflow(root, time.Now())
 
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Error("stale overflow directory survived the sweep")
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Error("fresh overflow directory was swept — a live instance would lose its files")
+	}
+}
+
+// TestConsoleOverflowStaysUnderRoot: a full console output can carry message
+// bodies and contact keys, so it must land in the directory it was given —
+// the data dir, which the user may keep in an encrypted volume — and never
+// in the system temp dir, which is outside it.
+func TestConsoleOverflowStaysUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	store := newConsoleOverflowStore(root)
+	t.Cleanup(store.removeAll)
+
+	path, err := store.save("secret output")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("overflow file %q escaped root %q", path, root)
 	}
 }
