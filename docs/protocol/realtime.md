@@ -238,6 +238,21 @@ dialler observes a bare `EOF` during session setup and emits
 backoff, this fans out into a CPU-burning storm whenever a small set
 of bootstrap nodes is the only candidate pool.
 
+**What counts as a setup failure.** Only a setup the peer failed is
+counted against it (the per-address counter behind the setup-failure
+dial cooldown, and the route quarantine armed when that counter
+crosses its threshold). When the dialler's own ConnectionManager drops
+the slot while setup is still running — the slot limit shrank, an
+operator `add_peer` needed the room, `connect_only` pinned egress to
+another peer, or the node is shutting down — it closes the session
+itself, and the error setup then sees on the closed socket is the
+dialler's own doing. Such a session is logged as
+`cm_session_setup_aborted_local_eviction`, is not counted, and is never
+published as connected, even when its last setup reply was already on
+the way and setup completes. The same rule holds for a session that is
+already serving: a local drop marks the peer disconnected without
+charging it a failure or disconnect-storm evidence.
+
 **Contract:**
 
 1. **Async fast path.** `sendHandshakeReplyViaNetwork` first attempts a
@@ -589,6 +604,22 @@ burst может заполнить 128-слотовый outbound-канал з�
 `cm_session_setup_failed`; в сочетании с default 2-4-8с retry
 backoff это раскручивается в CPU-storm, когда единственный набор
 кандидатов — несколько bootstrap-нод.
+
+**Что считается провалом setup.** Против пира засчитывается только
+setup, который провалил сам пир (по-адресный счётчик за cooldown
+дозвона по провалам setup и route quarantine, взводимый, когда этот
+счётчик переходит порог). Если собственный ConnectionManager дайлера
+сбрасывает слот, пока setup ещё идёт, — уменьшился лимит слотов,
+операторскому `add_peer` нужно место, `connect_only` закрепил исходящие
+за другим пиром или нода останавливается, — он сам закрывает сессию, и
+ошибка, которую setup затем видит на закрытом сокете, — дело рук самого
+дайлера. Такая сессия логируется как
+`cm_session_setup_aborted_local_eviction`, не засчитывается и никогда
+не публикуется как подключённая, даже если её последний setup-ответ
+уже был в пути и setup завершается успешно. То же правило действует и
+для сессии, которая уже обслуживается: локальный сброс помечает пира
+отключённым, не вменяя ему ни провала, ни свидетельства
+disconnect-storm.
 
 **Контракт:**
 

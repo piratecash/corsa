@@ -419,9 +419,9 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 		// (svc.isForbiddenDialIP) rejects loopback/RFC1918, which would drop a
 		// pinned LAN target and break its indefinite re-dial. This exemption is
 		// only ever reached by a VALIDATED pin: a runtime pin that equals a real
-		// peer has already cleared applyAddPeer's dial-admission check (which
-		// admits LAN via isManualLocalDialIP and still rejects structurally-
-		// undialable ranges), while a fail-closed startup pin uses a sentinel
+		// peer has already cleared validateAddPeerTarget (which admits LAN via
+		// isManualLocalDialIP and still rejects structurally-undialable
+		// ranges), while a fail-closed startup pin uses a sentinel
 		// that no real peer address can equal (connectOnlyBlockedSentinel), so
 		// this branch never matches a forbidden peer restored from peers.json.
 		ip := net.ParseIP(kp.IP)

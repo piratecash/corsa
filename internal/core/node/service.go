@@ -292,6 +292,24 @@ type Service struct {
 	// canonical lock order.
 	peerTeardownBarrier func()
 
+	// cmSessionRegisterBarrier is a TEST-ONLY synchronisation point, nil in
+	// production, run by the CM session goroutine after initPeerSession
+	// succeeded and was classified, immediately before registerCMSession
+	// (runCMSessionRegisterBarrier, peer_sessions.go).
+	//
+	// It exists because the window it opens — setup has succeeded, the
+	// ConnectionManager may evict the slot, the session is not registered yet
+	// — is the one the registration check under peerMu defends, and nothing
+	// outside the goroutine can otherwise land an eviction there: by the time
+	// any observable effect of the success exists, the registration has
+	// already happened.
+	//
+	// Fired with no mutex held, since the eviction it lets in runs on the CM
+	// event loop and takes peerMu in onCMSessionTeardown. Installed before the
+	// session it parks reaches it and never changed afterwards, so it takes
+	// part in no domain and adds no edge to the canonical lock order.
+	cmSessionRegisterBarrier func()
+
 	// runLoopsWg tracks EVERY loop Run starts that stops on the lifecycle
 	// context — the ConnectionManager event loop, bootstrapLoop,
 	// hotReadsRefreshLoop, the announce loop, the routing TTL ticker, the probe
@@ -918,6 +936,14 @@ type Service struct {
 	// whole pointer, so readers always observe a consistent value.
 	connectOnly atomic.Pointer[domain.PeerAddress]
 
+	// connectOnlyResolver resolves a connect_only hostname target
+	// (resolveConnectOnlyHost). Set to net.DefaultResolver in NewService. A
+	// test may replace it after NewService and before the Service is first
+	// used — the same discipline as networkOverride — and it is never
+	// written again, so it is immutable once the Service runs and takes part
+	// in no domain (docs/locking.md).
+	connectOnlyResolver *net.Resolver
+
 	// setupFailures tracks consecutive cm_session_setup_failed events per
 	// dial-target address. Above setupFailureBanThreshold the address is
 	// pushed out of PeerProvider.Candidates() for setupFailureCooldown to
@@ -1394,6 +1420,16 @@ type peerSession struct {
 	closeOnce sync.Once
 	closeErr  error
 
+	// closedBy names whoever closed the session FIRST; nil while it is open.
+	// Written exactly once, inside closeOnce and before the transport is torn
+	// down, so it is the close reason of record: a later Close cannot rewrite
+	// it. The CM session goroutine reads it to tell a failure the peer caused
+	// from a teardown this node chose (a ConnectionManager eviction or
+	// shutdown), which must not be charged to the peer. Atomic because the
+	// registration check reads it without having closed the session (see
+	// closedByLocalEviction).
+	closedBy atomic.Pointer[peerSessionCloser]
+
 	// ffDropsSinceWarn / ffLastDropWarnAt back the rate-limited
 	// fire_and_forget_buffer_full warn (see logFireAndForgetDrop).
 	// Only the servePeerSession goroutine reads or writes them, so
@@ -1449,10 +1485,21 @@ type peerWelcomeMeta struct {
 // The first caller performs the teardown; subsequent callers observe the
 // same stored result without re-running the callbacks.
 func (ps *peerSession) Close() error {
+	return ps.closeAs(peerSessionClosedByOwner)
+}
+
+// closeAs is Close with the reason recorded in closedBy when this call is the
+// one that closes the session. A session that is already closed keeps the
+// reason of the call that closed it.
+func (ps *peerSession) closeAs(closer peerSessionCloser) error {
 	if ps == nil {
 		return nil
 	}
 	ps.closeOnce.Do(func() {
+		// Recorded before anything is torn down: every observer that learns
+		// of the close from the transport (a read error, the writer exiting)
+		// does so after this store.
+		ps.closedBy.Store(&closer)
 		// Fence and finalise the upper queue BEFORE the transport goes
 		// away. Sessions that die before servePeerSession ever runs (failed
 		// handshake, CM generation mismatch) have no serve-loop exit to
@@ -1474,6 +1521,40 @@ func (ps *peerSession) Close() error {
 		}
 	})
 	return ps.closeErr
+}
+
+// peerSessionCloser names who closed a peerSession first (peerSession.closedBy).
+// The values start at 1 so that a forgotten initialisation can never read as a
+// meaningful reason.
+type peerSessionCloser int
+
+const (
+	// peerSessionClosedByOwner: the code running the session closed it — the
+	// handshake, the session goroutine after a failure it is charging, the
+	// legacy dial loop, a protocol violation. Whatever that code reports is
+	// the peer's outcome.
+	peerSessionClosedByOwner peerSessionCloser = iota + 1
+	// peerSessionClosedByLocalEviction: the ConnectionManager closed it on its
+	// own decision — shrinkToLimit, the add_peer eviction, RetainOnly, the
+	// connect_only pin, shutdown. The failure the session goroutine then
+	// observes on the closed transport is this node's doing and says nothing
+	// about the peer.
+	peerSessionClosedByLocalEviction
+)
+
+// closedByLocalEviction reports whether the session was closed by a
+// ConnectionManager eviction or shutdown.
+//
+// Two ways to read it soundly, and the CM session goroutine uses both:
+//   - after the reader's own Close/closeAs has returned: sync.Once orders the
+//     reader after the closing call, so the reason of whoever won is visible;
+//   - under peerMu without closing: the ConnectionManager stores the reason
+//     before it runs OnSessionTeardown, which takes peerMu, so a reader whose
+//     peerMu section comes after the teardown sees it, and one whose section
+//     comes first is the one whose registration the teardown then withdraws.
+func (ps *peerSession) closedByLocalEviction() bool {
+	closer := ps.closedBy.Load()
+	return closer != nil && *closer == peerSessionClosedByLocalEviction
 }
 
 type peerHealth struct {
@@ -1914,6 +1995,9 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		runCtx:           lifecycleCtx,
 		runCancel:        lifecycleCancel,
 		identity:         id,
+
+		connectOnlyResolver: net.DefaultResolver,
+
 		// startedAt is captured at construction (not at Run()) so the
 		// uptime_seconds reported by getNodeStatus stays meaningful in
 		// unit tests that drive the Service without calling Run, and
@@ -2185,6 +2269,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		// the pacer — see ConnectionManager.handleManualPeer.
 		DialPacerInterval: dialPacerProductionInterval,
 		DialPacerBurst:    dialPacerProductionBurst,
+		// The same pin PeerProvider.Candidates reads. The manager applies
+		// the connect_only rule against it — on RetainOnly, on every fill,
+		// and when an add_peer asks to dial someone else.
+		ConnectOnlyFn: svc.connectOnlyTarget,
 	})
 
 	// Initialize distance-vector routing table (Phase 1.2).
@@ -2683,7 +2771,7 @@ func (s *Service) Run(ctx context.Context) error {
 	// Apply the CORSA_CONNECT_ONLY startup seed after bootstrap priming so the
 	// pinned target is registered against the freshly primed peer set and any
 	// bootstrap-driven outbound slots are dropped right away.
-	s.applyStartupConnectOnly()
+	s.applyStartupConnectOnly(ctx)
 
 	// Bounded gossip-dispatch pool (gossip_dispatch.go): must be up
 	// before bootstrapLoop's first retryRelayDeliveries tick enqueues
@@ -4458,7 +4546,10 @@ func (s *Service) handleLocalFrameDispatch(frame protocol.Frame) protocol.Frame 
 	case "add_peer":
 		return s.addPeerFrame(frame)
 	case "connect_only":
-		return s.connectOnlyFrame(frame)
+		// A raw local frame carries no request scope; the node's lifecycle
+		// bounds the wait instead. The RPC command goes through ConnectOnly
+		// with its own request context.
+		return s.connectOnlyFrame(s.runCtx, frame)
 	case "fetch_dm_headers":
 		return s.fetchDMHeadersFrame()
 	case "fetch_relay_status":

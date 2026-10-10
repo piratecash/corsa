@@ -2069,36 +2069,90 @@ func (m addPeerMode) peerSource() domain.PeerSource {
 
 // addPeerFrame handles the operator "add_peer" command (console / RPC).
 // Operator intent dials immediately and bypasses candidate filtering.
+//
+// The local frame carries no request scope of its own, so the node's
+// lifecycle bounds the dial enqueue. Threading the RPC request context down
+// to here would need a typed add_peer entry on NodeProvider — and with it a
+// regenerated mock — for a wait the lifecycle already bounds: EmitSlot gives
+// up when the manager stops.
 func (s *Service) addPeerFrame(frame protocol.Frame) protocol.Frame {
-	return s.applyAddPeer(frame, addPeerModeOperator)
+	return s.applyAddPeer(s.runCtx, frame, addPeerModeOperator)
 }
 
-func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.Frame {
-	if len(frame.Peers) == 0 || strings.TrimSpace(frame.Peers[0]) == "" {
-		return protocol.Frame{Type: "error", Error: "address is required"}
+// applyAddPeer validates and admits an add_peer target. ctx bounds the wait to
+// enqueue an operator dial.
+func (s *Service) applyAddPeer(ctx context.Context, frame protocol.Frame, mode addPeerMode) protocol.Frame {
+	raw := ""
+	if len(frame.Peers) > 0 {
+		raw = frame.Peers[0]
 	}
-	peerSource := mode.peerSource()
-	operatorOverride := mode.operatorOverride()
-	address := strings.TrimSpace(frame.Peers[0])
+	target, err := s.validateAddPeerTarget(raw)
+	if err != nil {
+		return protocol.Frame{Type: "error", Error: err.Error()}
+	}
+	return s.admitAddPeerTarget(ctx, target, mode)
+}
+
+// addPeerTarget is an add_peer address that passed validateAddPeerTarget.
+type addPeerTarget struct {
+	// display is the address as the reply and logs show it: the operator's
+	// input, normalised to host:port.
+	display string
+	address domain.PeerAddress
+	// localDialIntent marks a loopback / RFC1918 / ULA LAN target that is
+	// forbidden for automatic dialling but admitted as a runtime-only
+	// operator dial intent.
+	localDialIntent bool
+}
+
+// addPeerRejection is which validation rule rejected an add_peer target.
+type addPeerRejection int
+
+const (
+	addPeerRejectedRequired addPeerRejection = iota + 1
+	addPeerRejectedSelf
+	addPeerRejectedForbidden
+	addPeerRejectedUnreachable
+)
+
+// addPeerRejectedError is a validation failure of an add_peer target. kind is
+// for callers that phrase the rejection their own way (connect_only); reason
+// is the operator-facing text the add_peer error reply carries.
+type addPeerRejectedError struct {
+	kind   addPeerRejection
+	reason string
+}
+
+func (e addPeerRejectedError) Error() string { return e.reason }
+
+// validateAddPeerTarget runs every check that can reject an add_peer target,
+// and nothing else: no state is read that another command could change and no
+// state is written, so a caller can validate first and commit afterwards —
+// connect_only relies on that to write its pin only for a target that will be
+// admitted. The checks are the same as on the network peer-exchange path, so
+// manually added peers cannot bypass forbidden-IP, self-address or
+// unreachable-network rules.
+func (s *Service) validateAddPeerTarget(raw string) (addPeerTarget, error) {
+	address := strings.TrimSpace(raw)
+	if address == "" {
+		return addPeerTarget{}, addPeerRejectedError{kind: addPeerRejectedRequired, reason: "address is required"}
+	}
 
 	// Ensure host:port format.
 	if _, _, ok := splitHostPort(address); !ok {
 		address = net.JoinHostPort(address, config.DefaultPeerPort)
 	}
 
-	// Apply the same validation as the network peer-exchange path so
-	// that manually added peers cannot bypass forbidden-IP, self-address,
-	// or unreachable-network checks.
-	peerAddress := domain.PeerAddress(address)
-	if s.isSelfAddress(peerAddress) {
-		return protocol.Frame{Type: "error", Error: "cannot add self as peer"}
+	target := addPeerTarget{display: address, address: domain.PeerAddress(address)}
+	if s.isSelfAddress(target.address) {
+		return addPeerTarget{}, addPeerRejectedError{kind: addPeerRejectedSelf, reason: "cannot add self as peer"}
 	}
-	if s.shouldSkipDialAddress(peerAddress) {
+	if s.shouldSkipDialAddress(target.address) {
 		// A forbidden address is normally rejected, but a loopback / RFC1918
 		// / ULA LAN target is admitted as a RUNTIME-ONLY dial intent. For an
 		// operator add_peer (addPeerModeOperator) the immediate connect flows
-		// via EmitSlot(ManualPeerRequested) below; for startup bootstrap
-		// priming (addPeerModeBootstrap) it is offered to Candidates() — but
+		// via EmitSlot(ManualPeerRequested); for startup bootstrap priming
+		// (addPeerModeBootstrap) it is offered to Candidates() — but
 		// shouldSkipPersistedPrivatePeer there keeps private addresses out of
 		// auto-selection, so in practice only an operator add actually dials
 		// one. Either way these addresses stay excluded from announce
@@ -2111,17 +2165,39 @@ func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.
 		// and never reaches this branch.
 		host, _, _ := splitHostPort(address)
 		if !isManualLocalDialIP(net.ParseIP(host)) {
-			return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in a forbidden IP range", address)}
+			return addPeerTarget{}, addPeerRejectedError{kind: addPeerRejectedForbidden, reason: fmt.Sprintf("address %s is in a forbidden IP range", address)}
 		}
-		log.Info().Str("address", address).Str("source", string(peerSource)).Msg("add_peer_local_allowed")
+		target.localDialIntent = true
 	}
-	if !s.canReach(peerAddress) {
-		return protocol.Frame{Type: "error", Error: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(peerAddress))}
+	if !s.canReach(target.address) {
+		return addPeerTarget{}, addPeerRejectedError{kind: addPeerRejectedUnreachable, reason: fmt.Sprintf("address %s is in an unreachable network group (%s)", address, classifyAddress(target.address))}
 	}
+	return target, nil
+}
 
-	log.Trace().Str("site", "applyAddPeer").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+// admitAddPeerTarget registers a validated target and enqueues its dial. It
+// cannot fail: every rejection happened in validateAddPeerTarget.
+func (s *Service) admitAddPeerTarget(ctx context.Context, target addPeerTarget, mode addPeerMode) protocol.Frame {
+	peerSource := mode.peerSource()
+	if target.localDialIntent {
+		log.Info().Str("address", target.display).Str("source", string(peerSource)).Msg("add_peer_local_allowed")
+	}
+	found := s.recordAddedPeer(target.address, mode)
+	s.registerAddedPeerCandidate(target.address, mode)
+	dial := s.enqueueAddedPeerDial(ctx, target.address, mode)
+	return s.addPeerReply(target, mode, found, dial)
+}
+
+// recordAddedPeer writes the peer into the Service's peer state — s.peers,
+// persistedMeta and, for an operator add, the penalty overrides — and marks it
+// for persistence. Returns whether the peer was already known.
+func (s *Service) recordAddedPeer(peerAddress domain.PeerAddress, mode addPeerMode) bool {
+	peerSource := mode.peerSource()
+	operatorOverride := mode.operatorOverride()
+
+	log.Trace().Str("site", "recordAddedPeer").Str("phase", "lock_wait").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
-	log.Trace().Str("site", "applyAddPeer").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "recordAddedPeer").Str("phase", "lock_held").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
 	now := time.Now().UTC()
 
@@ -2261,7 +2337,7 @@ func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.
 	}
 
 	s.peerMu.Unlock()
-	log.Trace().Str("site", "applyAddPeer").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "recordAddedPeer").Str("phase", "lock_released").Str("address", string(peerAddress)).Msg("peer_mu_writer")
 
 	// Mark the freshly added peer (operator or bootstrap) for persistence.
 	// The next bootstrapLoop tick coalesces this with any sibling adds into
@@ -2270,13 +2346,20 @@ func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.
 	// durability window is peerStateDebounceSeconds; a peer lost in that
 	// window is re-primed on the next start.
 	s.markPeerStateDirty()
+	return found
+}
+
+// registerAddedPeerCandidate offers the peer to the PeerProvider.
+func (s *Service) registerAddedPeerCandidate(peerAddress domain.PeerAddress, mode addPeerMode) {
+	operatorOverride := mode.operatorOverride()
 
 	// Register in PeerProvider so the CM can pick it up as a candidate.
 	// Operator add_peer uses Promote (re-stamps Source=Manual and refreshes
 	// AddedAt); bootstrap priming uses Add with Source=Bootstrap so it does
 	// not overwrite the origin tag with an operator assertion it never made.
 	// Neither call reorders Candidates() — operator dial priority comes from
-	// the ManualPeerRequested bypass below, not from this registration.
+	// the ManualPeerRequested bypass in enqueueAddedPeerDial, not from this
+	// registration.
 	if s.peerProvider != nil {
 		if operatorOverride {
 			s.peerProvider.Promote(peerAddress, domain.PeerSourceManual)
@@ -2284,52 +2367,90 @@ func (s *Service) applyAddPeer(frame protocol.Frame, mode addPeerMode) protocol.
 			s.peerProvider.Add(peerAddress, domain.PeerSourceBootstrap)
 		}
 	}
-	// Enqueue the dial according to caller intent.
-	if s.connManager != nil {
-		switch mode {
-		case addPeerModeOperator:
-			// ManualPeerRequested creates a slot directly, bypassing the
-			// Candidates() round-trip (and every gate in it, including
-			// subnet diversity) that NewPeersDiscovered would use. Uses
-			// EmitSlot (blocking) to guarantee delivery.
-			//
-			// Build the same primary+fallback dial address list that
-			// Candidates() would produce. Without this, a manual add of a
-			// non-default-port peer (e.g. 1.2.3.4:7777) would never attempt
-			// the standard fallback port (1.2.3.4:64646), making manual
-			// recovery strictly weaker than ordinary candidate dialing.
-			dialAddrs := []domain.PeerAddress{peerAddress}
-			if s.peerProvider != nil {
-				dialAddrs = s.peerProvider.BuildDialAddresses(peerAddress)
-			}
-			s.connManager.EmitSlot(ManualPeerRequested{
-				Address:       peerAddress,
-				DialAddresses: dialAddrs,
-			})
-		case addPeerModeBootstrap:
-			// Hint-only: the next fill() picks the peer up through
-			// Candidates() with full gating. Pre-bootstrap the hint is
-			// dropped by design — NotifyBootstrapReady triggers the first
-			// fill() right after startup priming completes, so the peer
-			// is still picked up without a special case.
-			s.connManager.EmitHint(NewPeersDiscovered{Count: 1})
-		}
-	}
+}
 
+// addedPeerDial is what enqueueAddedPeerDial did with the added peer.
+type addedPeerDial struct {
+	// withheldByPin is the live connect_only pin that kept an operator dial
+	// from being enqueued; nil when the dial was enqueued (or the mode does
+	// not dial directly).
+	withheldByPin *domain.PeerAddress
+}
+
+// enqueueAddedPeerDial enqueues the dial according to caller intent. Under a
+// live connect_only pin to another peer an operator dial is not enqueued: the
+// node dials only the pinned address, and the reply has to say so rather than
+// promise a dial. The ConnectionManager refuses such a request too, as the
+// guard for a pin that moves in between.
+func (s *Service) enqueueAddedPeerDial(ctx context.Context, peerAddress domain.PeerAddress, mode addPeerMode) addedPeerDial {
+	if s.connManager == nil {
+		return addedPeerDial{}
+	}
+	switch mode {
+	case addPeerModeOperator:
+		if pin, pinned := s.connectOnlyTarget(); pinned && pin != peerAddress {
+			return addedPeerDial{withheldByPin: &pin}
+		}
+		// ManualPeerRequested creates a slot directly, bypassing the
+		// Candidates() round-trip (and every gate in it, including
+		// subnet diversity) that NewPeersDiscovered would use. The send
+		// blocks until the event loop takes it — guaranteed delivery —
+		// unless ctx ends first: a caller that went away must not stay
+		// parked on a busy loop.
+		//
+		// Build the same primary+fallback dial address list that
+		// Candidates() would produce. Without this, a manual add of a
+		// non-default-port peer (e.g. 1.2.3.4:7777) would never attempt
+		// the standard fallback port (1.2.3.4:64646), making manual
+		// recovery strictly weaker than ordinary candidate dialing.
+		dialAddrs := []domain.PeerAddress{peerAddress}
+		if s.peerProvider != nil {
+			dialAddrs = s.peerProvider.BuildDialAddresses(peerAddress)
+		}
+		// A false return means the event loop is not running or ctx
+		// ended: there is no dial to start now, and the peer is already
+		// registered for a fill to pick up.
+		_ = s.connManager.emitSlotUnless(ctx.Done(), ManualPeerRequested{
+			Address:       peerAddress,
+			DialAddresses: dialAddrs,
+		})
+	case addPeerModeBootstrap:
+		// Hint-only: the next fill() picks the peer up through
+		// Candidates() with full gating. Pre-bootstrap the hint is
+		// dropped by design — NotifyBootstrapReady triggers the first
+		// fill() right after startup priming completes, so the peer
+		// is still picked up without a special case.
+		s.connManager.EmitHint(NewPeersDiscovered{Count: 1})
+	}
+	return addedPeerDial{}
+}
+
+// addPeerReply builds the add_peer reply and logs the outcome. A dial withheld
+// by a connect_only pin gets CodeAddPeerNotDialledConnectOnly and a status
+// that names the pin.
+func (s *Service) addPeerReply(target addPeerTarget, mode addPeerMode, found bool, dial addedPeerDial) protocol.Frame {
 	action := "added"
 	if found {
 		action = "already known"
-		if operatorOverride {
+		if mode.operatorOverride() {
 			action = "already known, moved to front"
 		}
 	}
-	log.Info().Str("address", address).Str("network", classifyAddress(peerAddress).String()).Str("action", action).Str("source", string(peerSource)).Msg("add_peer")
+	network := classifyAddress(target.address)
+	log.Info().Str("address", target.display).Str("network", network.String()).Str("action", action).Str("source", string(mode.peerSource())).Msg("add_peer")
 
-	return protocol.Frame{
+	reply := protocol.Frame{
 		Type:   "ok",
-		Peers:  []string{address},
-		Status: fmt.Sprintf("peer %s %s (network: %s)", address, action, classifyAddress(domain.PeerAddress(address))),
+		Peers:  []string{target.display},
+		Status: fmt.Sprintf("peer %s %s (network: %s)", target.display, action, network),
 	}
+	if dial.withheldByPin != nil {
+		pin := connectOnlyPinLabel(*dial.withheldByPin)
+		log.Info().Str("address", target.display).Str("pin", pin).Msg("add_peer_not_dialled_connect_only")
+		reply.Code = protocol.CodeAddPeerNotDialledConnectOnly
+		reply.Status = fmt.Sprintf("%s; not dialled: connect-only pins egress to %s — re-issue add_peer after clearing the pin", reply.Status, pin)
+	}
+	return reply
 }
 
 // applyStartupBootstrapPeer adds a compiled/default bootstrap peer through
@@ -2348,7 +2469,7 @@ func (s *Service) applyStartupBootstrapPeer(address string) {
 		return
 	}
 
-	frame := s.applyAddPeer(protocol.Frame{Type: "add_peer", Peers: []string{address}}, addPeerModeBootstrap)
+	frame := s.applyAddPeer(s.runCtx, protocol.Frame{Type: "add_peer", Peers: []string{address}}, addPeerModeBootstrap)
 	if frame.Type == "error" {
 		log.Debug().Str("address", address).Str("error", frame.Error).Msg("startup bootstrap peer skipped")
 		return
@@ -3835,8 +3956,11 @@ func (s *Service) outboundControlFrameAllowed(session *peerSession) bool {
 // removes an outbound session entry from s.sessions:
 //
 //   - runPeerSession error-cleanup (legacy non-CM path)
-//   - onCMSessionEstablished ownedCleanup (CM-managed path)
+//   - withdrawServedCMSession (CM-managed path, after the serve loop)
 //   - onCMSessionTeardown (CM-initiated close)
+//   - abortLocallyEvictedCMSession / failCMSessionSetup (CM sessions that
+//     end before they are published: frames dispatched during setup can
+//     already have created the bucket)
 //   - ensurePeerSessions outer defer (best-effort fallback)
 //
 // commandRateLimiter.cleanup is NOT wired to any periodic sweep,

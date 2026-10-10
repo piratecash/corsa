@@ -148,9 +148,11 @@ const (
 //     servePeerSession are local context cancellation (the ctx.Done
 //     case, and the writerDone case re-checked against ctx.Err), and
 //     the runPeerSession cleanup never runs with a nil error at all.
-//     Without the nil→local mapping a node shutdown whose session
-//     goroutine won the cleanup race against onCMSessionTeardown
-//     recorded a disconnect_storm event against every connected peer.
+//     Without the nil→local mapping a node shutdown recorded a
+//     disconnect_storm event against every connected peer. (A CM session
+//     the ConnectionManager evicted or shut down is attributed from its
+//     recorded close reason before this is consulted — see
+//     deregisterServedCMSessionRouting.)
 //
 // Everything else is peer-initiated.
 func sessionCloseCauseFromError(err error) sessionCloseCause {
@@ -900,19 +902,41 @@ func (s *Service) markPeerConnected(address domain.PeerAddress, direction domain
 // side's anti-replay covers. What it removes is the case where the queue
 // answers "accepted" for a frame the same teardown has already condemned.
 //
-// Takes no domain mutex: closeSendQueue holds only the session's leaf sendMu
-// and markPeerDisconnected takes peerMu afterwards, so the two sections are
+// Takes no domain mutex: closeSendQueue holds only the session's leaf sendMu,
+// the session's Close takes peerMu only for its own NetCore unregistration,
+// and markPeerDisconnected takes peerMu afterwards, so the sections are
 // sequential and the fence stays outside the canonical lock order
 // (docs/locking.md, "peerSession.sendMu — the outbound queue fence"). The
 // test-only peerTeardownBarrier sits BETWEEN the two publications and is the
 // only place the order is observable from; it must stay there, and it must stay
 // outside both locks.
+//
+// What the disconnect charges depends on who closed the session first. The
+// session is closed here, after the fence, before that is read: the first close
+// wins closeOnce, so either this records that the serve loop gave up on the
+// peer, or it returns after a ConnectionManager eviction that came first and
+// makes that reason visible. A session the ConnectionManager evicted is
+// published as disconnected without being charged — the read error the serve
+// loop saw on the closed socket is this node's doing.
+//
+// The first closer is not necessarily the first cause: when the peer's own
+// failure is already waiting in errCh and an eviction wins closeOnce first,
+// that failure goes uncharged. Accepted — the eviction was closing the session
+// regardless, and the error guarded against here is the opposite one, charging
+// the peer for this node's own close.
 func (s *Service) retirePeerSession(session *peerSession, err error) {
 	if session == nil {
 		return
 	}
 	session.discardSendQueue()
+	// Every caller is about to return from the serve loop with err; the
+	// close error adds nothing to it.
+	_ = session.Close()
 	s.runPeerTeardownBarrier()
+	if session.closedByLocalEviction() {
+		s.markPeerDisconnectedByLocalDecision(session.address)
+		return
+	}
 	s.markPeerDisconnected(session.address, err)
 }
 
@@ -931,7 +955,76 @@ func (s *Service) retirePeerSession(session *peerSession, err error) {
 // trackInboundDisconnect (NetCore.ShutSendQueue) on the accepted one. Callers
 // with NO live queue behind the address — a failed dial, a self-identity
 // cooldown — have nothing to fence and call this directly.
+//
+// A non-nil err charges the peer a failure; nil records a clean disconnect.
 func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
+	s.publishPeerDisconnected(address, peerDisconnectChargeFromError(err))
+}
+
+// markPeerDisconnectedByLocalDecision publishes the peer at address as
+// disconnected after THIS node closed the connection on its own decision (a
+// ConnectionManager eviction or shutdown). The peer did nothing, so neither its
+// failure counter, its last error nor its score moves; the same ordering
+// contract as markPeerDisconnected applies.
+func (s *Service) markPeerDisconnectedByLocalDecision(address domain.PeerAddress) {
+	s.publishPeerDisconnected(address, localDecisionDisconnect{})
+}
+
+// peerDisconnectCharge is what a disconnect does to the peer's health record
+// beyond publishing it as disconnected. Caller holds s.peerMu.
+type peerDisconnectCharge interface {
+	applyLocked(health *peerHealth)
+}
+
+// peerDisconnectChargeFromError maps a disconnect error onto its charge.
+func peerDisconnectChargeFromError(err error) peerDisconnectCharge {
+	if err != nil {
+		return failedDisconnect{err: err}
+	}
+	return cleanDisconnect{}
+}
+
+// failedDisconnect: the connection failed; the peer is charged for it.
+type failedDisconnect struct {
+	err error
+}
+
+func (c failedDisconnect) applyLocked(health *peerHealth) {
+	health.ConsecutiveFailures++
+	health.LastError = c.err.Error()
+	health.Score = clampScore(health.Score + peerScoreFailure)
+	// Set machine-readable disconnect code when the error wraps a
+	// known protocol error (e.g. frame-too-large, rate-limited).
+	// The generic "protocol-error" sentinel is excluded — it carries
+	// no diagnostic value beyond "something went wrong".
+	if code := protocol.ErrorCode(c.err); code != protocol.ErrCodeProtocol {
+		health.LastDisconnectCode = code
+	} else {
+		health.LastDisconnectCode = ""
+	}
+}
+
+// cleanDisconnect: the connection ended without an error.
+type cleanDisconnect struct{}
+
+func (cleanDisconnect) applyLocked(health *peerHealth) {
+	// Clean disconnect — clear the code so stale values from a
+	// previous error-disconnect do not persist in diagnostics.
+	health.ConsecutiveFailures = 0
+	health.LastDisconnectCode = ""
+	health.Score = clampScore(health.Score + peerScoreDisconnect)
+}
+
+// localDecisionDisconnect: this node closed the connection itself. It is
+// neither a failure nor a clean departure of the peer, so the record keeps
+// whatever it said about the peer before.
+type localDecisionDisconnect struct{}
+
+func (localDecisionDisconnect) applyLocked(*peerHealth) {}
+
+// publishPeerDisconnected is the body shared by markPeerDisconnected and
+// markPeerDisconnectedByLocalDecision; charge is the only part that differs.
+func (s *Service) publishPeerDisconnected(address domain.PeerAddress, charge peerDisconnectCharge) {
 	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_wait").Str("address", string(address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "markPeerDisconnected").Str("phase", "lock_held").Str("address", string(address)).Msg("peer_mu_writer")
@@ -943,26 +1036,7 @@ func (s *Service) markPeerDisconnected(address domain.PeerAddress, err error) {
 	health.Direction = ""
 	s.updatePeerStateLocked(health, peerStateReconnecting)
 	health.LastDisconnectedAt = now
-	if err != nil {
-		health.ConsecutiveFailures++
-		health.LastError = err.Error()
-		health.Score = clampScore(health.Score + peerScoreFailure)
-		// Set machine-readable disconnect code when the error wraps a
-		// known protocol error (e.g. frame-too-large, rate-limited).
-		// The generic "protocol-error" sentinel is excluded — it carries
-		// no diagnostic value beyond "something went wrong".
-		if code := protocol.ErrorCode(err); code != protocol.ErrCodeProtocol {
-			health.LastDisconnectCode = code
-		} else {
-			health.LastDisconnectCode = ""
-		}
-	} else {
-		// Clean disconnect — clear the code so stale values from a
-		// previous error-disconnect do not persist in diagnostics.
-		health.ConsecutiveFailures = 0
-		health.LastDisconnectCode = ""
-		health.Score = clampScore(health.Score + peerScoreDisconnect)
-	}
+	charge.applyLocked(health)
 	peerID := s.peerIDs[address]
 	if !peerID.IsZero() {
 		// observedAddrs is IP/advertise-domain state; nest s.ipStateMu
@@ -1232,7 +1306,7 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 
 	// Launch the session goroutine. All blocking I/O (subscribe, sync,
 	// serve loop) runs here, never in the CM event loop.
-	savedGen := info.SlotGeneration
+	//
 	// Joined by runLoopsWg (stopRunLifecycle). The goroutine serves
 	// frames — storing messages, scheduling receipts and key syncs on
 	// goBackground — until its session closes, and Run must not return while
@@ -1243,203 +1317,398 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// from here is legal even while stopRunLifecycle waits: this callback runs
 	// on the CM event loop, which is itself on runLoopsWg, so the counter is
 	// never zero at this Add.
-	s.goRunLoop(func() {
-		// --- Phase 1: application-level setup (blocking I/O) ---
-		if err := s.initPeerSession(session); err != nil {
-			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("cm_session_setup_failed")
-			// Session was never registered in s.sessions / s.upstream, so
-			// only dialOrigin (set by dialForCM for fallback ports) needs cleanup.
-			// Also record the setup failure in the local per-address counter so
-			// PeerProvider.SetupFailureBannedFn can mute the address once the
-			// threshold is reached — breaks the reconnect storm against peers
-			// whose handshake reply gets evicted by their own announce flush.
-			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-			s.peerMu.Lock()
-			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-			delete(s.dialOrigin, dialAddress)
-			// Record failure against the slot's canonical address (slotAddress)
-			// rather than dialAddress so siblings of a fallback-port peer share
-			// the cooldown — matches the per-slot semantics of CM retry budget.
-			now := time.Now()
-			s.recordSetupFailureLocked(slotAddress, now)
-			// Setup-failure quarantine trigger: when the per-address
-			// failure threshold is crossed AND we know the peer's
-			// identity (auth completed before initPeerSession failed),
-			// arm route quarantine on the session's penalty subject —
-			// the identity only when a v2 session proved it, the dialled
-			// address otherwise: the welcome of the threshold-crossing
-			// dial names whatever identity the dialled peer chose (see
-			// penalty_subject.go). B1 already mutes
-			// outbound dial attempts to the address; quarantine
-			// additionally mutes inbound routing-snapshot trust and
-			// transit usage for the same peer. Two complementary
-			// brakes on the same root signal. See
-			// routing_route_quarantine.go and
-			// docs/refactoring/route-withdrawal-grace-period.md.
-			if !session.peerIdentity.IsZero() && s.setupFailureExceedsThresholdLocked(slotAddress) {
-				s.armRouteQuarantineLocked(session.penaltySubject(), quarantineReasonSetupFailureCycle, now)
-			}
-			s.peerMu.Unlock()
-			log.Trace().Str("site", "onCMSessionEstablished_setupFailedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-			_ = session.Close()
-			// Notify CM so it can reconnect with backoff.
-			s.connManager.EmitSlot(ActiveSessionLost{
-				Address:        slotAddress,
-				Identity:       session.peerIdentity,
-				Error:          err,
-				WasHealthy:     false,
-				SlotGeneration: savedGen,
-			})
-			return
-		}
+	s.goRunLoop(func() { s.runCMSession(session, slotAddress, info.SlotGeneration) })
+}
 
-		// Setup succeeded — clear the per-address failure counter so an
-		// earlier bad period does not pin a now-healthy peer in cooldown.
-		// Done under s.peerMu (same lock that protects setupFailures).
-		s.peerMu.Lock()
-		s.clearSetupFailuresLocked(slotAddress)
-		s.peerMu.Unlock()
+// cmSessionSetupOutcome is how the application-level setup of a CM session
+// ended, from the point of view of who answers for it.
+type cmSessionSetupOutcome int
 
-		// --- Phase 2: session is fully operational ---
-		// Promote CM slot from Initializing → Active so ActiveCount() and
-		// buildPeerExchangeResponse() start counting and advertising this
-		// peer, and Slots() reports it as Active. Until this event the slot
-		// is not advertised to peer exchange.
-		s.connManager.EmitSlot(SessionInitReady{
-			Address:        slotAddress,
-			SlotGeneration: savedGen,
-		})
+const (
+	// cmSessionSetupSucceeded: initPeerSession succeeded on a session the
+	// ConnectionManager had not evicted when the outcome was classified.
+	cmSessionSetupSucceeded cmSessionSetupOutcome = iota + 1
+	// cmSessionSetupFailed: initPeerSession failed and the peer answers for
+	// it.
+	cmSessionSetupFailed
+	// cmSessionSetupAbortedByLocalEviction: the ConnectionManager evicted the
+	// slot — or shut down — while setup ran, and closed the session. Whatever
+	// initPeerSession returned, nobody may charge the peer for it or publish
+	// the session.
+	cmSessionSetupAbortedByLocalEviction
+)
 
-		// Register session in Service maps. This is the first point where
-		// the session becomes visible to routingTargets, enqueuePeerFrame,
-		// connectedHostsLocked, and other lookups.
-		//
-		// Cross-domain: s.sessions belongs to peer domain (s.peerMu),
-		// s.upstream belongs to delivery domain (s.deliveryMu).  Canonical
-		// s.peerMu OUTER → s.deliveryMu INNER.
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-		s.peerMu.Lock()
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
-		s.deliveryMu.Lock()
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
-		s.sessions[dialAddress] = session
-		s.upstream[dialAddress] = struct{}{}
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
-		s.peerMu.Unlock()
-		log.Trace().Str("site", "onCMSessionEstablished_register").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+// classifyCMSessionSetup decides the outcome of initPeerSession. A local
+// eviction outranks the error: the ConnectionManager closed the transport
+// under the setup, so the error is the echo of that close, not a failure of
+// the peer. When initErr is non-nil the caller must have closed the session
+// itself first (see closedByLocalEviction for why that makes the read sound).
+// A success is re-checked under peerMu when the session is registered.
+func classifyCMSessionSetup(session *peerSession, initErr error) cmSessionSetupOutcome {
+	switch {
+	case session.closedByLocalEviction():
+		return cmSessionSetupAbortedByLocalEviction
+	case initErr != nil:
+		return cmSessionSetupFailed
+	default:
+		return cmSessionSetupSucceeded
+	}
+}
 
-		// The welcome was checked against the pin during the dial; the
-		// identity may have proved itself over v2 since, and the sweep that
-		// closes legacy sessions (v2_identity_claims.go) only sees sessions
-		// already registered. Checking AFTER registering leaves no window: a
-		// proof that came first is seen here, one that comes later sweeps
-		// this session. A refused session is closed and its serve loop ends
-		// on the closed socket through the ordinary teardown.
-		if _, proven := session.provenIdentity(); !proven {
-			if err := s.refuseLegacyIdentity(session.peerIdentity.String()); err != nil {
-				log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("outbound_v1_refused_identity_proved_v2_during_setup")
-				_ = session.Close()
-			}
-		}
+// runCMSession is the session goroutine of an outbound ConnectionManager
+// session: application-level setup, publication, the serve loop and the
+// withdrawal after it. slotAddress is the CM slot's canonical address and
+// slotGeneration the generation the slot entered Initializing with; both go
+// back to the CM in SessionInitReady / ActiveSessionLost.
+//
+// The goroutine alone accounts for the peer behind the session — setup
+// failures, route quarantine, connected/disconnected health, routing
+// registration and deregistration. onCMSessionTeardown only withdraws the
+// session from the session maps. Each charge is decided by who closed the
+// session first (peerSession.closedBy): a session the ConnectionManager closed
+// on its own decision is never charged to the peer and never published.
+func (s *Service) runCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64) {
+	// --- Phase 1: application-level setup (blocking I/O) ---
+	initErr := s.initPeerSession(session)
+	if initErr != nil {
+		// Close BEFORE classifying: the first close wins closeOnce, so this
+		// either records that the goroutine gave up on the peer, or returns
+		// after the ConnectionManager's close that came first and makes its
+		// reason visible. The close error adds nothing to the setup error.
+		_ = session.Close()
+	}
 
-		s.markPeerConnected(dialAddress, peerDirectionOutbound)
-		s.flushPendingPeerFrames(dialAddress)
+	switch classifyCMSessionSetup(session, initErr) {
+	case cmSessionSetupAbortedByLocalEviction:
+		s.abortLocallyEvictedCMSession(session, slotAddress, initErr)
+	case cmSessionSetupFailed:
+		s.failCMSessionSetup(session, slotAddress, slotGeneration, initErr)
+	case cmSessionSetupSucceeded:
+		s.publishAndServeCMSession(session, slotAddress, slotGeneration)
+	}
+}
 
-		// Routing table: register direct peer. session.capabilities is
-		// stable by this point (applyWelcomeMetadata ran in
-		// openPeerSessionForCM before the CM event loop validated the
-		// slot generation), so we pass the raw slice and let the hook
-		// flatten it for the relay-cap direct-route gate.
-		s.onPeerSessionEstablished(session.peerIdentity, session.capabilities)
+// abortLocallyEvictedCMSession ends the goroutine of a session the
+// ConnectionManager closed on its own decision while setup ran. The peer is not
+// charged — no setup failure, no route quarantine — and the session is not
+// published; a session that was torn down proves nothing about the peer
+// either, so the setup-failure counter is not cleared.
+//
+// Only what the session left behind without being published is released: the
+// dialOrigin entry dialForCM registered for a fallback port, and the
+// control-frame bucket frames dispatched during setup may have created.
+// Nothing is reported to the ConnectionManager: every local eviction
+// removes the slot (or clears the whole table at shutdown), so there is no slot
+// left at this generation for an event to reach.
+func (s *Service) abortLocallyEvictedCMSession(session *peerSession, slotAddress domain.PeerAddress, initErr error) {
+	dialAddress := session.address
+	log.Trace().Str("site", "abortLocallyEvictedCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "abortLocallyEvictedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.forgetUnpublishedDialOriginLocked(session)
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "abortLocallyEvictedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.dropOutboundControlFrameBucket(session.connID)
 
-		// Send full table sync to the new peer (Phase 1.2).
-		if !session.peerIdentity.IsZero() && s.sessionHasCapability(session, domain.CapMeshRoutingV1) && s.sessionHasCapability(session, domain.CapMeshRelayV1) {
-			s.sendOutboundFullTableSync(s.runCtx, session.peerIdentity, dialAddress)
-		}
+	log.Info().
+		Err(initErr).
+		Str("peer", string(dialAddress)).
+		Str("slot", string(slotAddress)).
+		Uint64("conn_id", uint64(session.connID)).
+		Msg("cm_session_setup_aborted_local_eviction")
+}
 
-		// --- Phase 3: main session loop ---
-		err := s.servePeerSession(s.runCtx, session)
-
-		// servePeerSession already called markPeerDisconnected on some paths.
-		// Clean up session from Service maps — but only if the map entry
-		// still belongs to THIS session. A replacement session for the same
-		// dial address may have been registered by a concurrent reconnect
-		// before this goroutine finished unwinding.
-		//
-		// ownedCleanup tracks whether THIS goroutine won the race to remove
-		// the session entry. The winner is responsible for routing
-		// deregistration (onPeerSessionClosed). If onCMSessionTeardown
-		// already deleted the entry (CM-initiated close), the goroutine
-		// must NOT call onPeerSessionClosed a second time — that would
-		// double-decrement the identity session counter and could remove
-		// a live route belonging to a replacement session.
-		//
-		// Cross-domain cleanup: s.sessions / s.dialOrigin → s.peerMu;
-		// s.upstream → s.deliveryMu.  Canonical s.peerMu OUTER →
-		// s.deliveryMu INNER.
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-		s.peerMu.Lock()
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
-		s.deliveryMu.Lock()
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
-		ownedCleanup := s.sessions[dialAddress] == session
-		if ownedCleanup {
-			delete(s.sessions, dialAddress)
-			delete(s.upstream, dialAddress)
-			delete(s.dialOrigin, dialAddress)
-		}
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
-		s.peerMu.Unlock()
-		log.Trace().Str("site", "onCMSessionEstablished_ownedCleanup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
-
-		// Drop the per-session cmdLimiter bucket on the CM-managed
-		// path. Only when we owned the cleanup — otherwise
-		// onCMSessionTeardown ran first and will (also) drop it
-		// against the same connID; the underlying removeConn is
-		// idempotent on a missing key, so a duplicate call is harmless.
-		// See dropOutboundControlFrameBucket for the lifecycle
-		// contract.
-		if ownedCleanup {
-			s.dropOutboundControlFrameBucket(session.connID)
-		}
-
-		// Routing table: deregister direct peer only if this goroutine
-		// owns the cleanup (i.e. onCMSessionTeardown did not run first).
-		if ownedCleanup && !session.peerIdentity.IsZero() {
-			s.onPeerSessionClosedWithError(session.peerIdentity, session.penaltySubject(), session.capabilities, err)
-		}
-
-		// Accumulate traffic metrics from the metered connection.
-		if session.metered != nil {
-			s.accumulateSessionTraffic(dialAddress, session.metered)
-		}
-
-		// Emit ActiveSessionLost using the slot's canonical address so
-		// CM.findSlotLocked can match it. When a fallback port was used,
-		// dialAddress != slotAddress; using dialAddress here would cause
-		// CM to treat the event as unknown and never reconnect.
-		s.connManager.EmitSlot(ActiveSessionLost{
-			Address:        slotAddress,
-			Identity:       session.peerIdentity,
-			Error:          err,
-			WasHealthy:     true,
-			SlotGeneration: savedGen,
-		})
+// failCMSessionSetup charges a failed initPeerSession to the peer and reports
+// it to the ConnectionManager, which retries with backoff or replaces the slot.
+// The session is already closed (runCMSession).
+func (s *Service) failCMSessionSetup(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, initErr error) {
+	dialAddress := session.address
+	log.Warn().Err(initErr).Str("peer", string(dialAddress)).Msg("cm_session_setup_failed")
+	// Session was never registered in s.sessions / s.upstream, so only
+	// what it left unpublished needs cleanup: dialOrigin (set by dialForCM
+	// for fallback ports) and the control-frame bucket.
+	// Also record the setup failure in the local per-address counter so
+	// PeerProvider.SetupFailureBannedFn can mute the address once the
+	// threshold is reached — breaks the reconnect storm against peers
+	// whose handshake reply gets evicted by their own announce flush.
+	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.forgetUnpublishedDialOriginLocked(session)
+	// Record failure against the slot's canonical address (slotAddress)
+	// rather than dialAddress so siblings of a fallback-port peer share
+	// the cooldown — matches the per-slot semantics of CM retry budget.
+	now := time.Now()
+	s.recordSetupFailureLocked(slotAddress, now)
+	// Setup-failure quarantine trigger: when the per-address
+	// failure threshold is crossed AND we know the peer's
+	// identity (auth completed before initPeerSession failed),
+	// arm route quarantine on the session's penalty subject —
+	// the identity only when a v2 session proved it, the dialled
+	// address otherwise: the welcome of the threshold-crossing
+	// dial names whatever identity the dialled peer chose (see
+	// penalty_subject.go). B1 already mutes
+	// outbound dial attempts to the address; quarantine
+	// additionally mutes inbound routing-snapshot trust and
+	// transit usage for the same peer. Two complementary
+	// brakes on the same root signal. See
+	// routing_route_quarantine.go and
+	// docs/refactoring/route-withdrawal-grace-period.md.
+	if !session.peerIdentity.IsZero() && s.setupFailureExceedsThresholdLocked(slotAddress) {
+		s.armRouteQuarantineLocked(session.penaltySubject(), quarantineReasonSetupFailureCycle, now)
+	}
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.dropOutboundControlFrameBucket(session.connID)
+	// Notify CM so it can reconnect with backoff.
+	s.connManager.EmitSlot(ActiveSessionLost{
+		Address:        slotAddress,
+		Identity:       session.peerIdentity,
+		Error:          initErr,
+		WasHealthy:     false,
+		SlotGeneration: slotGeneration,
 	})
 }
 
-// onCMSessionTeardown is called by ConnectionManager whenever it deactivates
-// an active or initializing slot. Cleans up Service-level state.
-// Note: the CM has already closed the TCP transport at this point, so the
-// session goroutine charges the outcome itself — initPeerSession fails and
-// records a setup failure, or servePeerSession exits and calls
-// markPeerDisconnected — and we must NOT charge the peer here (that would be
-// a double penalty). The goroutine emits a stale ActiveSessionLost that the
-// generation guard suppresses.
+// forgetUnpublishedDialOriginLocked removes the dialOrigin entry dialForCM
+// registered for a session that is ending without ever having been published.
+// The entry is keyed by the dial address alone, so it is left alone when
+// another session is registered under that address: that entry is the other
+// session's, and deleting it would fold its fallback-port health back onto the
+// wrong key. Caller holds s.peerMu.Lock.
+func (s *Service) forgetUnpublishedDialOriginLocked(session *peerSession) {
+	if registered, ok := s.sessions[session.address]; ok && registered != session {
+		return
+	}
+	delete(s.dialOrigin, session.address)
+}
+
+// registerCMSession enters a session whose setup succeeded into s.sessions /
+// s.upstream, unless the ConnectionManager has closed it on its own decision
+// in the meantime. Returns false when it did not register.
+//
+// The check and the registration share one peerMu section, and that is what
+// makes them race-free against the ConnectionManager: it records the close
+// reason before it calls onCMSessionTeardown, which removes the entry under
+// peerMu. If the teardown's section came first, this section sees the reason
+// and does not register; if this section came first, the teardown finds the
+// entry and withdraws it. A closed session is never left registered.
+//
+// Clearing the setup-failure counter happens in the same section for the same
+// reason: only a setup that ends with a published session proves the peer
+// healthy.
+//
+// What the check does NOT cover is an eviction that lands after this section
+// and before publishAndServeCMSession's markPeerConnected /
+// onPeerSessionEstablished. That session IS published — registered, marked
+// connected, counted — and unwound moments later, when the serve loop sees the
+// closed socket, by this goroutine's own withdrawal. Guaranteed even then: the
+// accounting balances (this goroutine registers and deregisters, in that
+// order, exactly once), and the peer is not charged (closedBy says local
+// eviction). Not guaranteed: that no reader sees the session as live during
+// that window. A re-check before each later step would only narrow it — the
+// eviction can land after any of them — so none is made.
+//
+// Cross-domain: s.sessions and setupFailures belong to the peer domain
+// (s.peerMu), s.upstream to the delivery domain (s.deliveryMu). Canonical
+// s.peerMu OUTER → s.deliveryMu INNER.
+func (s *Service) registerCMSession(session *peerSession, slotAddress domain.PeerAddress) bool {
+	dialAddress := session.address
+	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	defer func() {
+		s.peerMu.Unlock()
+		log.Trace().Str("site", "registerCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	}()
+	if session.closedByLocalEviction() {
+		return false
+	}
+
+	s.clearSetupFailuresLocked(slotAddress)
+
+	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	s.sessions[dialAddress] = session
+	s.upstream[dialAddress] = struct{}{}
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "registerCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	return true
+}
+
+// runCMSessionRegisterBarrier fires the test-only synchronisation point
+// described on the cmSessionRegisterBarrier field.
+func (s *Service) runCMSessionRegisterBarrier() {
+	if s.cmSessionRegisterBarrier != nil {
+		s.cmSessionRegisterBarrier()
+	}
+}
+
+// publishAndServeCMSession publishes a session whose setup succeeded, serves
+// it until it ends and withdraws it again. A session the ConnectionManager
+// closed before it could be registered is aborted instead.
+func (s *Service) publishAndServeCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64) {
+	dialAddress := session.address
+
+	s.runCMSessionRegisterBarrier()
+
+	// Register session in Service maps. This is the first point where
+	// the session becomes visible to routingTargets, enqueuePeerFrame,
+	// connectedHostsLocked, and other lookups.
+	if !s.registerCMSession(session, slotAddress) {
+		s.abortLocallyEvictedCMSession(session, slotAddress, nil)
+		return
+	}
+
+	// --- Phase 2: session is fully operational ---
+	// Promote CM slot from Initializing → Active so ActiveCount() and
+	// buildPeerExchangeResponse() start counting and advertising this
+	// peer, and Slots() reports it as Active. Until this event the slot
+	// is not advertised to peer exchange. Emitted only once the session is
+	// registered, so a slot is never promoted for a session the Service
+	// did not publish.
+	s.connManager.EmitSlot(SessionInitReady{
+		Address:        slotAddress,
+		SlotGeneration: slotGeneration,
+	})
+
+	// The welcome was checked against the pin during the dial; the
+	// identity may have proved itself over v2 since, and the sweep that
+	// closes legacy sessions (v2_identity_claims.go) only sees sessions
+	// already registered. Checking AFTER registering leaves no window: a
+	// proof that came first is seen here, one that comes later sweeps
+	// this session. A refused session is closed and its serve loop ends
+	// on the closed socket through the ordinary teardown.
+	if _, proven := session.provenIdentity(); !proven {
+		if err := s.refuseLegacyIdentity(session.peerIdentity.String()); err != nil {
+			log.Warn().Err(err).Str("peer", string(dialAddress)).Msg("outbound_v1_refused_identity_proved_v2_during_setup")
+			_ = session.Close()
+		}
+	}
+
+	s.markPeerConnected(dialAddress, peerDirectionOutbound)
+	s.flushPendingPeerFrames(dialAddress)
+
+	// Routing table: register direct peer. session.capabilities is
+	// stable by this point (applyWelcomeMetadata ran in
+	// openPeerSessionForCM before the CM event loop validated the
+	// slot generation), so we pass the raw slice and let the hook
+	// flatten it for the relay-cap direct-route gate. This goroutine is
+	// the only one that deregisters it (withdrawServedCMSession), so the
+	// registration and its deregistration can never run in the wrong
+	// order.
+	s.onPeerSessionEstablished(session.peerIdentity, session.capabilities)
+
+	// Send full table sync to the new peer (Phase 1.2).
+	if !session.peerIdentity.IsZero() && s.sessionHasCapability(session, domain.CapMeshRoutingV1) && s.sessionHasCapability(session, domain.CapMeshRelayV1) {
+		s.sendOutboundFullTableSync(s.runCtx, session.peerIdentity, dialAddress)
+	}
+
+	// --- Phase 3: main session loop ---
+	err := s.servePeerSession(s.runCtx, session)
+	// Close before withdrawing, for the same reason as after a failed
+	// setup: the withdrawal reads who closed the session first. Every
+	// exit of the serve loop leaves the session dead, so closing it here
+	// changes nothing for the peer; the close error adds nothing to err.
+	_ = session.Close()
+
+	s.withdrawServedCMSession(session, slotAddress, slotGeneration, err)
+}
+
+// withdrawServedCMSession undoes publishAndServeCMSession once the serve loop
+// has returned with err, and reports the loss to the ConnectionManager.
+//
+// The session-map entry is removed only if it still belongs to THIS session:
+// onCMSessionTeardown may have removed it first (a ConnectionManager close),
+// and a replacement session for the same dial address may have been registered
+// since. Routing deregistration does not depend on that: this goroutine
+// registered the session with onPeerSessionEstablished, so it deregisters it,
+// exactly once — the teardown never does. The close is attributed to this node
+// when the ConnectionManager closed the session on its own decision, and from
+// the serve loop's error otherwise.
+func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress domain.PeerAddress, slotGeneration uint64, err error) {
+	dialAddress := session.address
+
+	// Cross-domain cleanup: s.sessions / s.dialOrigin → s.peerMu;
+	// s.upstream → s.deliveryMu.  Canonical s.peerMu OUTER →
+	// s.deliveryMu INNER.
+	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	s.peerMu.Lock()
+	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	s.deliveryMu.Lock()
+	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	ownedCleanup := s.sessions[dialAddress] == session
+	if ownedCleanup {
+		delete(s.sessions, dialAddress)
+		delete(s.upstream, dialAddress)
+		delete(s.dialOrigin, dialAddress)
+	}
+	s.deliveryMu.Unlock()
+	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("delivery_mu_writer")
+	s.peerMu.Unlock()
+	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
+
+	// Drop the per-session cmdLimiter bucket on the CM-managed
+	// path. Only when we owned the cleanup — otherwise
+	// onCMSessionTeardown ran first and will (also) drop it
+	// against the same connID; the underlying removeConn is
+	// idempotent on a missing key, so a duplicate call is harmless.
+	// See dropOutboundControlFrameBucket for the lifecycle
+	// contract.
+	if ownedCleanup {
+		s.dropOutboundControlFrameBucket(session.connID)
+	}
+
+	if !session.peerIdentity.IsZero() {
+		s.deregisterServedCMSessionRouting(session, err)
+	}
+
+	// Accumulate traffic metrics from the metered connection.
+	if session.metered != nil {
+		s.accumulateSessionTraffic(dialAddress, session.metered)
+	}
+
+	// Emit ActiveSessionLost using the slot's canonical address so
+	// CM.findSlotLocked can match it. When a fallback port was used,
+	// dialAddress != slotAddress; using dialAddress here would cause
+	// CM to treat the event as unknown and never reconnect.
+	s.connManager.EmitSlot(ActiveSessionLost{
+		Address:        slotAddress,
+		Identity:       session.peerIdentity,
+		Error:          err,
+		WasHealthy:     true,
+		SlotGeneration: slotGeneration,
+	})
+}
+
+// deregisterServedCMSessionRouting removes the direct route the session
+// registered. A ConnectionManager eviction or shutdown is a local decision and
+// is attributed as one, with no presence evidence: classifying it from the
+// serve loop's error would read the read error on the socket the
+// ConnectionManager closed as the peer hanging up.
+func (s *Service) deregisterServedCMSessionRouting(session *peerSession, err error) {
+	if session.closedByLocalEviction() {
+		s.onPeerSessionClosedWithCause(session.peerIdentity, session.penaltySubject(), session.capabilities, sessionCloseLocalEviction)
+		return
+	}
+	s.onPeerSessionClosedWithError(session.peerIdentity, session.penaltySubject(), session.capabilities, err)
+}
+
+// onCMSessionTeardown is called by ConnectionManager, on its event loop,
+// whenever it deactivates an active or initializing slot. The CM has already
+// closed the TCP transport and recorded on the session why (closedBy).
+//
+// It only withdraws the session from the session maps, so no producer picks a
+// closed session and a replacement registered for the same address cannot
+// collide with it. It charges the peer nothing and touches no routing state:
+// the session goroutine (runCMSession) owns all of that. The goroutine sees
+// the closed transport, reads the recorded reason, and either charges the
+// peer — when the loss was the peer's — or, for a local eviction or shutdown,
+// records neither a setup failure nor a failed disconnect and attributes the
+// route withdrawal to this node. Its ActiveSessionLost, if any, is stale and
+// suppressed by the generation guard.
 func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// Session is registered under DialAddress (the actual TCP address used,
 	// which may be a fallback port). Use DialAddress for cleanup, falling
@@ -1450,13 +1719,11 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 		addr = info.Address
 	}
 
-	// Whoever removes the session entry from s.sessions owns routing
-	// deregistration. When a peer-initiated EOF causes servePeerSession to
-	// exit, the goroutine cleanup may win this race and delete the entry
-	// before onCMSessionTeardown runs (via the stale ActiveSessionLost →
-	// deactivateSlot path). In that case the goroutine already called
-	// onPeerSessionClosed, and calling it again here would double-decrement
-	// the identity session counter.
+	// The entry is removed only if it still belongs to this session: the
+	// session goroutine may have withdrawn it already (a peer-initiated
+	// close it noticed first), or never registered it (setup still running,
+	// or aborted on the recorded local eviction — see registerCMSession for
+	// why the two sides cannot both miss each other).
 	//
 	// Cross-domain: s.sessions / s.dialOrigin → s.peerMu; s.upstream →
 	// s.deliveryMu.  Canonical s.peerMu OUTER → s.deliveryMu INNER.
@@ -1479,29 +1746,13 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 
 	// Drop the per-session cmdLimiter bucket on CM-initiated
 	// teardown. Guarded by ownedCleanup for symmetry with the
-	// onCMSessionEstablished cleanup path — we only own the
+	// withdrawServedCMSession path — we only own the
 	// bucket when we own the session entry. removeConn is
 	// idempotent on a missing key, so a double-call from the
 	// goroutine cleanup path (which only fires when ownedCleanup
 	// is true there) is harmless.
 	if ownedCleanup {
 		s.dropOutboundControlFrameBucket(info.Session.connID)
-	}
-
-	// Routing table: deregister direct peer only if we owned the entry.
-	// Pointer-compare ensures we don't accidentally delete or deregister
-	// a replacement session that was registered for the same address
-	// between deactivateSlotLocked and this callback.
-	//
-	// Cause is local eviction: CM deactivates a slot on replace or
-	// shutdown — a local decision, not peer instability. When the
-	// session died on its own, the servePeerSession goroutine cleanup
-	// owns the entry (it always runs before the ActiveSessionLost →
-	// deactivateSlot path emits this callback) and attributes the
-	// close from the actual session error, so this branch never
-	// shadows a genuine peer-side flap.
-	if ownedCleanup && !info.Identity.IsZero() {
-		s.onPeerSessionClosedWithCause(info.Identity, info.Session.penaltySubject(), info.Capabilities, sessionCloseLocalEviction)
 	}
 }
 
@@ -1548,9 +1799,10 @@ func (s *Service) onCMStaleSession(session *peerSession) {
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_wait").Str("address", string(session.address)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_held").Str("address", string(session.address)).Msg("peer_mu_writer")
-	// Clean up dialOrigin if it was registered for this address.
-	// No pointer-compare needed — dialOrigin maps addresses, not sessions.
-	delete(s.dialOrigin, session.address)
+	// Clean up the dialOrigin entry the stale dial registered — unless a
+	// newer session for the same dial address is registered, whose entry it
+	// now is. The same rule as every other unpublished-session exit.
+	s.forgetUnpublishedDialOriginLocked(session)
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onCMStaleSession").Str("phase", "lock_released").Str("address", string(session.address)).Msg("peer_mu_writer")
 }

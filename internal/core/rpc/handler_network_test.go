@@ -1,9 +1,14 @@
 package rpc_test
 
 import (
+	"context"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+
 	"github.com/piratecash/corsa/internal/core/protocol"
+	"github.com/piratecash/corsa/internal/core/rpc"
+	rpcmocks "github.com/piratecash/corsa/internal/core/rpc/mocks"
 )
 
 func TestNetworkPeers(t *testing.T) {
@@ -322,5 +327,26 @@ func TestNetworkAddPeerComplexAddress(t *testing.T) {
 			expectStatusCode(t, code, 200)
 			expectField(t, result, "type", "add_peer_response")
 		})
+	}
+}
+
+// The connectOnly command waits on the node, so the request's own context has
+// to reach the node: a client that goes away must end the wait.
+func TestConnectOnlyCommandPassesTheRequestContextToTheNode(t *testing.T) {
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "the request")
+	node := rpcmocks.NewMockNodeProvider(t)
+	node.EXPECT().ConnectOnly(mock.MatchedBy(func(got context.Context) bool {
+		return got.Value(ctxKey{}) == "the request"
+	}), "peer:8000").Return(protocol.Frame{Type: "ok"}).Once()
+	table := buildTestTable(node, nil, nil, nil)
+
+	resp := table.Execute(rpc.CommandRequest{
+		Name: "connectOnly",
+		Args: map[string]interface{}{"address": "peer:8000"},
+		Ctx:  ctx,
+	})
+	if resp.Error != nil {
+		t.Fatalf("connectOnly: %v", resp.Error)
 	}
 }

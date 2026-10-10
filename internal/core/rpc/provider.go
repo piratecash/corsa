@@ -14,6 +14,13 @@ import (
 // Both DesktopClient and standalone node can implement this.
 type NodeProvider interface {
 	HandleLocalFrame(frame protocol.Frame) protocol.Frame
+
+	// ConnectOnly pins outbound dialing to target, or clears the pin when
+	// target is empty or a disable token ("off" / "none" / "clear"). It
+	// takes the request context because enabling waits until the node has
+	// dropped its other outbound connections.
+	ConnectOnly(ctx context.Context, target string) protocol.Frame
+
 	Address() string
 	ClientVersion() string
 

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func TestResolveConnectOnlyHost_PassThrough(t *testing.T) {
 		strings.Repeat("b", 52) + ".b32.i2p",
 	}
 	for _, host := range cases {
-		got, err := resolveConnectOnlyHost(host)
+		got, err := (&Service{}).resolveConnectOnlyHost(context.Background(), host)
 		if err != nil {
 			t.Errorf("resolveConnectOnlyHost(%q): unexpected error %v", host, err)
 			continue
@@ -36,7 +37,7 @@ func TestResolveConnectOnlyHost_PassThrough(t *testing.T) {
 // an IP. Uses "localhost" which resolves via the hosts file without network;
 // skips if the environment cannot resolve it.
 func TestResolveConnectOnlyHost_DNSName(t *testing.T) {
-	got, err := resolveConnectOnlyHost("localhost")
+	got, err := newTestService(t, config.NodeTypeFull).resolveConnectOnlyHost(context.Background(), "localhost")
 	if err != nil {
 		t.Skipf("localhost not resolvable in this environment: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestConnectOnlyFrameDisableTokens(t *testing.T) {
 		if raw != "" {
 			peers = []string{raw}
 		}
-		reply := s.connectOnlyFrame(protocol.Frame{Type: "connect_only", Peers: peers})
+		reply := s.connectOnlyFrame(context.Background(), protocol.Frame{Type: "connect_only", Peers: peers})
 
 		if reply.Type != "ok" {
 			t.Errorf("raw %q: expected ok, got %q (%s)", raw, reply.Type, reply.Error)
@@ -100,7 +101,7 @@ func TestConnectOnlyRePinFailurePreservesPrevious(t *testing.T) {
 	prev := domain.PeerAddress("9.9.9.9:64646")
 	s.connectOnly.Store(&prev)
 
-	reply := s.enableConnectOnly("8.8.8.8:64646")
+	reply := s.enableConnectOnly(context.Background(), "8.8.8.8:64646")
 	if reply.Type != "error" {
 		t.Fatalf("expected admission error, got %q", reply.Type)
 	}
@@ -120,7 +121,7 @@ func TestConnectOnlyRePinFailurePreservesPrevious(t *testing.T) {
 func TestApplyStartupConnectOnly_FailClosed(t *testing.T) {
 	s := &Service{cfg: config.Node{ListenAddress: ":64646", ConnectOnly: ":64646"}}
 
-	s.applyStartupConnectOnly()
+	s.applyStartupConnectOnly(context.Background())
 
 	got, ok := s.connectOnlyTarget()
 	if !ok {
@@ -160,7 +161,7 @@ func TestCandidates_ConnectOnlyBlockedSentinelAdmitsNothing(t *testing.T) {
 func TestApplyStartupConnectOnly_BlankNoop(t *testing.T) {
 	s := &Service{cfg: config.Node{ListenAddress: ":64646"}}
 
-	s.applyStartupConnectOnly()
+	s.applyStartupConnectOnly(context.Background())
 
 	if _, ok := s.connectOnlyTarget(); ok {
 		t.Error("expected no pin for a blank startup seed")
@@ -172,7 +173,7 @@ func TestApplyStartupConnectOnly_BlankNoop(t *testing.T) {
 func TestConnectOnlyRejectsSelf(t *testing.T) {
 	s := &Service{cfg: config.Node{ListenAddress: ":64646"}}
 
-	reply := s.connectOnlyFrame(protocol.Frame{Type: "connect_only", Peers: []string{":64646"}})
+	reply := s.connectOnlyFrame(context.Background(), protocol.Frame{Type: "connect_only", Peers: []string{":64646"}})
 
 	if reply.Type != "error" {
 		t.Fatalf("expected error for self pin, got %q", reply.Type)

@@ -539,6 +539,16 @@ func waitForResolution(ctx context.Context, node NodeProvider, started protocol.
 	return latest
 }
 
+// requestContext returns the request's context, or a non-cancellable one when
+// the caller supplied none — CommandRequest documents a nil Ctx as "no
+// cancellation", which is exactly what context.Background means.
+func requestContext(req CommandRequest) context.Context {
+	if req.Ctx == nil {
+		return context.Background()
+	}
+	return req.Ctx
+}
+
 func ctxDone(req CommandRequest) (CommandResponse, bool) {
 	if req.Ctx == nil {
 		return CommandResponse{}, false
@@ -776,15 +786,7 @@ func RegisterNetworkCommands(t *CommandTable, node NodeProvider) {
 			if err != nil {
 				return validationError(err)
 			}
-			peers := []string{}
-			if address != "" {
-				peers = []string{address}
-			}
-			reply := node.HandleLocalFrame(protocol.Frame{
-				Type:  "connect_only",
-				Peers: peers,
-			})
-			return frameResponse(reply)
+			return frameResponse(node.ConnectOnly(requestContext(req), address))
 		},
 	)
 

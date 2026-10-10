@@ -536,6 +536,14 @@ const (
 	ConnectionStatusClosing = "closing"
 )
 
+// CodeAddPeerNotDialledConnectOnly is the Code of an "ok" add_peer reply
+// whose peer was registered but not dialled, because a connect_only pin to
+// another peer is live: under a pin the node dials only the pinned address.
+// The peer is dialled only if add_peer is issued again after the pin is
+// cleared — clearing the pin alone does not dial a peer the candidate filters
+// would skip, such as a private LAN address. Status names the pin.
+const CodeAddPeerNotDialledConnectOnly = "add-peer-not-dialled-connect-only"
+
 // PeerBannedReason is the closed enum of machine-readable reasons the
 // responder can cite when sending a peer-banned notice. Kept as a
 // distinct string type so stray untyped assignments are a compile error.

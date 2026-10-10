@@ -283,7 +283,7 @@ func TestLateSuccessAfterSlotReplacementReleasesOnce(t *testing.T) {
 	// Replace the slot: the generation moves, so the in-flight success will
 	// arrive stale.
 	cm.mu.Lock()
-	cm.replaceSlotLocked(cm.slots[0])
+	cm.replaceSlotLocked(cm.slots[0], slotDeactivationOutcomeReported)
 	cm.mu.Unlock()
 
 	dial.releaseDial()
@@ -461,7 +461,7 @@ func TestStaleSuccessReleasesAfterTheSocketIsClosed(t *testing.T) {
 	cm := dial.cm
 
 	cm.mu.Lock()
-	cm.replaceSlotLocked(cm.slots[0])
+	cm.replaceSlotLocked(cm.slots[0], slotDeactivationOutcomeReported)
 	cm.mu.Unlock()
 
 	dial.releaseDial()

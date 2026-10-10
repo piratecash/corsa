@@ -1,6 +1,7 @@
 package rpc_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -84,6 +85,16 @@ func newNodeProviderWithHandler(t *testing.T, fn func(protocol.Frame) protocol.F
 	t.Helper()
 	m := rpcmocks.NewMockNodeProvider(t)
 	m.EXPECT().HandleLocalFrame(mock.Anything).RunAndReturn(fn).Maybe()
+	// ConnectOnly is the typed entry of the connect_only command; the handler
+	// sees it as the frame the node would build from it, so tests written
+	// against the frame keep asserting what reaches the node.
+	m.EXPECT().ConnectOnly(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, target string) protocol.Frame {
+		peers := []string{}
+		if target != "" {
+			peers = []string{target}
+		}
+		return fn(protocol.Frame{Type: "connect_only", Peers: peers})
+	}).Maybe()
 	m.On("Address").Return("test-address-abc123").Maybe()
 	m.On("ClientVersion").Return("0.16-alpha").Maybe()
 	m.On("FetchFileTransfers").Return(json.RawMessage("[]"), nil).Maybe()

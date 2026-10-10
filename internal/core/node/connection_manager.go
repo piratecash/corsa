@@ -18,20 +18,23 @@ import (
 // ConnectionManager — event-driven outbound connection lifecycle
 // ---------------------------------------------------------------------------
 //
-// Stage 2 deliverable (see docs/connection-manager.md): self-contained
-// component with full test coverage. Production wiring into Service
-// (replacing ensurePeerSessions / bootstrapLoop) is Stage 3.
-//
 // ConnectionManager owns a fixed-size array of slots. Each slot tracks one
-// outbound peer through its lifecycle: Queued → Dialing → Active (or
-// Reconnecting / RetryWait / Replacing on failure).
+// outbound peer through its lifecycle: Queued → Dialing → Initializing →
+// Active (or Reconnecting / RetryWait on failure). Service wires it in
+// NewService; the lock rules it shares with Service are in docs/locking.md.
 //
-// All slot mutations happen inside a single-goroutine event loop (Run).
-// Dial workers communicate exclusively through typed events — they never
-// touch slots directly.
+// Single-writer invariant: every mutation of the slot table (slots,
+// generation, orphanReservations), every TopicSlotStateChanged publication
+// and every OnSessionEstablished / OnSessionTeardown callback happens on the
+// event loop goroutine (Run). Nothing else edits the table — dial workers,
+// session goroutines and operator commands (add_peer, connect_only) only
+// send typed events. That is what lets a handler release cm.mu and still act
+// on the slot it just changed: no other writer can run until it returns.
 //
 // Two event channels plus a dedicated bootstrap signal:
-//   - slotEvents: blocking send, loss not tolerated (DialFailed, DialSucceeded, ActiveSessionLost)
+//   - slotEvents: blocking send, loss not tolerated (DialFailed, DialSucceeded,
+//     ActiveSessionLost, SessionInitReady, ManualPeerRequested,
+//     retainOnlyRequest)
 //   - hintEvents: non-blocking send, safe to drop (InboundClosed, NewPeersDiscovered)
 //   - bootstrapCh: one-shot, guaranteed delivery (NotifyBootstrapReady closes it)
 
@@ -48,7 +51,8 @@ import (
 // wire-contract note.
 
 // slot is the internal bookkeeping record for one outbound connection.
-// Only mutated by the event loop goroutine (under cm.mu.Lock).
+// Only mutated by the event loop goroutine (under cm.mu.Lock); cm.mu exists
+// for the readers on other goroutines, not to arbitrate between writers.
 type slot struct {
 	Address          domain.PeerAddress
 	DialAddresses    []domain.PeerAddress
@@ -82,10 +86,12 @@ type slot struct {
 // Session and SlotGeneration carry the slot's lifecycle:
 //   - Session: the live TCP session. In OnSessionEstablished Service runs
 //     init and the serve loop (heartbeat) on it, but the slot keeps the
-//     pointer and CM still closes the transport itself when it deactivates
-//     the slot (deactivateSlotLocked). OnSessionTeardown carries the same
-//     pointer only so Service can tell whether its map entry still belongs
-//     to this session (pointer-compare ownership guard).
+//     pointer and CM still closes the transport itself when it evicts the
+//     slot (tearDownSession, after cm.mu is released); a session whose loss
+//     its goroutine reports, the goroutine has already closed itself.
+//     OnSessionTeardown carries the same pointer only so Service can tell
+//     whether its map entry still belongs to this session (pointer-compare
+//     ownership guard).
 //   - SlotGeneration: the generation the slot got when it entered
 //     Initializing. Service saves it and passes it back in
 //     SessionInitReady / ActiveSessionLost so the CM event loop can
@@ -169,6 +175,11 @@ type ConnectionManagerConfig struct {
 	//     (with the peer's Identity) is visible to Slots() readers BEFORE
 	//     the callback starts. Observing Initializing therefore does not
 	//     mean the callback has run.
+	//   - the slot stays exactly as handed over — in the table, Initializing,
+	//     at info.SlotGeneration, its session open — until the callback
+	//     returns. Every slot mutation runs on the event loop, which is busy
+	//     running the callback, so no eviction (RetainOnly included) and no
+	//     OnSessionTeardown for this session can happen meanwhile.
 	//   - cm.mu is NOT held. PeerProvider.Candidates / KnownPeers hold
 	//     pp.mu.RLock while calling QueuedFn → QueuedIPs (cm.mu.RLock), an
 	//     edge pp.mu → cm.mu, and Service's callback takes pp.mu.Lock
@@ -180,19 +191,26 @@ type ConnectionManagerConfig struct {
 	//     reported with ActiveSessionLost carrying the same generation.
 	// It runs on the event loop, so it must not block on I/O. Service
 	// keeps it to non-blocking bookkeeping and launches the session
-	// goroutine, which runs initPeerSession and, on success, emits
-	// SessionInitReady and then does markPeerConnected, pending frame
-	// flush, routing table registration and the serve loop (heartbeat).
+	// goroutine, which runs initPeerSession and, on success, registers the
+	// session, emits SessionInitReady and then does markPeerConnected,
+	// pending frame flush, routing table registration and the serve loop
+	// (heartbeat). A session this manager evicted meanwhile is neither
+	// registered nor promoted.
 	OnSessionEstablished func(SessionInfo)
 
-	// OnSessionTeardown is called after cm.mu is released — on the event
-	// loop, or from RetainOnly's caller — when an active or initializing
-	// slot is deactivated (deactivateSlotLocked has already closed the
-	// transport). Service uses it, when it still owns the session-map
-	// entry, for session-map cleanup and routing table deregistration. It
-	// does not charge the peer (no markPeerDisconnected): the session
-	// goroutine sees the closed transport and charges the outcome itself,
-	// so charging here as well would penalise the peer twice.
+	// OnSessionTeardown is called on the event loop, after cm.mu is
+	// released, when an active or initializing slot is deactivated. The
+	// session is already closed — tearDownSession closes it immediately
+	// before the callback, outside cm.mu, unless its own goroutine closed it
+	// first — and the first closer has recorded WHY (peerSession.closedBy):
+	// a local eviction (shrinkToLimit, the add_peer eviction, RetainOnly,
+	// the connect_only pin, shutdown) or the session's owner, for a loss the
+	// session goroutine has already reported. Service uses the callback only to withdraw the session from
+	// its session maps so no producer picks it and a replacement for the same
+	// address cannot collide with it. Accounting for the peer — setup
+	// failure, disconnect, routing deregistration — belongs to the session
+	// goroutine, which reads the recorded reason and charges the peer only
+	// when the session was not closed by a local eviction.
 	OnSessionTeardown func(SessionInfo)
 
 	// OnStaleSession is called when handleDialSucceeded detects a
@@ -266,13 +284,35 @@ type ConnectionManagerConfig struct {
 	// EventBus is used to publish TopicSlotStateChanged when a slot
 	// transitions between states. May be nil (tests, standalone usage).
 	EventBus *ebus.Bus
+
+	// ConnectOnlyFn reports the live connect_only egress pin, the same
+	// source PeerProvider.Candidates reads. handleRetainOnly consults it so
+	// that a RetainOnly request the operator has since superseded — re-pinned
+	// to another peer or cleared — evicts nothing: applied late, RetainOnly(A)
+	// would otherwise tear down the slot of a newer pin B, or the slots of a
+	// node whose operator has just restored unrestricted egress. Must be
+	// lock-free: it runs on the event loop.
+	//
+	// May be nil (tests, standalone usage): every request is then applied as
+	// asked.
+	ConnectOnlyFn func() (domain.PeerAddress, bool)
+
+	// RetainOnlyEnqueued is a TEST-ONLY observation point, nil in
+	// production: RetainOnly calls it on the caller's goroutine right after
+	// its request was accepted into the slot-event queue. Tests that hold the
+	// event loop use it to know the request is pending behind the hold,
+	// instead of guessing from the queue length. It is configuration, like
+	// every other dependency, so it is fixed before Run and never changes.
+	RetainOnlyEnqueued func()
 }
 
 // ConnectionManager manages the lifecycle of outbound connection slots.
 type ConnectionManager struct {
 	// mu protects slots for concurrent read access from QueuedIPs/Slots/ActiveCount.
-	// The event loop (Run) is the sole writer — it holds Lock during mutations.
-	// External readers hold RLock.
+	// The event loop (Run) is the sole writer of slots, generation and
+	// orphanReservations — it holds Lock during mutations; RetainOnly, the
+	// one operator-driven eviction, reaches it as an event too. External
+	// readers hold RLock.
 	mu         sync.RWMutex
 	slots      []*slot
 	generation uint64 // monotonic counter for slot generations
@@ -307,9 +347,13 @@ type ConnectionManager struct {
 
 	// dialWg tracks in-flight dial goroutines. shutdown() waits for all
 	// workers to finish before draining channels. This guarantees that
-	// drainChannels sees every event that will ever be emitted —
-	// eliminating the race where EmitSlot enqueues into a buffered
-	// channel after drain has already returned.
+	// drainChannels sees every event a dial worker will ever emit —
+	// eliminating the race where a worker's DialSucceeded is enqueued into
+	// the buffered channel after drain has already returned and its session
+	// is never closed. Producers outside dialWg (session goroutines,
+	// add_peer, RetainOnly) can still enqueue after the drain; none of them
+	// hands the loop a resource it would leak, and RetainOnly's waiter also
+	// watches cm.ctx so it never waits for a drain that already ran.
 	dialWg sync.WaitGroup
 
 	// startOnce enforces the single-start invariant: Run() must be called
@@ -502,6 +546,14 @@ func dialInFlight(state domain.SlotState) bool {
 // not running (pre-Run or post-shutdown). On false the caller retains
 // ownership of any resources (e.g. Session).
 func (cm *ConnectionManager) EmitSlot(event SlotEvent) bool {
+	// A nil abandon channel never fires: the send waits for the loop alone.
+	return cm.emitSlotUnless(nil, event)
+}
+
+// emitSlotUnless is EmitSlot that also gives up when abandon fires — for a
+// producer whose own caller can walk away: RetainOnly, and the operator dial
+// add_peer and connect_only enqueue (Service.enqueueAddedPeerDial).
+func (cm *ConnectionManager) emitSlotUnless(abandon <-chan struct{}, event SlotEvent) bool {
 	if cm.accepting.Load() != 1 {
 		return false
 	}
@@ -509,6 +561,8 @@ func (cm *ConnectionManager) EmitSlot(event SlotEvent) bool {
 	case cm.slotEvents <- event:
 		return true
 	case <-cm.ctx.Done():
+		return false
+	case <-abandon:
 		return false
 	}
 }
@@ -759,6 +813,8 @@ func (cm *ConnectionManager) handleSlotEvent(ctx context.Context, event SlotEven
 		cm.handleSessionInitReady(ctx, ev)
 	case ManualPeerRequested:
 		cm.handleManualPeer(ctx, ev)
+	case retainOnlyRequest:
+		cm.handleRetainOnly(ctx, ev)
 	}
 }
 
@@ -787,110 +843,138 @@ func (cm *ConnectionManager) handleHintEvent(ctx context.Context, event HintEven
 // /64 for IPv6): the operator explicitly requested this peer, so a
 // same-subnet connection is allowed here and only here.
 //
-// Dedup: checks both exact address AND IP to prevent two slots to the same host.
-// Slot limit: if at capacity, evicts the lowest-scoring non-active slot (or the
-// lowest-scoring active slot as last resort) to make room — operator intent takes
-// priority, but the maxSlots invariant is preserved.
+// Steps: refuse a peer the live connect_only pin forbids; read what lives
+// outside the manager (the slot limit, eviction scores) BEFORE cm.mu, since
+// both reach into the embedder; under cm.mu, dedup and admit
+// (admitManualPeerLocked); after it, publish and dial.
 func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeerRequested) {
-	dialAddrs := ev.DialAddresses
-	if len(dialAddrs) == 0 {
-		dialAddrs = []domain.PeerAddress{ev.Address}
-	}
-
-	targetIP, _, _ := splitHostPort(string(ev.Address))
-
-	cm.mu.Lock()
-
-	// Dedup by exact address.
-	if cm.findSlotLocked(ev.Address) != nil {
-		cm.mu.Unlock()
-		log.Debug().Str("address", string(ev.Address)).Msg("cm: manual peer already has a slot")
+	if cm.refuseManualPeerOutsideLivePin(ev.Address) {
 		return
 	}
+	maxSlots := cm.config.MaxSlotsFn()
+	scores := cm.slotScoresForEviction()
 
-	// Dedup by IP — another port on the same host already has a slot.
-	if targetIP != "" {
-		for _, existing := range cm.slots {
-			ip, _, _ := splitHostPort(string(existing.Address))
-			if ip == targetIP {
-				cm.mu.Unlock()
-				log.Debug().
-					Str("address", string(ev.Address)).
-					Str("existing", string(existing.Address)).
-					Msg("cm: manual peer IP already has a slot")
-				return
-			}
+	cm.mu.Lock()
+	if cm.manualPeerDuplicateLocked(ev.Address) {
+		cm.mu.Unlock()
+		return
+	}
+	admission := cm.admitManualPeerLocked(ev, maxSlots, scores)
+	cm.mu.Unlock()
+
+	cm.publishManualPeerAdmission(ctx, admission)
+}
+
+// refuseManualPeerOutsideLivePin reports, and logs, a manual peer the live
+// connect_only pin forbids dialling. The Service already tells the operator
+// so in the add_peer reply; this is the manager's own guard for a pin that
+// moved after the request was sent.
+func (cm *ConnectionManager) refuseManualPeerOutsideLivePin(address domain.PeerAddress) bool {
+	pin, refused := cm.manualPeerOutsideLivePin(address)
+	if refused {
+		log.Warn().
+			Str("address", string(address)).
+			Str("pin", connectOnlyPinLabel(pin)).
+			Msg("cm: manual peer not dialled — connect_only pins egress to another peer")
+	}
+	return refused
+}
+
+// manualPeerDuplicateLocked reports whether address already has a slot, by
+// exact address or — another port on the same host — by IP: two slots to one
+// host would defeat the point of a manual pick. Caller holds cm.mu.Lock.
+func (cm *ConnectionManager) manualPeerDuplicateLocked(address domain.PeerAddress) bool {
+	if cm.findSlotLocked(address) != nil {
+		log.Debug().Str("address", string(address)).Msg("cm: manual peer already has a slot")
+		return true
+	}
+	targetIP, _, _ := splitHostPort(string(address))
+	if targetIP == "" {
+		return false
+	}
+	for _, existing := range cm.slots {
+		ip, _, _ := splitHostPort(string(existing.Address))
+		if ip == targetIP {
+			log.Debug().
+				Str("address", string(address)).
+				Str("existing", string(existing.Address)).
+				Msg("cm: manual peer IP already has a slot")
+			return true
 		}
 	}
+	return false
+}
 
-	// The operator's dial pays the same budget as any other, and the POLICY
-	// here has to answer two questions that reviews found conflated twice.
-	//
-	// ⚠️ First conflation: the original order evicted before reserving, so a
-	// refusal by the SHARED ceiling cost a live session and bought nothing.
-	// ⚠️ Second: the fix made the slot-limit check CONDITIONAL on a budget
-	// error, which broke the manager's own invariant whenever the budget said
-	// yes — no budget wired, or a ceiling wider than MaxSlotsFn — and let the
-	// slot table grow past its maximum.
-	//
-	// Both are avoided by asking the two questions SEPARATELY:
-	//
-	//   1. is the slot table full? That is the manager's own invariant and
-	//      holds whether or not a budget exists;
-	//   2. does the shared ceiling have room for one more outbound?
-	//
-	// Eviction is justified by (1) alone, and ONLY when (2) can be satisfied
-	// afterwards. Killing a session to make room the ceiling would refuse
-	// anyway is exactly what §0.1.1 forbids — and, crucially, "refused by the
-	// direction limit" does not by itself mean the ceiling has room: the
-	// budget reports the most specific reason, so a node against BOTH limits
-	// answers ErrDirectionLimit while the shared ceiling is equally full.
-	maxSlots := cm.config.MaxSlotsFn()
-	slotsFull := len(cm.slots) >= maxSlots
+// manualPeerAdmission is what admitManualPeerLocked decided: the slot it
+// appended — nil when the manual peer was refused — and the eviction it made
+// room with, to publish once cm.mu is released.
+type manualPeerAdmission struct {
+	admitted  *slot
+	evictions slotEvictions
+}
 
-	var teardownInfo *SessionInfo
-	var evictedAddr domain.PeerAddress
-
+// admitManualPeerLocked decides whether the manual peer gets a slot, and
+// evicts one to make room when the table is full.
+//
+// The operator's dial pays the same budget as any other, and the POLICY
+// here has to answer two questions that reviews found conflated twice.
+//
+// ⚠️ First conflation: the original order evicted before reserving, so a
+// refusal by the SHARED ceiling cost a live session and bought nothing.
+// ⚠️ Second: the fix made the slot-limit check CONDITIONAL on a budget
+// error, which broke the manager's own invariant whenever the budget said
+// yes — no budget wired, or a ceiling wider than MaxSlotsFn — and let the
+// slot table grow past its maximum.
+//
+// Both are avoided by asking the two questions SEPARATELY:
+//
+//  1. is the slot table full? That is the manager's own invariant and
+//     holds whether or not a budget exists;
+//  2. does the shared ceiling have room for one more outbound?
+//
+// Eviction is justified by (1) alone, and ONLY when (2) can be satisfied
+// afterwards. Killing a session to make room the ceiling would refuse
+// anyway is exactly what §0.1.1 forbids — and, crucially, "refused by the
+// direction limit" does not by itself mean the ceiling has room: the
+// budget reports the most specific reason, so a node against BOTH limits
+// answers ErrDirectionLimit while the shared ceiling is equally full.
+//
+// Caller holds cm.mu.Lock; maxSlots and scores were read before it.
+func (cm *ConnectionManager) admitManualPeerLocked(ev ManualPeerRequested, maxSlots int, scores map[*slot]int) manualPeerAdmission {
+	var evictions slotEvictions
 	reservation, budgetErr := cm.reserveOutbound()
 
 	// Evict when the slot table is what stands in the way — either the budget
 	// already said yes (so only the invariant blocks us) or the refusal is one
 	// that evicting THIS victim can actually clear.
-	if slotsFull {
-		victim := cm.findLowestScoringSlotLocked()
+	if len(cm.slots) >= maxSlots {
+		victim := cm.findLowestScoringSlotLocked(scores)
 		switch {
 		case budgetErr != nil && !evictionWouldHelp(budgetErr, victim):
 			// The refusal is not about slots, or the victim's unit would
 			// not be freed by evicting it. Closing a session for room
 			// that never appears is what §0.1.1 forbids.
-			cm.mu.Unlock()
 			log.Warn().
 				Err(budgetErr).
 				Str("address", string(ev.Address)).
 				Msg("cm: manual peer refused by connection budget; nothing evicted")
-			return
+			return manualPeerAdmission{}
 		case victim == nil:
 			// Nothing to evict: the invariant wins over operator intent,
 			// and the reservation we may hold must not be leaked.
 			reservation.Release()
-			cm.mu.Unlock()
 			log.Warn().
 				Str("address", string(ev.Address)).
 				Msg("cm: manual peer refused — slot table full with no evictable slot")
-			return
+			return manualPeerAdmission{}
 		default:
-			evictedAddr = victim.Address
 			log.Info().
 				Str("evicted", string(victim.Address)).
 				Str("manual", string(ev.Address)).
 				Msg("cm: evicting slot to make room for manual peer")
-			if info := cm.deactivateSlotLocked(victim); info != nil {
-				teardownInfo = info
-			}
 			// Removal settles the victim's own unit: a live session
 			// releases it here, an in-flight dial keeps it parked.
-			cm.removeSlotLocked(victim)
-
+			evictions = cm.evictSlotsLocked([]*slot{victim})
 			if budgetErr != nil {
 				reservation, budgetErr = cm.reserveOutbound()
 			}
@@ -898,69 +982,80 @@ func (cm *ConnectionManager) handleManualPeer(ctx context.Context, ev ManualPeer
 	}
 
 	if budgetErr != nil {
-		cm.mu.Unlock()
-
 		log.Warn().
 			Err(budgetErr).
 			Str("address", string(ev.Address)).
 			Msg("cm: manual peer refused by connection budget")
-
-		if evictedAddr != "" {
-			cm.emitSlotRemoved(evictedAddr)
-		}
-		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
-			cm.config.OnSessionTeardown(*teardownInfo)
-		}
-		return
+		return manualPeerAdmission{evictions: evictions}
 	}
 
-	gen := cm.nextGenerationLocked()
-	s := &slot{
+	dialAddrs := ev.DialAddresses
+	if len(dialAddrs) == 0 {
+		dialAddrs = []domain.PeerAddress{ev.Address}
+	}
+	admitted := &slot{
 		Address:       ev.Address,
 		DialAddresses: dialAddrs,
 		State:         domain.SlotStateDialing,
-		Generation:    gen,
+		Generation:    cm.nextGenerationLocked(),
 		reservation:   reservation,
 	}
-	cm.slots = append(cm.slots, s)
-	cm.mu.Unlock()
+	cm.slots = append(cm.slots, admitted)
+	return manualPeerAdmission{admitted: admitted, evictions: evictions}
+}
 
-	// Emit slot events outside the lock: eviction (removal) then new dial.
-	if evictedAddr != "" {
-		cm.emitSlotRemoved(evictedAddr)
+// publishManualPeerAdmission publishes what admitManualPeerLocked did and
+// starts the dial, with cm.mu released: the eviction's removal and teardown
+// first, then the new slot. The admitted slot is read without cm.mu because
+// this runs on the event loop, its only writer.
+func (cm *ConnectionManager) publishManualPeerAdmission(ctx context.Context, admission manualPeerAdmission) {
+	cm.publishEvictions(admission.evictions)
+	admitted := admission.admitted
+	if admitted == nil {
+		return
 	}
-	cm.emitSlotStateChanged(ev.Address, domain.SlotStateDialing)
-
-	// Invoke teardown callback outside lock.
-	if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
-		cm.config.OnSessionTeardown(*teardownInfo)
-	}
+	cm.emitSlotStateChanged(admitted.Address, domain.SlotStateDialing)
 
 	log.Info().
-		Str("address", string(ev.Address)).
-		Uint64("generation", gen).
+		Str("address", string(admitted.Address)).
+		Uint64("generation", admitted.Generation).
 		Msg("cm: manual peer enqueued for immediate dial")
 
 	// Manual dials bypass the global pacer — operator intent overrides
 	// storm-protection. See dialWorkerImmediate / dial_pacer.go.
 	cm.dialWg.Add(1)
-	go cm.dialWorkerImmediate(ctx, ev.Address, dialAddrs, gen)
+	go cm.dialWorkerImmediate(ctx, admitted.Address, admitted.DialAddresses, admitted.Generation)
+}
+
+// slotScoresForEviction scores every slot for findLowestScoringSlotLocked.
+// Score reaches into Service (PeerProvider.HealthFn takes peerMu), so it must
+// run BEFORE cm.mu is taken — under it, it would be a cm.mu → peerMu edge.
+// Reading cm.slots without cm.mu is safe here because this runs on the event
+// loop, the only writer of the table, and it stays valid until the loop
+// itself changes the table.
+func (cm *ConnectionManager) slotScoresForEviction() map[*slot]int {
+	scores := make(map[*slot]int, len(cm.slots))
+	if cm.config.Provider == nil {
+		return scores
+	}
+	for _, s := range cm.slots {
+		scores[s] = cm.config.Provider.Score(s.Address)
+	}
+	return scores
 }
 
 // findLowestScoringSlotLocked returns the slot with the lowest score for eviction.
-// Prefers non-active slots. Returns nil only if no slots exist.
+// Prefers non-active slots. Returns nil only if no slots exist. scores comes
+// from slotScoresForEviction; a slot it has no entry for scores 0.
 // Caller must hold cm.mu.Lock.
-func (cm *ConnectionManager) findLowestScoringSlotLocked() *slot {
+func (cm *ConnectionManager) findLowestScoringSlotLocked(scores map[*slot]int) *slot {
 	var best *slot
 	bestScore := int(^uint(0) >> 1) // max int
 	bestActive := true
 
 	for _, s := range cm.slots {
 		isActive := s.State == domain.SlotStateActive
-		score := 0
-		if cm.config.Provider != nil {
-			score = cm.config.Provider.Score(s.Address)
-		}
+		score := scores[s]
 
 		// Prefer non-active over active; within same category, prefer lower score.
 		if best == nil ||
@@ -1001,8 +1096,9 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 		return
 	}
 
-	// Cleanup side-effects before reconnect.
-	teardownInfo := cm.deactivateSlotLocked(s)
+	// Cleanup side-effects before reconnect. The session goroutine reported
+	// this loss itself and has already accounted for it.
+	teardown := cm.deactivateSlotLocked(s, slotDeactivationOutcomeReported)
 
 	// WasHealthy distinguishes two failure modes:
 	//
@@ -1039,19 +1135,15 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 				Bool("setup_banned", setupBanned).
 				Msg("cm: replacing slot after repeated setup failures")
 
-			replaceTeardown := cm.replaceSlotLocked(s)
+			replaceTeardown := cm.replaceSlotLocked(s, slotDeactivationOutcomeReported)
 			addr := s.Address
 			cm.mu.Unlock()
 
 			// Slot removed — emit empty state so subscribers clear the peer.
 			cm.emitSlotRemoved(addr)
 
-			if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
-				cm.config.OnSessionTeardown(*teardownInfo)
-			}
-			if replaceTeardown != nil && cm.config.OnSessionTeardown != nil {
-				cm.config.OnSessionTeardown(*replaceTeardown)
-			}
+			cm.tearDownSession(teardown)
+			cm.tearDownSession(replaceTeardown)
 			if cm.config.OnDialFailed != nil {
 				cm.config.OnDialFailed(ev.Address, ev.Error, false)
 			}
@@ -1070,9 +1162,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 
 		cm.emitSlotStateChanged(addr, domain.SlotStateRetryWait)
 
-		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
-			cm.config.OnSessionTeardown(*teardownInfo)
-		}
+		cm.tearDownSession(teardown)
 		if cm.config.OnDialFailed != nil {
 			cm.config.OnDialFailed(addr, ev.Error, false)
 		}
@@ -1100,9 +1190,7 @@ func (cm *ConnectionManager) handleActiveSessionLost(ctx context.Context, ev Act
 
 	cm.emitSlotStateChanged(addr, domain.SlotStateReconnecting)
 
-	if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
-		cm.config.OnSessionTeardown(*teardownInfo)
-	}
+	cm.tearDownSession(teardown)
 
 	log.Info().
 		Str("address", string(ev.Address)).
@@ -1145,7 +1233,7 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		// removal that would otherwise park it, and release once the lock
 		// is gone.
 		finished := cm.takeReservationLocked(s)
-		teardownInfo := cm.replaceSlotLocked(s)
+		teardown := cm.replaceSlotLocked(s, slotDeactivationOutcomeReported)
 		replacedAddr := s.Address
 		cm.mu.Unlock()
 
@@ -1154,9 +1242,7 @@ func (cm *ConnectionManager) handleDialFailed(ctx context.Context, ev DialFailed
 		// Slot removed — emit empty state so subscribers clear the peer.
 		cm.emitSlotRemoved(replacedAddr)
 
-		if teardownInfo != nil && cm.config.OnSessionTeardown != nil {
-			cm.config.OnSessionTeardown(*teardownInfo)
-		}
+		cm.tearDownSession(teardown)
 
 		// Notify Service BEFORE fill() so health/ban state is updated
 		// and Candidates() won't return the same failed peer again.
@@ -1224,6 +1310,11 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 	info := cm.beginInitSlotLocked(s, ev)
 	cm.mu.Unlock()
 
+	// Published after the unlock, like every other slot state: a synchronous
+	// subscriber may read the table. The single writer keeps the order — the
+	// state is out before the callback runs.
+	cm.emitSlotStateChanged(info.Address, domain.SlotStateInitializing)
+
 	if cm.config.OnSessionEstablished != nil {
 		cm.config.OnSessionEstablished(info)
 	}
@@ -1251,6 +1342,9 @@ func (cm *ConnectionManager) handleSessionInitReady(_ context.Context, ev Sessio
 
 	cm.promoteSlotLocked(s)
 	cm.mu.Unlock()
+
+	// After the unlock: a synchronous subscriber may read the table.
+	cm.emitSlotStateChanged(ev.Address, domain.SlotStateActive)
 }
 
 // ---------------------------------------------------------------------------
@@ -1270,6 +1364,16 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 
 	maxSlots := cm.config.MaxSlotsFn()
 
+	// Pin first: while connect_only is live, only the pinned slot may exist.
+	// Shrinking first would pick its victims among ALL slots and prefers the
+	// non-active ones — exactly the state of a pinned slot that is still
+	// dialling or initializing right after connect_only.
+	//
+	// The pin is read here and again by Candidates() below. If the operator
+	// moves it in between, this fill may keep the old pin's slot and append
+	// the new pin's; the retention request that follows every pin write, and
+	// the next fill, apply the rule to the new pin and evict the old one.
+	cm.enforceLivePinRule()
 	// Shrink: if the limit dropped, evict excess slots.
 	cm.shrinkToLimit(maxSlots)
 
@@ -1294,9 +1398,9 @@ func (cm *ConnectionManager) fill(ctx context.Context) {
 	cm.mu.Lock()
 
 	// Re-check: slot count may have changed between RUnlock and Lock
-	// (another event could have been processed in between, but since
-	// fill() is called from the single-threaded event loop this
-	// cannot happen — still, defensive re-check costs nothing).
+	// only if another writer ran in between. Every slot mutation runs on
+	// this event loop, which is busy here, so it cannot — still, the
+	// defensive re-check costs nothing.
 	freeSlots = maxSlots - len(cm.slots)
 	if freeSlots <= 0 {
 		cm.mu.Unlock()
@@ -1405,48 +1509,186 @@ func (cm *ConnectionManager) shrinkToLimit(maxSlots int) {
 		}
 	}
 
-	// Deactivate and remove victims. Capture addresses before removal.
-	var teardowns []SessionInfo
-	evictedAddrs := make([]domain.PeerAddress, 0, len(victims))
-	for _, v := range victims {
-		evictedAddrs = append(evictedAddrs, v.Address)
-		if info := cm.deactivateSlotLocked(v); info != nil {
-			teardowns = append(teardowns, *info)
-		}
-		cm.removeSlotLocked(v)
-	}
-
+	evictions := cm.evictSlotsLocked(victims)
 	cm.mu.Unlock()
 
-	// Emit slot-removed events outside the lock so subscribers see the
-	// peer disappear from CM tracking. Empty state signals removal.
-	for _, addr := range evictedAddrs {
+	cm.publishEvictions(evictions)
+}
+
+// slotEvictions is what evictSlotsLocked leaves for the caller to publish
+// once cm.mu is released: the removed addresses and the teardown payloads of
+// the sessions it closed.
+type slotEvictions struct {
+	removed   []domain.PeerAddress
+	teardowns []*sessionTeardown
+}
+
+// evictSlotsLocked deactivates and removes victims on a LOCAL decision — the
+// slot limit shrank, or connect_only pinned egress to another peer. Their
+// sessions are closed as local evictions, so the session goroutines do not
+// charge the peers for a teardown this node chose. Caller holds cm.mu.Lock
+// and must hand the result to publishEvictions after releasing it.
+func (cm *ConnectionManager) evictSlotsLocked(victims []*slot) slotEvictions {
+	evictions := slotEvictions{removed: make([]domain.PeerAddress, 0, len(victims))}
+	for _, v := range victims {
+		evictions.removed = append(evictions.removed, v.Address)
+		evictions.teardowns = append(evictions.teardowns, cm.deactivateSlotLocked(v, slotDeactivationLocalEviction))
+		cm.removeSlotLocked(v)
+	}
+	return evictions
+}
+
+// publishEvictions emits the slot-removed signal (empty state) for every
+// evicted address so subscribers see the peers disappear from CM tracking,
+// then closes the evicted sessions and runs their teardown callbacks. Runs on
+// the event loop after cm.mu is released: closing a session is I/O and its
+// onClose takes peerMu, and the callbacks reach into Service — none of which
+// may happen under cm.mu.
+func (cm *ConnectionManager) publishEvictions(evictions slotEvictions) {
+	for _, addr := range evictions.removed {
 		cm.emitSlotRemoved(addr)
 	}
+	cm.tearDownSessions(evictions.teardowns)
+}
 
-	// Invoke teardown callbacks outside the lock.
-	if cm.config.OnSessionTeardown != nil {
-		for _, info := range teardowns {
-			cm.config.OnSessionTeardown(info)
-		}
+// RetainOnly makes the event loop apply the connect_only pin rule now and waits
+// for it: every outbound slot other than the pinned one is evicted. It is the
+// egress half of the pin; incoming connections are tracked outside the
+// ConnectionManager (Service ipState domain), so they are untouched here.
+//
+// The rule is applied against the LIVE pin (ConnectionManagerConfig.
+// ConnectOnlyFn), not against keep: requests queue behind other events, so by
+// the time one is handled the operator may have re-pinned or cleared the pin,
+// and only the live value says which slot may stay. keep is what is retained
+// only when no pin source is wired (tests, standalone use). See
+// enforceLivePinRule.
+//
+// The eviction runs on the event loop (retainOnlyRequest → handleRetainOnly),
+// never on the caller's goroutine: the loop is the only writer of the slot
+// table, and an eviction from outside could land between a handler's unlock
+// and the work it does with the slot it just changed (see retainOnlyRequest).
+//
+// true means the loop has applied the rule: the evicted slots are gone, their
+// removal published, their sessions closed and their teardown callbacks run.
+// false means it is not confirmed — the loop is not running (before Run there
+// are no slots; shutdown clears the table itself), or ctx or the loop's
+// context ended first. A request already queued may still be applied after a
+// false; every fill re-applies the rule anyway, so a lost request costs at
+// most the time until the next fill.
+//
+// Caller contract: never call it from the event loop (a CM callback), and never
+// while holding cm.mu, PeerProvider.mu or any Service domain mutex. The loop
+// takes all of those while handling the events queued ahead of this one, so
+// waiting for it under any of them is a deadlock — and from the loop itself the
+// request could never be reached at all.
+func (cm *ConnectionManager) RetainOnly(ctx context.Context, keep domain.PeerAddress) bool {
+	request := newRetainOnlyRequest(keep)
+	if !cm.emitSlotUnless(ctx.Done(), request) {
+		return false
+	}
+	if cm.config.RetainOnlyEnqueued != nil {
+		cm.config.RetainOnlyEnqueued()
+	}
+	return cm.awaitRetainOnly(ctx, request)
+}
+
+// awaitRetainOnly waits until the event loop has settled an enqueued request,
+// ctx ends, or the loop's context ends. Only valid once the request was
+// accepted by emitSlotUnless: that proves Run had published cm.ctx (accepting
+// is set after it), so reading it here is safe. Watching cm.ctx matters: a
+// producer is not tracked by dialWg, so its request can land in the channel
+// after shutdown has drained it, and nobody settles that one.
+//
+// When the request was settled AND a context ended by the time the waiter
+// wakes, select would pick either; the settled request wins, because the
+// eviction did run and false would say it had not.
+func (cm *ConnectionManager) awaitRetainOnly(ctx context.Context, request retainOnlyRequest) bool {
+	select {
+	case <-request.applied:
+		return true
+	case <-ctx.Done():
+	case <-cm.ctx.Done():
+	}
+	select {
+	case <-request.applied:
+		return true
+	default:
+		return false
 	}
 }
 
-// RetainOnly evicts every outbound slot whose address differs from keep,
-// leaving at most the single pinned peer in the slot table. It is the
-// egress half of the connectOnly pin: incoming connections are tracked
-// outside the ConnectionManager (Service ipState domain), so they are
-// untouched here. Mirrors shrinkToLimit's teardown discipline — slots are
-// deactivated/removed under cm.mu, then slot-removed events and teardown
-// callbacks fire AFTER the lock is released so no session I/O or re-entrant
-// Service callback runs while cm.mu is held.
-//
-// keep is matched verbatim against slot.Address (the dial address). A keep
-// that matches no current slot evicts everything — the caller is expected
-// to enqueue the pinned dial separately (ManualPeerRequested).
-func (cm *ConnectionManager) RetainOnly(keep domain.PeerAddress) {
-	cm.mu.Lock()
+// handleRetainOnly applies a retainOnlyRequest on the event loop and releases
+// its waiter last, so RetainOnly returns only once the evictions, their
+// publications, their teardown callbacks and any refill have all happened.
+func (cm *ConnectionManager) handleRetainOnly(ctx context.Context, ev retainOnlyRequest) {
+	defer ev.settle()
 
+	keep, pinned := cm.retentionTarget(ev.keep)
+	if !pinned {
+		log.Info().
+			Str("requested", connectOnlyPinLabel(ev.keep)).
+			Msg("cm: retain-only request found no live connect_only pin, nothing evicted")
+		return
+	}
+	cm.retainOnlyAddress(keep)
+	cm.refillMissingLivePin(ctx, keep)
+}
+
+// refillMissingLivePin fills at once when retention left the live pin without
+// a slot — its own manual dial can have been refused by the same-host dedup
+// while an evicted port of that host still held a slot — instead of leaving
+// egress at zero until the periodic fill. Only with a pin source wired:
+// without one keep is a test label and Candidates() is not pin-gated, so a
+// fill would re-dial the peers just evicted. Runs on the event loop.
+func (cm *ConnectionManager) refillMissingLivePin(ctx context.Context, keep domain.PeerAddress) {
+	if cm.config.ConnectOnlyFn == nil || !cm.bootstrapped {
+		return
+	}
+	cm.mu.RLock()
+	present := cm.findSlotLocked(keep) != nil
+	cm.mu.RUnlock()
+	if present {
+		return
+	}
+	cm.fill(ctx)
+}
+
+// retentionTarget is the address the pin rule keeps: the live pin when a pin
+// source is wired — pinned=false when the operator has cleared it — and the
+// requested address otherwise.
+func (cm *ConnectionManager) retentionTarget(requested domain.PeerAddress) (domain.PeerAddress, bool) {
+	if cm.config.ConnectOnlyFn == nil {
+		return requested, true
+	}
+	return cm.config.ConnectOnlyFn()
+}
+
+// enforceLivePinRule applies the pin rule on every fill: while a pin is live,
+// the slot table holds only the live pin. RetainOnly applies the same rule on
+// demand; doing it here as well makes the rule level-triggered, so a slot that
+// a lost request (an abandoned RPC, a pin write whose retention never reached
+// the loop) left behind is evicted at the next fill — the periodic ticker
+// bounds that — instead of living for as long as it stays connected. No pin
+// source, or no live pin: nothing to enforce.
+func (cm *ConnectionManager) enforceLivePinRule() {
+	if cm.config.ConnectOnlyFn == nil {
+		return
+	}
+	pin, pinned := cm.config.ConnectOnlyFn()
+	if !pinned {
+		return
+	}
+	cm.retainOnlyAddress(pin)
+}
+
+// retainOnlyAddress evicts every slot whose address differs from keep. Mirrors
+// shrinkToLimit's teardown discipline: slots are detached and removed under
+// cm.mu; removals are published and sessions closed and torn down after the
+// lock is released. keep is matched verbatim against slot.Address (the dial
+// address); a keep that matches no slot evicts everything — the pinned dial is
+// enqueued separately (ManualPeerRequested), or by the next fill.
+func (cm *ConnectionManager) retainOnlyAddress(keep domain.PeerAddress) {
+	cm.mu.Lock()
 	var victims []*slot
 	for _, s := range cm.slots {
 		if s.Address != keep {
@@ -1459,32 +1701,26 @@ func (cm *ConnectionManager) RetainOnly(keep domain.PeerAddress) {
 	}
 
 	log.Info().
-		Str("keep", string(keep)).
+		Str("keep", connectOnlyPinLabel(keep)).
 		Int("evicting", len(victims)).
 		Int("slots", len(cm.slots)).
 		Msg("cm: retaining only pinned peer, evicting other outbound slots")
 
-	var teardowns []SessionInfo
-	evictedAddrs := make([]domain.PeerAddress, 0, len(victims))
-	for _, v := range victims {
-		evictedAddrs = append(evictedAddrs, v.Address)
-		if info := cm.deactivateSlotLocked(v); info != nil {
-			teardowns = append(teardowns, *info)
-		}
-		cm.removeSlotLocked(v)
-	}
-
+	evictions := cm.evictSlotsLocked(victims)
 	cm.mu.Unlock()
 
-	for _, addr := range evictedAddrs {
-		cm.emitSlotRemoved(addr)
-	}
+	cm.publishEvictions(evictions)
+}
 
-	if cm.config.OnSessionTeardown != nil {
-		for _, info := range teardowns {
-			cm.config.OnSessionTeardown(info)
-		}
+// manualPeerOutsideLivePin reports whether a live connect_only pin forbids
+// dialling address: under a pin this node dials only the pinned peer, and an
+// add_peer of anyone else would otherwise open a slot the next fill evicts.
+func (cm *ConnectionManager) manualPeerOutsideLivePin(address domain.PeerAddress) (domain.PeerAddress, bool) {
+	if cm.config.ConnectOnlyFn == nil {
+		return "", false
 	}
+	pin, pinned := cm.config.ConnectOnlyFn()
+	return pin, pinned && pin != address
 }
 
 // beginInitSlotLocked transitions a slot to Initializing after a successful
@@ -1494,17 +1730,16 @@ func (cm *ConnectionManager) RetainOnly(keep domain.PeerAddress) {
 // advertised until SessionInitReady arrives; Slots() does report it, as
 // Initializing with its Identity, for diagnostics.
 //
-// Caller must hold cm.mu.Lock. Returns SessionInfo for the caller to invoke
-// OnSessionEstablished AFTER releasing the lock — so the Initializing state
-// becomes visible to Slots() readers before the callback has run.
+// Caller must hold cm.mu.Lock. Returns SessionInfo for the caller to publish
+// the Initializing state and invoke OnSessionEstablished AFTER releasing the
+// lock — so the state is visible to Slots() readers, and published, before the
+// callback has run.
 func (cm *ConnectionManager) beginInitSlotLocked(s *slot, ev DialSucceeded) SessionInfo {
 	s.State = domain.SlotStateInitializing
 	s.Session = ev.Session
 	s.ConnectedAddress = ev.ConnectedAddress
 	s.RetryCount = 0
 	s.Generation = cm.nextGenerationLocked()
-
-	cm.emitSlotStateChanged(s.Address, domain.SlotStateInitializing)
 
 	log.Info().
 		Str("address", string(s.Address)).
@@ -1525,7 +1760,7 @@ func (cm *ConnectionManager) beginInitSlotLocked(s *slot, ev DialSucceeded) Sess
 
 // promoteSlotLocked transitions a slot from Initializing to Active.
 // Called when the application-level init (initPeerSession) succeeds.
-// Caller must hold cm.mu.Lock.
+// Caller must hold cm.mu.Lock and publish the Active state after releasing it.
 func (cm *ConnectionManager) promoteSlotLocked(s *slot) {
 	s.State = domain.SlotStateActive
 
@@ -1533,51 +1768,123 @@ func (cm *ConnectionManager) promoteSlotLocked(s *slot) {
 		Str("address", string(s.Address)).
 		Str("connected_via", string(s.ConnectedAddress)).
 		Msg("cm: slot activated")
-
-	// Safe to call under cm.mu — ebus uses its own RWMutex.
-	cm.emitSlotStateChanged(s.Address, domain.SlotStateActive)
 }
 
-// deactivateSlotLocked performs cleanup when an active or initializing slot
-// loses its session. Called before reconnect, replace, or shutdown. Closes the
-// TCP transport and returns SessionInfo if teardown callback is needed. The
-// caller must invoke OnSessionTeardown AFTER releasing the lock.
-// Returns nil when the slot had no session to tear down.
+// slotDeactivationReason says why the event loop takes a session away from its
+// slot. It is recorded on the session when the loop closes it (see
+// peerSession.closedBy), because the session goroutine that may still be
+// running on it must know whether the failure it is about to observe on the
+// closed transport is the peer's or this node's doing.
+type slotDeactivationReason int
+
+const (
+	// slotDeactivationLocalEviction: this node decided to drop the slot —
+	// shrinkToLimit, the add_peer eviction, RetainOnly, the connect_only pin,
+	// shutdown. Says nothing about the peer, so the session goroutine charges
+	// it nothing.
+	slotDeactivationLocalEviction slotDeactivationReason = iota + 1
+	// slotDeactivationOutcomeReported: the session goroutine or dial worker
+	// has already reported the loss (ActiveSessionLost, DialFailed) and
+	// charged it. The session goroutine closes its session before it reports,
+	// so the loop's close is then a no-op; see sessionCloser.
+	slotDeactivationOutcomeReported
+)
+
+// sessionCloser maps the reason onto the close reason the session records if
+// the loop's close is the first one.
+func (r slotDeactivationReason) sessionCloser() peerSessionCloser {
+	switch r {
+	case slotDeactivationLocalEviction:
+		return peerSessionClosedByLocalEviction
+	default:
+		// slotDeactivationOutcomeReported, and any value nobody chose. The
+		// owner has normally closed the session already and this close
+		// changes nothing; if it ever comes first, it is recorded as the
+		// owner's, which is the reason that never excuses the peer.
+		return peerSessionClosedByOwner
+	}
+}
+
+// sessionTeardown is a session the event loop has taken away from its slot
+// but not closed yet: the close is I/O and its onClose takes peerMu, so it
+// runs after cm.mu is released, in tearDownSession.
+type sessionTeardown struct {
+	info   SessionInfo
+	closer peerSessionCloser
+}
+
+// deactivateSlotLocked detaches the session of an active or initializing slot.
+// Called before reconnect, replace, eviction or shutdown. It does NOT close the
+// session: closing is I/O, and the session's onClose takes peerMu, so a close
+// here would be I/O under cm.mu and a cm.mu → peerMu edge. The caller hands the
+// result to tearDownSession after releasing cm.mu. Returns nil when the slot
+// had no session to tear down.
 //
 // Handles both domain.SlotStateActive and domain.SlotStateInitializing — during init the
 // slot already holds a Session that must be closed on failure or shutdown.
 //
-// CM owns the transport lifecycle: it closes the underlying connection here.
-// Service's servePeerSession detects the close (EOF) and emits
-// ActiveSessionLost — which the generation guard suppresses because the
-// slot's generation was already incremented by the caller.
-func (cm *ConnectionManager) deactivateSlotLocked(s *slot) *SessionInfo {
+// Whoever closes a session first records why (peerSession.closedBy). For a
+// local eviction that is this manager, through tearDownSession; for a loss the
+// session goroutine reported, the goroutine already closed it. The session
+// goroutine accounts for the close by that reason and emits
+// ActiveSessionLost, which the generation guard suppresses, because the
+// caller either removed the slot or moved its generation on.
+//
+// Caller holds cm.mu.Lock.
+func (cm *ConnectionManager) deactivateSlotLocked(s *slot, reason slotDeactivationReason) *sessionTeardown {
 	if (s.State != domain.SlotStateActive && s.State != domain.SlotStateInitializing) || s.Session == nil {
 		return nil
 	}
 
-	info := SessionInfo{
-		Address:      s.Address,
-		DialAddress:  s.Session.address,
-		Identity:     s.Session.peerIdentity,
-		Capabilities: s.Session.capabilities,
-		ConnID:       s.Session.connID,
-		Session:      s.Session, // kept for pointer-compare ownership guard in onCMSessionTeardown
+	teardown := &sessionTeardown{
+		info: SessionInfo{
+			Address:      s.Address,
+			DialAddress:  s.Session.address,
+			Identity:     s.Session.peerIdentity,
+			Capabilities: s.Session.capabilities,
+			ConnID:       s.Session.connID,
+			Session:      s.Session, // kept for pointer-compare ownership guard in onCMSessionTeardown
+		},
+		closer: reason.sessionCloser(),
 	}
-
-	_ = s.Session.Close()
 	s.Session = nil
 	s.ConnectedAddress = ""
 
-	return &info
+	return teardown
+}
+
+// tearDownSession closes a detached session and then runs OnSessionTeardown
+// for it. Runs on the event loop with cm.mu released. The order is the
+// contract registerCMSession relies on: the close records the reason before
+// the callback takes peerMu, so a registration that runs after the callback's
+// section sees the reason and a registration that ran before it is withdrawn
+// by the callback. Nil-safe for slots that had no session.
+func (cm *ConnectionManager) tearDownSession(teardown *sessionTeardown) {
+	if teardown == nil {
+		return
+	}
+	// The close error is the transport's own; the slot is given up either
+	// way and nothing here could act on it.
+	_ = teardown.info.Session.closeAs(teardown.closer)
+	if cm.config.OnSessionTeardown != nil {
+		cm.config.OnSessionTeardown(teardown.info)
+	}
+}
+
+// tearDownSessions is tearDownSession for every entry, in order.
+func (cm *ConnectionManager) tearDownSessions(teardowns []*sessionTeardown) {
+	for _, teardown := range teardowns {
+		cm.tearDownSession(teardown)
+	}
 }
 
 // replaceSlotLocked removes a slot whose peer is exhausted.
-// Caller must hold cm.mu.Lock. Returns teardown info if the slot was active.
-func (cm *ConnectionManager) replaceSlotLocked(s *slot) *SessionInfo {
-	info := cm.deactivateSlotLocked(s)
+// Caller must hold cm.mu.Lock. Returns the detached session, if the slot had
+// one, for tearDownSession once cm.mu is released.
+func (cm *ConnectionManager) replaceSlotLocked(s *slot, reason slotDeactivationReason) *sessionTeardown {
+	teardown := cm.deactivateSlotLocked(s, reason)
 	cm.removeSlotLocked(s)
-	return info
+	return teardown
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,12 +2027,11 @@ func (cm *ConnectionManager) shutdown() {
 
 	log.Info().Int("slots", len(cm.slots)).Msg("cm: shutting down")
 
-	// 1. Deactivate all active slots (close sessions + routing cleanup).
-	var teardowns []SessionInfo
+	// 1. Deactivate all active slots (close sessions + session-map
+	//    cleanup). Shutdown is a local decision: the peers did nothing.
+	teardowns := make([]*sessionTeardown, 0, len(cm.slots))
 	for _, s := range cm.slots {
-		if info := cm.deactivateSlotLocked(s); info != nil {
-			teardowns = append(teardowns, *info)
-		}
+		teardowns = append(teardowns, cm.deactivateSlotLocked(s, slotDeactivationLocalEviction))
 	}
 
 	// 2. Clear slots, settling each slot's budget unit on the way out. The
@@ -1738,12 +2044,8 @@ func (cm *ConnectionManager) shutdown() {
 
 	cm.mu.Unlock()
 
-	// 3. Invoke teardown callbacks outside the lock.
-	if cm.config.OnSessionTeardown != nil {
-		for _, info := range teardowns {
-			cm.config.OnSessionTeardown(info)
-		}
-	}
+	// 3. Close the sessions and invoke teardown callbacks outside the lock.
+	cm.tearDownSessions(teardowns)
 
 	// 4. Wait for all in-flight dial goroutines to finish.
 	//    After this returns, no goroutine can emit into slotEvents/hintEvents,
@@ -1764,14 +2066,30 @@ func (cm *ConnectionManager) drainChannels() {
 	for {
 		select {
 		case ev := <-cm.slotEvents:
-			if ds, ok := ev.(DialSucceeded); ok && ds.Session != nil {
-				_ = ds.Session.Close()
-			}
+			cm.settleUndeliveredSlotEvent(ev)
 		case <-cm.hintEvents:
 			// ignore
 		default:
 			return // channels empty
 		}
+	}
+}
+
+// settleUndeliveredSlotEvent releases what an event the loop will never handle
+// still holds: a dialled session that nobody else will close, and a RetainOnly
+// waiter that would otherwise wait for an application that never comes. The
+// slot table is already empty, so a RetainOnly request has nothing left to
+// evict. Every other event carries nothing to release.
+func (cm *ConnectionManager) settleUndeliveredSlotEvent(event SlotEvent) {
+	switch ev := event.(type) {
+	case DialSucceeded:
+		if ev.Session != nil {
+			// The dial worker handed the session over and will not close it;
+			// its close error is of no use to a shutdown.
+			_ = ev.Session.closeAs(peerSessionClosedByLocalEviction)
+		}
+	case retainOnlyRequest:
+		ev.settle()
 	}
 }
 

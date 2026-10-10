@@ -5,6 +5,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -174,6 +175,63 @@ func (_c *MockNodeProvider_ClientVersion_Call) Return(s string) *MockNodeProvide
 }
 
 func (_c *MockNodeProvider_ClientVersion_Call) RunAndReturn(run func() string) *MockNodeProvider_ClientVersion_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ConnectOnly provides a mock function for the type MockNodeProvider
+func (_mock *MockNodeProvider) ConnectOnly(ctx context.Context, target string) protocol.Frame {
+	ret := _mock.Called(ctx, target)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ConnectOnly")
+	}
+
+	var r0 protocol.Frame
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) protocol.Frame); ok {
+		r0 = returnFunc(ctx, target)
+	} else {
+		r0 = ret.Get(0).(protocol.Frame)
+	}
+	return r0
+}
+
+// MockNodeProvider_ConnectOnly_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ConnectOnly'
+type MockNodeProvider_ConnectOnly_Call struct {
+	*mock.Call
+}
+
+// ConnectOnly is a helper method to define mock.On call
+//   - ctx context.Context
+//   - target string
+func (_e *MockNodeProvider_Expecter) ConnectOnly(ctx any, target any) *MockNodeProvider_ConnectOnly_Call {
+	return &MockNodeProvider_ConnectOnly_Call{Call: _e.mock.On("ConnectOnly", ctx, target)}
+}
+
+func (_c *MockNodeProvider_ConnectOnly_Call) Run(run func(ctx context.Context, target string)) *MockNodeProvider_ConnectOnly_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockNodeProvider_ConnectOnly_Call) Return(frame protocol.Frame) *MockNodeProvider_ConnectOnly_Call {
+	_c.Call.Return(frame)
+	return _c
+}
+
+func (_c *MockNodeProvider_ConnectOnly_Call) RunAndReturn(run func(ctx context.Context, target string) protocol.Frame) *MockNodeProvider_ConnectOnly_Call {
 	_c.Call.Return(run)
 	return _c
 }

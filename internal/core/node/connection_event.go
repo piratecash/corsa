@@ -10,7 +10,9 @@ import "github.com/piratecash/corsa/internal/core/domain"
 //
 //   SlotEvent — edge-triggered, loss is NOT acceptable.
 //   Delivered via blocking send on slotEvents channel.
-//   Producers: dial workers, servePeerSession goroutines.
+//   Producers: dial workers, the CM session goroutines started by
+//   onCMSessionEstablished, add_peer (ManualPeerRequested) and
+//   connect_only (retainOnlyRequest, through ConnectionManager.RetainOnly).
 //
 //   HintEvent — level-triggered, loss IS acceptable.
 //   Delivered via non-blocking send on hintEvents channel.
@@ -70,8 +72,10 @@ type DialSucceeded struct {
 
 func (DialSucceeded) slotEvent() {}
 
-// SessionInitReady is emitted by the init goroutine (onCMSessionEstablished)
-// after initPeerSession succeeds. Promotes the slot from Initializing to Active,
+// SessionInitReady is emitted by the session goroutine (runCMSession) after
+// initPeerSession succeeds and the session is registered with the Service; a
+// session the manager evicted before that is never reported as ready.
+// Promotes the slot from Initializing to Active,
 // so ActiveCount() counts it and buildPeerExchangeResponse() advertises it;
 // Slots() then reports it as Active instead of Initializing.
 type SessionInitReady struct {
@@ -114,6 +118,48 @@ type ManualPeerRequested struct {
 }
 
 func (ManualPeerRequested) slotEvent() {}
+
+// retainOnlyRequest asks the event loop to evict every outbound slot except
+// the live connect_only pin — the egress half of the pin. It is an event rather
+// than a method that edits the table directly because the event loop is the
+// only writer of the slot table: an eviction from the caller's goroutine could
+// interleave with a handler that has released cm.mu but is still acting on the
+// slot it just changed (OnSessionEstablished, a fill publishing its new slots),
+// and the table, the published slot states and the teardown callbacks would
+// then disagree about which slots exist.
+//
+// Unexported and built only by newRetainOnlyRequest, so every request the loop
+// can receive carries a live ack channel: settling the zero value would close
+// a nil channel and take the loop down.
+type retainOnlyRequest struct {
+	// keep is what the caller asked to retain. With a pin source wired
+	// (ConnectionManagerConfig.ConnectOnlyFn) the loop retains the LIVE pin
+	// instead and keep only labels the request in logs; see handleRetainOnly.
+	keep domain.PeerAddress
+	// applied is closed once the request is settled: by the event loop after
+	// the evictions and their teardown callbacks, or by the shutdown drain
+	// when the loop stopped before reaching it.
+	applied chan struct{}
+}
+
+func newRetainOnlyRequest(keep domain.PeerAddress) retainOnlyRequest {
+	return retainOnlyRequest{keep: keep, applied: make(chan struct{})}
+}
+
+// settle releases the waiter. Called exactly once per request: by
+// handleRetainOnly, or by the shutdown drain for a request the loop never
+// reached — the two are mutually exclusive because a request leaves the
+// channel exactly once. A request without an ack channel has no waiter to
+// release; tolerating it keeps a request built without newRetainOnlyRequest
+// from taking the event loop down with a close of a nil channel.
+func (r retainOnlyRequest) settle() {
+	if r.applied == nil {
+		return
+	}
+	close(r.applied)
+}
+
+func (retainOnlyRequest) slotEvent() {}
 
 // BootstrapReady is emitted once after initial peer loading completes.
 // Triggers the first fill() — no outbound connections start before this.
