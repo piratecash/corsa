@@ -621,7 +621,7 @@ func (r *DMRouter) evictDeletedMessageFromUI(peer domain.PeerIdentity, target do
 	if r.cache.MatchesPeer(peer) {
 		cacheRemoved = r.cache.RemoveMessage(string(target))
 		if cacheRemoved {
-			r.activeMessages = r.cache.Messages()
+			r.refreshActiveMessagesLocked()
 		}
 	}
 	// seenMessageIDs is the dedup gate for inbound new-message events;

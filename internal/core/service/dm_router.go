@@ -78,9 +78,12 @@ type RouterSnapshot struct {
 	PeerOrder      []domain.PeerIdentity
 	ActiveMessages []DirectMessage
 	CacheReady     bool // true when cache is loaded for ActivePeer (empty chat vs still loading)
-	NodeStatus     NodeStatus
-	SendStatus     string
-	MyAddress      domain.PeerIdentity
+	// UnreadMarker is where the open conversation's "unread messages"
+	// divider goes. Read live like ActivePeer: it belongs to the selection.
+	UnreadMarker UnreadMarker
+	NodeStatus   NodeStatus
+	SendStatus   string
+	MyAddress    domain.PeerIdentity
 
 	// Generation is a monotonically increasing counter bumped on every
 	// state mutation inside DMRouter. UI-side caches can compare this
@@ -379,6 +382,15 @@ type DMRouter struct {
 	// testing the easy half.
 	dispatchControlConversationDeleteAckFn func(ctx context.Context, peer domain.PeerIdentity, ack domain.ConversationDeleteAckPayload) error
 
+	// reader is what the UI last reported about the reader of the open
+	// conversation — whether what arrives lands on screen, and where the
+	// unread divider goes. See dm_router_reader.go. Guarded by mu.
+	reader openReader
+
+	// markConversationSeenFn is a test-only override for the seen-receipt
+	// RPC. Production code leaves it nil and calls the client.
+	markConversationSeenFn func(ctx context.Context, peer domain.PeerIdentity, batch []DirectMessage) error
+
 	// Pending UI widget actions (Gio widgets are NOT thread-safe).
 	pendingScrollToEnd     bool
 	pendingComposerRestore []ComposerRestore
@@ -425,6 +437,12 @@ type ComposerRestore struct {
 // PendingActions holds deferred widget mutations that must be applied
 // on the UI goroutine (Gio widgets are NOT thread-safe).
 type PendingActions struct {
+	// ScrollToEnd: the router has taken the reader to the end of the open
+	// conversation — it was opened, or clicked again with unread messages
+	// below the reader — and already counts them as there. It is the user's
+	// newest act on this screen, so the UI follows it whatever else holds
+	// the list. The user's own send asks nothing here: the composer shows the
+	// end itself, the moment send is pressed.
 	ScrollToEnd     bool
 	ComposerRestore []ComposerRestore
 	RecipientText   domain.PeerIdentity
@@ -533,7 +551,9 @@ func (r *DMRouter) SelectPeer(peerAddress domain.PeerIdentity) {
 // When the peer is the same (re-selection), it is a true no-op: no state
 // mutations, no unread clear, no doMarkSeen, no UI events, no goroutines.
 // SelectPeer differs: same-peer re-click retries a failed load (cache miss)
-// or retries doMarkSeen when Unread > 0 (stuck badge after rollback).
+// or, when Unread > 0, takes the reader to the end and marks the conversation
+// seen (a stuck badge after rollback, or messages waiting below a reader
+// scrolled up).
 func (r *DMRouter) AutoSelectPeer(peerAddress domain.PeerIdentity) {
 	r.selectPeerCore(peerAddress, false)
 }
@@ -562,6 +582,7 @@ func (r *DMRouter) DeselectPeer() {
 	}
 	r.activePeer = domain.PeerIdentity{}
 	r.peerClicked = false
+	r.reader = noReader()
 	// Clear the stale conversation immediately so a later frame never
 	// renders the previous peer's messages without its header — same
 	// rule as the peer-switch branch in selectPeerCore.
@@ -713,10 +734,14 @@ func (r *DMRouter) ShutdownDrain(timeout time.Duration) bool {
 }
 
 // selectPeerCore shares logic for SelectPeer and AutoSelectPeer.
-// Both paths clear the unread badge optimistically and send seen receipts.
+// Both paths clear the unread badge optimistically and open the conversation:
+// it is shown from its end, so the load that carries out the open reads
+// everything in it.
 // userClicked affects retry behaviour on same-peer re-selection:
-//   - cache miss → retries loadConversation + doMarkSeen
-//   - cache valid, Unread > 0 (stuck badge after rollback) → retries doMarkSeen
+//   - cache miss → retries loadConversation, which carries out the open
+//   - cache valid, Unread > 0 → scrolls the reader to the end and marks the
+//     conversation seen: either a stuck badge after a rollback, or messages
+//     that arrived below a reader scrolled further up (dm_router_reader.go)
 //   - cache valid, Unread == 0 → true no-op
 //
 // Programmatic re-selection (AutoSelectPeer) of the same peer is always
@@ -752,7 +777,7 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 	// Past the no-op guard — we are either switching peers or retrying
 	// a failed load. Commit state changes.
 	r.activePeer = peerAddress
-	r.peerClicked = true // chat is on screen — always treat as "seen"
+	r.peerClicked = true // the conversation is on screen, opened at its end
 	if changed {
 		// Clear stale messages immediately so the UI never renders
 		// the previous peer's conversation under the new header.
@@ -762,16 +787,44 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 	// Snapshot the unread set so it can be restored if the background
 	// doMarkSeen fails (optimistic clear with rollback).
 	oldUnread := r.unreadSnapshotLocked(peerAddress)
+	switch {
+	case changed:
+		// A conversation is shown from its end when it opens, and the
+		// badge it had is where its unread divider goes. The end is asked
+		// for now, not only by the load: whatever puts the conversation on
+		// screen before the load lands — a receipt publishing a warm cache —
+		// has to lay it out from the end too.
+		r.reader = openReaderFor(oldUnread)
+		r.requestScrollToEndLocked()
+	case needLoad:
+		// The same conversation, whose earlier load failed: this load is
+		// the one that brings it onto the screen.
+		r.reader.atEnd = true
+		r.reader.unreadAtOpen = oldUnread
+		r.reader.awaitingOpenLoad = true
+		r.reader.readWhileOpening = nil
+		r.requestScrollToEndLocked()
+	case needRetryMark:
+		// A click on the conversation already open, with messages waiting
+		// below the reader: that is the reader asking to go down to them.
+		// Marking them read without showing them would send receipts for
+		// messages still off screen.
+		r.reader.atEnd = true
+		r.requestScrollToEndLocked()
+	}
 	// And the backwards counters as they are BEFORE the optimistic clear
 	// below, so the load that follows is judged against the conversation the
 	// user asked for, not against the state this selection is about to
 	// create.
 	epochAtSelect := r.backwardsEpoch[peerAddress]
-	r.mu.Unlock()
-
 	// Optimistically clear the unread badge so the UI updates instantly.
 	// If the background goroutine fails, the badge is restored to oldUnread.
-	r.clearPeerUnread(peerAddress)
+	// In the same section that set the open up: a reader report landing in
+	// between would find the open pending and give the badge back
+	// (cancelPendingOpenLocked), and a clear after it would take it away
+	// again with nothing left to read it.
+	r.clearUnreadLocked(peerAddress)
+	r.mu.Unlock()
 
 	// Notify synchronously so the UI re-renders with cleared messages
 	// and cleared unread badge before the background load starts.
@@ -790,16 +843,21 @@ func (r *DMRouter) selectPeerCore(peerAddress domain.PeerIdentity, userClicked b
 	go func() {
 		defer r.endOp()
 		defer recoverLog(label)
-		if needLoad {
-			if !r.loadConversation(peerAddress, epochAtSelect) {
-				r.restorePeerUnread(peerAddress, oldUnread)
-				_ = r.repairBadgeFromStore(peerAddress)
-				return
+		if !needLoad {
+			if !r.doMarkSeen(peerAddress) {
+				r.putBadgeBack(peerAddress, oldUnread)
 			}
+			r.notify(UIEventMessagesUpdated)
+			return
 		}
-		if !r.doMarkSeen(peerAddress) {
-			r.restorePeerUnread(peerAddress, oldUnread)
-			_ = r.repairBadgeFromStore(peerAddress)
+		// The load that carries out the open reads the conversation
+		// (loadConversation) — this one, or another that landed first, or
+		// none if the reader started scrolling before any did. Reading it
+		// again here would send a second receipt, or receipts for a reader
+		// who is not at the end.
+		if !r.loadConversation(peerAddress, epochAtSelect) {
+			r.putBadgeBack(peerAddress, oldUnread)
+			return
 		}
 		r.notify(UIEventMessagesUpdated)
 	}()
@@ -928,10 +986,8 @@ func (r *DMRouter) SendMessage(to domain.PeerIdentity, msg domain.OutgoingDM) er
 
 		r.sendStatus = "message sent"
 
-		if sent != nil && r.cache.MatchesPeer(to) {
-			r.cache.AppendMessage(*sent)
-			r.activeMessages = r.cache.Messages()
-			r.pendingScrollToEnd = true
+		if sent != nil {
+			r.placeOwnSentLocked(to, *sent)
 		}
 
 		r.mu.Unlock()
@@ -1127,11 +1183,7 @@ func (r *DMRouter) sendFileAnnounceWithBaseline(to domain.PeerIdentity, msg doma
 		}
 		r.sendStatus = "message sent"
 
-		if r.cache.MatchesPeer(to) {
-			r.cache.AppendMessage(*result.Sent)
-			r.activeMessages = r.cache.Messages()
-			r.pendingScrollToEnd = true
-		}
+		r.placeOwnSentLocked(to, *result.Sent)
 
 		r.mu.Unlock()
 
@@ -1467,6 +1519,7 @@ func (r *DMRouter) RemovePeer(identity domain.PeerIdentity) (bool, error) {
 	if wasActive {
 		r.activePeer = domain.PeerIdentity{}
 		r.peerClicked = false
+		r.reader = noReader()
 		r.activeMessages = nil
 	}
 
@@ -2064,47 +2117,30 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 				// a peer switch during the goroutine would overwrite the
 				// ConversationCache for the new selection, corrupting
 				// MatchesPeer/HasMessage for subsequent paths.
-				if decryptedMsg != nil {
-					r.mu.Lock()
-					// The generation as well as the selection: a contact
-					// removed and added back is the same peer by name, and
-					// seeding this message into the new conversation would
-					// show a message from the old one.
-					seeded := r.activePeer == peerID &&
-						r.stampIsCurrentLocked(peerID, stampAtEvent)
-					if seeded {
-						r.cache.Load(peerID, []DirectMessage{*decryptedMsg}, 0)
-						r.activeMessages = r.cache.Messages()
-						r.pendingScrollToEnd = true
-					}
-					r.mu.Unlock()
-					if seeded {
-						r.notify(UIEventMessagesUpdated)
-						r.notify(UIEventSidebarUpdated)
-						// Message is now visible on screen — send seen
-						// receipt to maintain the "on screen = read"
-						// invariant (same as the success path below).
-						r.doMarkSeen(peerID)
-					}
+				// The seed reads the message it shows; the load that
+				// later carries out the open reads the rest.
+				if decryptedMsg != nil && r.seedOpeningConversation(peerID, stampAtEvent, *decryptedMsg) {
+					r.notify(UIEventMessagesUpdated)
+					r.notify(UIEventSidebarUpdated)
 				}
 				return
 			}
+			// Read by the load itself: as the open, if it carried it out,
+			// and otherwise as an arrival meeting the reader.
 			r.notify(UIEventMessagesUpdated)
 			r.notify(UIEventSidebarUpdated)
-			// Active chat is on screen — always send seen receipts
-			// now that the conversation has loaded.
-			r.doMarkSeen(peerID)
 		}()
 		return
 	}
 
+	// Already in the cache means a reload brought it in, and that reload met
+	// the reader with it (loadConversation).
 	if r.cache.HasMessage(event.MessageID) {
 		return
 	}
 
 	msg := r.client.DecryptIncomingMessage(r.opContext(), event)
 	if msg == nil {
-		isIncoming := event.Sender != r.client.Address().String()
 		if announce {
 			r.notify(UIEventBeep)
 		}
@@ -2115,14 +2151,13 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 		go func() {
 			defer r.endOp()
 			defer recoverLog("onNewMessage.decryptFail")
+			// The reload is what puts the message in front of the reader,
+			// and it asks the reader about it (loadConversation).
 			if !r.reloadAndRefreshPreview(peerID, event.MessageID) {
 				return
 			}
 			r.notify(UIEventMessagesUpdated)
 			r.notify(UIEventSidebarUpdated)
-			if isIncoming {
-				r.doMarkSeen(peerID)
-			}
 		}()
 		return
 	}
@@ -2132,7 +2167,6 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	// onDecryptSuccess chokepoint — every decrypt path shares it, so no
 	// per-branch handling here.
 
-	isIncoming := msg.Sender != r.client.Address()
 	if !r.deliverDecryptedMessage(msg, peerID, stampAtEvent) {
 		// The conversation moved off screen while the message was being
 		// decrypted; it has been handled as a background arrival, badge
@@ -2153,15 +2187,8 @@ func (r *DMRouter) onNewMessage(event protocol.LocalChangeEvent) {
 	if announce {
 		r.notify(UIEventBeep)
 	}
-
-	// The active chat is on screen — mark incoming messages as seen
-	// regardless of how the peer was selected (click or auto-select).
-	if isIncoming && r.beginOp() {
-		go func() {
-			defer r.endOp()
-			r.doMarkSeen(peerID)
-		}()
-	}
+	// Whether the reader saw it — and so whether it got its receipt or a
+	// badge — was settled by deliverDecryptedMessage.
 }
 
 func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
@@ -2190,7 +2217,7 @@ func (r *DMRouter) onReceiptUpdate(event protocol.LocalChangeEvent) {
 
 	if r.cache.UpdateStatus(event.MessageID, event.Status, deliveredAt, true) {
 		r.mu.Lock()
-		r.activeMessages = r.cache.Messages()
+		r.refreshActiveMessagesLocked()
 		r.mu.Unlock()
 		r.notify(UIEventMessagesUpdated)
 	} else if !r.cache.HasMessage(event.MessageID) {
@@ -2338,6 +2365,7 @@ func (r *DMRouter) resetIdentityState() {
 	r.peerOrder = nil
 	r.activePeer = domain.PeerIdentity{}
 	r.peerClicked = false
+	r.reader = noReader()
 	r.activeMessages = nil
 	r.seenMessageIDs = make(map[string]messageGate)
 	r.initialSynced = false
@@ -2432,9 +2460,24 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity, epochBefore
 		r.mu.Unlock()
 		return false
 	}
+	held := r.heldMessageIDsLocked(peerAddress)
 	r.cache.Load(peerAddress, messages, authoritativeUpTo)
-	r.activeMessages = r.cache.Messages()
-	r.pendingScrollToEnd = true
+	r.refreshActiveMessagesLocked()
+	// The load an open is waiting for shows the end, places the divider and
+	// reads the whole conversation — whoever ran it: when the selection's own
+	// load failed, the next reload is the one that puts the conversation on
+	// screen, and nothing else will read it. Any other reload of the
+	// conversation on screen leaves the reader where they are, and what it
+	// brought in that was not there before meets the reader here — it is the
+	// reload that put it in front of them, whichever message the reload was
+	// run for. Which one this is was decided by the selection, not by whether
+	// the cache already held the peer: leaving a conversation keeps its cache
+	// warm, and coming back to it is an open all the same.
+	openRead, opened := r.showOpenedConversationLocked()
+	var seen []DirectMessage
+	if !opened {
+		seen = r.admitReloadedArrivalsLocked(peerAddress, held)
+	}
 	r.mu.Unlock()
 
 	// Register receiver-side mappings for the file announcements in what was
@@ -2447,6 +2490,12 @@ func (r *DMRouter) loadConversation(peerAddress domain.PeerIdentity, epochBefore
 		if messages[i].Command == domain.DMCommandFileAnnounce && messages[i].Sender != myAddr {
 			r.registerFileReceiveForLivePeer(&messages[i], peerAddress, stamp)
 		}
+	}
+
+	if opened {
+		r.readOpenedConversationInBackground(peerAddress, openRead)
+	} else {
+		r.sendSeenReceipts(peerAddress, seen)
 	}
 	return true
 }
@@ -2522,17 +2571,27 @@ func (r *DMRouter) doMarkSeen(peerAddress domain.PeerIdentity) bool {
 	}
 	r.mu.RUnlock()
 
+	return r.markBatchSeen(peerAddress, msgs)
+}
+
+// markBatchSeen sends the seen receipts for a whole-conversation read and, when
+// they went through, takes what they carried off the badge. False when there
+// is nothing to send — no messages loaded — or the RPC failed; the caller
+// decides what goes back.
+func (r *DMRouter) markBatchSeen(peerAddress domain.PeerIdentity, msgs []DirectMessage) bool {
 	if len(msgs) == 0 {
 		// No messages loaded — conversation may not have loaded yet.
 		return false
 	}
 
-	seenCtx, seenCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	err := r.client.MarkConversationSeen(seenCtx, peerAddress, msgs)
+	seenCtx, seenCancel := context.WithTimeout(r.opContext(), seenReceiptTimeout)
+	err := r.markConversationSeen(seenCtx, peerAddress, msgs)
 	seenCancel()
 
 	if err != nil {
-		log.Warn().Err(err).Str("peer", peerAddress.String()).Msg("MarkConversationSeen failed")
+		log.Warn().Err(err).Str("peer", peerAddress.String()).
+			Int("messages", len(msgs)).Str("first_message_id", msgs[0].ID).
+			Msg("MarkConversationSeen failed")
 		return false
 	}
 
@@ -2578,7 +2637,7 @@ func (r *DMRouter) applyReceiptRepair(activePeer domain.PeerIdentity, receipts [
 
 	if updated {
 		r.mu.Lock()
-		r.activeMessages = r.cache.Messages()
+		r.refreshActiveMessagesLocked()
 		r.mu.Unlock()
 		r.notify(UIEventMessagesUpdated)
 	}
@@ -3787,13 +3846,45 @@ func (r *DMRouter) notePeerLastIncomingFromCacheLocked(peer domain.PeerIdentity)
 	}
 }
 
+// seedOpeningConversation puts the one message an event carried into the
+// conversation being opened, when the load that should have brought the whole
+// conversation failed — so the user sees the message instead of a blank
+// screen. It reports whether it did.
+//
+// The selection AND the generation are checked: a peer switch would have the
+// seed overwrite the cache of the conversation now on screen, and a contact
+// removed and added back is the same peer by name, so seeding would show a
+// message from the old one.
+func (r *DMRouter) seedOpeningConversation(peer domain.PeerIdentity, stamp peerStamp, msg DirectMessage) bool {
+	r.mu.Lock()
+	if r.activePeer != peer || !r.stampIsCurrentLocked(peer, stamp) {
+		r.mu.Unlock()
+		return false
+	}
+	r.cache.Load(peer, []DirectMessage{msg}, 0)
+	r.refreshActiveMessagesLocked()
+	// Shown at the end, but the open is NOT spent: one message is not the
+	// conversation, and the load that does bring it is the open. The
+	// message itself meets the reader like any arrival — read here, with the
+	// end on screen, and left out of the open's read for that.
+	r.requestScrollToEndLocked()
+	seen := msg.Sender != r.client.Address() && r.admitArrivalLocked(peer, domain.MessageID(msg.ID))
+	r.mu.Unlock()
+	if seen {
+		r.sendSeenReceipts(peer, []DirectMessage{msg})
+	}
+	return true
+}
+
 // reloadAndRefreshPreview runs loadConversation followed by
 // updatePreviewFromStore. If loadConversation fails, the messageID is
 // evicted from seenMessageIDs so repairUnreadFromHeaders can rediscover it.
 // Returns false only when loadConversation fails (no messages loaded).
 // Returns true when loadConversation succeeds, even if the subsequent
-// preview refresh fails — the caller should still emit MessagesUpdated
-// and run doMarkSeen because the conversation data is in cache.
+// preview refresh fails — the caller should still emit MessagesUpdated,
+// because the conversation data is in cache. Nothing is left to read: the
+// load itself read the conversation if it carried out its open, and met the
+// reader with what it brought in otherwise.
 // On partial success (load OK, preview fail), the message is already in
 // cache so eviction is NOT performed — the dedup gate must stay closed
 // to prevent redundant rediscovery on the next health poll.
@@ -4045,11 +4136,13 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 			// drop the badge for the session; the peer is handed to the
 			// database instead, which is the only thing that still knows.
 			//
-			// Except for the conversation on screen, which has no badge to
-			// rebuild: the user is reading it, the mark-seen that moved the
-			// counter is the receipt for these very messages, and a rebuild
-			// would put a count on the chat in front of them.
-			if !onScreen {
+			// Except for the conversation whose end is on screen, which has
+			// no badge to rebuild: the user is reading it, the mark-seen that
+			// moved the counter is the receipt for these very messages, and a
+			// rebuild would put a count on the chat in front of them. A reader
+			// scrolled further up is a different case — what lands lands below
+			// them, and the database is what knows which of it is unread.
+			if !onScreen || !r.reader.atEnd {
 				rebuild[a.peer] = struct{}{}
 			}
 			continue
@@ -4120,14 +4213,6 @@ func (r *DMRouter) repairUnreadFromHeaders(status NodeStatus) {
 				r.updatePreviewFromCache(selected)
 			}
 			r.notify(UIEventMessagesUpdated)
-			// Active chat is on screen — always send seen receipts,
-			// regardless of how the peer was selected.
-			if r.beginOp() {
-				go func() {
-					defer r.endOp()
-					r.doMarkSeen(selected)
-				}()
-			}
 		} else {
 			// Reload failed — the new messages are not in activeMessages.
 			// Evict their IDs from seenMessageIDs so the next repair cycle
@@ -4186,8 +4271,10 @@ func (r *DMRouter) repairBadgeFromStore(peer domain.PeerIdentity) bool {
 	}
 
 	changed := false
+	rebuilt := false
 	r.mu.Lock()
 	if _, alive := r.peers[peer]; alive && r.backwardsEpoch[peer] == before {
+		rebuilt = true
 		for id := range r.unreadIDs[peer] {
 			if _, had := badgedBefore[id]; had {
 				continue
@@ -4203,6 +4290,12 @@ func (r *DMRouter) repairBadgeFromStore(peer domain.PeerIdentity) bool {
 
 	if changed {
 		r.notify(UIEventSidebarUpdated)
+	}
+	if rebuilt {
+		// The database can call unread what the reader of the open
+		// conversation has on screen right now. See
+		// rereadThroughReaderPosition.
+		r.rereadThroughReaderPosition(peer)
 	}
 	return true
 }
@@ -4272,19 +4365,35 @@ func (r *DMRouter) deliverDecryptedMessage(msg *DirectMessage, peerID domain.Pee
 	r.mu.Lock()
 	gone := !r.peerGenUnchangedLocked(peerID, stamp.gen)
 	stale := !gone && r.backwardsEpoch[peerID].history != stamp.epochs.history
-	stillOpen := !gone && !stale &&
-		r.activePeer == peerID && !peerID.IsZero() &&
-		r.cache.AppendForPeer(peerID, *msg)
+	placement := cacheAppendRefused
+	if !gone && !stale && r.activePeer == peerID && !peerID.IsZero() {
+		placement = r.cache.AppendForPeer(peerID, *msg)
+	}
+	stillOpen := placement != cacheAppendRefused
 	unplaceable := false
+	seen := false
 	if stillOpen {
 		unplaceable = r.applyIncomingMessageLocked(peerID, *msg, stamp) == applyPreviewUnplaceable
-		r.activeMessages = r.cache.Messages()
-		r.pendingScrollToEnd = true
+		r.refreshActiveMessagesLocked()
+		// No scroll request: a reader at the end is kept there by the list
+		// itself, and one reading further up must not be pulled down.
+		//
+		// Only a message this delivery placed meets the reader. One the
+		// cache already held was brought in by a reload while the decrypt
+		// ran, and that reload met the reader with it already
+		// (admitReloadedArrivalsLocked) — admitting it again would send a
+		// second receipt, or badge a message already read.
+		seen = placement == cacheAppendPlaced &&
+			msg.Sender != r.client.Address() &&
+			r.admitArrivalLocked(peerID, domain.MessageID(msg.ID))
 	}
 	r.mu.Unlock()
 
 	if unplaceable {
 		r.repairPreviewFromStore(peerID, msg.ID)
+	}
+	if seen {
+		r.sendSeenReceipts(peerID, []DirectMessage{*msg})
 	}
 
 	if gone {
@@ -4301,8 +4410,11 @@ func (r *DMRouter) deliverDecryptedMessage(msg *DirectMessage, peerID domain.Pee
 		// loses it for good. The conversation on screen is reloaded from
 		// the same authority.
 		recovered := r.recoverFromStaleApply(peerID, msg)
+		// The reload puts the message in front of the reader and asks the
+		// reader about it (loadConversation).
 		if r.loadConversation(peerID, r.peerEpochsOf(peerID)) {
 			r.notify(UIEventMessagesUpdated)
+			r.notify(UIEventSidebarUpdated)
 		} else {
 			// The reload failed, so the message is not on screen either.
 			// Nothing here can put it there, and the cache still belongs to
@@ -5002,10 +5114,11 @@ func (r *DMRouter) composeSnapshotLocked(gen uint64) RouterSnapshot {
 		// Cheap scalars read live under r.mu so a status-only notify
 		// (which refreshes neither half's collections) still reflects a
 		// sendStatus / selection flip.
-		ActivePeer:  r.activePeer,
-		PeerClicked: r.peerClicked,
-		SendStatus:  r.sendStatus,
-		MyAddress:   r.client.Address(),
+		ActivePeer:   r.activePeer,
+		PeerClicked:  r.peerClicked,
+		UnreadMarker: r.reader.marker,
+		SendStatus:   r.sendStatus,
+		MyAddress:    r.client.Address(),
 		// Expensive collections shared from the cached DM half.
 		Peers:          dm.Peers,
 		PeerOrder:      dm.PeerOrder,

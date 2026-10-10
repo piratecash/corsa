@@ -89,6 +89,7 @@ type Window struct {
 	composerKeyboardPending  bool
 	contactsList             widget.List
 	chatList                 widget.List
+	chatReader               chatReader
 	consoleButton            widget.Clickable
 	updateButton             widget.Clickable
 	compactBackBtn           widget.Clickable
@@ -1701,6 +1702,16 @@ func (w *Window) resetConversationStateOnPeerChange() {
 	w.msgContextMsg = nil
 	w.chatJump = chatJump{}
 	w.msgHighlight = msgHighlight{}
+	// What was reported belongs to the conversation being left. The one being
+	// entered reports from its own first layout, even if that happens to land
+	// on the same position.
+	w.chatReader = chatReader{}
+	// The list position is the left conversation's — its indices are that
+	// conversation's messages. The zero position is the end, which is where
+	// an opened conversation is shown; carried over, it would lay the new
+	// one out wherever the old one was scrolled, and the first report from
+	// there would tell the router of a reader who never moved.
+	w.chatList.Position = layout.Position{}
 	// Reset ALL per-message widget caches HERE, at the top of layout,
 	// rather than lazily inside messageSelectable(): the lazy reset ran
 	// mid-frame, AFTER the first bubble had already registered its
@@ -1962,12 +1973,14 @@ func (w *Window) handlePendingActions() {
 			drained = true
 		}
 	}
-	// Through applyScrollToEnd, which knows about jumps: the user asked to be
-	// somewhere, and a message arriving while they are being taken there must
-	// not drag them back to the end of the conversation instead.
-	if pa.ScrollToEnd {
-		w.applyScrollToEnd()
-	}
+	// Only the router taking the reader to the end asks for it here — an open,
+	// a click on the open conversation with unread waiting — and it ends a
+	// jump to a quote that is still settling (see showConversationEnd). The
+	// user's own send shows the end at the press (triggerSend), not when its
+	// RPC answers. Arriving messages ask for no scroll at all: a reader
+	// at the end stays pinned there by the list, and one reading further up is
+	// left alone (see chat_reader.go).
+	w.applyScrollToEnd(pa.ScrollToEnd)
 	if !pa.RecipientText.IsZero() {
 		w.recipientEditor.SetText(pa.RecipientText.String())
 	}
@@ -2048,6 +2061,9 @@ func (w *Window) retryFailedSends(peer domain.PeerIdentity) {
 	if len(retrying) == 0 {
 		return
 	}
+	// Retry is the user pressing send again: the end is shown at the press,
+	// as for the composer (triggerSend), not when the send RPC answers.
+	w.showConversationEnd()
 	w.setFailedSends(peer, unseen)
 	for _, fs := range retrying {
 		if fs.file != "" {
@@ -2534,6 +2550,8 @@ func (w *Window) triggerSend(gtx layout.Context) {
 
 	// File attachment takes priority: if a file is attached, send file_announce DM.
 	if w.attachedFile != "" {
+		// At the press, as for text below.
+		w.showConversationEnd()
 		w.triggerFileSend(to)
 		return
 	}
@@ -2554,6 +2572,11 @@ func (w *Window) triggerSend(gtx layout.Context) {
 	if w.replyToMsg != nil {
 		outgoing.ReplyTo = domain.MessageID(w.replyToMsg.ID)
 	}
+	// At the press, which is the user's act — not when the send RPC answers,
+	// by which time they may have jumped to a quote or scrolled up, and that
+	// later act is theirs to keep. The list, at its end, then shows the
+	// message as it lands.
+	w.showConversationEnd()
 	if err := w.router.SendMessage(to, outgoing); err != nil {
 		// Immediate rejection: keep the composer intact so the user can retry.
 		// Outgoing barrier while a wipe is in progress for this peer
@@ -6703,24 +6726,44 @@ func (w *Window) layoutConversation(gtx layout.Context, recipient domain.PeerIde
 	// The row count behind menuRectSig is recorded in layoutChatCard, above the
 	// early returns that lay out no list — not here, where those paths never
 	// reach it.
+	// The divider goes INSIDE the element of the message it sits above, not
+	// in an element of its own: list indices stay message indices, which is
+	// what the reply jump and the reader position are both built on.
+	firstUnread, hasDivider := w.snap.UnreadMarker.FirstUnread()
+	w.chatReader.beginFrame()
 	list := material.List(w.theme, &w.chatList)
 	dims := list.Layout(gtx, len(conversation), func(gtx layout.Context, index int) layout.Dimensions {
 		message := conversation[index]
-		child := layout.Inset{Bottom: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return w.layoutChatBubble(gtx, recipient, message)
-		})
-		// The heights a jump needs, taken where the list itself measured them
-		// — insets included, because the inset is part of what the list
-		// scrolls past. Nothing else knows these numbers: a bubble's height is
-		// its text, its quote, its thumbnail and its reaction row, and none of
-		// those are known until they are laid out.
+		divided := unreadDividerAbove(firstUnread, hasDivider, message)
+		child := layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if !divided {
+					return layout.Dimensions{}
+				}
+				return w.kit().UnreadDivider(gtx, w.t("chat.unread_messages"))
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Bottom: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return w.layoutChatBubble(gtx, recipient, message)
+				})
+			}),
+		)
+		// The heights a jump and the reader position need, taken where the
+		// list itself measured them — insets and divider included, because
+		// they are part of what the list scrolls past. Nothing else knows
+		// these numbers: a bubble's height is its text, its quote, its
+		// thumbnail and its reaction row, and none of those are known until
+		// they are laid out.
 		w.chatJump.measure(index, child.Size.Y)
+		w.chatReader.measure(index, child.Size.Y)
 		return child
 	})
 	// After the list, never before it: this is where a jump finds out whether
-	// the target went where it was put, and Position only means that once the
-	// pass that rewrites it has finished.
+	// the target went where it was put, and where the reader's position is
+	// read — Position only means either once the pass that rewrites it has
+	// finished.
 	w.noteChatJumpDrawn(len(conversation))
+	w.reportReaderPosition(gtx, recipient, conversation)
 	return dims
 }
 

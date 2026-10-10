@@ -1980,3 +1980,24 @@ func TestPeerSetDigestIsMembershipNotOrder(t *testing.T) {
 		t.Error("nil and empty must agree")
 	}
 }
+
+// TestAConversationSwitchForgetsTheListPosition: a list position belongs to
+// the conversation it was taken in — its indices are that conversation's
+// messages. Carried into the next one, it lays that conversation out wherever
+// the previous one was scrolled, and the first report from there tells the
+// router of a reader who has gone up when they have not moved at all.
+func TestAConversationSwitchForgetsTheListPosition(t *testing.T) {
+	t.Parallel()
+
+	w := &Window{
+		snap:         service.RouterSnapshot{ActivePeer: domaintest.ID("peer-b")},
+		lastChatPeer: domaintest.ID("peer-a"),
+	}
+	w.chatList.Position = layout.Position{BeforeEnd: true, First: 7, Offset: 30}
+
+	w.resetConversationStateOnPeerChange()
+
+	if w.chatList.Position != (layout.Position{}) {
+		t.Fatalf("position after a switch = %+v, want the zero position (the end)", w.chatList.Position)
+	}
+}

@@ -991,7 +991,7 @@ func (r *DMRouter) evictWipedConversationFromUI(peer domain.PeerIdentity, remove
 			}
 		}
 		if cacheChanged {
-			r.activeMessages = r.cache.Messages()
+			r.refreshActiveMessagesLocked()
 		}
 	}
 	// Drop the matching seenMessageIDs entries so a future

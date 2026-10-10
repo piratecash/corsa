@@ -93,18 +93,18 @@ type drawnChild struct {
 	height int
 }
 
-// pending reports whether a jump still owns the list position, and it is what
-// keeps a message arriving mid-jump from pulling the conversation back to its
-// end underneath the reader.
+// pending reports whether a jump still owns the list position: while it does,
+// the jump writes the position at the top of every frame.
 //
 // It stays true for the whole of the settling frame, which is the part that
 // took a second attempt to get right. The guard is read AFTER applyChatJump
 // within one frame — the pending-actions drain runs between the jump and the
 // layout — so a jump that cleared itself the moment it wrote its final
 // position left the guard down while that position had not been drawn yet.
-// One message arriving in that window scrolled the conversation to the end and
-// the jump was simply lost: measured at 602px past the target, which is to say
-// off the screen it had just been put on.
+// One scroll request landing in that window (at the time, any arriving
+// message) scrolled the conversation to the end and the jump was simply lost:
+// measured at 602px past the target, which is to say off the screen it had
+// just been put on.
 func (j *chatJump) pending() bool { return j.msgID != "" }
 
 // measure records what the list gave one child, and is called for every child
@@ -248,12 +248,27 @@ func (w *Window) beginChatJump(gtx layout.Context, msgID string) {
 	gtx.Execute(op.InvalidateCmd{})
 }
 
-// applyScrollToEnd obeys the router's request to show the newest message,
-// unless a jump owns the list position right now. See chatJump.pending.
-func (w *Window) applyScrollToEnd() {
-	if w.chatJump.pending() {
+// applyScrollToEnd obeys the router's request to show the newest message: the
+// router has taken the reader to the end — an open, a click on the open
+// conversation with unread waiting. Arriving messages ask for nothing at all.
+func (w *Window) applyScrollToEnd(requested bool) {
+	if !requested {
 		return
 	}
+	w.showConversationEnd()
+}
+
+// showConversationEnd takes the reader to the end of the open conversation,
+// for the user's own acts that mean "show me the newest": the router taking
+// the reader there (applyScrollToEnd) and pressing send — in the composer
+// (triggerSend) or on the not-sent banner (retryFailedSends).
+//
+// It ends a jump to a quote that is still settling. Either act is newer than
+// the click on the quote; and for the router's request, a jump left holding
+// the list at the quote would be a reader the router thinks is at the end,
+// with no change of position for the UI to report.
+func (w *Window) showConversationEnd() {
+	w.chatJump = chatJump{}
 	w.chatList.Position.BeforeEnd = false
 }
 

@@ -10,6 +10,9 @@ import (
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
+
+	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 )
 
 // chat_jump_test.go drives the real layout.List, because the defect this
@@ -91,10 +94,11 @@ func itoa(v int) string {
 
 // frame runs one frame in the order layout() runs it, which is the order that
 // matters here: the jump is applied first, the router's pending actions are
-// drained after it, and only then does the list lay out. A message arriving
-// mid-jump therefore gets its say BETWEEN the jump and the drawing of what the
+// drained after it, and only then does the list lay out. A scroll-to-end
+// request landing mid-jump — the user's own message coming back from the
+// send — therefore gets its say BETWEEN the jump and the drawing of what the
 // jump decided, which is exactly the window the guard exists for.
-func (h *jumpHarness) frame(messageArrived ...bool) {
+func (h *jumpHarness) frame(scrollRequested ...bool) {
 	h.ops.Reset()
 	h.now = h.now.Add(16 * time.Millisecond)
 	gtx := layout.Context{
@@ -105,8 +109,8 @@ func (h *jumpHarness) frame(messageArrived ...bool) {
 	}
 	h.w.chatImagesWerePending, h.w.chatImagesArriving = h.w.chatImagesArriving, false
 	h.w.applyChatJump(gtx)
-	if len(messageArrived) > 0 && messageArrived[0] {
-		h.w.applyScrollToEnd()
+	if len(scrollRequested) > 0 {
+		h.w.applyScrollToEnd(scrollRequested[0])
 	}
 	h.w.chatList.Layout(gtx, len(h.heights), func(gtx layout.Context, index int) layout.Dimensions {
 		dims := layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, h.heights[index])}
@@ -645,34 +649,32 @@ func TestTheHoldCannotOutlastItsCap(t *testing.T) {
 	}
 }
 
-func TestAMessageArrivingMidJumpDoesNotStealTheScroll(t *testing.T) {
-	// The pending-actions drain sits BETWEEN the jump and the layout, so the
-	// frame that writes the final position is also a frame on which a new
-	// message can ask for the end of the conversation. It must not get it:
-	// being taken somewhere and then dumped at the bottom is worse than not
-	// being taken at all, and the reader has no idea what happened.
+func TestAScrollRequestEndsAJump(t *testing.T) {
+	// Only the router taking the reader to the end asks for it now: an open,
+	// a click on the open conversation with unread messages waiting. Either
+	// is newer than the click on the quote, so it wins — and the
+	// router, told the reader is at the end, must not be left with a reader
+	// held at the quote, who would then never report otherwise. The request
+	// lands on the frame the pending-actions drain runs, BETWEEN the jump and
+	// the layout, which is where a guard used to swallow it.
 	const target = 6
 
 	h := newJumpHarness(t, unevenHeights)
 	h.frame()
 
 	h.w.chatJump = chatJump{msgID: msgIDAt(target)}
-	h.frame(true) // rough placement, and a message arrives
-	h.frame(true) // the settling frame, and another one arrives
+	h.frame()     // rough placement
+	h.frame(true) // the settling frame, and the user asks for the end
 
-	want := (jumpViewport - unevenHeights[target]) / 2
-	if got := h.topOf(target); got != want {
-		t.Fatalf("target top at %d, want %d: the arrival took the list back to the end "+
-			"of the conversation while the jump was still being drawn", got, want)
-	}
-
-	// And once the jump has been drawn it lets go: the next arrival scrolls.
-	h.frame(true)
 	if h.w.chatJump.pending() {
-		t.Fatal("the jump still holds the list a frame after it settled")
+		t.Fatal("the jump still holds the list after the user asked for the end")
 	}
 	if h.w.chatList.Position.BeforeEnd {
-		t.Fatal("a message arriving after the jump was drawn did not scroll to the end")
+		t.Fatal("a scroll request during a jump did not take the list to the end")
+	}
+	h.frame()
+	if h.w.chatList.Position.BeforeEnd {
+		t.Fatal("the frame after the request left the end of the conversation")
 	}
 }
 
@@ -783,5 +785,93 @@ func TestOnlyTheJumpedMessageIsLit(t *testing.T) {
 	}
 	if got := h.levelFor(""); got != 0 {
 		t.Fatalf("a message with no id is lit at %v, want 0", got)
+	}
+}
+
+func TestPressingSendShowsTheEndAndEndsAJump(t *testing.T) {
+	// Sending from the composer is the user's newest act on this screen —
+	// newer than a click on a quote — so the end of the conversation is shown
+	// the moment send is pressed, a jump still settling included. Not when
+	// the send RPC answers: by then the user may have jumped to a quote or
+	// scrolled up, and that newer act is theirs to keep.
+	cases := []struct {
+		name   string
+		attach bool
+	}{
+		{name: "text", attach: false},
+		{name: "file", attach: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newJumpHarness(t, unevenHeights)
+			h.frame()
+			h.w.chatJump = chatJump{msgID: msgIDAt(6)}
+			h.frame()
+			if !h.w.chatJump.pending() || !h.w.chatList.Position.BeforeEnd {
+				t.Fatal("the jump did not take the list away from the end")
+			}
+
+			h.w.router = newClosedTestRouter(t)
+			h.w.language = "en"
+			// The file import runs on a goroutine of its own, which a closed
+			// UI gate keeps from starting: only what pressing send does on
+			// the UI goroutine is under test.
+			h.w.uiOpClosed = true
+			h.w.snap.ActivePeer = domaintest.ID("press-send-scrolls")
+			if tc.attach {
+				h.w.attachedFile = "/nonexistent/picture.png"
+			} else {
+				h.w.messageEditor.SetText("hello")
+			}
+			h.w.triggerSend(layout.Context{Ops: new(op.Ops)})
+
+			if h.w.chatJump.pending() {
+				t.Fatal("pressing send left the jump holding the list")
+			}
+			if h.w.chatList.Position.BeforeEnd {
+				t.Fatal("pressing send did not show the end of the conversation")
+			}
+		})
+	}
+}
+
+func TestRetryingAFailedSendShowsTheEndAndEndsAJump(t *testing.T) {
+	// "Retry" on the not-sent banner is the user pressing send again, so it
+	// shows the end at the press just as the composer does — a jump still
+	// settling included.
+	cases := []struct {
+		name  string
+		entry failedSend
+	}{
+		{name: "text", entry: failedSend{body: "hello"}},
+		{name: "file", entry: failedSend{body: "caption", file: "/nonexistent/picture.png"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newJumpHarness(t, unevenHeights)
+			h.frame()
+			h.w.chatJump = chatJump{msgID: msgIDAt(6)}
+			h.frame()
+			if !h.w.chatJump.pending() || !h.w.chatList.Position.BeforeEnd {
+				t.Fatal("the jump did not take the list away from the end")
+			}
+
+			peer := domaintest.ID("retry-scrolls")
+			h.w.router = newClosedTestRouter(t)
+			h.w.language = "en"
+			// The file import runs on a goroutine of its own, which a closed
+			// UI gate keeps from starting.
+			h.w.uiOpClosed = true
+			h.w.failedSends = map[domain.PeerIdentity][]failedSend{peer: {tc.entry}}
+			h.w.failedShown = map[domain.PeerIdentity]int{peer: 1}
+			h.w.retryFailedSends(peer)
+
+			if h.w.chatJump.pending() {
+				t.Fatal("retrying a failed send left the jump holding the list")
+			}
+			if h.w.chatList.Position.BeforeEnd {
+				t.Fatal("retrying a failed send did not show the end of the conversation")
+			}
+		})
 	}
 }

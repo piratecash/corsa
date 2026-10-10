@@ -181,22 +181,39 @@ func (c *ConversationCache) Len() int {
 	return len(c.messages)
 }
 
+// cacheAppend is what AppendForPeer did with a message.
+type cacheAppend int
+
+const (
+	// cacheAppendRefused: the cache belongs to another conversation.
+	cacheAppendRefused cacheAppend = iota + 1
+	// cacheAppendPlaced: the message is new here and was placed.
+	cacheAppendPlaced
+	// cacheAppendAlreadyHeld: the cache belongs to peer and already held the
+	// message — a reload brought it in first.
+	cacheAppendAlreadyHeld
+)
+
 // AppendForPeer places msg only if the cache still belongs to peer, and
-// reports whether it did. The pair has to be atomic: checking the owner and
+// reports what it did. The pair has to be atomic: checking the owner and
 // appending in two acquisitions leaves a window in which the cache is loaded
 // for someone else, and the message is spliced into their thread.
-func (c *ConversationCache) AppendForPeer(peer domain.PeerIdentity, msg DirectMessage) bool {
+//
+// "Already held" is told apart from "placed" because the caller acts on a
+// new message — it meets the reader, it may get a receipt — and doing that
+// for one a reload already brought in does it twice.
+func (c *ConversationCache) AppendForPeer(peer domain.PeerIdentity, msg DirectMessage) cacheAppend {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.peerAddress != peer {
-		return false
+		return cacheAppendRefused
 	}
 	if _, exists := c.index[msg.ID]; exists {
-		return true
+		return cacheAppendAlreadyHeld
 	}
 	c.placeLocked(msg)
-	return true
+	return cacheAppendPlaced
 }
 
 // AppendMessage ensures idempotency by message ID: only unique messages are

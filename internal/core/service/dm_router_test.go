@@ -1826,47 +1826,65 @@ func TestConversationLoadForANonSelectedPeerLeavesTheCacheAlone(t *testing.T) {
 
 // TestHeaderRepairDoesNotRebuildTheOpenConversationsBadge covers the escape
 // hatch added for a badge that moved backwards mid-scan. Handing the peer to
-// the database is right for a conversation in the list; for the one on
-// screen it is not — the user is reading it, the mark-seen that moved the
-// counter is the receipt for these very messages, and a rebuild would put a
-// count on the chat in front of them.
+// the database is right for a conversation in the list; for the one whose end
+// is on screen it is not — the user is reading it, the mark-seen that moved
+// the counter is the receipt for these very messages, and a rebuild would put
+// a count on the chat in front of them.
+//
+// A reader scrolled further up is the other case: what lands lands below
+// them, so the open conversation is handed to the database like any other,
+// and the database still calls the message unread.
 func TestHeaderRepairDoesNotRebuildTheOpenConversationsBadge(t *testing.T) {
-	client, id := newTestDesktopClientWithNode(t)
-	me := domain.PeerIdentityFromWire(id.Address)
-	peer := domaintest.ID("being-read-right-now")
-
-	if err := client.chatLog.Append(context.Background(), "dm", me, chatlog.Entry{
-		ID: "on-screen-1", Sender: peer.String(), Recipient: me.String(),
-		Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		DeliveryStatus: chatlog.StatusDelivered,
-	}); err != nil {
-		t.Fatalf("append: %v", err)
+	cases := []struct {
+		name        string
+		readerAtEnd bool
+		wantUnread  int
+	}{
+		{name: "reader at the end", readerAtEnd: true, wantUnread: 0},
+		{name: "reader scrolled up", readerAtEnd: false, wantUnread: 1},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, id := newTestDesktopClientWithNode(t)
+			me := domain.PeerIdentityFromWire(id.Address)
+			peer := domaintest.ID("being-read-right-now")
 
-	r := newSyncTestRouter()
-	r.client = client
-	r.mu.Lock()
-	r.tryEnsurePeerLocked(peer)
-	r.activePeer = peer
-	r.initialSynced = false
-	r.mu.Unlock()
+			if err := client.chatLog.Append(context.Background(), "dm", me, chatlog.Entry{
+				ID: "on-screen-1", Sender: peer.String(), Recipient: me.String(),
+				Body: "sealed", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				DeliveryStatus: chatlog.StatusDelivered,
+			}); err != nil {
+				t.Fatalf("append: %v", err)
+			}
 
-	// The optimistic clear lands while the scan runs: the badge moved
-	// backwards, and the conversation is the one on screen.
-	r.history = &interleavingReader{
-		inner: client.chatLog,
-		hook:  func(domain.PeerIdentity) { r.clearPeerUnread(peer) },
-	}
+			r := newSyncTestRouter()
+			r.client = client
+			r.mu.Lock()
+			r.tryEnsurePeerLocked(peer)
+			r.activePeer = peer
+			r.reader = openReaderFor(nil)
+			r.reader.atEnd = tc.readerAtEnd
+			r.initialSynced = false
+			r.mu.Unlock()
 
-	r.repairUnreadFromHeaders(NodeStatus{DMHeaders: []DMHeader{
-		{ID: "on-screen-1", Sender: peer, Recipient: me},
-	}})
+			// The optimistic clear lands while the scan runs: the badge moved
+			// backwards, and the conversation is the one on screen.
+			r.history = &interleavingReader{
+				inner: client.chatLog,
+				hook:  func(domain.PeerIdentity) { r.clearPeerUnread(peer) },
+			}
 
-	r.mu.RLock()
-	unread := r.peers[peer].Unread
-	r.mu.RUnlock()
-	if unread != 0 {
-		t.Fatalf("the conversation on screen carries %d unread after the repair", unread)
+			r.repairUnreadFromHeaders(NodeStatus{DMHeaders: []DMHeader{
+				{ID: "on-screen-1", Sender: peer, Recipient: me},
+			}})
+
+			r.mu.RLock()
+			unread := r.peers[peer].Unread
+			r.mu.RUnlock()
+			if unread != tc.wantUnread {
+				t.Fatalf("the open conversation carries %d unread after the repair, want %d", unread, tc.wantUnread)
+			}
+		})
 	}
 }
 
@@ -4285,6 +4303,8 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
+	// What the selection sets up: its open waits for the first load.
+	r.reader = openReaderFor(nil)
 	r.tryEnsurePeerLocked(peerID)
 	r.peers[peerID].Unread = 0
 	r.mu.Unlock()
@@ -4306,26 +4326,19 @@ func TestOnNewMessageMidSwitchInlineDecryptNoUnread(t *testing.T) {
 
 	r.onNewMessage(event)
 
-	// The mid-switch goroutine emits events in this order:
-	//   UIEventMessagesUpdated → UIEventSidebarUpdated → doMarkSeen()
-	// doMarkSeen() on success emits its own UIEventSidebarUpdated (from
-	// clearPeerUnread + notify inside doMarkSeen). We must wait for that
-	// final event to ensure all background I/O (chatlog reads, seen
-	// receipts) has completed before the test exits, preventing TempDir
-	// cleanup races.
-	//
-	// Strategy: consume UIEventMessagesUpdated first (proves goroutine
-	// started), then wait for UIEventSidebarUpdated that follows doMarkSeen.
+	// The mid-switch reload carries out the open, and the open reads the
+	// conversation on a tracked goroutine of its own. Draining the router
+	// after the mid-switch goroutine's last event waits for that read too,
+	// so no background I/O (chatlog reads, seen receipts) races TempDir
+	// cleanup.
 	if _, ok := awaitEvent(t, r.uiEvents, UIEventMessagesUpdated, 2*time.Second); !ok {
 		t.Fatal("timed out waiting for UIEventMessagesUpdated from mid-switch goroutine")
 	}
-	// Now consume the UIEventSidebarUpdated from the goroutine's own notify,
-	// then wait for the second one from doMarkSeen.
 	if _, ok := awaitEvent(t, r.uiEvents, UIEventSidebarUpdated, 2*time.Second); !ok {
-		t.Fatal("timed out waiting for first UIEventSidebarUpdated")
+		t.Fatal("timed out waiting for UIEventSidebarUpdated — goroutine may still be running")
 	}
-	if _, ok := awaitEvent(t, r.uiEvents, UIEventSidebarUpdated, 2*time.Second); !ok {
-		t.Fatal("timed out waiting for UIEventSidebarUpdated from doMarkSeen — goroutine may still be running")
+	if !r.ShutdownDrain(2 * time.Second) {
+		t.Fatal("the open's read did not finish")
 	}
 
 	// The critical assertion: Unread must stay 0 for the active peer.
@@ -4399,14 +4412,20 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 		uiEvents:       make(chan UIEvent, 64),
 		startupDone:    done,
 	}
+	// The receipts are counted: the seed reads the message it shows, and
+	// nothing reads it a second time.
+	recorder := &seenRecorder{}
+	r.markConversationSeenFn = recorder.record
 
 	// Active peer = the message peer, cache loaded for a DIFFERENT peer
 	// → MatchesPeer returns false → mid-switch path.
-	// Set Unread=1 so we can verify doMarkSeen clears it after fallback.
+	// Set Unread=1 so we can verify the seed reads it after fallback.
 	r.cache.Load(domaintest.ID("some-other-peer"), nil, 0)
 	r.mu.Lock()
 	r.activePeer = peerID
 	r.peerClicked = true
+	// What the selection sets up: its open waits for a load, from the end.
+	r.reader = openReaderFor(nil)
 	r.tryEnsurePeerLocked(peerID)
 	r.markUnreadLocked(peerID, domain.MessageID("mid-switch-reload-fail-1"))
 	r.mu.Unlock()
@@ -4456,8 +4475,8 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 	}
 
 	// The fallback seeded the message into the active chat — it's visible
-	// on screen. The "on screen = read" invariant requires doMarkSeen to
-	// run. Verify: Unread must drop to 0 after doMarkSeen completes.
+	// on screen, at the end. The "on screen = read" invariant requires the
+	// seed to read it. Verify: Unread must drop to 0 once it has.
 	ok := pollCondition(2*time.Second, func() bool {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
@@ -4467,7 +4486,13 @@ func TestOnNewMessageMidSwitchDecryptSuccessReloadFail(t *testing.T) {
 		r.mu.RLock()
 		unread := r.peers[peerID].Unread
 		r.mu.RUnlock()
-		t.Fatalf("Unread = %d after fallback, want 0 — doMarkSeen must run when message is visible on screen", unread)
+		t.Fatalf("Unread = %d after fallback, want 0 — the seeded message is on screen and must be read", unread)
+	}
+	if !r.ShutdownDrain(2 * time.Second) {
+		t.Fatal("background work did not finish")
+	}
+	if got := countID(flatten(recorder.sent()), "mid-switch-reload-fail-1"); got != 1 {
+		t.Fatalf("the seeded message got %d receipts (%v), want exactly one", got, recorder.sent())
 	}
 }
 

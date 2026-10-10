@@ -463,10 +463,27 @@ its beginning instead.
 
 Two things hold that together and both were needed twice before they were
 right. A jump owns the list position for one frame LONGER than it takes to
-place it, because the pending-actions drain runs between the jump and the
-layout: a message arriving on the frame that writes the final position would
-otherwise ask for the end of the conversation and get it, and the reader would
-be taken somewhere and then dumped at the bottom with no idea what happened.
+place it, because a jump that cleared itself the moment it wrote its final
+position left the frame that draws it unowned. That ownership used to hold off
+scroll-to-end requests as well — at the time every arriving message made one,
+and one landing mid-jump took the reader somewhere and then dumped them at the
+bottom. Arrivals ask for nothing now (see the reader rule below). What shows
+the end is the user's own acts, and each happens when the user acts, so each
+ends a jump that is still settling (`showConversationEnd`): it is newer than
+the click on the quote. The router's request (`PendingActions.ScrollToEnd`,
+`applyScrollToEnd`) is the reader taken to the end — opening a conversation,
+clicking the open one with unread waiting — and a jump left holding the list
+at the quote would be a reader the router thinks is at the end, with no change
+of position for the UI to report. Pressing send shows the end right there on
+the UI goroutine, for text and for a file — in the composer (`triggerSend`)
+and on the not-sent banner's Retry (`retryFailedSends`), which is pressing
+send again — not when the send RPC answers, which used to be the request: by
+then the user may have jumped to a quote or scrolled up, and being dragged
+back down from that newer act was the bug. It happens at the press even when
+the send is then rejected at once (a wipe in progress, unknown recipient
+keys): pressing send is the act, whatever the RPC says. The list, at its end,
+shows the message as it lands; a user who has moved since keeps where they
+went.
 And arming a jump asks for a frame (`op.InvalidateCmd`), because everything it
 does happens at the top of a later one and nothing schedules that by itself — a
 press is normally followed by a release and a release draws a frame, which is
@@ -525,6 +542,59 @@ drag unnoticed; it is the one thing the jump provably did not do, because it
 writes `First` back to the target on every frame and the target is therefore
 always among the children laid out. What the reader keeps when the hold lets go
 is the highlight: the message stays marked, it just stops being chased.
+
+**Unread messages in the open conversation** (`chat_reader.go`,
+`ui.UnreadDivider`). A message is read when the reader has seen it on screen,
+not when its conversation is selected — see "Reading the open conversation" in
+`docs/dm_router.md`. The window's half of that:
+
+- **No automatic scroll for arrivals.** A message arriving into the open
+  conversation asks for no scroll. A reader at the end stays there because
+  `layout.List{ScrollToEnd: true}` keeps a list that is not `BeforeEnd`
+  pinned to its last child; a reader scrolled further up is left exactly
+  where they are, and the arrival shows up in the sidebar as a badge and a
+  preview, like a message in any other conversation. The end of the
+  conversation is still shown on open, on a click on the open conversation
+  with unread waiting, and when the user presses send (composer or Retry). Each ends a jump to a
+  quote that is still settling (see the reply jump above).
+- **The reader's position.** Right after the conversation list is laid out,
+  `reportReaderPosition` works out the newest message on screen and whether
+  the end is (`!Position.BeforeEnd`) and hands that to
+  `DMRouter.ReportReaderPosition` — only when the conversation or the
+  position changed, because the call takes the router's lock and the window
+  draws at frame rate; the last report is forgotten on a conversation switch
+  (`resetConversationStateOnPeerChange`), and so is the list position: its
+  indices are the left conversation's messages, and carried over it would lay
+  the new conversation out wherever the old one was scrolled — the first
+  report from there telling the router of a reader who has gone up when they
+  never moved. The zero position is the end, where an open shows the
+  conversation; the router asks for the end at the selection as well. The newest message on screen is the
+  last visible child (`First + Count − 1`), counted only if at least
+  `min(half its height, 48dp)` of it shows — the one before it otherwise. The
+  heights are the ones the list measured for this frame's children, taken in
+  the element callback like the reply jump's. A frame on which the scrollbar
+  moved the list (`ScrollDistance() != 0` — `material.List` applies it after
+  the children were measured, so `Count` and `OffsetLast` still describe where
+  the list was) reports nothing, and neither does one whose last child was not
+  measured; the next frame lays those children out and reports. One case is
+  answered before that check: a conversation that fits on screen whole
+  (`Count` equal to its length, `OffsetLast >= 0`) reports its last message at
+  the end. Its scrollbar cannot scroll, so `ScrollbarStyle.Layout` returns
+  before `Scrollbar.Update` and the drag delta it last held stays non-zero
+  frame after frame — asked the other way round, a short conversation would
+  never report. A list that does not fit is one whose scrollbar is updated,
+  delta zeroed first, on every frame. Whether the divider is drawn above a
+  message is `unreadDividerAbove`.
+- **The divider.** A full-width band captioned "Unread messages"
+  (`chat.unread_messages`, all six languages) sits above the message named by
+  `RouterSnapshot.UnreadMarker` — the first unread message at open, or the
+  first of a new unread run that arrived while the reader was further up. It
+  is drawn INSIDE that message's list element, above the bubble, and not as an
+  element of its own, so list indices stay message indices: the reply jump and
+  the reader position are both built on that. Colours come from the existing
+  palette (`ChipFill(false)` band, received-author grey caption), one line,
+  centred. It stays put while the reader scrolls through the run it marks and
+  moves only when a new run starts.
 
 **Emoji panel** (`emoji_picker.go`) is one component drawn in two places: under
 the composer, where a choice is inserted into the draft, and over a message,
@@ -2095,10 +2165,28 @@ ID, телом может быть карточка файла, строка с�
 
 Держат это две вещи, и обе пришлось делать дважды, прежде чем они стали верны.
 Прыжок владеет позицией списка на кадр ДОЛЬШЕ, чем занимает её установка,
-потому что разбор отложенных действий идёт между прыжком и раскладкой:
-сообщение, пришедшее на кадре, который пишет финальную позицию, иначе попросит
-конец диалога и получит его, а читателя перенесут куда-то и тут же бросят внизу
-без объяснений. И постановка прыжка запрашивает кадр (`op.InvalidateCmd`),
+потому что прыжок, снимавший себя в момент записи финальной позиции, оставлял
+кадр, который её рисует, без владельца. Раньше это владение сдерживало и
+запросы прокрутки в конец — тогда их делало каждое пришедшее сообщение, и
+запрос посреди прыжка переносил читателя куда-то и тут же бросал внизу.
+Теперь пришедшие сообщения ничего не просят (см. правило читателя ниже).
+Конец показывают собственные действия пользователя, и каждое случается в
+момент действия, поэтому каждое завершает ещё не устоявшийся прыжок
+(`showConversationEnd`): оно новее клика по цитате. Запрос роутера
+(`PendingActions.ScrollToEnd`, `applyScrollToEnd`) — это читатель, уведённый
+в конец, — открытие диалога, клик по открытому с ждущими непрочитанными, — а
+прыжок, оставивший список у цитаты, был бы читателем, которого роутер считает
+в конце, без изменения позиции, о котором UI мог бы сообщить. Нажатие
+«отправить» показывает конец сразу, на UI-горутине, для текста и для файла —
+в композере (`triggerSend`) и по «Повторить» в баннере «не отправлено»
+(`retryFailedSends`), что тоже нажатие «отправить», — а не когда ответит RPC
+отправки, как было раньше: к тому времени пользователь мог прыгнуть к цитате
+или прокрутить вверх, и стаскивание вниз от этого более нового действия и было
+ошибкой. Это происходит в момент нажатия, даже если отправка тут же
+отклонена (идёт wipe, неизвестны ключи получателя): действие — само нажатие,
+что бы ни ответил RPC. Список, прижатый к концу,
+показывает сообщение, когда оно приземлится; пользователь, ушедший с тех пор,
+остаётся там, куда ушёл. И постановка прыжка запрашивает кадр (`op.InvalidateCmd`),
 потому что всё, что он делает, происходит наверху ПОЗДНЕЙШЕГО кадра, а сам себя
 никто не планирует: за нажатием обычно идёт отпускание, а отпускание рисует
 кадр, — поэтому пропуск был не виден, пока эти два события не приходят вместе.
@@ -2154,6 +2242,60 @@ ID, телом может быть карточка файла, строка с�
 поэтому всегда среди разложенных детей. Что читатель сохраняет, когда удержание
 отпускает, — подсветку: сообщение остаётся отмеченным, его просто перестают
 догонять.
+
+**Непрочитанные в открытом диалоге** (`chat_reader.go`,
+`ui.UnreadDivider`). Сообщение прочитано, когда читатель видел его на экране,
+а не когда выбран его диалог — см. «Чтение открытого диалога» в
+`docs/dm_router.md`. Половина этого, которая на стороне окна:
+
+- **Пришедшее сообщение не прокручивает.** Сообщение, пришедшее в открытый
+  диалог, прокрутку не запрашивает. Читатель в конце там и остаётся, потому
+  что `layout.List{ScrollToEnd: true}` держит не-`BeforeEnd` список прибитым
+  к последнему ребёнку; читатель, прокрутивший выше, остаётся ровно там, где
+  был, а пришедшее видно в сайдбаре как бейдж и превью, как сообщение любого
+  другого диалога. Конец диалога по-прежнему показывается при открытии, при
+  клике по открытому диалогу с ждущими непрочитанными и при нажатии
+  «отправить» (в композере или «Повторить» в баннере). Каждый из этих случаев завершает ещё не устоявшийся прыжок к
+  цитате (см. прыжок к цитате выше).
+- **Позиция читателя.** Сразу после раскладки списка диалога
+  `reportReaderPosition` вычисляет самое новое сообщение на экране и виден ли
+  конец (`!Position.BeforeEnd`) и передаёт это в
+  `DMRouter.ReportReaderPosition` — только если сменился диалог или позиция,
+  потому что вызов берёт мьютекс роутера, а окно рисуется с частотой кадров;
+  последний отчёт забывается при смене диалога
+  (`resetConversationStateOnPeerChange`), как и позиция списка: её индексы —
+  сообщения покинутого диалога, и, перенесённая, она разложила бы новый
+  диалог там, где был прокручен старый, а первый отчёт оттуда сообщил бы
+  роутеру о читателе, ушедшем наверх, хотя тот не двигался. Нулевая позиция —
+  это конец, где открытие и показывает диалог; роутер к тому же просит конец
+  ещё при выборе. Самое новое сообщение на экране —
+  последний видимый ребёнок (`First + Count − 1`), засчитываемый, только если
+  видно не меньше `min(половина его высоты, 48dp)`, иначе — предыдущий.
+  Высоты — те, что список намерил для детей этого кадра, снятые в колбэке
+  элемента, как у прыжка к цитате. Кадр, на котором полоса прокрутки сдвинула
+  список (`ScrollDistance() != 0` — `material.List` применяет его после
+  измерения детей, поэтому `Count` и `OffsetLast` ещё описывают прежнее
+  место), ничего не сообщает, как и кадр, чей последний ребёнок не измерен;
+  следующий кадр разложит этих детей и сообщит. Один случай отвечается до
+  этой проверки: диалог, который целиком помещается на экране (`Count`
+  равен его длине, `OffsetLast >= 0`), сообщает своё последнее сообщение и
+  конец. Его полоса прокрутки прокручивать не может, поэтому
+  `ScrollbarStyle.Layout` выходит до `Scrollbar.Update`, и последняя
+  дельта перетаскивания остаётся ненулевой кадр за кадром — при обратном
+  порядке проверок короткий диалог не сообщал бы никогда. У списка, который
+  не помещается, полоса обновляется — с обнулением дельты — на каждом кадре.
+  Рисовать ли разделитель над сообщением, решает `unreadDividerAbove`.
+- **Разделитель.** Полоса на всю ширину с подписью «Непрочитанные сообщения»
+  (`chat.unread_messages`, все шесть языков) стоит над сообщением, которое
+  называет `RouterSnapshot.UnreadMarker`, — первым непрочитанным на момент
+  открытия или первым из нового «забега» непрочитанных, пришедшего, пока
+  читатель был выше. Она рисуется ВНУТРИ элемента списка этого сообщения, над
+  пузырём, а не отдельным элементом, чтобы индексы списка оставались
+  индексами сообщений: на этом построены и прыжок к цитате, и позиция
+  читателя. Цвета — из существующей палитры (полоса `ChipFill(false)`,
+  подпись серым цветом автора входящих), одна строка, по центру. Она стоит на
+  месте, пока читатель прокручивает отмеченный «забег», и переезжает только с
+  началом нового.
 
 **Панель эмодзи** (`emoji_picker.go`) — один компонент в двух местах: под
 композером, где выбор вставляется в черновик, и над сообщением, где он
