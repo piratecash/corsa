@@ -16,8 +16,9 @@ package node
 //     OnDialFailed) — authoritative contract for the CM callbacks
 //     implemented in this file.
 //   - docs/locking.md — lock ordering for markPeerConnected /
-//     markPeerDisconnected (peerMu -> ipStateMu -> statusMu), the rule
-//     that side-effects run after domain mutexes are released, and the
+//     markPeerDisconnected (peerMu outer; deliveryMu.RLock / ipStateMu /
+//     statusMu nested), the rule that side-effects run after domain
+//     mutexes are released, and the
 //     "peerSession.sendMu — the outbound queue fence" section, which
 //     names per death path who finalises which of the two outbound
 //     queues.
@@ -1167,8 +1168,10 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	return session, nil
 }
 
-// onCMSessionEstablished is called by ConnectionManager when a slot
-// transitions to Active — i.e., AFTER the generation check passes.
+// onCMSessionEstablished is called by ConnectionManager when a slot has
+// entered Initializing — i.e., AFTER the generation check passes and after
+// cm.mu is released. The slot becomes Active only once the session
+// goroutine below emits SessionInitReady.
 //
 // The callback runs in the CM event loop, so it MUST NOT perform any
 // blocking I/O. All socket-level work (syncPeerSession,
@@ -1212,8 +1215,9 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	// Session is NOT yet registered in s.sessions / s.upstream — that
 	// happens only after initPeerSession succeeds (Phase 2).
 	// The CM slot is in domain.SlotStateInitializing (not Active) until
-	// SessionInitReady is emitted, so Slots(), ActiveCount(), and
-	// buildPeerExchangeResponse() do not expose this peer during setup.
+	// SessionInitReady is emitted, so ActiveCount() does not count this
+	// peer and buildPeerExchangeResponse() does not advertise it during
+	// setup; Slots() reports it only as Initializing.
 	if wm := session.welcomeMeta; wm != nil {
 		s.learnIdentityFromWelcome(wm.welcome, dialAddress)
 		s.peerMu.RLock()
@@ -1297,10 +1301,10 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 		s.peerMu.Unlock()
 
 		// --- Phase 2: session is fully operational ---
-		// Promote CM slot from Initializing → Active so Slots(),
-		// ActiveCount(), and buildPeerExchangeResponse() start exposing
-		// this peer. Until this event, the slot is invisible to peer
-		// exchange and diagnostics.
+		// Promote CM slot from Initializing → Active so ActiveCount() and
+		// buildPeerExchangeResponse() start counting and advertising this
+		// peer, and Slots() reports it as Active. Until this event the slot
+		// is not advertised to peer exchange.
 		s.connManager.EmitSlot(SessionInitReady{
 			Address:        slotAddress,
 			SlotGeneration: savedGen,
@@ -1428,13 +1432,14 @@ func (s *Service) onCMSessionEstablished(info SessionInfo) {
 	})
 }
 
-// onCMSessionTeardown is called by ConnectionManager when an active slot
-// is deactivated (replace or shutdown). Cleans up Service-level state.
-// Note: the CM has already closed the TCP transport at this point, so
-// servePeerSession will detect EOF and exit — it calls markPeerDisconnected
-// itself, so we must NOT call it here (that would be a double penalty).
-// The goroutine emits a stale ActiveSessionLost that the generation guard
-// suppresses.
+// onCMSessionTeardown is called by ConnectionManager whenever it deactivates
+// an active or initializing slot. Cleans up Service-level state.
+// Note: the CM has already closed the TCP transport at this point, so the
+// session goroutine charges the outcome itself — initPeerSession fails and
+// records a setup failure, or servePeerSession exits and calls
+// markPeerDisconnected — and we must NOT charge the peer here (that would be
+// a double penalty). The goroutine emits a stale ActiveSessionLost that the
+// generation guard suppresses.
 func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	// Session is registered under DialAddress (the actual TCP address used,
 	// which may be a fallback port). Use DialAddress for cleanup, falling

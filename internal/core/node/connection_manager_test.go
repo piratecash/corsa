@@ -1684,18 +1684,31 @@ func TestSlotState_WireLabels(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestCM_SlotInitializing_NotVisibleAsActive verifies that after DialSucceeded
-// the slot enters "initializing" (not "active") and is NOT counted by
-// ActiveCount or included by buildPeerExchangeResponse until SessionInitReady
-// promotes it.
+// the slot enters "initializing" (not "active"): Slots() already reports it
+// with its Identity, but ActiveCount does not count it until SessionInitReady
+// promotes it. Exclusion from peer exchange is covered separately by
+// TestBuildPeerExchange_InitializingSlotExcluded.
 func TestCM_SlotInitializing_NotVisibleAsActive(t *testing.T) {
 	b := testCMConfig("10.0.0.1:64646")
 	b.Cfg.MaxSlotsFn = func() int { return 1 }
 
-	// Block the SessionInitReady emission — custom callback that does NOT
-	// emit the promotion event.
-	var savedInfo atomic.Value
+	// The gate holds OnSessionEstablished for the whole of the Initializing
+	// assertions, pinning open on every run the window awaitSessionEstablished
+	// describes instead of leaving it to the scheduler, so the test passes
+	// only if it takes the SessionInfo from the callback's own signal. The
+	// gate relies on the callback running outside cm.mu: if that regressed,
+	// Slots() inside waitFor would block on cm.mu and the test would hang
+	// until -timeout instead of failing. The callback deliberately does not
+	// emit SessionInitReady, so promotion stays under the test's control.
+	gate := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(gate) }) }
+	// A failed assertion must not leave the event loop parked on the gate.
+	t.Cleanup(releaseGate)
+	established := make(chan SessionInfo, 1)
 	b.Cfg.OnSessionEstablished = func(info SessionInfo) {
-		savedInfo.Store(info)
+		<-gate
+		reportSessionEstablished(t, established, info)
 	}
 
 	dialFn, _ := fakeDialFn()
@@ -1724,8 +1737,10 @@ func TestCM_SlotInitializing_NotVisibleAsActive(t *testing.T) {
 		t.Fatal("expected Identity to be set on initializing slot")
 	}
 
+	releaseGate()
+	info := awaitSessionEstablished(t, established)
+
 	// Now emit SessionInitReady to promote the slot.
-	info := savedInfo.Load().(SessionInfo)
 	cm.EmitSlot(SessionInitReady{
 		Address:        info.Address,
 		SlotGeneration: info.SlotGeneration,
@@ -1738,6 +1753,35 @@ func TestCM_SlotInitializing_NotVisibleAsActive(t *testing.T) {
 
 	if got := cm.ActiveCount(); got != 1 {
 		t.Fatalf("ActiveCount() = %d after promotion, want 1", got)
+	}
+}
+
+// awaitSessionEstablished returns the SessionInfo handed to
+// OnSessionEstablished. Seeing the slot as Initializing through Slots() does
+// not mean the callback has run — the CM publishes the state first and calls
+// the callback after releasing cm.mu — so its SessionInfo is only known once
+// the callback itself reports it.
+func awaitSessionEstablished(t *testing.T, established <-chan SessionInfo) SessionInfo {
+	t.Helper()
+	select {
+	case info := <-established:
+		return info
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for OnSessionEstablished")
+		return SessionInfo{}
+	}
+}
+
+// reportSessionEstablished hands the callback's SessionInfo to
+// awaitSessionEstablished. The send never blocks: the callback runs on the
+// CM event loop, and a second call with the one-slot buffer already full
+// would park that loop for good instead of failing the test.
+func reportSessionEstablished(t *testing.T, established chan<- SessionInfo, info SessionInfo) {
+	t.Helper()
+	select {
+	case established <- info:
+	default:
+		t.Errorf("unexpected second OnSessionEstablished for %s", info.Address)
 	}
 }
 
@@ -1793,9 +1837,9 @@ func TestCM_SessionInitReady_StaleGeneration(t *testing.T) {
 	b := testCMConfig("10.0.0.1:64646")
 	b.Cfg.MaxSlotsFn = func() int { return 1 }
 
-	var initInfo atomic.Value
+	established := make(chan SessionInfo, 1)
 	b.Cfg.OnSessionEstablished = func(info SessionInfo) {
-		initInfo.Store(info)
+		reportSessionEstablished(t, established, info)
 		// Do NOT emit SessionInitReady — we'll do it manually with a stale gen.
 	}
 
@@ -1813,7 +1857,7 @@ func TestCM_SessionInitReady_StaleGeneration(t *testing.T) {
 		return len(s) == 1 && s[0].State == domain.SlotStateInitializing
 	})
 
-	info := initInfo.Load().(SessionInfo)
+	info := awaitSessionEstablished(t, established)
 
 	// Emit SessionInitReady with a wrong generation — should be ignored.
 	cm.EmitSlot(SessionInitReady{
@@ -1827,7 +1871,7 @@ func TestCM_SessionInitReady_StaleGeneration(t *testing.T) {
 	// Slot should still be initializing.
 	slots := cm.Slots()
 	if len(slots) != 1 || slots[0].State != domain.SlotStateInitializing {
-		t.Fatalf("slot state = %q, want 'initializing' (stale gen should be ignored)", slots[0].State)
+		t.Fatalf("slots = %+v, want one 'initializing' slot (stale gen should be ignored)", slots)
 	}
 }
 

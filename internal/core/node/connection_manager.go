@@ -79,15 +79,18 @@ type slot struct {
 // when a session is established or torn down (routing registration,
 // score updates, heartbeat, pending frame flush, etc.).
 //
-// Session and SlotGeneration are populated only in OnSessionEstablished:
-//   - Session: the live TCP session. Service starts servePeerSession /
-//     heartbeat against it. Ownership transfers to Service.
-//   - SlotGeneration: the slot's generation at activation time. Service
-//     saves it and later passes it back in ActiveSessionLost so the CM
-//     event loop can detect stale events.
-//
-// On teardown both fields are zero/nil — Service already holds the
-// session reference from the earlier OnSessionEstablished call.
+// Session and SlotGeneration carry the slot's lifecycle:
+//   - Session: the live TCP session. In OnSessionEstablished Service runs
+//     init and the serve loop (heartbeat) on it, but the slot keeps the
+//     pointer and CM still closes the transport itself when it deactivates
+//     the slot (deactivateSlotLocked). OnSessionTeardown carries the same
+//     pointer only so Service can tell whether its map entry still belongs
+//     to this session (pointer-compare ownership guard).
+//   - SlotGeneration: the generation the slot got when it entered
+//     Initializing. Service saves it and passes it back in
+//     SessionInitReady / ActiveSessionLost so the CM event loop can
+//     detect stale events. Set only in OnSessionEstablished; zero on
+//     teardown.
 type SessionInfo struct {
 	Address        domain.PeerAddress // canonical slot address (primary)
 	DialAddress    domain.PeerAddress // actual TCP address used (may differ from Address when fallback port was used)
@@ -160,17 +163,36 @@ type ConnectionManagerConfig struct {
 	DialFn func(ctx context.Context, addresses []domain.PeerAddress) (DialResult, error)
 
 	// OnSessionEstablished is called synchronously in the event loop
-	// when a slot transitions to Active. Service uses it for:
-	//   - markPeerConnected (score +10)
-	//   - routing table registration
-	//   - heartbeat goroutine launch
-	//   - pending frame flush
+	// after a dial succeeded and passed the generation check. Ordering
+	// contract the callback can rely on:
+	//   - the slot is already in Initializing, NOT Active, and that state
+	//     (with the peer's Identity) is visible to Slots() readers BEFORE
+	//     the callback starts. Observing Initializing therefore does not
+	//     mean the callback has run.
+	//   - cm.mu is NOT held. PeerProvider.Candidates / KnownPeers hold
+	//     pp.mu.RLock while calling QueuedFn → QueuedIPs (cm.mu.RLock), an
+	//     edge pp.mu → cm.mu, and Service's callback takes pp.mu.Lock
+	//     (promotePeerAddress → PeerProvider.Add); under cm.mu that would
+	//     close a cycle, besides adding cm.mu → Service-domain edges
+	//     (docs/locking.md).
+	//   - the slot becomes Active only when the callee emits
+	//     SessionInitReady with info.SlotGeneration; init failure is
+	//     reported with ActiveSessionLost carrying the same generation.
+	// It runs on the event loop, so it must not block on I/O. Service
+	// keeps it to non-blocking bookkeeping and launches the session
+	// goroutine, which runs initPeerSession and, on success, emits
+	// SessionInitReady and then does markPeerConnected, pending frame
+	// flush, routing table registration and the serve loop (heartbeat).
 	OnSessionEstablished func(SessionInfo)
 
-	// OnSessionTeardown is called synchronously in the event loop
-	// when an active slot is being deactivated. Service uses it for:
-	//   - routing table deregistration
-	//   - markPeerDisconnected (score update)
+	// OnSessionTeardown is called after cm.mu is released — on the event
+	// loop, or from RetainOnly's caller — when an active or initializing
+	// slot is deactivated (deactivateSlotLocked has already closed the
+	// transport). Service uses it, when it still owns the session-map
+	// entry, for session-map cleanup and routing table deregistration. It
+	// does not charge the peer (no markPeerDisconnected): the session
+	// goroutine sees the closed transport and charges the outcome itself,
+	// so charging here as well would penalise the peer twice.
 	OnSessionTeardown func(SessionInfo)
 
 	// OnStaleSession is called when handleDialSucceeded detects a
@@ -1208,9 +1230,11 @@ func (cm *ConnectionManager) handleDialSucceeded(_ context.Context, ev DialSucce
 }
 
 // handleSessionInitReady promotes a slot from Initializing to Active after
-// the application-level setup (syncPeerSession) succeeds.
-// Until this event arrives, Slots() and buildPeerExchangeResponse() do not
-// expose the slot — preventing advertisement of peers that are not yet usable.
+// the application-level setup (initPeerSession) succeeds.
+// Until this event arrives, ActiveCount() does not count the slot and
+// buildPeerExchangeResponse() does not advertise it — preventing
+// advertisement of peers that are not yet usable. Slots() still reports it,
+// labelled Initializing, for diagnostics.
 func (cm *ConnectionManager) handleSessionInitReady(_ context.Context, ev SessionInitReady) {
 	cm.mu.Lock()
 
@@ -1465,12 +1489,14 @@ func (cm *ConnectionManager) RetainOnly(keep domain.PeerAddress) {
 
 // beginInitSlotLocked transitions a slot to Initializing after a successful
 // TCP handshake. The slot is NOT yet Active — application-level setup
-// (syncPeerSession) has not completed. Slots(), ActiveCount(),
-// and buildPeerExchangeResponse() only expose Active slots, so this peer is
-// invisible to peer exchange and diagnostics until SessionInitReady arrives.
+// (initPeerSession) has not completed. ActiveCount() and
+// buildPeerExchangeResponse() count only Active slots, so this peer is not
+// advertised until SessionInitReady arrives; Slots() does report it, as
+// Initializing with its Identity, for diagnostics.
 //
 // Caller must hold cm.mu.Lock. Returns SessionInfo for the caller to invoke
-// OnSessionEstablished AFTER releasing the lock.
+// OnSessionEstablished AFTER releasing the lock — so the Initializing state
+// becomes visible to Slots() readers before the callback has run.
 func (cm *ConnectionManager) beginInitSlotLocked(s *slot, ev DialSucceeded) SessionInfo {
 	s.State = domain.SlotStateInitializing
 	s.Session = ev.Session

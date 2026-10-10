@@ -72,7 +72,8 @@ func (DialSucceeded) slotEvent() {}
 
 // SessionInitReady is emitted by the init goroutine (onCMSessionEstablished)
 // after initPeerSession succeeds. Promotes the slot from Initializing to Active,
-// making it visible to Slots(), ActiveCount(), and buildPeerExchangeResponse().
+// so ActiveCount() counts it and buildPeerExchangeResponse() advertises it;
+// Slots() then reports it as Active instead of Initializing.
 type SessionInitReady struct {
 	Address        domain.PeerAddress
 	SlotGeneration uint64
