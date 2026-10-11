@@ -223,6 +223,70 @@ func TestContactVerifyBudgetsAreIndependentPerRemote(t *testing.T) {
 	}
 }
 
+// TestContactVerifyBudgetBackwardsClockRefillsNothingAndKeepsTheOwedTime pins
+// the elapsed <= 0 guard of refillLocked. charge reads now BEFORE it takes mu,
+// so two concurrent charges of one key can enter the lock in the reverse order
+// and the second one carries an earlier now than the bucket's lastRefill.
+//
+// The first phase is what separates this rule from tokenBucketSet.take, which
+// would debit the step and refuse a remote that still holds tokens. The second
+// phase cannot tell the two apart — take's debit and credit cancel out — and
+// pins instead that the step is not counted as elapsed time, which a refill
+// that restamped lastRefill without debiting would do.
+func TestContactVerifyBudgetBackwardsClockRefillsNothingAndKeepsTheOwedTime(t *testing.T) {
+	t.Parallel()
+
+	clock := newManualTestClock()
+	registry := &contactVerifyRegistry{}
+	registry.setClock(clock.now)
+	start := clock.now()
+
+	funded := contactVerifyKey("ip:198.51.100.7")
+	if granted, _ := registry.charge(funded); !granted {
+		t.Fatal("a fresh remote was refused its first verification")
+	}
+	clock.advance(-time.Hour)
+	if granted, _ := registry.charge(funded); !granted {
+		t.Fatal("a clock stepped back refused a remote that still holds tokens: the step was debited")
+	}
+	if got := registry.remotes[funded].tokens; got != contactVerifyBurst-2 {
+		t.Fatalf("tokens after a backward step = %v, want exactly %v (two charges, no debit)", got, contactVerifyBurst-2)
+	}
+	if got := registry.remotes[funded].lastRefill; !got.Equal(start) {
+		t.Fatalf("lastRefill after a backward step = %v, want it left at %v", got, start)
+	}
+
+	drained := contactVerifyKey("ip:203.0.113.9")
+	clock.advance(time.Hour)
+	for i := 0; i < contactVerifyBurst; i++ {
+		if granted, _ := registry.charge(drained); !granted {
+			t.Fatalf("refused verification %d of the burst", i)
+		}
+	}
+	clock.advance(-time.Hour)
+	if granted, _ := registry.charge(drained); granted {
+		t.Fatal("a drained remote was granted after the clock stepped back")
+	}
+
+	// Half a second past the drain: the rewind must not count as time owed,
+	// so exactly half a second of refill is available.
+	clock.advance(time.Hour + 500*time.Millisecond)
+	granted := 0
+	for {
+		ok, _ := registry.charge(drained)
+		if !ok {
+			break
+		}
+		granted++
+		if granted > contactVerifyBurst {
+			t.Fatal("the refill after the rewind is unbounded")
+		}
+	}
+	if want := contactVerifiesPerSecond / 2; granted != want {
+		t.Fatalf("half a second after the drain granted %d verifications, want exactly %d: the rewind was credited as elapsed time", granted, want)
+	}
+}
+
 // TestContactVerifyBudgetEvictionCannotResetADebt pins the memory bound and the
 // trap inside it: the registry is capped, so entries are dropped — and dropping
 // a throttled one would hand back exactly the reset that keying on the endpoint

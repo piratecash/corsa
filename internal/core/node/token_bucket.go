@@ -21,10 +21,24 @@ type tokenBucket struct {
 }
 
 // tokenBucketSet is a keyed set of token buckets that refill and age by an
-// injected clock. It is the only place the package's per-key token-bucket math
-// lives; relayRateLimiter, announceRateLimiter and commandRateLimiter each own
-// one and add only what is specific to them (key type, sizing, exempt keys,
-// when to forget a key, how long an idle bucket is kept).
+// injected clock. relayRateLimiter, announceRateLimiter and commandRateLimiter
+// each own one and add only what is specific to them (key type, sizing, exempt
+// keys, when to forget a key, how long an idle bucket is kept).
+//
+// It is not the package's only token bucket. These need what tokenBucketSet
+// does not offer, so they keep their own buckets:
+//   - contactVerifyRegistry: a capped registry that drops a bucket only once
+//     it is full again, and whose overflow shares one tail bucket;
+//   - peerSessionAdmission: one per session; a byte, a frame and a push-byte
+//     budget refilled in one step that also decays a violation ledger,
+//     admitting while non-empty and going into debt;
+//   - dialPacer: one unkeyed bucket of whole tokens that may start empty and
+//     answers how long to wait.
+//
+// datagram.PeerAdmission (internal/core/datagram/admission.go) is the same
+// kind of structure outside this package: several buckets per key, bytes and
+// frames charged together, and a capped map that evicts idle, fully refilled
+// entries first.
 //
 // mu is a leaf: nothing is called under it except the clock, which is a pure
 // time source and never re-enters the caller.

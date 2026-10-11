@@ -5,9 +5,10 @@ import (
 	"time"
 )
 
-// tokenBucketSet carries the refill math every per-key limiter in the package
-// relies on, so its contract is pinned here once on a hand-driven clock; the
-// limiter tests then only pin what each limiter adds on top.
+// tokenBucketSet carries the refill math relayRateLimiter, announceRateLimiter
+// and commandRateLimiter rely on, so its contract is pinned here once on a
+// hand-driven clock; the limiter tests then only pin what each limiter adds on
+// top.
 
 // tokensOf reports key's current balance without refilling it, and whether
 // the key has a bucket at all.
