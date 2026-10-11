@@ -299,10 +299,7 @@ func TestEvictionBetweenSetupAndRegistration_IsNotPublished(t *testing.T) {
 		t.Errorf("setup failures = %d, want the seeded %d untouched: an evicted session proves nothing either way",
 			consecutive, evictionSeededSetupFailures)
 	}
-	rig.svc.cmdLimiter.mu.Lock()
-	_, bucketLeft := rig.svc.cmdLimiter.buckets[bucketKey]
-	rig.svc.cmdLimiter.mu.Unlock()
-	if bucketLeft {
+	if commandLimiterHasBucket(rig.svc.cmdLimiter, bucketKey) {
 		t.Error("the control-frame bucket of a session that was never published outlived it")
 	}
 }

@@ -2457,10 +2457,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 	svc.secureSessions = newSecureSessions(id, secureSessionStorePath(cfg), time.Now)
 
 	svc.relayStates = newRelayStateStore()
-	svc.relayLimiter = newRelayRateLimiter()
+	svc.relayLimiter = newRelayRateLimiter(time.Now)
 	svc.announceLimiter = newAnnounceRateLimiter(time.Now)
-	svc.connLimiter = newConnRateLimiter()
-	svc.cmdLimiter = newCommandRateLimiter()
+	svc.connLimiter = newConnRateLimiter(time.Now)
+	svc.cmdLimiter = newCommandRateLimiter(time.Now)
 	svc.inboundByIP = make(map[string]int)
 
 	// Compute initial aggregate status from restored health entries so that

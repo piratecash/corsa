@@ -1,7 +1,6 @@
 package node
 
 import (
-	"sync"
 	"time"
 )
 
@@ -56,11 +55,7 @@ import (
 // production), so refill and stale-bucket cleanup can be driven
 // deterministically in tests.
 type announceRateLimiter struct {
-	mu      sync.Mutex
-	buckets map[penaltySubject]*tokenBucket
-	// clock is set once in newAnnounceRateLimiter and never written again,
-	// which is why it needs no protection from mu.
-	clock func() time.Time
+	buckets *tokenBucketSet[penaltySubject]
 }
 
 // announceBurstRoutesPerPeer is the maximum number of route entries
@@ -98,16 +93,14 @@ const announceRefillRoutesPerSec = 200
 const announceLimiterCleanupAge = 30 * time.Minute
 
 // newAnnounceRateLimiter builds a limiter whose buckets refill and age by
-// clock. Production passes time.Now; a nil clock falls back to it, the same
-// as the package's other clock-driven structures, so a missing argument
-// cannot turn into a nil-func call on the receive path.
+// clock. Production passes time.Now; nil falls back to it (see
+// newTokenBucketSet).
 func newAnnounceRateLimiter(clock func() time.Time) *announceRateLimiter {
-	if clock == nil {
-		clock = time.Now
-	}
 	return &announceRateLimiter{
-		buckets: make(map[penaltySubject]*tokenBucket),
-		clock:   clock,
+		buckets: newTokenBucketSet[penaltySubject](tokenBucketPolicy{
+			burst:           announceBurstRoutesPerPeer,
+			refillPerSecond: announceRefillRoutesPerSec,
+		}, clock),
 	}
 }
 
@@ -145,31 +138,7 @@ func (rl *announceRateLimiter) allow(subject penaltySubject, cost int) bool {
 		// max(1, len(entries)).
 		cost = 1
 	}
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	b, ok := rl.buckets[subject]
-	now := rl.clock()
-	if !ok {
-		b = &tokenBucket{
-			tokens:     announceBurstRoutesPerPeer,
-			lastRefill: now,
-		}
-		rl.buckets[subject] = b
-	}
-
-	elapsed := now.Sub(b.lastRefill).Seconds()
-	b.tokens += elapsed * announceRefillRoutesPerSec
-	if b.tokens > announceBurstRoutesPerPeer {
-		b.tokens = announceBurstRoutesPerPeer
-	}
-	b.lastRefill = now
-
-	if b.tokens < float64(cost) {
-		return false
-	}
-	b.tokens -= float64(cost)
-	return true
+	return rl.buckets.take(subject, cost)
 }
 
 // cleanup removes stale buckets for peers that haven't been seen
@@ -178,12 +147,5 @@ func (rl *announceRateLimiter) allow(subject penaltySubject, cost int) bool {
 // grows monotonically with the set of identities seen during the
 // process lifetime).
 func (rl *announceRateLimiter) cleanup(maxAge time.Duration) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	cutoff := rl.clock().Add(-maxAge)
-	for subject, b := range rl.buckets {
-		if b.lastRefill.Before(cutoff) {
-			delete(rl.buckets, subject)
-		}
-	}
+	rl.buckets.evictIdle(maxAge)
 }

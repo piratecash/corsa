@@ -5,13 +5,29 @@ import (
 	"time"
 )
 
+// Both limiters here run on a hand-driven clock that only the test moves:
+// window expiry, refill and cleanup are asserted at exact instants instead
+// of after a sleep with timing headroom.
+
 // ---------------------------------------------------------------------------
 // connRateLimiter tests
 // ---------------------------------------------------------------------------
 
+func newTestConnLimiter() (*connRateLimiter, *manualTestClock) {
+	clock := newManualTestClock()
+	return newConnRateLimiter(clock.now), clock
+}
+
+func connLimiterHasWindow(cl *connRateLimiter, ip string) bool {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	_, ok := cl.windows[ip]
+	return ok
+}
+
 func TestConnRateLimiterAllowsNormalRate(t *testing.T) {
 	t.Parallel()
-	cl := newConnRateLimiter()
+	cl, _ := newTestConnLimiter()
 
 	// First connection from an IP should always be allowed.
 	if !cl.allowConnect("192.168.1.1") {
@@ -21,7 +37,7 @@ func TestConnRateLimiterAllowsNormalRate(t *testing.T) {
 
 func TestConnRateLimiterBlocksFlood(t *testing.T) {
 	t.Parallel()
-	cl := newConnRateLimiter()
+	cl, _ := newTestConnLimiter()
 
 	ip := "10.0.0.1"
 	// Exhaust the per-window limit.
@@ -39,30 +55,28 @@ func TestConnRateLimiterBlocksFlood(t *testing.T) {
 
 func TestConnRateLimiterAllowsAfterWindowReset(t *testing.T) {
 	t.Parallel()
-	cl := &connRateLimiter{
-		windows:      make(map[string]*connWindow),
-		maxPerWindow: 2,
-		windowSize:   50 * time.Millisecond,
-	}
-
+	cl, clock := newTestConnLimiter()
 	ip := "10.0.0.2"
-	cl.allowConnect(ip)
-	cl.allowConnect(ip)
-	if cl.allowConnect(ip) {
-		t.Fatal("should be blocked within window")
+	allowIP := func() bool { return cl.allowConnect(ip) }
+
+	if got := countAllowed(defaultConnRateLimit+1, allowIP); got != defaultConnRateLimit {
+		t.Fatalf("precondition: one window admits exactly the limit; admitted %d", got)
 	}
 
-	// Wait for window to expire.
-	time.Sleep(60 * time.Millisecond)
+	clock.advance(defaultConnRateWindow - time.Nanosecond)
+	if allowIP() {
+		t.Fatal("a connection before the window ends must stay blocked")
+	}
 
-	if !cl.allowConnect(ip) {
-		t.Fatal("should be allowed after window reset")
+	clock.advance(time.Nanosecond)
+	if got := countAllowed(defaultConnRateLimit+1, allowIP); got != defaultConnRateLimit {
+		t.Fatalf("a window that has run its full length must reset to the whole limit; admitted %d, want %d", got, defaultConnRateLimit)
 	}
 }
 
 func TestConnRateLimiterIsolatesIPs(t *testing.T) {
 	t.Parallel()
-	cl := newConnRateLimiter()
+	cl, _ := newTestConnLimiter()
 
 	// Exhaust limit for one IP.
 	for i := 0; i < defaultConnRateLimit; i++ {
@@ -77,30 +91,33 @@ func TestConnRateLimiterIsolatesIPs(t *testing.T) {
 
 func TestConnRateLimiterEmptyIPAllowed(t *testing.T) {
 	t.Parallel()
-	cl := newConnRateLimiter()
+	cl, _ := newTestConnLimiter()
 	if !cl.allowConnect("") {
 		t.Fatal("empty IP should always be allowed")
 	}
 }
 
-func TestConnRateLimiterCleanup(t *testing.T) {
+func TestConnRateLimiterCleanupEvictsOnlyWindowsOlderThanMaxAge(t *testing.T) {
 	t.Parallel()
-	cl := &connRateLimiter{
-		windows:      make(map[string]*connWindow),
-		maxPerWindow: defaultConnRateLimit,
-		windowSize:   defaultConnRateWindow,
-	}
+	cl, clock := newTestConnLimiter()
+	const maxAge = time.Minute
 
 	cl.allowConnect("10.0.0.1")
+	clock.advance(maxAge)
 	cl.allowConnect("10.0.0.2")
-	if len(cl.windows) != 2 {
-		t.Fatalf("expected 2 windows, got %d", len(cl.windows))
+
+	cl.cleanup(maxAge)
+	if !connLimiterHasWindow(cl, "10.0.0.1") {
+		t.Fatal("a window that started exactly maxAge ago must be kept")
 	}
 
-	// Cleanup with zero maxAge should remove everything.
-	cl.cleanup(0)
-	if len(cl.windows) != 0 {
-		t.Fatalf("expected 0 windows after cleanup, got %d", len(cl.windows))
+	clock.advance(time.Nanosecond)
+	cl.cleanup(maxAge)
+	if connLimiterHasWindow(cl, "10.0.0.1") {
+		t.Fatal("a window that started more than maxAge ago must be evicted")
+	}
+	if !connLimiterHasWindow(cl, "10.0.0.2") {
+		t.Fatal("a window that started inside maxAge must be kept")
 	}
 }
 
@@ -108,9 +125,19 @@ func TestConnRateLimiterCleanup(t *testing.T) {
 // commandRateLimiter tests
 // ---------------------------------------------------------------------------
 
+func newTestCommandLimiter() (*commandRateLimiter, *manualTestClock) {
+	clock := newManualTestClock()
+	return newCommandRateLimiter(clock.now), clock
+}
+
+func commandLimiterHasBucket(rl *commandRateLimiter, connKey string) bool {
+	_, ok := rl.buckets.tokensOf(connKey)
+	return ok
+}
+
 func TestCommandRateLimiterAllowsNormalRate(t *testing.T) {
 	t.Parallel()
-	rl := newCommandRateLimiter()
+	rl, _ := newTestCommandLimiter()
 
 	for i := 0; i < 50; i++ {
 		if !rl.allowCommand("conn1") {
@@ -121,22 +148,16 @@ func TestCommandRateLimiterAllowsNormalRate(t *testing.T) {
 
 func TestCommandRateLimiterBlocksFlood(t *testing.T) {
 	t.Parallel()
-	rl := newCommandRateLimiter()
+	rl, _ := newTestCommandLimiter()
 
-	// Exhaust the burst.
-	for i := 0; i < cmdBurstPerConn; i++ {
-		rl.allowCommand("conn1")
-	}
-
-	// Next command should be rejected.
-	if rl.allowCommand("conn1") {
-		t.Fatal("command beyond burst should be rejected")
+	if got := countAllowed(cmdBurstPerConn+1, func() bool { return rl.allowCommand("conn1") }); got != cmdBurstPerConn {
+		t.Fatalf("a fresh bucket must grant exactly the burst; granted %d, want %d", got, cmdBurstPerConn)
 	}
 }
 
 func TestCommandRateLimiterIsolatesConnections(t *testing.T) {
 	t.Parallel()
-	rl := newCommandRateLimiter()
+	rl, _ := newTestCommandLimiter()
 
 	// Exhaust burst for conn1.
 	for i := 0; i < cmdBurstPerConn; i++ {
@@ -149,32 +170,62 @@ func TestCommandRateLimiterIsolatesConnections(t *testing.T) {
 	}
 }
 
+func TestCommandRateLimiterRefillFollowsInjectedClock(t *testing.T) {
+	t.Parallel()
+	rl, clock := newTestCommandLimiter()
+	allowConn := func() bool { return rl.allowCommand("conn1") }
+
+	if got := countAllowed(cmdBurstPerConn+1, allowConn); got != cmdBurstPerConn {
+		t.Fatalf("precondition: fresh bucket grants the burst; granted %d", got)
+	}
+
+	clock.advance(time.Second / 2)
+	if got, want := countAllowed(cmdBurstPerConn, allowConn), int(cmdRefillRate/2); got != want {
+		t.Fatalf("half a second must restore exactly half the per-second rate; granted %d, want %d", got, want)
+	}
+
+	clock.advance(time.Second)
+	if got := countAllowed(cmdBurstPerConn, allowConn); got != int(cmdRefillRate) {
+		t.Fatalf("one second must restore exactly cmdRefillRate tokens; granted %d, want %d", got, int(cmdRefillRate))
+	}
+
+	clock.advance(time.Hour)
+	if got := countAllowed(cmdBurstPerConn+1, allowConn); got != cmdBurstPerConn {
+		t.Fatalf("a long idle period must refill to the burst and no further; granted %d, want %d", got, cmdBurstPerConn)
+	}
+}
+
 func TestCommandRateLimiterRemoveConn(t *testing.T) {
 	t.Parallel()
-	rl := newCommandRateLimiter()
+	rl, _ := newTestCommandLimiter()
 	rl.allowCommand("conn1")
 	rl.removeConn("conn1")
 
-	rl.mu.Lock()
-	_, exists := rl.buckets["conn1"]
-	rl.mu.Unlock()
-	if exists {
+	if commandLimiterHasBucket(rl, "conn1") {
 		t.Fatal("bucket should be removed after removeConn")
 	}
 }
 
-func TestCommandRateLimiterCleanup(t *testing.T) {
+func TestCommandRateLimiterCleanupEvictsOnlyBucketsIdlePastMaxAge(t *testing.T) {
 	t.Parallel()
-	rl := newCommandRateLimiter()
+	rl, clock := newTestCommandLimiter()
+	const maxAge = time.Minute
+
 	rl.allowCommand("conn1")
+	clock.advance(maxAge)
 	rl.allowCommand("conn2")
 
-	rl.cleanup(0)
+	rl.cleanup(maxAge)
+	if !commandLimiterHasBucket(rl, "conn1") {
+		t.Fatal("a bucket idle for exactly maxAge must be kept")
+	}
 
-	rl.mu.Lock()
-	count := len(rl.buckets)
-	rl.mu.Unlock()
-	if count != 0 {
-		t.Fatalf("expected 0 buckets after cleanup, got %d", count)
+	clock.advance(time.Nanosecond)
+	rl.cleanup(maxAge)
+	if commandLimiterHasBucket(rl, "conn1") {
+		t.Fatal("a bucket idle for longer than maxAge must be evicted")
+	}
+	if !commandLimiterHasBucket(rl, "conn2") {
+		t.Fatal("a bucket used inside maxAge must be kept")
 	}
 }

@@ -736,7 +736,7 @@ func newTestServiceWithRouting(t *testing.T, localIdentity domain.PeerIdentity) 
 	// nil-panics. An empty limiter is allow-all, so it does not
 	// change the behaviour of tests that never reach the gossip
 	// path.
-	svc.relayLimiter = newRelayRateLimiter()
+	svc.relayLimiter = newRelayRateLimiter(time.Now)
 	return svc
 }
 

@@ -91,10 +91,19 @@ func TestAnnounceRateLimiter_CleanupRemovesStaleBuckets(t *testing.T) {
 }
 
 func announceLimiterHasBucket(rl *announceRateLimiter, subject penaltySubject) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	_, ok := rl.buckets[subject]
+	_, ok := rl.buckets.tokensOf(subject)
 	return ok
+}
+
+// announceLimiterTokens reports the subject's current token balance; the
+// subject must already have a bucket.
+func announceLimiterTokens(t *testing.T, rl *announceRateLimiter, subject penaltySubject) float64 {
+	t.Helper()
+	tokens, ok := rl.buckets.tokensOf(subject)
+	if !ok {
+		t.Fatalf("no announce bucket for %v", subject)
+	}
+	return tokens
 }
 
 func TestAnnounceRateLimiter_RefillRestoresCapacityOverTime(t *testing.T) {
@@ -140,9 +149,7 @@ func TestAnnounceRateLimiter_LargeFrameDrainsByEntryCount(t *testing.T) {
 	if !rl.allow(peer, 100) {
 		t.Fatal("100-route frame against full burst must pass")
 	}
-	rl.mu.Lock()
-	got := rl.buckets[peer].tokens
-	rl.mu.Unlock()
+	got := announceLimiterTokens(t, rl, peer)
 	if want := float64(announceBurstRoutesPerPeer - 100); got != want {
 		t.Fatalf("after 100-cost allow, tokens = %v, want %v", got, want)
 	}
@@ -180,9 +187,7 @@ func TestAnnounceRateLimiter_OverBurstFrameRejectedWholesale(t *testing.T) {
 	if rl.allow(peer, announceBurstRoutesPerPeer+1) {
 		t.Fatal("frame demanding more than burst must be rejected")
 	}
-	rl.mu.Lock()
-	got := rl.buckets[peer].tokens
-	rl.mu.Unlock()
+	got := announceLimiterTokens(t, rl, peer)
 	if got != float64(announceBurstRoutesPerPeer) {
 		t.Fatalf("rejected frame must not partially drain bucket; tokens = %v, want %d", got, announceBurstRoutesPerPeer)
 	}
@@ -197,15 +202,11 @@ func TestAnnounceRateLimiter_NegativeCostClampedToOne(t *testing.T) {
 	if !rl.allow(peer, 0) {
 		t.Fatal("cost=0 must be accepted (clamped to 1)")
 	}
-	rl.mu.Lock()
-	gotZero := rl.buckets[peer].tokens
-	rl.mu.Unlock()
+	gotZero := announceLimiterTokens(t, rl, peer)
 	if !rl.allow(peer, -42) {
 		t.Fatal("cost<0 must be accepted (clamped to 1)")
 	}
-	rl.mu.Lock()
-	gotNeg := rl.buckets[peer].tokens
-	rl.mu.Unlock()
+	gotNeg := announceLimiterTokens(t, rl, peer)
 	if want := float64(announceBurstRoutesPerPeer - 1); gotZero != want {
 		t.Fatalf("cost=0 must drain exactly 1 token; tokens = %v, want %v", gotZero, want)
 	}

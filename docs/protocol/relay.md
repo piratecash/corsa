@@ -402,7 +402,7 @@ The relay subsystem enforces hard capacity limits to prevent unbounded growth un
 
 **Pending frame queue** (`pending`): bounded to `maxPendingFramesPerPeer` (200) per peer address and `maxPendingFramesTotal` (2 000) globally. When either limit is reached, `queuePeerFrame` returns false.
 
-**Per-peer rate limiting** (`relayRateLimiter`): a token bucket per peer address limits relay fan-out to `relayBurstPerPeer` (50) with a sustained rate of `relayRefillRate` (20 tokens/s). Applied in `relayViaGossip` and `tryRelayToCapableFullNodes`. Stale buckets are cleaned up every 5 minutes from the bootstrap loop.
+**Per-peer rate limiting** (`relayRateLimiter`): a token bucket per peer address limits relay fan-out to `relayBurstPerPeer` (50) with a sustained rate of `relayRefillRate` (20 tokens/s). Applied in `relayViaGossip` and `tryRelayToCapableFullNodes`. Buckets idle for longer than 5 minutes are evicted by the cleanup sweep that `bootstrapLoop` runs on every 2-second tick. A refused frame still restamps its bucket, so a peer that keeps being throttled is never evicted into a fresh full bucket. The bucket mechanics (fractional tokens, cap at the burst, all-or-nothing charge, idle eviction) are the package's shared `tokenBucketSet` (`token_bucket.go`), which reads time only through a clock injected at construction — the wall clock in production — so refill and eviction are tested at exact instants.
 
 ### Timeout centralization
 
@@ -412,12 +412,14 @@ All handshake and session timeouts are defined as named constants in `admission.
 
 - `internal/core/node/relay.go` — relay logic, state store, forwarding
 - `internal/core/node/admission.go` — relay admission control, invariant documentation, frame validation, capacity limits, timeout constants
-- `internal/core/node/ratelimit.go` — per-peer token bucket rate limiter
+- `internal/core/node/ratelimit.go` — per-peer relay rate limiter (sizing and keys)
+- `internal/core/node/token_bucket.go` — clock-driven keyed token bucket shared by the relay, command and announce limiters
 - `internal/core/node/capabilities.go` — capability negotiation
 - `internal/core/protocol/frame.go` — frame fields (`HopCount`, `MaxHops`, `PreviousHop`)
 - `internal/core/node/relay_test.go` — unit and integration tests, capacity limit tests
 - `internal/core/node/admission_test.go` — admission control, invariant contract, and constant value tests
-- `internal/core/node/ratelimit_test.go` — rate limiter tests
+- `internal/core/node/ratelimit_test.go` — relay rate limiter tests
+- `internal/core/node/token_bucket_test.go` — token bucket contract tests (refill, fractional carry, cap, all-or-nothing, eviction boundary)
 
 ---
 
@@ -819,7 +821,7 @@ Relay-подсистема устанавливает жёсткие лимит�
 
 **Очередь pending frame** (`pending`): ограничена `maxPendingFramesPerPeer` (200) на каждый адрес пира и `maxPendingFramesTotal` (2 000) глобально. При достижении лимита `queuePeerFrame` возвращает false.
 
-**Per-peer rate limiting** (`relayRateLimiter`): token bucket на каждый адрес пира ограничивает relay fan-out до `relayBurstPerPeer` (50) с устойчивой скоростью `relayRefillRate` (20 токенов/с). Применяется в `relayViaGossip` и `tryRelayToCapableFullNodes`. Устаревшие bucket'ы очищаются каждые 5 минут из bootstrap loop.
+**Per-peer rate limiting** (`relayRateLimiter`): token bucket на каждый адрес пира ограничивает relay fan-out до `relayBurstPerPeer` (50) с устойчивой скоростью `relayRefillRate` (20 токенов/с). Применяется в `relayViaGossip` и `tryRelayToCapableFullNodes`. Bucket'ы, простаивающие дольше 5 минут, удаляет очистка, которую `bootstrapLoop` выполняет на каждом 2-секундном тике. Отклонённый фрейм тоже обновляет отметку времени своего bucket'а, поэтому пир, которого продолжают ограничивать, никогда не вытесняется и не получает свежий полный bucket. Механика bucket'а (дробные токены, потолок на burst, списание «всё или ничего», вытеснение простаивающих) — общий для пакета `tokenBucketSet` (`token_bucket.go`), который читает время только через часы, переданные при создании (в production — системные), поэтому пополнение и вытеснение тестируются в точные моменты времени.
 
 ### Централизация таймаутов
 
@@ -829,9 +831,11 @@ Relay-подсистема устанавливает жёсткие лимит�
 
 - `internal/core/node/relay.go` — логика ретрансляции, хранилище состояний, пересылка
 - `internal/core/node/admission.go` — контроль допуска, документация инвариантов, валидация фреймов, лимиты ёмкости, константы таймаутов
-- `internal/core/node/ratelimit.go` — per-peer token bucket rate limiter
+- `internal/core/node/ratelimit.go` — per-peer relay rate limiter (размеры и ключи)
+- `internal/core/node/token_bucket.go` — keyed token bucket на инжектируемых часах, общий для relay-, command- и announce-лимитеров
 - `internal/core/node/capabilities.go` — согласование capabilities
 - `internal/core/protocol/frame.go` — поля фрейма (`HopCount`, `MaxHops`, `PreviousHop`)
 - `internal/core/node/relay_test.go` — юнит- и интеграционные тесты, тесты лимитов ёмкости
 - `internal/core/node/admission_test.go` — тесты контроля допуска, контрактов инвариантов и значений констант
-- `internal/core/node/ratelimit_test.go` — тесты rate limiter
+- `internal/core/node/ratelimit_test.go` — тесты relay rate limiter
+- `internal/core/node/token_bucket_test.go` — тесты контракта token bucket (пополнение, перенос дробной части, потолок, «всё или ничего», граница вытеснения)

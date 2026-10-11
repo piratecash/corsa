@@ -6,14 +6,20 @@ import (
 )
 
 // connRateLimiter enforces per-IP connection rate limiting at the TCP accept
-// level. Each IP gets a sliding-window counter that tracks connection attempts.
-// When the rate exceeds the configured threshold, new connections from that IP
-// are rejected immediately — before any protocol parsing or resource allocation.
+// level. Each IP gets a fixed-window counter that tracks connection attempts:
+// the window opens at the first attempt and the count starts over at the first
+// attempt once the window has run its full length. When the count exceeds the
+// configured threshold, new connections from that IP are rejected immediately —
+// before any protocol parsing or resource allocation.
 //
 // This prevents SYN flood and connection exhaustion attacks where a single IP
 // opens hundreds of connections per second to consume file descriptors and
 // goroutines. The approach follows established P2P network patterns: limit per
 // source before allocating any per-connection state.
+//
+// Time is read only through the injected clock (the wall clock in
+// production), so window expiry and stale-entry cleanup can be driven
+// deterministically in tests.
 type connRateLimiter struct {
 	mu      sync.Mutex
 	windows map[string]*connWindow
@@ -22,12 +28,16 @@ type connRateLimiter struct {
 	// IP within one window period. Connections beyond this limit are rejected.
 	maxPerWindow int
 
-	// windowSize is the duration of each sliding window.
+	// windowSize is the duration of each window.
 	windowSize time.Duration
+
+	// clock is set once in newConnRateLimiter and never written again,
+	// which is why it needs no protection from mu.
+	clock func() time.Time
 }
 
-// connWindow tracks connection attempts from a single IP address using a
-// sliding window counter. When the current window expires, the count resets.
+// connWindow tracks connection attempts from a single IP address in one fixed
+// window. When the current window expires, the count resets.
 type connWindow struct {
 	count       int
 	windowStart time.Time
@@ -38,7 +48,7 @@ type connWindow struct {
 // typically maintain 1-2 persistent connections) while blocking floods.
 const defaultConnRateLimit = 10
 
-// defaultConnRateWindow is the sliding window duration for connection rate
+// defaultConnRateWindow is the fixed window duration for connection rate
 // limiting. 10 seconds provides a good balance between detection speed and
 // tolerance for legitimate reconnection bursts.
 const defaultConnRateWindow = 10 * time.Second
@@ -49,8 +59,15 @@ const defaultConnRateWindow = 10 * time.Second
 // slowly but never disconnect.
 const maxConnPerIP = 8
 
-func newConnRateLimiter() *connRateLimiter {
+// newConnRateLimiter builds a limiter whose windows expire and age by clock.
+// Production passes time.Now; a nil clock falls back to it, the same as the
+// package's other clock-driven structures.
+func newConnRateLimiter(clock func() time.Time) *connRateLimiter {
+	if clock == nil {
+		clock = time.Now
+	}
 	return &connRateLimiter{
+		clock:        clock,
 		windows:      make(map[string]*connWindow),
 		maxPerWindow: defaultConnRateLimit,
 		windowSize:   defaultConnRateWindow,
@@ -58,7 +75,7 @@ func newConnRateLimiter() *connRateLimiter {
 }
 
 // allowConnect checks whether a new connection from the given IP should be
-// permitted based on the sliding window rate. Returns true if allowed,
+// permitted based on the fixed window rate. Returns true if allowed,
 // false if the rate has been exceeded.
 func (cl *connRateLimiter) allowConnect(ip string) bool {
 	if ip == "" {
@@ -68,7 +85,7 @@ func (cl *connRateLimiter) allowConnect(ip string) bool {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 
-	now := time.Now()
+	now := cl.clock()
 	w, ok := cl.windows[ip]
 	if !ok {
 		cl.windows[ip] = &connWindow{count: 1, windowStart: now}
@@ -86,12 +103,12 @@ func (cl *connRateLimiter) allowConnect(ip string) bool {
 	return w.count <= cl.maxPerWindow
 }
 
-// cleanup removes stale window entries that haven't been updated recently.
-// Called periodically to prevent unbounded map growth from abandoned IPs.
+// cleanup removes window entries whose window started more than maxAge ago.
+// Meant to be called periodically to bound map growth from abandoned IPs.
 func (cl *connRateLimiter) cleanup(maxAge time.Duration) {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
-	cutoff := time.Now().Add(-maxAge)
+	cutoff := cl.clock().Add(-maxAge)
 	for ip, w := range cl.windows {
 		if w.windowStart.Before(cutoff) {
 			delete(cl.windows, ip)
@@ -111,14 +128,12 @@ func (cl *connRateLimiter) cleanup(maxAge time.Duration) {
 // push_message or push_notice frames per second, consuming CPU for JSON
 // parsing, signature verification, and fan-out — even though each individual
 // frame passes all validation checks.
+//
+// Time is read only through the injected clock (the wall clock in
+// production), so refill and stale-bucket cleanup can be driven
+// deterministically in tests.
 type commandRateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*cmdBucket
-}
-
-type cmdBucket struct {
-	tokens     float64
-	lastRefill time.Time
+	buckets *tokenBucketSet[string]
 }
 
 // cmdBurstPerConn is the maximum command burst from a single connection.
@@ -128,9 +143,15 @@ const cmdBurstPerConn = 100
 // 30 commands/s is well above normal peer behavior (~5/s sustained).
 const cmdRefillRate = 30.0
 
-func newCommandRateLimiter() *commandRateLimiter {
+// newCommandRateLimiter builds a limiter whose buckets refill and age by
+// clock. Production passes time.Now; nil falls back to it (see
+// newTokenBucketSet).
+func newCommandRateLimiter(clock func() time.Time) *commandRateLimiter {
 	return &commandRateLimiter{
-		buckets: make(map[string]*cmdBucket),
+		buckets: newTokenBucketSet[string](tokenBucketPolicy{
+			burst:           cmdBurstPerConn,
+			refillPerSecond: cmdRefillRate,
+		}, clock),
 	}
 }
 
@@ -138,48 +159,15 @@ func newCommandRateLimiter() *commandRateLimiter {
 // be permitted. The key should uniquely identify the connection (e.g.
 // RemoteAddr().String()).
 func (rl *commandRateLimiter) allowCommand(connKey string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	now := time.Now()
-	b, ok := rl.buckets[connKey]
-	if !ok {
-		b = &cmdBucket{
-			tokens:     cmdBurstPerConn,
-			lastRefill: now,
-		}
-		rl.buckets[connKey] = b
-	}
-
-	elapsed := now.Sub(b.lastRefill).Seconds()
-	b.tokens += elapsed * cmdRefillRate
-	if b.tokens > cmdBurstPerConn {
-		b.tokens = cmdBurstPerConn
-	}
-	b.lastRefill = now
-
-	if b.tokens < 1 {
-		return false
-	}
-	b.tokens--
-	return true
+	return rl.buckets.take(connKey, 1)
 }
 
 // removeConn removes the bucket for a closed connection.
 func (rl *commandRateLimiter) removeConn(connKey string) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	delete(rl.buckets, connKey)
+	rl.buckets.forget(connKey)
 }
 
 // cleanup removes stale buckets for connections that haven't been seen recently.
 func (rl *commandRateLimiter) cleanup(maxAge time.Duration) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	cutoff := time.Now().Add(-maxAge)
-	for key, b := range rl.buckets {
-		if b.lastRefill.Before(cutoff) {
-			delete(rl.buckets, key)
-		}
-	}
+	rl.buckets.evictIdle(maxAge)
 }

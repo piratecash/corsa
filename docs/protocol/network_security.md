@@ -12,7 +12,9 @@ All limits are tuned for legitimate P2P node behavior: persistent connections wi
 
 **File**: `internal/core/node/conn_limiter.go`
 
-Every incoming TCP connection is checked against a per-IP sliding-window counter before any resources (goroutines, buffers, maps) are allocated. If an IP exceeds the configured rate, the connection is closed immediately at the accept level.
+Every incoming TCP connection is checked against a per-IP fixed-window counter before any resources (goroutines, buffers, maps) are allocated. If an IP exceeds the configured rate, the connection is closed immediately at the accept level.
+
+The window opens at an IP's first attempt and lasts `defaultConnRateWindow`. Attempts inside it are counted, and every attempt past `defaultConnRateLimit` is refused. The first attempt once the window has run its full length (elapsed ≥ the window) opens a new window with a count of 1. This is a fixed window, not a sliding one: a sender can place up to twice the limit around a window boundary. Time is read only through a clock injected when the limiter is built — the wall clock in production — so window expiry is tested at exact instants.
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
@@ -32,9 +34,11 @@ Every frame read on an inbound connection has a deadline. If no complete frame a
 
 ### 3. Per-Connection Command Rate Limiting
 
-**File**: `internal/core/node/conn_limiter.go`, `internal/core/node/service.go`
+**File**: `internal/core/node/conn_limiter.go`, `internal/core/node/token_bucket.go`, `internal/core/node/service.go`
 
 Each inbound TCP connection has a token-bucket rate limiter for command frames. This is separate from the relay rate limiter (which covers `relay_message` only). When the bucket is exhausted, the connection receives a `rate-limited` error and is closed, and the IP receives ban points.
+
+The bucket is the package's shared `tokenBucketSet`, the same one behind the relay and announce limiters: a fresh connection starts with the full burst, tokens are fractional and refill at `cmdRefillRate` per elapsed second up to the burst, each command costs one token, and time is read only through a clock injected at construction (the wall clock in production).
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
@@ -247,7 +251,7 @@ Cumulative ban scoring with automatic blacklisting. Different violations carry d
 
 ### 9. Relay-Specific Limits
 
-**File**: `internal/core/node/admission.go`, `internal/core/node/ratelimit.go`
+**File**: `internal/core/node/admission.go`, `internal/core/node/ratelimit.go`, `internal/core/node/token_bucket.go`
 
 | Limit | Value | Purpose |
 |-------|-------|---------|
@@ -419,7 +423,9 @@ graph TB
 
 **Файл**: `internal/core/node/conn_limiter.go`
 
-Каждое входящее TCP-соединение проверяется по счётчику скользящего окна для данного IP до выделения каких-либо ресурсов (горутин, буферов, карт). Если IP превышает настроенный лимит, соединение закрывается немедленно на уровне accept.
+Каждое входящее TCP-соединение проверяется по счётчику фиксированного окна для данного IP до выделения каких-либо ресурсов (горутин, буферов, карт). Если IP превышает настроенный лимит, соединение закрывается немедленно на уровне accept.
+
+Окно открывается первой попыткой IP и длится `defaultConnRateWindow`. Попытки внутри окна считаются, и каждая попытка сверх `defaultConnRateLimit` отклоняется. Первая попытка после того, как окно отработало полную длину (прошло ≥ окна), открывает новое окно со счётчиком 1. Это фиксированное окно, а не скользящее: отправитель может уложить до двух лимитов вокруг границы окна. Время читается только через часы, переданные лимитеру при создании (в production — системные), поэтому истечение окна тестируется в точные моменты времени.
 
 | Параметр | Значение | Обоснование |
 |----------|----------|-------------|
@@ -439,9 +445,11 @@ graph TB
 
 ### 3. Ограничение скорости команд на соединение
 
-**Файл**: `internal/core/node/conn_limiter.go`, `internal/core/node/service.go`
+**Файл**: `internal/core/node/conn_limiter.go`, `internal/core/node/token_bucket.go`, `internal/core/node/service.go`
 
 Каждое входящее TCP-соединение имеет token-bucket лимитер для командных фреймов. Это отдельно от лимитера relay (который покрывает только `relay_message`). При исчерпании бакета соединение получает ошибку `rate-limited` и закрывается, IP получает баллы бана.
+
+Бакет — общий для пакета `tokenBucketSet`, тот же, что у relay- и announce-лимитеров: новое соединение начинает с полного burst, токены дробные и пополняются со скоростью `cmdRefillRate` за каждую прошедшую секунду до потолка burst, каждая команда стоит один токен, а время читается только через часы, переданные при создании (в production — системные).
 
 | Параметр | Значение | Обоснование |
 |----------|----------|-------------|
@@ -647,7 +655,7 @@ Middleware HTTP Basic Auth отслеживает неудачные попыт�
 
 ### 9. Специфичные лимиты relay
 
-**Файл**: `internal/core/node/admission.go`, `internal/core/node/ratelimit.go`
+**Файл**: `internal/core/node/admission.go`, `internal/core/node/ratelimit.go`, `internal/core/node/token_bucket.go`
 
 | Лимит | Значение | Назначение |
 |-------|----------|------------|

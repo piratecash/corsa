@@ -306,7 +306,10 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 func TestDropOutboundControlFrameBucket_ForcesFreshBudgetAfterRemoval(t *testing.T) {
 	t.Parallel()
 
-	svc := &Service{cmdLimiter: newCommandRateLimiter()}
+	// Frozen clock: no token comes back while the test runs, so "exhausted"
+	// means exactly zero tokens rather than "fewer than the refill since".
+	cmdLimiter, _ := newTestCommandLimiter()
+	svc := &Service{cmdLimiter: cmdLimiter}
 	const connID = domain.ConnID(31415)
 	session := &peerSession{connID: connID}
 
@@ -316,15 +319,7 @@ func TestDropOutboundControlFrameBucket_ForcesFreshBudgetAfterRemoval(t *testing
 			t.Fatalf("burst budget should cover %d calls; failed at i=%d", cmdBurstPerConn, i)
 		}
 	}
-	// Sanity: at least one immediate next call must be blocked.
-	blocked := false
-	for i := 0; i < 20; i++ {
-		if !svc.outboundControlFrameAllowed(session) {
-			blocked = true
-			break
-		}
-	}
-	if !blocked {
+	if svc.outboundControlFrameAllowed(session) {
 		t.Fatal("post-burst call unexpectedly allowed; cmdLimiter never engaged")
 	}
 
@@ -348,14 +343,15 @@ func TestDropOutboundControlFrameBucket_ForcesFreshBudgetAfterRemoval(t *testing
 
 // TestOutboundControlFrameAllowed_PerSessionBucket pins the
 // predicate directly: the first cmdBurstPerConn calls return true,
-// then the bucket is exhausted and at least one subsequent call
-// returns false. This is the building block both outbound control-
+// then the bucket is exhausted and every subsequent call returns
+// false while the clock stands still. This is the building block both outbound control-
 // frame cases rely on; the integration tests below add the
 // dispatcher layer on top.
 func TestOutboundControlFrameAllowed_PerSessionBucket(t *testing.T) {
 	t.Parallel()
 
-	svc := &Service{cmdLimiter: newCommandRateLimiter()}
+	cmdLimiter, _ := newTestCommandLimiter()
+	svc := &Service{cmdLimiter: cmdLimiter}
 	session := &peerSession{connID: 9001}
 
 	for i := 0; i < cmdBurstPerConn; i++ {
@@ -364,17 +360,12 @@ func TestOutboundControlFrameAllowed_PerSessionBucket(t *testing.T) {
 		}
 	}
 
-	// Bucket exhausted. Some immediate subsequent calls must fail.
-	// Refill rate is 30/s, so in a tight loop we deterministically
-	// see at least a handful of failures before any token recovers.
-	blocked := 0
+	// Bucket exhausted and the clock frozen: nothing refills, so every
+	// further call must be refused.
 	for i := 0; i < 25; i++ {
-		if !svc.outboundControlFrameAllowed(session) {
-			blocked++
+		if svc.outboundControlFrameAllowed(session) {
+			t.Fatalf("post-burst call %d allowed; cmdLimiter did not engage on the outbound bucket", i)
 		}
-	}
-	if blocked == 0 {
-		t.Fatal("post-burst calls all allowed; cmdLimiter did not engage on the outbound bucket")
 	}
 }
 
@@ -388,7 +379,10 @@ func TestOutboundControlFrameAllowed_PerSessionBucket(t *testing.T) {
 func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.eventBus = newStormBus(t)
-	svc.cmdLimiter = newCommandRateLimiter()
+	// Frozen clock: the drained bucket below stays empty however long the
+	// dispatch takes. It is never advanced, so the dispatcher's goroutines
+	// only ever read it.
+	svc.cmdLimiter, _ = newTestCommandLimiter()
 
 	senderAddr := domain.PeerAddress("addr-peerB")
 	const connID = domain.ConnID(424242)
@@ -443,7 +437,10 @@ func TestDispatchPeerSessionFrame_RequestResync_CmdLimited(t *testing.T) {
 func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 	svc, _ := newTestServiceWithIdentity(t)
 	svc.eventBus = newStormBus(t)
-	svc.cmdLimiter = newCommandRateLimiter()
+	// Frozen clock: the drained bucket below stays empty however long the
+	// dispatch takes. It is never advanced, so the dispatcher's goroutines
+	// only ever read it.
+	svc.cmdLimiter, _ = newTestCommandLimiter()
 
 	peer, err := identity.Generate()
 	if err != nil {

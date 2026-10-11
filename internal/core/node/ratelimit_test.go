@@ -3,11 +3,39 @@ package node
 import (
 	"testing"
 	"time"
+
+	"github.com/piratecash/corsa/internal/core/domain"
 )
+
+// Every relay limiter here runs on a hand-driven clock that only the test
+// moves, so "no time has passed" and "exactly one refill period has passed"
+// are facts of the test rather than hopes about scheduler latency.
+
+func newTestRelayLimiter() (*relayRateLimiter, *manualTestClock) {
+	clock := newManualTestClock()
+	return newRelayRateLimiter(clock.now), clock
+}
+
+// countAllowed calls allow until it refuses or attempts runs out and returns
+// how many calls passed. A limiter that should grant exactly n is checked
+// with attempts > n, so a surplus grant shows up as a wrong count.
+func countAllowed(attempts int, allow func() bool) int {
+	for i := 0; i < attempts; i++ {
+		if !allow() {
+			return i
+		}
+	}
+	return attempts
+}
+
+func relayLimiterHasBucket(rl *relayRateLimiter, address domain.PeerAddress) bool {
+	_, ok := rl.buckets.tokensOf(address)
+	return ok
+}
 
 func TestRelayRateLimiter_BurstAllowed(t *testing.T) {
 	t.Parallel()
-	rl := newRelayRateLimiter()
+	rl, _ := newTestRelayLimiter()
 
 	for i := 0; i < relayBurstPerPeer; i++ {
 		if !rl.allow("peer-1") {
@@ -18,21 +46,16 @@ func TestRelayRateLimiter_BurstAllowed(t *testing.T) {
 
 func TestRelayRateLimiter_ExceedsBurstRejected(t *testing.T) {
 	t.Parallel()
-	rl := newRelayRateLimiter()
+	rl, _ := newTestRelayLimiter()
 
-	// Exhaust burst.
-	for i := 0; i < relayBurstPerPeer; i++ {
-		rl.allow("peer-1")
-	}
-
-	if rl.allow("peer-1") {
-		t.Fatal("request after burst exhaustion should be rejected")
+	if got := countAllowed(relayBurstPerPeer+1, func() bool { return rl.allow("peer-1") }); got != relayBurstPerPeer {
+		t.Fatalf("a fresh bucket must grant exactly the burst; granted %d, want %d", got, relayBurstPerPeer)
 	}
 }
 
 func TestRelayRateLimiter_IndependentPeers(t *testing.T) {
 	t.Parallel()
-	rl := newRelayRateLimiter()
+	rl, _ := newTestRelayLimiter()
 
 	// Exhaust peer-1.
 	for i := 0; i < relayBurstPerPeer; i++ {
@@ -45,53 +68,71 @@ func TestRelayRateLimiter_IndependentPeers(t *testing.T) {
 	}
 }
 
-func TestRelayRateLimiter_RefillOverTime(t *testing.T) {
+func TestRelayRateLimiter_RefillFollowsInjectedClock(t *testing.T) {
 	t.Parallel()
-	rl := newRelayRateLimiter()
+	rl, clock := newTestRelayLimiter()
+	allowPeer := func() bool { return rl.allow("peer-1") }
 
-	// Exhaust burst.
-	for i := 0; i < relayBurstPerPeer; i++ {
-		rl.allow("peer-1")
-	}
-	if rl.allow("peer-1") {
-		t.Fatal("should be empty after burst")
+	if got := countAllowed(relayBurstPerPeer+1, allowPeer); got != relayBurstPerPeer {
+		t.Fatalf("precondition: fresh bucket grants the burst; granted %d", got)
 	}
 
-	// Manually adjust lastRefill to simulate time passing.
-	rl.mu.Lock()
-	b := rl.buckets["peer-1"]
-	b.lastRefill = b.lastRefill.Add(-1 * time.Second)
-	rl.mu.Unlock()
+	clock.advance(time.Second / relayRefillRate)
+	if got := countAllowed(2, allowPeer); got != 1 {
+		t.Fatalf("one refill period must restore exactly one token; granted %d", got)
+	}
 
-	// After 1 second, refillRate tokens should be available.
-	if !rl.allow("peer-1") {
-		t.Fatal("should be allowed after refill")
+	clock.advance(time.Second)
+	if got := countAllowed(relayRefillRate+1, allowPeer); got != relayRefillRate {
+		t.Fatalf("one second must restore exactly relayRefillRate tokens; granted %d, want %d", got, int(relayRefillRate))
+	}
+
+	clock.advance(time.Hour)
+	if got := countAllowed(relayBurstPerPeer+1, allowPeer); got != relayBurstPerPeer {
+		t.Fatalf("a long idle period must refill to the burst and no further; granted %d, want %d", got, relayBurstPerPeer)
 	}
 }
 
-func TestRelayRateLimiter_CleanupRemovesStaleBuckets(t *testing.T) {
+// A refused call still advances the bucket to now and keeps the fraction it
+// earned; dropping the fraction (or not moving lastRefill) would make a
+// steady stream slower than the configured rate.
+func TestRelayRateLimiter_FractionalRefillAccumulatesAcrossRefusals(t *testing.T) {
 	t.Parallel()
-	rl := newRelayRateLimiter()
+	rl, clock := newTestRelayLimiter()
+	allowPeer := func() bool { return rl.allow("peer-1") }
+	countAllowed(relayBurstPerPeer, allowPeer)
+
+	halfPeriod := time.Second / relayRefillRate / 2
+	clock.advance(halfPeriod)
+	if allowPeer() {
+		t.Fatal("half a refill period must not yield a whole token")
+	}
+	clock.advance(halfPeriod)
+	if got := countAllowed(2, allowPeer); got != 1 {
+		t.Fatalf("two half periods must add up to exactly one token; granted %d", got)
+	}
+}
+
+func TestRelayRateLimiter_CleanupEvictsOnlyBucketsIdlePastMaxAge(t *testing.T) {
+	t.Parallel()
+	rl, clock := newTestRelayLimiter()
+	const maxAge = 5 * time.Minute
 
 	rl.allow("stale-peer")
-	// Simulate stale bucket.
-	rl.mu.Lock()
-	rl.buckets["stale-peer"].lastRefill = time.Now().Add(-10 * time.Minute)
-	rl.mu.Unlock()
-
+	clock.advance(maxAge)
 	rl.allow("fresh-peer")
 
-	rl.cleanup(5 * time.Minute)
-
-	rl.mu.Lock()
-	_, staleExists := rl.buckets["stale-peer"]
-	_, freshExists := rl.buckets["fresh-peer"]
-	rl.mu.Unlock()
-
-	if staleExists {
-		t.Fatal("stale bucket should be cleaned up")
+	rl.cleanup(maxAge)
+	if !relayLimiterHasBucket(rl, "stale-peer") {
+		t.Fatal("a bucket idle for exactly maxAge must be kept")
 	}
-	if !freshExists {
-		t.Fatal("fresh bucket should be kept")
+
+	clock.advance(time.Nanosecond)
+	rl.cleanup(maxAge)
+	if relayLimiterHasBucket(rl, "stale-peer") {
+		t.Fatal("a bucket idle for longer than maxAge must be evicted")
+	}
+	if !relayLimiterHasBucket(rl, "fresh-peer") {
+		t.Fatal("a bucket used inside maxAge must be kept")
 	}
 }
