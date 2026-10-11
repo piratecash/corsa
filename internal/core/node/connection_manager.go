@@ -258,7 +258,11 @@ type ConnectionManagerConfig struct {
 	// Injected for testability (zero backoff in tests).
 	BackoffFn func(attempt int) time.Duration
 
-	// NowFn returns current time. Injected for testability.
+	// NowFn is the manager's clock: every time read the manager makes goes
+	// through it. Today that is only the dial pacer's refill. Nil means
+	// time.Now; production passes nothing. A frozen NowFn stops the pacer
+	// from ever earning a token, so a test that freezes it must also drive
+	// DialPacerAfterFn (see connection_manager_pacer_test.go).
 	NowFn func() time.Time
 
 	// FillInterval overrides periodicFillInterval for testing.
@@ -280,6 +284,13 @@ type ConnectionManagerConfig struct {
 	// dials allowed before pacing engages). Ignored when
 	// DialPacerInterval is zero. Negative values are normalised to 0.
 	DialPacerBurst int
+
+	// DialPacerAfterFn is the timer a paced dial worker waits on until the
+	// pacer's next token is due. Nil means time.After. Tests pair it with
+	// NowFn to run the pacer in virtual time. It covers only the pacer: the
+	// retry backoff and the periodic fill have their own seams (BackoffFn,
+	// FillInterval).
+	DialPacerAfterFn func(time.Duration) <-chan time.Time
 
 	// EventBus is used to publish TopicSlotStateChanged when a slot
 	// transitions between states. May be nil (tests, standalone usage).
@@ -402,7 +413,10 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		// newDialPacer returns nil when interval <= 0; nil pacer is
 		// treated as "disabled" by Acquire-site nil checks below, so
 		// disabled mode pays no overhead on the hot path.
-		pacer: newDialPacer(cfg.DialPacerInterval, cfg.DialPacerBurst),
+		pacer: newDialPacer(cfg.DialPacerInterval, cfg.DialPacerBurst, dialPacerOpts{
+			clock: cfg.NowFn,
+			after: cfg.DialPacerAfterFn,
+		}),
 	}
 }
 

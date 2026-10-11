@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Production tuning for the global dial pacer. See dial_pacer.go.
+// Production tuning for the global dial pacer.
 //
 //   - dialPacerProductionInterval: minimum spacing between paced dial
 //     spawns. 300ms gives ~3.3 dials/sec sustained ceiling, which at 7
@@ -19,10 +19,9 @@ import (
 //     interval cost for the first few slots. After the burst is
 //     consumed every further dial waits for a refill.
 //
-// These constants must stay in this file so the test override seam in
-// connection_manager_pacer_test.go (overrides on b.Cfg.DialPacer*) is
-// the single knob — production wiring (service.go) and tests share the
-// same field names.
+// Production wiring (service.go) passes them through
+// ConnectionManagerConfig.DialPacerInterval / DialPacerBurst; tests set those
+// same fields directly, so the config fields are the single knob.
 const (
 	dialPacerProductionInterval = 300 * time.Millisecond
 	dialPacerProductionBurst    = 3
@@ -39,20 +38,44 @@ const (
 // upper-bounds outbound dial concurrency so a storm degrades into a slow
 // trickle instead of a tight retry loop.
 //
-// Implementation: classic leaky-bucket / token-bucket variant. Capacity is
-// the maximum burst (cold-start) and refill granularity is one token per
-// pacer interval. Acquire() blocks until a token is available OR ctx is
-// cancelled. The single goroutine that owns dial spawn (dialWorker /
-// retryAfterBackoff) consults the pacer before invoking DialFn.
+// Implementation: a token bucket with whole tokens. Capacity is the burst
+// (at least one) and one token is earned per interval. Acquire() blocks until
+// a token is available OR ctx is cancelled. Every paced dial worker
+// (dialWorker / retryAfterBackoff) acquires a token before invoking DialFn.
+//
+// The bucket never holds more than capacity tokens, and a full bucket earns
+// nothing: when a refill reaches capacity, the part of an interval already
+// elapsed is discarded, and accrual restarts when the bucket stops being full
+// (the first take from it). So in any window of length T at most
+// capacity + floor(T/interval) dials start, and the first paced dial after a
+// full bucket comes one interval after the bucket stopped being full —
+// however long it sat full before.
+//
+// With capacity 1 (burst 0 or 1) a waiter woken late by δ finds the bucket
+// full, so accrual restarts at its wake-up rather than at the interval
+// boundary, and such a pacer runs slightly slower than one dial per interval
+// under real timers. That only lowers the rate, and it is what "a full bucket
+// earns nothing" costs. With a larger capacity (production: 3) the bucket is
+// not full while dials are waiting, so the boundary is kept.
 //
 // Manual operator-driven dials (handleManualPeer) bypass the pacer — they
 // use a dedicated dialWorkerImmediate path that does not Acquire. This is
 // the documented contract: `addpeer 1.2.3.4` must be immediate even when
 // the storm-protection pacer would otherwise hold it.
+//
+// Why not the package's shared tokenBucketSet (token_bucket.go): that is a
+// keyed set of buckets that answer yes/no and start full. The pacer is one
+// bucket that must say how long to wait for the next token, may start below
+// capacity (burst 0 starts empty with capacity 1), and counts whole tokens so
+// a grant lands on an exact interval boundary instead of a float rounding of
+// one.
 // ---------------------------------------------------------------------------
 
 // dialPacer is a thread-safe token bucket. Zero value is unusable; call
 // newDialPacer.
+//
+// mu is a leaf: nothing is called under it except the clock, which is a pure
+// time source, and Acquire waits for the next token with mu released.
 type dialPacer struct {
 	mu sync.Mutex
 
@@ -66,27 +89,45 @@ type dialPacer struct {
 	// tokens is the current number of tokens. Mutated under mu.
 	tokens int
 
-	// lastRefill is the wall-clock instant of the last token grant.
-	// Used by acquireLocked to compute how many tokens have accrued
-	// since the previous call. Mutated under mu.
+	// lastRefill is the instant the token being earned started accruing:
+	// the last interval boundary a token was credited at, or the last
+	// instant the bucket was seen full. Mutated under mu.
 	lastRefill time.Time
 
-	// nowFn returns the current time. Injected so tests can drive the
-	// clock without sleeping.
-	nowFn func() time.Time
+	// clock and after are set once in newDialPacer and never written again,
+	// which is why they need no protection from mu.
+	clock func() time.Time
+	after func(time.Duration) <-chan time.Time
+}
+
+// dialPacerOpts carries the pacer's dependencies on the passage of time, so a
+// test steps the pacer through virtual time instead of waiting for it.
+//
+// Two function fields rather than a Clock interface, for the reason
+// updatecheck.CheckerOpts gives: Acquire selects on the wait channel together
+// with ctx.Done(), so the timer must hand back a channel the caller selects
+// on, which a sleeping provider or a generated mock cannot.
+type dialPacerOpts struct {
+	// clock is what refill reads. Nil means time.Now.
+	clock func() time.Time
+	// after is the timer Acquire waits on before retrying. Nil means
+	// time.After: an abandoned wait leaves a timer of at most one interval,
+	// which the runtime reclaims once it is unreferenced (Go 1.23+).
+	after func(time.Duration) <-chan time.Time
 }
 
 // newDialPacer constructs a pacer with the given interval and burst.
 // Returns nil when interval <= 0 — callers treat nil as "disabled" so
-// production configurations that opt out of pacing produce no pacer
-// goroutine, no token math, no measurable overhead.
+// production configurations that opt out of pacing produce no token
+// math and no measurable overhead.
 //
-// burst < 0 is normalised to 0 (one-by-one pacing). burst == 0 means
-// every Acquire pays the full interval — the most defensive setting.
-// The bucket capacity is internally clamped to >= 1 so a refilled
-// token is not immediately discarded; the initial token count still
-// honours the requested burst.
-func newDialPacer(interval time.Duration, burst int) *dialPacer {
+// burst < 0 is normalised to 0 (one-by-one pacing). burst == 0 starts
+// the bucket empty, so the first token is earned one interval after
+// construction — the most defensive setting. The bucket capacity is
+// internally clamped to >= 1 so a refilled token is not immediately
+// discarded (an idle pacer therefore holds one token); the initial token
+// count still honours the requested burst.
+func newDialPacer(interval time.Duration, burst int, opts dialPacerOpts) *dialPacer {
 	if interval <= 0 {
 		return nil
 	}
@@ -97,12 +138,19 @@ func newDialPacer(interval time.Duration, burst int) *dialPacer {
 	if capacity < 1 {
 		capacity = 1
 	}
+	if opts.clock == nil {
+		opts.clock = time.Now
+	}
+	if opts.after == nil {
+		opts.after = time.After
+	}
 	return &dialPacer{
 		capacity:   capacity,
 		interval:   interval,
 		tokens:     burst, // start with the requested burst (may be 0)
-		lastRefill: time.Now(),
-		nowFn:      time.Now,
+		lastRefill: opts.clock(),
+		clock:      opts.clock,
+		after:      opts.after,
 	}
 }
 
@@ -110,28 +158,20 @@ func newDialPacer(interval time.Duration, burst int) *dialPacer {
 // true on a successful acquire, false on ctx cancellation. The bucket
 // is decremented only on the success branch.
 //
-// The wait loop sleeps for the next refill boundary rather than busy
+// The wait loop sleeps until the next token is due rather than busy
 // polling, so an idle pacer holds a single sleeping goroutine per
 // waiter — fine for the small number of in-flight dial workers (bounded
-// by maxSlots).
+// by maxSlots). Several waiters woken for the same token race for it in
+// tryAcquire; the losers wait for the next one.
 func (p *dialPacer) Acquire(ctx context.Context) bool {
 	for {
 		wait, ok := p.tryAcquire()
 		if ok {
 			return true
 		}
-		// Cap the sleep so a long interval still respects ctx.Done()
-		// promptly — without the cap a cancelled ctx would have to wait
-		// up to `wait` before noticing.
-		if wait > p.interval {
-			wait = p.interval
-		}
-		timer := time.NewTimer(wait)
 		select {
-		case <-timer.C:
-			// loop and retry
+		case <-p.after(wait):
 		case <-ctx.Done():
-			timer.Stop()
 			return false
 		}
 	}
@@ -145,28 +185,42 @@ func (p *dialPacer) tryAcquire() (time.Duration, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	now := p.nowFn()
-	elapsed := now.Sub(p.lastRefill)
-	if elapsed >= p.interval {
-		gained := int(elapsed / p.interval)
-		p.tokens += gained
-		if p.tokens > p.capacity {
-			p.tokens = p.capacity
-		}
-		// Re-anchor lastRefill to the latest refill boundary (not now)
-		// so fractional time is preserved for the next call.
-		p.lastRefill = p.lastRefill.Add(time.Duration(gained) * p.interval)
-	}
+	now := p.clock()
+	p.refillLocked(now)
 
 	if p.tokens >= 1 {
 		p.tokens--
 		return 0, true
 	}
 
-	// Time until the next token becomes available.
+	// After refillLocked the token being earned has accrued for less than
+	// one interval, so the wait is in (0, interval]. Only a clock that reads
+	// earlier than lastRefill — a test clock stepped back; time.Now carries
+	// a monotonic reading — could ask for more, and the cap bounds every
+	// wait by one interval regardless.
 	wait := p.interval - now.Sub(p.lastRefill)
-	if wait <= 0 {
+	if wait > p.interval {
 		wait = p.interval
 	}
 	return wait, false
+}
+
+// refillLocked credits one token per whole interval since lastRefill and
+// keeps the remainder of the current interval — unless that fills the
+// bucket. A full bucket earns nothing, so its accrual restarts at now: a
+// fraction carried while full would be a token beyond capacity, granted one
+// part of an interval after the bucket stops being full instead of a whole
+// one. Caller holds p.mu.
+func (p *dialPacer) refillLocked(now time.Time) {
+	if elapsed := now.Sub(p.lastRefill); elapsed >= p.interval {
+		whole := int64(elapsed / p.interval)
+		room := int64(p.capacity - p.tokens)
+		gained := min(whole, room)
+		p.tokens += int(gained)
+		p.lastRefill = p.lastRefill.Add(time.Duration(gained) * p.interval)
+	}
+	if p.tokens >= p.capacity {
+		p.tokens = p.capacity
+		p.lastRefill = now
+	}
 }

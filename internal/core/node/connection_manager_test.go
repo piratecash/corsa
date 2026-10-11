@@ -123,7 +123,6 @@ func testCMConfig(addresses ...string) *testCMBuilder {
 			}
 		},
 		BackoffFn: func(attempt int) time.Duration { return 0 }, // zero backoff in tests
-		NowFn:     func() time.Time { return time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC) },
 	}
 	return b
 }
@@ -1886,9 +1885,9 @@ func TestCM_PeriodicFill_RetriesAfterCooldownExpiry(t *testing.T) {
 	b := testCMConfig("10.0.0.1:64646", "10.0.0.2:64646")
 
 	// Put both peers in cooldown: ConsecutiveFailures = 5, disconnected
-	// 1 minute ago. With the fixed NowFn (2026-04-11 12:00:00), cooldown
-	// = peerCooldownDuration(4) = 30s * 2^3 = 240s. Time since disconnect
-	// = 60s < 240s → in cooldown.
+	// 1 minute ago. With the provider's fixed NowFn (testProviderConfig,
+	// 2026-04-11 12:00:00), cooldown = peerCooldownDuration(4) = 30s * 2^3
+	// = 240s. Time since disconnect = 60s < 240s → in cooldown.
 	nowFixed := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
 	b.health["10.0.0.1:64646"] = &PeerHealthView{
 		ConsecutiveFailures: 5,

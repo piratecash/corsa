@@ -273,7 +273,6 @@ func TestCM_RetainOnlyDuringFillCandidates_NoUnpinnedSlotSurvives(t *testing.T) 
 		},
 		OnSessionTeardown: func(SessionInfo) {},
 		BackoffFn:         func(int) time.Duration { return 0 },
-		NowFn:             func() time.Time { return time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC) },
 		FillInterval:      time.Hour,
 	})
 	cmPtr.Store(cm)
