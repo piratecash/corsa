@@ -497,6 +497,170 @@ func TestDrainedRemoteStaysDrainedThroughASaturatedRegistry(t *testing.T) {
 	}
 }
 
+// TestContactVerifyRegistryReleasesRefilledBucketsOnlyForANewcomerAtTheCap pins
+// the exact release condition of releaseRefilledLocked, which is narrower in
+// WHEN and wider in WHAT than "a full bucket leaves":
+//
+//   - a charge of a key the registry already tracks releases nothing, even
+//     with full buckets in a registry at its cap;
+//   - a NEW key arriving at a registry at its cap releases EVERY bucket that is
+//     full at that instant, not one, and then gets a bucket of its own;
+//   - fullness is the whole test, not idleness: a bucket charged once is full
+//     again after 1/rate seconds, far short of burst/rate, and is released;
+//   - a bucket even a fraction of a token short of full stays, and the newcomer
+//     charges the tail instead — and gets its own bucket on its next charge once
+//     some tracked bucket is full.
+//
+// The below-cap half of the condition is pinned separately by
+// TestContactVerifyRegistryReleasesNothingBelowTheCap.
+func TestContactVerifyRegistryReleasesRefilledBucketsOnlyForANewcomerAtTheCap(t *testing.T) {
+	t.Parallel()
+
+	clock := newManualTestClock()
+	registry := &contactVerifyRegistry{}
+	registry.setClock(clock.now)
+
+	refillOneToken := exactOneTokenRefill(t)
+
+	// Two subjects owe one token each; every filler owes two. One token of
+	// refill then makes exactly the subjects full.
+	subjects := []contactVerifyKey{"ip:198.51.100.1", "ip:198.51.100.2"}
+	fillers := make([]contactVerifyKey, 0, maxTrackedContactVerifyRemotes-len(subjects))
+	for i := 0; i < maxTrackedContactVerifyRemotes-len(subjects); i++ {
+		fillers = append(fillers, contactVerifyKey(fmt.Sprintf("ip:10.%d.%d.1", i/256, i%256)))
+	}
+	for _, key := range subjects {
+		if granted, _ := registry.charge(key); !granted {
+			t.Fatalf("subject %s was refused its first verification", key)
+		}
+	}
+	for _, key := range fillers {
+		for i := 0; i < 2; i++ {
+			if granted, _ := registry.charge(key); !granted {
+				t.Fatalf("filler %s was refused verification %d", key, i)
+			}
+		}
+	}
+	if tracked := registry.trackedRemotes(); tracked != maxTrackedContactVerifyRemotes {
+		t.Fatalf("the registry tracks %d remotes after filling, want its cap %d", tracked, maxTrackedContactVerifyRemotes)
+	}
+
+	// Half a token short of full: the subjects are the most replenished buckets
+	// in the registry, and still not one of them may be released.
+	newcomer := contactVerifyKey("ip:203.0.113.1")
+	clock.advance(refillOneToken / 2)
+	granted, warn := registry.charge(newcomer)
+	if !granted || warn == nil {
+		t.Fatalf("a newcomer at a registry with no full bucket: granted=%v warn=%v, want a granted TAIL charge", granted, warn)
+	}
+	if _, tracked := registry.remotes[newcomer]; tracked {
+		t.Fatal("the newcomer got its own bucket while every tracked bucket still owed tokens: a debtor was released")
+	}
+	for _, key := range subjects {
+		if _, tracked := registry.remotes[key]; !tracked {
+			t.Fatalf("subject %s was released half a token short of full: dropping it forgave that half token", key)
+		}
+	}
+
+	// One token after the charge — 1/rate seconds, 1/burst of the burst/rate a
+	// drained bucket needs — the subjects are full. A charge of a key the
+	// registry already tracks must still release nothing.
+	clock.advance(refillOneToken / 2)
+	if granted, _ := registry.charge(fillers[0]); !granted {
+		t.Fatal("a filler that still holds tokens was refused")
+	}
+	if tracked := registry.trackedRemotes(); tracked != maxTrackedContactVerifyRemotes {
+		t.Fatalf("a charge of an already-tracked key changed the registry to %d remotes, want %d: release ran without a newcomer",
+			tracked, maxTrackedContactVerifyRemotes)
+	}
+	for _, key := range subjects {
+		if _, tracked := registry.remotes[key]; !tracked {
+			t.Fatalf("subject %s was released by a charge of a key the registry already tracks", key)
+		}
+	}
+
+	// The newcomer's next charge finds full buckets: every one of them is
+	// released, and the newcomer leaves the tail for a fresh bucket of its own.
+	// The tail is compared whole because its warn is rate-limited and cannot
+	// tell a second tail charge from no tail charge.
+	tailBefore := registry.tail
+	if granted, _ := registry.charge(newcomer); !granted {
+		t.Fatal("the newcomer's charge after the subjects refilled was refused")
+	}
+	if registry.tail.tokens != tailBefore.tokens || !registry.tail.lastRefill.Equal(tailBefore.lastRefill) {
+		t.Fatalf("the tail moved from %v tokens at %v to %v at %v: the newcomer charged the tail although full buckets could be released",
+			tailBefore.tokens, tailBefore.lastRefill, registry.tail.tokens, registry.tail.lastRefill)
+	}
+	for _, key := range subjects {
+		if _, tracked := registry.remotes[key]; tracked {
+			t.Fatalf("subject %s, full again 1/%d s after its only charge, was not released: release either stops before every full bucket or demands more than fullness",
+				key, contactVerifiesPerSecond)
+		}
+	}
+	bucket, tracked := registry.remotes[newcomer]
+	if !tracked {
+		t.Fatal("the newcomer is still charging the tail after full buckets were released")
+	}
+	if bucket.tokens != contactVerifyBurst-1 {
+		t.Fatalf("the newcomer's bucket holds %v tokens, want a fresh burst minus this charge (%d)", bucket.tokens, contactVerifyBurst-1)
+	}
+	for _, key := range fillers {
+		if _, tracked := registry.remotes[key]; !tracked {
+			t.Fatalf("filler %s, still owing a token, was released", key)
+		}
+	}
+	if want := maxTrackedContactVerifyRemotes - len(subjects) + 1; registry.trackedRemotes() != want {
+		t.Fatalf("the registry tracks %d remotes, want %d: every full bucket out, the newcomer in", registry.trackedRemotes(), want)
+	}
+}
+
+// TestContactVerifyRegistryReleasesNothingBelowTheCap pins the WHEN half of the
+// release condition that the at-cap test cannot reach: a new key arriving while
+// the registry still has room gets a slot without a release pass, so a bucket
+// that is full again stays tracked.
+func TestContactVerifyRegistryReleasesNothingBelowTheCap(t *testing.T) {
+	t.Parallel()
+
+	clock := newManualTestClock()
+	registry := &contactVerifyRegistry{}
+	registry.setClock(clock.now)
+
+	refillOneToken := exactOneTokenRefill(t)
+
+	refilled := contactVerifyKey("ip:198.51.100.1")
+	if granted, _ := registry.charge(refilled); !granted {
+		t.Fatal("a fresh remote was refused its first verification")
+	}
+	clock.advance(refillOneToken)
+
+	if granted, _ := registry.charge(contactVerifyKey("ip:203.0.113.1")); !granted {
+		t.Fatal("a second fresh remote was refused its first verification")
+	}
+	if _, tracked := registry.remotes[refilled]; !tracked {
+		t.Fatal("a full bucket was released by a new key arriving far below the cap: release runs without the registry being full")
+	}
+	if tracked := registry.trackedRemotes(); tracked != 2 {
+		t.Fatalf("the registry tracks %d remotes, want both keys (2)", tracked)
+	}
+}
+
+// exactOneTokenRefill returns 1/contactVerifiesPerSecond seconds, after checking
+// that it and its half are steps the float refill turns into exactly one and
+// one half token. That holds only for a power-of-two rate whose half-token step
+// is still a whole number of nanoseconds: elapsed seconds are then dyadic
+// fractions, so multiplying by the rate is exact and a bucket refilled by these
+// steps lands on the burst instead of a hair under it.
+func exactOneTokenRefill(t *testing.T) time.Duration {
+	t.Helper()
+
+	const rate = contactVerifiesPerSecond
+	oneToken := time.Second / rate
+	if rate&(rate-1) != 0 || (oneToken/2)*2*rate != time.Second {
+		t.Fatalf("contactVerifiesPerSecond = %d is not a power of two whose 1/(2*rate) s is whole nanoseconds: the refill steps of these tests would not land on exact tokens", rate)
+	}
+	return oneToken
+}
+
 // TestIPv6EndpointsShareTheAssignmentPrefixBudget pins the granularity.
 //
 // A single IPv6 address is not a cost: the usual customer assignment is a /64,

@@ -111,9 +111,9 @@ const contactVerifyBurst = maxContactsPerResponse
 // a recovery pass touches at most 1 + senderKeySyncFanout of them, so 1024
 // remembered remotes is two orders of magnitude above the working set and still
 // only ~100 KB. What the cap must NOT do is hand a reset back: a bucket leaves
-// the registry only when leaving forgives nothing (releaseRefilledLocked), and
-// what does not fit shares the tail bucket (tailBucketLocked) rather than
-// displacing a debtor.
+// the registry only when leaving forgives nothing (releaseRefilledLocked, run
+// only when a new key arrives at the cap), and what does not fit shares the
+// tail bucket (tailBucketLocked) rather than displacing a debtor.
 const maxTrackedContactVerifyRemotes = 1024
 
 // contactVerifyIPv6PrefixBits is the boundary an IPv6 endpoint is aggregated to
@@ -253,7 +253,6 @@ func sessionContactVerifyKey(session *peerSession) contactVerifyKey {
 // a steady trickle into a permanent block.
 type contactVerifyBucket struct {
 	lastRefill time.Time
-	lastCharge time.Time
 	tokens     float64
 }
 
@@ -362,7 +361,6 @@ func (r *contactVerifyRegistry) charge(key contactVerifyKey) (bool, *contactVeri
 	granted := bucket.tokens >= 1
 	if granted {
 		bucket.tokens--
-		bucket.lastCharge = now
 	}
 	if !tail {
 		return granted, nil
@@ -378,6 +376,7 @@ func (r *contactVerifyRegistry) charge(key contactVerifyKey) (bool, *contactVeri
 // node has never metered must not be refused. That is precisely why a bucket may
 // only be dropped when dropping it forgives nothing — and why, when nothing can
 // be dropped on those terms, the newcomer gets the tail instead of a new bucket.
+// Caller holds mu.
 func (r *contactVerifyRegistry) bucketLocked(key contactVerifyKey, now time.Time) (*contactVerifyBucket, bool) {
 	if bucket, known := r.remotes[key]; known {
 		return bucket, false
@@ -391,24 +390,34 @@ func (r *contactVerifyRegistry) bucketLocked(key contactVerifyKey, now time.Time
 	if len(r.remotes) >= maxTrackedContactVerifyRemotes {
 		return r.tailBucketLocked(now), true
 	}
-	bucket := &contactVerifyBucket{lastRefill: now, lastCharge: now, tokens: contactVerifyBurst}
+	bucket := &contactVerifyBucket{lastRefill: now, tokens: contactVerifyBurst}
 	r.remotes[key] = bucket
 	return bucket, false
 }
 
-// releaseRefilledLocked drops every bucket that has refilled completely.
+// releaseRefilledLocked refills every tracked bucket to now and drops EVERY one
+// that holds the full burst afterwards — all of them in one pass, not one. Caller
+// holds mu.
 //
-// This is the ONLY way a bucket leaves the registry, and the condition is the
-// whole safety argument: a full bucket is byte-for-byte identical to the one a
-// newcomer would be given, so forgetting it forgives nothing. A bucket in debt is
-// never dropped — the round-8 policy of dropping "the most replenished debtor"
-// still forgave that debtor's remaining debt, and an attacker able to cycle
-// endpoints (2^64 of them inside one IPv6 assignment, before that key started
-// aggregating to the /64) could collect that forgiveness once per cycle.
+// This is the ONLY way a bucket leaves the registry, and bucketLocked calls it in
+// one situation only: a key the registry does not track arrives while the
+// registry is at maxTrackedContactVerifyRemotes. Below the cap nothing is ever
+// released, so the map is bounded by the cap and not by any idle horizon.
 //
-// A full bucket is also, by construction, an idle one: tokens only reach the
-// burst after burst/rate seconds without a charge, so this doubles as the idle
-// sweep and no separate retention clock is needed.
+// The condition is the whole safety argument: a full bucket is byte-for-byte
+// identical to the one a newcomer would be given, so forgetting it forgives
+// nothing. A bucket in debt is never dropped — the round-8 policy of dropping
+// "the most replenished debtor" still forgave that debtor's remaining debt, and
+// an attacker able to cycle endpoints (2^64 of them inside one IPv6 assignment,
+// before that key started aggregating to the /64) could collect that
+// forgiveness once per cycle.
+//
+// Full does NOT mean idle. A bucket short of the burst by d tokens is full
+// again d/rate seconds after its last charge — 1/rate for a remote that spent a
+// single token from a full bucket — and only a drained one needs burst/rate.
+// That is harmless here precisely because the argument above is about fullness
+// alone, but it is why nothing may treat a release as evidence that the remote
+// went quiet.
 func (r *contactVerifyRegistry) releaseRefilledLocked(now time.Time) {
 	for key, bucket := range r.remotes {
 		r.refillLocked(bucket, now)
@@ -436,8 +445,14 @@ func (r *contactVerifyRegistry) releaseRefilledLocked(now time.Time) {
 //   - SHARE one bucket. Chosen: everything that does not fit is metered
 //     together, so the tail of the world collectively costs what a single
 //     neighbour costs. An honest peer arriving during saturation is degraded —
-//     it competes with the attacker for one budget — but never locked out, and
-//     it gets its own bucket the moment any tracked bucket refills.
+//     it competes with the attacker for one budget — but never locked out. The
+//     tail is not a membership: the newcomer stays untracked, so each of its
+//     charges either finds a free slot or re-runs releaseRefilledLocked, and it
+//     gets its own bucket on the first of its charges that finds a free slot or
+//     a tracked bucket full at that instant. A bucket that has gone burst/rate
+//     seconds without a charge is always full, but any other untracked key
+//     charging first may take the slot it frees, so while others compete for
+//     slots there is no fixed bound on how long the newcomer stays in the tail.
 //
 // # Why the tail's rate is one remote's rate
 //
@@ -459,10 +474,12 @@ func (r *contactVerifyRegistry) releaseRefilledLocked(now time.Time) {
 // endpoints each — a node cannot even be made to spend that much verification
 // work in one refill window. The tail is a backstop, and the saturation warn
 // exists so that an operator sees it if the reasoning above is ever wrong.
+//
+// Caller holds mu.
 func (r *contactVerifyRegistry) tailBucketLocked(now time.Time) *contactVerifyBucket {
 	if !r.tailStarted {
 		r.tailStarted = true
-		r.tail = contactVerifyBucket{lastRefill: now, lastCharge: now, tokens: contactVerifyBurst}
+		r.tail = contactVerifyBucket{lastRefill: now, tokens: contactVerifyBurst}
 	}
 	return &r.tail
 }
