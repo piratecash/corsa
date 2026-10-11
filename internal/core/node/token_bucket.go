@@ -60,10 +60,14 @@ func newTokenBucketSet[K comparable](policy tokenBucketPolicy, clock func() time
 // bucket, so the fraction it earned is carried to the next call and a bucket
 // that keeps being refused never counts as idle for evictIdle.
 //
-// cost is at least 1: relay and command charge 1 per frame, and the announce
-// limiter clamps its per-entry cost before calling, because how a miscounted
-// cost is charged is that limiter's policy.
+// A cost below 1 is charged as 1. The clamp lives here rather than in each
+// limiter because the invariant it protects belongs to the bucket: a take
+// never mints tokens. Without it a cost of 0 would pass for free forever and
+// a negative cost would raise the balance above the burst.
 func (s *tokenBucketSet[K]) take(key K, cost int) bool {
+	if cost < 1 {
+		cost = 1
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

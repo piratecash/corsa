@@ -16,18 +16,6 @@ func newTestRelayLimiter() (*relayRateLimiter, *manualTestClock) {
 	return newRelayRateLimiter(clock.now), clock
 }
 
-// countAllowed calls allow until it refuses or attempts runs out and returns
-// how many calls passed. A limiter that should grant exactly n is checked
-// with attempts > n, so a surplus grant shows up as a wrong count.
-func countAllowed(attempts int, allow func() bool) int {
-	for i := 0; i < attempts; i++ {
-		if !allow() {
-			return i
-		}
-	}
-	return attempts
-}
-
 func relayLimiterHasBucket(rl *relayRateLimiter, address domain.PeerAddress) bool {
 	_, ok := rl.buckets.tokensOf(address)
 	return ok
@@ -94,8 +82,9 @@ func TestRelayRateLimiter_RefillFollowsInjectedClock(t *testing.T) {
 }
 
 // A refused call still advances the bucket to now and keeps the fraction it
-// earned; dropping the fraction (or not moving lastRefill) would make a
-// steady stream slower than the configured rate.
+// earned. Dropping the fraction would make a steady stream slower than the
+// configured rate; not moving lastRefill would credit the same interval again
+// on the next call and make it faster.
 func TestRelayRateLimiter_FractionalRefillAccumulatesAcrossRefusals(t *testing.T) {
 	t.Parallel()
 	rl, clock := newTestRelayLimiter()
@@ -113,26 +102,25 @@ func TestRelayRateLimiter_FractionalRefillAccumulatesAcrossRefusals(t *testing.T
 	}
 }
 
-func TestRelayRateLimiter_CleanupEvictsOnlyBucketsIdlePastMaxAge(t *testing.T) {
+func TestRelayRateLimiter_SweepEvictsOnlyBucketsIdlePastCleanupAge(t *testing.T) {
 	t.Parallel()
 	rl, clock := newTestRelayLimiter()
-	const maxAge = 5 * time.Minute
 
 	rl.allow("stale-peer")
-	clock.advance(maxAge)
+	clock.advance(relayLimiterCleanupAge)
 	rl.allow("fresh-peer")
 
-	rl.cleanup(maxAge)
+	rl.sweepIdle()
 	if !relayLimiterHasBucket(rl, "stale-peer") {
-		t.Fatal("a bucket idle for exactly maxAge must be kept")
+		t.Fatal("a bucket idle for exactly the cleanup age must be kept")
 	}
 
 	clock.advance(time.Nanosecond)
-	rl.cleanup(maxAge)
+	rl.sweepIdle()
 	if relayLimiterHasBucket(rl, "stale-peer") {
-		t.Fatal("a bucket idle for longer than maxAge must be evicted")
+		t.Fatal("a bucket idle for longer than the cleanup age must be evicted")
 	}
 	if !relayLimiterHasBucket(rl, "fresh-peer") {
-		t.Fatal("a bucket used inside maxAge must be kept")
+		t.Fatal("a bucket used inside the cleanup age must be kept")
 	}
 }

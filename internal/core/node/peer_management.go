@@ -111,7 +111,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			// tick is the resolution; the per-entry exponential schedule
 			// provides the actual pacing.
 			s.retryDueDeliveries(time.Now().UTC())
-			s.relayLimiter.cleanup(5 * time.Minute)
+			s.relayLimiter.sweepIdle()
 			if s.announceLimiter != nil {
 				// Phase 4 13.7: drop per-peer announce buckets for
 				// identities idle past the cleanup horizon. The
@@ -120,7 +120,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 				// must keep accumulating abuse history (a peer
 				// flipping every 6 min would otherwise get a
 				// fresh bucket each time).
-				s.announceLimiter.cleanup(announceLimiterCleanupAge)
+				s.announceLimiter.sweepIdle()
 			}
 			s.unprovenRouting.cleanup(time.Now())
 			s.maybeSavePeerState()

@@ -733,9 +733,10 @@ func newTestServiceWithRouting(t *testing.T, localIdentity domain.PeerIdentity) 
 	// exhaustion / no alternative), which dereferences
 	// s.relayLimiter. Production NewService always wires it; the
 	// routing test fixture must too, otherwise onRelayHopAckTimeout
-	// nil-panics. An empty limiter is allow-all, so it does not
-	// change the behaviour of tests that never reach the gossip
-	// path.
+	// nil-panics. Every peer starts with a full relayBurstPerPeer
+	// bucket, so the limiter only throttles a test that relays more
+	// frames than that to one peer; tests that never reach the
+	// gossip path are unaffected.
 	svc.relayLimiter = newRelayRateLimiter(time.Now)
 	return svc
 }

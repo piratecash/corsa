@@ -56,6 +56,11 @@ import (
 // deterministically in tests.
 type announceRateLimiter struct {
 	buckets *tokenBucketSet[penaltySubject]
+	// idleAge is how long a bucket may go untouched before sweepIdle evicts
+	// it. The constructor fixes it next to the bucket policy instead of the
+	// sweep's caller choosing it, so "never swept sooner than a full refill"
+	// is checked against exactly what production wires.
+	idleAge time.Duration
 }
 
 // announceBurstRoutesPerPeer is the maximum number of route entries
@@ -86,10 +91,13 @@ const announceBurstRoutesPerPeer = 10000
 const announceRefillRoutesPerSec = 200
 
 // announceLimiterCleanupAge is the inactivity window after which a
-// per-peer bucket entry is removed from the map (called by the
-// existing cleanup loop on a sweep). Tuned long enough to survive a
+// per-peer bucket entry is removed from the map by sweepIdle (run on
+// every bootstrapLoop tick). Tuned long enough to survive a
 // reconnect cycle so the abuse history persists across short
 // outages, short enough that a long-departed peer's slot frees up.
+// It must also stay at least as long as a drained bucket takes to
+// refill (announceBurstRoutesPerPeer / announceRefillRoutesPerSec =
+// 50 s): an eviction hands the peer a full bucket.
 const announceLimiterCleanupAge = 30 * time.Minute
 
 // newAnnounceRateLimiter builds a limiter whose buckets refill and age by
@@ -101,6 +109,7 @@ func newAnnounceRateLimiter(clock func() time.Time) *announceRateLimiter {
 			burst:           announceBurstRoutesPerPeer,
 			refillPerSecond: announceRefillRoutesPerSec,
 		}, clock),
+		idleAge: announceLimiterCleanupAge,
 	}
 }
 
@@ -112,8 +121,8 @@ func newAnnounceRateLimiter(clock func() time.Time) *announceRateLimiter {
 // empty announce frames pass 1, while route_poison_v2 passes
 // len(identities) (one per listed identity), so they still consume the
 // per-peer rate (and a flood of control frames is bounded by
-// announceRefillRoutesPerSec). cost <= 0 is clamped to 1 so a buggy caller
-// never silently bypasses the limiter.
+// announceRefillRoutesPerSec). cost <= 0 is charged as 1 (by
+// tokenBucketSet.take) so a buggy caller never silently bypasses the limiter.
 //
 // Returns true and decrements `cost` tokens on success. Returns false
 // when the bucket holds fewer than `cost` tokens — the receive
@@ -130,22 +139,16 @@ func (rl *announceRateLimiter) allow(subject penaltySubject, cost int) bool {
 		// signal instead.
 		return true
 	}
-	if cost < 1 {
-		// Defensive clamp: a caller that passes 0 / negative cost
-		// (forgot to count entries, off-by-one) would otherwise
-		// silently bypass the limiter forever. Treating it as 1 keeps
-		// the call accounted for; the canonical caller passes
-		// max(1, len(entries)).
-		cost = 1
-	}
+	// A cost below 1 (a caller that forgot to count entries) is charged as
+	// 1 by take; the canonical caller passes max(1, len(entries)).
 	return rl.buckets.take(subject, cost)
 }
 
-// cleanup removes stale buckets for peers that haven't been seen
-// recently. Mirrors relayRateLimiter.cleanup; the limiter's caller is
+// sweepIdle evicts buckets idle for longer than the limiter's idle age.
+// Mirrors relayRateLimiter.sweepIdle; the limiter's caller is
 // responsible for invoking this periodically (the bucket map otherwise
 // grows monotonically with the set of identities seen during the
 // process lifetime).
-func (rl *announceRateLimiter) cleanup(maxAge time.Duration) {
-	rl.buckets.evictIdle(maxAge)
+func (rl *announceRateLimiter) sweepIdle() {
+	rl.buckets.evictIdle(rl.idleAge)
 }

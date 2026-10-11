@@ -89,11 +89,24 @@ func TestConnRateLimiterIsolatesIPs(t *testing.T) {
 	}
 }
 
+// An address the listener could not parse is not counted against any window:
+// on a frozen clock, well past the per-window limit, every attempt passes.
 func TestConnRateLimiterEmptyIPAllowed(t *testing.T) {
 	t.Parallel()
 	cl, _ := newTestConnLimiter()
-	if !cl.allowConnect("") {
-		t.Fatal("empty IP should always be allowed")
+	attempts := defaultConnRateLimit + 5
+	if got := countAllowed(attempts, func() bool { return cl.allowConnect("") }); got != attempts {
+		t.Fatalf("empty IP admitted %d of %d attempts; it must always be allowed", got, attempts)
+	}
+}
+
+// Construction with a nil clock falls back to the wall clock instead of
+// leaving a nil func to be called on the first attempt.
+func TestConnRateLimiterNilClockFallsBackToWallClock(t *testing.T) {
+	t.Parallel()
+	cl := newConnRateLimiter(nil)
+	if !cl.allowConnect("10.0.0.9") {
+		t.Fatal("the first connection on a limiter built with a nil clock must pass")
 	}
 }
 

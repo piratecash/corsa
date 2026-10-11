@@ -77,16 +77,16 @@ func TestAnnounceRateLimiter_CleanupRemovesStaleBuckets(t *testing.T) {
 	peer := provenIdentitySubject(domain.PeerIdentityFromWire("aa00000000000000000000000000000000000001"))
 	rl.allow(peer, 1)
 
-	clock.advance(time.Hour - time.Second)
-	rl.cleanup(time.Hour)
+	clock.advance(announceLimiterCleanupAge)
+	rl.sweepIdle()
 	if !announceLimiterHasBucket(rl, peer) {
-		t.Fatal("cleanup must keep a bucket used inside maxAge")
+		t.Fatal("the sweep must keep a bucket idle for exactly the cleanup age")
 	}
 
-	clock.advance(2 * time.Second)
-	rl.cleanup(time.Hour)
+	clock.advance(time.Nanosecond)
+	rl.sweepIdle()
 	if announceLimiterHasBucket(rl, peer) {
-		t.Fatal("cleanup must remove a bucket idle for longer than maxAge")
+		t.Fatal("the sweep must remove a bucket idle for longer than the cleanup age")
 	}
 }
 
