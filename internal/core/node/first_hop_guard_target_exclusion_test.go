@@ -191,7 +191,7 @@ func pinnedGuard(id domain.PeerIdentity, seq uint64, sampledAt time.Time) guardE
 // input fixed and the clock hand-driven.
 type guardExclusionFixture struct {
 	guards *firstHopGuards
-	clock  *guardTestClock
+	clock  *manualTestClock
 	pinned []domain.PeerIdentity
 	live   []guardCandidate
 }
@@ -207,7 +207,7 @@ type guardExclusionFixture struct {
 func newGuardExclusionFixture(t *testing.T, pinnedCount, freshCount int) *guardExclusionFixture {
 	t.Helper()
 
-	seedClock := &guardTestClock{at: time.Unix(1780000000, 0).UTC()}
+	seedClock := newManualTestClock()
 	sampledAt := seedClock.now().Add(-time.Hour)
 
 	pinned := make([]domain.PeerIdentity, 0, pinnedCount)

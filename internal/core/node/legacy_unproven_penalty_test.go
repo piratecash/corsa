@@ -54,7 +54,10 @@ func newLegacyPenaltyService(t *testing.T) *Service {
 	t.Helper()
 	svc := newTestServiceWithRouting(t, idNodeA)
 	svc.eventBus = newStormBus(t)
-	svc.announceLimiter = newAnnounceRateLimiter()
+	// A clock that never moves: the flood tests drain a whole burst and then
+	// expect it to stay drained, which wall-clock refill does not guarantee
+	// under the race detector.
+	svc.announceLimiter, _ = newTestAnnounceLimiter()
 	svc.health = make(map[domain.PeerAddress]*peerHealth)
 	svc.announceLoop.StateRegistry().MarkReconnected(idPeerB,
 		[]routing.PeerCapability{domain.CapMeshRoutingV1, domain.CapMeshRoutingV2})

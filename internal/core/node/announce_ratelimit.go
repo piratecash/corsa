@@ -51,9 +51,16 @@ import (
 // Behaviour on exhaustion: the frame is dropped at the receive-handler
 // entry with a warn-log carrying sender identity, frame type, and the
 // current bucket state. Storage is not touched; no event is published.
+//
+// Time is read only through the injected clock (the wall clock in
+// production), so refill and stale-bucket cleanup can be driven
+// deterministically in tests.
 type announceRateLimiter struct {
 	mu      sync.Mutex
 	buckets map[penaltySubject]*tokenBucket
+	// clock is set once in newAnnounceRateLimiter and never written again,
+	// which is why it needs no protection from mu.
+	clock func() time.Time
 }
 
 // announceBurstRoutesPerPeer is the maximum number of route entries
@@ -90,9 +97,17 @@ const announceRefillRoutesPerSec = 200
 // outages, short enough that a long-departed peer's slot frees up.
 const announceLimiterCleanupAge = 30 * time.Minute
 
-func newAnnounceRateLimiter() *announceRateLimiter {
+// newAnnounceRateLimiter builds a limiter whose buckets refill and age by
+// clock. Production passes time.Now; a nil clock falls back to it, the same
+// as the package's other clock-driven structures, so a missing argument
+// cannot turn into a nil-func call on the receive path.
+func newAnnounceRateLimiter(clock func() time.Time) *announceRateLimiter {
+	if clock == nil {
+		clock = time.Now
+	}
 	return &announceRateLimiter{
 		buckets: make(map[penaltySubject]*tokenBucket),
+		clock:   clock,
 	}
 }
 
@@ -134,7 +149,7 @@ func (rl *announceRateLimiter) allow(subject penaltySubject, cost int) bool {
 	defer rl.mu.Unlock()
 
 	b, ok := rl.buckets[subject]
-	now := time.Now()
+	now := rl.clock()
 	if !ok {
 		b = &tokenBucket{
 			tokens:     announceBurstRoutesPerPeer,
@@ -165,7 +180,7 @@ func (rl *announceRateLimiter) allow(subject penaltySubject, cost int) bool {
 func (rl *announceRateLimiter) cleanup(maxAge time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	cutoff := time.Now().Add(-maxAge)
+	cutoff := rl.clock().Add(-maxAge)
 	for subject, b := range rl.buckets {
 		if b.lastRefill.Before(cutoff) {
 			delete(rl.buckets, subject)

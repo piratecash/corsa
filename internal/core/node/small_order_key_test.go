@@ -56,7 +56,7 @@ func forgedKeyBase64() string {
 // error and the same 100 ban points as any other invalid binding.
 func TestHelloWithSmallOrderKeyIsRefusedWithBan(t *testing.T) {
 	t.Parallel()
-	svc, stop := startTestNode(t, config.Node{ListenAddress: freeAddress(t)})
+	svc, stop := startTestNodeWithoutDials(t, config.Node{ListenAddress: freeAddress(t)})
 	defer stop()
 
 	conn, err := net.DialTimeout("tcp", svc.externalListenAddress(), 2*time.Second)
@@ -91,7 +91,7 @@ func TestHelloWithSmallOrderKeyIsRefusedWithBan(t *testing.T) {
 // and is charged nothing.
 func TestHelloWithHonestKeyIsUnaffected(t *testing.T) {
 	t.Parallel()
-	svc, stop := startTestNode(t, config.Node{ListenAddress: freeAddress(t)})
+	svc, stop := startTestNodeWithoutDials(t, config.Node{ListenAddress: freeAddress(t)})
 	defer stop()
 	id, err := identity.Generate()
 	if err != nil {

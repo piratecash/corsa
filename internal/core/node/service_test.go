@@ -180,7 +180,7 @@ func TestInboundIncompatibleProtocolEmitsPerPeerBannedNotice(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -427,7 +427,7 @@ func TestV2InvalidAuthSignatureAccumulatesBanScore(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress: address,
 	})
 	defer stop()
@@ -2274,6 +2274,31 @@ func startTestNodeWithSetup(t *testing.T, cfg config.Node, setup func(*Service))
 	return startTestService(t, ctx, cancel, svc)
 }
 
+// startTestNodeWithoutDials is startTestNode for a test that asserts on what
+// the node records about its peers — health, scores, failure counts, cooldowns,
+// candidate order, the persisted peer file — and not on connecting to them.
+//
+// A running node's connection manager dials whatever candidates it knows
+// whenever it fills: first right after bootstrapLoop calls
+// NotifyBootstrapReady (which AwaitReady does not wait for, so a peer the test
+// adds just after start can already be in that fill), then on every periodic
+// tick, on an InboundClosed or NewPeersDiscovered hint, and when a slot gives
+// up on its peer; add_peer dials its target directly. Test addresses are
+// unreachable, and on some hosts such a dial fails within milliseconds; the
+// failure is charged to the peer (onCMDialFailed → markPeerDisconnected →
+// peerScoreFailure and a cooldown) while the test is still asserting.
+//
+// With no outbound slots no fill has room for a dial, and an add_peer finds a
+// full table with nothing to evict and is refused, so the peer state the test
+// reads is exactly what the test wrote, however the run is timed. Inbound
+// connections are unaffected.
+func startTestNodeWithoutDials(t *testing.T, cfg config.Node) (*Service, func()) {
+	t.Helper()
+	return startTestNodeWithSetup(t, cfg, func(svc *Service) {
+		svc.connManager.config.MaxSlotsFn = func() int { return 0 }
+	})
+}
+
 func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Identity) (*Service, func()) {
 	t.Helper()
 	return startTestNodeWithIdentityAndSetup(t, cfg, id, nil)
@@ -3399,7 +3424,7 @@ func TestBootstrapLoopFlushesOnShutdown(t *testing.T) {
 	peersPath := filepath.Join(dir, "peers.json")
 	address := freeAddress(t)
 
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{"10.0.0.1:64646"},
 		PeersStatePath: peersPath,
@@ -3440,7 +3465,7 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 	peersPath := filepath.Join(dir, "peers.json")
 
 	address1 := freeAddress(t)
-	svc1, stop1 := startTestNode(t, config.Node{
+	svc1, stop1 := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address1,
 		BootstrapPeers: []string{},
 		PeersStatePath: peersPath,
@@ -3466,7 +3491,7 @@ func TestNodeRestartPreservesPersistedPeers(t *testing.T) {
 
 	// Start a new node with different listen address but same peers file.
 	address2 := freeAddress(t)
-	svc2, stop2 := startTestNode(t, config.Node{
+	svc2, stop2 := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address2,
 		BootstrapPeers: []string{"10.0.0.99:64646"}, // different bootstrap
 		PeersStatePath: peersPath,
@@ -3647,7 +3672,7 @@ func TestMaybeSavePeerStateRespectsInterval(t *testing.T) {
 	peersPath := filepath.Join(dir, "peers.json")
 	address := freeAddress(t)
 
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{"10.0.0.1:64646"},
 		PeersStatePath: peersPath,
@@ -3783,7 +3808,7 @@ func TestPeerDialCandidatesSortedByScore(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -3825,7 +3850,7 @@ func TestPeerDialCandidatesSkipsCooldown(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -3866,7 +3891,7 @@ func TestPeerDialCandidatesCooldownExpires(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -3904,7 +3929,7 @@ func TestPeerDialCandidatesSkipsBannedPeer(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -3943,7 +3968,7 @@ func TestPeerDialCandidatesBanExpires(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -3977,7 +4002,7 @@ func TestPromotePeerAddressDoesNotClearBannedUntil(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4029,7 +4054,7 @@ func TestPromotePeerAddressDoesNotClearIPWideBanForAlternatePort(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4071,7 +4096,7 @@ func TestEvictStalePeersRemovesBadPeers(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4131,7 +4156,7 @@ func TestEvictStalePeersKeepsBootstrap(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{"10.0.0.99:64646"},
 		Type:           domain.NodeTypeFull,
@@ -4170,7 +4195,7 @@ func TestEvictStalePeersRespectsInterval(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4214,7 +4239,7 @@ func TestEvictStalePeersIgnoresLastDisconnectedAt(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4262,7 +4287,7 @@ func TestEvictStalePeers_ProtectsActiveVersionLockout(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4357,7 +4382,7 @@ func TestEvictOrphanedHealthEntries(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4472,7 +4497,7 @@ func TestEvictOrphanedHealthEntriesRefreshesAggregate(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4515,7 +4540,7 @@ func TestFallbackAddressHealthTracking(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4571,7 +4596,7 @@ func TestFallbackCooldownAppliesToAllVariants(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4649,7 +4674,7 @@ func TestEvictRuntimeDiscoveredPeerWithoutFlush(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -4779,7 +4804,7 @@ func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{"10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646"},
 		Type:           domain.NodeTypeFull,
@@ -4805,6 +4830,11 @@ func TestDialCandidatesSortStableWithEqualScores(t *testing.T) {
 		case "10.0.0.4:64646", "10.0.0.5:64646":
 			discoveredIdx[addr] = i
 		}
+	}
+	// The order check below compares only the peers it finds, so a missing
+	// candidate would pass it vacuously.
+	if len(bootstrapIdx) != 3 || len(discoveredIdx) != 2 {
+		t.Fatalf("expected all 3 bootstrap and 2 discovered peers as candidates, got %v", addresses)
 	}
 
 	for bAddr, bIdx := range bootstrapIdx {
@@ -5290,7 +5320,7 @@ func TestAddPeerFrameResetsCooldown(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -7098,7 +7128,7 @@ func TestPromotePeerAddress(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -7750,7 +7780,7 @@ func TestMarkPeerConnectedSetsDirection(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -7790,7 +7820,7 @@ func TestMarkPeerDisconnectedClearsDirection(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -7883,7 +7913,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -7957,7 +7987,7 @@ func TestInboundPeerHealthIncludesDirection(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -7988,7 +8018,7 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -9497,7 +9527,7 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})

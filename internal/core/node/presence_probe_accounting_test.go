@@ -21,7 +21,7 @@ import (
 // set and a projector, no network.
 func probeAccountingService(t *testing.T, seed ...guardEntry) *Service {
 	t.Helper()
-	clock := &guardTestClock{at: time.Unix(1780000000, 0).UTC()}
+	clock := newManualTestClock()
 	svc := &Service{
 		presenceProjector: newPresenceProjector(),
 		presenceClock:     clock.now,

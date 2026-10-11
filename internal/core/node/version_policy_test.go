@@ -3528,7 +3528,7 @@ func TestVersionDiagnostics_DiskRestartRoundTrip(t *testing.T) {
 
 	// --- Phase 1: start a node, create incompatible-version state, flush. ---
 	addr1 := freeAddress(t)
-	svc1, stop1 := startTestNode(t, config.Node{
+	svc1, stop1 := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  addr1,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,
@@ -3567,7 +3567,7 @@ func TestVersionDiagnostics_DiskRestartRoundTrip(t *testing.T) {
 
 	// --- Phase 2: start a fresh node from the same peers.json. ---
 	addr2 := freeAddress(t)
-	svc2, stop2 := startTestNode(t, config.Node{
+	svc2, stop2 := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  addr2,
 		BootstrapPeers: []string{},
 		Type:           domain.NodeTypeFull,

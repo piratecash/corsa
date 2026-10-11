@@ -21,7 +21,7 @@ func TestMarkPeerConnectedIncrementsScore(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -49,7 +49,7 @@ func TestMarkPeerDisconnectedWithErrorDecrementsScore(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -76,7 +76,7 @@ func TestMarkPeerDisconnectedCleanDecrementsLess(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -104,7 +104,7 @@ func TestScoreClampedOnRepeatedFailures(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -263,7 +263,7 @@ func TestFlushPeerStateWritesFile(t *testing.T) {
 	peersPath := filepath.Join(dir, "peers.json")
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{"10.0.0.1:64646"},
 		PeersStatePath: peersPath,
@@ -425,7 +425,7 @@ func TestCleanDisconnectResetsConsecutiveFailures(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -471,7 +471,7 @@ func TestFlushPeerStateRetryOnWriteFailure(t *testing.T) {
 	}
 	badPath := filepath.Join(badDir, "peers.json")
 
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{"10.0.0.1:64646"},
 		PeersStatePath: badPath,
@@ -496,7 +496,7 @@ func TestMarkPeerConnectedSetsLastUsefulReceiveAt(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -529,7 +529,7 @@ func TestComputePeerStateHealthyAfterInboundConnect(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -563,7 +563,7 @@ func TestInboundPingUpdatesHealth(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})
@@ -595,7 +595,7 @@ func TestInboundPongUpdatesHealth(t *testing.T) {
 	t.Parallel()
 
 	address := freeAddress(t)
-	svc, stop := startTestNode(t, config.Node{
+	svc, stop := startTestNodeWithoutDials(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: []string{},
 	})

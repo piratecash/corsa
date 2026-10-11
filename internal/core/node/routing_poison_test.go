@@ -465,8 +465,9 @@ func TestHandleRoutePoison_RateLimited(t *testing.T) {
 	// 13.7; the poison handler short-circuits the rate-limit branch on
 	// nil. This test exercises the actual throttle, so wire a fresh
 	// limiter explicitly — same shape NewService gives the production
-	// service.
-	svc.announceLimiter = newAnnounceRateLimiter()
+	// service. Its clock never moves, so no token refills between the
+	// drain below and the poison frame.
+	svc.announceLimiter, _ = newTestAnnounceLimiter()
 	addDirectViaIdentity(t, svc, idPeerB)
 	if _, err := svc.routingTable.UpdateRoute(routing.RouteEntry{
 		Identity: idTargetX,
@@ -492,12 +493,6 @@ func TestHandleRoutePoison_RateLimited(t *testing.T) {
 	if svc.announceLimiter.allow(provenIdentitySubject(idPeerB), 1) {
 		t.Fatalf("precondition: bucket should be exhausted after burst drain")
 	}
-	// Re-seed exactly zero tokens to remove any micro-refill that
-	// elapsed between the drain and this point. After this the next
-	// poison allow (cost=1) is precisely the one that should fail.
-	svc.announceLimiter.mu.Lock()
-	svc.announceLimiter.buckets[provenIdentitySubject(idPeerB)].tokens = 0
-	svc.announceLimiter.mu.Unlock()
 
 	frame := protocol.RoutePoisonFrame{
 		Type:     protocol.RoutePoisonFrameType,

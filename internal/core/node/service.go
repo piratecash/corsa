@@ -2458,7 +2458,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 
 	svc.relayStates = newRelayStateStore()
 	svc.relayLimiter = newRelayRateLimiter()
-	svc.announceLimiter = newAnnounceRateLimiter()
+	svc.announceLimiter = newAnnounceRateLimiter(time.Now)
 	svc.connLimiter = newConnRateLimiter()
 	svc.cmdLimiter = newCommandRateLimiter()
 	svc.inboundByIP = make(map[string]int)

@@ -14,13 +14,21 @@ import (
 // the measurement is the whole argument: rotation does not change the risk per
 // choice, it multiplies the number of choices.
 
-// guardTestClock is a hand-driven clock. The policy stores wall-clock dates
-// because the set is durable, so a test that used the real clock could not
-// reach a back-off expiry without sleeping.
-type guardTestClock struct{ at time.Time }
+// manualTestClock is the package's hand-driven clock: it moves only when a
+// test advances it. A structure that decides by elapsed time — a guard
+// back-off expiry, a token-bucket refill — can then be stepped across its
+// thresholds without sleeping, and stands still while a slow run (the race
+// detector) is still asserting.
+type manualTestClock struct{ at time.Time }
 
-func (c *guardTestClock) now() time.Time          { return c.at }
-func (c *guardTestClock) advance(d time.Duration) { c.at = c.at.Add(d) }
+// newManualTestClock starts a clock at a fixed instant, so dates the tests
+// read are the same on every run.
+func newManualTestClock() *manualTestClock {
+	return &manualTestClock{at: time.Unix(1780000000, 0).UTC()}
+}
+
+func (c *manualTestClock) now() time.Time          { return c.at }
+func (c *manualTestClock) advance(d time.Duration) { c.at = c.at.Add(d) }
 
 // recordingGuardPersister stands in for the durable store.
 type recordingGuardPersister struct {
@@ -47,9 +55,9 @@ func (p *recordingGuardPersister) Persist(entries []guardEntry) error {
 //
 // The rule this encodes: a test may pin randomness, but pinning it to the value
 // that makes the code look right is not a test.
-func newGuardTestSet(t *testing.T, seed ...guardEntry) (*firstHopGuards, *guardTestClock, *recordingGuardPersister) {
+func newGuardTestSet(t *testing.T, seed ...guardEntry) (*firstHopGuards, *manualTestClock, *recordingGuardPersister) {
 	t.Helper()
-	clock := &guardTestClock{at: time.Unix(1780000000, 0).UTC()}
+	clock := newManualTestClock()
 	persister := &recordingGuardPersister{}
 	guards := newFirstHopGuards(clock.now, persister, seed)
 	// A GROWING offset, not a constant one: a constant shifts every stored
@@ -304,7 +312,7 @@ func TestASmallNeighbourhoodStillGetsGuards(t *testing.T) {
 // and it correlates across nodes when everybody stamps a round number. Tor
 // fuzzes every stored date by RAND(now, LIFETIME/10) for this.
 func TestSampledDatesAreRandomised(t *testing.T) {
-	clock := &guardTestClock{at: time.Unix(1780000000, 0).UTC()}
+	clock := newManualTestClock()
 	guards := newFirstHopGuards(clock.now, &recordingGuardPersister{}, nil)
 
 	guards.Pick([]guardCandidate{guardLive(domaintest.ID("z"), true, clock.now())})
