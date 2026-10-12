@@ -222,6 +222,14 @@ type Service struct {
 	// the state the connection's join was added for.
 	heartbeatIntervalOverride time.Duration
 
+	// bootstrapTickOverride is a TEST-ONLY replacement for bootstrapLoop's
+	// two-second ticker, nil in production. The test sets it before
+	// bootstrapLoop starts, and the loop reads it once, at its start. It exists
+	// so a test can run the periodic sweeps by sending one tick instead of
+	// sleeping through a real one; the loop is a single goroutine, so the test
+	// knows a tick has finished once its next send is accepted.
+	bootstrapTickOverride <-chan time.Time
+
 	// sendAdmissionBarrier is a TEST-ONLY synchronisation point, nil in
 	// production, run by BOTH send tiers between the peer-state gate and the
 	// hand-over to a queue (runSendAdmissionBarrier, peer_management.go). One

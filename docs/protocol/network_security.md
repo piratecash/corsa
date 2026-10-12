@@ -16,6 +16,8 @@ Every incoming TCP connection is checked against a per-IP fixed-window counter b
 
 The window opens at an IP's first attempt and lasts `defaultConnRateWindow`. Attempts inside it are counted, and every attempt past `defaultConnRateLimit` is refused. The first attempt once the window has run its full length (elapsed ≥ the window) opens a new window with a count of 1. This is a fixed window, not a sliding one: a sender can place up to twice the limit around a window boundary. Time is read only through a clock injected when the limiter is built — the wall clock in production — so window expiry is tested at exact instants.
 
+**Every IP's entry is bounded in time.** The limiter keeps one entry per source IP, and an attacker that cycles source addresses would otherwise grow that map for the life of the process. `connRateLimiter.sweepIdle` drops every window that started more than `defaultConnRateWindow` ago; `bootstrapLoop` runs it on every 2-second tick through `Service.sweepIdleRateLimiters`, so an IP's entry is removed on the first tick after its window has expired. The horizon is the window itself, read from the same field the reset rule uses, so it cannot be set below it, and dropping an entry grants nothing: the reset rule opens a fresh window at elapsed ≥ the window, the sweep drops only at elapsed > the window, so the IP's next attempt counts 1 either way, and an IP still inside its window keeps its count. The sweep runs with no domain mutex held and takes only the limiter's own leaf mutex.
+
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
 | `defaultConnRateLimit` | 10 connections/window | Legitimate peers maintain 1–2 persistent connections |
@@ -34,9 +36,9 @@ Every frame read on an inbound connection has a deadline. If no complete frame a
 
 ### 3. Per-Connection Command Rate Limiting
 
-**File**: `internal/core/node/conn_limiter.go`, `internal/core/node/token_bucket.go`, `internal/core/node/service.go`
+**File**: `internal/core/node/conn_limiter.go`, `internal/core/node/token_bucket.go`, `internal/core/node/service.go`, `internal/core/node/peer_management.go`, `internal/core/node/peer_sessions.go`
 
-Each inbound TCP connection has a token-bucket rate limiter for command frames. This is separate from the relay rate limiter (which covers `relay_message` only). When the bucket is exhausted, the connection receives a `rate-limited` error and is closed, and the IP receives ban points.
+Each inbound TCP connection has a token-bucket rate limiter for command frames. This is separate from the relay rate limiter (which covers `relay_message` only). When the bucket is exhausted, the connection receives a `rate-limited` error and is closed, and the IP receives ban points. Each outbound session this node dialled has a bucket of the same limiter too, keyed `outbound:<connID>` and charged only for the announce control frames (`request_resync`, `route_poison_v1`, `route_poison_v2`) arriving on it (`outboundControlFrameAllowed`); an exhausted outbound bucket drops the frame and keeps the session.
 
 The bucket is the package's shared `tokenBucketSet`, the same one behind the relay and announce limiters: a fresh connection starts with the full burst, tokens are fractional and refill at `cmdRefillRate` per elapsed second up to the burst, each command costs one token, and time is read only through a clock injected at construction (the wall clock in production).
 
@@ -45,6 +47,9 @@ The bucket is the package's shared `tokenBucketSet`, the same one behind the rel
 | `cmdBurstPerConn` | 100 commands | Absorbs legitimate batch operations |
 | `cmdRefillRate` | 30 commands/second | Well above normal peer behavior (~5/s sustained) |
 | `banIncrementRateLimit` | 200 ban points | Signals intentional abuse; 5 violations → blacklist |
+| `cmdLimiterIdleAge` | 5 minutes | Idle horizon of the sweep below; far above the ≈3.3 s a drained bucket needs to refill |
+
+**Bucket lifetime.** An inbound connection's bucket is keyed by its remote address and removed when the read loop exits (`removeConn`); an outbound session's bucket (`outbound:<connID>`, charged for `request_resync` / `route_poison_v1` / `route_poison_v2` arriving on a session this node dialled) is removed by the goroutine that dispatches that session's frames once it can dispatch no more (`dropOutboundControlFrameBucket`), whoever withdrew the session-map entry: the connection manager's teardown withdraws the entry while the serve loop may still drain buffered inbox frames, and a control frame dispatched then would otherwise recreate a bucket nobody drops. These removals release a closed connection's bucket at once; the bound behind them, for a bucket any future path forgets, is `commandRateLimiter.sweepIdle`, run on every 2-second `bootstrapLoop` tick through `Service.sweepIdleRateLimiters`: it evicts a bucket not refilled for longer than `cmdLimiterIdleAge` (a bucket idle for exactly that long is kept). The horizon is part of the bucket policy (`tokenBucketPolicy.idleAge`), not something the caller passes, and the shared `tokenBucketSet` never sweeps sooner than a full refill (`cmdBurstPerConn / cmdRefillRate`, rounded up) whatever a policy declares, so an evicted bucket would have been full anyway; the relay and announce limiters get the same guarantee from the same set; a connection that keeps sending while drained restamps its bucket on every refused command and is never evicted. The sweep runs with no domain mutex held and takes only the bucket set's leaf mutex.
 
 **Exempt classes, and how the exemption is decided.** Three classes skip the
 bucket: `file_command` (the file data plane), the BULK announce frames
@@ -427,6 +432,8 @@ graph TB
 
 Окно открывается первой попыткой IP и длится `defaultConnRateWindow`. Попытки внутри окна считаются, и каждая попытка сверх `defaultConnRateLimit` отклоняется. Первая попытка после того, как окно отработало полную длину (прошло ≥ окна), открывает новое окно со счётчиком 1. Это фиксированное окно, а не скользящее: отправитель может уложить до двух лимитов вокруг границы окна. Время читается только через часы, переданные лимитеру при создании (в production — системные), поэтому истечение окна тестируется в точные моменты времени.
 
+**Запись каждого IP ограничена во времени.** Лимитер хранит по одной записи на IP источника, и атакующий, перебирающий адреса источника, иначе раздувал бы эту карту до конца жизни процесса. `connRateLimiter.sweepIdle` удаляет каждое окно, открытое больше `defaultConnRateWindow` назад; `bootstrapLoop` вызывает его на каждом 2-секундном тике через `Service.sweepIdleRateLimiters`, поэтому запись IP удаляется на первом тике после истечения её окна. Горизонт — само окно, читаемое из того же поля, что и правило сброса, поэтому задать его короче окна нельзя, и удаление записи ничего не дарит: правило сброса открывает новое окно при прошедшем ≥ окна, очистка удаляет только при прошедшем > окна, так что следующая попытка IP в обоих случаях получает счётчик 1, а IP, ещё находящийся внутри окна, сохраняет свой счётчик. Очистка выполняется без доменных мьютексов и берёт только собственный листовой мьютекс лимитера.
+
 | Параметр | Значение | Обоснование |
 |----------|----------|-------------|
 | `defaultConnRateLimit` | 10 соединений/окно | Легитимные пиры поддерживают 1–2 постоянных соединения |
@@ -445,9 +452,9 @@ graph TB
 
 ### 3. Ограничение скорости команд на соединение
 
-**Файл**: `internal/core/node/conn_limiter.go`, `internal/core/node/token_bucket.go`, `internal/core/node/service.go`
+**Файл**: `internal/core/node/conn_limiter.go`, `internal/core/node/token_bucket.go`, `internal/core/node/service.go`, `internal/core/node/peer_management.go`, `internal/core/node/peer_sessions.go`
 
-Каждое входящее TCP-соединение имеет token-bucket лимитер для командных фреймов. Это отдельно от лимитера relay (который покрывает только `relay_message`). При исчерпании бакета соединение получает ошибку `rate-limited` и закрывается, IP получает баллы бана.
+Каждое входящее TCP-соединение имеет token-bucket лимитер для командных фреймов. Это отдельно от лимитера relay (который покрывает только `relay_message`). При исчерпании бакета соединение получает ошибку `rate-limited` и закрывается, IP получает баллы бана. У каждой исходящей сессии, которую набрал этот узел, тоже есть бакет того же лимитера с ключом `outbound:<connID>`; он списывается только за control-кадры announce-плоскости (`request_resync`, `route_poison_v1`, `route_poison_v2`), пришедшие по ней (`outboundControlFrameAllowed`); исчерпанный исходящий бакет отбрасывает кадр, сессия остаётся.
 
 Бакет — общий для пакета `tokenBucketSet`, тот же, что у relay- и announce-лимитеров: новое соединение начинает с полного burst, токены дробные и пополняются со скоростью `cmdRefillRate` за каждую прошедшую секунду до потолка burst, каждая команда стоит один токен, а время читается только через часы, переданные при создании (в production — системные).
 
@@ -456,6 +463,9 @@ graph TB
 | `cmdBurstPerConn` | 100 команд | Поглощает легитимные пакетные операции |
 | `cmdRefillRate` | 30 команд/секунду | Значительно выше нормального поведения пира (~5/с) |
 | `banIncrementRateLimit` | 200 баллов бана | Сигнализирует преднамеренное злоупотребление; 5 нарушений → чёрный список |
+| `cmdLimiterIdleAge` | 5 минут | Горизонт простоя для очистки ниже; намного больше ≈3,3 с, за которые опустошённый бакет пополняется |
+
+**Время жизни бакета.** Бакет входящего соединения ключуется его удалённым адресом и удаляется при выходе из цикла чтения (`removeConn`); бакет исходящей сессии (`outbound:<connID>`, списывается за `request_resync` / `route_poison_v1` / `route_poison_v2`, пришедшие по сессии, которую набрал этот узел) удаляется горутиной, диспетчеризующей кадры этой сессии, когда она больше не может ничего диспетчеризовать (`dropOutboundControlFrameBucket`), кто бы ни снял запись сессии из map: teardown менеджера соединений снимает запись, пока цикл обслуживания ещё может дочитывать буферизованные inbox-кадры, и control-кадр, диспетчеризованный в этот момент, иначе заново создал бы бакет, который никто не удалит. Эти удаления освобождают бакет закрытого соединения сразу; граница за ними — для бакета, который забудет какой-нибудь будущий путь, — `commandRateLimiter.sweepIdle`, вызываемый на каждом 2-секундном тике `bootstrapLoop` через `Service.sweepIdleRateLimiters`: он удаляет бакет, не пополнявшийся дольше `cmdLimiterIdleAge` (бакет, простоявший ровно столько, остаётся). Горизонт — часть политики бакета (`tokenBucketPolicy.idleAge`), а не то, что передаёт вызывающий, и общий `tokenBucketSet` никогда не чистит раньше полного пополнения (`cmdBurstPerConn / cmdRefillRate`, с округлением вверх), что бы ни объявляла политика, поэтому удалённый бакет и так был бы полным; relay- и announce-лимитеры получают ту же гарантию от того же набора; соединение, которое продолжает слать в опустошённом состоянии, обновляет отметку бакета на каждой отклонённой команде и никогда не удаляется. Очистка выполняется без доменных мьютексов и берёт только листовой мьютекс набора бакетов.
 
 **Освобождённые классы и как принимается решение.** Ведро пропускают три
 класса: `file_command` (плоскость данных файлов), BULK-кадры announce-плоскости

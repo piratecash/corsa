@@ -168,8 +168,9 @@ func intersectCapabilities(local []domain.Capability, remote []string) []domain.
 // It takes the session and not its address because on a receive path those are
 // two different questions and only one of them is the right one. A reconnect
 // registers a replacement session under the SAME dial address while the
-// previous session's goroutines are still unwinding (the ownedCleanup block in
-// onCMSessionEstablished exists precisely for that overlap), so an
+// previous session's goroutines are still unwinding (the ownedCleanup checks
+// in withdrawServedCMSession and onCMSessionTeardown exist precisely for that
+// overlap), so an
 // address-keyed lookup taken from a frame that arrived on the old session
 // answers about the new one — and both directions of that answer are wrong: a
 // frame behind a capability the peer never declared on THIS connection gets

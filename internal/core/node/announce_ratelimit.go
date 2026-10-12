@@ -56,11 +56,6 @@ import (
 // deterministically in tests.
 type announceRateLimiter struct {
 	buckets *tokenBucketSet[penaltySubject]
-	// idleAge is how long a bucket may go untouched before sweepIdle evicts
-	// it. The constructor fixes it next to the bucket policy instead of the
-	// sweep's caller choosing it, so "never swept sooner than a full refill"
-	// is checked against exactly what production wires.
-	idleAge time.Duration
 }
 
 // announceBurstRoutesPerPeer is the maximum number of route entries
@@ -108,8 +103,8 @@ func newAnnounceRateLimiter(clock func() time.Time) *announceRateLimiter {
 		buckets: newTokenBucketSet[penaltySubject](tokenBucketPolicy{
 			burst:           announceBurstRoutesPerPeer,
 			refillPerSecond: announceRefillRoutesPerSec,
+			idleAge:         announceLimiterCleanupAge,
 		}, clock),
-		idleAge: announceLimiterCleanupAge,
 	}
 }
 
@@ -150,5 +145,5 @@ func (rl *announceRateLimiter) allow(subject penaltySubject, cost int) bool {
 // grows monotonically with the set of identities seen during the
 // process lifetime).
 func (rl *announceRateLimiter) sweepIdle() {
-	rl.buckets.evictIdle(rl.idleAge)
+	rl.buckets.sweepIdle()
 }

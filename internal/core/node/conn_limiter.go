@@ -103,12 +103,22 @@ func (cl *connRateLimiter) allowConnect(ip string) bool {
 	return w.count <= cl.maxPerWindow
 }
 
-// cleanup removes window entries whose window started more than maxAge ago.
-// Meant to be called periodically to bound map growth from abandoned IPs.
-func (cl *connRateLimiter) cleanup(maxAge time.Duration) {
+// sweepIdle drops every window that started more than windowSize ago.
+// bootstrapLoop runs it on every tick, which is what bounds the map: without
+// it each distinct source IP that ever reached the listener would keep an
+// entry for the life of the process.
+//
+// The horizon is the window itself, read from the same field allowConnect
+// resets on, so it cannot be configured below it. Dropping such a window
+// grants nothing: allowConnect would open a fresh window with a count of 1 on
+// that IP's next attempt anyway (it resets at elapsed >= windowSize), which is
+// exactly what a missing entry gives it. A window exactly windowSize old is
+// kept (strict Before); its next attempt resets it, so keeping it changes
+// nothing either.
+func (cl *connRateLimiter) sweepIdle() {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
-	cutoff := cl.clock().Add(-maxAge)
+	cutoff := cl.clock().Add(-cl.windowSize)
 	for ip, w := range cl.windows {
 		if w.windowStart.Before(cutoff) {
 			delete(cl.windows, ip)
@@ -143,6 +153,17 @@ const cmdBurstPerConn = 100
 // 30 commands/s is well above normal peer behavior (~5/s sustained).
 const cmdRefillRate = 30.0
 
+// cmdLimiterIdleAge is the inactivity window after which sweepIdle (run on
+// every bootstrapLoop tick) evicts a per-connection command bucket. Every
+// bucket has an owner that removes it when its connection ends — the inbound
+// read loop (removeConn) or the outbound session's goroutine
+// (dropOutboundControlFrameBucket) — so the sweep is only the backstop for a
+// bucket a future path forgets to drop. It must stay at least as long as a drained bucket takes to
+// refill (cmdBurstPerConn / cmdRefillRate ≈ 3.3 s): an evicted key comes back
+// with a full bucket, so a shorter horizon would be a refill shortcut for a
+// connection that is still open.
+const cmdLimiterIdleAge = 5 * time.Minute
+
 // newCommandRateLimiter builds a limiter whose buckets refill and age by
 // clock. Production passes time.Now; nil falls back to it (see
 // newTokenBucketSet).
@@ -151,6 +172,7 @@ func newCommandRateLimiter(clock func() time.Time) *commandRateLimiter {
 		buckets: newTokenBucketSet[string](tokenBucketPolicy{
 			burst:           cmdBurstPerConn,
 			refillPerSecond: cmdRefillRate,
+			idleAge:         cmdLimiterIdleAge,
 		}, clock),
 	}
 }
@@ -162,12 +184,13 @@ func (rl *commandRateLimiter) allowCommand(connKey string) bool {
 	return rl.buckets.take(connKey, 1)
 }
 
-// removeConn removes the bucket for a closed connection.
+// removeConn removes the bucket for a closed connection at once, so it does
+// not wait for sweepIdle.
 func (rl *commandRateLimiter) removeConn(connKey string) {
 	rl.buckets.forget(connKey)
 }
 
-// cleanup removes stale buckets for connections that haven't been seen recently.
-func (rl *commandRateLimiter) cleanup(maxAge time.Duration) {
-	rl.buckets.evictIdle(maxAge)
+// sweepIdle evicts buckets idle for longer than the limiter's idle age.
+func (rl *commandRateLimiter) sweepIdle() {
+	rl.buckets.sweepIdle()
 }

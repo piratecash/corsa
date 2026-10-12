@@ -53,8 +53,12 @@ func (s *Service) peerHealthFrame() protocol.Frame {
 }
 
 func (s *Service) bootstrapLoop(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	ticks := s.bootstrapTickOverride
+	if ticks == nil {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		ticks = ticker.C
+	}
 
 	// Signal ConnectionManager that bootstrap loading is complete.
 	// CM will call fill() on receipt, triggering the first outbound dials.
@@ -65,7 +69,7 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 		case <-ctx.Done():
 			s.flushPeerState()
 			return
-		case <-ticker.C:
+		case <-ticks:
 			s.cleanupExpiredMessagesForce()
 			s.cleanupExpiredNotices()
 			s.evictStalePeers()
@@ -111,22 +115,38 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 			// tick is the resolution; the per-entry exponential schedule
 			// provides the actual pacing.
 			s.retryDueDeliveries(time.Now().UTC())
-			s.relayLimiter.sweepIdle()
-			if s.announceLimiter != nil {
-				// Phase 4 13.7: drop per-peer announce buckets for
-				// identities idle past the cleanup horizon. The
-				// idle window is longer than the relay limiter's
-				// because reconnect bursts to the same identity
-				// must keep accumulating abuse history (a peer
-				// flipping every 6 min would otherwise get a
-				// fresh bucket each time).
-				s.announceLimiter.sweepIdle()
-			}
+			s.sweepIdleRateLimiters()
 			s.unprovenRouting.cleanup(time.Now())
 			s.maybeSavePeerState()
 			s.refreshAggregateStatus()
 			s.emitTrafficDeltas()
 		}
+	}
+}
+
+// sweepIdleRateLimiters drops per-key rate limiter entries idle past each
+// limiter's own horizon. bootstrapLoop calls it on every tick, and it is the
+// only thing that bounds those maps: every key a peer or a source address once
+// touched stays until it is swept, except a command bucket whose close path
+// removed it first. Each horizon lives in its limiter and is never shorter
+// than that limiter's window or full refill, so a sweep never hands a key a
+// fresher budget than it would have had anyway.
+//
+// Runs with no domain mutex held, as bootstrapLoop's tick does; each limiter
+// takes only its own leaf mutex.
+func (s *Service) sweepIdleRateLimiters() {
+	s.relayLimiter.sweepIdle()
+	s.connLimiter.sweepIdle()
+	s.cmdLimiter.sweepIdle()
+	if s.announceLimiter != nil {
+		// Phase 4 13.7: drop per-peer announce buckets for
+		// identities idle past the cleanup horizon. The
+		// idle window is longer than the relay limiter's
+		// because reconnect bursts to the same identity
+		// must keep accumulating abuse history (a peer
+		// flipping every 6 min would otherwise get a
+		// fresh bucket each time).
+		s.announceLimiter.sweepIdle()
 	}
 }
 
@@ -989,26 +1009,11 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 				s.peerMu.Lock()
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_held").Str("address", string(c.address)).Msg("peer_mu_writer")
 				s.deliveryMu.Lock()
-				// Best-effort cmdLimiter cleanup. Normally
-				// runPeerSession's error path (peer_sessions.go) has
-				// already deleted the session and dropped the bucket
-				// before we land here, so s.sessions[c.address] is
-				// usually nil. We still try in case a session was
-				// installed by a code path that never hit
-				// runPeerSession's cleanup (defence in depth — the
-				// helper no-ops on connID==0). All authoritative
-				// bucket drops live at the three session-removal
-				// sites; see dropOutboundControlFrameBucket.
-				var leftoverConnID domain.ConnID
-				if sess := s.sessions[c.address]; sess != nil {
-					leftoverConnID = sess.connID
-				}
 				delete(s.sessions, c.address)
 				delete(s.upstream, c.address)
 				delete(s.dialOrigin, c.address)
 				s.deliveryMu.Unlock()
 				s.peerMu.Unlock()
-				s.dropOutboundControlFrameBucket(leftoverConnID)
 				log.Trace().Str("site", "ensurePeerSessions_cleanup").Str("phase", "lock_released").Str("address", string(c.address)).Msg("peer_mu_writer")
 			}()
 			s.runPeerSession(ctx, c.address)
@@ -3952,24 +3957,32 @@ func (s *Service) outboundControlFrameAllowed(session *peerSession) bool {
 }
 
 // dropOutboundControlFrameBucket drops the per-session cmdLimiter
-// bucket for the given connID. Called from every place that
-// removes an outbound session entry from s.sessions:
+// bucket for the given connID.
 //
-//   - runPeerSession error-cleanup (legacy non-CM path)
-//   - withdrawServedCMSession (CM-managed path, after the serve loop)
-//   - onCMSessionTeardown (CM-initiated close)
+// The bucket lives exactly as long as the goroutine that dispatches
+// its session's frames: every dispatch that can create it
+// (outboundControlFrameAllowed) runs on that goroutine — setup
+// requests, the serve loop, the requests issued from it — so the
+// goroutine drops the bucket once it can dispatch no more, whoever
+// removed the session-map entry. Tying the drop to owning the entry
+// instead leaked: the ConnectionManager's teardown withdraws the
+// entry while the serve loop may still drain buffered inbox frames,
+// and a control frame dispatched then recreated a bucket no one
+// dropped. The sites:
+//
+//   - withdrawServedCMSession (CM path, after the serve loop returned)
 //   - abortLocallyEvictedCMSession / failCMSessionSetup (CM sessions that
 //     end before they are published: frames dispatched during setup can
 //     already have created the bucket)
-//   - ensurePeerSessions outer defer (best-effort fallback)
+//   - openPeerSession's deferred close (legacy path: the session lives and
+//     ends inside that call, on an error and on a cancelled context alike;
+//     dropping by the session's own connID, not through the session-map
+//     entry, cannot touch another session registered at the address)
 //
-// commandRateLimiter.cleanup is NOT wired to any periodic sweep,
-// so without an explicit removal at each site the bucket lives
-// forever — one entry per ever-opened outbound connection. A
-// long-running node would accumulate buckets at the rate of new
-// outbound sessions until restart, plus a stale connID could
-// shadow a future session that wraps to the same monotonic ID
-// (only theoretical at 64-bit, but free to defend against).
+// commandRateLimiter.sweepIdle, run on every bootstrapLoop tick, is
+// the bound behind these sites: a bucket some future path forgets is
+// evicted once idle past cmdLimiterIdleAge, by when it would have
+// refilled to the burst anyway.
 //
 // Safe to call with connID == 0 or when cmdLimiter is nil
 // (test fixtures); both are no-ops.

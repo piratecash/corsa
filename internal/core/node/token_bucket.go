@@ -1,6 +1,7 @@
 package node
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -11,6 +12,32 @@ type tokenBucketPolicy struct {
 	burst float64
 	// refillPerSecond is how many tokens an idle bucket regains per second.
 	refillPerSecond float64
+	// idleAge is how long a bucket may go unrefilled before sweepIdle drops
+	// it. It sits in the policy, next to the numbers that decide how long a
+	// refill takes, so no caller of the sweep chooses it; the set never
+	// sweeps sooner than fullRefill whatever is declared here (see
+	// newTokenBucketSet).
+	idleAge time.Duration
+}
+
+// neverRefills is fullRefill's answer for a policy whose rate is not
+// positive: such a bucket, once drained, never regains its burst, so no idle
+// age makes dropping it budget-neutral and the set must never sweep it. It is
+// the largest Duration, and sweepIdle measures idle time with Time.Sub, which
+// saturates at exactly that value, so no idle time ever exceeds it.
+const neverRefills = time.Duration(math.MaxInt64)
+
+// fullRefill is how long a drained bucket takes to regain the whole burst,
+// rounded up to the nanosecond so that a bucket idle for longer than it is
+// full to the last fraction. A rate that is not positive is answered
+// explicitly with neverRefills rather than by dividing by it: the quotient
+// would be infinite or negative, and the Go conversion of an out-of-range
+// float to a Duration is implementation-specific.
+func (p tokenBucketPolicy) fullRefill() time.Duration {
+	if p.refillPerSecond <= 0 {
+		return neverRefills
+	}
+	return time.Duration(math.Ceil(p.burst / p.refillPerSecond * float64(time.Second)))
 }
 
 // tokenBucket is one key's allowance. Tokens are fractional so a bucket
@@ -45,24 +72,34 @@ type tokenBucket struct {
 type tokenBucketSet[K comparable] struct {
 	mu      sync.Mutex
 	buckets map[K]*tokenBucket
-	// policy and clock are set once in newTokenBucketSet and never written
-	// again, which is why they need no protection from mu.
+	// policy, sweepAfter and clock are set once in newTokenBucketSet and
+	// never written again, which is why they need no protection from mu.
 	policy tokenBucketPolicy
-	clock  func() time.Time
+	// sweepAfter is the idle age sweepIdle evicts past: the policy's idleAge,
+	// raised to fullRefill when declared shorter; neverRefills means the set
+	// never evicts.
+	sweepAfter time.Duration
+	clock      func() time.Time
 }
 
 // newTokenBucketSet builds an empty set. Production passes time.Now; a nil
 // clock falls back to it, the same as the package's other clock-driven
 // structures, so a missing argument cannot turn into a nil-func call on a
 // receive path.
+//
+// The sweep horizon is fixed here, once for every limiter on the set: a policy
+// whose idleAge is shorter than a full refill is swept only after fullRefill
+// (never, for a policy that does not refill), because an earlier sweep would
+// hand a still-draining key a full bucket.
 func newTokenBucketSet[K comparable](policy tokenBucketPolicy, clock func() time.Time) *tokenBucketSet[K] {
 	if clock == nil {
 		clock = time.Now
 	}
 	return &tokenBucketSet[K]{
-		buckets: make(map[K]*tokenBucket),
-		policy:  policy,
-		clock:   clock,
+		buckets:    make(map[K]*tokenBucket),
+		policy:     policy,
+		sweepAfter: max(policy.idleAge, policy.fullRefill()),
+		clock:      clock,
 	}
 }
 
@@ -72,7 +109,7 @@ func newTokenBucketSet[K comparable](policy tokenBucketPolicy, clock func() time
 // tokens nothing is spent, so a sender cannot drip-drain a bucket with
 // requests that never fit. A refused call still refills and restamps the
 // bucket, so the fraction it earned is carried to the next call and a bucket
-// that keeps being refused never counts as idle for evictIdle.
+// that keeps being refused never counts as idle for sweepIdle.
 //
 // A cost below 1 is charged as 1. The clamp lives here rather than in each
 // limiter because the invariant it protects belongs to the bucket: a take
@@ -102,14 +139,25 @@ func (s *tokenBucketSet[K]) forget(key K) {
 	delete(s.buckets, key)
 }
 
-// evictIdle drops every bucket not refilled for longer than maxAge. A bucket
-// idle for exactly maxAge is kept.
-func (s *tokenBucketSet[K]) evictIdle(maxAge time.Duration) {
+// sweepIdle drops every bucket not refilled for longer than sweepAfter. A
+// bucket idle for exactly sweepAfter is kept.
+//
+// Dropping such a bucket changes no budget: sweepAfter is never shorter than
+// fullRefill, so the bucket had regained the whole burst, which is exactly
+// what the key's next take gets from a fresh one.
+//
+// The idle time is measured with Sub rather than by comparing lastRefill with
+// now minus sweepAfter: Sub saturates at the largest Duration, so a set whose
+// sweepAfter is neverRefills keeps its buckets however long they sit, where a
+// cutoff computed by subtraction would start evicting after the ~292 years a
+// Duration spans. A clock stepped back gives a negative idle time and keeps
+// the bucket.
+func (s *tokenBucketSet[K]) sweepIdle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cutoff := s.clock().Add(-maxAge)
+	now := s.clock()
 	for key, bucket := range s.buckets {
-		if bucket.lastRefill.Before(cutoff) {
+		if now.Sub(bucket.lastRefill) > s.sweepAfter {
 			delete(s.buckets, key)
 		}
 	}

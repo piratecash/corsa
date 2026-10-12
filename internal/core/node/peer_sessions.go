@@ -196,17 +196,6 @@ func (s *Service) runPeerSession(ctx context.Context, address domain.PeerAddress
 			s.peerMu.Unlock()
 			log.Trace().Str("site", "runPeerSession_cleanup").Str("phase", "lock_released").Str("address", string(address)).Msg("peer_mu_writer")
 
-			// Drop the per-session cmdLimiter bucket. Without this
-			// the bucket lives forever (commandRateLimiter.cleanup is
-			// not wired anywhere) — and ensurePeerSessions' outer
-			// defer cannot reach the connID because we have just
-			// deleted s.sessions[address]. See
-			// dropOutboundControlFrameBucket for the full lifecycle
-			// contract across all session-removal sites.
-			if closedSession != nil {
-				s.dropOutboundControlFrameBucket(closedSession.connID)
-			}
-
 			// Routing table: deregister direct peer on session close.
 			// The capability slice must match what was passed to
 			// onPeerSessionEstablished for balanced accounting — the session
@@ -287,6 +276,11 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		s.accumulateSessionTraffic(address, conn)
 		if session != nil {
 			_ = session.Close()
+			// The session ends here on every exit — an error, or the
+			// serve loop returning on a cancelled context — and this
+			// goroutine dispatched all of its frames, so the bucket they
+			// charged ends here too. See dropOutboundControlFrameBucket.
+			s.dropOutboundControlFrameBucket(session.connID)
 			return
 		}
 		_ = conn.Close()
@@ -1650,16 +1644,16 @@ func (s *Service) withdrawServedCMSession(session *peerSession, slotAddress doma
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "withdrawServedCMSession").Str("phase", "lock_released").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 
-	// Drop the per-session cmdLimiter bucket on the CM-managed
-	// path. Only when we owned the cleanup — otherwise
-	// onCMSessionTeardown ran first and will (also) drop it
-	// against the same connID; the underlying removeConn is
-	// idempotent on a missing key, so a duplicate call is harmless.
-	// See dropOutboundControlFrameBucket for the lifecycle
-	// contract.
-	if ownedCleanup {
-		s.dropOutboundControlFrameBucket(session.connID)
-	}
+	// Drop the per-session cmdLimiter bucket whether or not this
+	// goroutine still owned the map entry. The bucket belongs to the
+	// connID, not to the entry: onCMSessionTeardown may have withdrawn
+	// the entry while the serve loop was still dispatching buffered
+	// inbox frames, and a control frame dispatched after that
+	// recreated the bucket. The serve loop has returned, so no frame
+	// of this session is dispatched after this line, and the connID is
+	// never reused, so no other session can be using the key. See
+	// dropOutboundControlFrameBucket for the lifecycle contract.
+	s.dropOutboundControlFrameBucket(session.connID)
 
 	if !session.peerIdentity.IsZero() {
 		s.deregisterServedCMSessionRouting(session, err)
@@ -1744,16 +1738,10 @@ func (s *Service) onCMSessionTeardown(info SessionInfo) {
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "onCMSessionTeardown").Str("phase", "lock_released").Str("address", string(addr)).Msg("peer_mu_writer")
 
-	// Drop the per-session cmdLimiter bucket on CM-initiated
-	// teardown. Guarded by ownedCleanup for symmetry with the
-	// withdrawServedCMSession path — we only own the
-	// bucket when we own the session entry. removeConn is
-	// idempotent on a missing key, so a double-call from the
-	// goroutine cleanup path (which only fires when ownedCleanup
-	// is true there) is harmless.
-	if ownedCleanup {
-		s.dropOutboundControlFrameBucket(info.Session.connID)
-	}
+	// The control-frame bucket is NOT dropped here: the session's
+	// goroutine may still be dispatching frames it had buffered, and
+	// it drops the bucket itself once it can dispatch no more (the
+	// end of runCMSession — see dropOutboundControlFrameBucket).
 }
 
 // initPeerSession performs the application-level setup for an already

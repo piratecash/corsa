@@ -20,11 +20,6 @@ import (
 // deterministically in tests.
 type relayRateLimiter struct {
 	buckets *tokenBucketSet[domain.PeerAddress]
-	// idleAge is how long a bucket may go untouched before sweepIdle evicts
-	// it. The constructor fixes it next to the bucket policy instead of the
-	// sweep's caller choosing it, so "never swept sooner than a full refill"
-	// is checked against exactly what production wires.
-	idleAge time.Duration
 }
 
 // relayBurstPerPeer is the maximum number of relay frames that can be sent
@@ -49,8 +44,8 @@ func newRelayRateLimiter(clock func() time.Time) *relayRateLimiter {
 		buckets: newTokenBucketSet[domain.PeerAddress](tokenBucketPolicy{
 			burst:           relayBurstPerPeer,
 			refillPerSecond: relayRefillRate,
+			idleAge:         relayLimiterCleanupAge,
 		}, clock),
-		idleAge: relayLimiterCleanupAge,
 	}
 }
 
@@ -64,5 +59,5 @@ func (rl *relayRateLimiter) allow(address domain.PeerAddress) bool {
 // sweepIdle evicts buckets idle for longer than the limiter's idle age.
 // Called periodically to prevent unbounded map growth.
 func (rl *relayRateLimiter) sweepIdle() {
-	rl.buckets.evictIdle(rl.idleAge)
+	rl.buckets.sweepIdle()
 }

@@ -3,10 +3,12 @@ package node
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -297,9 +299,9 @@ func TestOutboundSessionReader_PopulatesRawLineForPoison(t *testing.T) {
 // drop it makes a subsequent allowCommand for the SAME connID key
 // observe a fresh burst budget — proving the underlying
 // removeConn ran. This is the property each session-removal site
-// relies on to prevent stale buckets from accumulating in the
-// cmdLimiter map (commandRateLimiter.cleanup is not wired
-// anywhere).
+// relies on to release a closed session's bucket at once instead of
+// leaving it to the idle sweep (commandRateLimiter.sweepIdle, five
+// minutes later).
 //
 // The helper is also expected to no-op safely on connID==0 and
 // when cmdLimiter is nil — both are exercised here.
@@ -515,5 +517,48 @@ func TestDispatchPeerSessionFrame_RoutePoison_CmdLimited(t *testing.T) {
 	}
 	if !stillLive {
 		t.Fatal("route_poison_v1 passed the outbound cmd-limit gate: handleRoutePoison invalidated the claim despite an exhausted bucket")
+	}
+}
+
+// A CM session's control-frame bucket ends with the session's goroutine, not
+// with whoever removed the session-map entry. The ConnectionManager's
+// teardown withdraws the entry while the serve loop is still alive, and a
+// request_resync / route_poison the loop dispatches after that (a buffered
+// inbox frame, or one already in dispatch) charges the bucket under the same
+// connID. The withdrawal that follows the serve loop must drop it although it
+// no longer owns the entry: no frame of this session can be dispatched after
+// it, and the key is this session's connID, so nothing else can be using it.
+func TestWithdrawServedCMSession_DropsBucketRecreatedAfterTeardown(t *testing.T) {
+	t.Parallel()
+	svc := newTestService(t, config.NodeTypeFull)
+	const addr = domain.PeerAddress("10.0.0.7:64646")
+	session := &peerSession{address: addr, connID: 4242}
+	bucketKey := outboundControlFrameLimitKey(session.connID)
+
+	svc.peerMu.Lock()
+	svc.deliveryMu.Lock()
+	svc.sessions[addr] = session
+	svc.upstream[addr] = struct{}{}
+	svc.deliveryMu.Unlock()
+	svc.peerMu.Unlock()
+	svc.outboundControlFrameAllowed(session)
+
+	svc.onCMSessionTeardown(SessionInfo{Address: addr, DialAddress: addr, Session: session})
+	svc.peerMu.RLock()
+	_, stillRegistered := svc.sessions[addr]
+	svc.peerMu.RUnlock()
+	if stillRegistered {
+		t.Fatal("precondition: the teardown withdraws the entry before the serve loop ends")
+	}
+
+	// The serve loop dispatches one more control frame after the teardown.
+	svc.outboundControlFrameAllowed(session)
+	if !commandLimiterHasBucket(svc.cmdLimiter, bucketKey) {
+		t.Fatal("precondition: the late control frame charges the session's bucket")
+	}
+	svc.withdrawServedCMSession(session, addr, 1, io.EOF)
+
+	if commandLimiterHasBucket(svc.cmdLimiter, bucketKey) {
+		t.Fatal("a control-frame bucket recreated after the teardown outlived its session")
 	}
 }

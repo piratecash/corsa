@@ -110,27 +110,75 @@ func TestConnRateLimiterNilClockFallsBackToWallClock(t *testing.T) {
 	}
 }
 
-func TestConnRateLimiterCleanupEvictsOnlyWindowsOlderThanMaxAge(t *testing.T) {
+// The sweep's horizon is the window itself and its boundary is exact: a window
+// exactly one window old is kept, a window still running keeps its count, and
+// only a window strictly older than the window is dropped. Dropping it is free
+// of any budget change: the IP's next attempt would have opened a new window
+// anyway, so a flooding IP mid-window is never handed a fresh count.
+func TestConnRateLimiterSweepIdleNeverResetsAWindowEarly(t *testing.T) {
 	t.Parallel()
 	cl, clock := newTestConnLimiter()
-	const maxAge = time.Minute
+	const (
+		expired = "10.0.0.1"
+		running = "10.0.0.2"
+	)
 
-	cl.allowConnect("10.0.0.1")
-	clock.advance(maxAge)
-	cl.allowConnect("10.0.0.2")
+	cl.allowConnect(expired)
+	clock.advance(cl.windowSize / 2)
+	if got := countAllowed(defaultConnRateLimit+1, func() bool { return cl.allowConnect(running) }); got != defaultConnRateLimit {
+		t.Fatalf("precondition: one window admits exactly the limit; admitted %d", got)
+	}
 
-	cl.cleanup(maxAge)
-	if !connLimiterHasWindow(cl, "10.0.0.1") {
-		t.Fatal("a window that started exactly maxAge ago must be kept")
+	clock.advance(cl.windowSize / 2)
+	cl.sweepIdle()
+	if !connLimiterHasWindow(cl, expired) {
+		t.Fatal("a window exactly windowSize old must be kept")
+	}
+	if !connLimiterHasWindow(cl, running) {
+		t.Fatal("a window still running must be kept")
+	}
+	if cl.allowConnect(running) {
+		t.Fatal("a sweep must not reset the count of an IP still inside its window")
 	}
 
 	clock.advance(time.Nanosecond)
-	cl.cleanup(maxAge)
-	if connLimiterHasWindow(cl, "10.0.0.1") {
-		t.Fatal("a window that started more than maxAge ago must be evicted")
+	cl.sweepIdle()
+	if connLimiterHasWindow(cl, expired) {
+		t.Fatal("a window strictly older than windowSize must be dropped")
 	}
-	if !connLimiterHasWindow(cl, "10.0.0.2") {
-		t.Fatal("a window that started inside maxAge must be kept")
+	if !connLimiterHasWindow(cl, running) {
+		t.Fatal("a window still running must survive the sweep that drops an expired one")
+	}
+}
+
+// Sweeping is invisible to admission: a limiter swept on every step admits
+// exactly what an identical limiter that is never swept admits, at every
+// instant around the window boundary. That is the "eviction never grants a
+// fresher budget" property stated against the reset rule (elapsed >= window)
+// and the sweep rule (elapsed > window) together.
+func TestConnRateLimiterSweepIdleIsInvisibleToAdmission(t *testing.T) {
+	t.Parallel()
+	swept, sweptClock := newTestConnLimiter()
+	kept, keptClock := newTestConnLimiter()
+	const ip = "203.0.113.9"
+	steps := []time.Duration{
+		0,
+		defaultConnRateWindow - time.Nanosecond,
+		time.Nanosecond,
+		time.Nanosecond,
+		defaultConnRateWindow / 2,
+		defaultConnRateWindow,
+		3 * defaultConnRateWindow,
+	}
+	for i, step := range steps {
+		sweptClock.advance(step)
+		keptClock.advance(step)
+		swept.sweepIdle()
+		admittedSwept := countAllowed(defaultConnRateLimit+1, func() bool { return swept.allowConnect(ip) })
+		admittedKept := countAllowed(defaultConnRateLimit+1, func() bool { return kept.allowConnect(ip) })
+		if admittedSwept != admittedKept {
+			t.Fatalf("step %d (+%v): swept limiter admitted %d, unswept admitted %d", i, step, admittedSwept, admittedKept)
+		}
 	}
 }
 
@@ -219,26 +267,47 @@ func TestCommandRateLimiterRemoveConn(t *testing.T) {
 	}
 }
 
-func TestCommandRateLimiterCleanupEvictsOnlyBucketsIdlePastMaxAge(t *testing.T) {
+// A bucket no close path removed is evicted once idle strictly longer than
+// the limiter's own horizon, and a bucket still in use is kept.
+func TestCommandRateLimiterSweepIdleEvictsOnlyBucketsIdlePastIdleAge(t *testing.T) {
 	t.Parallel()
 	rl, clock := newTestCommandLimiter()
-	const maxAge = time.Minute
 
 	rl.allowCommand("conn1")
-	clock.advance(maxAge)
+	clock.advance(rl.buckets.sweepAfter)
 	rl.allowCommand("conn2")
 
-	rl.cleanup(maxAge)
+	rl.sweepIdle()
 	if !commandLimiterHasBucket(rl, "conn1") {
-		t.Fatal("a bucket idle for exactly maxAge must be kept")
+		t.Fatal("a bucket idle for exactly the idle age must be kept")
 	}
 
 	clock.advance(time.Nanosecond)
-	rl.cleanup(maxAge)
+	rl.sweepIdle()
 	if commandLimiterHasBucket(rl, "conn1") {
-		t.Fatal("a bucket idle for longer than maxAge must be evicted")
+		t.Fatal("a bucket idle for longer than the idle age must be evicted")
 	}
 	if !commandLimiterHasBucket(rl, "conn2") {
-		t.Fatal("a bucket used inside maxAge must be kept")
+		t.Fatal("a bucket used inside the idle age must be kept")
+	}
+}
+
+// A sweep never shortens a drained bucket's refill: a connection that keeps
+// sending while drained is kept with its empty balance, because every
+// refused command restamps the bucket.
+func TestCommandRateLimiterSweepKeepsADrainedBucketThatKeepsSending(t *testing.T) {
+	t.Parallel()
+	rl, clock := newTestCommandLimiter()
+	allowConn := func() bool { return rl.allowCommand("conn1") }
+
+	if got := countAllowed(cmdBurstPerConn+1, allowConn); got != cmdBurstPerConn {
+		t.Fatalf("precondition: fresh bucket grants the burst; granted %d", got)
+	}
+	for elapsed := time.Second; elapsed <= rl.buckets.sweepAfter+time.Second; elapsed += time.Second {
+		clock.advance(time.Second)
+		rl.sweepIdle()
+		if got := countAllowed(cmdBurstPerConn, allowConn); got != int(cmdRefillRate) {
+			t.Fatalf("after %v of sending while drained, a second refilled %d tokens, want %d: the sweep handed the connection a fresh bucket", elapsed, got, int(cmdRefillRate))
+		}
 	}
 }

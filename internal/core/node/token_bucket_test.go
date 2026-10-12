@@ -42,8 +42,12 @@ const (
 	testBucketRefillPeriod    = time.Second / testBucketRefillPerSecond
 )
 
+// testBucketIdleAge is well above the test policy's half-second full refill,
+// so it is the horizon the set sweeps at, unraised.
+const testBucketIdleAge = time.Minute
+
 func testBucketPolicy() tokenBucketPolicy {
-	return tokenBucketPolicy{burst: testBucketBurst, refillPerSecond: testBucketRefillPerSecond}
+	return tokenBucketPolicy{burst: testBucketBurst, refillPerSecond: testBucketRefillPerSecond, idleAge: testBucketIdleAge}
 }
 
 func newTestBucketSet() (*tokenBucketSet[string], *manualTestClock) {
@@ -160,27 +164,90 @@ func TestTokenBucketSet_ForgetRestartsTheKeyFull(t *testing.T) {
 	}
 }
 
-func TestTokenBucketSet_EvictIdleKeepsExactlyMaxAgeAndDropsOlder(t *testing.T) {
+func TestTokenBucketSet_SweepIdleKeepsExactlyIdleAgeAndDropsOlder(t *testing.T) {
 	t.Parallel()
 	s, clock := newTestBucketSet()
-	const maxAge = time.Minute
 
 	s.take("old", 1)
-	clock.advance(maxAge)
+	clock.advance(testBucketIdleAge)
 	s.take("new", 1)
 
-	s.evictIdle(maxAge)
+	s.sweepIdle()
 	if _, ok := s.tokensOf("old"); !ok {
-		t.Fatal("a bucket idle for exactly maxAge must be kept")
+		t.Fatal("a bucket idle for exactly the idle age must be kept")
 	}
 
 	clock.advance(time.Nanosecond)
-	s.evictIdle(maxAge)
+	s.sweepIdle()
 	if _, ok := s.tokensOf("old"); ok {
-		t.Fatal("a bucket idle for longer than maxAge must be evicted")
+		t.Fatal("a bucket idle for longer than the idle age must be evicted")
 	}
 	if _, ok := s.tokensOf("new"); !ok {
-		t.Fatal("a bucket used inside maxAge must be kept")
+		t.Fatal("a bucket used inside the idle age must be kept")
+	}
+}
+
+// A policy that declares an idle age shorter than a full refill is swept only
+// after the full refill: the set, not each limiter, keeps a sweep from handing
+// a still-draining key a full bucket. Up to that instant the drained bucket
+// keeps its exact balance; one nanosecond past it, it is gone and would have
+// been full.
+func TestTokenBucketSet_SweepNeverRunsAheadOfAFullRefill(t *testing.T) {
+	t.Parallel()
+	policy := testBucketPolicy()
+	policy.idleAge = 0
+	clock := newManualTestClock()
+	s := newTokenBucketSet[string](policy, clock.now)
+	countAllowed(testBucketBurst, takeOne(s, "drained"))
+
+	clock.advance(policy.fullRefill())
+	s.sweepIdle()
+	if _, ok := s.tokensOf("drained"); !ok {
+		t.Fatalf("a bucket idle for exactly a full refill (%v) must be kept although the declared idle age is 0", policy.fullRefill())
+	}
+
+	clock.advance(time.Nanosecond)
+	s.sweepIdle()
+	if _, ok := s.tokensOf("drained"); ok {
+		t.Fatal("a bucket idle for longer than a full refill must be evicted")
+	}
+}
+
+// A policy that never refills never gets a drained bucket back to its burst,
+// so the set never sweeps it, whatever idle age the policy declares: dropping
+// it would hand the key a full bucket it would never have earned.
+func TestTokenBucketSet_PolicyThatNeverRefillsIsNeverSwept(t *testing.T) {
+	t.Parallel()
+	for _, rate := range []float64{0, -1} {
+		policy := tokenBucketPolicy{burst: testBucketBurst, refillPerSecond: rate, idleAge: testBucketIdleAge}
+		if got := policy.fullRefill(); got != neverRefills {
+			t.Fatalf("rate %v: fullRefill = %v, want neverRefills", rate, got)
+		}
+		clock := newManualTestClock()
+		s := newTokenBucketSet[string](policy, clock.now)
+		countAllowed(testBucketBurst, takeOne(s, "drained"))
+
+		// Four centuries, in steps the clock's own Duration can hold: past the
+		// ~292 years a Duration spans, so "never" cannot hide behind the
+		// largest idle age the type can express.
+		const century = 100 * 365 * 24 * time.Hour
+		for step := 1; step <= 4; step++ {
+			clock.advance(century)
+			s.sweepIdle()
+			if _, ok := s.tokensOf("drained"); !ok {
+				t.Fatalf("rate %v: after %d00 years a drained bucket that can never refill was swept into a fresh one", rate, step)
+			}
+		}
+	}
+}
+
+// fullRefill rounds up, so a bucket idle for longer than it holds the whole
+// burst even when burst/rate is not a whole number of nanoseconds (100/30 s).
+func TestTokenBucketPolicy_FullRefillRoundsUp(t *testing.T) {
+	t.Parallel()
+	policy := tokenBucketPolicy{burst: 100, refillPerSecond: 30}
+	if got, want := policy.fullRefill(), 3333333334*time.Nanosecond; got != want {
+		t.Fatalf("fullRefill = %v, want %v", got, want)
 	}
 }
 
@@ -189,15 +256,14 @@ func TestTokenBucketSet_EvictIdleKeepsExactlyMaxAgeAndDropsOlder(t *testing.T) {
 func TestTokenBucketSet_RefusedTakeKeepsTheBucketFromAgingOut(t *testing.T) {
 	t.Parallel()
 	s, clock := newTestBucketSet()
-	const maxAge = time.Minute
 	countAllowed(10, takeOne(s, "flooder"))
 
-	clock.advance(maxAge)
+	clock.advance(testBucketIdleAge)
 	if s.take("flooder", testBucketBurst+1) {
 		t.Fatal("precondition: a cost above the burst is always refused")
 	}
 	clock.advance(time.Nanosecond)
-	s.evictIdle(maxAge)
+	s.sweepIdle()
 	if _, ok := s.tokensOf("flooder"); !ok {
 		t.Fatal("a bucket refused a moment ago must not be evicted as idle")
 	}
@@ -294,18 +360,18 @@ func TestRateLimiterSweepNeverOutrunsAFullRefill(t *testing.T) {
 	t.Parallel()
 	relay := newRelayRateLimiter(nil)
 	announce := newAnnounceRateLimiter(nil)
+	command := newCommandRateLimiter(nil)
 	cases := []struct {
-		name    string
-		policy  tokenBucketPolicy
-		idleAge time.Duration
+		name   string
+		policy tokenBucketPolicy
 	}{
-		{"relay", relay.buckets.policy, relay.idleAge},
-		{"announce", announce.buckets.policy, announce.idleAge},
+		{"relay", relay.buckets.policy},
+		{"announce", announce.buckets.policy},
+		{"command", command.buckets.policy},
 	}
 	for _, c := range cases {
-		fullRefill := time.Duration(c.policy.burst / c.policy.refillPerSecond * float64(time.Second))
-		if c.idleAge < fullRefill {
-			t.Errorf("%s: idle age %v is shorter than the %v a drained bucket needs to refill", c.name, c.idleAge, fullRefill)
+		if c.policy.idleAge < c.policy.fullRefill() {
+			t.Errorf("%s: declared idle age %v is shorter than the %v a drained bucket needs to refill", c.name, c.policy.idleAge, c.policy.fullRefill())
 		}
 	}
 }
