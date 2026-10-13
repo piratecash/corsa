@@ -235,22 +235,46 @@ func TestAPinnedIdentityIsRefusedInAV1Welcome(t *testing.T) {
 
 // A recovery dial to a peer that speaks v2 goes over v2 too: the one-shot
 // paths are no side door to the relayable v1 proof.
+//
+// syncPeer closes its connection before it returns, so the session kind is
+// read from what the dial left behind — the dialler's endpoint binding, its
+// v1 marks and the listener's pin — never from a live connection, which is
+// gone or not depending on which goroutine ran first.
 func TestARecoverySyncToAV2PeerUsesV2(t *testing.T) {
 	t.Parallel()
 	listener, address, stopListener := listenerNode(t, nil)
 	defer stopListener()
-	dialer, stopDialer := startTestNode(t, config.Node{ListenAddress: freeAddress(t), BootstrapPeers: []string{}, Type: domain.NodeTypeFull})
+	// No outbound slots: syncPeer teaches the dialler the listener's address
+	// (learnIdentityFromWelcome promotes it), and a connection-manager fill
+	// could then open a session of its own — which would hold a connection
+	// the teardown wait never sees closed, and would leave the binding and
+	// the pin itself, hiding a recovery dial that left none. syncPeer is not
+	// affected: it dials through dialPeerWithBudget on the auxiliary share of
+	// the connection budget, not through a slot.
+	dialer, stopDialer := startTestNodeWithoutDials(t, config.Node{ListenAddress: freeAddress(t), BootstrapPeers: []string{}, Type: domain.NodeTypeFull})
 	defer stopDialer()
+	target := domain.PeerAddress(normalizeAddress(address))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	dialer.syncPeer(ctx, domain.PeerAddress(normalizeAddress(address)), false)
-	waitForConditionMsg(t, 5*time.Second, "the recovery dial did not open a v2 session", func() bool {
-		v2, _ := authenticatedInbound(listener)
-		return v2 > 0
-	})
-	if _, v1 := authenticatedInbound(listener); v1 != 0 {
-		t.Fatalf("%d v1 sessions from a recovery dial to a v2 peer", v1)
+	if imported := dialer.syncPeer(ctx, target, false); imported == 0 {
+		t.Fatal("the recovery dial imported nothing: the sync did not complete")
+	}
+	// The checks run after the listener has torn the connection down — the
+	// order in which a live-connection check found nothing. The imported
+	// contacts prove the listener registered the connection and answered on
+	// it, and it pins the dialler before it registers, so by then the pin is
+	// on record.
+	awaitInboundTeardown(t, listener)
+
+	if !dialer.secureSessions.store.endpointRequiresV2(target) {
+		t.Fatal("the recovery dial left no v2 binding for the endpoint it reached")
+	}
+	if _, v1 := marksOf(dialer); v1 != 0 {
+		t.Fatalf("the recovery dial marked %d addresses as old nodes", v1)
+	}
+	if !listener.secureSessions.store.identityPinned(peerIdentityOf(t, dialer)) {
+		t.Fatal("the listener did not pin the dialler as proven over v2")
 	}
 }
 
@@ -270,11 +294,59 @@ func TestARecoverySyncToABoundEndpointIsNotDowngraded(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	dialer.syncPeer(ctx, bound, false)
-	assertNoV1SessionFor(t, old, time.Second, "the recovery dial fell back to v1 on an endpoint bound to v2")
+	if imported := dialer.syncPeer(ctx, bound, false); imported != 0 {
+		t.Fatalf("the recovery dial imported %d contacts from an endpoint bound to v2 that answered like an old node", imported)
+	}
+	// No wait is needed for the old node: a v1 fallback would have to get
+	// auth_ok before syncPeer can import anything, and the old node records
+	// the dialler's identity in completeInboundAuth before it sends auth_ok —
+	// so a downgrade leaves its trace before syncPeer returns.
+	if nodeAuthenticatedIdentity(old, peerIdentityOf(t, dialer)) {
+		t.Fatal("the recovery dial fell back to v1 on an endpoint bound to v2: the old node learned the dialler's identity")
+	}
 	if _, v1 := marksOf(dialer); v1 != 0 {
 		t.Fatal("the downgrade was recorded as an old node")
 	}
+	if !dialer.secureSessions.store.endpointRequiresV2(bound) {
+		t.Fatal("the refused downgrade lost the endpoint's v2 binding")
+	}
+}
+
+// awaitInboundTeardown waits until node holds no inbound connection: a
+// one-shot dial has closed its socket and node has finished the handler that
+// served it. Call it only once something has proven that node registered the
+// connection — a reply received on it — because an empty registry is also
+// what a node shows before it has accepted the connection at all.
+func awaitInboundTeardown(t *testing.T, node *Service) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		held := inboundConnCount(node)
+		if held == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the node never tore down the one-shot connection: %d inbound connections still registered (waited 10s)", held)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// nodeAuthenticatedIdentity reports whether node recorded id for any peer
+// address — on the inbound side only completeInboundAuth writes that record,
+// so id authenticated to node (v1 auth_session or v2 session_proof); a hello
+// alone leaves no trace. The record is not removed on disconnect, only by
+// the evict* sweeps with their long idle windows, so it outlives the
+// connection that carried it.
+func nodeAuthenticatedIdentity(node *Service, id domain.PeerIdentity) bool {
+	node.peerMu.RLock()
+	defer node.peerMu.RUnlock()
+	for _, recorded := range node.peerIDs {
+		if recorded == id {
+			return true
+		}
+	}
+	return false
 }
 
 // The pin a v2 session earns must be on disk before the session counts. With
