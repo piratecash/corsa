@@ -74,8 +74,11 @@ type PeerProviderConfig struct {
 	// be mutated by the caller after return.
 	HealthFn func(domain.PeerAddress) *PeerHealthView
 
-	// ConnectedFn returns a snapshot copy of IPs that already have an active
-	// connection (both inbound and outbound). Must be a new map each call.
+	// ConnectedFn returns a snapshot copy of IPs that already have a peer
+	// connection: an outbound session, or an inbound connection that has
+	// completed authentication (v1 auth_session or v2 session_proof). A
+	// silent socket, a hello without auth and an unfinished handshake do
+	// not count. Must be a new map each call.
 	ConnectedFn func() map[string]struct{}
 
 	// QueuedFn returns a snapshot copy of IPs currently in ConnectionManager
@@ -340,7 +343,7 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 	cfg := pp.config
 	now := cfg.NowFn()
 
-	// Step 1: connected IPs (inbound + outbound).
+	// Step 1: connected IPs (outbound + authenticated inbound).
 	connectedIPs := cfg.ConnectedFn()
 
 	// Step 2: queued IPs in CM.

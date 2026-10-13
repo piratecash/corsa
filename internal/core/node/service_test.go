@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -2328,49 +2329,83 @@ func startTestNodeWithIdentityAndSetup(t *testing.T, cfg config.Node, id *identi
 	return startTestService(t, ctx, cancel, svc)
 }
 
+// nodeReadinessHangGuard bounds how long startTestService waits for a node to
+// come up. It is a hang detector, not a start-up deadline: AwaitReady reads
+// readiness from the node's own state, which a healthy start publishes within
+// milliseconds even on a starved scheduler, so only a node that never gets
+// there runs into it — and then the goroutine dump says where it stopped.
+const nodeReadinessHangGuard = 30 * time.Second
+
 // startTestService runs svc for an ordinary test: every failure
 // runServiceForTest reports becomes t.Fatal, except an unfinished background
 // drain, which has only ever been worth a log line.
 func startTestService(t *testing.T, ctx context.Context, cancel context.CancelFunc, svc *Service) (*Service, func()) {
 	t.Helper()
+	return startTestServiceWithin(t, ctx, cancel, svc, nodeReadinessHangGuard)
+}
+
+// startTestServiceWithin is startTestService with the readiness guard as a
+// parameter, so the harness's own tests can run out of it on purpose.
+//
+// A node that does not come up is stopped before the test is failed: t.Fatal
+// ends the test, not the node, and a node left running keeps its loops, its
+// listener and its dials alive until the process exits — in a long stress run
+// each such leak adds the load that makes the next start fail as well.
+func startTestServiceWithin(t testing.TB, ctx context.Context, cancel context.CancelFunc, svc *Service, readinessGuard time.Duration) (*Service, func()) {
+	t.Helper()
 
 	running := runServiceForTest(ctx, svc)
 
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), readinessGuard)
 	defer readyCancel()
 	if err := running.AwaitReady(readyCtx); err != nil {
-		t.Fatalf("node did not become ready: %v", err)
+		if errors.Is(err, errServiceNotReady) {
+			logAllGoroutines(t, "node not ready within its readiness guard")
+		}
+		t.Fatalf("node did not become ready: %v", errors.Join(err, shutDownTestService(t, running, cancel)))
 	}
 
 	stop := func() {
-		cancel()
-		// 5 s shutdown budget: Run() unwinds through several deferred
-		// stages (ConnectionManager.Run → close inbound listener →
-		// closeAllInboundConns + connWg.Wait → stopFileTransfer →
-		// relayStates.stop → captureManager.Close). Under load, and
-		// especially in multi-node tests where several Run() goroutines
-		// are draining simultaneously, the 2 s window that used to be
-		// wired in here was tight enough to flake even when the test
-		// body itself passed. 5 s is well above observed shutdown
-		// latencies on CI while still catching genuine shutdown hangs
-		// quickly enough to keep the suite fast.
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stopCancel()
-		if err := running.Stop(stopCtx); err != nil {
-			logGoroutinesOnStopOverrun(t, err)
+		if err := shutDownTestService(t, running, cancel); err != nil {
 			t.Fatalf("node shutdown: %v", err)
-		}
-		// Wait for fire-and-forget goroutines (trust store writes,
-		// gossip fan-outs, etc.) to finish so TempDir cleanup does not
-		// race with async disk writes.
-		drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer drainCancel()
-		if err := running.DrainBackground(drainCtx); err != nil {
-			t.Logf("%v — some background goroutines may still be running", err)
 		}
 	}
 
 	return svc, stop
+}
+
+// shutDownTestService cancels the node's context, waits for Run to return and
+// then for its background work. It returns Run's stop error; an unfinished
+// background drain is only logged.
+func shutDownTestService(t testing.TB, running *runningTestService, cancel context.CancelFunc) error {
+	t.Helper()
+
+	cancel()
+	// 5 s shutdown budget: Run() unwinds through several deferred
+	// stages (ConnectionManager.Run → close inbound listener →
+	// closeAllInboundConns + connWg.Wait → stopFileTransfer →
+	// relayStates.stop → captureManager.Close). Under load, and
+	// especially in multi-node tests where several Run() goroutines
+	// are draining simultaneously, the 2 s window that used to be
+	// wired in here was tight enough to flake even when the test
+	// body itself passed. 5 s is well above observed shutdown
+	// latencies on CI while still catching genuine shutdown hangs
+	// quickly enough to keep the suite fast.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	if err := running.Stop(stopCtx); err != nil {
+		logGoroutinesOnStopOverrun(t, err)
+		return err
+	}
+	// Wait for fire-and-forget goroutines (trust store writes,
+	// gossip fan-outs, etc.) to finish so TempDir cleanup does not
+	// race with async disk writes.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer drainCancel()
+	if err := running.DrainBackground(drainCtx); err != nil {
+		t.Logf("%v — some background goroutines may still be running", err)
+	}
+	return nil
 }
 
 func TestFullNodeRetriesDirectMessageUntilRecipientPeerAppears(t *testing.T) {
@@ -7888,9 +7923,11 @@ func TestConnectedHostsLocked(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
+	svc.registerAuthenticatedInboundPeerLocked(server, pc)
 
+	svc.deliveryMu.RLock()
 	hosts := svc.connectedHostsLocked()
+	svc.deliveryMu.RUnlock()
 	svc.peerMu.Unlock()
 
 	if _, ok := hosts["10.0.0.1"]; !ok {
@@ -7951,7 +7988,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
+	svc.registerAuthenticatedInboundPeerLocked(server, pc)
 	svc.peerMu.Unlock()
 
 	candidates := svc.peerDialCandidates()
@@ -8147,8 +8184,8 @@ func newInboundTeardownFixture(t *testing.T) (*Service, *ConnectionManager) {
 // and the address-keyed persistence cache (Service.peerIDs) carry an
 // identity for the same peer, trackInboundDisconnect must emit the
 // InboundClosed hint with the per-conn NetCore identity. The
-// persistence cache is a fallback for paths that never call SetIdentity
-// (auth-not-required, legacy tests) — see
+// persistence cache is a defensive fallback for paths that never call
+// SetIdentity — in practice tests that bypass the inbound auth flow — see
 // TestTrackInboundDisconnect_FallsBackToPeerIDsMap below for that branch.
 func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	t.Parallel()
@@ -8199,12 +8236,11 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 // branch of the identity precedence enforced by
 // TestTrackInboundDisconnect_PrefersNetCoreIdentity. When the NetCore
 // mirror is empty (no SetIdentity was ever called on the connEntry —
-// typical for auth-not-required peers and tests that register a conn
-// without running the full inbound auth flow), trackInboundDisconnect
-// must fall back to the address-keyed persistence cache
-// (Service.peerIDs). Without this branch, auth-not-required flows would
-// emit InboundClosed with an empty identity and break downstream hint
-// consumers.
+// typical for tests that register a conn without running the full
+// inbound auth flow), trackInboundDisconnect must fall back to the
+// address-keyed persistence cache (Service.peerIDs). Without this branch,
+// such a connection would emit InboundClosed with an empty identity and
+// break downstream hint consumers.
 func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	t.Parallel()
 
@@ -8285,9 +8321,11 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
 	})
-	svc.setTestConnEntryLocked(server, &connEntry{core: pc})
+	svc.registerAuthenticatedInboundPeerLocked(server, pc)
 
+	svc.deliveryMu.RLock()
 	hosts := svc.connectedHostsLocked()
+	svc.deliveryMu.RUnlock()
 	svc.peerMu.Unlock()
 
 	// The real remote IP (127.0.0.1) should be in the set.
@@ -9267,23 +9305,20 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	// svc.upstream is under s.deliveryMu; conn/registry state under s.peerMu.
 	// Canonical order: s.peerMu OUTER, s.deliveryMu INNER.
 	svc.peerMu.Lock()
-	// Clear any pre-existing inbound connections left over from
-	// startTestNode's health-check dial to avoid 127.0.0.1 collisions.
-	for c := range svc.connIDByNetConn {
-		svc.deleteTestConn(c)
-	}
 	pc := netcore.New(netcore.ConnID(1), server1, netcore.Inbound, netcore.Options{
 		Address:      stalledPeerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.setTestConnEntryLocked(server1, &connEntry{core: pc})
+	svc.registerAuthenticatedInboundPeerLocked(server1, pc)
 
 	// Also add an outbound session as control.
 	svc.deliveryMu.Lock()
 	svc.upstream["10.0.0.1:64646"] = struct{}{}
 	svc.deliveryMu.Unlock()
 
+	svc.deliveryMu.RLock()
 	hosts := svc.connectedHostsLocked()
+	svc.deliveryMu.RUnlock()
 	svc.peerMu.Unlock()
 
 	// Outbound host must still be present.

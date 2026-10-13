@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"runtime"
 	"testing"
 	"time"
@@ -22,13 +21,6 @@ var (
 	// already reported the node ready — the node was stopped (or failed)
 	// since, and a caller asking again is asking a node that no longer runs.
 	errServiceStoppedAfterReady = errors.New("service has stopped since it was ready")
-)
-
-// listenerProbeInterval and listenerProbeDialTimeout are the cadence the
-// readiness probe dials at; they are the values startTestService always used.
-const (
-	listenerProbeInterval    = 100 * time.Millisecond
-	listenerProbeDialTimeout = 200 * time.Millisecond
 )
 
 // stopStage names the step of a shutdown that ran out of budget, so a journal
@@ -95,12 +87,27 @@ func runServiceForTest(ctx context.Context, svc *Service) *runningTestService {
 	return running
 }
 
-// startupProbeInterval is how often AwaitReady looks for the end of Run's
-// start-up; the wait is normally a few milliseconds.
-const startupProbeInterval = 5 * time.Millisecond
+// readinessProbeInterval is how often AwaitReady looks at the node's state for
+// the end of Run's start-up and for its bound listener; the wait is normally a
+// few milliseconds. Each look is an atomic load or a short peerMu.RLock — no
+// socket and no deadline of its own, so a probe goroutine that is scheduled
+// late only answers late, never wrong.
+const readinessProbeInterval = 5 * time.Millisecond
 
 // AwaitReady returns once Run has finished its start-up and, for a node with a
-// listener, once that node's OWN listener accepts a TCP connection.
+// listener, once Run has bound that listener itself.
+//
+// Both are the node's own state, published by Run, and AwaitReady reads them;
+// it measures nothing over the network. A dial to the node's address used to
+// stand in for the listener check, with its own 200 ms deadline: under CPU
+// starvation the probe goroutine woke after that deadline while the listener
+// had already accepted the connection, and a node that was up was reported as
+// not ready. The guarantee the dial gave is kept by the state: Run publishes
+// s.listener only after net.Listen succeeded on the configured address, and
+// from that moment the kernel accepts connections into the listen backlog,
+// which Run's accept loop drains right after — a caller that dials once
+// AwaitReady returned is connected. ctx is a guard against a node that hangs,
+// not a deadline the start-up is expected to meet.
 //
 // "Start-up finished" is the publication of the routing snapshot, the last of
 // the hot-read snapshots Run primes before it opens the listener. It is
@@ -136,7 +143,7 @@ func (r *runningTestService) awaitStartupAndListener(ctx context.Context) error 
 	if !r.svc.cfg.EffectiveListenerEnabled() {
 		return nil
 	}
-	return awaitListenerAccepts(ctx, r.svc.externalListenAddress(), r.exited, r.svc.ownsBoundListenerForTest)
+	return awaitListenerBound(ctx, r.exited, r.svc.ownsBoundListenerForTest)
 }
 
 // refuseIfExited is the last word before a "ready" answer.
@@ -167,56 +174,59 @@ func (r *runningTestService) describeExit(err error) error {
 }
 
 func awaitRunStartup(ctx context.Context, svc *Service, exited <-chan struct{}) error {
-	ticker := time.NewTicker(startupProbeInterval)
-	defer ticker.Stop()
-	for svc.routingSnap.Load() == nil {
-		select {
-		case <-exited:
-			return errServiceExitedBeforeReady
-		case <-ctx.Done():
-			return fmt.Errorf("%w: start-up not finished: %w", errServiceNotReady, ctx.Err())
-		case <-ticker.C:
-		}
+	startupPublished := func() bool { return svc.routingSnap.Load() != nil }
+	if err := awaitNodeState(ctx, exited, startupPublished); err != nil {
+		return describeNotReady(err, "start-up not finished")
 	}
 	return nil
 }
 
-// ownsBoundListenerForTest reports whether Run has bound its listener. Run publishes
-// it under peerMu only after net.Listen succeeded, so a connection accepted
-// while this is false was accepted by somebody else's socket on the same
-// address.
+// ownsBoundListenerForTest reports whether Run has bound its listener. Run
+// publishes s.listener under peerMu only after its own net.Listen on the
+// configured address succeeded, so true means the node's socket is in the
+// kernel's listen state and connections to it are queued for Run's accept
+// loop; nothing another process binds at that address can make it true.
 func (s *Service) ownsBoundListenerForTest() bool {
 	s.peerMu.RLock()
 	defer s.peerMu.RUnlock()
 	return s.listener != nil
 }
 
-// awaitListenerAccepts treats the node as listening only when a dial succeeds
-// AND ownsListener confirms the socket is the node's own: a port reserved and
-// released can be handed to another process — or another stand node — which
-// would then answer for this one.
-func awaitListenerAccepts(ctx context.Context, address string, exited <-chan struct{}, ownsListener func() bool) error {
-	dialer := net.Dialer{Timeout: listenerProbeDialTimeout}
-	ticker := time.NewTicker(listenerProbeInterval)
+// awaitListenerBound waits until ownsListener reports the node's OWN bound
+// listener. A socket bound by somebody else on the node's address — a port
+// reserved, released and handed to another process or stand node — never
+// satisfies it: the node's Run fails its own net.Listen instead, which
+// AwaitReady reports as an early exit.
+func awaitListenerBound(ctx context.Context, exited <-chan struct{}, ownsListener func() bool) error {
+	if err := awaitNodeState(ctx, exited, ownsListener); err != nil {
+		return describeNotReady(err, "listener not bound")
+	}
+	return nil
+}
+
+// awaitNodeState polls reached until it holds, Run exits, or ctx ends.
+func awaitNodeState(ctx context.Context, exited <-chan struct{}, reached func() bool) error {
+	ticker := time.NewTicker(readinessProbeInterval)
 	defer ticker.Stop()
-	for {
-		conn, err := dialer.DialContext(ctx, "tcp", address)
-		if err == nil {
-			// The probe connection carries nothing; a failed close changes
-			// nothing about whether the listener accepted it.
-			_ = conn.Close()
-			if ownsListener() {
-				return nil
-			}
-		}
+	for !reached() {
 		select {
 		case <-exited:
 			return errServiceExitedBeforeReady
 		case <-ctx.Done():
-			return fmt.Errorf("%w: listener %s: %w", errServiceNotReady, address, ctx.Err())
+			return ctx.Err()
 		case <-ticker.C:
 		}
 	}
+	return nil
+}
+
+// describeNotReady names the stage a budget ran out in; an early exit is
+// passed through unchanged, describeExit owns its wording.
+func describeNotReady(err error, stage string) error {
+	if errors.Is(err, errServiceExitedBeforeReady) {
+		return err
+	}
+	return fmt.Errorf("%w: %s: %w", errServiceNotReady, stage, err)
 }
 
 // Stop cancels Run and waits for it to return within ctx. A nil error means
@@ -294,10 +304,18 @@ func logGoroutinesOnStopOverrun(t testing.TB, err error) {
 	if !errors.As(err, &stageErr) || stageErr.Stage != stopStageRunExit {
 		return
 	}
+	logAllGoroutines(t, "Run still running after the stop budget")
+}
+
+// logAllGoroutines writes the stack of every goroutine to the test log,
+// headed by what made it worth looking at.
+func logAllGoroutines(t testing.TB, reason string) {
+	t.Helper()
+
 	buf := make([]byte, goroutineDumpLimit)
 	n := runtime.Stack(buf, true)
-	t.Logf("Run still running after the stop budget; all goroutines (%d bytes%s):\n%s",
-		n, truncationNote(n, len(buf)), buf[:n])
+	t.Logf("%s; all goroutines (%d bytes%s):\n%s",
+		reason, n, truncationNote(n, len(buf)), buf[:n])
 }
 
 func truncationNote(written, capacity int) string {

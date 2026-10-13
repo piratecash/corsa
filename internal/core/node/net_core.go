@@ -13,8 +13,9 @@ import (
 //     conn, populating core and (optionally) metered.
 //   - attachOutboundCoreLocked creates the entry for a dialed outbound
 //     conn after the NetCore wrap completes.
-//   - trackInboundConnect flips tracked to true once the peer has passed
-//     auth-complete or auth-not-required promotion.
+//   - trackInboundConnect flips tracked to true once the peer has completed
+//     authentication (completeInboundAuth: v1 auth_session or v2
+//     session_proof) — the only promotion there is.
 //   - trackInboundDisconnect flips tracked back to false on peer teardown.
 //   - unregisterConnLocked is the single delete call site: it removes the
 //     entry from both Service.conns and the secondary connIDByNetConn

@@ -3,8 +3,10 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -154,34 +156,25 @@ func TestRunServiceForTestAwaitReadyReportsEarlyRunExit(t *testing.T) {
 	}
 }
 
-func neverOwnsListener() bool { return false }
-
-func TestAwaitListenerAcceptsReportsListenerThatNeverAccepts(t *testing.T) {
-	t.Parallel()
-
-	// freeAddress hands back a port nobody is bound to, and the never-closed
-	// exit channel stands for a Run that is still alive: the shape of a node
-	// wedged before its listener came up.
-	stillRunning := make(chan struct{})
-
-	err := awaitListenerAccepts(withBudget(t, harnessExpiredBudget), freeAddress(t), stillRunning, neverOwnsListener)
-	if !errors.Is(err, errServiceNotReady) {
-		t.Fatalf("awaitListenerAccepts = %v, want errServiceNotReady", err)
-	}
-}
-
 // A port handed out twice — the reservation closes its socket, so the OS may
-// give it to someone else — puts ANOTHER listener at the node's address. A
-// connection that listener accepts says nothing about this node.
-func TestAwaitListenerAcceptsIgnoresListenerItDoesNotOwn(t *testing.T) {
+// give it to someone else — puts ANOTHER listener at the node's address. That
+// listener accepting connections says nothing about this node. The test also
+// stands for a listener that is simply never bound: it pins that AwaitReady
+// asks the node's own state (ownsBoundListenerForTest) and nothing that a
+// socket at the node's address could answer.
+func TestAwaitReadyIgnoresAListenerTheNodeDoesNotOwn(t *testing.T) {
 	t.Parallel()
 
-	foreign := listenForeign(t, "127.0.0.1:0")
-	stillRunning := make(chan struct{})
+	svc := newHarnessProbeService(t, domain.NodeTypeFull)
+	svc.rebuildRoutingSnapshot()
+	listenForeign(t, svc.cfg.ListenAddress)
 
-	err := awaitListenerAccepts(withBudget(t, harnessExpiredBudget), foreign.Addr().String(), stillRunning, neverOwnsListener)
+	// No Run: start-up is published, the node's own listener never is.
+	running := &runningTestService{svc: svc, cancel: func() {}, exited: make(chan struct{})}
+
+	err := running.AwaitReady(withBudget(t, harnessExpiredBudget))
 	if !errors.Is(err, errServiceNotReady) {
-		t.Fatalf("awaitListenerAccepts = %v, want errServiceNotReady while the listener is not the node's", err)
+		t.Fatalf("AwaitReady = %v, want errServiceNotReady while the only listener at the address is not the node's", err)
 	}
 }
 
@@ -335,5 +328,83 @@ func TestRunServiceForTestAwaitReadyRefusesAStoppedNode(t *testing.T) {
 				t.Fatalf("AwaitReady after Stop = %v, want errServiceStoppedAfterReady only", err)
 			}
 		})
+	}
+}
+
+// Readiness is the node's own state — start-up finished and a listener bound
+// by Run — and nothing the harness has to measure over the network. The
+// socket round trip a probe makes can fail for reasons that are not the
+// node's: under CPU starvation the probe goroutine wakes after its own dial
+// deadline while the listener has already accepted the connection, and a
+// readiness verdict built on it reports a node that is up as not ready. Here
+// the round trip is made to fail outright — the node owns a bound listener,
+// and its address answers nobody — so only a verdict taken from the node's
+// state can say ready.
+func TestAwaitReadyAnswersFromTheNodesStateNotFromASocketRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	svc := newHarnessProbeService(t, domain.NodeTypeFull)
+	svc.rebuildRoutingSnapshot()
+	bound := listenForeign(t, "127.0.0.1:0")
+	svc.peerMu.Lock()
+	svc.listener = bound
+	svc.peerMu.Unlock()
+
+	running := &runningTestService{svc: svc, cancel: func() {}, exited: make(chan struct{})}
+
+	if err := running.AwaitReady(withBudget(t, harnessGenerousBudget)); err != nil {
+		t.Fatalf("AwaitReady = %v, want nil for a node that finished start-up and owns a bound listener", err)
+	}
+}
+
+// fatalRecorder is a testing.TB whose Fatalf records the message and ends
+// the calling goroutine, as the real one does, without failing the test that
+// owns it.
+type fatalRecorder struct {
+	testing.TB
+	fatal string
+}
+
+func (r *fatalRecorder) Helper() {}
+
+// Logf drops the lines a deliberately failed start writes — a goroutine dump
+// among them — which would otherwise land in the log of the test that owns
+// the recorder and passes.
+func (r *fatalRecorder) Logf(string, ...any) {}
+
+func (r *fatalRecorder) Fatalf(format string, args ...any) {
+	r.fatal = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+// A node that did not come up within its budget must not outlive the test
+// that started it: it keeps its loops, its listener and its dials running
+// until the process exits, and in a long stress run every such leak adds the
+// load that makes the next start miss its budget too.
+func TestAStartThatMissesItsBudgetStopsTheNodeItStarted(t *testing.T) {
+	t.Parallel()
+
+	svc := newHarnessProbeService(t, domain.NodeTypeFull)
+	// Holds Run between its primed start-up and its listener until Run's own
+	// context ends: the node never becomes ready, and only a stop lets it go.
+	svc.faultDuringRunStartup = func() { <-svc.runCtx.Done() }
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	recorder := &fatalRecorder{TB: t}
+	started := make(chan struct{})
+	go func() {
+		defer close(started)
+		startTestServiceWithin(recorder, ctx, cancel, svc, harnessExpiredBudget)
+	}()
+	<-started
+
+	if recorder.fatal == "" {
+		t.Fatal("a node that never became ready was reported as started")
+	}
+	select {
+	case <-svc.done:
+	default:
+		t.Fatalf("Run is still running after the failed start was reported (%q)", recorder.fatal)
 	}
 }

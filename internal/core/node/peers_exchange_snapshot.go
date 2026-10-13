@@ -28,9 +28,10 @@ import (
 // force an out-of-band rebuild of this snapshot.  The eager refresh helper
 // on the peer-transition path only rebuilds peer_health because
 // rebuildPeersExchangeSnapshot calls peerProvider.Candidates() which
-// re-acquires s.peerMu.RLock via its callbacks — doing so from the caller's
-// goroutine (session teardown, shutdown drain) couples those paths to
-// s.peerMu contention from other writers.  The 500 ms staleness window on
+// re-acquires s.peerMu.RLock (and, through ConnectedFn, s.deliveryMu.RLock)
+// via its callbacks — doing so from the caller's goroutine (session
+// teardown, shutdown drain) couples those paths to s.peerMu and
+// s.deliveryMu contention from other writers.  The 500 ms staleness window on
 // get_peers is acceptable because it feeds gossip propagation, not the
 // click-to-render UI paths.
 type peersExchangeSnapshot struct {
@@ -50,9 +51,10 @@ type peersExchangeSnapshot struct {
 	// candidateAddresses holds the addresses returned by
 	// peerProvider.Candidates() captured at refresh time.  The candidates
 	// helper itself acquires s.peerMu.RLock via its HealthFn / ConnectedFn /
-	// NetworksFn / VersionLockedOutFn / RemoteBannedFn callbacks and
+	// NetworksFn / VersionLockedOutFn / RemoteBannedFn callbacks,
+	// s.deliveryMu.RLock inside s.peerMu.RLock via ConnectedFn, and
 	// s.ipStateMu.RLock via BannedIPsFn, so invoking it on the RPC path
-	// would re-couple get_peers to peer-domain and ipState-domain writers
+	// would re-couple get_peers to peer-, delivery- and ipState-domain writers
 	// and reintroduce the writer-storm starvation the snapshot is meant to
 	// break.  Computing the list inside the refresher moves that coupling
 	// onto the background goroutine (which is allowed to stall under

@@ -60,6 +60,9 @@ func (s *Service) bootstrapLoop(ctx context.Context) {
 		ticks = ticker.C
 	}
 
+	if s.bootstrapReadyBarrier != nil {
+		s.bootstrapReadyBarrier()
+	}
 	// Signal ConnectionManager that bootstrap loading is complete.
 	// CM will call fill() on receipt, triggering the first outbound dials.
 	s.connManager.NotifyBootstrapReady()
@@ -1022,9 +1025,10 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 }
 
 // connectedHostsLocked returns the set of hosts (IP addresses or
-// hostnames) that already have an active connection — either an
-// outbound peer session or an inbound connection. Used by
-// peerDialCandidates to avoid dialing hosts we are already connected
+// hostnames) that already have a peer connection — either an outbound
+// peer session or an inbound connection that has become a peer. Used by
+// the dial candidate filters (PeerProvider.Candidates through ConnectedFn,
+// and peerDialCandidates) to avoid dialing hosts we are already connected
 // to, since the goal is fault tolerance across distinct hosts.
 //
 // For inbound connections the actual TCP remote IP is used instead of the
@@ -1032,6 +1036,19 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 // advertises a different endpoint would not reserve its real host if we
 // relied on NetCore.Address(), allowing a second outbound connection
 // to the same machine.
+//
+// An inbound connection reserves its host only once it is tracked — it
+// has completed authentication (v1 auth_session or v2 session_proof). A
+// silent socket, a hello without auth and an unfinished handshake do not
+// reserve it. Only the closing of a tracked connection can wake the
+// ConnectionManager (trackInboundDisconnect emits InboundClosed when the
+// last tracked connection of an address closes), so an untracked socket
+// that excluded its host closed without a hint, and the host stayed
+// excluded until the next periodic fill, thirty seconds later. A v2
+// connection is not even registered before its handshake has proven the
+// peer, so the rule also makes both session kinds reserve a host at the
+// same point.
+//
 // Cross-domain read: s.upstream is delivery-domain (s.deliveryMu);
 // inbound conn state is peer-domain (s.peerMu).  Caller MUST hold
 // s.peerMu AND s.deliveryMu at least for read, acquired in canonical
@@ -1046,18 +1063,17 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 		}
 	}
 
-	// Inbound connections — use the real transport-level remote IP.
-	// Skip connections that have not received any frame for longer than
-	// the stall threshold. Uses per-connection lastActivity instead of
-	// shared health state to avoid conflating NATed peers that advertise
-	// the same listen address.
+	// Authenticated inbound connections — use the real transport-level
+	// remote IP. Skip connections that have not received any frame for
+	// longer than the stall threshold. Uses per-connection lastActivity
+	// instead of shared health state to avoid conflating NATed peers that
+	// advertise the same listen address.
 	//
-	// The unified registry now carries both directions;
-	// filter to Inbound so outbound NetCores are not double-counted here —
-	// they are already represented via s.upstream above.
+	// Outbound NetCores are not walked here — they are already represented
+	// via s.upstream above.
 	now := time.Now().UTC()
 	stallThreshold := heartbeatInterval + pongStallTimeout
-	s.forEachInboundConnLocked(func(info connInfo) bool {
+	s.forEachTrackedInboundConnLocked(func(info connInfo) bool {
 		if !info.lastActivity.IsZero() && now.Sub(info.lastActivity) >= stallThreshold {
 			return true
 		}

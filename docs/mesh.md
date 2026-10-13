@@ -378,6 +378,14 @@ Peer states: `healthy` → `degraded` → `stalled` → `reconnecting`.
   that `peerDialCandidates` can attempt a fresh outbound dial to the
   same host immediately. See [protocol/peers.md](protocol/peers.md) for
   the full recovery timeline.
+- **Only an authenticated peer reserves its host** — `connectedHostsLocked`
+  counts an inbound connection only once it is tracked, i.e. it completed
+  authentication (v1 `auth_session` or v2 `session_proof`). A silent socket,
+  a hello without auth and an unfinished handshake do not keep the host out
+  of the dial candidates: only the closing of a tracked connection emits
+  `InboundClosed`, so an exclusion they caused would last until the next
+  periodic fill. See [routing.md](routing.md), "Which connections reserve a
+  host".
 
 **Aggregate network status** is derived from the number of _usable_ peers
 (healthy + degraded). Stalled peers have a live TCP session but are excluded
@@ -1147,6 +1155,14 @@ sequenceDiagram
   `peerDialCandidates` мог немедленно попытаться установить новое исходящее
   соединение к тому же хосту. Подробный таймлайн восстановления — в
   [protocol/peers.md](protocol/peers.md).
+- **Хост резервирует только аутентифицированный peer** — `connectedHostsLocked`
+  учитывает inbound-соединение лишь после того, как оно стало tracked, т.е.
+  завершило аутентификацию (v1 `auth_session` или v2 `session_proof`).
+  Молчащий сокет, hello без auth и незавершённое рукопожатие не исключают
+  хост из кандидатов на дозвон: `InboundClosed` эмитит только закрытие
+  tracked-соединения, поэтому вызванное ими исключение длилось бы до
+  следующего периодического fill. См. [routing.md](routing.md),
+  «Какие соединения резервируют хост».
 
 **Агрегированный статус сети** определяется по количеству _пригодных_ пиров
 (healthy + degraded). Stalled-пиры имеют живое TCP-соединение, но исключены

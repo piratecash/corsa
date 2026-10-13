@@ -58,6 +58,14 @@ func (s *Service) setTestConnEntryLocked(conn net.Conn, entry *connEntry) {
 	s.connIDByNetConn[conn] = id
 }
 
+// registerAuthenticatedInboundPeerLocked registers conn as an inbound peer
+// that completed authentication — tracked, as completeInboundAuth leaves it —
+// which is the only kind of inbound connection that reserves its host against
+// outbound dials. The caller must hold s.peerMu.
+func (s *Service) registerAuthenticatedInboundPeerLocked(conn net.Conn, core *netcore.NetCore) {
+	s.setTestConnEntryLocked(conn, &connEntry{core: core, tracked: true})
+}
+
 // testConnEntry is the read counterpart of setTestConnEntryLocked: it
 // resolves a net.Conn through the secondary index and returns the
 // matching connEntry, or nil if the conn is not registered. Tests that

@@ -43,9 +43,10 @@ func (s *Service) primeHotReadSnapshots() {
 //     stops paying for the 2x/s per-peer copies.
 //   - peers_exchange — s.peerMu.RLock for persistedMeta/health, then
 //     peerProvider.Candidates() whose callbacks reach BannedIPsFn
-//     (ipStateMu.RLock) and RemoteBannedFn (s.peerMu.RLock → ipStateMu.RLock
-//     in the canonical order).  A burst of IP-state writers can delay
-//     this specific rebuild even with other domains quiet.
+//     (ipStateMu.RLock), RemoteBannedFn (s.peerMu.RLock → ipStateMu.RLock
+//     in the canonical order) and ConnectedFn (s.peerMu.RLock →
+//     s.deliveryMu.RLock).  A burst of IP-state or delivery writers can
+//     delay this specific rebuild even with other domains quiet.
 //   - cm_slots — cm.mu.RLock only (separate mutex inside
 //     ConnectionManager, not covered by the Service domain split).
 //   - routing — routing.Table.t.mu.Lock (exclusive: SnapshotIncremental
@@ -185,10 +186,11 @@ func (s *Service) runSnapshotTicker(ctx context.Context, rebuild func()) {
 //
 // Only peer_health is rebuilt here.  peers_exchange is intentionally left
 // to the periodic ticker because rebuildPeersExchangeSnapshot calls
-// peerProvider.Candidates(), whose callbacks reach s.peerMu.RLock and
-// ipStateMu.RLock (BannedIPsFn, RemoteBannedFn) — doing that on the
-// caller's goroutine (session write loop, shutdown drain, etc.) couples
-// those paths to both peer-domain and IP-state contention.  The 500 ms
+// peerProvider.Candidates(), whose callbacks reach s.peerMu.RLock,
+// s.deliveryMu.RLock (ConnectedFn) and ipStateMu.RLock (BannedIPsFn,
+// RemoteBannedFn) — doing that on the caller's goroutine (session write
+// loop, shutdown drain, etc.) couples those paths to peer-domain,
+// delivery-domain and IP-state contention.  The 500 ms
 // staleness window on get_peers is acceptable: that RPC feeds gossip
 // propagation, not the click-to-render UI paths that fetch_peer_health
 // serves.  networkStats is likewise skipped — it tracks aggregate traffic

@@ -386,6 +386,8 @@ When internet drops, TCP sockets may linger for minutes due to OS-level retransm
 
 The `evictStaleInboundConns` sweep runs on every bootstrap tick (~2 s) and force-closes inbound TCP connections whose peer health state is `stalled`. This frees the host slot so the remote peer's retry loop can re-establish the connection. Additionally, `connectedHostsLocked` excludes stalled inbound connections when computing the set of connected hosts — allowing `peerDialCandidates` to attempt a fresh outbound connection to the same host without waiting for the zombie socket to time out.
 
+Only an authenticated peer connection reserves its host: `connectedHostsLocked` counts an inbound connection once it is tracked, i.e. it completed authentication (v1 `auth_session` or v2 `session_proof`). A silent socket (a probe, a scanner), a hello without auth and an unfinished handshake do not block outbound dials to the host, because only the closing of a tracked connection emits the `InboundClosed` hint and the exclusion would otherwise last until the next periodic fill (30 s). See [routing.md](../routing.md), "Which connections reserve a host".
+
 Recovery timeline after internet outage:
 
 1. Heartbeat detects unresponsive peer within ~2 min 45 s (heartbeat interval + pong timeout)
@@ -851,6 +853,8 @@ graph TB
 При потере интернета TCP-сокеты могут оставаться «живыми» минуты из-за тайм-аутов ретрансмиссии на уровне ОС — даже после того, как heartbeat объявил пир `stalled`. Эти зомби-соединения занимают слот в `inboundConns` и блокируют исходящие попытки подключения к тому же хосту (потому что `connectedHostsLocked` видит хост как уже подключённый).
 
 Очистка `evictStaleInboundConns` выполняется на каждом тике bootstrap (~2 с) и принудительно закрывает inbound TCP-соединения, чей peer health находится в состоянии `stalled`. Это освобождает слот хоста, чтобы retry-цикл удалённого пира мог восстановить соединение. Кроме того, `connectedHostsLocked` исключает зависшие inbound-соединения при вычислении набора подключённых хостов — позволяя `peerDialCandidates` попытаться установить новое исходящее соединение к тому же хосту, не дожидаясь тайм-аута зомби-сокета.
+
+Хост резервирует только аутентифицированное peer-соединение: `connectedHostsLocked` учитывает inbound-соединение, когда оно стало tracked, т.е. завершило аутентификацию (v1 `auth_session` или v2 `session_proof`). Молчащий сокет (проба, сканер), hello без auth и незавершённое рукопожатие не блокируют исходящие дозвоны к хосту: hint `InboundClosed` эмитит только закрытие tracked-соединения, и иначе исключение длилось бы до следующего периодического fill (30 с). См. [routing.md](../routing.md), «Какие соединения резервируют хост».
 
 Таймлайн восстановления после обрыва интернета:
 

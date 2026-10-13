@@ -230,6 +230,17 @@ type Service struct {
 	// knows a tick has finished once its next send is accepted.
 	bootstrapTickOverride <-chan time.Time
 
+	// bootstrapReadyBarrier is a TEST-ONLY synchronisation point, nil in
+	// production, run by bootstrapLoop immediately before it tells the
+	// ConnectionManager that bootstrap is complete — that is, before the
+	// first fill. Run does not wait for that goroutine, so the listener opens
+	// and accepts while the barrier holds; a test uses the window to put an
+	// inbound connection in place before the first fill reads the connected
+	// hosts. Fired with no mutex held. Installed before Run and never changed
+	// afterwards, so it takes part in no domain and adds no edge to the
+	// canonical lock order.
+	bootstrapReadyBarrier func()
+
 	// sendAdmissionBarrier is a TEST-ONLY synchronisation point, nil in
 	// production, run by BOTH send tiers between the peer-state gate and the
 	// hand-over to a queue (runSendAdmissionBarrier, peer_management.go). One
@@ -2105,8 +2116,12 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 			}
 		},
 		ConnectedFn: func() map[string]struct{} {
+			// connectedHostsLocked reads s.upstream (delivery domain) and the
+			// inbound registry (peer domain): both mutexes, canonical order.
 			svc.peerMu.RLock()
 			defer svc.peerMu.RUnlock()
+			svc.deliveryMu.RLock()
+			defer svc.deliveryMu.RUnlock()
 			return svc.connectedHostsLocked()
 		},
 		QueuedFn: func() map[string]struct{} {
@@ -5387,9 +5402,11 @@ func (s *Service) completeInboundAuth(id domain.ConnID, verified *connauth.State
 		// fallback branch by TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
 		// Mirror identity/address into the NetCore. The handle is resolved
 		// here (not at handleAuthSession entry) because this is the only
-		// branch that needs it; nil result means the conn was unregistered
-		// between auth completion and this mirror — fail silently, the
-		// disconnect path will reconcile.
+		// branch that needs it. In production it cannot be nil: this branch
+		// was entered because inboundPeerAddress found the NetCore, and the
+		// only place that unregisters an inbound entry is handleConn's
+		// teardown on this same goroutine, which has not run yet. The nil
+		// check is defensive only.
 		if core := s.netCoreForID(id); core != nil {
 			core.SetIdentity(domain.PeerIdentityFromWire(verified.Hello.Address))
 			core.SetAddress(addr)
@@ -5611,8 +5628,8 @@ func (s *Service) inboundPeerAddress(id domain.ConnID) domain.PeerAddress {
 
 // trackedInboundPeerAddress returns the peer overlay address only when
 // this specific connection has been promoted via trackInboundConnect
-// (i.e. after successful authentication or for peers that do not require
-// auth). Returns "" if the peer address is unknown or this connection
+// (i.e. after completeInboundAuth: a v1 auth_session or a v2
+// session_proof). Returns "" if the peer address is unknown or this connection
 // has not been promoted, preventing unauthenticated connections from
 // creating or refreshing health entries — even if another legitimate
 // connection for the same address is already tracked.
@@ -5765,17 +5782,22 @@ func (s *Service) trackInboundDisconnectWithPresenceEvidence(id domain.ConnID, a
 		// Prefer NetCore as the source of truth for transport-level
 		// identity: it is updated in the inbound auth mirror (see the
 		// SetIdentity call next to the peerIDs map write in
-		// handleAcceptedHello), so the two sources cannot diverge while
-		// the conn is live. Fallback to the persistence cache below
-		// keeps behaviour for paths that never call SetIdentity on the
-		// NetCore (auth-not-required, legacy tests that bypass the
-		// inbound-auth path). This precedence is pinned by
+		// completeInboundAuth), so the two sources cannot diverge while
+		// the conn is live. In production the mirror is always set by
+		// teardown: completeInboundAuth calls SetIdentity right after
+		// trackInboundConnect, on the connection's own goroutine, which
+		// is the one that later runs this teardown. The fallback to the
+		// persistence cache below is a defensive branch; it is taken by
+		// tests that call trackInboundConnect without the inbound auth
+		// flow, so SetIdentity never ran on their NetCore. This precedence is pinned by
 		// TestTrackInboundDisconnect_PrefersNetCoreIdentity and its
 		// fallback branch TestTrackInboundDisconnect_FallsBackToPeerIDsMap.
 		// connIdentityByIDLocked returns "" both when the entry is missing
-		// and when it has no core; the entry-not-nil guard above is held by
-		// the surrounding block so the only nil case left for the helper is
-		// a missing core, which the fallback handles.
+		// and when it has no core. Neither happens here in production: the
+		// surrounding block holds the entry-not-nil guard, and every
+		// registered entry carries a NetCore (registerInboundConnLocked and
+		// attachOutboundCoreLocked both store the one netcore.New built). The
+		// missing-core case is defensive only; the fallback would handle it.
 		peerIdentity = s.connIdentityByIDLocked(id)
 		// coreForIDLocked is the single carve-out for the live handle, so the
 		// queue fence after the unlock reaches it the same way every other
