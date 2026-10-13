@@ -22,16 +22,18 @@ import (
 //
 // Bounded: an entry is forgotten when its envelope leaves s.topics
 // (forgetRelayDelivered follows every expiry/eviction/delete path that
-// drops the envelope's relayRetry entry, once that path has released its
-// domain mutexes), and a hard cap guards against a leak if a forget path is
-// ever missed.
+// removes a transit envelope) or when an orphan `msg|` entry is reaped
+// (dropConfirmedRelayMessageRetryLocked), and a hard cap guards against a
+// leak if a forget path is ever missed.
 //
 // Locking: guarded by its OWN leaf mutex (s.relayDeliveredMu). It is taken
-// alone (forgetRelayDelivered; relayDeliveredSnapshot, BEFORE peerMu in
-// filterGossipTargetsForEnvelope) or innermost under s.deliveryMu.RLock
-// (recordRelayDeliveredWhileRelayed, which must check the msg| entry and
-// record in one hold), and it is never held while acquiring a domain mutex —
-// so it adds no edge to the canonical domain lock order. See docs/locking.md.
+// alone (forgetRelayDelivered after an envelope-removal commit;
+// relayDeliveredSnapshot, BEFORE peerMu in filterGossipTargetsForEnvelope) or
+// innermost under s.deliveryMu (recordRelayDeliveredWhileRelayed under the
+// read lock, which must check the msg| entry and record in one hold; the
+// orphan reap's forgetRelayDelivered under the write lock), and it is never
+// held while acquiring a domain mutex — so it adds no edge to the canonical
+// domain lock order. See docs/locking.md.
 
 // maxRelayDeliveredMessages caps how many distinct message ids carry a
 // suppression set. Sized well above the live transit backlog (per-recipient
@@ -93,9 +95,13 @@ func (s *Service) relayDeliveredSnapshot(id protocol.MessageID) map[domain.PeerI
 // The check and the record happen under ONE s.deliveryMu.RLock hold, with
 // relayDeliveredMu (a leaf) taken innermost. Every path that removes a
 // transit envelope drops its `msg|` entry under s.deliveryMu (write) and
-// calls forgetRelayDelivered after releasing it, so a record made while the
-// entry exists always precedes that removal and is forgotten by it, and a
-// record attempted after the removal finds no entry. Checking in one hold and
+// calls forgetRelayDelivered after releasing it, and the orphan reap drops
+// the entry and forgets its set in one hold, so a record made while the entry
+// exists always precedes that drop and is forgotten by it, and a record
+// attempted after the drop finds no entry. Paths that end the relay but keep
+// the envelope — a confirming receipt, the retry walk's TTL and receipt
+// checks — drop the entry without forgetting: that closes the gate, and the
+// set stays with its envelope until the envelope is removed. Checking in one hold and
 // recording after releasing it let a removal and its forget land in between;
 // the record was then made for an id with no envelope and no entry, and
 // nothing forgot it again. Caller MUST hold no domain mutex.
@@ -109,11 +115,13 @@ func (s *Service) recordRelayDeliveredWhileRelayed(id protocol.MessageID, who do
 	return true
 }
 
-// forgetRelayDelivered drops the suppression sets for envelopes that left
-// s.topics (expired / evicted / acked-and-removed). Called right after the
-// section that dropped the same envelopes' relayRetry entries, so the two
-// bounded side-indexes are pruned together. Takes only its leaf mutex;
-// every caller does so after releasing that section's domain mutexes.
+// forgetRelayDelivered drops the suppression sets of transit envelopes that
+// left s.topics (expired / evicted / acked-and-removed), or of a reaped
+// orphan `msg|` entry. Takes only its leaf mutex, which may be held alone or
+// innermost under s.deliveryMu: the envelope-removal paths call it after
+// their commit has released every domain mutex, the orphan reap calls it
+// inside its deliveryMu (write) hold. The caller must never hold it while
+// acquiring a domain mutex — it takes none.
 func (s *Service) forgetRelayDelivered(ids []protocol.MessageID) {
 	if len(ids) == 0 {
 		return

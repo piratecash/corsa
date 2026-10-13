@@ -1838,7 +1838,7 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 			delete(s.relayRetry, key)
 			continue
 		}
-		if s.hasReceiptForMessageLocked(msg.Sender, msg.ID) {
+		if s.hasReceiptForMessageLocked(messageIdentityOf(msg)) {
 			delete(s.relayRetry, key)
 			continue
 		}
@@ -2050,6 +2050,78 @@ func (s *Service) armRelayReceiptRetryLocked(receipt protocol.DeliveryReceipt, n
 	s.relayRetry[relayReceiptKey(receipt)] = relayAttempt{FirstSeen: now}
 }
 
+// dropConfirmedRelayMessageRetryLocked ends the relay retry of the transit DM
+// a just-committed receipt confirms. Caller MUST hold s.deliveryMu (write)
+// and no gossip-domain lock: s.topics["dm"] is read under a nested
+// s.gossipMu.RLock (deliveryMu → gossipMu, canonical order).
+//
+// The `msg|` key is the id alone, and the id is unsigned, so the key cannot
+// say whose message it is — only the envelope that owns it can. The
+// admission's exact-id dedup keeps at most one envelope per id in
+// s.topics["dm"], so the entry goes only when that envelope IS the confirmed
+// message. Dropping by key let a receipt for this node's own message, or for
+// a pair of identities the transit DM is not between, end that DM's onward
+// re-sends.
+//
+// It is dropped here rather than left to retryableRelayMessages, which stops
+// at a backlogged receipt too, because the receipt does not stay backlogged:
+// the original sender's ack_delete, the per-recipient cap and the offline
+// drop all take it, and the walk would then resume re-sending a message its
+// recipient has already confirmed.
+func (s *Service) dropConfirmedRelayMessageRetryLocked(message messageIdentity) {
+	key := relayMessageKey(message.MessageID)
+	if _, armed := s.relayRetry[key]; !armed {
+		return
+	}
+	s.gossipMu.RLock()
+	owner, backlogged := s.backlogMessageUnderIDLocked(message.MessageID)
+	s.gossipMu.RUnlock()
+	if !backlogged {
+		// An entry with no envelope behind it breaks the invariant the
+		// admission commit and every removal path keep (an entry exists only
+		// while its envelope is backlogged). It is owned by no live message:
+		// retryableRelayMessages walks s.topics["dm"] and nothing walks the
+		// map itself, so left here it would hold a maxRelayRetryEntries slot
+		// until exit and keep the ack_delete gate treating the id as relayed.
+		// There is nothing to relay under it, and a later transit DM with the
+		// id re-arms at its own admission, so it is reaped — together with
+		// its ack_delete suppression set, which only envelope-removal paths
+		// forget and which would otherwise hand stale suppression to the next
+		// transit DM under the id. Forgotten in this hold (relayDeliveredMu is
+		// a leaf, allowed innermost under deliveryMu), so no ack_delete record
+		// can land between the reap and the forget.
+		log.Warn().Str("message_id", string(message.MessageID)).
+			Str("confirmed_sender", message.Sender).Str("confirmed_recipient", message.Recipient).
+			Msg("relay_retry_entry_without_backlogged_envelope")
+		delete(s.relayRetry, key)
+		s.forgetRelayDelivered([]protocol.MessageID{message.MessageID})
+		return
+	}
+	if owner == message {
+		delete(s.relayRetry, key)
+		return
+	}
+	// An armed entry whose envelope is some other message: an id collision
+	// or a forged receipt. Logged so a relay that keeps running after a
+	// receipt can be traced to the mismatch that kept it.
+	log.Debug().Str("message_id", string(message.MessageID)).
+		Str("confirmed_sender", message.Sender).Str("confirmed_recipient", message.Recipient).
+		Str("envelope_sender", owner.Sender).Str("envelope_recipient", owner.Recipient).
+		Msg("relay_retry_kept_receipt_confirms_another_message")
+}
+
+// backlogMessageUnderIDLocked returns the identity of the dm backlog's
+// envelope under id; the admission's exact-id dedup keeps at most one.
+// Caller MUST hold s.gossipMu (RLock or Lock; reads s.topics).
+func (s *Service) backlogMessageUnderIDLocked(id protocol.MessageID) (messageIdentity, bool) {
+	for _, envelope := range s.topics["dm"] {
+		if envelope.ID == id {
+			return messageIdentityOf(envelope), true
+		}
+	}
+	return messageIdentity{}, false
+}
+
 func relayMessageKey(id protocol.MessageID) string {
 	return "msg|" + string(id)
 }
@@ -2075,11 +2147,23 @@ func (s *Service) relayFrameAged(frame protocol.Frame, sender, recipient string)
 }
 
 // hasReceiptForMessageLocked reports whether s.receipts already contains a
-// delivery receipt for (originalSender, messageID).  Caller MUST hold
-// s.deliveryMu (RLock or Lock).
-func (s *Service) hasReceiptForMessageLocked(originalSender string, messageID protocol.MessageID) bool {
-	for _, receipt := range s.receipts[originalSender] {
-		if receipt.MessageID == messageID {
+// receipt that confirms this very message. A receipt under the same id that
+// some other identity made, or that is addressed to someone else, is about a
+// different message: the id is unsigned, and taking it as confirmation would
+// end this message's relay (or skip its abandonment) on another's word.
+//
+// Only backlogged receipts are consulted, so a seen_ack never counts here:
+// it is not backlogged (finishReceipt). Its effect is the immediate drop in
+// its own commit, which ends the relay of a message backlogged at that
+// moment. A copy of the message admitted after it is relayed until a
+// delivered/seen receipt or its TTL — accepted, because a seen_ack follows
+// the recipient's seen receipt, which ends that relay through this walk
+// wherever it is backlogged, and keeping a second, ack-only record to cover
+// the leftover would be state with no reaper of its own.
+// Caller MUST hold s.deliveryMu (RLock or Lock).
+func (s *Service) hasReceiptForMessageLocked(message messageIdentity) bool {
+	for _, receipt := range s.receipts[message.Sender] {
+		if confirmed, ok := confirmedMessageOf(receipt); ok && confirmed == message {
 			return true
 		}
 	}
@@ -2324,6 +2408,24 @@ func (s *Service) sweepTerminalOutbound(now time.Time) {
 	if removed > 0 {
 		log.Debug().Int("removed", removed).Msg("outbound_terminal_entries_swept")
 	}
+}
+
+// clearConfirmedOutboundLocked drops the outbound status entry of the own
+// message a receipt confirms. Caller MUST hold s.deliveryMu (write).
+//
+// s.outbound holds only messages this node authored but keys them by the
+// bare id, so an entry under the id is the confirmed message only when this
+// node is its author and the entry's recipient is its addressee. A receipt
+// for anything else under the id — a transit DM this node relays, or a claim
+// by an identity the message was not sent to — must leave the entry: its
+// status is what fetch_pending_messages shows, and CancelOutgoingDeliveriesTo
+// learns the id from it.
+func (s *Service) clearConfirmedOutboundLocked(message messageIdentity) {
+	entry, tracked := s.outbound[string(message.MessageID)]
+	if !tracked || s.ownMessageIdentity(message.MessageID, entry.Recipient) != message {
+		return
+	}
+	delete(s.outbound, string(message.MessageID))
 }
 
 func (s *Service) clearOutboundQueued(messageID string) {

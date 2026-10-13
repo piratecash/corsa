@@ -61,7 +61,10 @@ func TestCancelOutgoingDeliveryClearsEveryDeliveryHook(t *testing.T) {
 	// Give the message the full set of delivery hooks a queued send owns:
 	// the backlog envelope and retry entry come from the store above, the
 	// pending frame and outbound entry from the queue-on-unreachable path.
-	frame := protocol.Frame{Type: "send_message", ID: string(target), Topic: "dm", Recipient: recipientID.Address}
+	// The frame names its author, as every message frame the node queues
+	// does: the withdrawal clears frames of THIS message, and an id alone
+	// does not say whose message a frame carries.
+	frame := protocol.Frame{Type: "send_message", ID: string(target), Topic: "dm", Address: svc.Address(), Recipient: recipientID.Address}
 	svc.deliveryMu.Lock()
 	svc.pending[domain.PeerAddress("127.0.0.1:64646")] = []pendingFrame{{Frame: frame, QueuedAt: time.Now().UTC()}}
 	svc.pendingKeys[pendingFrameKey(domain.PeerAddress("127.0.0.1:64646"), frame)] = struct{}{}
@@ -99,7 +102,7 @@ func TestCancelOutgoingDeliveryClearsEveryDeliveryHook(t *testing.T) {
 	// Not a hook the cancellation clears: an own message is never armed
 	// for relay retry at all, before or after the withdrawal.
 	_, ownArmed := svc.relayRetry[relayMessageKey(target)]
-	pendingLeft := svc.countPendingFramesLocked(target)
+	pendingLeft := svc.countPendingFramesLocked(svc.ownMessageIdentity(target, recipientID.Address))
 	svc.deliveryMu.RUnlock()
 
 	if stillAwaiting {

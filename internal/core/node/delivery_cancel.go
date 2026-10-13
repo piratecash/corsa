@@ -178,8 +178,9 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 		result.OutboundCleared = true
 	}
 
-	result.PendingFrames = s.countPendingFramesLocked(messageID)
-	affected := s.clearPendingMessageLocked(messageID)
+	withdrawnMessage := s.ownMessageIdentity(messageID, wireRecipient)
+	result.PendingFrames = s.countPendingFramesLocked(withdrawnMessage)
+	affected := s.clearPendingMessageLocked(withdrawnMessage)
 
 	s.statusMu.Lock()
 	if len(affected) > 0 {
@@ -356,10 +357,11 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 
 	// No relayRetry delete, for the reason CancelOutgoingDelivery gives:
 	// these ids are this node's own messages, which never own a `msg|`
-	// entry, so one under the same id is a live transit DM's.
+	// entry, so one under the same id is a live transit DM's. Its queued
+	// frames are spared the same way — the clear matches our authorship.
 	var affected []ebus.PeerPendingDelta
 	for id := range withdrawn {
-		affected = mergePendingDeltas(affected, s.clearPendingMessageLocked(id))
+		affected = mergePendingDeltas(affected, s.clearPendingMessageLocked(s.ownMessageIdentity(id, wireRecipient)))
 	}
 
 	s.statusMu.Lock()
@@ -442,16 +444,16 @@ func (s *Service) dropBacklogEnvelopeLocked(messageID protocol.MessageID, recipi
 // sizes it leaves behind, not what it removed, so the count is taken
 // before it runs.
 // Caller MUST hold s.deliveryMu (reads s.pending).
-func (s *Service) countPendingFramesLocked(messageID protocol.MessageID) int {
+func (s *Service) countPendingFramesLocked(message messageIdentity) int {
 	count := 0
 	for _, items := range s.pending {
 		for _, item := range items {
-			// Same reader as clearPendingMessageLocked, so the count and
+			// Same matcher as clearPendingMessageLocked, so the count and
 			// the removal can never disagree about which frames carry the
 			// message. They used to: this one read only the flat id, so a
 			// push_message was removed (once that was fixed) but never
 			// counted, and the caller under-reported what it withdrew.
-			if frameMessageID(item.Frame) == messageID {
+			if frameCarriesMessage(item.Frame, message) {
 				count++
 			}
 		}

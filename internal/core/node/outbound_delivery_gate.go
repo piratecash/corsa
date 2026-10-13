@@ -99,13 +99,6 @@ func frameEnvelope(frame protocol.Frame) protocol.Envelope {
 	return envelope
 }
 
-// frameMessageID is frameEnvelope for the callers that only need the id —
-// the pending-ring bookkeeping, which matches frames against a withdrawn
-// message.
-func frameMessageID(frame protocol.Frame) protocol.MessageID {
-	return frameEnvelope(frame).ID
-}
-
 // deliveryRefForFrame returns the dispatch this frame belongs to, or the
 // zero ref when the frame is not one of ours to answer for.
 //

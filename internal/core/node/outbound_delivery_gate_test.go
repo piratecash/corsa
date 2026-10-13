@@ -393,7 +393,7 @@ func TestWithdrawalRemovesPendingGossipFrames(t *testing.T) {
 	svc.deliveryMu.Lock()
 	svc.registerAwaitingDeliveredLocked(envelope, time.Now().UTC(), true)
 	svc.pending[addr] = []pendingFrame{{Frame: gossipPushFrame(envelope), QueuedAt: time.Now().UTC()}}
-	counted := svc.countPendingFramesLocked(target)
+	counted := svc.countPendingFramesLocked(messageIdentityOf(envelope))
 	svc.deliveryMu.Unlock()
 
 	if counted != 1 {

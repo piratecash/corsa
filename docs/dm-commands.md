@@ -667,12 +667,14 @@ already destroyed.
 `node.Service.CancelOutgoingDelivery` empties every place that could
 still put the envelope on the wire, in one cross-domain section
 (`docs/locking.md`): the store-and-forward backlog (`s.topics`), the
-queued per-peer frames, the sender-owned end-to-end retry
-(`awaitingDelivered`) and the outbound status entry. The node-level
-relay retry never holds a message this node authored, so the withdrawal
-leaves it alone — an entry under the same (unsigned) id belongs to some
-peer's transit DM. It refuses a message this node did not author, so a local caller
-cannot purge a transit envelope by guessing an id.
+message's queued per-peer frames (matched by id, author and recipient,
+so a peer's transit DM under the same unsigned id keeps its own), the
+sender-owned end-to-end retry (`awaitingDelivered`) and the outbound
+status entry. The node-level relay retry never holds a message this
+node authored, so the withdrawal leaves it alone — an entry under the
+same (unsigned) id belongs to some peer's transit DM. It refuses a
+message this node did not author, so a local caller cannot purge a
+transit envelope by guessing an id.
 
 Ordering is load-bearing: the cancellation runs **before** the local row
 is removed, so a delivery cannot hand the peer a message the user has
@@ -2227,13 +2229,15 @@ DM, который получатель ни разу не подтвердил,
 
 `node.Service.CancelOutgoingDelivery` очищает всё, откуда конверт ещё
 может уйти в сеть, одной кросс-доменной секцией (`docs/locking.md`):
-store-and-forward backlog (`s.topics`), очереди кадров по пирам,
-sender-owned end-to-end retry (`awaitingDelivered`) и запись
-outbound-статуса. Node-level relay retry никогда не держит сообщение,
-автором которого является узел, поэтому отзыв его не трогает: запись под
-тем же (неподписанным) id принадлежит транзитному DM какого-то пира. Сообщение, автором которого узел не является,
-отклоняется — локальный вызывающий не может вычистить транзитный конверт,
-угадав id.
+store-and-forward backlog (`s.topics`), кадры этого сообщения в очередях
+по пирам (по id, автору и получателю, поэтому транзитный DM пира под
+тем же неподписанным id свои кадры сохраняет), sender-owned end-to-end
+retry (`awaitingDelivered`) и запись outbound-статуса. Node-level relay
+retry никогда не держит сообщение, автором которого является узел,
+поэтому отзыв его не трогает: запись под тем же (неподписанным) id
+принадлежит транзитному DM какого-то пира. Сообщение, автором которого
+узел не является, отклоняется — локальный вызывающий не может вычистить
+транзитный конверт, угадав id.
 
 Порядок принципиален: отмена выполняется **до** удаления локальной
 строки, чтобы доставка не вручила пиру сообщение, которое пользователь

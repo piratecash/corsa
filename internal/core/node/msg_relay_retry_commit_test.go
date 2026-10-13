@@ -42,16 +42,9 @@ type transitDMFixture struct {
 func newTransitDMFixture(t *testing.T) transitDMFixture {
 	t.Helper()
 	svc := newTestService(t, config.NodeTypeFull)
-	sender, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
-	}
-	recipient, err := identity.Generate()
-	if err != nil {
-		t.Fatalf("identity.Generate: %v", err)
-	}
+	sender := mustGenerateIdentity(t)
 	registerForeignKey(t, svc, sender)
-	return transitDMFixture{svc: svc, sender: sender, recipient: recipient}
+	return transitDMFixture{svc: svc, sender: sender, recipient: mustGenerateIdentity(t)}
 }
 
 func (f transitDMFixture) message(t *testing.T, id protocol.MessageID) incomingMessage {

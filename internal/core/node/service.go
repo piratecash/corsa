@@ -7412,7 +7412,8 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	count := len(s.topics[msg.Topic])
 	s.unlockMessageAdmission(msg.ID, admission, "lock_released")
 
-	// Leaf lock, after every domain mutex is released (relay_delivered.go).
+	// Leaf lock, taken here after the commit released every domain mutex
+	// (alone or innermost under deliveryMu are both allowed, relay_delivered.go).
 	s.forgetRelayDelivered(evictedIDs)
 	if len(evictedIDs) > 0 {
 		log.Debug().Str("node", s.identity.Address).Int("evicted", len(evictedIDs)).Str("recipient", msg.Recipient).Msg("transit_backlog_cap_eviction")
@@ -8143,7 +8144,8 @@ const (
 // by every path that drops the receipt. See armRelayReceiptRetryLocked.
 //
 // Cross-domain: deliveryMu (write) for the whole commit, a brief nested
-// gossipMu.RLock for the subscriber re-check and a nested statusMu for the
+// gossipMu.RLock for the subscriber re-check, another for the backlog check
+// of dropConfirmedRelayMessageRetryLocked, and a nested statusMu for the
 // aggregate refresh — deliveryMu → gossipMu → statusMu, each inner one
 // released before the next is taken.
 func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, endsRetry bool) (
@@ -8184,10 +8186,24 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 	// reason the backlog does: the clean drop above promises to touch
 	// NOTHING, and a pending counter cleared at the door — published to
 	// the UI on the way out — cannot be put back when the drop happens.
-	delete(s.outbound, string(receipt.MessageID))
-	msgAffected := s.clearPendingMessageLocked(receipt.MessageID)
+	//
+	// The message side is settled only for the message the receipt
+	// confirms, never by its id alone: the id is unsigned, and another
+	// author's message under it — a transit DM this node relays, or our
+	// own that shares the id — keeps its outbound status, its queued
+	// frames and its `msg|` entry.
+	//
+	// A transit seen_ack reaches this point without the subscriber gate
+	// above, so the "touch nothing" promise does not cover it — and need
+	// not: it is the author's evidence that the recipient has seen the
+	// message, so ending that message's relay is right whoever is online.
+	var msgAffected []ebus.PeerPendingDelta
+	if confirmed, ok := confirmedMessageOf(receipt); ok {
+		s.clearConfirmedOutboundLocked(confirmed)
+		msgAffected = s.clearPendingMessageLocked(confirmed)
+		s.dropConfirmedRelayMessageRetryLocked(confirmed)
+	}
 	rcptAffected := s.clearPendingReceiptLocked(identityOf(receipt))
-	delete(s.relayRetry, relayMessageKey(receipt.MessageID))
 	delete(s.relayRetry, relayReceiptKey(receipt))
 	deltas = mergePendingDeltas(msgAffected, rcptAffected)
 	// statusMu is INNERMOST per canonical deliveryMu → statusMu order —
@@ -8400,7 +8416,9 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 	//     original DM sender, who is reachable via relay/gossip and is NOT
 	//     required to be a local subscriber. Gating it would silently swallow
 	//     the delivered/seen receipt, so the sender never learns the DM landed.
-	// seen_ack is plumbing (never buffered), also always admitted.
+	// seen_ack is plumbing (never buffered), also always admitted. Its commit
+	// still ends the relay of the message it acknowledges (finishReceipt):
+	// it is the author's evidence the recipient has seen it.
 	//
 	// Reading s.subs under a nested gossipMu.RLock while holding deliveryMu
 	// (deliveryMu OUTER → gossipMu INNER, canonical order) makes the decision
@@ -8719,16 +8737,20 @@ func mergePendingDeltas(a, b []ebus.PeerPendingDelta) []ebus.PeerPendingDelta {
 }
 
 // clearPendingMessageLocked removes every queued frame that carries the
-// message (matched by messageID) from the pending queue: the sender-side
-// send_message AND any relay_message queued for the same id by the relay
-// fallback (sendRelayMessage → queuePeerFrame when the session is
-// unavailable). Both must go together — once the message is confirmed
-// delivered or abandoned, flushing a leftover relay_message later would
-// re-emit a finished delivery. Returns affected (address, newCount) pairs
-// so the caller can emit TopicPeerPendingChanged after releasing the lock.
+// message from the pending queue: the gossip push_message AND any
+// relay_message queued for it by the relay fallback (sendRelayMessage →
+// queuePeerFrame when the session is unavailable). All of them go together —
+// once the message is confirmed delivered or abandoned, flushing a leftover
+// frame later would re-emit a finished delivery. Returns affected
+// (address, newCount) pairs so the caller can emit TopicPeerPendingChanged
+// after releasing the lock.
+//
+// Frames are matched by the whole messageIdentity, not by the id: the id is
+// unsigned, so a frame under the same id may carry another author's message
+// whose delivery the caller knows nothing about.
 // Caller MUST hold s.deliveryMu.Lock (mutates s.pending / s.pendingKeys).
-func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) []ebus.PeerPendingDelta {
-	if strings.TrimSpace(string(messageID)) == "" {
+func (s *Service) clearPendingMessageLocked(message messageIdentity) []ebus.PeerPendingDelta {
+	if strings.TrimSpace(string(message.MessageID)) == "" {
 		return nil
 	}
 	var affected []ebus.PeerPendingDelta
@@ -8742,7 +8764,7 @@ func (s *Service) clearPendingMessageLocked(messageID protocol.MessageID) []ebus
 			// and a withdrawn message therefore stayed in the ring: the
 			// in-memory withdrawal shadow expires after five minutes, and
 			// the next flush handed the recalled message over.
-			if frameMessageID(item.Frame) == messageID {
+			if frameCarriesMessage(item.Frame, message) {
 				delete(s.pendingKeys, pendingFrameKey(address, item.Frame))
 				continue
 			}
@@ -8905,7 +8927,7 @@ func (s *Service) fetchInboxFrame(topic, recipient string) protocol.Frame {
 			// separate lock window after the gossipMu snapshot was
 			// already released, so no nested-lock concern.
 			s.deliveryMu.RLock()
-			delivered := s.hasReceiptForMessageLocked(msg.Sender, msg.ID)
+			delivered := s.hasReceiptForMessageLocked(messageIdentityOf(msg))
 			s.deliveryMu.RUnlock()
 			if delivered {
 				continue
@@ -10782,7 +10804,8 @@ func (s *Service) cleanupExpiredMessagesForce() {
 	s.unlockTopicsCommit(sweep)
 	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_released").Msg(sweep.lockTrace())
 
-	// Leaf lock, after every domain mutex is released (relay_delivered.go).
+	// Leaf lock, taken here after the commit released every domain mutex
+	// (alone or innermost under deliveryMu are both allowed, relay_delivered.go).
 	s.forgetRelayDelivered(relayedIDs)
 }
 

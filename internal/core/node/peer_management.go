@@ -5918,13 +5918,13 @@ func (k pendingKey) IsValid() bool { return k.Type != "" }
 func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) pendingKey {
 	switch frame.Type {
 	case "send_message":
-		return pendingKey{Address: address, Type: "send_message", A: frame.ID, B: frame.Recipient}
+		return messagePendingKey(address, frame)
 	case "push_message":
 		// Gossip path: fields live in Item, not flat Frame fields.
 		if frame.Item == nil {
 			return pendingKey{}
 		}
-		return pendingKey{Address: address, Type: "push_message", A: frame.Item.ID, B: frame.Item.Recipient}
+		return messagePendingKey(address, frame)
 	case "relay_delivery_receipt":
 		// frame.Address is the receipt's AUTHOR here, and it belongs in the
 		// key: two receipts about one message from two peers are two frames,
@@ -5945,11 +5945,22 @@ func pendingFrameKey(address domain.PeerAddress, frame protocol.Frame) pendingKe
 	case "relay_message":
 		// relay_message must be queueable so sendRelayMessage's fallback
 		// to queuePeerFrame actually works when the session is unavailable.
-		// Keyed by message ID + recipient to dedupe identical relay attempts.
-		return pendingKey{Address: address, Type: "relay_message", A: frame.ID, B: frame.Recipient}
+		return messagePendingKey(address, frame)
 	default:
 		return pendingKey{}
 	}
+}
+
+// messagePendingKey keys a message-carrying frame by the message it carries:
+// id, addressee AND author, read through frameEnvelope like
+// frameCarriesMessage reads it. The author is in the key for the reason it is
+// in a receipt's: the id is unsigned, so two authors' messages under one id
+// to one recipient are two messages. Keyed without it they were one, and the
+// duplicate branch of queuePeerFrame REPLACED a queued frame of this node's
+// own message with a peer's transit frame under the same id.
+func messagePendingKey(address domain.PeerAddress, frame protocol.Frame) pendingKey {
+	message := messageIdentityOf(frameEnvelope(frame))
+	return pendingKey{Address: address, Type: frame.Type, A: string(message.MessageID), B: message.Recipient, C: message.Sender}
 }
 
 // flushPendingPeerFrames is cross-domain:

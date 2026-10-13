@@ -155,11 +155,14 @@ func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	// Sent an hour ago to auto-delete after a minute: the delivery window
 	// this message was given has closed.
 	createdAt := now.Add(-time.Hour)
-	frame := protocol.Frame{Type: "send_message", Topic: "dm", ID: "retry-cap-1", Recipient: "someone", Body: "x", CreatedAt: createdAt.Format(time.RFC3339)}
+	// Both frames name their author, as every message frame the node queues
+	// does: abandonment clears the frames of THIS message, and the id alone
+	// does not say whose message a frame carries.
+	frame := protocol.Frame{Type: "send_message", Topic: "dm", ID: "retry-cap-1", Address: svc.Address(), Recipient: "someone", Body: "x", CreatedAt: createdAt.Format(time.RFC3339)}
 	// The relay fallback (sendRelayMessage → queuePeerFrame) can queue a
-	// relay_message for the SAME id — abandonment must drop it too, or a
-	// later flush would re-emit a finished delivery.
-	relayFrame := protocol.Frame{Type: "relay_message", Topic: "dm", ID: "retry-cap-1", Recipient: "someone", Body: "x", CreatedAt: createdAt.Format(time.RFC3339)}
+	// relay_message for the SAME message — abandonment must drop it too, or
+	// a later flush would re-emit a finished delivery.
+	relayFrame := protocol.Frame{Type: "relay_message", Topic: "dm", ID: "retry-cap-1", Address: svc.Address(), Recipient: "someone", Body: "x", CreatedAt: createdAt.Format(time.RFC3339)}
 	svc.deliveryMu.Lock()
 	svc.awaitingDelivered["retry-cap-1"] = &deliveryRetryEntry{
 		Envelope: protocol.Envelope{

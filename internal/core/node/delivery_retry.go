@@ -3236,7 +3236,7 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 	// in the unlocked gap (clearing awaitingDelivered and updating chatlog).
 	// Terminalizing or journaling on top of that would overwrite a
 	// confirmed delivery with failed/expired — skip entirely.
-	if s.hasReceiptForMessageLocked(envelope.Sender, envelope.ID) {
+	if s.hasReceiptForMessageLocked(messageIdentityOf(envelope)) {
 		s.deliveryMu.Unlock()
 		log.Trace().Str("site", "failDelivery").Str("phase", "lock_released_receipt_won").Str("msg_id", string(envelope.ID)).Msg("delivery_mu_writer")
 		s.peerMu.Unlock()
@@ -3245,7 +3245,7 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 		return
 	}
 	s.markOutboundTerminalLocked(frame, status, reason)
-	pendingDeltas := s.clearPendingMessageLocked(envelope.ID)
+	pendingDeltas := s.clearPendingMessageLocked(messageIdentityOf(envelope))
 	// No relayRetry delete: this node's own message never owns a `msg|`
 	// entry (envelopeEntersRelayRetry), so one under its unsigned id
 	// belongs to a live transit DM and must stay with that envelope.
