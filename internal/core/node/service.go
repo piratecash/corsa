@@ -6975,8 +6975,12 @@ func (s *Service) handleAckDeleteFrame(id domain.ConnID, frame protocol.Frame) (
 		// starving real suppression. A relayRetry entry exists only for transit
 		// DMs we are actually relaying (recipient-delete clears it, phantom ids
 		// never had one). frame.Address is verified == hello.Address above.
-		if s.hasRelayRetryEntry(protocol.MessageID(frame.ID)) {
-			s.recordRelayDeliveredTo(protocol.MessageID(frame.ID), domain.PeerIdentityFromWire(frame.Address))
+		if !s.recordRelayDeliveredWhileRelayed(protocol.MessageID(frame.ID), domain.PeerIdentityFromWire(frame.Address)) {
+			// Not an error: the id is not (or no longer) relayed here — this
+			// peer's own message it just removed, one already delivered or
+			// expired, or a phantom. Logged so a missing suppression can be
+			// traced back to the ack that did not record it.
+			log.Debug().Str("message_id", frame.ID).Str("peer", frame.Address).Int("removed", count).Msg("ack_delete_suppression_not_recorded_not_relayed")
 		}
 	case "receipt":
 		count = s.deleteBacklogReceiptForRecipient(identityFromAck(frame))
@@ -7129,8 +7133,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	s.cleanupExpiredMessages()
 
 	// Knowledge-domain section: register sender/recipient into s.known.
-	// Taken FIRST because canonical lock order is knowledgeMu → gossipMu,
-	// and the s.gossipMu section below covers the gossip domain (seen/topics).
+	// A section of its own, released before the admission commit below
+	// takes deliveryMu → gossipMu: holding knowledgeMu into that commit
+	// would take deliveryMu after knowledgeMu, against the canonical order.
 	// DM senders are cryptographically verified above (VerifyEnvelope),
 	// so they are safe to register as known identities unconditionally.
 	// Non-DM senders are only registered when the node already holds
@@ -7154,53 +7159,70 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	s.knowledgeMu.Unlock()
 	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("knowledgeMu_writer")
 
-	// Gossip-domain section: dedup via s.seen and append to s.topics.
+	// Whether this admission re-propagates the message. Decided BEFORE the
+	// admission commit because the commit arms the relay retry by it (a
+	// transit DM that will not be routed must not own a retry entry), and
+	// neither input needs a domain mutex: the node type and the class age
+	// gate read only the message and configuration.
+	//
+	// Re-propagation gate (envelope_retention.go). For BROADCAST this is an
+	// age ceiling — the only class that still has one. For the DM classes it
+	// no longer gates on age at all: what it still refuses is a frame that
+	// cannot be reasoned about, one with no created_at or a date beyond
+	// clock skew into the future. MaxAge=0 classes (local, transit, control)
+	// are never aged out here.
+	propagationAged := s.envelopePropagationAged(msg.Topic, msg.Sender, msg.Recipient, msg.CreatedAt, time.Now().UTC())
+	routesStored := s.shouldRouteStoredMessage(msg) && !propagationAged
+
+	// Forward-once (Phase 3, CORSA_TRANSIT_FORWARD_ONCE): a transit DM is
+	// forwarded on the wire below but NEVER stored in s.topics — relays are
+	// pure forwarders, not a buffer. This removes the re-gossip storm at its
+	// source (nothing stored ⇒ retryRelayDeliveries has nothing to re-emit).
+	// Durability is the sender's (HoldDMUntilReachable + delivery_retry). The
+	// bloom (s.seen) still dedups in-window; no backlog-dedup is needed because
+	// there is no backlog, and no relay retry is armed: nothing would hold the
+	// envelope a `msg|` entry names.
+	header := protocol.Envelope{Topic: msg.Topic, Sender: msg.Sender, Recipient: msg.Recipient}
+	forwardOnceTransit := s.cfg.TransitForwardOnce && s.isTransitEnvelope(header)
+	admission := s.messageAdmissionModeFor(header, forwardOnceTransit)
+	if !admission.known() {
+		// Before anything is marked or stored, so the refusal leaves the
+		// message exactly where StoreDeferred does: with the sender.
+		log.Error().Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("mode", int(admission)).Msg("store_incoming_message_unknown_admission_mode")
+		return false, 0, protocol.ErrCodeStoreDeferred
+	}
+
+	// A transit DM is the one admission that takes deliveryMu, and on a
+	// relay most transit admissions are mesh echoes of a message already
+	// seen. Answering those under gossipMu alone, before the commit, keeps
+	// them from queueing a writer on deliveryMu that would then wait for
+	// gossipMu behind a long reader and, through Go's writer priority,
+	// stall every deliveryMu reader. The commit checks again, because the
+	// message may be seen between the two.
+	if admission.holdsDeliveryMu() {
+		s.gossipMu.RLock()
+		duplicate := s.bloomDuplicateLocked(msg)
+		s.gossipMu.RUnlock()
+		if duplicate.final {
+			return s.answerBloomDuplicate(msg, duplicate)
+		}
+	}
+
+	// Admission commit: dedup via s.seen and append to s.topics; for a
+	// transit DM entering the backlog, also evict over the transit caps and
+	// arm the relay retry — then deliveryMu is held too, so a `msg|` entry
+	// and its envelope enter and leave together (see topicsCommitMode).
 	// Separate lock window from the knowledge section above — the two are
-	// sequential, not nested, per the canonical knowledgeMu → gossipMu
-	// order.  Splitting is semantically safe because the known writes are
+	// sequential, not nested, because the knowledge section takes
+	// knowledgeMu, which comes after deliveryMu in the canonical order.
+	// Splitting is semantically safe because the known writes are
 	// idempotent: a concurrent writer cannot race with us to produce a
 	// different outcome, and the dedup decision below depends only on
 	// s.seen, not on s.known.
-	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
-	s.gossipMu.Lock()
-	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
-	if s.seen.Has(string(msg.ID)) {
-		count := len(s.topics[msg.Topic])
-		// A duplicate of a DM addressed to us means the sender most likely
-		// never received the original delivered receipt and is retrying
-		// end-to-end — re-send the receipt or the retries never stop. The
-		// dedupe stays silent towards the UI (no message.new below).
-		//
-		// Bloom positives can be FALSE positives (rotating filter, see
-		// bloom_dedup.go), so the receipt is only re-sent when the envelope
-		// is genuinely present in the local backlog: confirming delivery of
-		// a message we never stored would convert a bloom FP from "lost,
-		// sender keeps retrying" into a silent false "delivered".
-		confirmedPresent := false
-		if s.owesDeliveryReceipt(msg) {
-			for i := range s.topics[msg.Topic] {
-				if s.topics[msg.Topic][i].ID == msg.ID {
-					confirmedPresent = true
-					break
-				}
-			}
-		}
-		// Recipient-local DM that is NOT visible in the runtime backlog
-		// (e.g. cleared by a same-identity subscriber's ack_delete) while a
-		// durable MessageStore is registered: fall through and let the
-		// chatlog primary key decide — StoreDuplicate re-sends the receipt
-		// below; StoreInserted means the bloom hit was a FALSE positive and
-		// the message is genuinely new (stored properly instead of lost).
-		fallThroughToStore := s.owesDeliveryReceipt(msg) && !confirmedPresent && s.messageStore != nil
-		if !fallThroughToStore {
-			s.gossipMu.Unlock()
-			log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_dedup").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
-			log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_dedup")
-			if confirmedPresent {
-				s.goBackground(func() { s.resendDeliveryReceipt(msg) })
-			}
-			return false, count, ""
-		}
+	s.lockMessageAdmission(msg.ID, admission)
+	if duplicate := s.bloomDuplicateLocked(msg); duplicate.final {
+		s.unlockMessageAdmission(msg.ID, admission, "lock_released_dedup")
+		return s.answerBloomDuplicate(msg, duplicate)
 	}
 	// The dedup mark is NOT set here. It is set after the store has
 	// answered, because one answer — StoreDeferred — means "ask me again":
@@ -7279,12 +7301,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	// learns of them.
 	if isLocal && s.messageStore != nil && msg.Topic != protocol.TopicControlDM {
 		// Unlock before calling into the store — it may do SQLite I/O.
-		s.gossipMu.Unlock()
-		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_mid").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
+		s.unlockMessageAdmission(msg.ID, admission, "lock_released_mid")
 		storeResult = s.messageStore.StoreMessage(envelope, ownAuthored)
-		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait_reacquire").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
-		s.gossipMu.Lock()
-		log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held_reacquire").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
+		s.lockMessageAdmission(msg.ID, admission)
 	}
 
 	// Duplicate local messages must NOT enter s.topics. The message is
@@ -7312,7 +7331,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// a message whose local RPC reported an error and whose row is on
 		// no disk anywhere.
 		count := len(s.topics[msg.Topic])
-		s.gossipMu.Unlock()
+		s.unlockMessageAdmission(msg.ID, admission, "lock_released_deferred")
 		log.Info().
 			Str("id", string(msg.ID)).
 			Str("topic", msg.Topic).
@@ -7342,7 +7361,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		// and dropping the message as well would lose it from the network
 		// too, for a peer who has already done everything right.
 		count := len(s.topics[msg.Topic])
-		s.gossipMu.Unlock()
+		s.unlockMessageAdmission(msg.ID, admission, "lock_released_store_failed")
 		log.Error().
 			Str("id", string(msg.ID)).
 			Str("topic", msg.Topic).
@@ -7353,18 +7372,10 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	s.seen.Add(string(msg.ID))
 
 	beforeCount := len(s.topics[msg.Topic])
-	// evictedIDs collects messages displaced by the transit caps; their
-	// relayRetry entries are dropped AFTER gossipMu is released (the
-	// canonical deliveryMu → gossipMu order forbids nesting here).
+	// evictedIDs collects messages displaced by the transit caps. Their
+	// relayRetry entries are dropped inside this commit; only the leaf-lock
+	// ack_delete suppression sets are pruned after it.
 	var evictedIDs []protocol.MessageID
-	// Forward-once (Phase 3, CORSA_TRANSIT_FORWARD_ONCE): a transit DM is
-	// forwarded on the wire below but NEVER stored in s.topics — relays are
-	// pure forwarders, not a buffer. This removes the re-gossip storm at its
-	// source (nothing stored ⇒ retryRelayDeliveries has nothing to re-emit).
-	// Durability is the sender's (HoldDMUntilReachable + delivery_retry). The
-	// bloom (s.seen) still dedups in-window; no backlog-dedup is needed because
-	// there is no backlog. trackRelayMessage is skipped below for the same id.
-	forwardOnceTransit := s.cfg.TransitForwardOnce && s.isTransitEnvelope(envelope)
 	if storeResult != StoreDuplicate && msg.Topic != protocol.TopicControlDM && !forwardOnceTransit {
 		// Single admission pass over the backlog (transit_retention.go):
 		// exact-ID dedup plus transit accounting. The rotating bloom
@@ -7377,8 +7388,7 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		scan := scanTopicForAdmission(s.topics[msg.Topic], msg.ID, msg.Recipient, s.isTransitEnvelope)
 		if scan.duplicate {
 			count := len(s.topics[msg.Topic])
-			s.gossipMu.Unlock()
-			log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released_exact_dedup").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
+			s.unlockMessageAdmission(msg.ID, admission, "lock_released_exact_dedup")
 			log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", count).Msg("store_incoming_message_backlog_dedup")
 			// Same contract as the bloom-dedup exit above: a retried DM
 			// addressed to us still owes the sender a delivered receipt.
@@ -7387,22 +7397,22 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 			}
 			return false, count, ""
 		}
-		// Transit retention (layer 1): enforce the per-recipient FIFO
-		// cap and the global byte budget before appending.
-		if s.isTransitEnvelope(envelope) {
-			s.topics[msg.Topic], evictedIDs = evictTransitOverflowLocked(
-				s.topics[msg.Topic], scan, msg.Recipient, len(envelope.Payload), s.isTransitEnvelope)
+		// The one branch point between the two commit shapes. Only the
+		// relay-retry mode holds deliveryMu, so only it can evict over the
+		// transit caps and arm. originEcho and originUnreachableHold, which
+		// also gate routing below, need no say in the arm: both concern a
+		// message this node authored, which never takes that mode.
+		switch admission {
+		case topicsCommitWithRelayRetry:
+			evictedIDs = s.appendTransitEnvelopeLocked(envelope, scan, routesStored)
+		case topicsCommitGossipOnly:
+			s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
 		}
-		s.topics[msg.Topic] = append(s.topics[msg.Topic], envelope)
 	}
 	count := len(s.topics[msg.Topic])
-	s.gossipMu.Unlock()
-	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("gossipMu_writer")
+	s.unlockMessageAdmission(msg.ID, admission, "lock_released")
 
-	// Orphan prevention: retryableRelayMessages iterates the TOPIC
-	// snapshot, so relayRetry entries of evicted envelopes would never
-	// be visited (and never lazily deleted) again.
-	s.dropRelayRetryEntries(evictedIDs)
+	// Leaf lock, after every domain mutex is released (relay_delivered.go).
 	s.forgetRelayDelivered(evictedIDs)
 	if len(evictedIDs) > 0 {
 		log.Debug().Str("node", s.identity.Address).Int("evicted", len(evictedIDs)).Str("recipient", msg.Recipient).Msg("transit_backlog_cap_eviction")
@@ -7580,22 +7590,9 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 		s.goBackground(func() { s.pushOwnEnvelopeToSubscribers(wireEnvelope, decision.PushSubscribers, dispatchedAt) })
 	}
 
-	// Re-propagation gate (envelope_retention.go). For BROADCAST this is an
-	// age ceiling — the only class that still has one. For the DM classes it
-	// no longer gates on age at all: what it still refuses is a frame that
-	// cannot be reasoned about, one with no created_at or a date beyond
-	// clock skew into the future. MaxAge=0 classes (local, transit, control)
-	// are never aged out here.
-	propagationAged := s.envelopePropagationAged(msg.Topic, msg.Sender, msg.Recipient, msg.CreatedAt, time.Now().UTC())
-	if s.shouldRouteStoredMessage(msg) && !originEcho && !originUnreachableHold && !propagationAged {
-		// Forward-once: do NOT register a relay-retry entry for transit — the
-		// frame is forwarded below in a single pass and never re-gossiped over
-		// time (it was also not stored above). Local-origin sends still track
-		// via the sender-owned engine, not this transit contour.
-		if !forwardOnceTransit {
-			s.trackRelayMessage(envelope)
-		}
-
+	// routesStored folds in the re-propagation gate; the relay retry of a
+	// transit DM routed here was armed by the admission commit above.
+	if routesStored && !originEcho && !originUnreachableHold {
 		// Gossip is the baseline delivery mechanism. It spreads the
 		// envelope so relays can forward it (transit DMs are held IN
 		// MEMORY only as the in-flight buffer of the forwarding
@@ -7686,6 +7683,215 @@ func (s *Service) storeIncomingMessage(msg incomingMessage, validateTimestamp bo
 	}
 
 	return true, count, ""
+}
+
+// bloomDuplicateVerdict is the bloom dedup's answer for one admission.
+type bloomDuplicateVerdict struct {
+	// final: the admission ends here as a duplicate. False means it goes
+	// on — the message is not in the bloom, or it is a DM addressed to
+	// this node whose duplicate the chatlog must judge.
+	final bool
+	// topicCount is the topic's backlog size reported to the caller.
+	topicCount int
+	// resendReceipt: the duplicate is a DM addressed to this node whose
+	// envelope is in the backlog, so the sender is retrying because our
+	// delivered receipt was lost.
+	resendReceipt bool
+}
+
+// bloomDuplicateLocked consults the bloom dedup for msg. Caller MUST hold
+// s.gossipMu (read or write): it reads s.topics; s.seen has its own mutex.
+//
+// A duplicate of a DM addressed to us means the sender most likely never
+// received the original delivered receipt and is retrying end-to-end —
+// re-send the receipt or the retries never stop. The dedupe stays silent
+// towards the UI. Bloom positives can be FALSE positives (rotating filter,
+// see bloom_dedup.go), so the receipt is only re-sent when the envelope is
+// genuinely present in the local backlog: confirming delivery of a message
+// we never stored would convert a bloom FP from "lost, sender keeps
+// retrying" into a silent false "delivered". A recipient-local DM that is
+// NOT in the backlog (e.g. cleared by a same-identity subscriber's
+// ack_delete) while a durable MessageStore is registered is not final: the
+// chatlog primary key decides — StoreDuplicate re-sends the receipt;
+// StoreInserted means the bloom hit was a false positive and the message is
+// genuinely new.
+func (s *Service) bloomDuplicateLocked(msg incomingMessage) bloomDuplicateVerdict {
+	if !s.seen.Has(string(msg.ID)) {
+		return bloomDuplicateVerdict{}
+	}
+	confirmedPresent := false
+	if s.owesDeliveryReceipt(msg) {
+		for i := range s.topics[msg.Topic] {
+			if s.topics[msg.Topic][i].ID == msg.ID {
+				confirmedPresent = true
+				break
+			}
+		}
+	}
+	fallThroughToStore := s.owesDeliveryReceipt(msg) && !confirmedPresent && s.messageStore != nil
+	return bloomDuplicateVerdict{
+		final:         !fallThroughToStore,
+		topicCount:    len(s.topics[msg.Topic]),
+		resendReceipt: confirmedPresent,
+	}
+}
+
+// answerBloomDuplicate is storeIncomingMessage's answer to a final bloom
+// duplicate, given with no domain mutex held: the duplicate outcome
+// (false, count, "") acks the previous hop so its retries stop.
+func (s *Service) answerBloomDuplicate(msg incomingMessage, duplicate bloomDuplicateVerdict) (bool, int, string) {
+	log.Debug().Str("node", s.identity.Address).Str("id", string(msg.ID)).Str("topic", msg.Topic).Int("topic_count", duplicate.topicCount).Msg("store_incoming_message_dedup")
+	if duplicate.resendReceipt {
+		s.goBackground(func() { s.resendDeliveryReceipt(msg) })
+	}
+	return false, duplicate.topicCount, ""
+}
+
+// topicsCommitMode names the domain mutexes a commit over s.topics holds.
+// storeIncomingMessage's admission commit and cleanupExpiredMessagesForce's
+// removal phase each decide it once, before locking, and pass the same value
+// to every lock and unlock of that commit.
+type topicsCommitMode int
+
+const (
+	// topicsCommitGossipOnly holds gossipMu alone (seen, topics). The commit
+	// creates or removes no envelope that owns a `msg|` relayRetry entry: a
+	// broadcast, a DM this node sends or receives, a control DM, a
+	// forward-once transit DM that is never stored, or an expiry sweep that
+	// found none of those. This is every admission's shape except one, so
+	// the frequent ones never queue a writer on deliveryMu.
+	topicsCommitGossipOnly topicsCommitMode = iota + 1
+	// topicsCommitWithRelayRetry holds deliveryMu then gossipMu, canonical
+	// order. The commit appends or removes a transit DM of topic "dm" — an
+	// envelope envelopeEntersRelayRetry admits — so the `msg|` entries enter
+	// and leave relayRetry in the same hold as their envelopes leave or
+	// enter s.topics.
+	topicsCommitWithRelayRetry
+)
+
+// known reports whether m is one of the declared modes. storeIncomingMessage
+// refuses an unknown mode with it before anything is marked seen or written,
+// which is the only point where a refusal can still be "ask me again"; past
+// it, the append switch handles exactly the modes listed here, so a mode
+// added here must get its own branch there.
+func (m topicsCommitMode) known() bool {
+	switch m {
+	case topicsCommitGossipOnly, topicsCommitWithRelayRetry:
+		return true
+	default:
+		return false
+	}
+}
+
+// holdsDeliveryMu reports whether a commit in mode m takes deliveryMu. An
+// unknown mode takes it: holding deliveryMu as well is never wrong, holding
+// too little would be an unguarded write to relayRetry.
+func (m topicsCommitMode) holdsDeliveryMu() bool {
+	return m != topicsCommitGossipOnly
+}
+
+func (m topicsCommitMode) lockTrace() string {
+	if m.holdsDeliveryMu() {
+		return "delivery_gossip_mu_writer"
+	}
+	return "gossipMu_writer"
+}
+
+// topicsCommitModeFor is the mode of a commit that appends or removes
+// envelope: with relayRetry exactly when the envelope can own a `msg|`
+// entry. It reads only the envelope's topic, sender and recipient and the
+// local identity, which is immutable after NewService, so it needs no lock.
+func (s *Service) topicsCommitModeFor(envelope protocol.Envelope) topicsCommitMode {
+	if s.identity != nil && envelopeEntersRelayRetry(envelope, s.identity.Address) {
+		return topicsCommitWithRelayRetry
+	}
+	return topicsCommitGossipOnly
+}
+
+// topicsCommitCovers reports whether a commit in mode may remove envelope: a
+// commit holding gossipMu alone must leave alone any envelope that can own a
+// `msg|` entry, since it cannot write relayRetry to match. The expiry sweep's
+// removal phase, whose mode was decided from an earlier scan, puts every
+// envelope through it, so the envelope actually found under the lock — not
+// the one the decision was made from — is what counts. The admission needs
+// no such check: it decides its mode from the very message it appends,
+// through the same predicate (topicsCommitModeFor), and its transit-cap
+// eviction runs only in the relay-retry mode.
+func (s *Service) topicsCommitCovers(mode topicsCommitMode, envelope protocol.Envelope) bool {
+	return mode.holdsDeliveryMu() || s.topicsCommitModeFor(envelope) == topicsCommitGossipOnly
+}
+
+// lockTopicsCommit enters a commit over s.topics in the given mode:
+// deliveryMu (relayRetry) first when the mode needs it, then gossipMu.
+// Caller MUST hold no domain mutex.
+func (s *Service) lockTopicsCommit(mode topicsCommitMode) {
+	if mode.holdsDeliveryMu() {
+		s.deliveryMu.Lock()
+	}
+	s.gossipMu.Lock()
+}
+
+// unlockTopicsCommit leaves a commit entered by lockTopicsCommit with the
+// same mode, releasing LIFO. Caller MUST hold s.gossipMu (write), and
+// s.deliveryMu (write) as well when mode.holdsDeliveryMu().
+func (s *Service) unlockTopicsCommit(mode topicsCommitMode) {
+	s.gossipMu.Unlock()
+	if mode.holdsDeliveryMu() {
+		s.deliveryMu.Unlock()
+	}
+}
+
+// messageAdmissionModeFor decides the admission commit's mode from the
+// message's topic, sender and recipient (header) and whether forward-once
+// keeps it out of the backlog — nothing that needs a lock. A transit DM
+// entering the backlog is the only admission that can touch relayRetry: the
+// envelopes envelopeEntersRelayRetry admits are the transit DMs of topic
+// "dm", which are also the only ones subject to the transit caps (control
+// DMs never enter s.topics).
+func (s *Service) messageAdmissionModeFor(header protocol.Envelope, forwardOnceTransit bool) topicsCommitMode {
+	if forwardOnceTransit {
+		return topicsCommitGossipOnly
+	}
+	return s.topicsCommitModeFor(header)
+}
+
+// lockMessageAdmission enters storeIncomingMessage's admission commit in the
+// given mode. Caller MUST hold no domain mutex.
+func (s *Service) lockMessageAdmission(id protocol.MessageID, mode topicsCommitMode) {
+	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_wait").Str("msg_id", string(id)).Msg(mode.lockTrace())
+	s.lockTopicsCommit(mode)
+	log.Trace().Str("site", "storeIncomingMessage").Str("phase", "lock_held").Str("msg_id", string(id)).Msg(mode.lockTrace())
+}
+
+// unlockMessageAdmission leaves the admission commit, releasing LIFO. phase
+// names the exit for the lock trace. Caller MUST hold s.gossipMu (write), and
+// s.deliveryMu (write) as well when mode.holdsDeliveryMu().
+func (s *Service) unlockMessageAdmission(id protocol.MessageID, mode topicsCommitMode, phase string) {
+	s.unlockTopicsCommit(mode)
+	log.Trace().Str("site", "storeIncomingMessage").Str("phase", phase).Str("msg_id", string(id)).Msg(mode.lockTrace())
+}
+
+// appendTransitEnvelopeLocked appends a transit DM to s.topics["dm"] with
+// everything relayRetry owes the change, and returns the ids the transit caps
+// evicted to make room. Caller MUST hold s.deliveryMu (write) and s.gossipMu
+// (write) — the topicsCommitWithRelayRetry admission commit — and must have checked scan
+// for an exact duplicate.
+//
+// The relay retry enters and leaves with its envelope: the evicted envelopes'
+// `msg|` entries go and the new one's is armed (when the admission routes the
+// message) in this same section, so no ack_delete, eviction or expiry can
+// take the envelope between the append and the arm. Dropped first so the
+// evictions' slots are free for the arm.
+func (s *Service) appendTransitEnvelopeLocked(envelope protocol.Envelope, scan transitAdmissionScan, armRelayRetry bool) []protocol.MessageID {
+	// Transit retention (layer 1): enforce the per-recipient FIFO cap and
+	// the global byte budget before appending.
+	backlog, evicted := evictTransitOverflowLocked(s.topics[envelope.Topic], scan, envelope.Recipient, len(envelope.Payload), s.isTransitEnvelope)
+	s.topics[envelope.Topic] = append(backlog, envelope)
+	s.dropRelayRetryEntriesLocked(evicted)
+	if armRelayRetry {
+		s.armRelayMessageRetryLocked(envelope)
+	}
+	return evicted
 }
 
 // owesDeliveryReceipt reports whether msg is a data DM addressed to this
@@ -10464,12 +10670,17 @@ func (s *Service) cleanupExpiredMessages() {
 // messages. Used by bootstrapLoop where throttling is already handled by
 // the tick interval.
 //
-// Two-phase approach avoids holding s.peerMu.Lock() during the full scan:
+// Two-phase approach avoids holding a writer lock during the full scan:
 //
-//	Phase 1 (RLock): collect expired message IDs — read-only, concurrent
-//	                  with other readers.
-//	Phase 2 (Lock):  rebuild only affected topic slices — short critical
-//	                  section proportional to expired count, not total count.
+//	Phase 1 (gossipMu.RLock): collect expired message IDs — read-only,
+//	                  concurrent with other readers.
+//	Phase 2 (gossipMu Lock, preceded by deliveryMu Lock only when an
+//	                  expired envelope can own a `msg|` relay retry entry):
+//	                  rebuild only affected topic slices and drop those
+//	                  entries — short critical section proportional to
+//	                  expired count, not total count.
+//
+// Caller MUST hold no domain mutex.
 func (s *Service) cleanupExpiredMessagesForce() {
 	now := time.Now().UTC()
 	drift := s.effectiveClockDrift()
@@ -10480,6 +10691,18 @@ func (s *Service) cleanupExpiredMessagesForce() {
 		id    string
 	}
 	var expired []expiredEntry
+	// The removal phase's mode: with relayRetry only when an expired
+	// envelope can own a `msg|` entry. A sweep that expires only broadcasts
+	// or this node's own messages — and storeIncomingMessage reaches this
+	// sweep for every kind of admission — must not queue a writer on
+	// deliveryMu.
+	sweep := topicsCommitGossipOnly
+	markExpired := func(topic string, message protocol.Envelope) {
+		expired = append(expired, expiredEntry{topic, string(message.ID)})
+		if s.topicsCommitModeFor(message) == topicsCommitWithRelayRetry {
+			sweep = topicsCommitWithRelayRetry
+		}
+	}
 
 	s.gossipMu.RLock()
 	for topic, messages := range s.topics {
@@ -10487,7 +10710,7 @@ func (s *Service) cleanupExpiredMessagesForce() {
 			if message.Flag == protocol.MessageFlagAutoDeleteTTL && message.TTLSeconds > 0 {
 				expiresAt := message.CreatedAt.Add(time.Duration(message.TTLSeconds) * time.Second)
 				if !expiresAt.After(now) {
-					expired = append(expired, expiredEntry{topic, string(message.ID)})
+					markExpired(topic, message)
 					continue
 				}
 			}
@@ -10501,7 +10724,7 @@ func (s *Service) cleanupExpiredMessagesForce() {
 			// chatlog / the sender engine) and are unaffected.
 			pol := s.envelopeRetentionPolicy(topic, message.Sender, message.Recipient)
 			if envelopeAgeExceeded(message.CreatedAt, now, pol.MaxAge, drift) {
-				expired = append(expired, expiredEntry{topic, string(message.ID)})
+				markExpired(topic, message)
 				continue
 			}
 			// Forwarding-only transit (transit_retention.go): a
@@ -10512,7 +10735,7 @@ func (s *Service) cleanupExpiredMessagesForce() {
 			// window still bounds the SHORT forwarding op; the CreatedAt
 			// ceiling above is the re-injection-proof global cap.
 			if s.isTransitEnvelope(message) && transitExpired(message, now) {
-				expired = append(expired, expiredEntry{topic, string(message.ID)})
+				markExpired(topic, message)
 			}
 		}
 	}
@@ -10540,17 +10763,59 @@ func (s *Service) cleanupExpiredMessagesForce() {
 		expiredIDs[e.topic][e.id] = struct{}{}
 	}
 
-	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_wait").Int("expired", len(expired)).Msg("gossipMu_writer")
-	s.gossipMu.Lock()
-	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_held").Int("expired", len(expired)).Msg("gossipMu_writer")
+	// With relayRetry, deliveryMu OUTER (relayRetry), gossipMu INNER
+	// (topics), canonical order: an expired transit envelope and its relay
+	// retry entry leave in ONE section. retryableRelayMessages iterates
+	// s.topics["dm"], so an entry whose envelope is gone is never visited
+	// again and its lazy TTL delete never fires; dropping it in a later
+	// section would also let a reader in between see the id as relayed (the
+	// ack_delete suppression gate, recordRelayDeliveredWhileRelayed) with
+	// nothing behind it. The mode is decided from what phase 1 saw, and
+	// phase 2 re-checks every envelope it removes against it
+	// (removeExpiredEnvelopesLocked).
+	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_wait").Int("expired", len(expired)).Msg(sweep.lockTrace())
+	s.lockTopicsCommit(sweep)
+	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_held").Int("expired", len(expired)).Msg(sweep.lockTrace())
 	s.lastExpiredCleanup = now
 
+	relayedIDs := s.removeExpiredEnvelopesLocked(expiredIDs, sweep)
+	s.unlockTopicsCommit(sweep)
+	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_released").Msg(sweep.lockTrace())
+
+	// Leaf lock, after every domain mutex is released (relay_delivered.go).
+	s.forgetRelayDelivered(relayedIDs)
+}
+
+// removeExpiredEnvelopesLocked is the removal phase of
+// cleanupExpiredMessagesForce: it removes the envelopes named by expiredIDs
+// (topic → ids) and returns the ids of the removed envelopes that owned relay
+// state — a `msg|` entry, an ack_delete suppression set — dropping their
+// entries itself in the relay-retry mode. Caller MUST hold s.gossipMu
+// (write), preceded by s.deliveryMu (write) when mode.holdsDeliveryMu().
+//
+// Each envelope is re-classified here (topicsCommitCovers) rather than
+// trusted to be the one phase 1 classified: the ids came from a scan under a
+// lock that has since been released, and the outer message id is not
+// covered by the envelope signature, so another message — a peer's transit
+// DM — can sit under the same id by now. A gossipMu-only sweep keeps such an
+// envelope; the next sweep that sees it expired takes the relay-retry mode.
+//
+// The relay state is keyed by id alone, and for the same reason an id does
+// not identify one envelope across topics: a broadcast can carry the id of a
+// live transit DM. So only a removed envelope that itself enters relay retry
+// gives its id to the drop and to the caller's forget; removing anything else
+// must leave the live DM's entry and suppression set alone.
+func (s *Service) removeExpiredEnvelopesLocked(expiredIDs map[string]map[string]struct{}, mode topicsCommitMode) []protocol.MessageID {
+	var relayedIDs []protocol.MessageID
 	for topic, ids := range expiredIDs {
 		messages := s.topics[topic]
 		filtered := messages[:0]
 		for _, msg := range messages {
-			if _, drop := ids[string(msg.ID)]; drop {
+			if _, drop := ids[string(msg.ID)]; drop && s.topicsCommitCovers(mode, msg) {
 				log.Debug().Str("node", s.identity.Address).Str("topic", topic).Str("id", string(msg.ID)).Msg("cleanupExpiredMessages: removing expired")
+				if s.topicsCommitModeFor(msg) == topicsCommitWithRelayRetry {
+					relayedIDs = append(relayedIDs, msg.ID)
+				}
 				continue
 			}
 			filtered = append(filtered, msg)
@@ -10566,20 +10831,10 @@ func (s *Service) cleanupExpiredMessagesForce() {
 			s.topics[topic] = filtered
 		}
 	}
-	s.gossipMu.Unlock()
-	log.Trace().Str("site", "cleanupExpiredMessagesForce").Str("phase", "lock_released").Msg("gossipMu_writer")
-
-	// Orphan prevention (transit_retention.go): retryableRelayMessages
-	// iterates the TOPIC snapshot, so the relayRetry entry of a removed
-	// envelope is never visited again and its lazy TTL delete never
-	// fires. Sequential lock use (gossipMu released above, deliveryMu
-	// inside) keeps the canonical deliveryMu → gossipMu order intact.
-	removedIDs := make([]protocol.MessageID, 0, len(expired))
-	for _, e := range expired {
-		removedIDs = append(removedIDs, protocol.MessageID(e.id))
+	if mode.holdsDeliveryMu() {
+		s.dropRelayRetryEntriesLocked(relayedIDs)
 	}
-	s.dropRelayRetryEntries(removedIDs)
-	s.forgetRelayDelivered(removedIDs)
+	return relayedIDs
 }
 
 func (s *Service) validateMessageTiming(msg incomingMessage) error {

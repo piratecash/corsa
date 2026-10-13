@@ -21,13 +21,16 @@ import (
 // (other peers / the eventual recipient may still need it).
 //
 // Bounded: an entry is forgotten when its envelope leaves s.topics
-// (forgetRelayDelivered is wired next to dropRelayRetryEntries on every
-// expiry/eviction/delete path), and a hard cap guards against a leak if a
-// forget path is ever missed.
+// (forgetRelayDelivered follows every expiry/eviction/delete path that
+// drops the envelope's relayRetry entry, once that path has released its
+// domain mutexes), and a hard cap guards against a leak if a forget path is
+// ever missed.
 //
-// Locking: guarded by its OWN leaf mutex (s.relayDeliveredMu). It is only
-// ever taken alone or as the innermost lock (snapshotted BEFORE peerMu in
-// filterGossipTargetsForEnvelope), never while acquiring a domain mutex —
+// Locking: guarded by its OWN leaf mutex (s.relayDeliveredMu). It is taken
+// alone (forgetRelayDelivered; relayDeliveredSnapshot, BEFORE peerMu in
+// filterGossipTargetsForEnvelope) or innermost under s.deliveryMu.RLock
+// (recordRelayDeliveredWhileRelayed, which must check the msg| entry and
+// record in one hold), and it is never held while acquiring a domain mutex —
 // so it adds no edge to the canonical domain lock order. See docs/locking.md.
 
 // maxRelayDeliveredMessages caps how many distinct message ids carry a
@@ -79,22 +82,38 @@ func (s *Service) relayDeliveredSnapshot(id protocol.MessageID) map[domain.PeerI
 	return out
 }
 
-// hasRelayRetryEntry reports whether we are actively relaying message id
-// (a relayRetry bookkeeping entry exists). Used to gate ack_delete
-// suppression recording: an authenticated peer must not be able to fill
+// recordRelayDeliveredWhileRelayed records that peer `who` confirmed (via
+// ack_delete) it holds message id — the ack_delete suppression gate. It
+// records only while this node relays the id, i.e. while a `msg|` relayRetry
+// entry exists: an authenticated peer must not be able to fill
 // relayDeliveredTo with ack_deletes for ids we never relay (phantom ids),
-// which would otherwise reach the hard cap and starve real entries. Takes
-// deliveryMu.RLock alone — caller must hold no domain mutex.
-func (s *Service) hasRelayRetryEntry(id protocol.MessageID) bool {
+// which would reach the hard cap and starve real entries. Reports whether it
+// recorded.
+//
+// The check and the record happen under ONE s.deliveryMu.RLock hold, with
+// relayDeliveredMu (a leaf) taken innermost. Every path that removes a
+// transit envelope drops its `msg|` entry under s.deliveryMu (write) and
+// calls forgetRelayDelivered after releasing it, so a record made while the
+// entry exists always precedes that removal and is forgotten by it, and a
+// record attempted after the removal finds no entry. Checking in one hold and
+// recording after releasing it let a removal and its forget land in between;
+// the record was then made for an id with no envelope and no entry, and
+// nothing forgot it again. Caller MUST hold no domain mutex.
+func (s *Service) recordRelayDeliveredWhileRelayed(id protocol.MessageID, who domain.PeerIdentity) bool {
 	s.deliveryMu.RLock()
 	defer s.deliveryMu.RUnlock()
-	_, ok := s.relayRetry[relayMessageKey(id)]
-	return ok
+	if _, relayed := s.relayRetry[relayMessageKey(id)]; !relayed {
+		return false
+	}
+	s.recordRelayDeliveredTo(id, who)
+	return true
 }
 
 // forgetRelayDelivered drops the suppression sets for envelopes that left
-// s.topics (expired / evicted / acked-and-removed). Wired next to
-// dropRelayRetryEntries so the two bounded side-indexes are pruned together.
+// s.topics (expired / evicted / acked-and-removed). Called right after the
+// section that dropped the same envelopes' relayRetry entries, so the two
+// bounded side-indexes are pruned together. Takes only its leaf mutex;
+// every caller does so after releasing that section's domain mutexes.
 func (s *Service) forgetRelayDelivered(ids []protocol.MessageID) {
 	if len(ids) == 0 {
 		return

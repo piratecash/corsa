@@ -3208,10 +3208,10 @@ func (s *Service) connSupportsProtocol(connID domain.ConnID, min int) bool {
 // same "expired"/"failed" statuses the pending-ring paths use, visible through
 // fetch_pending_messages — the pending rings drop every queued frame of the
 // message (the send_message AND any relay_message queued by the relay
-// fallback), relayRetry drops its entry, the aggregate pending count
-// refreshes, and the durable failure journal (written synchronously — it is
-// the durable boundary of the abandonment) keeps RegisterDeliveryOutbox
-// from reseeding the same chatlog row after a restart. A late-receipt
+// fallback), the aggregate pending count refreshes, and the durable
+// failure journal (written synchronously — it is the durable boundary of
+// the abandonment) keeps RegisterDeliveryOutbox from reseeding the same
+// chatlog row after a restart. A late-receipt
 // re-check under the locks makes the abandon decision lose against a
 // delivered/seen receipt that landed in the unlocked gap since the retry
 // tick. The chatlog row itself intentionally stays at "sent": sent→failed
@@ -3246,7 +3246,9 @@ func (s *Service) failDelivery(envelope protocol.Envelope, status, reason string
 	}
 	s.markOutboundTerminalLocked(frame, status, reason)
 	pendingDeltas := s.clearPendingMessageLocked(envelope.ID)
-	delete(s.relayRetry, relayMessageKey(envelope.ID))
+	// No relayRetry delete: this node's own message never owns a `msg|`
+	// entry (envelopeEntersRelayRetry), so one under its unsigned id
+	// belongs to a live transit DM and must stay with that envelope.
 	s.statusMu.Lock()
 	if len(pendingDeltas) > 0 {
 		s.refreshAggregatePendingLocked()

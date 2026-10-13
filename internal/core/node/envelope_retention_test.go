@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
@@ -225,16 +226,23 @@ func TestEnvelopePropagationAged(t *testing.T) {
 	}
 }
 
-func TestHasRelayRetryEntryGatesAckSuppression(t *testing.T) {
+func TestRelayRetryEntryGatesAckSuppression(t *testing.T) {
 	t.Parallel()
 	svc := &Service{relayRetry: map[string]relayAttempt{}}
+	hop := domain.PeerIdentityFromWire("1111111111111111111111111111111111111111")
 
-	if svc.hasRelayRetryEntry("ghost") {
-		t.Error("phantom id must not report a relay-retry entry")
+	if svc.recordRelayDeliveredWhileRelayed("ghost", hop) {
+		t.Error("an ack_delete for a phantom id must not be recorded")
+	}
+	if relayDeliveredTracked(svc, "ghost") {
+		t.Error("a phantom id must not get a suppression set")
 	}
 	svc.relayRetry[relayMessageKey("real")] = relayAttempt{}
-	if !svc.hasRelayRetryEntry("real") {
-		t.Error("an active relay-retry id must report present")
+	if !svc.recordRelayDeliveredWhileRelayed("real", hop) {
+		t.Error("an ack_delete for a relayed id must be recorded")
+	}
+	if _, ok := svc.relayDeliveredSnapshot("real")[hop]; !ok {
+		t.Error("the acking hop must be in the relayed id's suppression set")
 	}
 }
 

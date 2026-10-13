@@ -140,8 +140,10 @@ func TestRetryDueDeliveriesResendsViaLiveRoute(t *testing.T) {
 // delivery — no attempt cap, no age horizon — so this path carries the
 // whole cleanup contract: the entry leaves the retry set, outbound goes
 // terminal ("expired", visible through fetch_pending_messages), the
-// pending rings and relayRetry drop the envelope, and the abandonment is
-// journaled durably so a restart does not reseed the same chatlog row.
+// pending rings drop every queued frame of the message, and the
+// abandonment is journaled durably so a restart does not reseed the same
+// chatlog row. (relayRetry is not part of it: an own message never owns a
+// msg| entry.)
 func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
@@ -171,7 +173,9 @@ func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	svc.pendingKeys[pendingFrameKey("peer-x:64646", frame)] = struct{}{}
 	svc.pending["peer-y:64646"] = []pendingFrame{{Frame: relayFrame, QueuedAt: now}}
 	svc.pendingKeys[pendingFrameKey("peer-y:64646", relayFrame)] = struct{}{}
-	svc.relayRetry[relayMessageKey("retry-cap-1")] = relayAttempt{FirstSeen: now}
+	// No relayRetry entry: an own message never owns one, and abandoning it
+	// must not touch an entry under its id, which would be some transit
+	// DM's (TestOwnDeliveryWithdrawalLeavesTransitRelayRetryAlone).
 	svc.deliveryMu.Unlock()
 
 	svc.retryDueDeliveries(now)
@@ -182,7 +186,6 @@ func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	outboundState := svc.outbound["retry-cap-1"]
 	pendingLeft := len(svc.pending["peer-x:64646"])
 	relayPendingLeft := len(svc.pending["peer-y:64646"])
-	_, relayLeft := svc.relayRetry[relayMessageKey("retry-cap-1")]
 	svc.deliveryMu.RUnlock()
 	if stillThere {
 		t.Fatal("an expired message must leave the retry set")
@@ -195,9 +198,6 @@ func TestRetryDueDeliveriesDropsExpiredMessage(t *testing.T) {
 	}
 	if relayPendingLeft != 0 {
 		t.Fatalf("pending ring must drop the queued relay_message of the abandoned id, %d left", relayPendingLeft)
-	}
-	if relayLeft {
-		t.Fatal("relayRetry must drop the abandoned envelope")
 	}
 	journal.mu.Lock()
 	failed := append([]protocol.MessageID(nil), journal.failed...)

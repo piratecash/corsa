@@ -759,7 +759,7 @@ Anti-poisoning admission rule (Phase 4 §3.6): a draft "Announcement cannot over
 ### Delivery state is in-memory only (no disk persistence)
 
 All routing-driven delivery state — `pending` per-peer rings, `relayRetry`
-bookkeeping, receipts, outbound status (`trackRelayMessage`,
+bookkeeping, receipts, outbound status (`armRelayMessageRetryLocked`,
 `armRelayReceiptRetryLocked`, `noteRelayAttempt`, `queuePeerFrame`, outbound status
 transitions, route-drain outbound cleanup) — lives in RAM only and **does not
 survive a restart**. Pending frames are bounded by an in-memory per-peer ring
@@ -1543,7 +1543,7 @@ Anti-poisoning admission rule (Phase 4 §3.6): draft rule «Announcement не м
 ### Состояние доставки живёт только в памяти (без дискового персиста)
 
 Всё routing-driven состояние доставки — пер-пировые кольца `pending`,
-учёт `relayRetry`, receipts, outbound-статус (`trackRelayMessage`,
+учёт `relayRetry`, receipts, outbound-статус (`armRelayMessageRetryLocked`,
 `armRelayReceiptRetryLocked`, `noteRelayAttempt`, `queuePeerFrame`, переходы статуса
 outbound, очистка outbound после route drain) — живёт только в RAM и **не
 переживает рестарт**. Pending-фреймы ограничены in-memory пер-пировым кольцом

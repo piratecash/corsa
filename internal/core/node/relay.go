@@ -1827,15 +1827,10 @@ func (s *Service) retryableRelayMessages(now time.Time) []protocol.Envelope {
 	out := make([]protocol.Envelope, 0)
 	for _, msg := range items {
 		key := relayMessageKey(msg.ID)
-		if msg.Recipient == "" || msg.Recipient == "*" || msg.Recipient == s.identity.Address {
-			delete(s.relayRetry, key)
-			continue
-		}
-		// Origin-authored DMs belong to the sender-owned engine, not the
-		// transit relay-retry contour (relay.md INV-1/INV-2). Reap any
-		// stale/echo-armed entry and skip — re-gossiping our own message
-		// here is the indefinite-DM-spam bug. See trackRelayMessage.
-		if s.identity != nil && msg.Sender == s.identity.Address {
+		// The same predicate the admission commit arms by, so an envelope
+		// the commit would not arm can never be retried from here, whatever
+		// put an entry under its id. See envelopeEntersRelayRetry.
+		if !envelopeEntersRelayRetry(msg, s.identity.Address) {
 			delete(s.relayRetry, key)
 			continue
 		}
@@ -1917,13 +1912,14 @@ func relayRetryBackoff(attempts int) time.Duration {
 // noteRelayAttempt records one retry attempt on an entry that is still
 // tracked and returns the attempt count. The bool is false when the
 // entry is gone: the retry loop works from a snapshot taken under
-// deliveryMu and released before this call, so a receipt ack, a
-// cancel or a transit eviction can remove the message — and its entry
-// — in between. Re-creating the entry here made it unreachable for
-// every reaper (they all walk the live backlog, which no longer holds
-// the message), so it stayed until process exit and burned the
+// deliveryMu and released before this call, so in between a delivery
+// receipt can remove the entry, and ack_delete, a transit-cap eviction or
+// the expiry sweep can remove the message together with its entry.
+// Re-creating the entry for a removed message made it unreachable for
+// every reaper (they all walk the live backlog, which no longer holds the
+// message), so it stayed until process exit and burned the
 // maxRelayRetryEntries quota. Absent entry → no write, and the caller
-// skips the send, because the work it was about to do was cancelled.
+// skips the send, because the work it was about to do is no longer owed.
 func (s *Service) noteRelayAttempt(key string, now time.Time) (int, bool) {
 	log.Trace().Str("site", "noteRelayAttempt").Str("phase", "lock_wait").Str("key", key).Msg("delivery_mu_writer")
 	s.deliveryMu.Lock()
@@ -1939,57 +1935,70 @@ func (s *Service) noteRelayAttempt(key string, now time.Time) (int, bool) {
 	return state.Attempts, tracked
 }
 
-func (s *Service) trackRelayMessage(msg protocol.Envelope) {
-	// Control DMs (TopicControlDM) intentionally bypass the node-level
-	// relayRetry tracker: their retry policy lives at the application
-	// layer (the DMRouter delete intent, with exponential backoff). That
-	// retry queue is in-memory only in the current implementation —
-	// see docs/dm-commands.md §"Acknowledgement and retry"; restart
-	// abandons in-flight retries, and JSON persistence is a tracked
-	// follow-up. Tracking control DMs here would create dead state
-	// either way — retryableRelayMessages only consults topics["dm"],
-	// so a control envelope put into relayRetry would never get
-	// retried and would only burn the maxRelayRetryEntries quota until
-	// tombstone TTL.
-	if msg.Topic != "dm" || msg.Recipient == "" || msg.Recipient == "*" {
+// envelopeEntersRelayRetry reports whether a BACKLOGGED envelope is one this
+// node relays onward on a retry schedule: a data DM between two OTHER
+// identities. The admission commit arms by it and retryableRelayMessages
+// reaps by it, so the two cannot disagree on which envelopes own a `msg|`
+// entry.
+//
+// Excluded, each for its own reason:
+//   - control DMs (TopicControlDM): their retry policy lives at the
+//     application layer (the DMRouter delete intent, with exponential
+//     backoff — see docs/dm-commands.md §"Acknowledgement and retry"), and
+//     they never enter s.topics, so an entry for one would be visited by no
+//     walk and would only burn the maxRelayRetryEntries quota;
+//   - broadcast and addressless envelopes, and DMs addressed to this node,
+//     which have arrived and are not forwarded;
+//   - DMs this node authored. They are owned by the sender-owned delivery
+//     engine (delivery_retry.go: registerAwaitingDelivered →
+//     dispatchEnvelopeRetry), which paces itself on a capped backoff, emits
+//     only into a route that exists and ends on the recipient's receipt, the
+//     author's withdrawal or the message's own TTL. This contour is for
+//     TRANSIT forwarding only (relay.md INV-1/INV-2: "relay is
+//     forwarding-only — offline delivery is the sender's job") and re-emits
+//     BLINDLY; arming our own message here re-gossiped it forever, every mesh
+//     echo re-armed the relayRetryTTL window, and that was the source of the
+//     multi-day DM spam.
+func envelopeEntersRelayRetry(envelope protocol.Envelope, localAddress string) bool {
+	return envelope.Topic == "dm" &&
+		envelope.Recipient != "" && envelope.Recipient != "*" && envelope.Recipient != localAddress &&
+		envelope.Sender != localAddress
+}
+
+// armRelayMessageRetryLocked starts the relay retry of a transit DM that the
+// caller has just appended to s.topics["dm"]. Caller MUST hold s.deliveryMu
+// (write) and s.gossipMu (write), in canonical order, in the same section as
+// the append.
+//
+// It is called only from storeIncomingMessage's admission commit, never as a
+// step of its own, because a `msg|` entry is reaped only through its
+// envelope: retryableRelayMessages (and its TTL) walks s.topics["dm"], and
+// ack_delete, the transit cap and the in-flight window remove the entry in
+// the same section that removes the envelope. Arming in a later
+// section left a window in which any of them could take the envelope; the
+// entry was then created for an envelope no walk would visit. It held a
+// maxRelayRetryEntries slot and made the ack_delete suppression gate
+// (recordRelayDeliveredWhileRelayed) treat the id as relayed — admitting
+// records for it — until a receipt for the id or (as cancels then did) a
+// withdrawal of an own message with the same id happened to delete it.
+//
+// It writes a fresh entry without looking for an existing one. That is safe
+// because the append it accompanies is never a duplicate (the caller's exact-ID
+// scan returned first), so an entry already under this id would have no
+// envelope behind it — itself the orphan this invariant rules out — and
+// replacing it loses nothing live.
+//
+// A full map leaves the envelope unarmed rather than evicting a live entry.
+// It is still backlogged, so subscribers and fetch_inbox still get it and its
+// first send still goes out from the admission; what it loses is this node's
+// onward re-sends, and the sender's own end-to-end retry covers those.
+func (s *Service) armRelayMessageRetryLocked(envelope protocol.Envelope) {
+	if len(s.relayRetry) >= maxRelayRetryEntries {
+		log.Debug().Str("message_id", string(envelope.ID)).Str("recipient", envelope.Recipient).
+			Msg("relay retry not armed for transit message: relayRetry is full")
 		return
 	}
-	// Origin-authored DMs are owned by the sender-owned delivery engine
-	// (delivery_retry.go: registerAwaitingDelivered → dispatchEnvelopeRetry),
-	// which paces itself on a capped backoff and ends on the recipient's
-	// receipt, the author's withdrawal, or the message's own TTL.
-	// The relay-retry contour is for TRANSIT forwarding only (relay.md
-	// INV-1/INV-2: "relay is forwarding-only — offline delivery is the
-	// sender's job"). Arming our own message here re-gossiped it forever,
-	// and that is a different thing from the sender's own retry: this
-	// contour re-emits BLINDLY, so every mesh echo re-armed the
-	// relayRetryTTL window and flooded the mesh whether or not the
-	// recipient was reachable. The sender's engine emits only into a
-	// route that exists, which is why waiting there costs no wire traffic
-	// at all — this was the source of the multi-day DM spam.
-	if s.identity != nil && msg.Sender == s.identity.Address {
-		return
-	}
-	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_wait").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
-	s.deliveryMu.Lock()
-	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_held").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
-	key := relayMessageKey(msg.ID)
-	state := s.relayRetry[key]
-	if state.FirstSeen.IsZero() {
-		// Enforce capacity: reject new entries when the retry map is full.
-		if len(s.relayRetry) >= maxRelayRetryEntries {
-			s.deliveryMu.Unlock()
-			log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released_full").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
-			return
-		}
-		state.FirstSeen = time.Now().UTC()
-		s.relayRetry[key] = state
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released_new").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
-		return
-	}
-	s.deliveryMu.Unlock()
-	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
+	s.relayRetry[relayMessageKey(envelope.ID)] = relayAttempt{FirstSeen: envelope.StoredAt}
 }
 
 // receiptEntersRelayRetry reports whether a BACKLOGGED receipt is one this

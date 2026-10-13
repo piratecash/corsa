@@ -79,8 +79,9 @@ func (r CancelOutgoingDeliveryResult) Total() int {
 
 // CancelOutgoingDelivery withdraws a DM this node originated: the envelope
 // leaves the store-and-forward backlog and every queue that could still emit
-// it — pending peer frames, the sender-owned end-to-end retry, the relay
-// retry shadow and the outbound status entry.
+// it — pending peer frames, the sender-owned end-to-end retry and the
+// outbound status entry. (The node-level relay retry never holds an own
+// message, so there is nothing of it to withdraw.)
 //
 // What it guarantees is "no further attempt", not "the peer never saw it". A
 // dispatch already in flight when the call lands is on the wire and cannot be
@@ -133,8 +134,12 @@ func (s *Service) CancelOutgoingDelivery(messageID protocol.MessageID, recipient
 		return result, fmt.Errorf("cancel outgoing delivery %s: %w: message was not originated by this node", messageID, protocol.ErrInvalidCancelDelivery)
 	}
 
+	// No relayRetry delete: a message this node authored never owns a
+	// `msg|` entry (envelopeEntersRelayRetry), and the outer id is
+	// unsigned, so an entry under this id belongs to some peer's transit
+	// DM that is still backlogged — deleting it would cost that DM its
+	// onward re-sends. An entry leaves only with the envelope that owns it.
 	result.BacklogRemoved = s.dropBacklogEnvelopeLocked(messageID, wireRecipient)
-	delete(s.relayRetry, relayMessageKey(messageID))
 
 	// The claim set tracks ids whose ROW still carries a durable
 	// never-emitted mark, and a withdrawn message's row is being destroyed
@@ -349,9 +354,11 @@ func (s *Service) CancelOutgoingDeliveriesTo(recipient domain.PeerIdentity, scop
 		s.clearClaimsLocked(withdrawn)
 	}
 
+	// No relayRetry delete, for the reason CancelOutgoingDelivery gives:
+	// these ids are this node's own messages, which never own a `msg|`
+	// entry, so one under the same id is a live transit DM's.
 	var affected []ebus.PeerPendingDelta
 	for id := range withdrawn {
-		delete(s.relayRetry, relayMessageKey(id))
 		affected = mergePendingDeltas(affected, s.clearPendingMessageLocked(id))
 	}
 

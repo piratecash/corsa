@@ -9,7 +9,7 @@ import (
 	"github.com/piratecash/corsa/internal/core/protocol"
 )
 
-// TestTrackRelayMessage_SkipsOriginAuthored is the regression guard for the
+// TestEnvelopeEntersRelayRetry is the regression guard for the
 // indefinite-DM-gossip bug: a DM this node ORIGINATED (sender == self) must
 // not enter the relay-retry contour. Origin re-sends are owned by the
 // sender-owned delivery engine (delivery_retry.go), which emits only into
@@ -19,41 +19,29 @@ import (
 // here re-gossiped it forever, and BLINDLY — every mesh echo re-armed the
 // 3-minute window and flooded the mesh whether or not the recipient was
 // reachable.
-func TestTrackRelayMessage_SkipsOriginAuthored(t *testing.T) {
+//
+// The admission commit arms by this predicate and retryableRelayMessages
+// reaps by it, so pinning it pins both sides.
+func TestEnvelopeEntersRelayRetry(t *testing.T) {
 	t.Parallel()
-	svc := newTestService(t, config.NodeTypeFull)
-	other1, _ := identity.Generate()
-	other2, _ := identity.Generate()
-
-	origin := protocol.Envelope{
-		ID:        "origin-dm-1",
-		Topic:     "dm",
-		Sender:    svc.identity.Address,
-		Recipient: other1.Address,
-		Flag:      protocol.MessageFlagSenderDelete,
+	const self = "self-identity"
+	cases := []struct {
+		name     string
+		envelope protocol.Envelope
+		want     bool
+	}{
+		{"transit DM between two other identities", protocol.Envelope{Topic: "dm", Sender: "alice", Recipient: "bob"}, true},
+		{"origin-authored DM is the sender engine's", protocol.Envelope{Topic: "dm", Sender: self, Recipient: "bob"}, false},
+		{"DM addressed to this node has arrived", protocol.Envelope{Topic: "dm", Sender: "alice", Recipient: self}, false},
+		{"control DM retries at the application layer", protocol.Envelope{Topic: protocol.TopicControlDM, Sender: "alice", Recipient: "bob"}, false},
+		{"broadcast recipient", protocol.Envelope{Topic: "dm", Sender: "alice", Recipient: "*"}, false},
+		{"no recipient", protocol.Envelope{Topic: "dm", Sender: "alice"}, false},
+		{"non-DM topic", protocol.Envelope{Topic: "global", Sender: "alice", Recipient: "bob"}, false},
 	}
-	svc.trackRelayMessage(origin)
-	svc.deliveryMu.RLock()
-	_, originTracked := svc.relayRetry[relayMessageKey(origin.ID)]
-	svc.deliveryMu.RUnlock()
-	if originTracked {
-		t.Fatal("trackRelayMessage must NOT arm relayRetry for an origin-authored DM (sender == self)")
-	}
-
-	// Transit DM (neither party is us) is the legitimate relay-retry subject.
-	transit := protocol.Envelope{
-		ID:        "transit-dm-1",
-		Topic:     "dm",
-		Sender:    other1.Address,
-		Recipient: other2.Address,
-		Flag:      protocol.MessageFlagSenderDelete,
-	}
-	svc.trackRelayMessage(transit)
-	svc.deliveryMu.RLock()
-	_, transitTracked := svc.relayRetry[relayMessageKey(transit.ID)]
-	svc.deliveryMu.RUnlock()
-	if !transitTracked {
-		t.Fatal("trackRelayMessage must arm relayRetry for a transit DM (in-flight forwarding)")
+	for _, tc := range cases {
+		if got := envelopeEntersRelayRetry(tc.envelope, self); got != tc.want {
+			t.Errorf("%s: envelopeEntersRelayRetry = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

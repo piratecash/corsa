@@ -668,8 +668,10 @@ already destroyed.
 still put the envelope on the wire, in one cross-domain section
 (`docs/locking.md`): the store-and-forward backlog (`s.topics`), the
 queued per-peer frames, the sender-owned end-to-end retry
-(`awaitingDelivered`), the relay-retry shadow and the outbound status
-entry. It refuses a message this node did not author, so a local caller
+(`awaitingDelivered`) and the outbound status entry. The node-level
+relay retry never holds a message this node authored, so the withdrawal
+leaves it alone — an entry under the same (unsigned) id belongs to some
+peer's transit DM. It refuses a message this node did not author, so a local caller
 cannot purge a transit envelope by guessing an id.
 
 Ordering is load-bearing: the cancellation runs **before** the local row
@@ -1341,11 +1343,13 @@ Consequences:
    Routing/push fan-out is unaffected because `executeGossipTargets`
    and `sendTableDirectedRelay` send wire frames on the fly,
    independent of `s.topics`.
-6. The node-level `relayRetry` tracker likewise rejects control DMs
-   at its entry gate (`trackRelayMessage`). Same reasoning as #5:
-   the retry loop only consults `s.topics["dm"]`, so a control entry
-   in `relayRetry` would be a dead state burning the
-   `maxRelayRetryEntries` quota until its own expiry.
+6. The node-level `relayRetry` tracker likewise never arms control
+   DMs: `envelopeEntersRelayRetry`, the predicate the admission commit
+   arms by and the retry loop reaps by, admits only topic `dm`. Same
+   reasoning as #5: the retry loop only consults `s.topics["dm"]`, so a
+   control entry in `relayRetry` would be a dead state burning the
+   `maxRelayRetryEntries` quota until process exit — an entry's TTL is
+   checked only when the loop visits its envelope.
 
 ### Failure modes
 
@@ -2224,8 +2228,10 @@ DM, который получатель ни разу не подтвердил,
 `node.Service.CancelOutgoingDelivery` очищает всё, откуда конверт ещё
 может уйти в сеть, одной кросс-доменной секцией (`docs/locking.md`):
 store-and-forward backlog (`s.topics`), очереди кадров по пирам,
-sender-owned end-to-end retry (`awaitingDelivered`), тень relay-retry и
-запись outbound-статуса. Сообщение, автором которого узел не является,
+sender-owned end-to-end retry (`awaitingDelivered`) и запись
+outbound-статуса. Node-level relay retry никогда не держит сообщение,
+автором которого является узел, поэтому отзыв его не трогает: запись под
+тем же (неподписанным) id принадлежит транзитному DM какого-то пира. Сообщение, автором которого узел не является,
 отклоняется — локальный вызывающий не может вычистить транзитный конверт,
 угадав id.
 
@@ -2893,11 +2899,13 @@ Control DM не попадают в chatlog **на обеих сторонах**
    Routing/push fan-out не страдает: `executeGossipTargets` и
    `sendTableDirectedRelay` шлют wire-фреймы на лету, независимо от
    `s.topics`.
-6. Node-level `relayRetry` tracker тоже отвергает control DM на
-   входе (`trackRelayMessage`). По той же причине, что и #5: retry
-   loop читает только `s.topics["dm"]`, и control-запись в
-   `relayRetry` была бы мёртвым состоянием, которое жжёт квоту
-   `maxRelayRetryEntries` до собственного истечения.
+6. Node-level `relayRetry` tracker тоже никогда не взводит control DM:
+   `envelopeEntersRelayRetry` — предикат, по которому коммит приёма
+   взводит запись, а retry loop её убирает, — пропускает только topic
+   `dm`. По той же причине, что и #5: retry loop читает только
+   `s.topics["dm"]`, и control-запись в `relayRetry` была бы мёртвым
+   состоянием, которое жжёт квоту `maxRelayRetryEntries` до выхода
+   процесса — TTL записи проверяется, только когда цикл обходит её конверт.
 
 ### Сценарии отказа
 

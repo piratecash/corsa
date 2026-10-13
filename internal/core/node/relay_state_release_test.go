@@ -90,10 +90,10 @@ func TestRerouteAfterAckRestoresFrameLine(t *testing.T) {
 
 // The retry loop snapshots the backlog under deliveryMu, releases it,
 // and only then records the attempt. Anything that removed the message
-// and its relayRetry entry in between (receipt ack, cancel, transit
-// eviction) must win: recording the attempt for a message that is gone
-// re-created an entry no sweep could ever reach, because the only reaper
-// walks the live backlog.
+// and its relayRetry entry in between (ack_delete, transit-cap eviction,
+// the expiry sweep) must win: recording the attempt for a message that is
+// gone re-created an entry no sweep could ever reach, because the only
+// reaper walks the live backlog.
 func TestNoteRelayAttemptDoesNotResurrectRemovedEntry(t *testing.T) {
 	t.Parallel()
 	svc := newTestService(t, config.NodeTypeFull)
@@ -117,11 +117,11 @@ func TestNoteRelayAttemptDoesNotResurrectRemovedEntry(t *testing.T) {
 		t.Fatalf("snapshot = %+v, want the armed transit message", snapshot)
 	}
 
-	// Concurrent removal lands between the snapshot and the attempt.
-	svc.gossipMu.Lock()
-	svc.topics["dm"] = nil
-	svc.gossipMu.Unlock()
-	svc.dropRelayRetryEntries([]protocol.MessageID{transit.ID})
+	// Concurrent removal (an ack_delete) lands between the snapshot and the
+	// attempt.
+	if removed := svc.deleteBacklogMessageForRecipient(recipient.Address, transit.ID); removed != 1 {
+		t.Fatalf("ack_delete removed %d envelopes, want 1", removed)
+	}
 
 	attempts, live := svc.noteRelayAttempt(relayMessageKey(snapshot[0].ID), now)
 	if live {

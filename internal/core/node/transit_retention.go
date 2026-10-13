@@ -179,9 +179,9 @@ func scanTopicForAdmission(backlog []protocol.Envelope, id protocol.MessageID, r
 // the global byte budget on backlog before `incoming` (a transit
 // envelope of payloadLen bytes for `recipient`) is appended. It
 // returns the filtered backlog and the IDs evicted — the caller must
-// drop those IDs from relayRetry AFTER releasing gossipMu (canonical
-// deliveryMu → gossipMu order forbids taking deliveryMu here), or the
-// retry map keeps orphan entries for envelopes that no longer exist.
+// drop those IDs from relayRetry (dropRelayRetryEntriesLocked) in the
+// same deliveryMu → gossipMu section, or the retry map keeps orphan
+// entries for envelopes that no longer exist.
 //
 // Slice order in s.topics is chronological (every removal path
 // rebuilds with order preserved), so "first transit match" == oldest.
@@ -237,22 +237,21 @@ func transitExpired(e protocol.Envelope, now time.Time) bool {
 	return now.Sub(anchor) > transitInFlightWindow
 }
 
-// dropRelayRetryEntries removes the relayRetry bookkeeping for
-// messages that were evicted/expired out of s.topics. Without this the
-// entries are orphaned forever: retryableRelayMessages iterates the
-// TOPIC snapshot, so an entry whose envelope is gone is never visited
-// and its lazy TTL delete never fires. Takes deliveryMu — caller must
-// NOT hold gossipMu (sequential lock use only, per the canonical
-// deliveryMu → gossipMu order).
-func (s *Service) dropRelayRetryEntries(ids []protocol.MessageID) {
-	if len(ids) == 0 {
-		return
-	}
-	s.deliveryMu.Lock()
+// dropRelayRetryEntriesLocked removes the relayRetry bookkeeping for
+// messages that were evicted/expired out of s.topics. Caller MUST hold
+// s.deliveryMu (write) and s.gossipMu (write), in canonical order, in the
+// same section that removed the envelopes.
+//
+// Without this the entries are orphaned forever: retryableRelayMessages
+// iterates s.topics["dm"], so an entry whose envelope is gone is never
+// visited and its lazy TTL delete never fires. It runs in the removing
+// section rather than after it so that no reader — the ack_delete
+// suppression gate (recordRelayDeliveredWhileRelayed), the retry walk — ever
+// sees an entry whose envelope is already gone.
+func (s *Service) dropRelayRetryEntriesLocked(ids []protocol.MessageID) {
 	for _, id := range ids {
 		delete(s.relayRetry, relayMessageKey(id))
 	}
-	s.deliveryMu.Unlock()
 }
 
 // viaIdentityForAddress resolves the authenticated identity of an

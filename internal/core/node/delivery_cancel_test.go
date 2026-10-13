@@ -96,7 +96,9 @@ func TestCancelOutgoingDeliveryClearsEveryDeliveryHook(t *testing.T) {
 	svc.deliveryMu.RLock()
 	_, stillAwaiting := svc.awaitingDelivered[target]
 	_, stillOutbound := svc.outbound[string(target)]
-	_, stillRelayRetry := svc.relayRetry[relayMessageKey(target)]
+	// Not a hook the cancellation clears: an own message is never armed
+	// for relay retry at all, before or after the withdrawal.
+	_, ownArmed := svc.relayRetry[relayMessageKey(target)]
 	pendingLeft := svc.countPendingFramesLocked(target)
 	svc.deliveryMu.RUnlock()
 
@@ -106,8 +108,8 @@ func TestCancelOutgoingDeliveryClearsEveryDeliveryHook(t *testing.T) {
 	if stillOutbound {
 		t.Error("outbound status entry survived cancellation")
 	}
-	if stillRelayRetry {
-		t.Error("relay retry shadow survived cancellation")
+	if ownArmed {
+		t.Error("an own outgoing DM holds a relay retry entry; only transit DMs may own one")
 	}
 	if pendingLeft != 0 {
 		t.Errorf("pending frames left = %d, want 0", pendingLeft)

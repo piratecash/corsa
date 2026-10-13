@@ -103,7 +103,11 @@ sequenceDiagram
         end
     else transit message (neither party is this node)
         Note over NODE: NOT written to chatlog<br/>(MessageStore not called)
-        NODE->>NODE: trackRelayMessage()
+        alt forward-once off (default)
+            NODE->>NODE: append to s.topics + arm relayRetry (one commit)
+        else CORSA_TRANSIT_FORWARD_ONCE
+            Note over NODE: not stored, no relayRetry entry
+        end
         NODE->>NODE: gossip to other peers
     end
 ```
@@ -973,9 +977,12 @@ storeIncomingMessage()
   │           ├── add to s.topics (don't lose from network)
   │           └── skip event (stale data)
   ├── if !isLocal or messageStore == nil:
-  │     └── add to s.topics unconditionally
-  ├── gossip to peers (if routing, via shouldRouteStoredMessage)
-  └── trackRelayMessage() (transit DMs only)
+  │     └── add to s.topics — except a control DM, and a transit DM under
+  │         CORSA_TRANSIT_FORWARD_ONCE, which are forwarded but not stored;
+  │         a stored transit DM that is routed also gets its relayRetry
+  │         entry (armRelayMessageRetryLocked) in the same
+  │         deliveryMu → gossipMu commit as the append
+  └── gossip to peers (if routing, via shouldRouteStoredMessage)
 ```
 
 The node delegates persistence to the registered `MessageStore` handler
@@ -1241,7 +1248,11 @@ sequenceDiagram
         end
     else транзитное сообщение (ни одна сторона — не эта нода)
         Note over NODE: НЕ записывается в chatlog<br/>(MessageStore не вызывается)
-        NODE->>NODE: trackRelayMessage()
+        alt forward-once выключен (по умолчанию)
+            NODE->>NODE: append в s.topics + взвод relayRetry (один коммит)
+        else CORSA_TRANSIT_FORWARD_ONCE
+            Note over NODE: не сохраняется, записи relayRetry нет
+        end
         NODE->>NODE: gossip другим peers
     end
 ```
@@ -2099,9 +2110,12 @@ storeIncomingMessage()
   │           ├── добавить в s.topics (не терять из сети)
   │           └── пропустить event (устаревшие данные)
   ├── если !isLocal или messageStore == nil:
-  │     └── добавить в s.topics безусловно
-  ├── gossip к peers (если relay, через shouldRouteStoredMessage)
-  └── trackRelayMessage() (только транзитные DM)
+  │     └── добавить в s.topics — кроме control DM и транзитного DM при
+  │         CORSA_TRANSIT_FORWARD_ONCE: они пересылаются, но не хранятся;
+  │         сохранённый маршрутизируемый транзитный DM получает и запись
+  │         relayRetry (armRelayMessageRetryLocked) в том же коммите
+  │         deliveryMu → gossipMu, что и append
+  └── gossip к peers (если relay, через shouldRouteStoredMessage)
 ```
 
 Нода делегирует персистентность зарегистрированному обработчику `MessageStore`
