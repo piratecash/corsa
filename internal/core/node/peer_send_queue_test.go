@@ -63,6 +63,7 @@ func newQueueTestSession(t *testing.T, addr domain.PeerAddress, sendBuffer int) 
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
 	session.netCore = netcore.New(netcore.ConnID(1), remote, netcore.Outbound, netcore.Options{})
+	closeNetCoreOnCleanup(t, session.netCore)
 	return session, local
 }
 

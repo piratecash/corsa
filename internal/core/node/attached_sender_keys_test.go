@@ -787,7 +787,7 @@ func TestOwnedContactSyncFailureTearsDownSession(t *testing.T) {
 		errCh:         make(chan error, 1),
 		contactSyncCh: make(chan chan int),
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session
@@ -922,7 +922,7 @@ func TestRelayMessageDispatchedDuringOwnedSync(t *testing.T) {
 		// capability gate of the receive path refuses it.
 		authOK: true,
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session

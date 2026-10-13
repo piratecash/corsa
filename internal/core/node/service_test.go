@@ -3066,7 +3066,7 @@ func TestClearRelayRetryForOutboundReceipt(t *testing.T) {
 		Status:      protocol.ReceiptStatusSeen,
 		DeliveredAt: time.Now().UTC(),
 	}
-	svc.trackRelayReceipt(receipt)
+	commitTransitReceiptForTest(t, svc, receipt, netcore.ConnID(9501))
 
 	svc.deliveryMu.RLock()
 	if _, ok := svc.relayRetry[relayReceiptKey(receipt)]; !ok {
@@ -3115,10 +3115,7 @@ func TestRetryableRelayReceiptsSkipsClearedReceiptState(t *testing.T) {
 		DeliveredAt: time.Now().UTC(),
 	}
 
-	svc.deliveryMu.Lock()
-	svc.receipts[receipt.Recipient] = append(svc.receipts[receipt.Recipient], receipt)
-	svc.deliveryMu.Unlock()
-	svc.trackRelayReceipt(receipt)
+	commitTransitReceiptForTest(t, svc, receipt, netcore.ConnID(9502))
 	svc.clearRelayRetryForOutbound(protocol.Frame{
 		Type: "relay_delivery_receipt",
 		ID:   string(receipt.MessageID),

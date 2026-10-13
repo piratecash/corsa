@@ -1866,7 +1866,7 @@ func (s *Service) retryableRelayReceipts(now time.Time) []protocol.DeliveryRecei
 	for _, list := range s.receipts {
 		for _, receipt := range list {
 			key := relayReceiptKey(receipt)
-			if receipt.Recipient == "" || receipt.Recipient == s.identity.Address {
+			if !receiptEntersRelayRetry(receipt, s.identity.Address) {
 				delete(s.relayRetry, key)
 				continue
 			}
@@ -1992,35 +1992,53 @@ func (s *Service) trackRelayMessage(msg protocol.Envelope) {
 	log.Trace().Str("site", "trackRelayMessage").Str("phase", "lock_released").Str("msg_id", string(msg.ID)).Msg("delivery_mu_writer")
 }
 
-func (s *Service) trackRelayReceipt(receipt protocol.DeliveryReceipt) {
-	log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_wait").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	s.deliveryMu.Lock()
-	log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_held").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
-	key := relayReceiptKey(receipt)
-	state := s.relayRetry[key]
-	dirty := false
-	if state.FirstSeen.IsZero() {
-		// Enforce capacity: reject new entries when the retry map is full.
-		// Deletions below (message key cleanup) still proceed.
-		if len(s.relayRetry) >= maxRelayRetryEntries {
-			// Still try to clean up the message key below before returning.
-		} else {
-			state.FirstSeen = time.Now().UTC()
-			s.relayRetry[key] = state
-			dirty = true
-		}
-	}
-	if _, ok := s.relayRetry[relayMessageKey(receipt.MessageID)]; ok {
-		delete(s.relayRetry, relayMessageKey(receipt.MessageID))
-		dirty = true
-	}
-	if !dirty {
-		s.deliveryMu.Unlock()
-		log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_released_clean").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
+// receiptEntersRelayRetry reports whether a BACKLOGGED receipt is one this
+// node relays onward on a retry schedule: a transit receipt for some other
+// identity, as opposed to one addressed to this node, which has arrived.
+// (seen_ack never reaches the backlog, so it needs no clause here.) The
+// commit arms by it and retryableRelayReceipts reaps by it, so the two cannot
+// disagree on which receipts own an entry.
+func receiptEntersRelayRetry(receipt protocol.DeliveryReceipt, localAddress string) bool {
+	return receipt.Recipient != "" && receipt.Recipient != localAddress
+}
+
+// armRelayReceiptRetryLocked starts the relay retry of a transit receipt
+// that the caller has just appended to s.receipts. Caller MUST hold
+// s.deliveryMu (write).
+//
+// It is called only from finishReceipt's commit, never as a step of its
+// own, because a `receipt|` entry is reaped almost only through its
+// receipt: retryableRelayReceipts (and its TTL), the offline-recipient drop,
+// ack_delete and the per-recipient cap all walk s.receipts. The one reaper
+// that goes by key, clearRelayRetryForOutbound, runs only in an OUTBOUND
+// peer session's serve loop, when a relay_delivery_receipt frame for it is
+// accepted into that session's NetCore writer queue (SendOK). Arming in a
+// later section left a window in which the recipient's last subscriber
+// could go and take the backlog with it; the entry was then created for a
+// receipt no walk would visit. Unless the first send happened to get such a
+// frame accepted by an outbound session's writer queue, it held a
+// maxRelayRetryEntries slot until the process exited — that is, when there
+// was no route and no gossip target, when every send was refused or dropped
+// (an oversize frame included), or when the frames went out over inbound
+// connections only.
+//
+// A full map leaves the receipt unarmed rather than evicting a live entry.
+// It is still backlogged, so fetch_delivery_receipts serves it to the
+// subscriber, and it still gets its first send from distributeReceipt;
+// what it loses is this node's onward re-sends. End-to-end recovery then
+// depends on the status. A lost delivered is recovered by the message
+// sender's own delivery retry: while it has no receipt it re-sends the
+// message, and the recipient answers the duplicate with a fresh delivered
+// receipt (resendDeliveryReceipt). A lost seen is recovered by its author:
+// the seen-sender re-sends the seen receipt on its own schedule until the
+// matching seen_ack arrives (the seen-retry pass in delivery_retry.go).
+func (s *Service) armRelayReceiptRetryLocked(receipt protocol.DeliveryReceipt, now time.Time) {
+	if len(s.relayRetry) >= maxRelayRetryEntries {
+		log.Debug().Str("message_id", string(receipt.MessageID)).Str("recipient", receipt.Recipient).
+			Msg("relay retry not armed for transit receipt: relayRetry is full")
 		return
 	}
-	s.deliveryMu.Unlock()
-	log.Trace().Str("site", "trackRelayReceipt").Str("phase", "lock_released").Str("msg_id", string(receipt.MessageID)).Msg("delivery_mu_writer")
+	s.relayRetry[relayReceiptKey(receipt)] = relayAttempt{FirstSeen: now}
 }
 
 func relayMessageKey(id protocol.MessageID) string {

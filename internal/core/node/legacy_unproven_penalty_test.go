@@ -202,6 +202,7 @@ func legacyInboundConn(t *testing.T, svc *Service, id netcore.ConnID, remote *ne
 		Identity: claimed,
 		Caps:     legacyRoutingCaps,
 	})
+	closeNetCoreOnCleanup(t, pc)
 	pc.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: claimed.String()}})
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})

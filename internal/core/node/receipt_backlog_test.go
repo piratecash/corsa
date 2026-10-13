@@ -129,8 +129,9 @@ func TestStoreDeliveryReceipt_EvictionClearsShadows(t *testing.T) {
 	svc.sentDMIDs.Add("evict-0")
 	svc.storeDeliveryReceipt(first)
 
-	// Simulate the relayRetry entry trackRelayReceipt would attach, and confirm
-	// the dedup entry exists before eviction.
+	// Plant a relayRetry entry under the receipt's key (an own-identity
+	// receipt is never armed by the commit; the eviction must clear the key
+	// regardless), and confirm the dedup entry exists before eviction.
 	firstKey := receiptKeyOf(first)
 	svc.deliveryMu.Lock()
 	svc.relayRetry[relayReceiptKey(first)] = relayAttempt{FirstSeen: time.Now().UTC()}

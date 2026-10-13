@@ -34,7 +34,7 @@ func TestDispatchPeerSessionFrame_PingRespondsPong(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 8),
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session
 	svc.peerMu.Unlock()
@@ -89,7 +89,7 @@ func TestPeerSessionRequest_PingDuringWaitRespondsPong(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 8),
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session
 	svc.health[peerAddr] = &peerHealth{Connected: true}

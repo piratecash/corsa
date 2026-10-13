@@ -46,7 +46,7 @@ func TestFireAndForgetBufferFullDropsFrameKeepsSession(t *testing.T) {
 		errCh:        make(chan error, 1),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session
@@ -124,7 +124,7 @@ func TestFireAndForgetBufferFullDoesNotFeedDisconnectHistory(t *testing.T) {
 		errCh:        make(chan error, 1),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	svc.peerMu.Lock()
 	svc.sessions[peerAddr] = session

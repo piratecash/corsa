@@ -35,6 +35,7 @@ func attachPushObserverWithVersion(t *testing.T, svc *Service, recipient string,
 		_ = clientConn.Close()
 	})
 	core := netcore.New(connID, clientConn, netcore.Outbound, netcore.Options{})
+	closeNetCoreOnCleanup(t, core)
 	core.SetProtocolVersion(domain.ProtocolVersion(version))
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(clientConn, &connEntry{core: core})

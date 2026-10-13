@@ -2,6 +2,7 @@ package node
 
 import (
 	"net"
+	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
@@ -16,6 +17,20 @@ import (
 func mustConnIDForTest(s *Service, conn net.Conn) domain.ConnID {
 	id, _ := s.connIDFor(conn)
 	return id
+}
+
+// closeNetCoreOnCleanup closes a test-built NetCore when the test ends.
+//
+// Closing the conn underneath is not enough: an idle writerLoop returns only
+// on Close, so a helper that skipped it leaked the writer goroutine and its
+// buffers on every call, which a stress test calling such a helper a
+// thousand times per run multiplies by its -count. The order against the caller's own pipe
+// cleanups does not matter: Close closes the conn itself before it waits for
+// the writer, so it never blocks on a far end that is still open. Close is
+// idempotent, so a test that also closes the core or its session is fine.
+func closeNetCoreOnCleanup(t *testing.T, core *netcore.NetCore) {
+	t.Helper()
+	t.Cleanup(core.Close)
 }
 
 // setTestConnEntryLocked is the test-only equivalent of the three lifecycle

@@ -760,7 +760,7 @@ Anti-poisoning admission rule (Phase 4 §3.6): a draft "Announcement cannot over
 
 All routing-driven delivery state — `pending` per-peer rings, `relayRetry`
 bookkeeping, receipts, outbound status (`trackRelayMessage`,
-`trackRelayReceipt`, `noteRelayAttempt`, `queuePeerFrame`, outbound status
+`armRelayReceiptRetryLocked`, `noteRelayAttempt`, `queuePeerFrame`, outbound status
 transitions, route-drain outbound cleanup) — lives in RAM only and **does not
 survive a restart**. Pending frames are bounded by an in-memory per-peer ring
 (`CORSA_PENDING_RING_SIZE`, evict-oldest). Rationale: the legacy persisted
@@ -1544,7 +1544,7 @@ Anti-poisoning admission rule (Phase 4 §3.6): draft rule «Announcement не м
 
 Всё routing-driven состояние доставки — пер-пировые кольца `pending`,
 учёт `relayRetry`, receipts, outbound-статус (`trackRelayMessage`,
-`trackRelayReceipt`, `noteRelayAttempt`, `queuePeerFrame`, переходы статуса
+`armRelayReceiptRetryLocked`, `noteRelayAttempt`, `queuePeerFrame`, переходы статуса
 outbound, очистка outbound после route drain) — живёт только в RAM и **не
 переживает рестарт**. Pending-фреймы ограничены in-memory пер-пировым кольцом
 (`CORSA_PENDING_RING_SIZE`, evict-oldest). Причина: legacy-персист JSON-файла

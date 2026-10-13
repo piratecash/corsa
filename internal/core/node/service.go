@@ -7889,17 +7889,27 @@ const maxSentDMIDs = 50_000
 // separately (transit-backlog follow-up).
 const maxReceiptBacklogPerRecipient = 4096
 
-// storeDeliveryReceipt persists a receipt addressed to this node, dedupes
-// against seenReceipts, clears the corresponding outbound/pending/relayRetry
-// bookkeeping and recomputes the aggregate status.
-//
-// Cross-domain: writes s.seenReceipts/receipts/outbound/pending/relayRetry
-// (deliveryMu) and s.aggregateStatus (statusMu), and reads s.subs (gossipMu)
-// for the admission check below. Canonical order:
-// peerMu → deliveryMu → gossipMu → statusMu — the gossipMu admission read is a
-// brief nested RLock inside the deliveryMu section (deliveryMu OUTER → gossipMu
-// INNER), released before the statusMu window; see the offline-recipient early
-// return.
+// commitResult is what the commit did, and only the first of the three
+// leaves anything for the caller to do.
+type commitResult int
+
+const (
+	// committedFirst: this call stored the receipt.
+	committedFirst commitResult = iota
+	// committedElsewhere: a concurrent copy stored it while this one was
+	// in its write. Its commit armed the relay retry, and everything
+	// downstream — the badge event, the distribution — is that copy's to
+	// do, once.
+	committedElsewhere
+	// droppedAtCommit: the recipient's last subscriber went away during
+	// the write. Same clean drop as the door's offline gate: no backlog,
+	// no dedup key, no relayRetry entry, and nothing distributed. An
+	// entry created here would never be drained — retryableRelayReceipts
+	// only walks receipts that are in s.receipts — and would sit in the
+	// shared cap evicting live ones.
+	droppedAtCommit
+)
+
 // finishReceipt commits everything that means "this receipt is finished
 // with", and is called ONLY after its durable consequence is recorded.
 //
@@ -7920,26 +7930,16 @@ const maxReceiptBacklogPerRecipient = 4096
 // the write showed `delivered` over a row still reading `sent`, which the
 // next reload took back, and a repeatedly failing write stacked duplicate
 // copies of the same receipt in the backlog.
-// commitResult is what the commit did, and only the first of the three
-// leaves anything for the caller to do.
-type commitResult int
-
-const (
-	// committedFirst: this call stored the receipt.
-	committedFirst commitResult = iota
-	// committedElsewhere: a concurrent copy stored it while this one was
-	// in its write. Everything downstream — the badge event, the relay
-	// tracking, the distribution — is that copy's to do, once.
-	committedElsewhere
-	// droppedAtCommit: the recipient's last subscriber went away during
-	// the write. Same clean drop as the door's offline gate: no backlog,
-	// no dedup key, no relayRetry entry, and nothing distributed. An
-	// entry created here would never be drained — retryableRelayReceipts
-	// only walks receipts that are in s.receipts — and would sit in the
-	// shared cap evicting live ones.
-	droppedAtCommit
-)
-
+//
+// And so is arming a transit receipt's relay retry, for a different reason:
+// the `receipt|` entry is reaped through the backlog receipt it names, so
+// the two are committed under one hold of deliveryMu and reclaimed together
+// by every path that drops the receipt. See armRelayReceiptRetryLocked.
+//
+// Cross-domain: deliveryMu (write) for the whole commit, a brief nested
+// gossipMu.RLock for the subscriber re-check and a nested statusMu for the
+// aggregate refresh — deliveryMu → gossipMu → statusMu, each inner one
+// released before the next is taken.
 func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, endsRetry bool) (
 	count int, deltas []ebus.PeerPendingDelta, aggregate domain.AggregateStatusSnapshot, result commitResult,
 ) {
@@ -8026,6 +8026,15 @@ func (s *Service) finishReceipt(key string, receipt protocol.DeliveryReceipt, en
 			list = trimmed
 		}
 		s.receipts[receipt.Recipient] = list
+		// Armed in this section and nowhere else: the backlog entry and its
+		// relay retry entry are one fact, so they are committed under one
+		// hold of deliveryMu, behind the same subscriber re-check above.
+		// Any later section opens a gap in which the last subscriber's
+		// teardown reclaims the backlog and the entry is then created for a
+		// receipt no backlog walk visits. See armRelayReceiptRetryLocked.
+		if receiptEntersRelayRetry(receipt, s.identity.Address) {
+			s.armRelayReceiptRetryLocked(receipt, now)
+		}
 	}
 
 	if entry, awaiting := s.awaitingDelivered[id]; awaiting && endsRetry {
@@ -8059,6 +8068,17 @@ type receiptOutcome struct {
 	ackable bool
 }
 
+// storeDeliveryReceipt persists a receipt addressed to this node, dedupes
+// against seenReceipts, clears the corresponding outbound/pending/relayRetry
+// bookkeeping and recomputes the aggregate status.
+//
+// Cross-domain: writes s.seenReceipts/receipts/outbound/pending/relayRetry
+// (deliveryMu) and s.aggregateStatus (statusMu), and reads s.subs (gossipMu)
+// for the admission check below. Canonical order:
+// peerMu → deliveryMu → gossipMu → statusMu — the gossipMu admission read is a
+// brief nested RLock inside the deliveryMu section (deliveryMu OUTER → gossipMu
+// INNER), released before the statusMu window; see the offline-recipient early
+// return.
 func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receiptOutcome {
 	// Stamped here because this is the one door: every receipt that gets
 	// stored, deduped, backlogged or announced comes through it, whether it
@@ -8294,11 +8314,11 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 	}
 	// The two non-first outcomes take the SAME early exit the door takes
 	// for a duplicate and for an offline recipient, and for the same
-	// reason: everything below — the badge event, the seen_ack, the relay
-	// tracking, the distribution — is the work of the copy that did
-	// commit, or is work that must not happen at all for a receipt that
-	// was dropped. Falling through was how a dropped receipt still
-	// created a relayRetry entry that nothing would ever clean up.
+	// reason: everything below — the badge event, the seen_ack, the
+	// distribution — is the work of the copy that did commit, or is work
+	// that must not happen at all for a receipt that was dropped. (The
+	// relay retry is not below: it is armed inside the commit, so a drop
+	// cannot leave one behind.)
 	switch result {
 	case committedElsewhere:
 		return receiptOutcome{count: count, ackable: true}
@@ -8348,19 +8368,12 @@ func (s *Service) storeDeliveryReceipt(receipt protocol.DeliveryReceipt) receipt
 		return receiptOutcome{stored: true, count: count, ackable: committed}
 	}
 
-	// Transit receipt bookkeeping: seen_ack is excluded — it is not stored
-	// in s.receipts, so retryableRelayReceipts could never revisit its
-	// relayRetry entry, and the sender-side scheduler already owns its
-	// end-to-end retry.
-	if receipt.Status == protocol.ReceiptStatusSeenAck {
-		s.distributeReceipt(receipt)
-		return receiptOutcome{stored: true, count: count, ackable: committed}
-	}
-
-	s.trackRelayReceipt(receipt)
-	// Relay receipt return path first, gossip fallback, plus live
-	// subscribers — shared with the duplicate re-send paths and the
-	// delivery retry scheduler.
+	// The transit receipt's relay retry was armed by finishReceipt, in the
+	// same section that appended it to the backlog. What is left is the
+	// first send: relay receipt return path first, gossip fallback, plus
+	// live subscribers — shared with the duplicate re-send paths and the
+	// delivery retry scheduler. seen_ack takes the same path; it is never
+	// backlogged, so it was never armed.
 	s.distributeReceipt(receipt)
 
 	return receiptOutcome{stored: true, count: count, ackable: committed}

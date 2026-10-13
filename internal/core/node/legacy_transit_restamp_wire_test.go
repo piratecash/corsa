@@ -190,8 +190,12 @@ func TestEveryCopyOfOneDispatchCarriesOneDate(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	// Three sinks in one dispatch: the recipient is a subscriber AND the
-	// next hop, and a second peer takes the gossip fan-out.
+	// One dispatch, several copies: the recipient is the next hop, a second
+	// peer takes the gossip fan-out, and the recipient also holds a push
+	// subscription. That subscription has no registered connection, so its
+	// push copy never reaches a wire (the push drops the subscriber instead);
+	// it is here so the dispatch walks its push-subscriber branch as well,
+	// and the copies compared below are the ones the two peers receive.
 	recipientCh := attachCapableRelayPeer(t, svc, "recipient-peer:64646", recipientID)
 	gossipCh := attachCapableRelayPeer(t, svc, "bystander:64646", domain.PeerIdentityFromWire(bystander.Address))
 	if _, err := svc.routingTable.UpdateRoute(routeToward(t, recipient.Address, recipient.Address)); err != nil {

@@ -196,15 +196,16 @@ func TestPushDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 	svc.initMaps()
 	svc.identity = id
 
-	// Register a subscriber for a client identity.
-	// hasSubscriber is the only behaviour exercised here; it reads
-	// len(s.subs[recipient]) and never touches connID. A zero connID keeps
-	// the subscriber synthetic and compatible with the post-PR 10.3b schema.
+	// The subscriber must own a registered connection. Storing the receipt
+	// pushes it to the recipient's subscribers in the background, and a
+	// subscriber whose connection is not registered is removed by that push
+	// — taking the recipient's whole backlog with it, the documented
+	// "recipient went offline" path. A connection-less subscriber is a state
+	// production never builds (registerHelloRoute only subscribes a live
+	// connection), so with one the assertion below would be checking the
+	// offline drop, not the admission.
 	clientID := "client-identity-bbb"
-	_ = drainPipe(t) // preserved for test symmetry; no longer wired to the subscriber.
-	svc.subs[clientID] = map[string]*subscriber{
-		"sub-1": {id: "sub-1", recipient: clientID},
-	}
+	_ = attachPushObserver(t, svc, clientID, netcore.ConnID(9301))
 
 	conn := drainPipe(t)
 
@@ -220,6 +221,8 @@ func TestPushDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 		Type:    "push_delivery_receipt",
 		Receipt: &receiptFrame,
 	})
+	// Read the settled state: the background push to the subscriber has run.
+	svc.WaitBackground()
 
 	svc.deliveryMu.RLock()
 	count := len(svc.receipts[clientID])
@@ -1114,12 +1117,12 @@ func TestRelayDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 	svc.initMaps()
 	svc.identity = id
 
-	// hasSubscriber only reads len(s.subs[recipient]); connID is irrelevant
-	// to THAT gate after the PR 10.3b subscriber re-key.
+	// A subscriber on a registered connection, as registerHelloRoute builds
+	// it: the background push that storing triggers must find the
+	// connection, or it removes the subscriber and reclaims the backlog
+	// this test is about.
 	clientID := "client-identity-ccc"
-	svc.subs[clientID] = map[string]*subscriber{
-		"sub-1": {id: "sub-1", recipient: clientID},
-	}
+	_ = attachPushObserver(t, svc, clientID, netcore.ConnID(9302))
 
 	receipt := protocol.DeliveryReceipt{
 		MessageID:   "msg-relay-3",
@@ -1133,15 +1136,8 @@ func TestRelayDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 	if !svc.hasSubscriber(clientID) {
 		t.Fatal("fixture: the subscriber must be visible to the handler's gate")
 	}
-	// And what the fast path does with it, taken from the call itself.
-	//
-	// NOT from s.receipts afterwards: storing hands the receipt to a
-	// BACKGROUND push, that push resolves the subscriber's connection,
-	// and a subscriber without one is dropped — after which the recipient
-	// has no subscribers and its backlog and dedup keys are reclaimed,
-	// exactly as the no-store-and-forward rule says. Reading the map after
-	// the handler therefore raced that teardown and lost roughly once in a
-	// hundred runs, on this tree and on the one before it.
+	// And what the fast path does with it, both as the call reports it and
+	// as the backlog holds it once the background push has settled.
 	outcome := svc.storeDeliveryReceipt(receipt)
 	if !outcome.stored {
 		t.Fatal("relay receipt for active subscriber should be stored")
@@ -1150,4 +1146,11 @@ func TestRelayDeliveryReceiptAcceptsActiveSubscriber(t *testing.T) {
 		t.Fatalf("receipt count = %d, want 1", outcome.count)
 	}
 	svc.WaitBackground()
+
+	svc.deliveryMu.RLock()
+	count := len(svc.receipts[clientID])
+	svc.deliveryMu.RUnlock()
+	if count != 1 {
+		t.Fatalf("settled backlog for active subscriber = %d, want 1", count)
+	}
 }

@@ -1715,7 +1715,7 @@ func TestFireAndForgetWriteFailureDisconnectsPeer(t *testing.T) {
 		errCh:        errCh,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = session
@@ -1785,7 +1785,7 @@ func TestFireAndForgetHopAckWriteFailureDisconnects(t *testing.T) {
 		errCh:        errCh,
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	svc.peerMu.Lock()
 	svc.sessions[domain.PeerAddress(peerAddr)] = session

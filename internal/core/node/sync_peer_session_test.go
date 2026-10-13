@@ -20,16 +20,17 @@ import (
 // session.netCore to be non-nil under the single-writer invariant; tests
 // that drive an outbound session over net.Pipe use this helper to mirror
 // production.
-// The svc parameter is retained for call-site compatibility but is not
-// used: session-local reply paths probe s.Network() first and fall back to
-// session.netCore when the ConnID is absent from the backend/registry — so
-// a manually-built session whose ConnID was never registered still
-// delivers reply frames through this attached NetCore.
-func attachTestNetCore(_ *Service, session *peerSession) {
+// No Service is needed: session-local reply paths probe s.Network() first and
+// fall back to session.netCore when the ConnID is absent from the
+// backend/registry — so a manually-built session whose ConnID was never
+// registered still delivers reply frames through this attached NetCore.
+func attachTestNetCore(t *testing.T, session *peerSession) {
+	t.Helper()
 	if session == nil || session.conn == nil || session.netCore != nil {
 		return
 	}
 	session.netCore = netcore.New(netcore.ConnID(1), session.conn, netcore.Outbound, netcore.Options{})
+	closeNetCoreOnCleanup(t, session.netCore)
 }
 
 // newSyncTestService creates a minimal Service for testing syncPeerSession().
@@ -105,7 +106,7 @@ func TestSyncPeerSession_RequestPeersTrue(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	// Responses the mock peer will send for each request type.
 	responses := map[string]protocol.Frame{
@@ -179,7 +180,7 @@ func TestSyncPeerSession_RequestPeersFalse(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	// Only fetch_contacts response needed — get_peers should not be sent.
 	responses := map[string]protocol.Frame{
@@ -251,7 +252,7 @@ func TestSyncPeerSession_SkipDoesNotEmitNewPeersDiscovered(t *testing.T) {
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	responses := map[string]protocol.Frame{
 		"fetch_contacts": {
@@ -315,7 +316,7 @@ func TestSyncPeerSession_RequestPeersTrue_EmitsNewPeersDiscovered(t *testing.T) 
 		errCh:   make(chan error, 1),
 		sendCh:  make(chan peerSendItem, 16),
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	responses := map[string]protocol.Frame{
 		"get_peers": {
@@ -401,7 +402,7 @@ func TestSyncPeerSession_SkipsContactSyncForDiscoveryPeer(t *testing.T) {
 			DeclaredDTypes: domain.ExplicitDTypes([]domain.DType{domain.DTypeGetIdentity, domain.DTypePostIdentity, domain.DTypePushIdentity}),
 		},
 	}
-	attachTestNetCore(svc, session)
+	attachTestNetCore(t, session)
 
 	// A reply is provided so that a regression (the fetch being sent)
 	// shows up as a failed assertion rather than a hung request.
@@ -444,7 +445,7 @@ func TestSyncPeerSession_KeepsContactSyncWithoutDiscovery(t *testing.T) {
 				sendCh:       make(chan peerSendItem, 16),
 				declarations: netcore.HandshakeDeclarations{DeclaredDTypes: declared},
 			}
-			attachTestNetCore(svc, session)
+			attachTestNetCore(t, session)
 			responses := map[string]protocol.Frame{"fetch_contacts": {Type: "contacts"}}
 			receivedCh := make(chan []string, 1)
 			go func() { receivedCh <- mockResponder(t, remote, session, responses) }()
