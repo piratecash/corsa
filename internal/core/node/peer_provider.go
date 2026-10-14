@@ -121,10 +121,10 @@ type PeerProviderConfig struct {
 	// explicit peer-banned notice from the remote) this gate is purely
 	// local: we accumulated N consecutive cm_session_setup_failed events
 	// against the peer and chose to stop dialling it for a short window.
-	// Used to break the reconnect storm against full-routing-table
-	// bootstraps whose own announce_routes flush evicts our handshake
-	// reply (see setup_failure.go). Returns false when the callback is
-	// nil or when the cooldown has elapsed.
+	// Used to break the reconnect storm against bootstraps whose
+	// handshake reply keeps failing during session setup (see
+	// setup_failure.go). Returns false when the callback is nil or when
+	// the cooldown has elapsed.
 	SetupFailureBannedFn func(domain.PeerAddress) bool
 
 	// ListenAddr is this node's own listen address (for self-filtering).

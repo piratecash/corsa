@@ -20,8 +20,8 @@
 //     answers as the production networkBridge does: the same suite runs
 //     against the Backend here and against the bridge in package node. Any
 //     semantic drift from the bridge is a Backend bug, not a test bug. The
-//     cases the suite excludes, and why, are listed on it — one of them,
-//     SendFrameSync on a saturated queue, is a known Backend drift.
+//     cases the suite excludes, and why, are listed on it; they are
+//     differences of the medium, not of the contract.
 //   - Per-ConnID ordering of outbound frames is preserved: a frame that
 //     leaves SendFrame before another was enqueued appears on Outbound(id)
 //     strictly before the later one.
@@ -239,7 +239,7 @@ func (b *Backend) Inbound(id domain.ConnID) <-chan []byte {
 //
 // Blocks while the inbound channel is full; ctx is the caller's own way out
 // and teardown is the other one. It takes a ctx for the same reason
-// SendFrameSync does: a test that saturates the channel on purpose must be
+// SendFrameBlocking does: a test that saturates the channel on purpose must be
 // able to end its own wait, and "the whole package run times out" is not an
 // answer a helper may give.
 //
@@ -261,9 +261,9 @@ func (b *Backend) Inject(ctx context.Context, id domain.ConnID, frame []byte) er
 }
 
 // Shutdown tears down every registered connection and makes the Backend
-// reject subsequent Register / Inject / SendFrame / SendFrameSync calls.
-// Idempotent. Named Shutdown, not Close, so Close can implement the
-// netcore.Network contract for per-ConnID close.
+// reject subsequent Register / Inject / SendFrame / SendFrameSync /
+// SendFrameBlocking calls. Idempotent. Named Shutdown, not Close, so Close
+// can implement the netcore.Network contract for per-ConnID close.
 //
 // It returns even while senders are parked on saturated channels: each slot is
 // released by its own done before the join for that slot, and the slots are
@@ -364,6 +364,47 @@ var _ netcore.Network = (*Backend)(nil)
 // reused. This matches production behaviour where the writer goroutine
 // owns its own buffer lifecycle.
 func (b *Backend) SendFrame(ctx context.Context, id domain.ConnID, frame []byte) error {
+	return b.sendWithoutWaiting(ctx, id, frame)
+}
+
+// SendFrameSync answers exactly as SendFrame does, ErrSendBufferFull on a
+// full channel included: the production bridge does not wait for room on its
+// sync path either, only for the flush (netcore.Network.SendFrameSync), and a
+// Backend that waited let tests pass on a wait production never makes. The
+// flush itself has no Backend counterpart — there is no writer — so a nil
+// means the frame is on the outbound channel.
+func (b *Backend) SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error {
+	return b.sendWithoutWaiting(ctx, id, frame)
+}
+
+// SendFrameBlocking blocks until one of: frame is accepted by the outbound
+// channel, ctx ends, or the connection is torn down. The sentinel set is:
+//   - ctx.Err() on cancellation or pre-cancelled ctx on entry.
+//   - ErrSendChanClosed if the Backend is shut down, or the connection
+//     closed or torn down, before or during send.
+//   - ErrUnknownConn if id is not registered.
+//   - nil on successful enqueue.
+//
+// It never answers ErrSendBufferFull: it waits for a reader of Outbound(id)
+// to make room, as the bridge waits for its writer to take a frame out of the
+// queue.
+func (b *Backend) SendFrameBlocking(ctx context.Context, id domain.ConnID, frame []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	slot, err := b.acquireForSend(id)
+	if err != nil {
+		return err
+	}
+	defer slot.senders.Done()
+
+	b.runLookupBarrier()
+	return b.offerBlocking(ctx, slot, slot.outbound, append([]byte(nil), frame...))
+}
+
+// sendWithoutWaiting is the one non-blocking outbound offer behind SendFrame
+// and SendFrameSync, whose answers are the same by contract.
+func (b *Backend) sendWithoutWaiting(ctx context.Context, id domain.ConnID, frame []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -396,36 +437,6 @@ func (b *Backend) SendFrame(ctx context.Context, id domain.ConnID, frame []byte)
 		return netcore.ErrSendBufferFull
 	}
 	return nil
-}
-
-// SendFrameSync blocks until one of: frame is accepted by the outbound
-// channel, ctx is cancelled, or the Backend is shut down. The sentinel
-// set is:
-//   - ctx.Err() on cancellation or pre-cancelled ctx on entry.
-//   - ErrSendChanClosed if the Backend is shut down, or the connection
-//     closed or torn down, before or during send.
-//   - ErrUnknownConn if id is not registered.
-//   - nil on successful enqueue.
-//
-// Unlike SendFrame, SendFrameSync does not return ErrSendBufferFull: it waits
-// for room. That is a KNOWN DRIFT and a Backend bug: netcore.Network promises
-// SendFrameSync the same sentinel set as SendFrame, and the production bridge
-// answers ErrSendBufferFull at once on a saturated queue. It is left in place
-// pending a decision — TestSendHandshakeReply_BufferFullWaitsAndDelivers and
-// the handshake reply path's waiting tier rely on it — and is excluded from
-// RunNetworkContract, which says why.
-func (b *Backend) SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	slot, err := b.acquireForSend(id)
-	if err != nil {
-		return err
-	}
-	defer slot.senders.Done()
-
-	b.runLookupBarrier()
-	return b.offerBlocking(ctx, slot, slot.outbound, append([]byte(nil), frame...))
 }
 
 // acquireForSend resolves id and registers the caller as an in-flight sender on

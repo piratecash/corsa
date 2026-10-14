@@ -44,6 +44,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -272,21 +273,30 @@ func (s *Service) sendFrameViaNetworkSync(ctx context.Context, id domain.ConnID,
 }
 
 // handshakeReplyTimeout caps how long sendHandshakeReplyViaNetwork will
-// wait for the writer to drain before giving up on a handshake-phase
-// reply. Long enough to absorb a transient peer-side broadcast burst
-// (initial announce_routes flush averages 100-300ms on full-routing-table
-// bootstraps), short enough that a wedged peer doesn't park the goroutine
-// forever. See sendHandshakeReplyViaNetwork docstring for the contract.
+// wait for room in the writer queue before giving up on a handshake-phase
+// reply. Long enough to absorb a transient burst of fire-and-forget frames
+// the asynchronous senders queued toward the same peer, short enough that a
+// wedged peer doesn't park the goroutine forever. See
+// sendHandshakeReplyViaNetwork docstring for the contract.
 const handshakeReplyTimeout = 2 * time.Second
 
 // sendHandshakeReplyViaNetwork is the no-eviction reply path for
-// session-setup control-plane frames (auth_ok, peers, contacts). Unlike sendFrameViaNetwork — which calls network.Close on
-// ErrSendBufferFull as the slow-peer eviction signal — this helper
-// NEVER closes the connection. Buffer pressure during session setup is
-// almost always caused by the peer's own initial announce_routes flush
-// saturating our outbound queue; evicting on the next reply guarantees
-// the handshake fails, which is precisely the cm_session_setup_failed
-// → reconnect storm pattern this helper exists to break.
+// session-setup control-plane frames (auth_ok, peers, contacts). Unlike
+// sendFrameViaNetwork — which calls network.Close on ErrSendBufferFull as the
+// slow-peer eviction signal — this helper NEVER closes the connection. Buffer
+// pressure during session setup comes from the fire-and-forget frames the
+// asynchronous senders (sendFrameViaNetwork, sendFrameBytesViaNetwork,
+// enqueueFrameByID) queue toward the same peer without waiting for room;
+// evicting on the next reply guarantees the handshake fails, which is
+// precisely the cm_session_setup_failed → reconnect storm pattern this helper
+// exists to break. (The initial announce_routes flush to an inbound conn is
+// not one of those senders: it goes through sendFrameBytesViaNetworkSync,
+// which evicts on a full queue rather than filling it.)
+//
+// Contract: nil means the reply is in the writer queue — behind every frame
+// queued before it, which is what lets the auth_ok caller order the backlog
+// replay after it. A non-nil error means it is not. Whatever the outcome,
+// this helper never closes the connection.
 //
 // Mechanism (two-tier to preserve async semantics for the common case):
 //
@@ -296,12 +306,20 @@ const handshakeReplyTimeout = 2 * time.Second
 //     this helper.
 //
 //  2. Backpressure path: ONLY when the fast path returned
-//     ErrSendBufferFull, fall back to SendFrameSync with an internal
-//     ctx timeout of handshakeReplyTimeout. The blocking variant
-//     absorbs a transient announce-flush burst; the timeout caps the
-//     wait so a permanently dead peer doesn't park the goroutine.
-//     If the blocking attempt also fails, return the underlying
+//     ErrSendBufferFull, wait for room with SendFrameBlocking under a ctx
+//     bounded by handshakeReplyTimeout. The wait resumes on the writer
+//     taking a frame out of the queue, so a transient burst of
+//     fire-and-forget frames is absorbed without polling; the bound keeps
+//     a permanently wedged peer from parking the goroutine. Like the fast
+//     path it does not wait for the flush — nil means queued in both
+//     tiers. A queue that stays full for the whole bound is answered
+//     ErrSendBufferFull (wrapped with the bound), a caller ctx that ends
+//     first with its own ctx error, and any other failure with its
 //     sentinel — still no Close (the heartbeat path owns eviction).
+//
+// The wait cannot be SendFrameSync: that one never waits for room (a full
+// queue is ErrSendBufferFull at once, the eviction signal of every other
+// caller), only for the flush.
 //
 // Keeping the fast path async matches the runtime contract of every
 // pre-fix call-site (sendFrameViaNetwork was non-blocking), so tests
@@ -309,7 +327,7 @@ const handshakeReplyTimeout = 2 * time.Second
 // goroutine ordering.
 //
 // ctx is the caller's operation context. The internal timeout is
-// stacked on top of it via context.WithTimeout, so caller-side
+// stacked on top of it via context.WithTimeoutCause, so caller-side
 // cancellation still propagates promptly.
 func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.ConnID, frame protocol.Frame) error {
 	network := s.Network()
@@ -355,6 +373,7 @@ func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.Co
 	if !errors.Is(sendErr, netcore.ErrSendBufferFull) {
 		emitProtocolTrace(addr, frame, enqueueDropped)
 		log.Debug().
+			Uint64("conn_id", uint64(id)).
 			Str("addr", addr).
 			Str("type", frame.Type).
 			Err(sendErr).
@@ -362,33 +381,47 @@ func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.Co
 		return sendErr
 	}
 
-	// Buffer is full — the intent is to wait for drain up to
-	// handshakeReplyTimeout without ever closing the connection.
-	//
-	// KNOWN DEFECT, pending a decision: in production this does not wait.
-	// The bridge's SendFrameSync answers ErrSendBufferFull at once on a
-	// saturated queue — which is what netcore.Network.SendFrameSync promises
-	// ("the sentinel set is the same as SendFrame") — so this tier returns
-	// the same buffer-full it was meant to absorb. Only netcoretest.Backend
-	// waits for room, and TestSendHandshakeReply_BufferFullWaitsAndDelivers
-	// is green on it alone (docs/protocol/network_core.md, "Test backend").
-	sendCtx, cancel := context.WithTimeout(ctx, handshakeReplyTimeout)
-	defer cancel()
-	syncErr := network.SendFrameSync(sendCtx, id, data)
-	emitProtocolTrace(addr, frame, classifyNetworkSendResult(syncErr))
-	if syncErr == nil {
+	waitErr := waitForRoomAndQueue(ctx, network, id, data)
+	emitProtocolTrace(addr, frame, classifyNetworkSendResult(waitErr))
+	if waitErr == nil {
 		return nil
 	}
-	if errors.Is(syncErr, netcore.ErrUnknownConn) {
-		logUnregisteredWrite(addr, frame, "sendHandshakeReplyViaNetwork.sync")
+	if errors.Is(waitErr, netcore.ErrUnknownConn) {
+		logUnregisteredWrite(addr, frame, "sendHandshakeReplyViaNetwork.wait")
 		return ErrUnregisteredWrite
 	}
 	log.Debug().
+		Uint64("conn_id", uint64(id)).
 		Str("addr", addr).
 		Str("type", frame.Type).
-		Err(syncErr).
+		Err(waitErr).
 		Msg("handshake reply send failed after backpressure wait (no eviction)")
-	return syncErr
+	return waitErr
+}
+
+// errHandshakeReplyQueueStayedFull is the cause waitForRoomAndQueue gives its
+// own bound. It wraps netcore.ErrSendBufferFull because that is the fact: the
+// queue had no room for the whole of handshakeReplyTimeout.
+var errHandshakeReplyQueueStayedFull = fmt.Errorf("handshake reply: send queue stayed full for %s: %w", handshakeReplyTimeout, netcore.ErrSendBufferFull)
+
+// waitForRoomAndQueue is Tier 2 of sendHandshakeReplyViaNetwork: it waits up
+// to handshakeReplyTimeout for room in id's queue and enqueues data there.
+//
+// Running out of the bound is reported as the fact it is — the queue stayed
+// full — and not as the context.DeadlineExceeded the internal ctx produces:
+// that error would read as the caller's own deadline in the auth_ok WARN log.
+// Which deadline ended the wait is read from the ctx's cause, the one record
+// of it: a caller ctx that ended first passes its own cause down, so the
+// caller keeps its own error. On an exact tie the two timers race and either
+// cause may win; both answers are then true.
+func waitForRoomAndQueue(ctx context.Context, network netcore.Network, id domain.ConnID, data []byte) error {
+	waitCtx, cancel := context.WithTimeoutCause(ctx, handshakeReplyTimeout, errHandshakeReplyQueueStayedFull)
+	defer cancel()
+	err := network.SendFrameBlocking(waitCtx, id, data)
+	if errors.Is(err, context.DeadlineExceeded) && errors.Is(context.Cause(waitCtx), errHandshakeReplyQueueStayedFull) {
+		return errHandshakeReplyQueueStayedFull
+	}
+	return err
 }
 
 // sendFrameBytesViaNetwork is the raw-bytes companion of sendFrameViaNetwork.

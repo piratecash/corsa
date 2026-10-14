@@ -224,15 +224,23 @@ The replies that complete the session-setup handshake (`auth_ok`,
 (`sendHandshakeReplyViaNetwork`) that intentionally weakens the
 slow-peer eviction policy used by every other reply.
 
-**Why a separate path:** during the initial seconds of a connection the
-peer's writer queue is being drained by its own broadcast traffic —
-most notably the initial `announce_routes` flush sent to every freshly
-authenticated outbound peer. On a full-routing-table node this burst
-can fill the 128-slot outbound channel within ~100-300ms. The regular
-reply helper closes the connection on `ErrSendBufferFull` (the
-documented slow-peer eviction signal), which means the next handshake
-reply in line — almost always the `auth_ok` that the dialler is
-waiting on — torpedoes the session before it ever reaches Active. The
+**Why a separate path:** during the initial seconds of a connection our
+writer queue toward the new peer fills with fire-and-forget frames. The
+asynchronous senders (`sendFrameViaNetwork`, `sendFrameBytesViaNetwork`,
+`enqueueFrameByID`) enqueue without waiting — subscriber pushes, relay
+and routing traffic, the backlog replay — and a burst of them can fill
+the 512-slot queue before the peer reads it. Only what was queued before
+a reply can stand ahead of it. The backlog replay starts only after
+`auth_ok` has been queued (it is ordered behind it on purpose), so it can
+never delay `auth_ok`; it can delay only the later `peers` and
+`contacts` replies. The initial `announce_routes` flush is not one of
+these senders on an inbound connection: it goes through the sync path
+(`sendFrameBytesViaNetworkSync`), which evicts the peer on a full queue
+instead of filling it. The regular reply helper closes the connection
+on `ErrSendBufferFull` (the documented slow-peer eviction signal), which
+means a handshake reply that meets a full queue — the `auth_ok` the
+dialler is waiting on, or a later `peers` / `contacts` — torpedoes the
+session before it ever reaches Active. The
 dialler observes a bare `EOF` during session setup and emits
 `cm_session_setup_failed`; combined with the default 2-4-8s retry
 backoff, this fans out into a CPU-burning storm whenever a small set
@@ -259,19 +267,28 @@ charging it a failure or disconnect-storm evidence.
    non-blocking `SendFrame`, exactly like the regular reply path. On
    any outcome other than `ErrSendBufferFull` the result is returned
    verbatim — the connection is never closed from this helper.
-2. **Bounded blocking fallback.** Only when the async send returned
-   `ErrSendBufferFull` does the helper fall back to `SendFrameSync`
-   with an internal timeout cap (`handshakeReplyTimeout = 2s`). The
-   blocking variant absorbs the transient broadcast burst; the timeout
-   stops a permanently dead peer from parking the goroutine. If the
-   blocking attempt also fails, the sentinel is returned without
-   closing the connection.
+2. **Bounded wait for room.** Only when the async send returned
+   `ErrSendBufferFull` does the helper wait for a free slot with
+   `Network.SendFrameBlocking`, under an internal timeout cap
+   (`handshakeReplyTimeout = 2s`) stacked on the caller's ctx. The wait
+   resumes the moment the writer takes a frame out of the queue (no
+   polling), so a transient burst of fire-and-forget frames queued toward
+   the peer is absorbed; the cap stops
+   a permanently dead peer from parking the goroutine. Neither tier
+   waits for the flush: `nil` means the reply is queued, behind every
+   frame queued before it — which is what lets the `auth_ok` caller order
+   the backlog replay after it. A queue that stays full for the whole
+   cap is answered `ErrSendBufferFull` (wrapped with the cap), a caller
+   ctx that ends first with its own ctx error, any other failure with its
+   sentinel. This helper never closes the connection. `SendFrameSync` cannot
+   serve here: it never waits for room, only for the flush.
 3. **No eviction from this helper.** A wedged peer is still evicted —
    but by the heartbeat path (`inboundHeartbeat`), which is the
    documented owner of liveness-based eviction. The handshake-reply
    helper is deliberately silent on buffer pressure so a transient
-   self-inflicted overload (peer broadcasts saturating its own writer)
-   cannot kill a session that is otherwise healthy.
+   self-inflicted overload (our own async senders filling our outbound
+   queue toward the peer) cannot kill a session that is otherwise
+   healthy.
 
 **Applies to:** `auth_ok` (replies to `auth_session`), `peers`
 (replies to `get_peers`), `contacts` (replies to `fetch_contacts`).
@@ -591,14 +608,23 @@ signature = ed25519_sign(payload, private_key)
 (`sendHandshakeReplyViaNetwork`), который намеренно ослабляет
 политику slow-peer eviction, применяемую ко всем остальным ответам.
 
-**Зачем отдельный путь.** В первые секунды соединения writer-очередь
-пира забивается его же собственным broadcast-трафиком — прежде всего
-начальным flush'ем `announce_routes`, отправляемым каждому свежее
-аутентифицированному outbound-пиру. На full-routing-table-ноде этот
-burst может заполнить 128-слотовый outbound-канал за ~100-300мс.
-Обычный helper закрывает соединение на `ErrSendBufferFull` (штатный
-сигнал slow-peer eviction), а это значит, что следующий handshake-
-ответ в очереди — почти всегда `auth_ok`, которого ждёт дайлер —
+**Зачем отдельный путь.** В первые секунды соединения наша
+writer-очередь к новому пиру забивается fire-and-forget кадрами.
+Асинхронные отправители (`sendFrameViaNetwork`,
+`sendFrameBytesViaNetwork`, `enqueueFrameByID`) ставят кадр в очередь,
+не дожидаясь места, — push-и подписчику, relay- и routing-трафик,
+replay backlog'а, — и их burst может заполнить 512-слотовую очередь
+раньше, чем пир её прочитает. Впереди ответа может стоять только то, что
+попало в очередь до него. Replay backlog'а стартует лишь после того, как
+`auth_ok` уже в очереди (он намеренно упорядочен за ним), поэтому
+задержать `auth_ok` он не может никогда — только более поздние ответы
+`peers` и `contacts`. Начальный flush `announce_routes` к этим
+отправителям на входящем соединении не относится: он идёт sync-путём
+(`sendFrameBytesViaNetworkSync`), который на полной очереди вытесняет
+пира, а не заполняет её. Обычный helper закрывает соединение на
+`ErrSendBufferFull` (штатный сигнал slow-peer eviction), а это значит,
+что handshake-ответ, наткнувшийся на полную очередь, — `auth_ok`,
+которого ждёт дайлер, или более поздние `peers` / `contacts`, —
 торпедирует сессию ещё до того, как она перешла в Active. Дайлер
 видит голый `EOF` во время session-setup и эмитит
 `cm_session_setup_failed`; в сочетании с default 2-4-8с retry
@@ -627,19 +653,28 @@ disconnect-storm.
    неблокирующий `SendFrame`, ровно как обычный reply-путь. При любом
    исходе кроме `ErrSendBufferFull` результат возвращается как есть —
    соединение никогда не закрывается из этого хелпера.
-2. **Ограниченный blocking fallback.** Только когда async-отправка
-   вернула `ErrSendBufferFull`, хелпер падает в `SendFrameSync` с
-   внутренним cap'ом таймаута (`handshakeReplyTimeout = 2s`).
-   Блокирующий вариант абсорбирует кратковременный broadcast-burst;
-   таймаут не даёт мёртвому пиру навсегда залипшить горутину. Если
-   и блокирующая попытка не прошла — sentinel возвращается без
-   закрытия соединения.
+2. **Ограниченное ожидание места.** Только когда async-отправка
+   вернула `ErrSendBufferFull`, хелпер ждёт свободный слот через
+   `Network.SendFrameBlocking` с внутренним cap'ом таймаута
+   (`handshakeReplyTimeout = 2s`) поверх ctx caller'а. Ожидание
+   возобновляется в тот момент, когда writer забирает кадр из очереди
+   (без опроса), так что кратковременный burst fire-and-forget кадров,
+   поставленных в очередь к пиру, абсорбируется; cap не даёт мёртвому пиру навсегда занять горутину.
+   Ни один уровень не ждёт flush: `nil` значит, что ответ в очереди —
+   за всеми кадрами, поставленными до него, — и именно это позволяет
+   caller'у `auth_ok` пустить replay backlog'а после него. Очередь,
+   остающаяся полной весь cap, даёт `ErrSendBufferFull` (обёрнутый с
+   указанием cap'а), ctx caller'а, закончившийся раньше, — собственную
+   ошибку ctx, любой другой сбой — свой sentinel. Этот хелпер никогда не
+   закрывает соединение. `SendFrameSync` здесь не подходит: он
+   никогда не ждёт места, только flush.
 3. **Никакого eviction из этого хелпера.** Залипший пир всё равно
    будет эвиктнут — но через heartbeat-путь (`inboundHeartbeat`),
    который является штатным владельцем liveness-eviction. Handshake-
    reply хелпер сознательно молчит на buffer pressure, чтобы
-   кратковременная самонаведённая перегрузка (пир сам забил свой
-   writer broadcast'ом) не убила здоровую сессию.
+   кратковременная самонаведённая перегрузка (наши же асинхронные
+   отправители забили нашу исходящую очередь к пиру) не убила здоровую
+   сессию.
 
 **Применяется к:** `auth_ok` (ответ на `auth_session`), `peers`
 (ответ на `get_peers`), `contacts` (ответ на `fetch_contacts`).

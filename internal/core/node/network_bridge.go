@@ -157,17 +157,42 @@ func (b *networkBridge) SendFrameSync(ctx context.Context, id domain.ConnID, fra
 	if core == nil {
 		return netcore.ErrUnknownConn
 	}
-	status := core.SendRawSyncCtx(ctx, frame)
-	if status == netcore.SendCtxCancelled {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// Defensive: core reported ctx-cancel but ctx reports no error —
-		// surface the typed sentinel rather than nil so the caller never
-		// mistakes "ctx said cancelled mid-flight" for a successful send.
-		return netcore.ErrSendCtxCancelled
+	return ctxSendStatusToError(ctx, core.SendRawSyncCtx(ctx, frame))
+}
+
+// SendFrameBlocking enqueues frame on id's writer queue, waiting for a slot
+// while the queue is full until ctx ends, and returns once the frame is
+// queued — it does not wait for the flush. Delegates to
+// NetCore.SendRawBlockingCtx, whose wait resumes on the writer's own receive
+// from the queue, so room is noticed the moment it appears and nothing polls.
+// SendFrame and SendFrameSync are untouched: on them a full queue is still
+// ErrSendBufferFull, the slow-peer eviction signal.
+func (b *networkBridge) SendFrameBlocking(ctx context.Context, id domain.ConnID, frame []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return netcore.SendStatusToError(status)
+	core := b.coreForID(id)
+	if core == nil {
+		return netcore.ErrUnknownConn
+	}
+	return ctxSendStatusToError(ctx, core.SendRawBlockingCtx(ctx, frame))
+}
+
+// ctxSendStatusToError maps the status of a ctx-aware NetCore send to the
+// Network contract. SendCtxCancelled becomes ctx.Err() verbatim, so callers
+// can tell context.Canceled from context.DeadlineExceeded via errors.Is;
+// every other status goes through netcore.SendStatusToError.
+func ctxSendStatusToError(ctx context.Context, status netcore.SendStatus) error {
+	if status != netcore.SendCtxCancelled {
+		return netcore.SendStatusToError(status)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Defensive: core reported ctx-cancel but ctx reports no error —
+	// surface the typed sentinel rather than nil so the caller never
+	// mistakes "ctx said cancelled mid-flight" for a successful send.
+	return netcore.ErrSendCtxCancelled
 }
 
 // Enumerate iterates registered connections matching dir. If ctx is

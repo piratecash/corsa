@@ -638,10 +638,11 @@ func (pc *NetCore) teardownStatus() SendStatus {
 
 // queueFrame is the enqueue half of every non-blocking send path: refuse at
 // the door once the queue is shut, offer the frame without waiting, then read
-// the door again. It is one helper because four of the five send entry points
-// need exactly this protocol and the fifth differs only in how it waits for a
-// slot (queueFrameBlocking) — a gate that some entry points implement
-// differently is not a gate.
+// the door again. It is one helper because every send entry point that does
+// not wait for a slot needs exactly this protocol, and the two that do
+// (SendRawSyncBlocking, SendRawBlockingCtx) differ only in how they wait
+// (queueFrameBlocking) — a gate that some entry points implement differently
+// is not a gate.
 //
 // A full queue is reported as SendBufferFull and is deliberately NOT a link
 // failure: the frame never entered the queue, and what back-pressure means is
@@ -660,15 +661,22 @@ func (pc *NetCore) queueFrame(item sendItem) SendStatus {
 	return pc.settleEnqueuedFrame(item)
 }
 
-// queueFrameBlocking is the enqueue half of the control-plane path that waits
-// for a slot instead of dropping the frame. It never reports SendBufferFull:
-// teardown and the caller's own deadline are the only ways out of the wait.
+// queueFrameBlocking is the enqueue half of the paths that wait for a slot
+// instead of dropping the frame. It never reports SendBufferFull: teardown,
+// the caller's cancellation and the caller's own deadline are the only ways
+// out of the wait. `cancel` and `deadline` are the two kinds of bound its
+// callers have — a ctx's Done channel and a timer — and a nil channel simply
+// never fires, so each caller passes the one it has.
+//
+// The wait IS the signal that room was freed: the writer's receive from
+// sendCh is what makes this send ready, so the producer resumes exactly when
+// a slot appears and never polls.
 //
 // The teardown arm answers from teardownStatus rather than from the channel it
 // woke on: a producer waiting for a slot when the OWNER closes the connection
 // is owed SendChanClosed, and writerDone alone cannot tell that apart from a
 // socket that died under the writer.
-func (pc *NetCore) queueFrameBlocking(item sendItem, deadline <-chan time.Time) SendStatus {
+func (pc *NetCore) queueFrameBlocking(item sendItem, cancel <-chan struct{}, deadline <-chan time.Time) SendStatus {
 	if st := pc.gateStatus(); st != SendOK {
 		return st
 	}
@@ -678,6 +686,8 @@ func (pc *NetCore) queueFrameBlocking(item sendItem, deadline <-chan time.Time) 
 	case pc.sendCh <- item:
 	case <-pc.writerDone:
 		return pc.teardownStatus()
+	case <-cancel:
+		return SendCtxCancelled
 	case <-deadline:
 		return SendTimeout
 	}
@@ -975,10 +985,36 @@ func (pc *NetCore) SendRawSyncBlocking(data []byte) SendStatus {
 	deadline := time.NewTimer(syncFlushTimeout)
 	defer deadline.Stop()
 
-	if st := pc.queueFrameBlocking(sendItem{data: data, ack: ack}, deadline.C); st != SendOK {
+	if st := pc.queueFrameBlocking(sendItem{data: data, ack: ack}, nil, deadline.C); st != SendOK {
 		return st
 	}
 	return pc.awaitFlush(ack, nil, deadline.C)
+}
+
+// SendRawBlockingCtx enqueues pre-serialized bytes like SendRaw, except that
+// on a full queue it waits for a slot until ctx ends instead of answering
+// SendBufferFull. It returns as soon as the frame is in the queue and does NOT
+// wait for the flush: SendOK means exactly what it means from SendRaw.
+//
+// It exists for the callers that must not lose a frame to transient
+// back-pressure but must not evict on it either — the handshake reply path
+// (node.sendHandshakeReplyViaNetwork) is the one today. The wait is bounded
+// only by ctx, which every such caller derives with its own deadline; a ctx
+// that never ends leaves teardown as the only way out.
+//
+// It never reports SendBufferFull, and it does not change SendRaw or the sync
+// entry points: SendBufferFull stays the slow-peer eviction signal of every
+// path that does not opt into waiting.
+//
+// Ctx is checked before the enqueue (a pre-cancelled caller consumes no slot)
+// and during the wait for a slot (SendCtxCancelled). The caller
+// (network_bridge.SendFrameBlocking) turns SendCtxCancelled back into
+// ctx.Err(), as it does for SendRawSyncCtx.
+func (pc *NetCore) SendRawBlockingCtx(ctx context.Context, data []byte) SendStatus {
+	if err := ctx.Err(); err != nil {
+		return SendCtxCancelled
+	}
+	return pc.queueFrameBlocking(sendItem{data: data}, ctx.Done(), nil)
 }
 
 // WriterDone returns a channel that is closed as soon as the writer stops

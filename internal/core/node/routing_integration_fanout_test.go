@@ -131,6 +131,10 @@ func (n *fanoutTestNetwork) SendFrameSync(ctx context.Context, id domain.ConnID,
 	}
 }
 
+func (n *fanoutTestNetwork) SendFrameBlocking(context.Context, domain.ConnID, []byte) error {
+	return nil
+}
+
 func (n *fanoutTestNetwork) Enumerate(context.Context, netcore.Direction, func(domain.ConnID) bool) {
 }
 

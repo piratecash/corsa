@@ -966,8 +966,8 @@ type Service struct {
 	// setupFailures tracks consecutive cm_session_setup_failed events per
 	// dial-target address. Above setupFailureBanThreshold the address is
 	// pushed out of PeerProvider.Candidates() for setupFailureCooldown to
-	// break reconnect storms against peers whose handshake reply gets
-	// evicted by their own announce_routes flush. Lives in the peer
+	// break reconnect storms against peers whose handshake reply keeps
+	// failing during session setup. Lives in the peer
 	// domain — guarded by s.peerMu. See setup_failure.go.
 	setupFailures map[domain.PeerAddress]*setupFailureEntry
 
@@ -3909,10 +3909,9 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		}
 		// Handshake-phase reply: auth_ok is the gate the dialler waits on
 		// before the session becomes usable. Use the no-eviction path so a
-		// transient outbound burst (broadcast of our own announce_routes
-		// to the new peer kicked off by the auth_session handler) does
-		// not torpedo the connection right at the threshold of becoming
-		// usable. See network_consumer.go.
+		// transient burst of fire-and-forget frames the asynchronous senders
+		// queued toward this peer does not torpedo the connection right at
+		// the threshold of becoming usable. See network_consumer.go.
 		//
 		// Half-auth window contract: handleAuthSession has ALREADY
 		// committed local auth state (setConnAuthStateByID), learned
@@ -4020,9 +4019,10 @@ func (s *Service) dispatchNetworkFrame(connID domain.ConnID, wire string) bool {
 		// Handshake-phase reply: peers is one of the session-setup frames
 		// emitted while the peer is still inside initPeerSession on the
 		// other side. Use sendHandshakeReplyViaNetwork so a transient
-		// outbound-queue burst (our own announce_routes flush going to
-		// the same peer) does NOT trigger slow-peer eviction and
-		// torpedo the handshake. See network_consumer.go.
+		// outbound-queue burst (fire-and-forget frames the asynchronous
+		// senders queued toward the same peer, the backlog replay that
+		// follows auth_ok among them) does NOT trigger slow-peer eviction
+		// and torpedo the handshake. See network_consumer.go.
 		_ = s.sendHandshakeReplyViaNetwork(s.runCtx, connID, protocol.Frame{
 			Type:  "peers",
 			Count: len(peers),

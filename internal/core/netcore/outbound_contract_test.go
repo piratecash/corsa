@@ -539,6 +539,9 @@ func TestQueueIsShutAfterSocketFailure(t *testing.T) {
 	if st := pc.SendRawSyncBlocking([]byte("after\n")); st != SendWriterDone {
 		t.Fatalf("SendRawSyncBlocking after socket failure = %v, want SendWriterDone", st)
 	}
+	if st := pc.SendRawBlockingCtx(context.Background(), []byte("after\n")); st != SendWriterDone {
+		t.Fatalf("SendRawBlockingCtx after socket failure = %v, want SendWriterDone", st)
+	}
 	if st := pc.SendRawTracked([]byte("after\n"), tracked()); st != SendWriterDone {
 		t.Fatalf("SendRawTracked after socket failure = %v, want SendWriterDone", st)
 	}
@@ -650,13 +653,14 @@ func TestSendRefusesFrameQueuedAfterSocketFailure(t *testing.T) {
 	// SendRawTracked is the row that pins the change under test; it used to be
 	// a case of its own, asserting a terminal that no longer exists, and the
 	// status plus "nothing reached the socket" is all it ever observed besides
-	// that. The other four are GUARDS that the entry points stayed consistent
-	// with each other, and the honest caveat is that the three sync ones
-	// answered SendWriterDone before the change as well — they also watch
-	// `writerDone`, which is closed by then. `SendRawSyncBlocking` in particular
-	// offers into a select where both the free slot and `writerDone` are ready,
-	// so which of the two answers it gives is up to the runtime; the row asserts
-	// the answer, not the path.
+	// that. The other five are GUARDS that the entry points stayed consistent
+	// with each other, and the honest caveat is that the entry points that
+	// watch `writerDone`, which is closed by then, answer SendWriterDone
+	// through it as well — the three sync ones did so before the change, and
+	// SendRawBlockingCtx, which came later, does too. `SendRawSyncBlocking` and
+	// `SendRawBlockingCtx` in particular offer into a select where both the free
+	// slot and `writerDone` are ready, so which of the two answers they give is
+	// up to the runtime; the rows assert the answer, not the path.
 	entries := []struct {
 		name string
 		id   ConnID
@@ -671,6 +675,9 @@ func TestSendRefusesFrameQueuedAfterSocketFailure(t *testing.T) {
 			return pc.SendRawSyncCtx(context.Background(), []byte("after-drain\n"))
 		}},
 		{"SendRawSyncBlocking", 24, func(pc *NetCore) SendStatus { return pc.SendRawSyncBlocking([]byte("after-drain\n")) }},
+		{"SendRawBlockingCtx", 26, func(pc *NetCore) SendStatus {
+			return pc.SendRawBlockingCtx(context.Background(), []byte("after-drain\n"))
+		}},
 	}
 	for _, entry := range entries {
 		t.Run(entry.name, func(t *testing.T) {

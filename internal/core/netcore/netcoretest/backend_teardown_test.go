@@ -103,9 +103,9 @@ func TestTeardownReleasesASenderParkedOnAFullChannel(t *testing.T) {
 		name string
 		call func(*parkedSender) func() error
 	}{
-		{"SendFrameSync", func(p *parkedSender) func() error {
+		{"SendFrameBlocking", func(p *parkedSender) func() error {
 			return func() error {
-				return p.backend.SendFrameSync(context.Background(), p.id, []byte("parked"))
+				return p.backend.SendFrameBlocking(context.Background(), p.id, []byte("parked"))
 			}
 		}},
 		{"Inject", func(p *parkedSender) func() error {
@@ -248,6 +248,11 @@ func TestTeardownAnswersASenderWithRoomLeftInTheChannel(t *testing.T) {
 		{"SendFrameSync", func(p *tornDownSender) func() error {
 			return func() error {
 				return p.backend.SendFrameSync(context.Background(), p.id, []byte("late"))
+			}
+		}},
+		{"SendFrameBlocking", func(p *tornDownSender) func() error {
+			return func() error {
+				return p.backend.SendFrameBlocking(context.Background(), p.id, []byte("late"))
 			}
 		}},
 		{"Inject", func(p *tornDownSender) func() error {
@@ -405,6 +410,11 @@ func TestTeardownAnswersASenderPastThePreCheck(t *testing.T) {
 				return p.backend.SendFrameSync(context.Background(), p.id, []byte("late"))
 			}
 		}},
+		{"SendFrameBlocking", func(p *lateTornDownSender) func() error {
+			return func() error {
+				return p.backend.SendFrameBlocking(context.Background(), p.id, []byte("late"))
+			}
+		}},
 		{"Inject", func(p *lateTornDownSender) func() error {
 			return func() error {
 				return p.backend.Inject(context.Background(), p.id, []byte("late"))
@@ -474,20 +484,37 @@ func TestTeardownAnswersASenderPastThePreCheck(t *testing.T) {
 // would still be reachable for any test that never tears its Backend down.
 func TestParkedSenderIsReleasedByItsOwnCtx(t *testing.T) {
 	t.Parallel()
-	p := newParkedSender(t, domain.ConnID(2))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	got := p.park(t, func() error { return p.backend.Inject(ctx, p.id, []byte("parked")) })
-	p.release()
-	cancel()
+	sends := []struct {
+		name string
+		call func(p *parkedSender, ctx context.Context) error
+	}{
+		{"SendFrameBlocking", func(p *parkedSender, ctx context.Context) error {
+			return p.backend.SendFrameBlocking(ctx, p.id, []byte("parked"))
+		}},
+		{"Inject", func(p *parkedSender, ctx context.Context) error {
+			return p.backend.Inject(ctx, p.id, []byte("parked"))
+		}},
+	}
+	for _, send := range sends {
+		t.Run(send.name, func(t *testing.T) {
+			t.Parallel()
+			p := newParkedSender(t, domain.ConnID(2))
 
-	select {
-	case err := <-got:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Inject parked on a full channel and cancelled = %v, want context.Canceled", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Inject ignored its ctx while parked on a full channel")
+			ctx, cancel := context.WithCancel(context.Background())
+			got := p.park(t, func() error { return send.call(p, ctx) })
+			p.release()
+			cancel()
+
+			select {
+			case err := <-got:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("%s parked on a full channel and cancelled = %v, want context.Canceled", send.name, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s ignored its ctx while parked on a full channel", send.name)
+			}
+		})
 	}
 }
 
@@ -507,7 +534,7 @@ func TestTeardownStillClosesTheChannelsAfterTheLastSender(t *testing.T) {
 	inbound := p.backend.Inbound(p.id)
 
 	got := p.park(t, func() error {
-		return p.backend.SendFrameSync(context.Background(), p.id, []byte("parked"))
+		return p.backend.SendFrameBlocking(context.Background(), p.id, []byte("parked"))
 	})
 	done := make(chan struct{})
 	go func() {
@@ -522,7 +549,7 @@ func TestTeardownStillClosesTheChannelsAfterTheLastSender(t *testing.T) {
 		t.Fatal("Shutdown never returned")
 	}
 	if err := <-got; !errors.Is(err, netcore.ErrSendChanClosed) {
-		t.Fatalf("parked SendFrameSync = %v, want ErrSendChanClosed", err)
+		t.Fatalf("parked SendFrameBlocking = %v, want ErrSendChanClosed", err)
 	}
 
 	for name, ch := range map[string]<-chan []byte{"outbound": outbound, "inbound": inbound} {

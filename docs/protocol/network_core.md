@@ -27,6 +27,7 @@ enumeration, shutdown and a lightweight address accessor:
 type Network interface {
     SendFrame(ctx context.Context, id domain.ConnID, frame []byte) error
     SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error
+    SendFrameBlocking(ctx context.Context, id domain.ConnID, frame []byte) error
     Enumerate(ctx context.Context, dir Direction, fn func(domain.ConnID) bool)
     Close(ctx context.Context, id domain.ConnID) error
     RemoteAddr(id domain.ConnID) string
@@ -41,9 +42,9 @@ policy concern stay on `node.Service` — they are not the transport's job.
 The production implementation is `networkBridge` in
 `internal/core/node/network_bridge.go`: a thin adapter that resolves
 `ConnID → *netcore.NetCore` under the registry lock, then delegates to
-`NetCore.SendRaw` / `SendRawSync` / `Close` / `RemoteAddr`. The bridge
-holds no state of its own and multiple calls to `Service.Network()` are
-safe and cheap.
+`NetCore.SendRaw` / `SendRawSyncCtx` / `SendRawBlockingCtx` / `Close` /
+`RemoteAddr`. The bridge holds no state of its own and multiple calls to
+`Service.Network()` are safe and cheap.
 
 ### `Close` is not cancellable
 
@@ -132,16 +133,27 @@ walk callback cannot race with those writes.
 ### Single-writer invariant
 
 Every `NetCore` owns its `net.Conn` privately. Frames reach the wire only
-through the entry points below (each has a tracked twin carrying a
-per-frame outbound contract — see the next section):
+through the entry points below (`Send`, `SendTracked` and `SendSync`
+marshal a `protocol.Frame` and call them):
 
 - `NetCore.SendRaw(frame) SendStatus` — asynchronous; enqueues on the
-  writer channel.
-- `NetCore.SendRawSync(frame) SendStatus` — synchronous; enqueues and
-  blocks on a per-frame ack until the writer flushes or the sync
-  deadline elapses.
+  writer channel, `SendBufferFull` when it is full. `SendRawTracked` and
+  `SendTrackedObserved` are its tracked twins, carrying a per-frame
+  outbound contract — see the next section.
+- `NetCore.SendRawSync(frame) SendStatus` — synchronous; enqueues
+  without waiting for room and blocks on a per-frame ack until the
+  writer flushes or the sync deadline elapses.
+- `NetCore.SendRawSyncCtx(ctx, frame) SendStatus` — `SendRawSync` that
+  also ends the flush wait on the caller's ctx; behind the bridge's
+  `SendFrameSync`.
+- `NetCore.SendRawSyncBlocking(frame) SendStatus` — waits for a slot
+  instead of answering `SendBufferFull`, then for the flush, both under
+  one sync deadline; the outbound control plane uses it.
+- `NetCore.SendRawBlockingCtx(ctx, frame) SendStatus` — waits for a slot
+  until ctx ends instead of answering `SendBufferFull`, and does not wait
+  for the flush; behind the bridge's `SendFrameBlocking`.
 
-Both feed a single dedicated writer goroutine per connection. No other
+All feed a single dedicated writer goroutine per connection. No other
 code path writes to the socket. The goroutine owns `conn.Write` and is
 the only place where partial-write / short-write can occur, so the
 backpressure signal is well-defined: buffer saturation is the
@@ -327,6 +339,46 @@ silently upgraded to `s.runCtx` at the routing-layer entry. The
 defensive `ErrSendCtxCancelled` mapping exists for any future caller
 that bypasses the bridge path.
 
+### Waiting for room: `SendFrameBlocking`
+
+Neither `SendFrame` nor `SendFrameSync` waits for room. A saturated
+queue is answered `ErrSendBufferFull` at once by both — `SendFrameSync`
+waits only for the flush of a frame that got in — because on those paths
+`ErrSendBufferFull` is the slow-peer eviction signal: `sendFrameViaNetwork`
+and the sync helpers close the connection on it.
+
+`SendFrameBlocking` is the opt-in for a caller that must ride out
+transient back-pressure without evicting. On a full queue it waits for a
+slot until its `ctx` ends, and returns as soon as the frame is queued —
+it does not wait for the flush, so `nil` means what it means from
+`SendFrame`. It never answers `ErrSendBufferFull`; a `ctx` that ends
+first is answered `ctx.Err()` verbatim, teardown `ErrSendChanClosed`.
+On the bridge it delegates to `NetCore.SendRawBlockingCtx`, whose wait is
+a blocking send on the writer queue next to the caller's `ctx.Done()` and
+the writer's `writerDone`: the writer's own receive from the queue is
+what wakes it, so room is noticed the moment it appears and nothing
+polls. The wait is bounded only by `ctx`, so every caller derives one
+with its own deadline.
+
+A waiting frame keeps its place. Once queued it is ordered after every
+frame queued before it, and while it waits it is not overtaken: the slot
+a reader frees goes to a waiting sender, so every other send still finds
+the queue full (`SendFrame` answers `ErrSendBufferFull`). The contract
+case `send_frame_blocking_is_not_overtaken_while_it_waits` pins that for a
+single waiter on both implementations: the parked sender is not overtaken
+and takes the freed slot. The order among several waiters is
+first-come-first-served only because the Go runtime queues blocked
+channel senders FIFO; the language specification does not promise it and
+no case pins it.
+
+Its one caller today is the handshake reply path
+(`sendHandshakeReplyViaNetwork`, see
+[realtime.md](realtime.md#handshake-reply-no-eviction-contract)): Tier 1
+is `SendFrame`, and only on `ErrSendBufferFull` Tier 2 waits with
+`SendFrameBlocking` for up to `handshakeReplyTimeout` (2 s). A queue that
+stays full for the whole bound is reported as `ErrSendBufferFull`
+(wrapped with the bound) and the connection is not closed.
+
 ### Lifecycle carve-out
 
 `Network` is the working API for frames on already-registered
@@ -375,10 +427,20 @@ path that fails in production. The suite covers unknown ids
 (`ErrUnknownConn`, an empty `RemoteAddr`, absent from `Enumerate`),
 direction filtering for both directions and early stop in `Enumerate`,
 send order, `SendFrameSync` delivery, `SendFrame` into a remote that never
-reads (`ErrSendBufferFull`, nothing else before it), a ctx cancelled on
+reads (`ErrSendBufferFull`, nothing else before it), `SendFrameSync` into a
+saturated queue (`ErrSendBufferFull` at once, no wait for room),
+`SendFrameBlocking` on a saturated queue (it waits, and once the remote
+reads it is queued behind every earlier frame, and no send overtakes it
+while it waits; a queue that stays full
+ends the wait with `ctx.Err()` exactly at the ctx deadline; a sender parked
+there is released by `Close` with `ErrSendChanClosed`), a ctx cancelled on
 entry (answered before the registry, nothing queued), and `Close` in both
 directions: it releases the connection under any ctx, and keeps its
-registration — the rule `netcore.Network.Close` states.
+registration — the rule `netcore.Network.Close` states. Every case runs in
+a `testing/synctest` bubble with its harness, so a case can wait until the
+implementation's goroutines are parked — the bridge writer inside its
+write to an unread pipe, a sender waiting for room — and bounded waits run
+in virtual time.
 
 Closing is not unregistering, on either side. The bridge's `Close` closes
 the `NetCore` and leaves the registry entry to the owner's lifecycle
@@ -397,20 +459,9 @@ The bridge harness also checks, after every other cleanup, that each core
 it registered was released, so a harness that forgets a teardown fails
 instead of leaking a writer.
 
-Three differences are known and deliberately left out of the suite.
-
-- `SendFrameSync` on a saturated queue — a known Backend DRIFT. The
-  interface decides it: `netcore.Network.SendFrameSync`'s sentinel set "is
-  the same as SendFrame", so `ErrSendBufferFull`. The bridge conforms and
-  answers it at once (`NetCore.SendRawSyncCtx` does not wait for room);
-  the Backend waits for room until ctx ends. It stays pending a decision,
-  because the waiting tier of the handshake reply path
-  (`sendHandshakeReplyViaNetwork`) relies on the wait: in production that
-  tier does not wait, and `TestSendHandshakeReply_BufferFullWaitsAndDelivers`
-  is green only on the Backend. Both carry a marker saying so.
-
-The other two are differences of the medium, about which the interface
-states no rule, and encoding either side would invent one:
+Two differences are known and deliberately left out of the suite. Both
+are differences of the medium, about which the interface states no rule,
+and encoding either side would invent one:
 
 - Frames still queued when `Close` runs: the bridge's writer discards them
   unwritten; the Backend leaves them readable on `Outbound(id)` (see
@@ -586,6 +637,7 @@ frame I/O, enumeration, shutdown и лёгкий accessor адреса:
 type Network interface {
     SendFrame(ctx context.Context, id domain.ConnID, frame []byte) error
     SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error
+    SendFrameBlocking(ctx context.Context, id domain.ConnID, frame []byte) error
     Enumerate(ctx context.Context, dir Direction, fn func(domain.ConnID) bool)
     Close(ctx context.Context, id domain.ConnID) error
     RemoteAddr(id domain.ConnID) string
@@ -600,9 +652,9 @@ tracking, capabilities, peer health и прочие policy-заботы оста
 Production-реализация — `networkBridge` в
 `internal/core/node/network_bridge.go`: тонкий adapter, который
 резолвит `ConnID → *netcore.NetCore` под lock реестра и делегирует в
-`NetCore.SendRaw` / `SendRawSync` / `Close` / `RemoteAddr`. Мост не
-хранит собственного состояния, повторные вызовы `Service.Network()`
-безопасны и дешёвы.
+`NetCore.SendRaw` / `SendRawSyncCtx` / `SendRawBlockingCtx` / `Close` /
+`RemoteAddr`. Мост не хранит собственного состояния, повторные вызовы
+`Service.Network()` безопасны и дешёвы.
 
 ### `Close` не отменяется
 
@@ -694,17 +746,27 @@ handle. Форма снимка гарантирует, что callback walker'�
 ### Инвариант single-writer
 
 Каждый `NetCore` владеет своим `net.Conn` приватно. Фреймы выходят на
-провод только через перечисленные ниже точки входа (у каждой есть
-tracked-близнец, несущий контракт отправки на один кадр, — см. следующий
-раздел):
+провод только через перечисленные ниже точки входа (`Send`,
+`SendTracked` и `SendSync` маршалят `protocol.Frame` и вызывают их):
 
 - `NetCore.SendRaw(frame) SendStatus` — асинхронно; энкью на writer
-  канал.
-- `NetCore.SendRawSync(frame) SendStatus` — синхронно; энкью и блок
-  на per-frame ack, пока writer не сбросит или не сработает sync
-  deadline.
+  канал, `SendBufferFull`, если он полон. `SendRawTracked` и
+  `SendTrackedObserved` — его tracked-близнецы, несущие контракт
+  отправки на один кадр, — см. следующий раздел.
+- `NetCore.SendRawSync(frame) SendStatus` — синхронно; энкью без
+  ожидания места и блок на per-frame ack, пока writer не сбросит или не
+  сработает sync deadline.
+- `NetCore.SendRawSyncCtx(ctx, frame) SendStatus` — `SendRawSync`,
+  который заканчивает ожидание flush ещё и по ctx caller'а; на нём стоит
+  `SendFrameSync` моста.
+- `NetCore.SendRawSyncBlocking(frame) SendStatus` — ждёт слот вместо
+  `SendBufferFull`, затем flush, оба под одним sync deadline; им
+  пользуется исходящий control plane.
+- `NetCore.SendRawBlockingCtx(ctx, frame) SendStatus` — ждёт слот, пока
+  не кончится ctx, вместо `SendBufferFull` и flush не ждёт; на нём стоит
+  `SendFrameBlocking` моста.
 
-Оба питают одну дедицированную writer-горутину на соединение. Никакой
+Все питают одну дедицированную writer-горутину на соединение. Никакой
 другой code path в сокет не пишет. Горутина владеет `conn.Write` и
 является единственным местом, где возможен partial-write /
 short-write, так что сигнал backpressure чётко определён:
@@ -885,6 +947,47 @@ routing-слое — per-cycle контекст, пробрасываемый ч
 входе в routing-слой. Defensive-маппинг `ErrSendCtxCancelled`
 существует для любого будущего caller'а, который обойдёт bridge-путь.
 
+### Ожидание места: `SendFrameBlocking`
+
+Ни `SendFrame`, ни `SendFrameSync` не ждут места. На переполненную
+очередь оба сразу отвечают `ErrSendBufferFull` — `SendFrameSync` ждёт
+только flush уже попавшего в очередь кадра, — потому что на этих путях
+`ErrSendBufferFull` — сигнал вытеснения медленного пира:
+`sendFrameViaNetwork` и sync-хелперы закрывают по нему соединение.
+
+`SendFrameBlocking` — явный выбор caller'а, который обязан пережить
+кратковременное back-pressure, не вытесняя пира. На полной очереди он
+ждёт слот, пока не кончится его `ctx`, и возвращается, как только кадр
+оказался в очереди, — flush он не ждёт, поэтому `nil` значит то же, что
+у `SendFrame`. `ErrSendBufferFull` он не возвращает никогда; `ctx`,
+закончившийся раньше, даёт `ctx.Err()` как есть, teardown —
+`ErrSendChanClosed`. У bridge он делегирует в
+`NetCore.SendRawBlockingCtx`, чьё ожидание — блокирующая отправка в
+очередь writer'а рядом с `ctx.Done()` caller'а и `writerDone` writer'а:
+будит его собственное чтение writer'а из очереди, поэтому место
+замечается в момент появления, и ничто не опрашивает. Ожидание
+ограничено только `ctx`, поэтому каждый caller задаёт ему свой дедлайн.
+
+Ждущий кадр не теряет своего места. Попав в очередь, он стоит после
+всех кадров, поставленных до него, а пока ждёт, его никто не обгоняет:
+слот, освобождённый читателем, достаётся ждущему отправителю, поэтому
+любая другая отправка по-прежнему видит полную очередь (`SendFrame`
+отвечает `ErrSendBufferFull`). Contract-случай
+`send_frame_blocking_is_not_overtaken_while_it_waits` закрепляет это для
+одного ждущего на обеих реализациях: вставшего отправителя не обгоняют, и
+освободившийся слот достаётся ему. Порядок между несколькими ждущими —
+«кто раньше встал, тот раньше обслужен» только потому, что runtime Go
+держит заблокированных отправителей канала в FIFO-очереди; спецификация
+языка этого не обещает, и ни один случай это не закрепляет.
+
+Единственный caller сейчас — путь ответа на рукопожатие
+(`sendHandshakeReplyViaNetwork`, см.
+[realtime.md](realtime.md#handshake-reply-no-eviction-contract)): уровень 1 —
+`SendFrame`, и только на `ErrSendBufferFull` уровень 2 ждёт через
+`SendFrameBlocking` не дольше `handshakeReplyTimeout` (2 с). Очередь,
+остающаяся полной всё это время, даёт `ErrSendBufferFull` (обёрнутый с
+указанием предела), и соединение не закрывается.
+
 ### Lifecycle carve-out
 
 `Network` — working API для фреймов уже зарегистрированных
@@ -936,10 +1039,21 @@ buffered outbound канал (глубина 512 — совпадает с produ
 отсутствие в `Enumerate`), фильтр по направлению для обоих направлений и
 раннюю остановку `Enumerate`, порядок отправки, доставку `SendFrameSync`,
 `SendFrame` в соединение, которое никто не читает (`ErrSendBufferFull`, и
-ничего другого до него), ctx, отменённый на входе (ответ даётся до
-реестра, ничего не ставится в очередь), и `Close` в обоих направлениях:
-он освобождает соединение при любом ctx и сохраняет его регистрацию —
-правило, которое формулирует `netcore.Network.Close`.
+ничего другого до него), `SendFrameSync` в переполненную очередь
+(`ErrSendBufferFull` сразу, без ожидания места), `SendFrameBlocking` на
+переполненной очереди (он ждёт и, как только удалённая сторона читает,
+встаёт в очередь за всеми прежними кадрами, и никакая отправка не
+обгоняет его, пока он ждёт; очередь, которая так и
+остаётся полной, завершает ожидание с `ctx.Err()` ровно в дедлайн ctx;
+отправитель, ждущий там, освобождается `Close` с `ErrSendChanClosed`),
+ctx, отменённый на входе (ответ даётся до реестра, ничего не ставится в
+очередь), и `Close` в обоих направлениях: он освобождает соединение при
+любом ctx и сохраняет его регистрацию — правило, которое формулирует
+`netcore.Network.Close`. Каждый случай выполняется вместе со своим
+harness в пузыре `testing/synctest`, поэтому случай может дождаться, пока
+горутины реализации встанут — writer у bridge внутри записи в
+непрочитанный pipe, отправитель в ожидании места, — а ограниченные
+ожидания идут в виртуальном времени.
 
 Закрытие — не снятие регистрации, ни на одной из сторон. `Close` у
 bridge закрывает `NetCore` и оставляет запись реестра жизненному циклу
@@ -959,21 +1073,9 @@ writer-горутина вернулась, а возвращается она �
 ядро освобождено, так что забытый teardown роняет тест, а не оставляет
 writer висеть.
 
-Три расхождения известны и сознательно исключены из набора.
-
-- `SendFrameSync` на переполненной очереди — известный ДРЕЙФ Backend.
-  Интерфейс это уже решает: набор sentinel-ошибок
-  `netcore.Network.SendFrameSync` «тот же, что у SendFrame», то есть
-  `ErrSendBufferFull`. Bridge соответствует и отвечает так сразу
-  (`NetCore.SendRawSyncCtx` не ждёт места); Backend ждёт места, пока не
-  кончится ctx. Это оставлено до решения, потому что ожидающий уровень
-  пути ответа на рукопожатие (`sendHandshakeReplyViaNetwork`) полагается
-  на это ожидание: в продакшене этот уровень не ждёт, а
-  `TestSendHandshakeReply_BufferFullWaitsAndDelivers` зелёный только на
-  Backend. На обоих стоит пометка об этом.
-
-Два других — различия среды, про которые интерфейс правила не задаёт, и
-закрепить любую из сторон значило бы его выдумать:
+Два расхождения известны и сознательно исключены из набора. Оба —
+различия среды, про которые интерфейс правила не задаёт, и закрепить
+любую из сторон значило бы его выдумать:
 
 - Кадры, ещё стоящие в очереди в момент `Close`: writer у bridge
   выбрасывает их, не записав; Backend оставляет их читаемыми в

@@ -15,7 +15,7 @@ import (
 // must honour the SetupFailureBannedFn callback to skip the peer until the
 // cooldown elapses, otherwise the CM keeps re-dialling bootstrap nodes that
 // can never complete the application-level setup — producing the CPU storm
-// observed when peer-side announce_routes flush evicts our handshake reply.
+// observed when their handshake reply keeps failing during session setup.
 // ---------------------------------------------------------------------------
 
 func TestCandidates_SetupFailureBannedSkipsPeer(t *testing.T) {

@@ -1428,7 +1428,7 @@ func (s *Service) failCMSessionSetup(session *peerSession, slotAddress domain.Pe
 	// Also record the setup failure in the local per-address counter so
 	// PeerProvider.SetupFailureBannedFn can mute the address once the
 	// threshold is reached — breaks the reconnect storm against peers
-	// whose handshake reply gets evicted by their own announce flush.
+	// whose handshake reply keeps failing during session setup.
 	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_wait").Str("address", string(dialAddress)).Msg("peer_mu_writer")
 	s.peerMu.Lock()
 	log.Trace().Str("site", "failCMSessionSetup").Str("phase", "lock_held").Str("address", string(dialAddress)).Msg("peer_mu_writer")

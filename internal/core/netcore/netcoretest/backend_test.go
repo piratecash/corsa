@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/domain"
@@ -102,44 +103,78 @@ func TestBackend_SendFrame_CtxCancelled(t *testing.T) {
 	}
 }
 
-// TestBackend_SendFrameSync_Blocks asserts that SendFrameSync waits for a
-// consumer rather than returning ErrSendBufferFull. This is the
-// observable difference between the two send methods.
-func TestBackend_SendFrameSync_Blocks(t *testing.T) {
-	b := netcoretest.NewWithOptions(netcoretest.Options{OutboundBuffer: 1})
-	defer b.Shutdown()
+// TestBackend_SendFrameSync_FullQueueIsRefused: SendFrameSync does not wait
+// for room, exactly like the production bridge — a saturated queue is
+// answered ErrSendBufferFull at once and the frame is not queued. Waiting is
+// SendFrameBlocking's job (TestBackend_SendFrameBlocking_WaitsForRoom). The
+// bounded ctx and the bubble make an implementation that waits fail here in
+// virtual time instead of hanging the package run.
+func TestBackend_SendFrameSync_FullQueueIsRefused(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := netcoretest.NewWithOptions(netcoretest.Options{OutboundBuffer: 1})
+		defer b.Shutdown()
 
-	id := domain.ConnID(11)
-	b.Register(id, netcore.Outbound, "203.0.113.44:5050")
+		id := domain.ConnID(11)
+		b.Register(id, netcore.Outbound, "203.0.113.44:5050")
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	// Prefill the buffer.
-	if err := b.Network().SendFrame(ctx, id, []byte("first")); err != nil {
-		t.Fatalf("prefill SendFrame: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- b.Network().SendFrameSync(ctx, id, []byte("second"))
-	}()
-
-	// Drain to unblock the sync sender.
-	select {
-	case <-b.Outbound(id):
-	case <-time.After(time.Second):
-		t.Fatal("timed out draining first frame")
-	}
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("SendFrameSync returned %v after drain", err)
+		if err := b.Network().SendFrame(ctx, id, []byte("first")); err != nil {
+			t.Fatalf("prefill SendFrame: %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("SendFrameSync did not complete after drain")
-	}
+		if err := b.Network().SendFrameSync(ctx, id, []byte("second")); !errors.Is(err, netcore.ErrSendBufferFull) {
+			t.Fatalf("SendFrameSync into a full queue = %v, want ErrSendBufferFull", err)
+		}
+
+		if got := <-b.Outbound(id); string(got) != "first" {
+			t.Fatalf("queued frame = %q, want the prefill", got)
+		}
+		select {
+		case got := <-b.Outbound(id):
+			t.Fatalf("the refused frame %q was queued anyway", got)
+		default:
+		}
+	})
+}
+
+// TestBackend_SendFrameBlocking_WaitsForRoom: SendFrameBlocking parks on a
+// full queue instead of answering ErrSendBufferFull, and enqueues as soon as
+// a reader makes room. The bubble proves the park: synctest.Wait returns only
+// once the sender is blocked, so a sender that did not wait has already
+// returned by then.
+func TestBackend_SendFrameBlocking_WaitsForRoom(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		b := netcoretest.NewWithOptions(netcoretest.Options{OutboundBuffer: 1})
+		defer b.Shutdown()
+
+		id := domain.ConnID(12)
+		b.Register(id, netcore.Outbound, "203.0.113.45:5050")
+		ctx := context.Background()
+
+		if err := b.Network().SendFrame(ctx, id, []byte("first")); err != nil {
+			t.Fatalf("prefill SendFrame: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- b.Network().SendFrameBlocking(ctx, id, []byte("second")) }()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("SendFrameBlocking returned %v while the queue was full; want it to wait", err)
+		default:
+		}
+
+		if got := <-b.Outbound(id); string(got) != "first" {
+			t.Fatalf("first frame = %q, want the prefill", got)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("SendFrameBlocking after room appeared = %v, want nil", err)
+		}
+		if got := <-b.Outbound(id); string(got) != "second" {
+			t.Fatalf("second frame = %q, want the blocked frame", got)
+		}
+	})
 }
 
 // TestBackend_Enumerate_DirectionFilter verifies that Enumerate yields

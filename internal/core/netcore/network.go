@@ -23,13 +23,13 @@ import (
 //     the transport.
 //
 // Partial-failure model.
-//   - SendFrame / SendFrameSync return plain error. Partial-failure
-//     outcomes (buffer full, writer goroutine already exited, sync flush
-//     timeout, channel closed during teardown, marshal error) are
-//     expressed via typed sentinel errors declared below and discriminated
-//     through errors.Is. The lower-level SendStatus enum remains an
-//     implementation detail of *NetCore and is mapped to sentinels at the
-//     bridge boundary.
+//   - SendFrame / SendFrameSync / SendFrameBlocking return plain error.
+//     Partial-failure outcomes (buffer full, writer goroutine already
+//     exited, sync flush timeout, channel closed during teardown, marshal
+//     error) are expressed via typed sentinel errors declared below and
+//     discriminated through errors.Is. The lower-level SendStatus enum
+//     remains an implementation detail of *NetCore and is mapped to
+//     sentinels at the bridge boundary.
 //
 // Lifecycle carve-out.
 //   - Accept / Register / Unregister are not methods of Network. Those
@@ -68,8 +68,34 @@ type Network interface {
 	// flushes it, ctx is cancelled, or the per-connection sync deadline
 	// elapses. Applied on paths that must not proceed before the bytes
 	// have left the process (auth handshake, critical control frames).
-	// The sentinel set is the same as SendFrame plus ctx.Err() propagation.
+	// The sentinel set is the same as SendFrame plus ctx.Err() propagation:
+	// the enqueue does not wait, so a saturated queue is answered
+	// ErrSendBufferFull at once. Only the flush is waited for.
 	SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error
+
+	// SendFrameBlocking enqueues frame like SendFrame, except that on a
+	// saturated queue it waits for room until ctx ends instead of answering
+	// ErrSendBufferFull. It returns once the frame is in the queue and does
+	// not wait for the flush, so nil means what it means from SendFrame.
+	// The sentinel set is SendFrame's without ErrSendBufferFull, plus
+	// ctx.Err() — verbatim, so context.Canceled and DeadlineExceeded stay
+	// distinguishable — when ctx ends first.
+	//
+	// Ordering. Once queued, the frame is ordered after every frame queued
+	// before it. While it waits it is not overtaken: the slot a reader frees
+	// goes to a waiting sender, so every other send still finds the queue
+	// full (SendFrame answers ErrSendBufferFull). That much is the contract,
+	// pinned by netcoretest.RunNetworkContract for a single waiter. The order
+	// among several waiters is first-come-first-served only because the Go
+	// runtime queues blocked channel senders FIFO; the language spec does not
+	// promise it and no contract case pins it, so do not build on it.
+	//
+	// It is the opt-in for callers that must ride out transient
+	// back-pressure without evicting (the handshake reply path). Every other
+	// caller keeps the non-waiting SendFrame / SendFrameSync, for which
+	// ErrSendBufferFull is the slow-peer eviction signal. The wait ends only
+	// on room, ctx or teardown, so the caller bounds it through ctx.
+	SendFrameBlocking(ctx context.Context, id domain.ConnID, frame []byte) error
 
 	// Enumerate walks the registered connections matching dir and calls fn
 	// with each ConnID. The callback is transport-level only: PeerIdentity
@@ -91,7 +117,7 @@ type Network interface {
 	// unregisterInboundConn, an outbound session's onClose), so until that
 	// runs a closed id stays registered: Enumerate still lists it,
 	// RemoteAddr still reports its address, a second Close returns nil, and
-	// SendFrame / SendFrameSync are answered ErrSendChanClosed, not
+	// every send is answered ErrSendChanClosed, not
 	// ErrUnknownConn. netcoretest.RunNetworkContract pins this for every
 	// implementation.
 	//
@@ -158,11 +184,12 @@ var (
 	ErrSendInvalidStatus = errors.New("netcore: invalid send status")
 
 	// ErrSendCtxCancelled — defensive sentinel for SendCtxCancelled. The
-	// bridge boundary (networkBridge.SendFrameSync) intercepts this status
-	// and returns the caller's ctx.Err() verbatim, preserving the
-	// context.Canceled / context.DeadlineExceeded distinction. This
-	// sentinel exists so that any future caller bypassing the bridge still
-	// receives a typed error instead of a silent mis-mapping.
+	// bridge boundary (networkBridge.SendFrameSync / SendFrameBlocking)
+	// intercepts this status and returns the caller's ctx.Err() verbatim,
+	// preserving the context.Canceled / context.DeadlineExceeded
+	// distinction. This sentinel exists so that any future caller bypassing
+	// the bridge still receives a typed error instead of a silent
+	// mis-mapping.
 	ErrSendCtxCancelled = errors.New("netcore: caller ctx cancelled")
 )
 

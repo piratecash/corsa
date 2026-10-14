@@ -76,6 +76,10 @@ func (n *recursiveRLockTrapNetwork) SendFrameSync(context.Context, domain.ConnID
 	return nil
 }
 
+func (n *recursiveRLockTrapNetwork) SendFrameBlocking(context.Context, domain.ConnID, []byte) error {
+	return nil
+}
+
 func (n *recursiveRLockTrapNetwork) Enumerate(context.Context, netcore.Direction, func(domain.ConnID) bool) {
 }
 
