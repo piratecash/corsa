@@ -122,9 +122,8 @@ func seedTrackedInboundPeer(t *testing.T, svc *Service, id domain.ConnID, peerId
 // (info.remoteAddr), not by calling back into Network().RemoteAddr —
 // which would re-enter s.peerMu.RLock.
 func TestRoutingCapablePeers_DoesNotCallNetworkRemoteAddr(t *testing.T) {
-	svc := newTestServiceWithRouting(t, idNodeA)
 	trap := &recursiveRLockTrapNetwork{t: t}
-	svc.networkOverride = trap
+	svc := newTestServiceWithRoutingOverNetwork(t, idNodeA, trap)
 
 	const remoteAddr = "10.0.0.1:7001"
 	seedTrackedInboundPeer(t, svc, domain.ConnID(100), idPeerB, remoteAddr)
@@ -149,9 +148,8 @@ func TestRoutingCapablePeers_DoesNotCallNetworkRemoteAddr(t *testing.T) {
 // (1) for resolveRoutableAddress, which has the same recursive-RLock
 // shape as routingCapablePeers on the inbound branch.
 func TestResolveRoutableAddress_DoesNotCallNetworkRemoteAddr(t *testing.T) {
-	svc := newTestServiceWithRouting(t, idNodeA)
 	trap := &recursiveRLockTrapNetwork{t: t}
-	svc.networkOverride = trap
+	svc := newTestServiceWithRoutingOverNetwork(t, idNodeA, trap)
 
 	const remoteAddr = "10.0.0.2:7002"
 	seedTrackedInboundPeer(t, svc, domain.ConnID(101), idPeerC, remoteAddr)
@@ -170,9 +168,8 @@ func TestResolveRoutableAddress_DoesNotCallNetworkRemoteAddr(t *testing.T) {
 // for resolveRelayAddress, which has the same recursive-RLock shape on
 // the inbound branch.
 func TestResolveRelayAddress_DoesNotCallNetworkRemoteAddr(t *testing.T) {
-	svc := newTestServiceWithRouting(t, idNodeA)
 	trap := &recursiveRLockTrapNetwork{t: t}
-	svc.networkOverride = trap
+	svc := newTestServiceWithRoutingOverNetwork(t, idNodeA, trap)
 
 	const remoteAddr = "10.0.0.3:7003"
 	seedTrackedInboundPeer(t, svc, domain.ConnID(102), idPeerD, remoteAddr)

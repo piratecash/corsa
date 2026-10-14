@@ -151,7 +151,9 @@ func (rig *evictionRig) attachFarEnd(t *testing.T, farEnd farEndFunc) {
 	t.Helper()
 	local, remote := net.Pipe()
 	rig.session.conn = local
-	rig.svc.attachOutboundNetCore(rig.session)
+	if err := rig.svc.attachOutboundNetCore(rig.session); err != nil {
+		t.Fatalf("fixture: attachOutboundNetCore: %v", err)
+	}
 	// The session goroutine must not outlive the test if an assertion fails
 	// before the CM closes the session.
 	t.Cleanup(func() { _ = rig.session.Close() })

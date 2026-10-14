@@ -50,7 +50,7 @@ type fanoutPeerBehaviour struct {
 // the configured err after `delay` or ctx cancellation — and counts
 // calls per ConnID so tests can assert exactly-once delivery semantics.
 // The other Network methods are implemented as safe no-ops so the
-// fixture can be installed through svc.networkOverride without bringing
+// fixture can be installed as the Service's Network override without bringing
 // up the full netcoretest.Backend (which, as of this commit, has no
 // per-id delay knob).
 type fanoutTestNetwork struct {
@@ -180,12 +180,14 @@ type fanoutFixture struct {
 //     RemoveDirectPeer produces a non-empty withdrawal on close.
 //   - len(targets) routing-capable inbound connections registered in
 //     s.conns with tracked=true and both CapMeshRoutingV1 + CapMeshRelayV1.
-//   - svc.networkOverride pointing at the fanoutTestNetwork, so every
-//     inbound SendFrameSync lands on the fixture's per-id behaviour.
+//   - the Network override set to the fanoutTestNetwork at construction
+//     (newTestServiceWithRoutingOverNetwork), so every inbound
+//     SendFrameSync lands on the fixture's per-id behaviour.
 func setupFanoutFixture(t *testing.T, disconnectingIdentity domain.PeerIdentity, targets []fanoutTarget) *fanoutFixture {
 	t.Helper()
 
-	svc := newTestServiceWithRouting(t, idNodeA)
+	netFixture := newFanoutTestNetwork()
+	svc := newTestServiceWithRoutingOverNetwork(t, idNodeA, netFixture)
 	svc.conns = make(map[netcore.ConnID]*connEntry)
 	svc.connIDByNetConn = make(map[net.Conn]netcore.ConnID)
 
@@ -197,9 +199,6 @@ func setupFanoutFixture(t *testing.T, disconnectingIdentity domain.PeerIdentity,
 	if _, err := svc.routingTable.AddDirectPeer(disconnectingIdentity); err != nil {
 		t.Fatalf("AddDirectPeer: %v", err)
 	}
-
-	netFixture := newFanoutTestNetwork()
-	svc.networkOverride = netFixture
 
 	connIDs := make([]domain.ConnID, 0, len(targets))
 	for i, target := range targets {

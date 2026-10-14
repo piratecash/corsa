@@ -357,12 +357,95 @@ explicit extension of the carve-out at review.
 
 Protocol-level tests do not open real TCP sockets. `netcoretest.Backend`
 is an in-memory implementation of `netcore.Network` wired into `Service`
-via `node.NewServiceWithNetwork(..., backend)`. It preserves the same
-sentinel-error contract and the same per-ConnID ordering invariant as
-the production bridge, and collapses the writer-goroutine model into a
-buffered outbound channel (depth 512, matching the production
+via `node.NewServiceWithNetwork(..., backend)`. On every case
+`RunNetworkContract` covers (below) it answers as the production bridge
+does, it keeps the same per-ConnID ordering invariant, and it collapses
+the writer-goroutine model
+into a buffered outbound channel (depth 512, matching the production
 `sendChBuffer`). Tests observe what `Service` sends by draining
 `backend.Outbound(id)` and drive inbound traffic with `backend.Inject`.
+
+"Answers as the bridge does" is checked, not promised:
+`netcoretest.RunNetworkContract` is one suite run against both — against
+the Backend in `netcoretest`, and against the bridge over a real
+`Service` registry in package `node` (a harness that registers `net.Pipe`
+connections through `registerInboundConn` and `attachOutboundNetCore`). A
+Backend that drifts fails there, instead of letting a node test pass on a
+path that fails in production. The suite covers unknown ids
+(`ErrUnknownConn`, an empty `RemoteAddr`, absent from `Enumerate`),
+direction filtering for both directions and early stop in `Enumerate`,
+send order, `SendFrameSync` delivery, `SendFrame` into a remote that never
+reads (`ErrSendBufferFull`, nothing else before it), a ctx cancelled on
+entry (answered before the registry, nothing queued), and `Close` in both
+directions: it releases the connection under any ctx, and keeps its
+registration — the rule `netcore.Network.Close` states.
+
+Closing is not unregistering, on either side. The bridge's `Close` closes
+the `NetCore` and leaves the registry entry to the owner's lifecycle
+(`unregisterInboundConn`, an outbound session's `onClose`); the Backend's
+`Close` releases the slot — sends are answered `ErrSendChanClosed`, the
+channels close — and keeps it registered, so `Enumerate` still lists it,
+`RemoteAddr` still reports it and a second `Close` is `nil`.
+`Backend.Unregister` is the counterpart of the owner's lifecycle and
+removes it. Since nothing a test reads through `Network` changes on a
+`Close` any more, `Backend.Closed(id)` is how a test observes one. On the
+bridge side the witness is `NetCore.WriterExited()`, which closes only
+when the writer goroutine has returned — and it returns only after
+`Close` signals it. `WriterDone()` is not a witness of a release: it also
+closes on the first write failure, while the writer still owns the queue.
+The bridge harness also checks, after every other cleanup, that each core
+it registered was released, so a harness that forgets a teardown fails
+instead of leaking a writer.
+
+Three differences are known and deliberately left out of the suite.
+
+- `SendFrameSync` on a saturated queue — a known Backend DRIFT. The
+  interface decides it: `netcore.Network.SendFrameSync`'s sentinel set "is
+  the same as SendFrame", so `ErrSendBufferFull`. The bridge conforms and
+  answers it at once (`NetCore.SendRawSyncCtx` does not wait for room);
+  the Backend waits for room until ctx ends. It stays pending a decision,
+  because the waiting tier of the handshake reply path
+  (`sendHandshakeReplyViaNetwork`) relies on the wait: in production that
+  tier does not wait, and `TestSendHandshakeReply_BufferFullWaitsAndDelivers`
+  is green only on the Backend. Both carry a marker saying so.
+
+The other two are differences of the medium, about which the interface
+states no rule, and encoding either side would invent one:
+
+- Frames still queued when `Close` runs: the bridge's writer discards them
+  unwritten; the Backend leaves them readable on `Outbound(id)` (see
+  below).
+- What a `nil` from `SendFrameSync` promises: on the bridge the bytes were
+  written to the socket; on the Backend the frame is in a channel.
+
+A `Service` built by `NewServiceWithNetwork` owns no real connection. A
+`NetCore` that `registerInboundConn` or `attachOutboundNetCore` inserts
+into the registry is closed through `Service.Network()` — the inbound
+teardown and the shutdown drain reach it no other way — and an override
+does not hold the registry's cores: a real connection registered under
+one had its `Close` answered `ErrUnknownConn` while the entry was removed
+anyway, and the drain enumerated the override and missed it, so its
+socket and writer leaked and `Run` waited on the read timeout. So the
+overridden `Service` refuses, with
+`node.ErrNetworkOverrideOwnsNoConnections`: `Run` returns it instead of
+serving, `registerInboundConn` refuses (the handler closes the socket),
+and `attachOutboundNetCore` refuses before building a `NetCore` (the
+session's `Close` closes the socket). Every core those two insert is
+therefore reachable by the `Network` that closes it. Outside that
+invariant, on purpose: test fixtures that seed the registry directly with
+`setTestConnEntryLocked`; their cores are closed by `newTestNetCore`'s
+test cleanup, not by any `Network`.
+
+The refusal holds only if the override cannot change after a connection
+is registered, so it is fixed at construction: the field is set only by
+a struct literal key (`newService` behind `NewServiceWithNetwork`, or a
+test fixture that builds the `Service` as a literal), never assigned
+afterwards — `TestNetworkOverrideIsSetOnlyAtConstruction` fails on any
+other write — which is also why it is read without a lock. Should the
+inbound teardown still find no entry, it closes the socket itself; should
+the `Network` fail to close an entry that is registered, it closes that
+entry's own `NetCore`, which closes the socket and is the only thing that
+ends the writer. Either way it logs the broken invariant.
 
 The naming convention mirrors `net/http/httptest`. The lifetime method
 is `Backend.Shutdown()` rather than `Close()` because `netcore.Network`
@@ -378,11 +461,13 @@ reading the queue as an observable.
 Closing needs the same guarantee the production gate provides, that no
 send is in flight when it happens, and the Backend gets it WITHOUT
 holding the registry lock across the send. Each slot carries a `done`
-channel and a counter of senders past the registry lookup, and teardown
-runs in four ordered steps: drop the registration, raise `done`, join the
-senders, close the channels. A sender therefore holds the registry lock
-for the LOOKUP ONLY; its blocking offer selects on `done` and on its own
-`ctx`.
+channel and a counter of senders past the registry lookup, and the
+release runs in three ordered steps: raise `done`, join the senders,
+close the channels. `Unregister` and `Shutdown` drop the registration
+first; `Close` keeps it, and a sender that still resolves the slot reads
+`done` before any offer, so it never reaches a closed channel. A sender
+therefore holds the registry lock for the LOOKUP ONLY; its blocking offer
+selects on `done` and on its own `ctx`.
 
 That ordering is what makes "the Backend was shut down during the send" a
 reachable outcome instead of a sentence in a doc comment. Holding the
@@ -399,8 +484,8 @@ has two ready cases at once — the channel and `done` — and `select` picks
 between them uniformly, so a slot torn down under the sender answered the
 promised `ErrSendChanClosed` only about half the time; the non-blocking
 twin had no `done` arm at all and answered `nil`. Neither is an answer
-the Backend may give about a connection whose registration is already
-gone, and Go cannot express precedence through the order of `select`
+the Backend may give about a connection that is already released, and
+Go cannot express precedence through the order of `select`
 cases, so it is expressed by reads around the offer instead: one before
 it, and one on the way out for the window the first cannot cover — the
 fence raised after the sender has already read it down. A saturated
@@ -408,12 +493,12 @@ channel of a torn-down slot is answered the same way, because
 `ErrSendBufferFull` invites a retry on a connection that will not be
 there.
 
-That answer is about the REGISTRATION and not about the frame. A frame
+That answer is about the CONNECTION and not about the frame. A frame
 that reached the buffer stays in it: closing a Go channel does not
 discard what is buffered, and teardown joins the senders before it closes
 anything, so a reader draining `Outbound(id)` still receives it. The
-Backend reports which connection the caller is now holding — gone — and
-leaves the fate of the bytes to the reader, exactly as the production
+Backend reports which connection the caller is now holding — released —
+and leaves the fate of the bytes to the reader, exactly as the production
 gate's post-offer read reports about the queue rather than about the
 socket.
 
@@ -831,13 +916,100 @@ routing-слое — per-cycle контекст, пробрасываемый ч
 Protocol-level тесты не открывают реальных TCP-сокетов.
 `netcoretest.Backend` — in-memory реализация `netcore.Network`,
 которая втыкается в `Service` через
-`node.NewServiceWithNetwork(..., backend)`. Она держит тот же
-sentinel-error контракт и тот же инвариант per-ConnID ordering, что
-и production bridge, и схлопывает модель writer-горутины в
+`node.NewServiceWithNetwork(..., backend)`. На каждый случай, который
+покрывает `RunNetworkContract` (см. ниже), она отвечает так же, как
+production bridge, держит тот же инвариант per-ConnID ordering и
+схлопывает модель writer-горутины в
 buffered outbound канал (глубина 512 — совпадает с production
 `sendChBuffer`). Тесты наблюдают, что посылает `Service`, дренируя
 `backend.Outbound(id)`, и драйвят inbound трафик через
 `backend.Inject`.
+
+«Отвечает так же, как bridge» — проверяемый факт, а не обещание:
+`netcoretest.RunNetworkContract` — один набор тестов, который гоняется
+против обоих: против Backend в `netcoretest` и против bridge поверх
+настоящего реестра `Service` в пакете `node` (harness регистрирует
+`net.Pipe`-соединения через `registerInboundConn` и
+`attachOutboundNetCore`). Backend, который разошёлся с bridge, падает
+там, а не даёт node-тесту пройти по пути, который в продакшене сломан.
+Набор покрывает неизвестные id (`ErrUnknownConn`, пустой `RemoteAddr`,
+отсутствие в `Enumerate`), фильтр по направлению для обоих направлений и
+раннюю остановку `Enumerate`, порядок отправки, доставку `SendFrameSync`,
+`SendFrame` в соединение, которое никто не читает (`ErrSendBufferFull`, и
+ничего другого до него), ctx, отменённый на входе (ответ даётся до
+реестра, ничего не ставится в очередь), и `Close` в обоих направлениях:
+он освобождает соединение при любом ctx и сохраняет его регистрацию —
+правило, которое формулирует `netcore.Network.Close`.
+
+Закрытие — не снятие регистрации, ни на одной из сторон. `Close` у
+bridge закрывает `NetCore` и оставляет запись реестра жизненному циклу
+владельца (`unregisterInboundConn`, `onClose` исходящей сессии); `Close`
+у Backend освобождает слот — отправки получают `ErrSendChanClosed`,
+каналы закрываются — и оставляет его зарегистрированным, поэтому
+`Enumerate` его по-прежнему перечисляет, `RemoteAddr` по-прежнему
+возвращает адрес, а повторный `Close` возвращает `nil`.
+`Backend.Unregister` — аналог жизненного цикла владельца, он запись и
+удаляет. Раз через `Network` тест больше не видит изменений от
+`Close`, наблюдать его нужно через `Backend.Closed(id)`. На стороне
+bridge свидетель — `NetCore.WriterExited()`: он закрывается только когда
+writer-горутина вернулась, а возвращается она только после сигнала
+`Close`. `WriterDone()` освобождение не доказывает: он закрывается и при
+первой ошибке записи, пока writer ещё владеет очередью. Harness bridge
+после всех остальных cleanup проверяет, что каждое зарегистрированное им
+ядро освобождено, так что забытый teardown роняет тест, а не оставляет
+writer висеть.
+
+Три расхождения известны и сознательно исключены из набора.
+
+- `SendFrameSync` на переполненной очереди — известный ДРЕЙФ Backend.
+  Интерфейс это уже решает: набор sentinel-ошибок
+  `netcore.Network.SendFrameSync` «тот же, что у SendFrame», то есть
+  `ErrSendBufferFull`. Bridge соответствует и отвечает так сразу
+  (`NetCore.SendRawSyncCtx` не ждёт места); Backend ждёт места, пока не
+  кончится ctx. Это оставлено до решения, потому что ожидающий уровень
+  пути ответа на рукопожатие (`sendHandshakeReplyViaNetwork`) полагается
+  на это ожидание: в продакшене этот уровень не ждёт, а
+  `TestSendHandshakeReply_BufferFullWaitsAndDelivers` зелёный только на
+  Backend. На обоих стоит пометка об этом.
+
+Два других — различия среды, про которые интерфейс правила не задаёт, и
+закрепить любую из сторон значило бы его выдумать:
+
+- Кадры, ещё стоящие в очереди в момент `Close`: writer у bridge
+  выбрасывает их, не записав; Backend оставляет их читаемыми в
+  `Outbound(id)` (см. ниже).
+- Что обещает `nil` от `SendFrameSync`: у bridge байты записаны в сокет,
+  у Backend кадр лежит в канале.
+
+`Service`, собранный через `NewServiceWithNetwork`, не владеет ни одним
+настоящим соединением. `NetCore`, который `registerInboundConn` или
+`attachOutboundNetCore` вставляет в реестр, закрывается через
+`Service.Network()` — входящий teardown и дренаж при остановке иначе до
+него не дотягиваются, — а override ядер реестра не держит: настоящее
+соединение, зарегистрированное под ним, получало на `Close` ответ
+`ErrUnknownConn`, а запись всё равно удалялась, дренаж же перечислял
+override и его не видел, так что сокет и writer утекали, а `Run` ждал
+таймаута чтения. Поэтому такой `Service` отказывает с
+`node.ErrNetworkOverrideOwnsNoConnections`: `Run` возвращает эту ошибку
+вместо того, чтобы обслуживать, `registerInboundConn` отказывает
+(обработчик закрывает сокет), `attachOutboundNetCore` отказывает до
+создания `NetCore` (сокет закрывает `Close` сессии). Значит, каждое ядро,
+которое вставляют эти двое, достижимо тем `Network`, который его
+закрывает. Вне этого инварианта, сознательно: тестовые фикстуры, которые
+кладут записи в реестр напрямую через `setTestConnEntryLocked`; их ядра
+закрывает test cleanup `newTestNetCore`, а не какой-либо `Network`.
+
+Отказ держится, только если override не может смениться после
+регистрации соединения, поэтому он фиксируется при создании: поле
+задаётся только ключом struct literal (`newService` за
+`NewServiceWithNetwork` или тестовая фикстура, собирающая `Service`
+литералом) и никогда не присваивается потом —
+`TestNetworkOverrideIsSetOnlyAtConstruction` падает на любой другой
+записи; по той же причине его читают без lock-а. Если входящий teardown
+всё же не найдёт записи, он закроет сокет сам; если `Network` не сможет
+закрыть зарегистрированную запись, он закроет собственный `NetCore` этой
+записи — это закрывает и сокет, и только это завершает writer. В обоих
+случаях нарушенный инвариант логируется.
 
 Naming convention зеркалит `net/http/httptest`. Lifetime-метод —
 `Backend.Shutdown()`, а не `Close()`, потому что `netcore.Network`
@@ -854,11 +1026,13 @@ Naming convention зеркалит `net/http/httptest`. Lifetime-метод —
 Закрытию нужна та же гарантия, что даёт продакшен-gate: в момент
 закрытия ни одной отправки не идёт. Backend получает её БЕЗ удержания
 замка реестра на время отправки. У каждого слота есть канал `done` и
-счётчик отправителей, прошедших поиск в реестре, а teardown идёт
-четырьмя упорядоченными шагами: снять регистрацию, поднять `done`,
-дождаться отправителей, закрыть каналы. Отправитель держит замок
-реестра ТОЛЬКО на поиск; его блокирующая отправка селектится на `done`
-и на собственном `ctx`.
+счётчик отправителей, прошедших поиск в реестре, а освобождение идёт
+тремя упорядоченными шагами: поднять `done`, дождаться отправителей,
+закрыть каналы. `Unregister` и `Shutdown` сначала снимают регистрацию;
+`Close` её сохраняет, и отправитель, который всё ещё находит слот,
+читает `done` раньше любого offer-а, так что до закрытого канала не
+доходит. Отправитель держит замок реестра ТОЛЬКО на поиск; его
+блокирующая отправка селектится на `done` и на собственном `ctx`.
 
 Этот порядок и делает исход «Backend закрыли во время отправки»
 достижимым, а не строчкой в комментарии. Удержание read-замка на время
@@ -875,19 +1049,19 @@ offer-а разом готовы две ветки — канал и `done`, —
 между ними равновероятно, поэтому слот, снесённый под отправителем,
 отвечал обещанным `ErrSendChanClosed` примерно в половине случаев; у
 неблокирующего близнеца ветки `done` не было вовсе, и он отвечал `nil`.
-Ни то, ни другое Backend не вправе отвечать про соединение, регистрация
-которого уже снята, а выразить приоритет порядком case-ов в Go нельзя —
+Ни то, ни другое Backend не вправе отвечать про соединение, которое уже
+освобождено, а выразить приоритет порядком case-ов в Go нельзя —
 поэтому он выражен чтениями вокруг offer-а: одно до него и одно на
 выходе, на то окно, которое первое закрыть не может, — забор поднят уже
 после того, как отправитель прочитал его опущенным. Переполненный канал
 снесённого слота отвечает так же: `ErrSendBufferFull` приглашает
 повторить на соединении, которого уже не будет.
 
-Этот ответ — про РЕГИСТРАЦИЮ, а не про кадр. Кадр, попавший в буфер, там
+Этот ответ — про СОЕДИНЕНИЕ, а не про кадр. Кадр, попавший в буфер, там
 и остаётся: закрытие Go-канала не выбрасывает буферизованное, а teardown
 дожидается отправителей прежде, чем что-либо закрыть, поэтому читатель
 `Outbound(id)` его всё равно получит. Backend сообщает, каким соединением
-владеет вызывающий, — уже никаким, — а судьбу байтов оставляет читателю,
+владеет вызывающий, — уже освобождённым, — а судьбу байтов оставляет читателю,
 ровно как post-offer чтение продакшен-gate сообщает про очередь, а не про
 сокет.
 

@@ -694,7 +694,18 @@ func TestConfirmRouteViaHopAck_EmptyForwardedToSkips(t *testing.T) {
 // initialized, suitable for unit tests that don't need network I/O.
 func newTestServiceWithRouting(t *testing.T, localIdentity domain.PeerIdentity) *Service {
 	t.Helper()
+	return newTestServiceWithRoutingOverNetwork(t, localIdentity, nil)
+}
+
+// newTestServiceWithRoutingOverNetwork is newTestServiceWithRouting whose
+// Network() is network (nil: the bridge). The override goes into the struct
+// literal because that is the only place it may be set: it is read without a
+// lock, which is safe only for a value fixed before the Service exists for
+// anyone else (TestNetworkOverrideIsSetOnlyAtConstruction).
+func newTestServiceWithRoutingOverNetwork(t *testing.T, localIdentity domain.PeerIdentity, network netcore.Network) *Service {
+	t.Helper()
 	svc := &Service{
+		networkOverride:       network,
 		identity:              &identity.Identity{Address: localIdentity.String()},
 		identitySessions:      make(map[domain.PeerIdentity]int),
 		identityRelaySessions: make(map[domain.PeerIdentity]int),

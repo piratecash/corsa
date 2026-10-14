@@ -16,21 +16,29 @@
 //     name on one type, so the Backend-wide shutdown gets a distinct name.
 //
 // Invariants the Backend enforces:
-//   - SendFrame / SendFrameSync return exactly the sentinel error set
-//     declared in internal/core/netcore/network.go. Any semantic drift
-//     from production networkBridge is a Backend bug, not a test bug.
+//   - On every case RunNetworkContract (contract.go) covers, the Backend
+//     answers as the production networkBridge does: the same suite runs
+//     against the Backend here and against the bridge in package node. Any
+//     semantic drift from the bridge is a Backend bug, not a test bug. The
+//     cases the suite excludes, and why, are listed on it — one of them,
+//     SendFrameSync on a saturated queue, is a known Backend drift.
 //   - Per-ConnID ordering of outbound frames is preserved: a frame that
 //     leaves SendFrame before another was enqueued appears on Outbound(id)
 //     strictly before the later one.
-//   - Lifecycle is explicit: Register adds, Unregister / Close(ctx,id)
-//     remove. Double-close is idempotent. After Shutdown() every
-//     subsequent Send returns ErrSendChanClosed and every Register panics.
+//   - Lifecycle is explicit, and closing is not unregistering, exactly as on
+//     the bridge: Register adds; Close(ctx, id) releases the connection —
+//     its sends are answered ErrSendChanClosed and its channels close — but
+//     keeps the registration, so Enumerate still lists it, RemoteAddr still
+//     reports it and a second Close is nil; Unregister removes it, as the
+//     owner's lifecycle helper does in production. Closed(id) observes the
+//     release. After Shutdown() every subsequent Send returns
+//     ErrSendChanClosed and every Register panics.
 //   - Teardown always terminates, and it terminates every send with it: a
 //     sender inside the send path when Shutdown / Unregister / Close raises the
 //     fence is answered ErrSendChanClosed rather than pinning them, whether it
 //     was parked on a saturated channel or would have found room, and whether
 //     the fence went up before it read it or after. That answer is about the
-//     REGISTRATION and not about the bytes: a frame already in the buffer stays
+//     CONNECTION and not about the bytes: a frame already in the buffer stays
 //     there and reaches a reader, because closing a channel does not discard
 //     what is buffered. No lock is held across a blocking send, so "the Backend
 //     was shut down during the send" is a reachable outcome and not just a
@@ -69,14 +77,15 @@ var ErrBackendClosed = errors.New("netcoretest: backend closed")
 // Each slot owns its own outbound and inbound channels so tests can drive
 // both directions independently.
 //
-// done and senders are the teardown fence, and they exist because the two data
-// channels ARE closed (unlike the production queue, see removeLocked): a close
-// racing a send is a panic, and a sender that held the registry lock across the
-// send made the close impossible to reach. done is the monotonic "this slot is
-// finished" edge, raised BEFORE anything is closed, so a sender parked in a
-// blocking offer selects its way out instead of waiting for a reader that will
-// never come. senders counts the senders that are past the registry lookup, so
-// the close can be ordered strictly after the last of them.
+// done and senders are the teardown fence, and they exist because the two
+// data channels ARE closed (unlike the production queue, see
+// releaseSlotLocked): a close racing a send is a panic, and a sender that held
+// the registry lock across the send made the close impossible to reach. done
+// is the monotonic "this slot is finished" edge, raised BEFORE anything is
+// closed, so a sender parked in a blocking offer selects its way out instead
+// of waiting for a reader that will never come. senders counts the senders
+// that are past the registry lookup, so the close can be ordered strictly
+// after the last of them.
 type connSlot struct {
 	dir      netcore.Direction
 	addr     string
@@ -178,9 +187,12 @@ func (b *Backend) Register(id domain.ConnID, dir netcore.Direction, addr string)
 	}
 }
 
-// Unregister removes a virtual connection, releases every sender parked on it
-// with ErrSendChanClosed and closes both its channels. A second call for the
-// same id is a no-op.
+// Unregister removes a virtual connection, releasing it first if Close has
+// not: every sender parked on it is answered ErrSendChanClosed and both its
+// channels close. A second call for the same id is a no-op. It is the
+// Backend's counterpart of the owner's lifecycle helper in production
+// (unregisterInboundConn, an outbound session's onClose), which removes the
+// registry entry after the bridge's Close.
 func (b *Backend) Unregister(id domain.ConnID) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -190,7 +202,9 @@ func (b *Backend) Unregister(id domain.ConnID) {
 // Outbound returns the read side of the outbound queue for id. If id is
 // not registered, Outbound returns nil — reads block forever. Callers
 // that need to distinguish "not registered" from "registered but idle"
-// should check via Enumerate or track registration themselves.
+// should check via Enumerate or track registration themselves. After
+// Close the connection is still registered and the channel returned is
+// closed, so a reader sees the release as the end of the stream.
 func (b *Backend) Outbound(id domain.ConnID) <-chan []byte {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -219,7 +233,7 @@ func (b *Backend) Inbound(id domain.ConnID) <-chan []byte {
 //   - ctx.Err() if ctx is already cancelled on entry or is cancelled while
 //     the inbound channel is full.
 //   - ErrSendChanClosed if the Backend is shut down, or the connection
-//     unregistered, before or during the send.
+//     closed (Close) or unregistered, before or during the send.
 //   - ErrUnknownConn if id is not registered.
 //   - nil once the frame is on the inbound channel.
 //
@@ -267,24 +281,45 @@ func (b *Backend) Shutdown() {
 	}
 }
 
-// removeLocked drops id from the registry and closes both channels.
-// Caller must hold b.mu with write intent.
+// removeLocked drops id from the registry and releases the slot if Close has
+// not already. Caller must hold b.mu with write intent.
+//
+// Dropping the registration first means no NEW sender can resolve this slot —
+// every later one is answered ErrUnknownConn (or ErrSendChanClosed after
+// Shutdown) at the lookup, under this same lock. The release itself is
+// releaseSlotLocked's fence.
+func (b *Backend) removeLocked(id domain.ConnID) {
+	slot, ok := b.conns[id]
+	if !ok {
+		return
+	}
+	delete(b.conns, id)
+	releaseSlotLocked(slot)
+}
+
+// releaseSlotLocked releases every sender of slot and closes both its channels,
+// whether or not the slot stays registered: Close keeps the registration,
+// removeLocked has just dropped it. Idempotent — a released slot is left as it
+// is, so a slot closed and later unregistered is released once. Caller must
+// hold b.mu with write intent.
 //
 // The order is the whole fence and every step is load-bearing:
 //
-//  1. drop the registration, so no NEW sender can resolve this slot — every
-//     later one is answered ErrUnknownConn (or ErrSendChanClosed after
-//     Shutdown) at the lookup, under this same lock;
-//  2. raise done, which releases every sender already parked in a blocking
-//     offer with the ErrSendChanClosed the doc comments promise. Without this
-//     step a sender waiting for a reader that will never arrive is waiting for
-//     the very teardown it is blocking;
-//  3. join the senders that are past the lookup. This is bounded precisely
-//     BECAUSE step 2 came first, and a released sender needs nothing from the
+//  1. raise done, which releases every sender already parked in a blocking
+//     offer with the ErrSendChanClosed the doc comments promise, and answers
+//     every sender that resolves the slot afterwards — Close keeps it
+//     resolvable — before it reaches an offer. Without this step a sender
+//     waiting for a reader that will never arrive is waiting for the very
+//     teardown it is blocking;
+//  2. join the senders that are past the lookup. This is bounded precisely
+//     BECAUSE step 1 came first, and a released sender needs nothing from the
 //     registry on its way out, so joining it while holding the write lock
-//     cannot close a cycle;
-//  4. close the channels. Reaching this line means no sender can be inside an
-//     offer any more, so the close — the whole reason the previous version
+//     cannot close a cycle. A sender that resolves the slot after this join
+//     reads done before any offer, so it never touches a closed channel, and
+//     its Add follows this Wait under the registry lock, as WaitGroup reuse
+//     requires;
+//  3. close the channels. Reaching this line means no sender can be inside an
+//     offer any more, so the close — the whole reason an earlier version
 //     held the read lock across the send — can no longer land under one.
 //
 // Closing at all, rather than following the production queue and never closing
@@ -294,12 +329,10 @@ func (b *Backend) Shutdown() {
 // an `ok` of false telling the reader the frame it waited for will never come.
 // The production queue has no such reader and can afford to let its buffer die
 // with the object.
-func (b *Backend) removeLocked(id domain.ConnID) {
-	slot, ok := b.conns[id]
-	if !ok {
+func releaseSlotLocked(slot *connSlot) {
+	if tornDown(slot) {
 		return
 	}
-	delete(b.conns, id)
 	close(slot.done)
 	slot.senders.Wait()
 	close(slot.outbound)
@@ -312,11 +345,13 @@ var _ netcore.Network = (*Backend)(nil)
 
 // SendFrame enqueues frame onto id's outbound channel. Returns:
 //   - ctx.Err() if ctx is already cancelled on entry (no enqueue attempted).
-//   - ErrSendChanClosed if the Backend has been shut down, or the connection
-//     torn down at any point after this call resolved the slot — including
-//     after the frame reached the buffer. Non-blocking or not, a sender past
-//     the registry lookup is owed the same answer as its blocking twin: the
-//     registration is gone and both channels are about to close.
+//   - ErrSendChanClosed if the Backend has been shut down, the connection
+//     was closed before this call (Close keeps the registration, so the slot
+//     still resolves), or it was torn down at any point after this call
+//     resolved the slot — including after the frame reached the buffer.
+//     Non-blocking or not, a sender past the registry lookup is owed the
+//     same answer as its blocking twin: the connection is released and both
+//     channels are closed or about to close.
 //   - ErrUnknownConn if id is not registered.
 //   - ErrSendBufferFull if the per-connection outbound channel is full
 //     (mirrors production slow-peer eviction on writer-queue saturation) and
@@ -353,7 +388,7 @@ func (b *Backend) SendFrame(ctx context.Context, id domain.ConnID, frame []byte)
 	// The teardown answer OVERRIDES both outcomes of the offer, and it has to be
 	// asked again here: the pre-check above can only speak for the instant it
 	// ran, and this send has no select to put the fence in. A saturated channel
-	// of a dropped registration is not "come back later" either.
+	// of a released connection is not "come back later" either.
 	if tornDown(slot) {
 		return netcore.ErrSendChanClosed
 	}
@@ -367,12 +402,18 @@ func (b *Backend) SendFrame(ctx context.Context, id domain.ConnID, frame []byte)
 // channel, ctx is cancelled, or the Backend is shut down. The sentinel
 // set is:
 //   - ctx.Err() on cancellation or pre-cancelled ctx on entry.
-//   - ErrSendChanClosed if the Backend is shut down before or during send.
+//   - ErrSendChanClosed if the Backend is shut down, or the connection
+//     closed or torn down, before or during send.
 //   - ErrUnknownConn if id is not registered.
 //   - nil on successful enqueue.
 //
-// Unlike SendFrame, SendFrameSync does not return ErrSendBufferFull: the
-// caller explicitly opted into blocking semantics.
+// Unlike SendFrame, SendFrameSync does not return ErrSendBufferFull: it waits
+// for room. That is a KNOWN DRIFT and a Backend bug: netcore.Network promises
+// SendFrameSync the same sentinel set as SendFrame, and the production bridge
+// answers ErrSendBufferFull at once on a saturated queue. It is left in place
+// pending a decision — TestSendHandshakeReply_BufferFullWaitsAndDelivers and
+// the handshake reply path's waiting tier rely on it — and is excluded from
+// RunNetworkContract, which says why.
 func (b *Backend) SendFrameSync(ctx context.Context, id domain.ConnID, frame []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -389,7 +430,7 @@ func (b *Backend) SendFrameSync(ctx context.Context, id domain.ConnID, frame []b
 
 // acquireForSend resolves id and registers the caller as an in-flight sender on
 // the slot. On success the caller MUST release it with slot.senders.Done() —
-// removeLocked joins that counter before it closes anything.
+// releaseSlotLocked joins that counter before it closes anything.
 //
 // The registry lock is held for the LOOKUP ONLY and is released before the
 // offer. That is the fix for the deadlock the previous version had: it held the
@@ -400,8 +441,8 @@ func (b *Backend) SendFrameSync(ctx context.Context, id domain.ConnID, frame []b
 // unreachable by construction.
 //
 // Holding the lock was not arbitrary either: it was there to keep the close in
-// removeLocked from landing on a live sender. The production queue solves the
-// same dilemma by never closing at all and refusing through a monotonic gate
+// releaseSlotLocked from landing on a live sender. The production queue solves
+// the same dilemma by never closing at all and refusing through a monotonic gate
 // (docs/protocol/network_core.md, "Queue ownership"); this Backend cannot copy
 // that, because a closed channel is how its tests observe a connection going
 // away. So it keeps the close and moves the ordering out of the mutex: done
@@ -419,8 +460,11 @@ func (b *Backend) acquireForSend(id domain.ConnID) (*connSlot, error) {
 		return nil, netcore.ErrUnknownConn
 	}
 	// Under the read lock, so it is ordered against the senders.Wait() in
-	// removeLocked, which runs under the write lock: either this Add is
-	// visible to that join, or the slot was already gone from the map above.
+	// releaseSlotLocked, which runs under the write lock: either this Add is
+	// visible to that join, or the join has already returned — the slot was
+	// gone from the map above, or Close released it and kept it there. A
+	// sender on a released slot reads done before any offer, so it needs no
+	// join, and its Add after the returned Wait is the reuse WaitGroup allows.
 	slot.senders.Add(1)
 	return slot, nil
 }
@@ -442,12 +486,12 @@ func (b *Backend) acquireForSend(id domain.ConnID) (*connSlot, error) {
 // the order of cases in Go, so it is expressed by a re-check on the way out —
 // the same shape awaitFlush uses on the production queue.
 //
-// WHAT THE ANSWER IS ABOUT is the registration, not the bytes. A frame accepted
+// WHAT THE ANSWER IS ABOUT is the connection, not the bytes. A frame accepted
 // into the buffer stays there: closing a Go channel does not discard what is
-// buffered, and removeLocked joins the senders before it closes anything, so a
-// reader draining Outbound(id) still receives it. ErrSendChanClosed here means
-// "the connection you addressed is gone", which is the fact the caller acts on;
-// the frame's own fate is not something a queue can report.
+// buffered, and releaseSlotLocked joins the senders before it closes anything,
+// so a reader draining Outbound(id) still receives it. ErrSendChanClosed here
+// means "the connection you addressed is released", which is the fact the
+// caller acts on; the frame's own fate is not something a queue can report.
 func (b *Backend) offerBlocking(ctx context.Context, slot *connSlot, ch chan []byte, frame []byte) error {
 	if tornDown(slot) {
 		return netcore.ErrSendChanClosed
@@ -467,11 +511,13 @@ func (b *Backend) offerBlocking(ctx context.Context, slot *connSlot, ch chan []b
 }
 
 // tornDown reports whether the slot's teardown fence is already up, i.e.
-// whether the registration has been dropped and the channels are about to be
-// closed. It is asked on both sides of the offer by both send paths: a sender
-// past the registry lookup can no longer be refused at the door, so this is
-// where "the connection went away while you were inside" is decided — in one
-// place, for the blocking and the non-blocking offer alike.
+// whether the connection has been released — by Close, which keeps the
+// registration, or with the registration by Unregister / Shutdown — and its
+// channels are closed or about to be. It is asked on both sides of the offer
+// by both send paths: a sender past the registry lookup can no longer be
+// refused at the door, so this is where "the connection went away while you
+// were inside" is decided — in one place, for the blocking and the
+// non-blocking offer alike.
 func tornDown(slot *connSlot) bool {
 	select {
 	case <-slot.done:
@@ -517,26 +563,37 @@ func (b *Backend) Enumerate(ctx context.Context, dir netcore.Direction, fn func(
 }
 
 // Close implements netcore.Network.Close: graceful per-ConnID shutdown.
-// Returns ErrUnknownConn if id is not registered, nil otherwise. ctx is not
-// consulted, as in the production networkBridge: releasing a connection is
-// not cancellable work, and a backend that skipped the close under a
-// cancelled ctx would let a test pass on a teardown that leaks in
-// production.
+// Returns ErrUnknownConn if id is not registered, nil otherwise — a second
+// Close included. ctx is not consulted, as in the production networkBridge:
+// releasing a connection is not cancellable work, and a backend that skipped
+// the close under a cancelled ctx would let a test pass on a teardown that
+// leaks in production.
 //
-// Known divergence from production, tracked separately: this Close also
-// removes the registration, so a second Close for the same id returns
-// ErrUnknownConn. The production networkBridge only closes the NetCore and
-// leaves the registry entry to the owner's lifecycle helper
-// (unregisterInboundConn), so a second bridge Close before that returns nil.
-// By the package header's own rule this drift is a Backend bug.
+// Like the bridge, Close releases the connection and keeps its registration:
+// the bridge closes the NetCore and leaves the registry entry to the owner's
+// lifecycle helper, and a Backend that removed it here answered a second
+// Close, a send, Enumerate and RemoteAddr differently from production. The
+// registration goes with Unregister or Shutdown.
 func (b *Backend) Close(_ context.Context, id domain.ConnID) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.conns[id]; !ok {
+	slot, ok := b.conns[id]
+	if !ok {
 		return netcore.ErrUnknownConn
 	}
-	b.removeLocked(id)
+	releaseSlotLocked(slot)
 	return nil
+}
+
+// Closed reports whether id is registered and has been released by Close.
+// Close keeps the registration, so RemoteAddr and Enumerate do not change on
+// it, and this is how a test observes one. An id that was never registered,
+// or has been unregistered, answers false.
+func (b *Backend) Closed(id domain.ConnID) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	slot := b.conns[id]
+	return slot != nil && tornDown(slot)
 }
 
 // RemoteAddr returns the addr passed to Register for id, or "" if id is

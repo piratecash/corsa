@@ -883,26 +883,25 @@ func TestTheInboundHeartbeatIsJoinedNotMerelyStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	dir := t.TempDir()
-	svc := NewService(config.Node{
-		ListenAddress:     "127.0.0.1:0",
-		TrustStorePath:    filepath.Join(dir, "trust.json"),
-		PeersStatePath:    filepath.Join(dir, "peers.json"),
-		ChatLogDir:        dir,
-		Type:              config.NodeTypeFull,
-		AllowPrivatePeers: true,
-	}, id, nil)
-	t.Cleanup(svc.WaitBackground)
-
 	network := &blockingSendNetwork{
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(network.release) }) }
+
+	dir := t.TempDir()
+	svc := NewServiceWithNetwork(config.Node{
+		ListenAddress:     "127.0.0.1:0",
+		TrustStorePath:    filepath.Join(dir, "trust.json"),
+		PeersStatePath:    filepath.Join(dir, "peers.json"),
+		ChatLogDir:        dir,
+		Type:              config.NodeTypeFull,
+		AllowPrivatePeers: true,
+	}, id, network)
+	t.Cleanup(svc.WaitBackground)
 	t.Cleanup(release)
 
-	svc.networkOverride = network
 	svc.runCtx = context.Background()
 	svc.heartbeatIntervalOverride = time.Millisecond
 

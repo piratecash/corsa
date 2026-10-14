@@ -26,12 +26,12 @@ import (
 // built on it — and it is the only place test code may call netcore.New —
 // pinned structurally by TestNetCoresInTestsAreBuiltOnlyByNewTestNetCore.
 //
-// The run-time observable is WriterDone: on a core that never wrote, it closes
-// only when writerLoop returns, so "closed after the subtest's cleanup" is
-// exactly "the writer goroutine is gone". (failedNetCore is not covered here:
-// its writer has already failed a write by design, which closes WriterDone
-// while the loop is still alive, and the loop's own exit signal is not
-// exported.)
+// The run-time observable is WriterExited (through writerReturned): it closes
+// only when writerLoop returns, which happens only after Close, so "closed
+// after the subtest's cleanup" is exactly "the writer goroutine is gone".
+// WriterDone would not do: it also closes on a write failure while the loop
+// is still alive, so a core that failed a write and was never closed would
+// pass — failedNetCore is covered here for exactly that reason.
 
 func TestNetCoreTestHelpersReleaseTheirWriterOnCleanup(t *testing.T) {
 	t.Parallel()
@@ -57,6 +57,10 @@ func TestNetCoreTestHelpersReleaseTheirWriterOnCleanup(t *testing.T) {
 			session, _ := newQueueTestSession(t, domain.PeerAddress("10.0.0.96:64646"), 4)
 			return session.netCore
 		},
+		"failedNetCore": func(t *testing.T) *netcore.NetCore {
+			core, _ := failedNetCore(t)
+			return core
+		},
 		"attachTestNetCore": func(t *testing.T) *netcore.NetCore {
 			local, remote := net.Pipe()
 			t.Cleanup(func() { _ = local.Close() })
@@ -76,9 +80,7 @@ func TestNetCoreTestHelpersReleaseTheirWriterOnCleanup(t *testing.T) {
 				}
 			})
 			// The inner subtest has returned, so its cleanups have run.
-			select {
-			case <-core.WriterDone():
-			default:
+			if !writerReturned(core) {
 				t.Fatalf("%s left its NetCore writer goroutine running after the test's cleanup", name)
 			}
 		})

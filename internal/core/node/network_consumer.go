@@ -362,8 +362,16 @@ func (s *Service) sendHandshakeReplyViaNetwork(ctx context.Context, id domain.Co
 		return sendErr
 	}
 
-	// Buffer is full — wait for drain up to handshakeReplyTimeout
-	// without ever closing the connection.
+	// Buffer is full — the intent is to wait for drain up to
+	// handshakeReplyTimeout without ever closing the connection.
+	//
+	// KNOWN DEFECT, pending a decision: in production this does not wait.
+	// The bridge's SendFrameSync answers ErrSendBufferFull at once on a
+	// saturated queue — which is what netcore.Network.SendFrameSync promises
+	// ("the sentinel set is the same as SendFrame") — so this tier returns
+	// the same buffer-full it was meant to absorb. Only netcoretest.Backend
+	// waits for room, and TestSendHandshakeReply_BufferFullWaitsAndDelivers
+	// is green on it alone (docs/protocol/network_core.md, "Test backend").
 	sendCtx, cancel := context.WithTimeout(ctx, handshakeReplyTimeout)
 	defer cancel()
 	syncErr := network.SendFrameSync(sendCtx, id, data)

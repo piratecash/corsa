@@ -328,7 +328,7 @@ func TestAcceptedSocketsAreAccountedBeforeRegistration(t *testing.T) {
 		go func() {
 			// The handler's first act is to register, which needs peerMu —
 			// held by the test below.
-			if !svc.registerInboundConn(conn, reservation) {
+			if err := svc.registerInboundConn(conn, reservation); err != nil {
 				reservation.Release()
 				_ = conn.Close()
 			}

@@ -313,7 +313,9 @@ func (s *Service) openPeerSession(ctx context.Context, address domain.PeerAddres
 		// see the peerSession field doc.
 		contactSyncCh: make(chan chan int),
 	}
-	s.attachOutboundNetCore(session)
+	if err := s.attachOutboundNetCore(session); err != nil {
+		return false, err
+	}
 	go s.readPeerSession(reader, session)
 
 	welcome, err := s.peerSessionRequest(session, protocol.Frame{}, "welcome", true)
@@ -1133,8 +1135,6 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 		// see the peerSession field doc.
 		contactSyncCh: make(chan chan int),
 	}
-	s.attachOutboundNetCore(session)
-
 	// closeOnError tears down the session (including the outbound NetCore
 	// registration) and stops the guard goroutine. Must be called on every
 	// error return path; success exits via close(abort) below, leaving the
@@ -1142,6 +1142,10 @@ func (s *Service) openPeerSessionForCM(ctx context.Context, address domain.PeerA
 	closeOnError := func() {
 		_ = session.Close()
 		close(abort)
+	}
+	if err := s.attachOutboundNetCore(session); err != nil {
+		closeOnError()
+		return nil, err
 	}
 
 	// The reader outlives this function: it serves the session for its whole

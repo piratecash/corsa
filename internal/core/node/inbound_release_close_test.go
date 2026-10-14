@@ -28,16 +28,17 @@ import (
 // teardown passed the cancelled context to Close, and Close returned ctx.Err()
 // without closing anything.
 //
-// The witness is WriterDone. On a core that never failed a write it closes only
-// when writerLoop returns, and NetCore.Close waits for that return, so once a
-// Close has run the channel is already closed and a non-blocking read is exact.
+// The witness is WriterExited. It closes only when writerLoop returns, which
+// happens only after Close signals it, and NetCore.Close waits for that return,
+// so once a Close has run the channel is already closed and a non-blocking read
+// is exact. WriterDone would not do: it also closes on a write failure, while
+// the writer is still alive, draining.
 
-// writerReturned reports whether core's writer goroutine has returned. Only
-// meaningful on a core that never failed a write: a failed write closes
-// WriterDone while the writer is still alive, draining.
+// writerReturned reports whether core's writer goroutine has returned — that
+// is, whether Close has released the core.
 func writerReturned(core *netcore.NetCore) bool {
 	select {
-	case <-core.WriterDone():
+	case <-core.WriterExited():
 		return true
 	default:
 		return false
@@ -77,8 +78,8 @@ func TestUnregisterInboundConnClosesTheCoreEvenAfterRunCtxEnded(t *testing.T) {
 			svc, _ := newInboundTeardownFixture(t)
 			server, client := net.Pipe()
 			t.Cleanup(func() { _ = client.Close() })
-			if !svc.registerInboundConn(server, nil) {
-				t.Fatal("fixture: registerInboundConn refused the conn")
+			if err := svc.registerInboundConn(server, nil); err != nil {
+				t.Fatalf("fixture: registerInboundConn refused the conn: %v", err)
 			}
 			core := registeredInboundCore(t, svc, server)
 			if writerReturned(core) {
@@ -89,9 +90,10 @@ func TestUnregisterInboundConnClosesTheCoreEvenAfterRunCtxEnded(t *testing.T) {
 				// What Run's AfterFunc does the moment its caller's ctx ends.
 				svc.runCancel()
 			}
-			// handleConn's teardown order: the wire first, then the registry.
-			_ = server.Close()
+			// handleConn's teardown: the registry helper alone, which closes
+			// the wire together with the core.
 			svc.unregisterInboundConn(server)
+			expectHangUp(t, client)
 
 			if _, still := svc.connIDFor(server); still {
 				t.Fatal("the conn is still registered after unregisterInboundConn")
@@ -104,37 +106,52 @@ func TestUnregisterInboundConnClosesTheCoreEvenAfterRunCtxEnded(t *testing.T) {
 	}
 }
 
-// TestNetworkBridgeCloseClosesTheCoreUnderACancelledContext pins the bridge's
-// side of the Network.Close contract: a cancelled ctx neither skips the close
-// nor turns it into an error.
-func TestNetworkBridgeCloseClosesTheCoreUnderACancelledContext(t *testing.T) {
+// TestUnregisterInboundConnClosesAConnItCannotFindInTheRegistry pins the
+// fallback of the inbound teardown. The handler's teardown closes the socket
+// only through the core registered for it; a conn with no entry has no core,
+// so without the fallback its socket would stay open with nothing left to
+// close it. Unreachable while every inbound entry is removed only by its own
+// handler, which is exactly why it must not be silent if that ever breaks.
+func TestUnregisterInboundConnClosesAConnItCannotFindInTheRegistry(t *testing.T) {
 	t.Parallel()
 
 	svc, _ := newInboundTeardownFixture(t)
 	server, client := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
-	if !svc.registerInboundConn(server, nil) {
-		t.Fatal("fixture: registerInboundConn refused the conn")
-	}
-	core := registeredInboundCore(t, svc, server)
-	id, ok := svc.connIDFor(server)
-	if !ok {
-		t.Fatal("fixture: the registered conn has no ConnID")
-	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := svc.Network().Close(ctx, id); err != nil {
-		t.Fatalf("Close under a cancelled ctx = %v, want nil: the conn exists and was closed", err)
-	}
-	if !writerReturned(core) {
-		t.Fatal("Close under a cancelled ctx left the NetCore open")
-	}
-	// Registry eviction stays with the lifecycle helpers; Close only closes.
-	if _, still := svc.connIDFor(server); !still {
-		t.Fatal("Close removed the registry entry; eviction belongs to unregisterInboundConn")
-	}
 	svc.unregisterInboundConn(server)
+	expectHangUp(t, client)
+}
+
+// TestUnregisterInboundConnReleasesTheCoreWhenTheNetworkCannotCloseIt pins
+// the other fallback of the inbound teardown: Network().Close fails for a conn
+// that IS registered. The entry still holds its NetCore, and the writer returns
+// only from that core's Close — closing just the socket would leave the writer
+// alive with nothing left to reach it once the entry goes.
+//
+// Production cannot reach this branch (a Service with an override registers
+// nothing); a fixture can: an override Service whose registry is seeded
+// directly, so the override answers ErrUnknownConn for a registered conn.
+func TestUnregisterInboundConnReleasesTheCoreWhenTheNetworkCannotCloseIt(t *testing.T) {
+	t.Parallel()
+
+	svc := newOverrideService(t)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	core := newTestNetCore(t, netcore.ConnID(7101), server, netcore.Inbound, netcore.Options{})
+	svc.peerMu.Lock()
+	svc.setTestConnEntryLocked(server, &connEntry{core: core})
+	svc.peerMu.Unlock()
+
+	svc.unregisterInboundConn(server)
+
+	expectHangUp(t, client)
+	if !writerReturned(core) {
+		t.Fatal("the teardown closed the socket but left the registered core's writer alive")
+	}
+	if _, still := svc.connIDFor(server); still {
+		t.Fatal("the conn is still registered after unregisterInboundConn")
+	}
 }
 
 // TestAnInboundConnThatEndsDuringShutdownDoesNotLeakItsWriter drives the

@@ -170,21 +170,18 @@ func TestBackend_Enumerate_DirectionFilter(t *testing.T) {
 	}
 }
 
-// TestBackend_Close_PerConnID verifies that Close(ctx, id) removes the
-// connection, closes its channels and returns ErrUnknownConn on a
-// second call — matching the networkBridge contract. Distinct from
-// TestBackend_Shutdown which tears down the whole backend.
+// TestBackend_Close_PerConnID verifies that Close(ctx, id) releases the
+// connection — Closed reports it and its channels close — while keeping the
+// registration, so a second Close is nil, as on the networkBridge; only
+// Unregister removes it. The rest of the bridge's Close contract is checked by
+// TestBackendSatisfiesTheNetworkContract. Distinct from TestBackend_Shutdown
+// which tears down the whole backend.
 func TestBackend_Close_PerConnID(t *testing.T) {
 	b := netcoretest.New()
 	defer b.Shutdown()
 
 	id := domain.ConnID(99)
 	b.Register(id, netcore.Inbound, "203.0.113.77:7777")
-
-	// Capture the outbound channel reference before Close. Outbound's
-	// documented contract returns nil for an unregistered id (and Close
-	// removes the registration), so observing the closed-channel signal
-	// requires holding the channel reference from the registered window.
 	out := b.Outbound(id)
 	if out == nil {
 		t.Fatal("Outbound returned nil for registered id")
@@ -194,40 +191,22 @@ func TestBackend_Close_PerConnID(t *testing.T) {
 	if err := b.Network().Close(ctx, id); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	if !b.Closed(id) {
+		t.Fatal("Closed must report a conn released by Close")
+	}
 	if _, ok := <-out; ok {
 		t.Fatal("Outbound channel must be closed after per-ConnID Close")
 	}
-	if err := b.Network().Close(ctx, id); !errors.Is(err, netcore.ErrUnknownConn) {
-		t.Fatalf("expected ErrUnknownConn on second Close, got %v", err)
-	}
-}
-
-// TestBackend_Close_CancelledContextStillCloses pins the backend to the
-// Network.Close contract the production bridge follows: releasing a
-// connection is not cancellable work, so a cancelled ctx neither skips the
-// close nor is reported as its outcome. A backend that kept the old early
-// return would let a test pass on a teardown that leaks in production.
-func TestBackend_Close_CancelledContextStillCloses(t *testing.T) {
-	b := netcoretest.New()
-	defer b.Shutdown()
-
-	id := domain.ConnID(100)
-	b.Register(id, netcore.Inbound, "203.0.113.78:7777")
-	out := b.Outbound(id)
-	if out == nil {
-		t.Fatal("Outbound returned nil for registered id")
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	if err := b.Network().Close(ctx, id); err != nil {
-		t.Fatalf("Close under a cancelled ctx = %v, want nil", err)
+		t.Fatalf("second Close = %v, want nil: Close keeps the registration", err)
 	}
-	if _, ok := <-out; ok {
-		t.Fatal("Outbound channel must be closed after Close under a cancelled ctx")
-	}
+
+	b.Unregister(id)
 	if err := b.Network().Close(ctx, id); !errors.Is(err, netcore.ErrUnknownConn) {
-		t.Fatalf("expected ErrUnknownConn on second Close, got %v", err)
+		t.Fatalf("Close after Unregister = %v, want ErrUnknownConn", err)
+	}
+	if b.Closed(id) {
+		t.Fatal("Closed must answer false for an id that is no longer registered")
 	}
 }
 

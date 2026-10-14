@@ -137,7 +137,9 @@ func deadOutboundSession(t *testing.T, f reactionFixture) *peerSession {
 	if _, proven := session.provenIdentity(); !proven {
 		t.Fatal("precondition: the session carries no v2 proof")
 	}
-	f.svc.attachOutboundNetCore(session)
+	if err := f.svc.attachOutboundNetCore(session); err != nil {
+		t.Fatalf("fixture: attachOutboundNetCore: %v", err)
+	}
 	t.Cleanup(func() { _ = session.Close() })
 	return session
 }

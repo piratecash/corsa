@@ -7711,7 +7711,9 @@ func TestEnqueueFrameSyncReturnsImmediatelyWhenWriterDead(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	// Register the pipe as an inbound connection — starts connWriter.
-	svc.registerInboundConn(server, nil)
+	if err := svc.registerInboundConn(server, nil); err != nil {
+		t.Fatalf("registerInboundConn: %v", err)
+	}
 	connID, ok := svc.connIDFor(server)
 	if !ok {
 		t.Fatalf("registered conn has no ConnID")
@@ -7774,7 +7776,9 @@ func TestEnqueueFrameSyncReportsDroppedOnWriteError(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	// Register the pipe — starts connWriter.
-	svc.registerInboundConn(server, nil)
+	if err := svc.registerInboundConn(server, nil); err != nil {
+		t.Fatalf("registerInboundConn: %v", err)
+	}
 	connID, ok := svc.connIDFor(server)
 	if !ok {
 		t.Fatalf("registered conn has no ConnID")
@@ -8075,11 +8079,11 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 	// helpers in conn_registry.go is preserved; tests must follow the
 	// same order or they will exercise a codepath that cannot happen in
 	// production.
-	if !svc.registerInboundConn(conn1a, nil) {
-		t.Fatalf("registerInboundConn conn1a failed")
+	if err := svc.registerInboundConn(conn1a, nil); err != nil {
+		t.Fatalf("registerInboundConn conn1a failed: %v", err)
 	}
-	if !svc.registerInboundConn(conn2a, nil) {
-		t.Fatalf("registerInboundConn conn2a failed")
+	if err := svc.registerInboundConn(conn2a, nil); err != nil {
+		t.Fatalf("registerInboundConn conn2a failed: %v", err)
 	}
 
 	// Two inbound connections to the same peer.
@@ -8206,8 +8210,8 @@ func TestTrackInboundDisconnect_PrefersNetCoreIdentity(t *testing.T) {
 	defer func() { _ = connA.Close() }()
 	defer func() { _ = connB.Close() }()
 
-	if !svc.registerInboundConn(connA, nil) {
-		t.Fatalf("registerInboundConn failed")
+	if err := svc.registerInboundConn(connA, nil); err != nil {
+		t.Fatalf("registerInboundConn failed: %v", err)
 	}
 
 	// Set the NetCore mirror and the persistence cache to different values
@@ -8260,8 +8264,8 @@ func TestTrackInboundDisconnect_FallsBackToPeerIDsMap(t *testing.T) {
 	defer func() { _ = connA.Close() }()
 	defer func() { _ = connB.Close() }()
 
-	if !svc.registerInboundConn(connA, nil) {
-		t.Fatalf("registerInboundConn failed")
+	if err := svc.registerInboundConn(connA, nil); err != nil {
+		t.Fatalf("registerInboundConn failed: %v", err)
 	}
 
 	// Deliberately do NOT call SetIdentity on the NetCore — only populate

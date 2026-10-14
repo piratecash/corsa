@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
@@ -42,6 +43,50 @@ type networkBridge struct {
 // compile-time assertion: bridge satisfies the transport contract.
 var _ netcore.Network = (*networkBridge)(nil)
 
+// ErrNetworkOverrideOwnsNoConnections is the refusal a Service built by
+// NewServiceWithNetwork answers whenever it is asked to own a real
+// connection: to serve (Run), to register an accepted socket
+// (registerInboundConn) or to attach a dialled one (attachOutboundNetCore).
+var ErrNetworkOverrideOwnsNoConnections = errors.New("node: a Service with a Network override owns no real connections")
+
+// refuseRealConnectionUnderNetworkOverride answers
+// ErrNetworkOverrideOwnsNoConnections on a Service whose Network is
+// overridden, and nil otherwise.
+//
+// A core that registerInboundConn or attachOutboundNetCore inserts into
+// s.conns is closed through Service.Network(): the inbound teardown
+// (unregisterInboundConn) and the shutdown drain (closeAllInboundConns) can
+// reach it no other way. An override does not hold the registry's cores, so
+// a real connection registered under one could not be closed by the paths
+// that own its teardown — its Close is answered ErrUnknownConn while the
+// entry is removed anyway, and the drain enumerates the override and misses
+// it, leaving the socket and the writer goroutine open and Run waiting on
+// connWg for the read timeout. The override exists to drive protocol logic
+// over an in-memory transport, so owning no real connection costs it
+// nothing; refusing at both insertion points keeps every core they insert
+// reachable by the Network that closes it.
+//
+// Outside that invariant, on purpose: test fixtures that seed s.conns
+// directly with setTestConnEntryLocked. Their cores are built by
+// newTestNetCore and closed by its test cleanup, not by any Network, and no
+// production teardown path runs on them.
+//
+// The read takes no lock because networkOverride is set only by a struct
+// literal key while the Service is being built — newService, behind
+// NewServiceWithNetwork, or a test fixture that builds the Service as a
+// literal — before it exists for any other goroutine, so every later read is
+// ordered after that write by whatever hands the Service out.
+// TestNetworkOverrideIsSetOnlyAtConstruction fails on any other write. A
+// late write would also break the refusal itself: it is taken at
+// registration, so an override installed afterwards would receive the Close
+// of a connection registered under the bridge.
+func (s *Service) refuseRealConnectionUnderNetworkOverride() error {
+	if s.networkOverride != nil {
+		return ErrNetworkOverrideOwnsNoConnections
+	}
+	return nil
+}
+
 // Network returns the transport-level API surface of the Service.
 //
 // Default path: the returned value is backed by a bridge adapter and shares
@@ -49,8 +94,9 @@ var _ netcore.Network = (*networkBridge)(nil)
 // and safe; every call returns an independent bridge instance over the same
 // Service. Consumers must not assume pointer identity across calls.
 //
-// Override path: when NewServiceWithNetwork has pinned a caller-supplied
-// netcore.Network (see s.networkOverride), that value is returned verbatim
+// Override path: when the Service was built with a caller-supplied
+// netcore.Network (NewServiceWithNetwork; see s.networkOverride), that value
+// is returned verbatim
 // on every call. This is the single injection seam used by tests — the
 // override pointer is intentionally reused across calls so that test
 // backends (internal/core/netcore/netcoretest) can observe Service frames

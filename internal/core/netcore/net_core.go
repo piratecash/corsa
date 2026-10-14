@@ -981,13 +981,31 @@ func (pc *NetCore) SendRawSyncBlocking(data []byte) SendStatus {
 	return pc.awaitFlush(ack, nil, deadline.C)
 }
 
-// WriterDone returns a channel that is closed when the per-connection
-// writer goroutine exits. Callers use this to react to local teardown
-// (socket closed, Close() called) independently of Send*() return values —
-// e.g. servePeerSession breaks out of its read loop as soon as the writer
-// dies, instead of waiting for the next heartbeat to notice.
+// WriterDone returns a channel that is closed as soon as the writer stops
+// writing to the socket: on the first write failure, or when Close() ends the
+// writer. After a write failure the writer goroutine is still alive — it
+// keeps owning the queue in drain-only mode until Close() — so this is the
+// signal that the LINK is dead, not that the core was released (that is
+// WriterExited). Callers use it to react to a dead link independently of
+// Send*() return values — e.g. servePeerSession breaks out of its read loop
+// as soon as the writer stops, instead of waiting for the next heartbeat to
+// notice.
 func (pc *NetCore) WriterDone() <-chan struct{} {
 	return pc.writerDone
+}
+
+// WriterExited returns a channel that is closed when the writer goroutine has
+// returned. The writer returns only after Close signals it, so this is the
+// exact witness that the core was released. WriterDone is not: it also closes
+// on the first write failure, while the writer still owns the queue in
+// drain-only mode and lives until Close.
+//
+// It is a teardown witness for tests and diagnostics ("was this core
+// released?"). Production logic that reacts to a dead link waits on
+// WriterDone: waiting here instead would sit out a failed link until someone
+// happens to call Close.
+func (pc *NetCore) WriterExited() <-chan struct{} {
+	return pc.writerExited
 }
 
 // WriterQueue reports the writer queue's occupancy and capacity. The

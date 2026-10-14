@@ -86,6 +86,15 @@ type Network interface {
 	// hold the connection and are sending on it — they are answered
 	// ErrSendChanClosed. Returns ErrUnknownConn if id is not registered.
 	//
+	// Close releases the connection; it does not unregister it. Removing the
+	// registration belongs to the owner's lifecycle (node's
+	// unregisterInboundConn, an outbound session's onClose), so until that
+	// runs a closed id stays registered: Enumerate still lists it,
+	// RemoteAddr still reports its address, a second Close returns nil, and
+	// SendFrame / SendFrameSync are answered ErrSendChanClosed, not
+	// ErrUnknownConn. netcoretest.RunNetworkContract pins this for every
+	// implementation.
+	//
 	// Releasing a connection is not cancellable work: Close closes the
 	// connection whatever the state of ctx, and never reports ctx.Err().
 	// Its callers are teardown and eviction paths that have already decided

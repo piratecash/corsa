@@ -77,6 +77,13 @@ func TestSendHandshakeReply_HappyPath(t *testing.T) {
 // saturated by a peer-side announce_routes burst, the handshake reply
 // must wait for the writer to drain rather than evict the connection.
 // We simulate this by filling the buffer, then draining a slot mid-call.
+//
+// KNOWN DIVERGENCE: green only on netcoretest.Backend. Its SendFrameSync
+// waits for room on a saturated queue; the production bridge answers
+// ErrSendBufferFull at once, as netcore.Network.SendFrameSync promises, so
+// in production the Tier 2 wait in sendHandshakeReplyViaNetwork does not
+// happen. The fix is a pending decision; see the Tier 2 comment there and
+// the exclusions of netcoretest.RunNetworkContract.
 func TestSendHandshakeReply_BufferFullWaitsAndDelivers(t *testing.T) {
 	t.Parallel()
 
@@ -127,7 +134,7 @@ func TestSendHandshakeReply_BufferFullWaitsAndDelivers(t *testing.T) {
 	}
 
 	// Connection must still be registered — no eviction on buffer pressure.
-	if backend.RemoteAddr(connID) == "" {
+	if backend.Closed(connID) {
 		t.Fatal("connection was evicted despite handshake-reply path being eviction-free")
 	}
 }
@@ -173,7 +180,7 @@ func TestSendHandshakeReply_BufferFullTimesOutNoClose(t *testing.T) {
 	}
 
 	// Critical assertion: no eviction.
-	if backend.RemoteAddr(connID) == "" {
+	if backend.Closed(connID) {
 		t.Fatal("connection was evicted on timeout — handshake reply path must NOT close on buffer pressure")
 	}
 }

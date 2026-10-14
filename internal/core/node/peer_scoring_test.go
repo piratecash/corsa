@@ -649,8 +649,12 @@ func TestTrackedInboundPeerAddressIsPerConnection(t *testing.T) {
 	spoofConn, spoofPeer := net.Pipe()
 	defer func() { _ = spoofPeer.Close() }()
 
-	svc.registerInboundConn(authConn, nil)
-	svc.registerInboundConn(spoofConn, nil)
+	if err := svc.registerInboundConn(authConn, nil); err != nil {
+		t.Fatalf("registerInboundConn authConn: %v", err)
+	}
+	if err := svc.registerInboundConn(spoofConn, nil); err != nil {
+		t.Fatalf("registerInboundConn spoofConn: %v", err)
+	}
 
 	// Simulate hello on both connections (populates NetCore state).
 	authID, _ := svc.connIDFor(authConn)

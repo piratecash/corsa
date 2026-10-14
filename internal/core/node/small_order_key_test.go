@@ -311,7 +311,7 @@ func TestPushIdentityWithSmallOrderRecordKeyKeepsTheSession(t *testing.T) {
 		if result := handler.Handle(context.Background(), delivery, payload); result.Outcome() == datagram.HandlerAccepted {
 			t.Fatal("a record under a small-order key was accepted")
 		}
-		if backend.RemoteAddr(sessionConn) == "" {
+		if backend.Closed(sessionConn) {
 			t.Fatal("the session was closed for a key that is the record's, not the peer's")
 		}
 	})
@@ -325,7 +325,7 @@ func TestPushIdentityWithSmallOrderRecordKeyKeepsTheSession(t *testing.T) {
 		if result := handler.Handle(context.Background(), delivery, payload); result.Outcome() == datagram.HandlerAccepted {
 			t.Fatal("a record with a forged signature was accepted")
 		}
-		if backend.RemoteAddr(sessionConn) != "" {
+		if !backend.Closed(sessionConn) {
 			t.Fatal("the session survived its own invalid record; the observable above is vacuous")
 		}
 	})

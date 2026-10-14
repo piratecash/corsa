@@ -1270,10 +1270,14 @@ type Service struct {
 	// returned by Service.Network(). It is the single seam that lets tests
 	// (see internal/core/netcore/netcoretest) drive protocol logic against
 	// an in-memory transport without binding to real sockets. Production
-	// code never sets this — the field is written only by
-	// NewServiceWithNetwork, which is intended solely for test wiring.
+	// code never sets this. It is set only by a struct literal key while
+	// the Service is being built — newService, behind NewServiceWithNetwork,
+	// or a test fixture that builds the Service as a literal — and never
+	// written again (TestNetworkOverrideIsSetOnlyAtConstruction), so it is
+	// read without a lock and takes part in no domain (docs/locking.md).
 	// When nil, Service.Network() falls back to the standard bridge over
-	// the live s.conns registry.
+	// the live s.conns registry. When set, the Service owns no real
+	// connection (refuseRealConnectionUnderNetworkOverride).
 	networkOverride netcore.Network
 
 	// statusMu guards the "aggregate-status" domain: the materialized
@@ -1784,7 +1788,17 @@ type incomingMessage struct {
 	SenderBoxSig string
 }
 
+// NewService builds the production Service: its transport surface is the
+// bridge over its own connection registry.
 func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Service {
+	return newService(cfg, id, eventBus, nil)
+}
+
+// newService is the one construction path. networkOverride is set in the
+// struct literal, before the Service exists for anyone else, which is what
+// lets every reader take it without a lock (see the field). nil means the
+// bridge.
+func newService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus, networkOverride netcore.Network) *Service {
 	// Load persisted peer state and merge with bootstrap peers.
 	// Bootstrap peers always appear first; persisted peers are appended
 	// in score-descending order, skipping duplicates.
@@ -2013,6 +2027,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 		recordProtection: recordProtection,
 		runCtx:           lifecycleCtx,
 		runCancel:        lifecycleCancel,
+		networkOverride:  networkOverride,
 		identity:         id,
 
 		connectOnlyResolver: net.DefaultResolver,
@@ -2513,8 +2528,10 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 // This is the single injection seam used by tests (see
 // internal/core/netcore/netcoretest) to drive protocol logic against an
 // in-memory transport without binding to real sockets. Production callers
-// must use NewService — passing a non-bridge Network breaks the invariant
-// that Service.Network() reflects the live s.conns registry.
+// must use NewService. The returned Service owns no real connection — Run,
+// registerInboundConn and attachOutboundNetCore refuse with
+// ErrNetworkOverrideOwnsNoConnections — because the override cannot close
+// the cores of the s.conns registry; network is the only transport it has.
 //
 // When network is nil, the function panics rather than silently downgrading
 // to the default bridge: accepting a nil here would defeat the compile-time
@@ -2523,9 +2540,7 @@ func NewServiceWithNetwork(cfg config.Node, id *identity.Identity, network netco
 	if network == nil {
 		panic("node.NewServiceWithNetwork: network is nil (use NewService for the default bridge)")
 	}
-	svc := NewService(cfg, id, nil)
-	svc.networkOverride = network
-	return svc
+	return newService(cfg, id, nil, network)
 }
 
 // RegisterMessageStore sets the optional handler for message persistence.
@@ -2662,7 +2677,8 @@ func (s *Service) Run(ctx context.Context) error {
 	stopFollowingCaller := context.AfterFunc(ctx, runCancel)
 	defer stopFollowingCaller()
 	// The BACKSTOP, for a panic raised before the ordered shutdown sequence
-	// below is registered, and for the early return just below. It is
+	// below is registered, and for the two early returns just below (an
+	// unusable connection budget, a Network override). It is
 	// idempotent, so on every ordinary path the sequence has already done it
 	// and this is a no-op.
 	defer runCancel()
@@ -2673,6 +2689,11 @@ func (s *Service) Run(ctx context.Context) error {
 	// operator asked for a limit, and the node would run without one.
 	if s.connBudgetErr != nil {
 		return fmt.Errorf("connection budget: %w", s.connBudgetErr)
+	}
+	// Serving would accept and dial real connections the override could not
+	// close (refuseRealConnectionUnderNetworkOverride).
+	if err := s.refuseRealConnectionUnderNetworkOverride(); err != nil {
+		return fmt.Errorf("serve: %w", err)
 	}
 
 	log.Info().
@@ -3193,8 +3214,8 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 	if s.inboundBeforeRegister != nil {
 		s.inboundBeforeRegister()
 	}
-	if !s.registerInboundConn(wire, reservation) {
-		log.Warn().Str("addr", conn.RemoteAddr().String()).Str("reason", "max-connections-or-shutdown").Msg("reject connection")
+	if err := s.registerInboundConn(wire, reservation); err != nil {
+		log.Warn().Err(err).Str("addr", conn.RemoteAddr().String()).Msg("reject connection")
 		_ = wire.Close()
 		return
 	}
@@ -3222,15 +3243,10 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 			s.trackInboundDisconnectWithPresenceEvidence(connID, addr, peerOfflineEvidence)
 		}
 		s.accumulateInboundTraffic(metered)
-		// On the bridge path this close is redundant: unregisterInboundConn
-		// closes the core, and NetCore.Close shuts this same socket before
-		// it waits for the writer. It stays for the Network override
-		// (NewServiceWithNetwork): there Network().Close goes to the
-		// override, which does not hold this registry's cores, and this line
-		// is the only thing that closes the socket — a known divergence,
-		// tracked separately. Close is idempotent, so the bridge path pays
-		// nothing for it.
-		_ = wire.Close()
+		// Closes the socket too: the core was built on wire, and
+		// NetCore.Close shuts it before it waits for the writer. No other
+		// close is needed — a Service whose Network could not reach this
+		// core (an override) never got this far, registerInboundConn refused.
 		s.unregisterInboundConn(wire)
 		s.removeSubscriberConnID(connID)
 		s.clearConnAuth(connID)
@@ -9013,7 +9029,18 @@ func (s *Service) countInboundConnsLocked() int {
 // Ownership transfers on success: the registry entry holds the unit and
 // releases it on unregister. On failure the caller's deferred Release covers
 // it — and since Release is idempotent, the two paths cannot double-free.
-func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Reservation) bool {
+//
+// It refuses — and the caller closes the socket — with a distinct error per
+// cause: ErrNetworkOverrideOwnsNoConnections on a Service whose Network is
+// overridden (refuseRealConnectionUnderNetworkOverride),
+// errInboundRegistrationClosed once the shutdown drain has run
+// (inboundClosed), and errInboundLimitReached at the inbound limit. The
+// override check comes first and outside peerMu: it reads a field fixed at
+// construction, and it is a refusal no state change can lift.
+func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Reservation) error {
+	if err := s.refuseRealConnectionUnderNetworkOverride(); err != nil {
+		return err
+	}
 	// conn is what the session's frames travel on; on a v2 session that is
 	// TLS over the metered socket, which MeteredOf finds underneath.
 	metered := netcore.MeteredOf(conn)
@@ -9026,11 +9053,11 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	}()
 
 	if s.inboundClosed {
-		return false
+		return errInboundRegistrationClosed
 	}
 	limit := s.cfg.EffectiveMaxIncomingPeers()
 	if limit > 0 && s.countInboundConnsLocked() >= limit {
-		return false
+		return fmt.Errorf("%w (%d)", errInboundLimitReached, limit)
 	}
 
 	s.connIDCounter++
@@ -9040,8 +9067,16 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 	}
 
 	s.registerInboundConnLocked(conn, pc, metered, reservation)
-	return true
+	return nil
 }
+
+// The refusals of registerInboundConn other than the override's
+// (ErrNetworkOverrideOwnsNoConnections). Each names its own cause, so the
+// caller logs that cause instead of guessing it.
+var (
+	errInboundRegistrationClosed = errors.New("inbound registration closed: the shutdown drain has run")
+	errInboundLimitReached       = errors.New("inbound connection limit reached")
+)
 
 // attachOutboundNetCore creates an outbound NetCore for the given dialled
 // connection, registers it in s.conns (the single primary registry that
@@ -9053,7 +9088,14 @@ func (s *Service) registerInboundConn(conn net.Conn, reservation *connbudget.Res
 // and auth frames are routed through the managed single-writer path instead
 // of raw io.WriteString. This is the Phase 1 gate C1 — all outbound writes
 // share the same back-pressure and deadline discipline as inbound.
-func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
+//
+// On a Service whose Network is overridden it refuses before building
+// anything (refuseRealConnectionUnderNetworkOverride): the session is left
+// without a NetCore and the caller's session.Close closes the socket itself.
+func (s *Service) attachOutboundNetCore(session *peerSession) error {
+	if err := s.refuseRealConnectionUnderNetworkOverride(); err != nil {
+		return fmt.Errorf("attach outbound conn %d: %w", session.connID, err)
+	}
 	pc := netcore.New(session.connID, session.conn, netcore.Outbound, netcore.Options{})
 
 	log.Trace().Str("site", "attachOutboundNetCore").Str("phase", "lock_wait").Uint64("conn_id", uint64(session.connID)).Msg("peer_mu_writer")
@@ -9085,7 +9127,7 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 		s.peerMu.Unlock()
 		log.Trace().Str("site", "attachOutboundNetCore_onClose").Str("phase", "lock_released").Uint64("conn_id", uint64(connID)).Msg("peer_mu_writer")
 	}
-	return pc
+	return nil
 }
 
 // unregisterInboundConn is the public lifecycle wrapper that tears down the
@@ -9094,10 +9136,9 @@ func (s *Service) attachOutboundNetCore(session *peerSession) *netcore.NetCore {
 // s.connIDByNetConn cannot be trimmed without the same net.Conn that
 // registerInboundConn registered.
 func (s *Service) unregisterInboundConn(conn net.Conn) {
-	// Resolve the ConnID under the lock, then run the teardown via the
-	// netcore.Network surface BEFORE unregister so the bridge can still
-	// look the entry up. NetCore.Close() handles the full shutdown
-	// sequence:
+	// Close the core through the netcore.Network surface BEFORE unregister,
+	// so the bridge can still look the entry up. NetCore.Close() handles the
+	// full shutdown sequence:
 	//   1. shut the send gate — every producer still holding the NetCore
 	//      is answered SendChanClosed instead of racing the teardown
 	//   2. rawConn.Close() — unblocks writer stuck in conn.Write
@@ -9108,26 +9149,9 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	// bug: the registry is not a lease, a sender may hold the NetCore
 	// across the whole teardown, and Close is what refuses it.
 	//
-	// Note: handleConn calls wire.Close() before unregisterInboundConn,
-	// which is redundant: wire is the conn registerInboundConn built the
-	// NetCore on, and NetCore.Close closes it again in step 2. The double
-	// Close on net.Conn is safe — subsequent calls return an error but don't
-	// panic.
-	s.peerMu.RLock()
-	id, ok := s.connIDForLocked(conn)
-	s.peerMu.RUnlock()
-
-	if ok {
-		// The core must be closed before the entry below goes: once it is
-		// removed, closeAllInboundConns cannot enumerate it and the writer,
-		// which returns only on Close, would live as long as the process.
-		// Network.Close closes it even when runCtx has ended, which is
-		// exactly when a handler that exits on its own during shutdown gets
-		// here. The bridge cannot answer ErrUnknownConn either: an inbound
-		// entry is removed only here, and only the conn's own handler calls
-		// this, once, so the entry resolved above is still registered.
-		_ = s.Network().Close(s.runCtx, id)
-	}
+	// Step 2 is the only close of the socket handleConn's teardown performs:
+	// conn is the conn registerInboundConn built the NetCore on.
+	s.closeRegisteredInboundCore(conn)
 
 	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_wait").Msg("peer_mu_writer")
 	s.peerMu.Lock()
@@ -9135,6 +9159,54 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	s.unregisterConnLocked(conn)
 	s.peerMu.Unlock()
 	log.Trace().Str("site", "unregisterInboundConn").Str("phase", "lock_released").Msg("peer_mu_writer")
+}
+
+// closeRegisteredInboundCore closes the NetCore registered for conn through
+// Service.Network(), before unregisterInboundConn removes the entry.
+//
+// The core must be closed before the entry goes: once it is removed,
+// closeAllInboundConns cannot enumerate it and the writer, which returns only
+// on Close, would live as long as the process. Network.Close closes it even
+// when runCtx has ended, which is exactly when a handler that exits on its
+// own during shutdown gets here.
+//
+// Neither fallback below is reachable while the invariant holds: an inbound
+// entry is removed only by its own handler, once, so the entry exists; and
+// Network() is the bridge for it, because a Service with an override refuses
+// to register (refuseRealConnectionUnderNetworkOverride) and the override is
+// fixed at construction. If either breaks, the broken invariant is logged
+// rather than left to show up as a leaked connection, and what is left is
+// released directly: with no entry there is no core, so the socket itself is
+// closed; with an entry the Network could not close, the entry's own core is
+// closed, which closes the socket too and is the only thing that ends its
+// writer.
+func (s *Service) closeRegisteredInboundCore(conn net.Conn) {
+	s.peerMu.RLock()
+	id, ok := s.connIDForLocked(conn)
+	s.peerMu.RUnlock()
+
+	if !ok {
+		log.Error().Str("addr", conn.RemoteAddr().String()).Msg("unregister_inbound_conn_not_registered")
+		_ = conn.Close()
+		return
+	}
+	if err := s.Network().Close(s.runCtx, id); err != nil {
+		log.Error().Err(err).Uint64("conn_id", uint64(id)).Str("addr", conn.RemoteAddr().String()).Msg("unregister_inbound_conn_close_failed")
+		s.closeRegistryCore(id, conn)
+	}
+}
+
+// closeRegistryCore closes the NetCore the registry holds for id. netCoreForID
+// releases peerMu before returning, so the Close — which waits for the writer
+// and closes the socket — runs under no domain mutex. With no core in the
+// entry it closes conn itself.
+func (s *Service) closeRegistryCore(id domain.ConnID, conn net.Conn) {
+	core := s.netCoreForID(id)
+	if core == nil {
+		_ = conn.Close()
+		return
+	}
+	core.Close()
 }
 
 // closeAllInboundConns closes every tracked inbound connection so that
