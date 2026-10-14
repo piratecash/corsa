@@ -136,6 +136,8 @@ Response:
     "pin_capacity": 20000,
     "pin_store_full": false,
     "pin_refusals_pin_store_full": 0,
+    "v1_refusals_identity_pinned": 0,
+    "v1_refusals_endpoint_bound": 0,
     "store_unreadable": false
   }
 }
@@ -266,6 +268,8 @@ whole network is in".
 | `secure_sessions.pin_capacity` | int | The bound on pinned identities. |
 | `secure_sessions.pin_store_full` | bool | `true` when no NEW identity can be pinned: a v2 session of an identity not pinned yet is then refused with `pin_store_full` (no v1 fallback in that attempt). Pinned identities keep being served; existing pins are never dropped to make room. |
 | `secure_sessions.pin_refusals_pin_store_full` | uint64 | v2 sessions refused with `pin_store_full`, both directions, since the process started (in memory, reset on restart). |
+| `secure_sessions.v1_refusals_identity_pinned` | uint64 | v1 sessions refused because the identity they name requires v2 — pinned, or holding a live v2 connection — since the process started (in memory, reset on restart). Counted at every check: on accept at the `hello` and again at `auth_session`, on dial at the `welcome` and again right after an outbound v1 session is registered. The `hello` and `welcome` refusals come before anything is signed for that identity; the two re-checks come after the v1 `auth_session` signature and close the session instead. |
+| `secure_sessions.v1_refusals_endpoint_bound` | uint64 | v1 answers refused on dial because the endpoint that gave them is bound to v2 — a downgrade, not followed: the dial fails instead of falling back — since the process started (in memory, reset on restart). |
 | `secure_sessions.store_unreadable` | bool | The store file exists but could not be read: every peer is treated as pinned, v1 is refused, v2 keeps working until an operator repairs the file. |
 
 ### fetchRouteLookup
@@ -621,6 +625,8 @@ corsa-cli fetchRouteSummary
     "pin_capacity": 20000,
     "pin_store_full": false,
     "pin_refusals_pin_store_full": 0,
+    "v1_refusals_identity_pinned": 0,
+    "v1_refusals_endpoint_bound": 0,
     "store_unreadable": false
   }
 }
@@ -748,6 +754,8 @@ negotiated(O)    = Σ count где reason = negotiated / total(O)
 | `secure_sessions.pin_capacity` | int | Предел закреплённых identity. |
 | `secure_sessions.pin_store_full` | bool | `true`, когда НОВУЮ identity закрепить нельзя: сессия v2 ещё не закреплённой identity тогда отклоняется с `pin_store_full` (без отката на v1 в этой попытке). Закреплённые identity продолжают обслуживаться; существующие pin ради места не удаляются. |
 | `secure_sessions.pin_refusals_pin_store_full` | uint64 | Сессии v2, отклонённые с `pin_store_full`, в обоих направлениях, с запуска процесса (в памяти, сбрасывается при перезапуске). |
+| `secure_sessions.v1_refusals_identity_pinned` | uint64 | Сессии v1, отклонённые потому, что названная в них identity требует v2 — закреплена или держит живое v2-соединение, — с запуска процесса (в памяти, сбрасывается при перезапуске). Учитывается каждая проверка: на приёме — на `hello` и повторно на `auth_session`, при дозвоне — на `welcome` и повторно сразу после регистрации исходящей v1-сессии. Отказы на `hello` и `welcome` происходят до того, как для этой identity что-либо подписано; две повторные проверки идут после подписи v1 `auth_session` и вместо этого закрывают сессию. |
+| `secure_sessions.v1_refusals_endpoint_bound` | uint64 | Ответы v1, отклонённые при дозвоне потому, что давший их адрес привязан к v2, — понижение, за которым не следуют: дозвон завершается неудачей вместо отката, — с запуска процесса (в памяти, сбрасывается при перезапуске). |
 | `secure_sessions.store_unreadable` | bool | Файл хранилища есть, но не читается: все пиры считаются закреплёнными, v1 отвергается, v2 работает, пока оператор не исправит файл. |
 
 ### fetchRouteLookup

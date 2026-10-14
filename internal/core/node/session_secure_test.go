@@ -139,24 +139,43 @@ func TestAnOldNodeDiallingANewOneIsServedOverV1(t *testing.T) {
 // like, and following it would hand him the relayable v1 proof.
 func TestAnAddressThatSpokeV2IsNotDowngraded(t *testing.T) {
 	t.Parallel()
-	old, address, stopOld := listenerNode(t, asOldNode)
+	old, address, stopOld := listenerNode(t, withoutOwnDials(asOldNode))
 	defer stopOld()
+	bound := domain.PeerAddress(normalizeAddress(address))
 	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
-		if err := svc.secureSessions.store.noteProvenOutbound(domain.PeerAddress(normalizeAddress(address)), domain.PeerIdentity{1}, false); err != nil {
+		if err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, false); err != nil {
 			t.Fatalf("bind: %v", err)
 		}
 	})
 	defer stopDialer()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, v1 := authenticatedInbound(old); v1 > 0 {
-			t.Fatal("a v2-seen address was downgraded to v1")
-		}
-		time.Sleep(50 * time.Millisecond)
+	assertDowngradeRefused(t, dialer, old, bound, "a v2-seen address")
+}
+
+// assertDowngradeRefused watches dialer's connection manager — dialling an
+// endpoint bound to v2 that an old node now answers — until it has refused
+// the downgrade twice, and checks that nothing gave way: no v1 session (the
+// old node never authenticated the dialler), no v1 mark, the binding still in
+// force. Two refusals because the manager reacts to a failed attempt before
+// it retries; a reaction that forgot the binding would let the retry follow
+// the v1 answer.
+func assertDowngradeRefused(t *testing.T, dialer, old *Service, bound domain.PeerAddress, what string) {
+	t.Helper()
+	dialerID := peerIdentityOf(t, dialer)
+	awaitRepeatedRefusal(t, what+": the downgrade refusal",
+		func() uint64 { return dialer.SecureSessionStoreStats().V1RefusalsEndpointBound },
+		func() bool {
+			_, seenV1 := marksOf(dialer)
+			return nodeAuthenticatedIdentity(old, dialerID) || seenV1 > 0
+		})
+	if nodeAuthenticatedIdentity(old, dialerID) {
+		t.Fatalf("%s was downgraded: the old node authenticated the dialler over v1", what)
 	}
 	if _, seenV1 := marksOf(dialer); seenV1 != 0 {
-		t.Fatal("the downgrade attempt was recorded as a v1 node")
+		t.Fatalf("the downgrade attempt on %s was recorded as a v1 node", what)
+	}
+	if !dialer.secureSessions.store.endpointRequiresV2(bound) {
+		t.Fatalf("the refused downgrade lost the v2 binding of %s", what)
 	}
 }
 
@@ -189,17 +208,106 @@ func peerIdentityOf(t *testing.T, svc *Service) domain.PeerIdentity {
 	return id
 }
 
-// assertNoV1SessionFor watches node for a while and fails on any
-// authenticated v1 inbound session.
-func assertNoV1SessionFor(t *testing.T, node *Service, d time.Duration, what string) {
+// awaitRepeatedRefusal waits until refusals has counted at least two refusals
+// or breached reports that the protection gave way, whichever comes first.
+//
+// The refusal itself is the gate — an attempt that ended in any other way
+// never reached the protection, and waiting for it to end proves nothing.
+// Two of them because the connection manager reacts to a failed attempt
+// (onCMDialFailed) before it retries: the second refusal is made by an
+// attempt that started after that reaction, so a reaction that undid the
+// protection is caught as well as the attempt itself. The caller asserts on
+// the breach after this returns.
+func awaitRepeatedRefusal(t *testing.T, what string, refusals func() uint64, breached func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if _, v1 := authenticatedInbound(node); v1 > 0 {
-			t.Fatal(what)
+	deadline := time.Now().Add(20 * time.Second)
+	for refusals() < 2 && !breached() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was counted %d times, want at least 2, and nothing gave way either (waited 20s)", what, refusals())
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// withoutOwnDials wraps a node setup so the node keeps no outbound slots. A
+// node that a test dials learns the dialler's address from the session and
+// would dial it back; its own sessions would then add refusals, marks and
+// learned identities the test reads as the dialler's.
+func withoutOwnDials(setup func(*Service)) func(*Service) {
+	return func(svc *Service) {
+		svc.connManager.config.MaxSlotsFn = func() int { return 0 }
+		if setup != nil {
+			setup(svc)
+		}
+	}
+}
+
+// startQuietNode starts a node that dials nobody on its own — no bootstrap
+// peers and no outbound slots — so the only attempts it makes are the ones a
+// test makes through dialPastTransport, and what they leave behind is theirs.
+func startQuietNode(t *testing.T, setup func(*Service)) (*Service, func()) {
+	t.Helper()
+	return startTestNodeWithSetup(t, config.Node{
+		ListenAddress:  freeAddress(t),
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
+	}, withoutOwnDials(setup))
+}
+
+// dialPastTransport makes one connection-manager attempt from svc to address
+// on the calling goroutine — the DialFn the manager's workers call — and
+// returns how it ended. Call it only while svc's Run is alive: the attempt
+// starts goroutines that Run's lifecycle joins, as it does for the manager's
+// own dial workers. Only an attempt that could not open its socket at
+// all is repeated: it never reached the peer, so it says nothing about what
+// the peer or this node decide. A test that keeps getting those fails here
+// instead of reading "nothing happened" as a pass. A session the attempt
+// established is closed at once: no slot owns it, and the node's stop would
+// otherwise wait on its reader.
+//
+// The caller's negative checks are made after this returns, so they see
+// everything the attempt did, including a v1 fallback inside it.
+func dialPastTransport(t *testing.T, svc *Service, address domain.PeerAddress) (bool, error) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		result, err := svc.dialForCM(ctx, []domain.PeerAddress{address})
+		cancel()
+		if err == nil {
+			_ = result.Session.Close()
+			return true, nil
+		}
+		if !errors.Is(err, errPeerDialTransport) {
+			return false, err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no attempt on %s got past opening its socket (waited 15s): %v", address, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// awaitV2RefusalOrAuthentication waits until dialer has recorded a failed
+// session setup with address — its v2 handshake completed, and the listener
+// closed the connection before the session could be used — or until the
+// listener authenticated the dialler. A v2 dialler finishes its handshake
+// before the listener stores the pin, so a refusal of that pin reaches the
+// dialler only as a failed setup, and by then the listener has decided. The
+// caller asserts which of the two happened.
+func awaitV2RefusalOrAuthentication(t *testing.T, dialer, listener *Service, address domain.PeerAddress) {
+	t.Helper()
+	dialerID := peerIdentityOf(t, dialer)
+	waitForConditionMsg(t, 15*time.Second, "the attempt on "+string(address)+" was neither refused nor established", func() bool {
+		return setupFailureRecorded(dialer, address) || nodeAuthenticatedIdentity(listener, dialerID)
+	})
+}
+
+func setupFailureRecorded(svc *Service, address domain.PeerAddress) bool {
+	svc.peerMu.RLock()
+	defer svc.peerMu.RUnlock()
+	entry := svc.setupFailures[address]
+	return entry != nil && entry.Consecutive > 0
 }
 
 // An identity that proved v2 is refused over v1 on accept: the v1 hello may
@@ -208,12 +316,73 @@ func TestAPinnedIdentityIsRefusedOverV1OnAccept(t *testing.T) {
 	t.Parallel()
 	listener, address, stopListener := listenerNode(t, nil)
 	defer stopListener()
-	_, stopOld := dialerNode(t, address, func(old *Service) {
-		asOldNode(old)
-		_ = listener.secureSessions.store.noteProvenInbound(peerIdentityOf(t, old))
-	})
+	old, stopOld := startQuietNode(t, asOldNode)
 	defer stopOld()
-	assertNoV1SessionFor(t, listener, 3*time.Second, "a v1 session was accepted for an identity pinned to v2")
+	oldID := peerIdentityOf(t, old)
+	if err := listener.secureSessions.store.noteProvenInbound(oldID); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	established, err := dialPastTransport(t, old, domain.PeerAddress(normalizeAddress(address)))
+	// The gate is the listener's own refusal: an attempt that ended for any
+	// other reason never reached the protection.
+	if refused := listener.SecureSessionStoreStats().V1RefusalsIdentityPinned; refused == 0 {
+		t.Fatalf("the listener did not refuse the v1 hello of an identity pinned to v2 (established=%v err=%v)", established, err)
+	}
+	if established {
+		t.Fatal("a v1 session was accepted for an identity pinned to v2")
+	}
+	if nodeAuthenticatedIdentity(listener, oldID) {
+		t.Fatal("a v1 session was accepted for an identity pinned to v2: the listener authenticated it")
+	}
+}
+
+// Every v1 session refused because its identity requires v2 is counted, on
+// whichever path refused it: the counter is the trace a diagnostic — and a
+// test of the refusal — reads instead of hoping to catch a connection.
+func TestEveryV1RefusalOfAPinnedIdentityIsCounted(t *testing.T) {
+	t.Parallel()
+	svc := newHarnessProbeService(t, domain.NodeTypeFull)
+	pinned, unpinned := domain.PeerIdentity{0x51}, domain.PeerIdentity{0x52}
+	if err := svc.secureSessions.store.noteProvenInbound(pinned); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	for attempt := range 2 {
+		if err := svc.refuseLegacyIdentity(pinned.String()); !errors.Is(err, errLegacyRefusedPinned) {
+			t.Fatalf("attempt %d: refuseLegacyIdentity(pinned) = %v, want errLegacyRefusedPinned", attempt, err)
+		}
+	}
+	if err := svc.refuseLegacyIdentity(unpinned.String()); err != nil {
+		t.Fatalf("refuseLegacyIdentity(unpinned) = %v, want nil", err)
+	}
+	if got := svc.SecureSessionStoreStats().V1RefusalsIdentityPinned; got != 2 {
+		t.Fatalf("v1 refusals counted = %d, want 2 (one per refusal, none for the unpinned identity)", got)
+	}
+}
+
+// Every downgrade refused on dial — a v1 answer from an endpoint bound to v2
+// — is counted, once per refused answer.
+func TestEveryRefusedDowngradeIsCounted(t *testing.T) {
+	t.Parallel()
+	_, address, stopOld := listenerNode(t, asOldNode)
+	defer stopOld()
+	bound := domain.PeerAddress(normalizeAddress(address))
+	dialer, stopDialer := startQuietNode(t, func(svc *Service) {
+		if err := svc.secureSessions.store.noteProvenOutbound(bound, domain.PeerIdentity{1}, false); err != nil {
+			t.Fatalf("bind: %v", err)
+		}
+	})
+	defer stopDialer()
+
+	for attempt := range 2 {
+		if established, err := dialPastTransport(t, dialer, bound); established || !errors.Is(err, errLegacyRefusedV2Bound) {
+			t.Fatalf("attempt %d ended with established=%v err=%v, want the downgrade refused", attempt, established, err)
+		}
+	}
+	if got := dialer.SecureSessionStoreStats().V1RefusalsEndpointBound; got != 2 {
+		t.Fatalf("refused downgrades counted = %d, want 2", got)
+	}
 }
 
 // The dialling side: an old node answering with a welcome that names a
@@ -221,16 +390,29 @@ func TestAPinnedIdentityIsRefusedOverV1OnAccept(t *testing.T) {
 func TestAPinnedIdentityIsRefusedInAV1Welcome(t *testing.T) {
 	t.Parallel()
 	var oldID domain.PeerIdentity
-	old, address, stopOld := listenerNode(t, func(svc *Service) {
+	old, address, stopOld := listenerNode(t, withoutOwnDials(func(svc *Service) {
 		asOldNode(svc)
 		oldID = peerIdentityOf(t, svc)
-	})
+	}))
 	defer stopOld()
-	_, stopDialer := dialerNode(t, address, func(svc *Service) {
+	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
 		_ = svc.secureSessions.store.noteProvenInbound(oldID)
 	})
 	defer stopDialer()
-	assertNoV1SessionFor(t, old, 3*time.Second, "the dialler signed a v1 session for an identity pinned to v2")
+	dialerID := peerIdentityOf(t, dialer)
+
+	// Refused twice by the connection manager's own attempts: the second
+	// came after the manager reacted to the first, and a reaction that
+	// dropped the pin would let it sign the v1 session.
+	awaitRepeatedRefusal(t, "the refusal of a v1 welcome naming a pinned identity",
+		func() uint64 { return dialer.SecureSessionStoreStats().V1RefusalsIdentityPinned },
+		func() bool { return nodeAuthenticatedIdentity(old, dialerID) })
+	if nodeAuthenticatedIdentity(old, dialerID) {
+		t.Fatal("the dialler signed a v1 session for an identity pinned to v2: the old node authenticated it")
+	}
+	if !dialer.secureSessions.store.identityPinned(oldID) {
+		t.Fatal("the refusals cost the identity its pin")
+	}
 }
 
 // A recovery dial to a peer that speaks v2 goes over v2 too: the one-shot
@@ -356,11 +538,13 @@ func nodeAuthenticatedIdentity(node *Service, id domain.PeerIdentity) bool {
 func TestAV2SessionWaitsForItsPinToBeWritten(t *testing.T) {
 	t.Parallel()
 	var failing atomic.Bool
+	var failedWrites atomic.Int64
 	failing.Store(true)
 	listener, address, stopListener := listenerNode(t, func(svc *Service) {
 		store := svc.secureSessions.store
 		store.writeFile = func(raw []byte) error {
 			if failing.Load() {
+				failedWrites.Add(1)
 				return errors.New("disk full")
 			}
 			return store.writeToDisk(raw)
@@ -370,12 +554,12 @@ func TestAV2SessionWaitsForItsPinToBeWritten(t *testing.T) {
 	dialer, stopDialer := dialerNode(t, address, nil)
 	defer stopDialer()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if v2, _ := authenticatedInbound(listener); v2 > 0 {
-			t.Fatal("a v2 session was established while its pin could not be written")
-		}
-		time.Sleep(50 * time.Millisecond)
+	awaitV2RefusalOrAuthentication(t, dialer, listener, domain.PeerAddress(normalizeAddress(address)))
+	if failedWrites.Load() == 0 {
+		t.Fatal("the listener never tried to store the pin of the attempt that failed")
+	}
+	if nodeAuthenticatedIdentity(listener, peerIdentityOf(t, dialer)) {
+		t.Fatal("a v2 session was established while its pin could not be written")
 	}
 	failing.Store(false)
 	waitForConditionMsg(t, 15*time.Second, "no v2 session after the disk recovered", func() bool {
@@ -393,10 +577,10 @@ func TestAV2SessionWaitsForItsPinToBeWritten(t *testing.T) {
 // identity — is a downgrade, and the dial does not fall back.
 func TestAContactEndpointRefusesASubstituteIdentityAfterThirtyDays(t *testing.T) {
 	t.Parallel()
-	old, address, stopOld := listenerNode(t, asOldNode)
+	old, address, stopOld := listenerNode(t, withoutOwnDials(asOldNode))
 	defer stopOld()
 	bound := domain.PeerAddress(normalizeAddress(address))
-	_, stopDialer := dialerNode(t, address, func(svc *Service) {
+	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
 		clock := newStoreClock()
 		store := loadSecureSessionStore("", clock.read)
 		if err := store.noteProvenOutbound(bound, domain.PeerIdentity{7}, true); err != nil {
@@ -406,7 +590,7 @@ func TestAContactEndpointRefusesASubstituteIdentityAfterThirtyDays(t *testing.T)
 		svc.secureSessions.store = store
 	})
 	defer stopDialer()
-	assertNoV1SessionFor(t, old, 3*time.Second, "a protected endpoint fell back to v1 for a substitute identity after 30 days")
+	assertDowngradeRefused(t, dialer, old, bound, "a protected endpoint 30 days on")
 }
 
 // Shutdown on the boundary between a connection's first byte and its
@@ -457,35 +641,34 @@ func TestADialledV2SessionWaitsForItsBindingToBeWritten(t *testing.T) {
 	t.Parallel()
 	_, address, stopListener := listenerNode(t, nil)
 	defer stopListener()
+	errDiskFull := errors.New("disk full")
 	var failing atomic.Bool
 	failing.Store(true)
-	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
+	dialer, stopDialer := startQuietNode(t, func(svc *Service) {
 		store := svc.secureSessions.store
 		store.writeFile = func(raw []byte) error {
 			if failing.Load() {
-				return errors.New("disk full")
+				return errDiskFull
 			}
 			return store.writeToDisk(raw)
 		}
 	})
 	defer stopDialer()
-	sessions := func() int {
-		dialer.peerMu.RLock()
-		defer dialer.peerMu.RUnlock()
-		return len(dialer.sessions)
+	target := domain.PeerAddress(normalizeAddress(address))
+
+	// The gate is the failed write of this attempt's binding: an attempt
+	// that ended for any other reason never reached it.
+	established, err := dialPastTransport(t, dialer, target)
+	if !errors.Is(err, errDiskFull) {
+		t.Fatalf("the attempt ended with established=%v err=%v, want it refused on the unwritten binding", established, err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sessions() > 0 {
-			t.Fatal("a dialled v2 session was established while its binding could not be written")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
 	failing.Store(false)
-	waitForConditionMsg(t, 15*time.Second, "no dialled session after the disk recovered", func() bool { return sessions() > 0 })
+	if established, err := dialPastTransport(t, dialer, target); !established {
+		t.Fatalf("no dialled session after the disk recovered: %v", err)
+	}
 	reloaded := loadSecureSessionStore(secureSessionStorePath(dialer.cfg), time.Now)
-	if !reloaded.endpointRequiresV2(domain.PeerAddress(normalizeAddress(address))) {
+	if !reloaded.endpointRequiresV2(target) {
 		t.Fatal("the binding of the established session is not on disk")
 	}
 }

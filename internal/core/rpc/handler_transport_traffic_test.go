@@ -107,11 +107,13 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 	provider.On("NeighbourComposition").Return(domain.NeighbourComposition{}).Once()
 	provider.On("TransportTrafficStats").Return(domain.TransportTrafficStats{}).Once()
 	provider.On("SecureSessionStoreStats").Return(domain.SecureSessionStoreStats{
-		ReadAt:               now,
-		PinnedIdentities:     20000,
-		PinCapacity:          20000,
-		Full:                 true,
-		PinRefusalsStoreFull: 7,
+		ReadAt:                   now,
+		PinnedIdentities:         20000,
+		PinCapacity:              20000,
+		Full:                     true,
+		PinRefusalsStoreFull:     7,
+		V1RefusalsIdentityPinned: 3,
+		V1RefusalsEndpointBound:  5,
 	}).Once()
 
 	table := rpc.NewCommandTable()
@@ -137,6 +139,8 @@ func TestFetchRouteSummaryReportsThePinStore(t *testing.T) {
 		"pinned_identities":           "20000",
 		"pin_capacity":                "20000",
 		"pin_refusals_pin_store_full": "7",
+		"v1_refusals_identity_pinned": "3",
+		"v1_refusals_endpoint_bound":  "5",
 	} {
 		if got, _ := section[field].(json.Number); got.String() != want {
 			t.Fatalf("secure_sessions.%s = %v, want %s", field, section[field], want)

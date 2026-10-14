@@ -83,11 +83,13 @@ func newSecureSessions(id *identity.Identity, storePath string, clock func() tim
 // refuseLegacyIdentity reports errLegacyRefusedPinned for a v1 session whose
 // hello or welcome names an identity that requires v2 — pinned, or with a
 // live v2 connection (identityRequiresV2) — on accept and on dial alike. A
-// v1-only build pins nothing and refuses nothing. The caller must hold no
+// v1-only build pins nothing and refuses nothing. Every refusal is counted
+// (SecureSessionStoreStats.V1RefusalsIdentityPinned). The caller must hold no
 // domain mutex.
 func (s *Service) refuseLegacyIdentity(address string) error {
 	id := domain.PeerIdentityFromWire(address)
 	if s.identityRequiresV2(id) {
+		s.secureSessions.store.noteIdentityRefusal()
 		return fmt.Errorf("%w: %s", errLegacyRefusedPinned, id)
 	}
 	return nil
@@ -271,6 +273,7 @@ func (s *Service) dialPeerTransport(ctx context.Context, address domain.PeerAddr
 	case mode == sessionv2.ModeV2Only:
 		return nil, fmt.Errorf("%w: %w", errV1RefusedV2Only, err)
 	case required:
+		s.secureSessions.store.noteEndpointRefusal()
 		log.Warn().Str("peer", string(address)).Msg("secure_session_downgrade_refused")
 		return nil, fmt.Errorf("%w: %w", errLegacyRefusedV2Bound, err)
 	}

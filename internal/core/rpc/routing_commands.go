@@ -425,6 +425,8 @@ func routeSummaryHandler(rp RoutingProvider) CommandHandler {
 			"pin_capacity":                pinStore.PinCapacity,
 			"pin_store_full":              pinStore.Full,
 			"pin_refusals_pin_store_full": pinStore.PinRefusalsStoreFull,
+			"v1_refusals_identity_pinned": pinStore.V1RefusalsIdentityPinned,
+			"v1_refusals_endpoint_bound":  pinStore.V1RefusalsEndpointBound,
 			"store_unreadable":            pinStore.Unreadable,
 		}
 

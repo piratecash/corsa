@@ -101,18 +101,22 @@ func TestANodeWithAFullPinStoreRefusesANewIdentitysSession(t *testing.T) {
 
 	newcomer, stopNewcomer := dialerNode(t, address, nil)
 	defer stopNewcomer()
-	waitForConditionMsg(t, 10*time.Second, "the refusal was never counted", func() bool {
-		return listener.SecureSessionStoreStats().PinRefusalsStoreFull > 0
-	})
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if v2, v1 := authenticatedInbound(listener); v2 > 0 || v1 > 0 {
-			t.Fatalf("a session without a stored pin was established: v2=%d v1=%d", v2, v1)
-		}
-		if _, v1 := marksOf(newcomer); v1 > 0 {
-			t.Fatal("the dialler fell back to v1 after the pin was refused")
-		}
-		time.Sleep(50 * time.Millisecond)
+	awaitV2RefusalOrAuthentication(t, newcomer, listener, domain.PeerAddress(normalizeAddress(address)))
+	if listener.SecureSessionStoreStats().PinRefusalsStoreFull == 0 {
+		t.Fatal("the newcomer's attempt failed, but not on the listener's full pin store")
+	}
+	if nodeAuthenticatedIdentity(listener, peerIdentityOf(t, newcomer)) {
+		t.Fatal("a session without a stored pin was established: the listener authenticated the newcomer")
+	}
+	// The listener speaks v2, so the newcomer can only go v1 towards it
+	// through a v1 mark set in reaction to the refusal; the v2 handshake
+	// itself ends without an error to fall back from. A mark set while the
+	// failed setup is handled is there by the time the failure is recorded,
+	// which is what the wait above waited for; a fallback that marked the
+	// listener only later, on another attempt, would be missed here — no such
+	// path exists.
+	if _, v1 := marksOf(newcomer); v1 > 0 {
+		t.Fatal("the dialler fell back to v1 after the pin was refused")
 	}
 
 	_, stopKnown := dialerNode(t, address, func(svc *Service) {
@@ -132,25 +136,27 @@ func TestANodeWithAFullPinStoreRefusesANewIdentitysSession(t *testing.T) {
 // v2 session with an identity it has not pinned, and does not fall back to v1.
 func TestADiallerWithAFullPinStoreDoesNotEstablishOrFallBack(t *testing.T) {
 	t.Parallel()
-	listener, address, stopListener := listenerNode(t, nil)
+	_, address, stopListener := listenerNode(t, withoutOwnDials(nil))
 	defer stopListener()
 	dialer, stopDialer := dialerNode(t, address, func(svc *Service) {
 		fillPinStore(t, svc.secureSessions.store)
 	})
 	defer stopDialer()
-	listenerID := peerIdentityOf(t, listener)
 
-	waitForConditionMsg(t, 10*time.Second, "the dialler never counted the refusal", func() bool {
-		return dialer.SecureSessionStoreStats().PinRefusalsStoreFull > 0
-	})
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if v2, legacy := claimsOf(dialer, listenerID); v2 > 0 || legacy > 0 {
-			t.Fatalf("the dialler established a session without a stored pin: v2=%d v1=%d", v2, legacy)
-		}
-		if _, v1 := authenticatedInbound(listener); v1 > 0 {
-			t.Fatal("the dialler fell back to v1 after its pin was refused")
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Refused twice by the connection manager's own attempts, the second
+	// after the manager reacted to the first: a fallback — inside an attempt
+	// or through a v1 mark its reaction set — shows as a mark or a session.
+	breached := func() bool {
+		_, v1 := marksOf(dialer)
+		return v1 > 0 || dialer.SessionOutcomeStats().Succeeded > 0
+	}
+	awaitRepeatedRefusal(t, "the pin_store_full refusal",
+		func() uint64 { return dialer.SecureSessionStoreStats().PinRefusalsStoreFull },
+		breached)
+	if outcomes := dialer.SessionOutcomeStats(); outcomes.Succeeded > 0 {
+		t.Fatalf("the dialler established a session without a stored pin: %d of %d attempts succeeded", outcomes.Succeeded, outcomes.Attempts)
+	}
+	if _, v1 := marksOf(dialer); v1 > 0 {
+		t.Fatal("the dialler fell back to v1 after its pin was refused")
 	}
 }

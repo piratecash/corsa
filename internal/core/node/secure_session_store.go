@@ -104,6 +104,12 @@ type secureSessionStore struct {
 	changes, written uint64
 	// pinRefusals counts sessions refused with errPinStoreFull.
 	pinRefusals uint64
+	// v1RefusalsIdentity counts v1 sessions refused because the identity they
+	// name requires v2 (errLegacyRefusedPinned), on accept and on dial.
+	v1RefusalsIdentity uint64
+	// v1RefusalsEndpoint counts v1 answers refused because the endpoint that
+	// gave them is bound to v2 (errLegacyRefusedV2Bound).
+	v1RefusalsEndpoint uint64
 
 	writeMu sync.Mutex
 	// writeFile puts the encoded store on disk; writeToDisk outside tests.
@@ -199,13 +205,31 @@ func (s *secureSessionStore) stats() domain.SecureSessionStoreStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return domain.SecureSessionStoreStats{
-		ReadAt:               s.clock(),
-		PinnedIdentities:     len(s.identities),
-		PinCapacity:          maxPinnedIdentities,
-		Full:                 len(s.identities) >= maxPinnedIdentities,
-		PinRefusalsStoreFull: s.pinRefusals,
-		Unreadable:           s.unreadable,
+		ReadAt:                   s.clock(),
+		PinnedIdentities:         len(s.identities),
+		PinCapacity:              maxPinnedIdentities,
+		Full:                     len(s.identities) >= maxPinnedIdentities,
+		PinRefusalsStoreFull:     s.pinRefusals,
+		V1RefusalsIdentityPinned: s.v1RefusalsIdentity,
+		V1RefusalsEndpointBound:  s.v1RefusalsEndpoint,
+		Unreadable:               s.unreadable,
 	}
+}
+
+// noteIdentityRefusal counts one v1 session refused because the identity it
+// names requires v2.
+func (s *secureSessionStore) noteIdentityRefusal() {
+	s.mu.Lock()
+	s.v1RefusalsIdentity++
+	s.mu.Unlock()
+}
+
+// noteEndpointRefusal counts one v1 answer refused because the endpoint that
+// gave it is bound to v2.
+func (s *secureSessionStore) noteEndpointRefusal() {
+	s.mu.Lock()
+	s.v1RefusalsEndpoint++
+	s.mu.Unlock()
 }
 
 // identityPinned reports whether a v1 session naming id must be refused.

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/piratecash/corsa/internal/core/config"
 	"github.com/piratecash/corsa/internal/core/domain"
+	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/netcore"
 	"github.com/piratecash/corsa/internal/core/protocol"
 	"github.com/piratecash/corsa/internal/core/routing"
@@ -257,7 +259,9 @@ func claimsOf(node *Service, id domain.PeerIdentity) (v2, legacy int) {
 // attack, and it needs no relay to set up.
 func TestALegacyImpostorLosesEverythingOnceTheRealIdentityProvesV2(t *testing.T) {
 	t.Parallel()
-	listener, address, stopListener := listenerNode(t, nil)
+	// The listener dials nobody: every connection it holds here is one the
+	// test's nodes opened to it.
+	listener, address, stopListener := listenerNode(t, withoutOwnDials(nil))
 	defer stopListener()
 	xKeys := testIdentityForNetworkConsumerTest(t)
 	x := peerIdentityOf(t, &Service{identity: xKeys})
@@ -292,16 +296,67 @@ func TestALegacyImpostorLosesEverythingOnceTheRealIdentityProvesV2(t *testing.T)
 		v2, _ := claimsOf(listener, x)
 		return v2 == 0
 	})
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, legacy := claimsOf(listener, x); legacy > 0 {
-			t.Fatal("the impostor got a connection back after X's last v2 session closed")
-		}
-		if targets := listener.peerSendableTargetsForTest(x); targets > 0 {
-			t.Fatalf("%d connections would carry traffic meant for X", targets)
-		}
-		time.Sleep(50 * time.Millisecond)
+
+	// A fresh v1 attempt in X's name, made now instead of waited for: the
+	// impostor's own reconnect sits behind a backoff (2, 4, 8 s, then the
+	// periodic fill), so a window watched for it may hold no attempt at all.
+	// The impostor is stopped first, so the listener's refusals from here on
+	// are the probe's alone.
+	stopImpostor()
+	target := domain.PeerAddress(normalizeAddress(address))
+
+	// Precondition: the listener serves its contacts to a v1 peer it has no
+	// reason to refuse — otherwise "nothing imported" below would prove
+	// nothing.
+	if imported := syncAsOldNode(t, nil, target); imported == 0 {
+		t.Fatal("precondition: the listener served no contacts to an unpinned v1 peer")
 	}
+
+	// A hello the impostor sent before it stopped may still be in the
+	// listener's handler; its refusal must not be counted for the probe.
+	waitForConditionMsg(t, 10*time.Second, "the listener kept an inbound connection after the impostor stopped", func() bool {
+		return inboundConnCount(listener) == 0
+	})
+	refusedBefore := listener.SecureSessionStoreStats().V1RefusalsIdentityPinned
+	imported := syncAsOldNode(t, xKeys, target)
+	// The gate is the listener's own refusal of this hello; a sync that
+	// ended for any other reason never reached the protection.
+	if listener.SecureSessionStoreStats().V1RefusalsIdentityPinned == refusedBefore {
+		t.Fatalf("the listener did not refuse the v1 hello in X's name (imported %d)", imported)
+	}
+	if imported != 0 {
+		t.Fatalf("the listener served a v1 session in X's name after X's last v2 session closed: %d contacts imported", imported)
+	}
+	// This catches a connection of X the listener still holds at this point —
+	// the stopped impostor's, or any other that outlived its session — and the
+	// relay path. The probe's own connection is closed by the time syncPeer
+	// returns; that one is covered by the refusal above.
+	if targets := listener.peerSendableTargetsForTest(x); targets > 0 {
+		t.Fatalf("%d connections would carry traffic meant for X", targets)
+	}
+}
+
+// syncAsOldNode runs one recovery sync to target from a fresh old node that
+// dials nobody else, holding keys (a new identity when nil), and returns how
+// many contacts it imported. syncPeer has finished with the connection when
+// it returns.
+func syncAsOldNode(t *testing.T, keys *identity.Identity, target domain.PeerAddress) int {
+	t.Helper()
+	if keys == nil {
+		keys = testIdentityForNetworkConsumerTest(t)
+	}
+	prober, stopProber := startTestNodeWithIdentityAndSetup(t, config.Node{
+		ListenAddress:  freeAddress(t),
+		BootstrapPeers: []string{},
+		Type:           domain.NodeTypeFull,
+	}, keys, func(svc *Service) {
+		asOldNode(svc)
+		svc.connManager.config.MaxSlotsFn = func() int { return 0 }
+	})
+	defer stopProber()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return prober.syncPeer(ctx, target, false)
 }
 
 // peerSendableTargetsForTest counts the connections a send to id would pick
