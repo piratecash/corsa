@@ -1568,17 +1568,35 @@ func TestCM_ShrinkToLimit_EvictsNonActiveFirst(t *testing.T) {
 	}
 }
 
+// TestCM_ShrinkToLimit_EvictsActiveWhenNoNonActive drops the limit below the
+// number of active slots: the excess active slots are evicted and each of
+// their sessions reaches OnSessionTeardown exactly once.
+//
+// shrinkToLimit removes the slots under cm.mu but closes the sessions and runs
+// the callbacks only after releasing it (closing is I/O and the callbacks take
+// peerMu), so a shrunk slot table does not mean the teardowns have happened.
+// The first callback parks on a gate to hold that window open on every run;
+// the teardowns are then awaited on their own signal, never inferred from the
+// slot table.
 func TestCM_ShrinkToLimit_EvictsActiveWhenNoNonActive(t *testing.T) {
-	// Start with 3 active slots, drop limit to 1.
 	b := testCMConfig("10.0.0.1:64646", "10.0.0.2:64646", "10.0.0.3:64646")
 	b.Cfg.MaxSlotsFn = func() int { return 3 }
 
 	dialFn, _ := fakeDialFn()
 	b.Cfg.DialFn = dialFn
 
-	var teardownCount atomic.Int32
+	// One entry per slot: the two evicted sessions now and the survivor's
+	// when shutdown tears it down, so the event loop never blocks on a send.
+	teardowns := make(chan SessionInfo, 3)
+	firstTeardownParked := make(chan struct{})
+	firstTeardownGate := make(chan struct{})
+	var parkOnce sync.Once
 	b.Cfg.OnSessionTeardown = func(info SessionInfo) {
-		teardownCount.Add(1)
+		parkOnce.Do(func() {
+			close(firstTeardownParked)
+			<-firstTeardownGate
+		})
+		teardowns <- info
 	}
 
 	cm := b.Build()
@@ -1588,8 +1606,12 @@ func TestCM_ShrinkToLimit_EvictsActiveWhenNoNonActive(t *testing.T) {
 	maxSlots.Store(3)
 	cm.config.MaxSlotsFn = func() int { return int(maxSlots.Load()) }
 
-	cancel := runCM(cm)
-	defer cancel()
+	stop := runCMUntilStopped(t, cm)
+	defer stop()
+	releaseFirstTeardown := sync.OnceFunc(func() { close(firstTeardownGate) })
+	// Deferred after stop so it runs first: a failed assertion must not leave
+	// the event loop parked inside the callback, where stop would wait for it.
+	defer releaseFirstTeardown()
 
 	cm.NotifyBootstrapReady()
 
@@ -1601,17 +1623,79 @@ func TestCM_ShrinkToLimit_EvictsActiveWhenNoNonActive(t *testing.T) {
 	maxSlots.Store(1)
 	cm.EmitHint(NewPeersDiscovered{})
 
-	waitFor(t, 2*time.Second, "shrunk to 1", func() bool {
-		return cm.SlotCount() == 1
-	})
-
-	if got := cm.ActiveCount(); got != 1 {
-		t.Fatalf("ActiveCount = %d, want 1", got)
+	select {
+	case <-firstTeardownParked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no evicted session reached OnSessionTeardown")
 	}
 
-	// 2 active slots were evicted → 2 teardown callbacks.
-	if got := teardownCount.Load(); got != 2 {
-		t.Fatalf("teardownCount = %d, want 2", got)
+	// Probe before any blocking read: if the callbacks ran under cm.mu, a
+	// plain RLock here would wait on the parked callback until the package
+	// timeout instead of failing. Every cm.mu.Lock runs on the event loop,
+	// which is parked, and readers on other goroutines only take RLock, which
+	// cannot make TryRLock fail — so the probe cannot fail spuriously.
+	if !cm.mu.TryRLock() {
+		t.Fatal("OnSessionTeardown is running while cm.mu is held")
+	}
+	cm.mu.RUnlock()
+
+	// A teardown callback is still running, yet the slot table already
+	// shows the shrink.
+	slots := cm.Slots()
+	if len(slots) != 1 {
+		t.Fatalf("slots = %d, want 1", len(slots))
+	}
+	if slots[0].State != domain.SlotStateActive {
+		t.Fatalf("surviving slot state = %s, want %s", slots[0].State, domain.SlotStateActive)
+	}
+	survivor := slots[0].Address
+
+	releaseFirstTeardown()
+
+	// 2 active slots were evicted → 2 teardown callbacks, one per evicted
+	// session and none for the survivor.
+	awaitTeardownsOfDistinctSlots(t, teardowns, 2, survivor)
+
+	// Barrier: both teardowns were received from inside the hint's fill
+	// handler, and the loop handles one event at a time, so it cannot take
+	// a RetainOnly request until that handler — its whole tearDownSessions
+	// batch included — has returned. Sent any earlier, the request could be
+	// handled before the fill: Run picks between slotEvents and hintEvents at
+	// random. With no pin source wired, the request retains the address it
+	// is given (retentionTarget), here the survivor, so it evicts nothing and
+	// does not refill (refillMissingLivePin needs ConnectOnlyFn).
+	barrier := retainOnlyAsync(context.Background(), cm, survivor)
+	if !awaitRetainOnlyResult(t, barrier, "as a barrier after the eviction batch") {
+		t.Fatal("RetainOnly was not applied by the running event loop")
+	}
+	select {
+	case info := <-teardowns:
+		t.Fatalf("unexpected extra teardown for %s", info.Address)
+	default:
+	}
+}
+
+// awaitTeardownsOfDistinctSlots receives want teardowns, each carrying its
+// session, for distinct slots other than the survivor.
+func awaitTeardownsOfDistinctSlots(t *testing.T, teardowns <-chan SessionInfo, want int, survivor domain.PeerAddress) {
+	t.Helper()
+	tornDown := make(map[domain.PeerAddress]bool, want)
+	for len(tornDown) < want {
+		select {
+		case info := <-teardowns:
+			if info.Session == nil {
+				t.Fatalf("teardown for %s carries no session", info.Address)
+			}
+			if info.Address == survivor {
+				t.Fatalf("teardown for the surviving slot %s", survivor)
+			}
+			if tornDown[info.Address] {
+				t.Fatalf("second teardown for %s", info.Address)
+			}
+			tornDown[info.Address] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("got %d teardown callbacks, want %d", len(tornDown), want)
+		}
 	}
 }
 
