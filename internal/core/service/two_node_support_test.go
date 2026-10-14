@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/ebus"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -60,7 +61,7 @@ func startClientNode(t *testing.T, address string, peers ...string) *runningClie
 	if err != nil {
 		t.Fatalf("generate identity: %v", err)
 	}
-	cfg := config.Node{
+	cfg := configtest.WithTempDataDirs(t, config.Node{
 		ListenAddress:  address,
 		BootstrapPeers: peers,
 		TrustStorePath: filepath.Join(dir, "trust.json"),
@@ -69,7 +70,7 @@ func startClientNode(t *testing.T, address string, peers ...string) *runningClie
 		// default — it exists to stop a mesh peer advertising a private
 		// address, not to stop a test from using one.
 		AllowPrivatePeers: true,
-	}
+	})
 
 	database := newTestStateDB(t, domain.PeerIdentityFromWire(id.Address))
 	store := testChatlogStore(database.Executor(), domain.PeerIdentityFromWire(id.Address))

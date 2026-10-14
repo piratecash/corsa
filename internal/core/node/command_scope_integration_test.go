@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
 	"github.com/piratecash/corsa/internal/core/protocol"
@@ -98,11 +99,11 @@ func newScopedTestService(t *testing.T) (*Service, func()) {
 	if err != nil {
 		t.Fatalf("identity.Generate: %v", err)
 	}
-	svc := NewService(config.Node{
+	svc := NewService(configtest.WithTempDataDirs(t, config.Node{
 		ListenAddress:  addr,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
 		Type:           domain.NodeTypeFull,
-	}, id, nil)
+	}), id, nil)
 	svc.disableRateLimiting = true
 
 	ctx, cancel := context.WithCancel(context.Background())

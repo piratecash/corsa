@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/directmsg"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
@@ -2250,12 +2251,10 @@ func startTestNode(t *testing.T, cfg config.Node) (*Service, func()) {
 func startTestNodeWithSetup(t *testing.T, cfg config.Node, setup func(*Service)) (*Service, func()) {
 	t.Helper()
 
-	// Isolate peer state so tests never load leftover files from a
-	// previous run that happened to bind the same port.
-	tmpDir := t.TempDir()
-	if cfg.PeersStatePath == "" {
-		cfg.PeersStatePath = filepath.Join(tmpDir, "peers.json")
-	}
+	// Peer state and the data directory in the test's own TempDir: a node
+	// never loads leftovers of a previous run on the same port, and writes
+	// nothing outside the test.
+	cfg = configtest.WithTempDataDirs(t, cfg)
 	// Allow private/loopback IPs as peer addresses in tests.
 	// Tests that explicitly verify forbidden-IP filtering turn this back off
 	// through `setup`, while the service is still theirs to write to.
@@ -2310,12 +2309,10 @@ func startTestNodeWithIdentity(t *testing.T, cfg config.Node, id *identity.Ident
 func startTestNodeWithIdentityAndSetup(t *testing.T, cfg config.Node, id *identity.Identity, setup func(*Service)) (*Service, func()) {
 	t.Helper()
 
-	// Isolate peer state so tests never load leftover files from a
-	// previous run that happened to bind the same port.
-	tmpDir := t.TempDir()
-	if cfg.PeersStatePath == "" {
-		cfg.PeersStatePath = filepath.Join(tmpDir, "peers.json")
-	}
+	// Peer state and the data directory in the test's own TempDir: a node
+	// never loads leftovers of a previous run on the same port, and writes
+	// nothing outside the test.
+	cfg = configtest.WithTempDataDirs(t, cfg)
 	cfg.AllowPrivatePeers = true
 	cfg = deriveTestAdvertisePort(cfg)
 
@@ -8838,11 +8835,11 @@ func TestMixedVersionLegacyPeerExchange(t *testing.T) {
 		t.Fatalf("identity.Generate: %v", err)
 	}
 
-	svc := NewService(config.Node{
+	svc := NewService(configtest.WithTempDataDirs(t, config.Node{
 		ListenAddress:  addr,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
 		Type:           domain.NodeTypeFull,
-	}, nodeID, nil)
+	}), nodeID, nil)
 	svc.disableRateLimiting = true
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -8928,11 +8925,11 @@ func TestUnauthenticatedPeerCannotSendRelayMessage(t *testing.T) {
 	}
 
 	tempDir := t.TempDir()
-	svc := NewService(config.Node{
+	svc := NewService(configtest.WithTempDataDirs(t, config.Node{
 		ListenAddress:  addr,
 		TrustStorePath: filepath.Join(tempDir, "trust.json"),
 		Type:           domain.NodeTypeFull,
-	}, id, nil)
+	}), id, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	svc, stop := startTestService(t, ctx, cancel, svc)

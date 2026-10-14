@@ -3,11 +3,11 @@ package node
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/datagram"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -121,14 +121,13 @@ func startDatagramNodeWithRegistry(
 	bootstrap ...string,
 ) (*Service, func()) {
 	t.Helper()
-	cfg := deriveTestAdvertisePort(config.Node{
+	cfg := deriveTestAdvertisePort(configtest.WithTempDataDirs(t, config.Node{
 		ListenAddress:     listen,
 		BootstrapPeers:    bootstrap,
 		Type:              config.NodeTypeFull,
 		EnableDatagramV1:  true,
 		AllowPrivatePeers: true,
-		PeersStatePath:    filepath.Join(t.TempDir(), "peers.json"),
-	})
+	}))
 	id, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("generate test identity: %v", err)

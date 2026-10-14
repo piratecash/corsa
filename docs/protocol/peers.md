@@ -346,7 +346,7 @@ Retrieves rolling per-second traffic history collected by the metrics layer. The
 
 ## Peer address persistence
 
-Peer addresses discovered via `get_peers` exchange and bootstrap are persisted locally in `peers-{port}.json` (default path: `.corsa/peers-{port}.json`, override: `CORSA_PEERS_PATH`). The file follows a reputation-based scoring model:
+Peer addresses discovered via `get_peers` exchange and bootstrap are persisted locally in `peers-{port}.json` (default path: `<data directory>/peers-{port}.json`, override: `CORSA_PEERS_PATH`; the data directory is the platform one listed in [privacy.md](../privacy.md#where-corsa-keeps-its-data) — under `go test` it is `.corsa` in the package's working directory, so every test that runs a node gives it its own `t.TempDir()`). The file follows a reputation-based scoring model:
 
 - each entry stores the peer address, node type, last connection/disconnection timestamps, consecutive failure count, source tag (`bootstrap`, `peer_exchange`, `persisted`), first-seen time (`added_at`), and a numeric score
 - score increases on successful TCP handshake (+10) and decreases on failure (-5) or clean disconnect (-2), clamped to [-50, +100]
@@ -814,7 +814,7 @@ graph TB
 
 ## Персистенция адресов пиров
 
-Адреса пиров, обнаруженные через обмен `get_peers` и bootstrap, сохраняются локально в `peers-{port}.json` (путь по умолчанию: `.corsa/peers-{port}.json`, переопределение: `CORSA_PEERS_PATH`). Файл использует репутационную модель scoring:
+Адреса пиров, обнаруженные через обмен `get_peers` и bootstrap, сохраняются локально в `peers-{port}.json` (путь по умолчанию: `<каталог данных>/peers-{port}.json`, переопределение: `CORSA_PEERS_PATH`; каталог данных — платформенный, см. [privacy.md](../privacy.md#где-corsa-хранит-данные); под `go test` это `.corsa` в рабочем каталоге пакета, поэтому каждый тест, запускающий ноду, задаёт ей собственный `t.TempDir()`). Файл использует репутационную модель scoring:
 
 - каждая запись хранит адрес пира, тип ноды, временные метки последнего подключения/отключения, число последовательных ошибок, тег источника (`bootstrap`, `peer_exchange`, `persisted`), время первого обнаружения (`added_at`) и числовой score
 - score увеличивается при успешном TCP-рукопожатии (+10) и уменьшается при ошибке (-5) или чистом отключении (-2), зажат в диапазоне [-50, +100]

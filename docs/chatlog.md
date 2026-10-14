@@ -199,7 +199,10 @@ the node's shared state database, which `internal/core/storage` opens once at
 the composition root — see [storage.md](storage.md).
 
 By default that database is still the historical chatlog file in the data
-directory (defaults to `.corsa/`, configurable via `CORSA_CHATLOG_DIR`):
+directory (the platform directory listed in
+[privacy.md](privacy.md#where-corsa-keeps-its-data), configurable via
+`CORSA_CHATLOG_DIR`; under `go test` it is `.corsa` in the package's working
+directory, so every test that runs a node gives it its own `t.TempDir()`):
 
 ```
 chatlog-<identity_short>-<port>.db
@@ -914,7 +917,9 @@ log.Error().Err(err).Str("message_id", id).Msg("chatlog update status failed")
 log.Warn().Str("address", ip).Int("score", score).Msg("blacklisted peer")
 ```
 
-The log directory defaults to `.corsa/` (same as chatlog) and respects
+The log directory is the data directory (same as chatlog: the platform
+directory listed in [privacy.md](privacy.md#where-corsa-keeps-its-data),
+`.corsa` in the package's working directory under `go test`) and respects
 `CORSA_CHATLOG_DIR`.
 
 The log level defaults to `info` and can be changed via `CORSA_LOG_LEVEL`
@@ -1104,7 +1109,7 @@ FetchSinglePreview(ctx, peerAddress)
 
 | Environment Variable  | Config Field          | Default   | Description                  |
 |-----------------------|-----------------------|-----------|------------------------------|
-| `CORSA_CHATLOG_DIR`   | `Node.ChatLogDir`     | `.corsa`  | Directory for chatlog files (auto-created if missing) |
+| `CORSA_CHATLOG_DIR`   | `Node.ChatLogDir`     | the data directory ([privacy.md](privacy.md#where-corsa-keeps-its-data); `.corsa` under `go test`) | Directory for chatlog files (auto-created if missing) |
 
 ### Deduplication
 
@@ -1344,7 +1349,10 @@ sequenceDiagram
 composition root — см. [storage.md](storage.md).
 
 По умолчанию эта база — по-прежнему исторический файл chatlog в директории
-данных (по умолчанию `.corsa/`, настраивается через `CORSA_CHATLOG_DIR`):
+данных (платформенный каталог из [privacy.md](privacy.md#где-corsa-хранит-данные),
+настраивается через `CORSA_CHATLOG_DIR`; под `go test` это `.corsa` в рабочем
+каталоге пакета, поэтому каждый тест, запускающий ноду, задаёт ей собственный
+`t.TempDir()`):
 
 ```
 chatlog-<identity_short>-<port>.db
@@ -2048,7 +2056,7 @@ log.Error().Err(err).Str("message_id", id).Msg("chatlog update status failed")
 log.Warn().Str("address", ip).Int("score", score).Msg("blacklisted peer")
 ```
 
-Директория логов — `.corsa/` (совпадает с chatlog), учитывает `CORSA_CHATLOG_DIR`.
+Директория логов — каталог данных (совпадает с chatlog: платформенный каталог из [privacy.md](privacy.md#где-corsa-хранит-данные), под `go test` — `.corsa` в рабочем каталоге пакета), учитывает `CORSA_CHATLOG_DIR`.
 
 Уровень логирования по умолчанию — `info`, меняется через переменную окружения
 `CORSA_LOG_LEVEL`. Допустимые значения: `trace`, `debug`, `info`, `warn`,
@@ -2210,7 +2218,7 @@ storeDeliveryReceipt()
 
 | Переменная окружения  | Поле конфига         | По умолчанию | Описание                    |
 |-----------------------|----------------------|--------------|-----------------------------|
-| `CORSA_CHATLOG_DIR`   | `Node.ChatLogDir`    | `.corsa`     | Директория для chatlog файлов (создаётся автоматически) |
+| `CORSA_CHATLOG_DIR`   | `Node.ChatLogDir`    | каталог данных ([privacy.md](privacy.md#где-corsa-хранит-данные); `.corsa` под `go test`) | Директория для chatlog файлов (создаётся автоматически) |
 
 ### Дедупликация
 

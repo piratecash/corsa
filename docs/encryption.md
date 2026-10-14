@@ -366,8 +366,13 @@ Binding payload:
 Default trust store path:
 
 ```text
-.corsa/trust-<port>.json
+<data directory>/trust-<port>.json
 ```
+
+The data directory is the platform one listed in
+[privacy.md](privacy.md#where-corsa-keeps-its-data); under `go test` it is
+`.corsa` in the package's working directory, so every test that runs a node
+gives it its own `t.TempDir()`.
 
 ### Gazeta
 
@@ -776,8 +781,12 @@ Payload привязки:
 Путь trust store по умолчанию:
 
 ```text
-.corsa/trust-<port>.json
+<каталог данных>/trust-<port>.json
 ```
+
+Каталог данных — платформенный, см. [privacy.md](privacy.md#где-corsa-хранит-данные);
+под `go test` это `.corsa` в рабочем каталоге пакета, поэтому каждый тест,
+запускающий ноду, задаёт ей собственный `t.TempDir()`.
 
 ### Gazeta
 

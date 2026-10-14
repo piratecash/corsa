@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/identity"
 )
 
@@ -36,7 +37,7 @@ func runningBudgetNode(t *testing.T, total int) (*Service, string, context.Cance
 		t.Fatalf("identity.Generate: %v", err)
 	}
 	tempDir := t.TempDir()
-	svc := NewService(config.Node{
+	svc := NewService(configtest.WithTempDataDirs(t, config.Node{
 		ListenAddress:       "127.0.0.1:0",
 		TrustStorePath:      filepath.Join(tempDir, "trust.json"),
 		PeersStatePath:      filepath.Join(tempDir, "peers.json"),
@@ -44,7 +45,7 @@ func runningBudgetNode(t *testing.T, total int) (*Service, string, context.Cance
 		ListenerSet:         true,
 		AllowPrivatePeers:   true,
 		MaxTotalConnections: total,
-	}, id, nil)
+	}), id, nil)
 	// Per-IP caps would refuse the flood for their own reasons; this test is
 	// about the shared ceiling, and every connection comes from loopback.
 	svc.disableRateLimiting = true

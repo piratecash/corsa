@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/piratecash/corsa/internal/core/config"
+	"github.com/piratecash/corsa/internal/core/config/configtest"
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/domain/domaintest"
 	"github.com/piratecash/corsa/internal/core/identity"
@@ -158,7 +159,7 @@ func TestNewServiceMergesPersistedPeersWithBootstrap(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	svc := NewService(cfg, id, nil)
+	svc := NewService(configtest.WithTempDataDirs(t, cfg), id, nil)
 	runDone := make(chan struct{})
 	go func() { _ = svc.Run(ctx); close(runDone) }()
 	defer func() { cancel(); <-runDone }()
@@ -237,7 +238,7 @@ func TestNewServiceWithEmptyPeersFile(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	svc := NewService(cfg, id, nil)
+	svc := NewService(configtest.WithTempDataDirs(t, cfg), id, nil)
 	done := make(chan struct{})
 	go func() {
 		_ = svc.Run(ctx)
@@ -362,7 +363,7 @@ func TestPersistedMetadataSurvivesFlushWithoutReconnect(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	svc := NewService(cfg, id, nil)
+	svc := NewService(configtest.WithTempDataDirs(t, cfg), id, nil)
 	runDone := make(chan struct{})
 	go func() { _ = svc.Run(ctx); close(runDone) }()
 	defer func() { cancel(); <-runDone }()
