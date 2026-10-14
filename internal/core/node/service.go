@@ -3222,11 +3222,14 @@ func (s *Service) handleConn(conn net.Conn, reservation *connbudget.Reservation)
 			s.trackInboundDisconnectWithPresenceEvidence(connID, addr, peerOfflineEvidence)
 		}
 		s.accumulateInboundTraffic(metered)
-		// Close TCP before waiting for the writer goroutine to drain.
-		// Without this, the writer might be stuck in conn.Write with a
-		// 30-second deadline and unregisterInboundConn would hang waiting
-		// for writerDone. Closing the socket unblocks conn.Write with an
-		// error, letting the writer exit promptly.
+		// On the bridge path this close is redundant: unregisterInboundConn
+		// closes the core, and NetCore.Close shuts this same socket before
+		// it waits for the writer. It stays for the Network override
+		// (NewServiceWithNetwork): there Network().Close goes to the
+		// override, which does not hold this registry's cores, and this line
+		// is the only thing that closes the socket — a known divergence,
+		// tracked separately. Close is idempotent, so the bridge path pays
+		// nothing for it.
 		_ = wire.Close()
 		s.unregisterInboundConn(wire)
 		s.removeSubscriberConnID(connID)
@@ -9105,18 +9108,24 @@ func (s *Service) unregisterInboundConn(conn net.Conn) {
 	// bug: the registry is not a lease, a sender may hold the NetCore
 	// across the whole teardown, and Close is what refuses it.
 	//
-	// Note: handleConn calls metered.Close() before unregisterInboundConn,
-	// which is now redundant (NetCore.Close does it). The double Close on
-	// net.Conn is safe — subsequent calls return an error but don't panic.
+	// Note: handleConn calls wire.Close() before unregisterInboundConn,
+	// which is redundant: wire is the conn registerInboundConn built the
+	// NetCore on, and NetCore.Close closes it again in step 2. The double
+	// Close on net.Conn is safe — subsequent calls return an error but don't
+	// panic.
 	s.peerMu.RLock()
 	id, ok := s.connIDForLocked(conn)
 	s.peerMu.RUnlock()
 
 	if ok {
-		// Errors here mean the conn was already torn down on a parallel
-		// path (ErrUnknownConn) or the runCtx is cancelled — both are
-		// expected during shutdown. The eviction below is idempotent and
-		// must run regardless.
+		// The core must be closed before the entry below goes: once it is
+		// removed, closeAllInboundConns cannot enumerate it and the writer,
+		// which returns only on Close, would live as long as the process.
+		// Network.Close closes it even when runCtx has ended, which is
+		// exactly when a handler that exits on its own during shutdown gets
+		// here. The bridge cannot answer ErrUnknownConn either: an inbound
+		// entry is removed only here, and only the conn's own handler calls
+		// this, once, so the entry resolved above is still registered.
 		_ = s.Network().Close(s.runCtx, id)
 	}
 

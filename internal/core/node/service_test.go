@@ -8151,6 +8151,12 @@ func TestInboundRefCountKeepsHealthAlive(t *testing.T) {
 // The teardown path itself needs no run loop: registerInboundConn,
 // trackInboundConnect and trackInboundDisconnect work on the registry and the
 // peer domain, both of which NewService fully initialises.
+//
+// Every conn a test registers on the fixture is closed when the test ends by
+// the same drain Run's shutdown uses. A registered conn's NetCore writer
+// returns only on Close, and these tests stop at the hint, before the
+// handler's teardown would close it — without the drain each of them leaked
+// a writer goroutine for the rest of the package run.
 func newInboundTeardownFixture(t *testing.T) (*Service, *ConnectionManager) {
 	t.Helper()
 
@@ -8169,6 +8175,7 @@ func newInboundTeardownFixture(t *testing.T) (*Service, *ConnectionManager) {
 	svc.disableRateLimiting = true
 	svc.markPeerStateIntervalTest = -1
 	t.Cleanup(svc.WaitBackground)
+	t.Cleanup(svc.closeAllInboundConns)
 
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		MaxSlotsFn: func() int { return 4 },

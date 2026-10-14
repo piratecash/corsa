@@ -517,14 +517,19 @@ func (b *Backend) Enumerate(ctx context.Context, dir netcore.Direction, fn func(
 }
 
 // Close implements netcore.Network.Close: graceful per-ConnID shutdown.
-// Returns ErrUnknownConn if id is not registered, ctx.Err() if ctx is
-// cancelled on entry, nil otherwise. Idempotent in the sense that a
-// second Close for an already-removed id returns ErrUnknownConn, not a
-// duplicate-teardown error — matches production networkBridge.
-func (b *Backend) Close(ctx context.Context, id domain.ConnID) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+// Returns ErrUnknownConn if id is not registered, nil otherwise. ctx is not
+// consulted, as in the production networkBridge: releasing a connection is
+// not cancellable work, and a backend that skipped the close under a
+// cancelled ctx would let a test pass on a teardown that leaks in
+// production.
+//
+// Known divergence from production, tracked separately: this Close also
+// removes the registration, so a second Close for the same id returns
+// ErrUnknownConn. The production networkBridge only closes the NetCore and
+// leaves the registry entry to the owner's lifecycle helper
+// (unregisterInboundConn), so a second bridge Close before that returns nil.
+// By the package header's own rule this drift is a Backend bug.
+func (b *Backend) Close(_ context.Context, id domain.ConnID) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.conns[id]; !ok {

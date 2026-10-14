@@ -311,6 +311,11 @@ func TestAcceptedSocketsAreAccountedBeforeRegistration(t *testing.T) {
 	svc.conns = make(map[domain.ConnID]*connEntry)
 	svc.connIDByNetConn = make(map[net.Conn]domain.ConnID)
 	svc.disableRateLimiting = true
+	// The admitted sockets become registered entries whose NetCore writers
+	// return only on Close, and nothing in this test tears them down. The
+	// shutdown drain closes them the way Run's own would — it needs only the
+	// registry this test builds — and refuses a handler that registers late.
+	t.Cleanup(svc.closeAllInboundConns)
 
 	// Stand in for the accept loop's admission step, which is the thing under
 	// test: reserve first, hand the unit to the handler, release on refusal.

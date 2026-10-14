@@ -1165,28 +1165,6 @@ func TestOwnDeliveryWithdrawalLeavesTransitRelayRetryAlone(t *testing.T) {
 	}
 }
 
-// goroutineParkedIn reports whether some goroutine is parked on a
-// sync.RWMutex read lock with fn on its stack. There is no API that reports
-// a mutex's waiters, so the goroutine dump is the only witness; the check
-// requires both the runtime's wait reason in the goroutine header — parked,
-// not merely about to call RLock — and fn, a function only the waiting
-// goroutine runs.
-func goroutineParkedIn(fn string) bool {
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	for n == len(buf) {
-		buf = make([]byte, 2*len(buf))
-		n = runtime.Stack(buf, true)
-	}
-	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
-		header, _, _ := strings.Cut(g, "\n")
-		if strings.Contains(header, "[sync.RWMutex.RLock") && strings.Contains(g, fn) {
-			return true
-		}
-	}
-	return false
-}
-
 // relayRetrySighting is what one deliveryMu reader saw of a message.
 type relayRetrySighting struct {
 	envelope bool
@@ -1194,7 +1172,7 @@ type relayRetrySighting struct {
 }
 
 // readRelayRetryAfterCommit is the reader queued behind a transit
-// admission's commit. Its name is what goroutineParkedIn looks for.
+// admission's commit. Its name is what goroutineParkedOn looks for.
 func readRelayRetryAfterCommit(svc *Service, id protocol.MessageID, out chan<- relayRetrySighting) {
 	svc.deliveryMu.RLock()
 	_, entry := svc.relayRetry[relayMessageKey(id)]
@@ -1243,7 +1221,7 @@ func TestStoreIncomingMessage_FirstReaderAfterTransitCommitSeesItsArm(t *testing
 	go readRelayRetryAfterCommit(f.svc, msg.ID, sighting)
 	readerQueued := false
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); runtime.Gosched() {
-		if goroutineParkedIn("readRelayRetryAfterCommit") {
+		if goroutineParkedOn(waitReasonRWMutexRLock, "readRelayRetryAfterCommit") {
 			readerQueued = true
 			break
 		}

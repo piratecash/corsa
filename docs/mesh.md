@@ -672,9 +672,19 @@ sequenceDiagram
     Reader->>Writer: close(closing) — the writer's exit signal
     Note over Writer: releases the queue residue without writing it —<br/>sendCh itself is NEVER closed as a channel
     Writer->>Reader: close(writerExited)
-    Note over Reader: registry entry is removed only after the writer returned
+    Note over Reader: registry entry is removed only after the writer returned,<br/>also when shutdown has already cancelled the lifecycle context
 ```
 *Diagram — Inbound connection lifecycle*
+
+The close in this teardown is unconditional. A handler can end on its own
+during shutdown — the peer hangs up after the node's lifecycle context was
+cancelled and before the shutdown drain closes the remaining inbound
+connections — and its teardown then runs with a cancelled context.
+`Network.Close` is not cancellable (see
+[network_core.md](protocol/network_core.md), "`Close` is not cancellable"),
+so the core is still closed before the entry goes. Were it skipped, the
+drain, which enumerates the registry, could no longer reach the core, and
+its writer would live until the process exits.
 
 #### Write path: all protocol commands
 
@@ -1455,9 +1465,19 @@ sequenceDiagram
     Reader->>Writer: close(closing) — сигнал выхода writer'у
     Note over Writer: отпускает остаток очереди, не записывая его —<br/>сам sendCh как канал НИКОГДА не закрывается
     Writer->>Reader: close(writerExited)
-    Note over Reader: запись реестра снимается только после возврата writer'а
+    Note over Reader: запись реестра снимается только после возврата writer'а,<br/>в том числе когда shutdown уже отменил lifecycle-контекст
 ```
 *Диаграмма — Жизненный цикл входящего соединения*
+
+Закрытие в этом teardown-е безусловно. Обработчик может завершиться сам
+во время shutdown-а — пир кладёт трубку после отмены lifecycle-контекста
+узла и до того, как shutdown-drain закроет оставшиеся входящие
+соединения, — и тогда его teardown выполняется с отменённым контекстом.
+`Network.Close` не отменяется (см.
+[network_core.md](protocol/network_core.md), «`Close` не отменяется»),
+поэтому ядро всё равно закрывается до снятия записи. Если бы закрытие
+пропускалось, drain, который перечисляет реестр, уже не смог бы
+дотянуться до ядра, и его writer жил бы до выхода процесса.
 
 #### Путь записи: все команды протокола
 

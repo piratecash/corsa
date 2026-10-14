@@ -85,6 +85,21 @@ type Network interface {
 	// is idempotent, and it is safe to call while other goroutines still
 	// hold the connection and are sending on it — they are answered
 	// ErrSendChanClosed. Returns ErrUnknownConn if id is not registered.
+	//
+	// Releasing a connection is not cancellable work: Close closes the
+	// connection whatever the state of ctx, and never reports ctx.Err().
+	// Its callers are teardown and eviction paths that have already decided
+	// the connection must go, and any of them can run while a lifecycle ctx
+	// is ending. A close skipped there is not a cancelled operation but a
+	// leak — the writer goroutine returns only on Close, and a teardown
+	// that drops its last handle to the connection right after this call
+	// leaves nothing that could close it later. The work is bounded because
+	// Close writes nothing to the network: every conn a NetCore is built on
+	// closes its socket directly (a v2 session's TLS conn skips close_notify,
+	// see sessionv2.sessionConn.Close), the writer's in-flight Write then
+	// fails at once, and the writer discards the queued frames unwritten.
+	// ctx stays in the signature for uniformity with the rest of the
+	// interface.
 	Close(ctx context.Context, id domain.ConnID) error
 
 	// RemoteAddr is a lightweight accessor for logging and ban tracking.

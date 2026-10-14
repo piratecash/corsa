@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -323,4 +324,34 @@ func truncationNote(written, capacity int) string {
 		return ", truncated"
 	}
 	return ""
+}
+
+// Wait reasons the runtime prints in a goroutine header for a goroutine
+// blocked on a lock, as goroutineParkedOn matches them.
+const (
+	waitReasonRWMutexRLock = "sync.RWMutex.RLock"
+	waitReasonMutexLock    = "sync.Mutex.Lock"
+)
+
+// goroutineParkedOn reports whether some goroutine is parked with waitReason
+// and fn on its stack. There is no API that reports a mutex's waiters, so the
+// goroutine dump is the only witness; the check requires both the runtime's
+// wait reason in the goroutine header — parked, not merely about to call the
+// lock — and fn, a frame only the waiting goroutine's stack carries (a
+// function name, optionally followed by "(" and its receiver pointer to pin
+// one instance).
+func goroutineParkedOn(waitReason, fn string) bool {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	for n == len(buf) {
+		buf = make([]byte, 2*len(buf))
+		n = runtime.Stack(buf, true)
+	}
+	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+		header, _, _ := strings.Cut(g, "\n")
+		if strings.Contains(header, "["+waitReason) && strings.Contains(g, fn) {
+			return true
+		}
+	}
+	return false
 }

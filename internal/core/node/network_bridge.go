@@ -154,10 +154,15 @@ func (b *networkBridge) Enumerate(ctx context.Context, dir netcore.Direction, fn
 // (unregisterConnLocked) and is not performed here — Close() signals
 // the transport to stop, registry cleanup follows the existing teardown
 // path on the owning Service method.
-func (b *networkBridge) Close(ctx context.Context, id domain.ConnID) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+//
+// Unlike SendFrame and Enumerate, Close does not consult ctx: releasing a
+// connection is not cancellable work (see netcore.Network.Close). Its callers
+// are teardown and eviction paths that have already decided the connection
+// must go, and many of them run exactly when the lifecycle ctx has ended. A
+// skipped close there is a leak, not a cancellation: the inbound teardown
+// removes the registry entry right after this call, and once it is gone
+// nothing can reach the core, whose writer returns only on Close.
+func (b *networkBridge) Close(_ context.Context, id domain.ConnID) error {
 	core := b.coreForID(id)
 	if core == nil {
 		return netcore.ErrUnknownConn

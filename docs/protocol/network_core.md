@@ -45,6 +45,45 @@ The production implementation is `networkBridge` in
 holds no state of its own and multiple calls to `Service.Network()` are
 safe and cheap.
 
+### `Close` is not cancellable
+
+`Network.Close` closes the connection it names whatever the state of
+`ctx`, and never reports `ctx.Err()`. The rest of the interface honours a
+`ctx` that is already cancelled on entry — no frame is enqueued, no walk
+starts — because skipping those loses nothing anyone was promised.
+Skipping a close does. Every caller of `Close` is a teardown or eviction
+path that has already decided the connection must go: the inbound
+teardown, the shutdown drain, the eviction of stale inbound connections,
+slow-peer and sync-timeout eviction, the inbound heartbeat stall, the
+identity-discovery closes (a `push_identity` that breaks the rules, a
+failed initial `push_identity`) and the session-v2 close of the legacy
+connections of an identity that has just proved itself over v2. Any of
+them can run while a lifecycle context is ending, so a cancelled `ctx`
+there is an ordinary case, not a reason to stop.
+
+The cost of the old early return was a leak. The writer goroutine of a
+`NetCore` returns only from `Close`, and the inbound teardown removes the
+registry entry right after its `Close` call. An inbound handler that
+ended on its own after the node's lifecycle context was cancelled and
+before the shutdown drain ran — the peer hung up, a read failed — skipped
+the close and then removed the only handle on the core; the drain
+enumerates the registry and could no longer see it, so the writer and its
+queue lived until the process exited.
+
+The work is bounded because `Close` writes nothing to the network. Every
+connection a `NetCore` is built on closes its socket directly: a v1
+connection is a TCP socket — accepted, dialled directly or tunnelled
+through SOCKS — under the metered wrapper and, for a dial, the budget
+wrapper that releases its unit on close, none of which writes anything;
+a v2 session's TLS connection deliberately skips the TLS `close_notify`
+alert (see `sessionv2.sessionConn.Close`). No write deadline is involved. What
+`Close` then waits for is the writer goroutine: its in-flight `Write`, if
+any, fails at once on the closed socket, and it discards the frames still
+queued without writing them. `Close` is idempotent. `ctx` stays in the
+signature for uniformity with the rest of the interface. The test backend
+(`netcoretest.Backend.Close`) follows the same rule, so a test cannot pass
+on a teardown that would leak in production.
+
 ### Identity currency
 
 The public key of `Network` is `domain.ConnID`. It is the transport-layer
@@ -479,6 +518,46 @@ Production-реализация — `networkBridge` в
 `NetCore.SendRaw` / `SendRawSync` / `Close` / `RemoteAddr`. Мост не
 хранит собственного состояния, повторные вызовы `Service.Network()`
 безопасны и дешёвы.
+
+### `Close` не отменяется
+
+`Network.Close` закрывает названное соединение при любом состоянии
+`ctx` и никогда не возвращает `ctx.Err()`. Остальной интерфейс уважает
+`ctx`, отменённый уже на входе, — кадр не ставится в очередь, обход не
+начинается, — потому что пропуск этих операций не теряет ничего
+обещанного. Пропуск закрытия теряет. Каждый вызывающий `Close` — это путь
+teardown-а или вытеснения, который уже решил, что соединение должно
+уйти: inbound teardown, shutdown-drain, вытеснение зависших входящих
+соединений, вытеснение медленного пира и по таймауту sync-отправки,
+зависание inbound heartbeat, закрытия identity discovery (`push_identity`,
+нарушивший правила, неудавшийся начальный `push_identity`) и закрытие
+плоскостью session v2 legacy-соединений identity, которая только что
+доказала себя по v2. Любой из них может выполняться, пока
+lifecycle-контекст заканчивается, так что отменённый `ctx` для них —
+обычный случай, а не причина остановиться.
+
+Ценой прежнего раннего возврата была утечка. Writer-горутина `NetCore`
+возвращается только из `Close`, а inbound teardown снимает запись
+реестра сразу после своего вызова `Close`. Inbound-обработчик, который
+завершился сам после отмены lifecycle-контекста узла и до того, как
+отработал shutdown-drain (пир положил трубку, чтение упало), пропускал
+закрытие и затем снимал единственный handle на ядро; drain перечисляет
+реестр и уже не мог его увидеть, поэтому writer и его очередь жили до
+выхода процесса.
+
+Работа ограничена, потому что `Close` ничего не пишет в сеть. Каждое
+соединение, на котором построен `NetCore`, закрывает свой сокет напрямую:
+v1-соединение — это TCP-сокет (принятый, набранный напрямую или
+проброшенный через SOCKS) под metered-обёрткой и, для исходящего, под
+обёрткой бюджета, которая при закрытии возвращает свою единицу, — ни
+одна из них ничего не пишет; TLS-соединение v2-сессии намеренно не
+отправляет TLS-алерт `close_notify` (см. `sessionv2.sessionConn.Close`).
+Дедлайн записи здесь не участвует. Дальше `Close` ждёт writer-горутину: её текущий `Write`, если
+он есть, сразу падает на закрытом сокете, а оставшиеся в очереди кадры
+она отбрасывает, не записывая. `Close` идемпотентен. `ctx` остаётся в
+сигнатуре ради единообразия с остальным интерфейсом. Тестовый backend
+(`netcoretest.Backend.Close`) следует тому же правилу, чтобы тест не мог
+пройти на teardown-е, который в продакшене течёт.
 
 ### Валюта идентичности
 

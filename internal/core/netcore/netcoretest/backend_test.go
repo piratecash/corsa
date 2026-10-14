@@ -202,6 +202,35 @@ func TestBackend_Close_PerConnID(t *testing.T) {
 	}
 }
 
+// TestBackend_Close_CancelledContextStillCloses pins the backend to the
+// Network.Close contract the production bridge follows: releasing a
+// connection is not cancellable work, so a cancelled ctx neither skips the
+// close nor is reported as its outcome. A backend that kept the old early
+// return would let a test pass on a teardown that leaks in production.
+func TestBackend_Close_CancelledContextStillCloses(t *testing.T) {
+	b := netcoretest.New()
+	defer b.Shutdown()
+
+	id := domain.ConnID(100)
+	b.Register(id, netcore.Inbound, "203.0.113.78:7777")
+	out := b.Outbound(id)
+	if out == nil {
+		t.Fatal("Outbound returned nil for registered id")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := b.Network().Close(ctx, id); err != nil {
+		t.Fatalf("Close under a cancelled ctx = %v, want nil", err)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("Outbound channel must be closed after Close under a cancelled ctx")
+	}
+	if err := b.Network().Close(ctx, id); !errors.Is(err, netcore.ErrUnknownConn) {
+		t.Fatalf("expected ErrUnknownConn on second Close, got %v", err)
+	}
+}
+
 // TestBackend_Shutdown_RejectsSends verifies the lifecycle contract:
 // after Shutdown, every SendFrame / SendFrameSync returns
 // ErrSendChanClosed rather than silently succeeding into a dead channel.
