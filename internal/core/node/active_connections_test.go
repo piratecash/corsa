@@ -59,19 +59,15 @@ func primeActiveConnSnapshots(svc *Service) {
 }
 
 // testInboundCore creates a real netcore.NetCore for an inbound connection
-// and returns a cleanup function that closes the underlying pipe.
-func testInboundCore(t *testing.T, addr domain.PeerAddress, identity domain.PeerIdentity, connID domain.ConnID) (*netcore.NetCore, func()) {
+// over a pipe; the core and both pipe ends are closed when the test ends.
+func testInboundCore(t *testing.T, addr domain.PeerAddress, identity domain.PeerIdentity, connID domain.ConnID) *netcore.NetCore {
 	t.Helper()
 	server, client := net.Pipe()
-	core := netcore.New(connID, server, netcore.Inbound, netcore.Options{
+	t.Cleanup(func() { _ = client.Close() })
+	return newTestNetCore(t, connID, server, netcore.Inbound, netcore.Options{
 		Address:  addr,
 		Identity: identity,
 	})
-	cleanup := func() {
-		core.Close()
-		_ = client.Close()
-	}
-	return core, cleanup
 }
 
 // addOutboundPeer populates health + session entries for a connected
@@ -100,7 +96,7 @@ func addOutboundPeer(svc *Service, addr string, identity string, connID domain.C
 // addInboundPeer populates health entry and registers a real NetCore in the
 // conn registry so inboundConnIDsLocked can find it, then refreshes the
 // hot-read snapshots so peerHealthFrames sees the seeded state.
-func addInboundPeer(t *testing.T, svc *Service, addr string, identity string, connID domain.ConnID) func() {
+func addInboundPeer(t *testing.T, svc *Service, addr string, identity string, connID domain.ConnID) {
 	t.Helper()
 	pa := domain.PeerAddress(addr)
 	now := time.Now().UTC()
@@ -114,10 +110,9 @@ func addInboundPeer(t *testing.T, svc *Service, addr string, identity string, co
 	}
 	svc.peerIDs[pa] = domaintest.ID(identity)
 
-	core, cleanup := testInboundCore(t, pa, domaintest.ID(identity), connID)
+	core := testInboundCore(t, pa, domaintest.ID(identity), connID)
 	svc.conns[connID] = &connEntry{core: core}
 	primeActiveConnSnapshots(svc)
-	return cleanup
 }
 
 // addDisconnectedPeer adds a health entry with Connected=false and
@@ -187,8 +182,7 @@ func TestActiveConnectionsJSON_EmptySnapshot(t *testing.T) {
 
 func TestActiveConnectionsJSON_InboundOnlyAppears(t *testing.T) {
 	svc := activeConnTestService(t)
-	cleanup := addInboundPeer(t, svc, "10.0.0.1:9000", "aaa111", domain.ConnID(100))
-	defer cleanup()
+	addInboundPeer(t, svc, "10.0.0.1:9000", "aaa111", domain.ConnID(100))
 
 	data, err := svc.ActiveConnectionsJSON()
 	if err != nil {
@@ -338,8 +332,7 @@ func TestActiveConnectionsJSON_QueuedDialingExcluded(t *testing.T) {
 func TestActiveConnectionsJSON_DirectionCorrect(t *testing.T) {
 	svc := activeConnTestService(t)
 	addOutboundPeer(svc, "1.2.3.4:9000", "out111", domain.ConnID(10))
-	cleanup := addInboundPeer(t, svc, "5.6.7.8:9000", "in222", domain.ConnID(20))
-	defer cleanup()
+	addInboundPeer(t, svc, "5.6.7.8:9000", "in222", domain.ConnID(20))
 
 	data, err := svc.ActiveConnectionsJSON()
 	if err != nil {
@@ -363,8 +356,7 @@ func TestActiveConnectionsJSON_DirectionCorrect(t *testing.T) {
 func TestActiveConnectionsJSON_NetworkClassification(t *testing.T) {
 	svc := activeConnTestService(t)
 	addOutboundPeer(svc, "1.2.3.4:9000", "ipv4peer", domain.ConnID(10))
-	cleanup := addInboundPeer(t, svc, "127.0.0.1:9000", "localpeer", domain.ConnID(20))
-	defer cleanup()
+	addInboundPeer(t, svc, "127.0.0.1:9000", "localpeer", domain.ConnID(20))
 
 	data, err := svc.ActiveConnectionsJSON()
 	if err != nil {
@@ -388,13 +380,11 @@ func TestActiveConnectionsJSON_OverlayClassification(t *testing.T) {
 	svc := activeConnTestService(t)
 	// Tor v3 address (56-char base32 + .onion)
 	torAddr := "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst2345.onion:9000"
-	cleanup1 := addInboundPeer(t, svc, torAddr, "torpeer", domain.ConnID(30))
-	defer cleanup1()
+	addInboundPeer(t, svc, torAddr, "torpeer", domain.ConnID(30))
 
 	// I2P address
 	i2pAddr := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b32.i2p:9000"
-	cleanup2 := addInboundPeer(t, svc, i2pAddr, "i2ppeer", domain.ConnID(31))
-	defer cleanup2()
+	addInboundPeer(t, svc, i2pAddr, "i2ppeer", domain.ConnID(31))
 
 	data, err := svc.ActiveConnectionsJSON()
 	if err != nil {
@@ -600,8 +590,7 @@ func TestActiveConnectionsJSON_Integration(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	// Register the inbound core in the conn registry.
-	core, coreCleanup := testInboundCore(t, inAddr, domaintest.ID("inbound_identity"), domain.ConnID(999))
-	defer coreCleanup()
+	core := testInboundCore(t, inAddr, domaintest.ID("inbound_identity"), domain.ConnID(999))
 	func() {
 		svc.peerMu.Lock()
 		defer svc.peerMu.Unlock()
@@ -766,17 +755,13 @@ func TestInboundConnIDLookups_LightweightScan(t *testing.T) {
 	addrA := domain.PeerAddress("10.0.0.1:64646")
 	addrB := domain.PeerAddress("10.0.0.2:64646")
 
-	c1, cl1 := testInboundCore(t, addrA, domaintest.ID("idA1"), domain.ConnID(1))
-	defer cl1()
-	c2, cl2 := testInboundCore(t, addrA, domaintest.ID("idA2"), domain.ConnID(2))
-	defer cl2()
-	c3, cl3 := testInboundCore(t, addrB, domaintest.ID("idB"), domain.ConnID(3))
-	defer cl3()
+	c1 := testInboundCore(t, addrA, domaintest.ID("idA1"), domain.ConnID(1))
+	c2 := testInboundCore(t, addrA, domaintest.ID("idA2"), domain.ConnID(2))
+	c3 := testInboundCore(t, addrB, domaintest.ID("idB"), domain.ConnID(3))
 	// Outbound conn for addrA — must be invisible to inbound lookups.
 	oserver, oclient := net.Pipe()
 	defer func() { _ = oclient.Close() }()
-	c4 := netcore.New(domain.ConnID(4), oserver, netcore.Outbound, netcore.Options{Address: addrA})
-	defer c4.Close()
+	c4 := newTestNetCore(t, domain.ConnID(4), oserver, netcore.Outbound, netcore.Options{Address: addrA})
 
 	svc.conns[domain.ConnID(1)] = &connEntry{core: c1, tracked: true}
 	svc.conns[domain.ConnID(2)] = &connEntry{core: c2, tracked: false}

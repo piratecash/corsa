@@ -279,11 +279,10 @@ func TestTrafficCaptureBridgeStartedPayloadCarriesOverlayIdentity(t *testing.T) 
 	left, right := net.Pipe()
 	defer func() { _ = right.Close() }()
 
-	core := netcore.New(netcore.ConnID(connID), left, netcore.Outbound, netcore.Options{
+	core := newTestNetCore(t, netcore.ConnID(connID), left, netcore.Outbound, netcore.Options{
 		Address:  overlayAddress,
 		Identity: peerIdentity,
 	})
-	defer core.Close()
 
 	// Resolver for the capture.Manager — independent of s.conns (the
 	// Manager does not know anything about node.Service).

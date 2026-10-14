@@ -745,8 +745,7 @@ func TestApplyWelcomeMetadata_MirrorsDeclarationsOnSession(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { _ = clientPipe.Close() })
 	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(netcore.ConnID(4242), serverPipe, netcore.Outbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	pc := newTestNetCore(t, netcore.ConnID(4242), serverPipe, netcore.Outbound, netcore.Options{})
 
 	session := &peerSession{address: domain.PeerAddress("addr-peer"), connID: domain.ConnID(7601), netCore: pc}
 	welcome := protocol.Frame{
@@ -814,8 +813,7 @@ func TestDeclarationsNotProvidedDoNotClobber(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { _ = clientPipe.Close() })
 	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(netcore.ConnID(4243), serverPipe, netcore.Inbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	pc := newTestNetCore(t, netcore.ConnID(4243), serverPipe, netcore.Inbound, netcore.Options{})
 
 	pc.SetDeclarations(netcore.HandshakeDeclarations{
 		AdvertisedNames: []domain.CapabilityName{"mesh_datagram_durable_v1"},

@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"net"
 	"strings"
 	"testing"
 
@@ -33,38 +32,25 @@ import (
 //     got the cheapest verdict on the node for free, at line rate.
 
 // datagramTestPeerIP is the source address the inbound fixture of this file
-// reports. It has to be a real host:port, which is the point of routableConn
-// below.
+// reports. It has to be a real host:port, which is the point of the
+// remoteAddrConn the fixture builds.
 const datagramTestPeerIP = "10.0.0.90"
 
 // datagramTestSecondDstHex is a SECOND valid identity, used where a test needs
 // the peer to rename itself between two connections.
 const datagramTestSecondDstHex = "11a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4"
 
-// routableConn gives a net.Pipe end a routable RemoteAddr.
-//
-// It exists to keep the ban-score assertions of this file HONEST. addBanScore
-// keys on net.SplitHostPort(NetCore.RemoteAddr()), and a bare pipe reports
-// "pipe", which fails the split and makes the whole ban path a no-op — so
-// "the neighbour was not scored" would hold on such a fixture no matter what
-// the code did. With a real host:port the assertion has a live subject, which
-// the positive control in TestCapabilityDropChargesTheNeighbourSilently proves
-// by making the very same counter move.
-type routableConn struct {
-	net.Conn
-	remote net.Addr
-}
-
-func (c routableConn) RemoteAddr() net.Addr { return c.remote }
-
-// hostPortAddr is a net.Addr that is a host:port string and nothing else.
-type hostPortAddr string
-
-func (a hostPortAddr) Network() string { return "tcp" }
-func (a hostPortAddr) String() string  { return string(a) }
-
 // newRoutableDatagramInboundFixture is newLayeredDatagramInboundFixture with a
 // routable remote address, so the ban surface is reachable.
+//
+// The routable address keeps the ban-score assertions of this file HONEST.
+// addBanScore keys on net.SplitHostPort(NetCore.RemoteAddr()), and a bare pipe
+// reports "pipe", which fails the split and makes the whole ban path a no-op —
+// so "the neighbour was not scored" would hold on such a fixture no matter
+// what the code did. With a real host:port the assertion has a live subject,
+// which the positive control in TestCapabilityDropChargesTheNeighbourSilently
+// proves by making the very same counter move. Replies go through the
+// backend, never through the conn, so the conn carries no I/O.
 func newRoutableDatagramInboundFixture(t *testing.T, caps ...domain.Capability) (*Service, *netcoretest.Backend, domain.ConnID) {
 	t.Helper()
 	backend := netcoretest.New()
@@ -87,11 +73,8 @@ func newRoutableDatagramInboundFixture(t *testing.T, caps ...domain.Capability) 
 	remote := datagramTestPeerIP + ":64646"
 	backend.Register(connID, netcore.Inbound, remote)
 
-	clientPipe, serverPipe := net.Pipe()
-	t.Cleanup(func() { _ = clientPipe.Close() })
-	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(connID, routableConn{Conn: serverPipe, remote: hostPortAddr(remote)}, netcore.Inbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	conn := newNoIOConn(t, hostPortAddr(remote))
+	pc := newTestNetCore(t, connID, conn, netcore.Inbound, netcore.Options{})
 	// The VERIFIED hello is where the proof lives: connauth.VerifyAuthSession
 	// checked a signature over a challenge this node generated against
 	// Hello.Address, so that address — and nothing the peer says afterwards —
@@ -101,7 +84,7 @@ func newRoutableDatagramInboundFixture(t *testing.T, caps ...domain.Capability) 
 	pc.SetIdentity(domain.PeerIdentityFromWire(datagramTestDstHex))
 
 	svc.peerMu.Lock()
-	svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
+	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
 
 	return svc, backend, connID

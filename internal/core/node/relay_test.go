@@ -1340,7 +1340,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 		defer func() { _ = c2.Close() }()
 
 		svc.peerMu.Lock()
-		pc := netcore.New(netcore.ConnID(1), c1, netcore.Inbound, netcore.Options{
+		pc := newTestNetCore(t, netcore.ConnID(1), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-peer-1"),
 			Identity: domaintest.ID("inbound-peer-1"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1383,7 +1383,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan peerSendItem),
 		}
-		pc := netcore.New(netcore.ConnID(2), c1, netcore.Inbound, netcore.Options{
+		pc := newTestNetCore(t, netcore.ConnID(2), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress(peerAddr),
 			Identity: domaintest.ID(peerID),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1424,7 +1424,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan peerSendItem),
 		}
-		pc := netcore.New(netcore.ConnID(3), c1, netcore.Inbound, netcore.Options{
+		pc := newTestNetCore(t, netcore.ConnID(3), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-peer-2"),
 			Identity: domaintest.ID("inbound-id-2"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1475,7 +1475,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan peerSendItem),
 		}
-		pc := netcore.New(netcore.ConnID(4), c1, netcore.Inbound, netcore.Options{
+		pc := newTestNetCore(t, netcore.ConnID(4), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("127.0.0.1:64646"), // NATed listen address
 			Identity: domaintest.ID(sharedID),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -1528,7 +1528,7 @@ func TestCountCapablePeersIncludesInbound(t *testing.T) {
 			capabilities: []domain.Capability{domain.CapMeshRelayV1},
 			sendCh:       make(chan peerSendItem),
 		}
-		pc := netcore.New(netcore.ConnID(5), c1, netcore.Inbound, netcore.Options{
+		pc := newTestNetCore(t, netcore.ConnID(5), c1, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress("inbound-preactivation"),
 			Identity: domaintest.ID("preactivation-id-2"),
 			Caps:     []domain.Capability{domain.CapMeshRelayV1},

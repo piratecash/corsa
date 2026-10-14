@@ -62,8 +62,7 @@ func newQueueTestSession(t *testing.T, addr domain.PeerAddress, sendBuffer int) 
 		errCh:        make(chan error, 1),
 		capabilities: []domain.Capability{domain.CapMeshRelayV1},
 	}
-	session.netCore = netcore.New(netcore.ConnID(1), remote, netcore.Outbound, netcore.Options{})
-	closeNetCoreOnCleanup(t, session.netCore)
+	session.netCore = newTestNetCore(t, netcore.ConnID(1), remote, netcore.Outbound, netcore.Options{})
 	return session, local
 }
 
@@ -336,8 +335,7 @@ func TestSendTrackedFrameToConnUsesTheSingleWriterQueue(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { _ = clientPipe.Close() })
 	t.Cleanup(func() { _ = serverPipe.Close() })
-	core := netcore.New(netcore.ConnID(9911), serverPipe, netcore.Inbound, netcore.Options{Address: address})
-	t.Cleanup(core.Close)
+	core := newTestNetCore(t, netcore.ConnID(9911), serverPipe, netcore.Inbound, netcore.Options{Address: address})
 
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(clientPipe, &connEntry{core: core, tracked: true})

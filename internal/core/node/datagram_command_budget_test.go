@@ -38,8 +38,7 @@ func registerDatagramCommandConn(t *testing.T, svc *Service, id domain.ConnID, a
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { _ = clientPipe.Close() })
 	t.Cleanup(func() { _ = serverPipe.Close() })
-	core := netcore.New(id, serverPipe, netcore.Inbound, netcore.Options{})
-	t.Cleanup(core.Close)
+	core := newTestNetCore(t, id, serverPipe, netcore.Inbound, netcore.Options{})
 	if authenticated {
 		core.SetAuth(&connauth.State{
 			Verified: true,

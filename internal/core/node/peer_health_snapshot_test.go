@@ -255,11 +255,8 @@ func TestRebuildPeerHealthSnapshot_InboundIndexMatchesPerPeerScan(t *testing.T) 
 	// Two inbound connections that both declared the same overlay address —
 	// inboundConnIDs must carry BOTH ids.
 	mk := func(id netcore.ConnID, ip string, port int) net.Conn {
-		local, remote := net.Pipe()
-		t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
-		conn := &fakeConn{Conn: local, remoteAddr: &net.TCPAddr{IP: net.ParseIP(ip), Port: port}}
-		core := netcore.New(id, conn, netcore.Inbound, netcore.Options{})
-		t.Cleanup(func() { core.Close() })
+		conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP(ip), Port: port})
+		core := newTestNetCore(t, id, conn, netcore.Inbound, netcore.Options{})
 		core.SetAddress(addr)
 		core.SetCapabilities(caps)
 		svc.peerMu.Lock()

@@ -31,10 +31,7 @@ func failedNetCore(t *testing.T) (*netcore.NetCore, net.Conn) {
 	t.Helper()
 
 	local, remote := net.Pipe()
-	core := netcore.New(netcore.ConnID(7), local, netcore.Outbound, netcore.Options{})
-	// The failed write below closes the socket and WriterDone, but not the
-	// writerLoop itself, which still waits for Close.
-	closeNetCoreOnCleanup(t, core)
+	core := newTestNetCore(t, netcore.ConnID(7), local, netcore.Outbound, netcore.Options{})
 	// Closing both ends makes the writer's first Write fail, which is what
 	// raises the "this link is finished" gate inside netcore.
 	_ = remote.Close()

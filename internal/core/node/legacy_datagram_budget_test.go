@@ -1,7 +1,6 @@
 package node
 
 import (
-	"net"
 	"strings"
 	"testing"
 	"time"
@@ -71,16 +70,13 @@ func registerDatagramInboundConn(
 	t.Helper()
 	connID := netcore.ConnID(id)
 	backend.Register(connID, netcore.Inbound, remote)
-	clientPipe, serverPipe := net.Pipe()
-	t.Cleanup(func() { _ = clientPipe.Close() })
-	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(connID, routableConn{Conn: serverPipe, remote: hostPortAddr(remote)}, netcore.Inbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	conn := newNoIOConn(t, hostPortAddr(remote))
+	pc := newTestNetCore(t, connID, conn, netcore.Inbound, netcore.Options{})
 	pc.SetAuth(auth)
 	pc.SetCapabilities([]domain.Capability{domain.CapMeshDatagramV1})
 	pc.SetIdentity(claimed)
 	svc.peerMu.Lock()
-	svc.setTestConnEntryLocked(clientPipe, &connEntry{core: pc})
+	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
 	svc.peerMu.Unlock()
 	return connID
 }

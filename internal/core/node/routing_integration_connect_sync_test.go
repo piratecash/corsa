@@ -65,15 +65,11 @@ func TestConnectTimeFullSync_UsesLegacySender_NonEmptySnapshot(t *testing.T) {
 	defer func() { _ = pipeLocal.Close() }()
 	defer func() { _ = pipeRemote.Close() }()
 
-	conn := &fakeConn{
-		Conn:       pipeLocal,
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.10"), Port: 22000},
-	}
+	conn := withRemoteAddr(pipeLocal, &net.TCPAddr{IP: net.ParseIP("10.0.0.10"), Port: 22000})
 	// NetCore must be created BEFORE setTestConnEntryLocked because
-	// enqueueFrameSync routes through the writer goroutine; without one
+	// enqueueFrameSyncByID routes through the writer goroutine; without one
 	// the send would fall back to a blocking direct write with a deadline.
-	pc := netcore.New(netcore.ConnID(100), conn, netcore.Inbound, netcore.Options{})
-	defer pc.Close()
+	pc := newTestNetCore(t, netcore.ConnID(100), conn, netcore.Inbound, netcore.Options{})
 
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})
@@ -179,12 +175,8 @@ func TestConnectTimeFullSync_UsesV3FullSender_NonEmptySnapshot(t *testing.T) {
 	defer func() { _ = pipeLocal.Close() }()
 	defer func() { _ = pipeRemote.Close() }()
 
-	conn := &fakeConn{
-		Conn:       pipeLocal,
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.11"), Port: 22001},
-	}
-	pc := netcore.New(netcore.ConnID(101), conn, netcore.Inbound, netcore.Options{})
-	defer pc.Close()
+	conn := withRemoteAddr(pipeLocal, &net.TCPAddr{IP: net.ParseIP("10.0.0.11"), Port: 22001})
+	pc := newTestNetCore(t, netcore.ConnID(101), conn, netcore.Inbound, netcore.Options{})
 	// v3-triplet caps on the inbound conn so peerSupportsRoutingV3
 	// returns true and sendConnectTimeFullSync picks the v3 baseline
 	// branch. Without these caps the dispatch falls back to legacy
@@ -306,12 +298,8 @@ func TestConnectTimeFullSync_EmptySnapshot_NoWireFrame(t *testing.T) {
 	defer func() { _ = pipeLocal.Close() }()
 	defer func() { _ = pipeRemote.Close() }()
 
-	conn := &fakeConn{
-		Conn:       pipeLocal,
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.11"), Port: 22001},
-	}
-	pc := netcore.New(netcore.ConnID(101), conn, netcore.Inbound, netcore.Options{})
-	defer pc.Close()
+	conn := withRemoteAddr(pipeLocal, &net.TCPAddr{IP: net.ParseIP("10.0.0.11"), Port: 22001})
+	pc := newTestNetCore(t, netcore.ConnID(101), conn, netcore.Inbound, netcore.Options{})
 
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})

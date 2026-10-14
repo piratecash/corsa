@@ -363,8 +363,7 @@ func TestNeighbourCompositionCountsOnlyV2AsProven(t *testing.T) {
 	addTrackedInbound := func(id netcore.ConnID, claimed domain.PeerIdentity, auth *connauth.State) {
 		local, remote := net.Pipe()
 		t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
-		core := netcore.New(id, local, netcore.Inbound, netcore.Options{Identity: claimed})
-		t.Cleanup(core.Close)
+		core := newTestNetCore(t, id, local, netcore.Inbound, netcore.Options{Identity: claimed})
 		core.SetAuth(auth)
 		svc.peerMu.Lock()
 		svc.setTestConnEntryLocked(local, &connEntry{core: core, tracked: true})

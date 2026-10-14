@@ -100,22 +100,14 @@ func (n *recursiveRLockTrapNetwork) RemoteAddr(id domain.ConnID) string {
 func seedTrackedInboundPeer(t *testing.T, svc *Service, id domain.ConnID, peerIdentity domain.PeerIdentity, remoteAddr string) string {
 	t.Helper()
 
-	pipeLocal, pipeRemote := net.Pipe()
-	t.Cleanup(func() { _ = pipeLocal.Close() })
-	t.Cleanup(func() { _ = pipeRemote.Close() })
-
 	host, port := splitHostPortOrPanic(t, remoteAddr)
-	conn := &fakeConn{
-		Conn:       pipeLocal,
-		remoteAddr: &net.TCPAddr{IP: net.ParseIP(host), Port: port},
-	}
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP(host), Port: port})
 
-	pc := netcore.New(id, conn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, id, conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(peerIdentity.String()),
 		Identity: peerIdentity,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 	})
-	t.Cleanup(pc.Close)
 
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})

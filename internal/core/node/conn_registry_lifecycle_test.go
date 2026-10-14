@@ -21,18 +21,6 @@ import (
 	"github.com/piratecash/corsa/internal/core/netcore"
 )
 
-// memConn is a minimal in-memory net.Conn used purely as a map key for
-// lifecycle exercises. It never carries bytes — NetCore.writerLoop is not
-// started because we do not call Close() on the core; the test only
-// validates registry bookkeeping, not socket I/O.
-type memConn struct {
-	net.Conn
-	remote net.Addr
-}
-
-func (c *memConn) RemoteAddr() net.Addr { return c.remote }
-func (c *memConn) Close() error         { return nil }
-
 func newRegistryTestService() *Service {
 	return &Service{
 		conns:           make(map[netcore.ConnID]*connEntry),
@@ -44,12 +32,12 @@ func TestConnRegistry_InvalidationIsAtomic(t *testing.T) {
 	t.Parallel()
 
 	svc := newRegistryTestService()
-	conn := &memConn{remote: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 5001}}
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 5001})
 
 	// Seed an entry mirroring what registerInboundConn / trackInboundConnect
 	// produce together: core present, tracked flag set. metered is nil —
 	// the test does not need a real MeteredConn to exercise the invariant.
-	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
 	svc.peerMu.Lock()
@@ -123,9 +111,9 @@ func TestConnRegistry_RegisterSyncsSecondaryIndex(t *testing.T) {
 	t.Parallel()
 
 	svc := newRegistryTestService()
-	conn := &memConn{remote: &net.TCPAddr{IP: net.ParseIP("10.0.0.2"), Port: 5002}}
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP("10.0.0.2"), Port: 5002})
 
-	pc := netcore.New(netcore.ConnID(42), conn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(42), conn, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
 

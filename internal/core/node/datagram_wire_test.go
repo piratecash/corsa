@@ -140,8 +140,7 @@ func newDatagramInboundFixture(t *testing.T, caps ...domain.Capability) (*Servic
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { _ = clientPipe.Close() })
 	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	pc := newTestNetCore(t, connID, serverPipe, netcore.Inbound, netcore.Options{})
 	// The VERIFIED hello is what production leaves behind on an accepted
 	// connection, and it is where the proof of identity lives: handleAuthSession
 	// stores the state connauth.VerifyAuthSession returned, whose Hello.Address
@@ -195,8 +194,7 @@ func newLayeredDatagramInboundFixture(
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { _ = clientPipe.Close() })
 	t.Cleanup(func() { _ = serverPipe.Close() })
-	pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-	t.Cleanup(pc.Close)
+	pc := newTestNetCore(t, connID, serverPipe, netcore.Inbound, netcore.Options{})
 	// The VERIFIED hello is what production leaves behind on an accepted
 	// connection, and it is where the proof of identity lives: handleAuthSession
 	// stores the state connauth.VerifyAuthSession returned, whose Hello.Address

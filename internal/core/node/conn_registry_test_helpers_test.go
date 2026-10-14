@@ -2,7 +2,6 @@ package node
 
 import (
 	"net"
-	"testing"
 
 	"github.com/piratecash/corsa/internal/core/domain"
 	"github.com/piratecash/corsa/internal/core/netcore"
@@ -19,20 +18,6 @@ func mustConnIDForTest(s *Service, conn net.Conn) domain.ConnID {
 	return id
 }
 
-// closeNetCoreOnCleanup closes a test-built NetCore when the test ends.
-//
-// Closing the conn underneath is not enough: an idle writerLoop returns only
-// on Close, so a helper that skipped it leaked the writer goroutine and its
-// buffers on every call, which a stress test calling such a helper a
-// thousand times per run multiplies by its -count. The order against the caller's own pipe
-// cleanups does not matter: Close closes the conn itself before it waits for
-// the writer, so it never blocks on a far end that is still open. Close is
-// idempotent, so a test that also closes the core or its session is fine.
-func closeNetCoreOnCleanup(t *testing.T, core *netcore.NetCore) {
-	t.Helper()
-	t.Cleanup(core.Close)
-}
-
 // setTestConnEntryLocked is the test-only equivalent of the three lifecycle
 // helpers in conn_registry.go (registerInboundConnLocked,
 // attachOutboundCoreLocked, unregisterConnLocked). Tests that predate
@@ -42,7 +27,7 @@ func closeNetCoreOnCleanup(t *testing.T, core *netcore.NetCore) {
 // coherent.
 //
 // If entry.core is set and carries a non-zero ConnID (i.e. was built via
-// netcore.New(...)), that ConnID is used as primary key. Otherwise —
+// newTestNetCore), that ConnID is used as primary key. Otherwise —
 // zero-value NetCore fixtures or nil-core entries — a synthetic ConnID
 // is minted from s.connIDCounter so the two fixtures sites in the same
 // test do not collide at ConnID(0).
@@ -59,25 +44,19 @@ func (s *Service) setTestConnEntryLocked(conn net.Conn, entry *connEntry) {
 }
 
 // registerTestInboundLocked registers core as an inbound connection on conn;
-// authenticated mirrors what completeInboundAuth leaves behind (tracked). It
-// owns the core's lifetime: the core is closed when the test ends, so no
-// caller can leak its writer goroutine by forgetting to (closing conn alone
-// does not stop it). A test that also closes the core is fine — Close is
-// idempotent. The caller must hold s.peerMu.
-func (s *Service) registerTestInboundLocked(t *testing.T, conn net.Conn, core *netcore.NetCore, authenticated bool) {
-	t.Helper()
-	closeNetCoreOnCleanup(t, core)
+// authenticated mirrors what completeInboundAuth leaves behind (tracked). The
+// core's lifetime belongs to newTestNetCore, which built it. The caller must
+// hold s.peerMu.
+func (s *Service) registerTestInboundLocked(conn net.Conn, core *netcore.NetCore, authenticated bool) {
 	s.setTestConnEntryLocked(conn, &connEntry{core: core, tracked: authenticated})
 }
 
 // registerAuthenticatedInboundPeerLocked registers conn as an inbound peer
 // that completed authentication — tracked, as completeInboundAuth leaves it —
 // which is the only kind of inbound connection that reserves its host against
-// outbound dials. The core is closed when the test ends. The caller must hold
-// s.peerMu.
-func (s *Service) registerAuthenticatedInboundPeerLocked(t *testing.T, conn net.Conn, core *netcore.NetCore) {
-	t.Helper()
-	s.registerTestInboundLocked(t, conn, core, true)
+// outbound dials. The caller must hold s.peerMu.
+func (s *Service) registerAuthenticatedInboundPeerLocked(conn net.Conn, core *netcore.NetCore) {
+	s.registerTestInboundLocked(conn, core, true)
 }
 
 // testConnEntry is the read counterpart of setTestConnEntryLocked: it

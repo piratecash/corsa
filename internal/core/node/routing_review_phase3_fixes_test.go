@@ -290,9 +290,9 @@ func TestFailoverRelay_GossipFallbackSkippedOnEmptyFrameLine(t *testing.T) {
 func TestResolvePeerIdentity_HandlesInboundPrefixedKey(t *testing.T) {
 	svc := newTestServiceWithRoutingAndHealth(t, idNodeB)
 
-	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080}}
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 8080})
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB.String()),
 		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},
@@ -329,9 +329,9 @@ func TestSendRelayToAddress_InboundOriginStampsHopAckBudgetAndFrameLine(t *testi
 	// Install an inbound conn for peer-B so writeFrameToInbound
 	// has somewhere to land. We register through netcore so the
 	// inbound-conn lookup helpers can find it.
-	conn := &fakeConn{remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 9090}}
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP("10.0.0.5"), Port: 9090})
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(7), conn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(7), conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(idPeerB.String()),
 		Identity: idPeerB,
 		Caps:     []domain.Capability{domain.CapMeshRelayV1},

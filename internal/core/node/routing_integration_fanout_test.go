@@ -205,22 +205,14 @@ func setupFanoutFixture(t *testing.T, disconnectingIdentity domain.PeerIdentity,
 	for i, target := range targets {
 		id := domain.ConnID(100 + i)
 
-		pipeLocal, pipeRemote := net.Pipe()
-		t.Cleanup(func() { _ = pipeLocal.Close() })
-		t.Cleanup(func() { _ = pipeRemote.Close() })
-
 		host, port := splitHostPortOrPanic(t, target.remoteAddr)
-		conn := &fakeConn{
-			Conn:       pipeLocal,
-			remoteAddr: &net.TCPAddr{IP: net.ParseIP(host), Port: port},
-		}
+		conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP(host), Port: port})
 
-		pc := netcore.New(id, conn, netcore.Inbound, netcore.Options{
+		pc := newTestNetCore(t, id, conn, netcore.Inbound, netcore.Options{
 			Address:  domain.PeerAddress(target.identity.String()),
 			Identity: target.identity,
 			Caps:     []domain.Capability{domain.CapMeshRelayV1, domain.CapMeshRoutingV1},
 		})
-		t.Cleanup(pc.Close)
 
 		svc.peerMu.Lock()
 		svc.setTestConnEntryLocked(conn, &connEntry{core: pc, tracked: true})

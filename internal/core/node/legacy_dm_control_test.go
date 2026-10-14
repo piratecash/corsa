@@ -87,15 +87,13 @@ func TestSendSelectionPrefersTheProvenConnection(t *testing.T) {
 	svc.health[legacy.address] = &peerHealth{Connected: true, LastConnectedAt: old}
 	svc.peerMu.Unlock()
 
-	local, remote := net.Pipe()
-	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
 	overlay := domain.PeerAddress("10.0.0.21:64646")
-	core := netcore.New(netcore.ConnID(77), &fakeConn{Conn: local, remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.21"), Port: 40021}},
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP("10.0.0.21"), Port: 40021})
+	core := newTestNetCore(t, netcore.ConnID(77), conn,
 		netcore.Inbound, netcore.Options{Address: overlay, Identity: x, Caps: caps})
-	t.Cleanup(core.Close)
 	core.SetAuth(provenInboundAuth(t, peer))
 	svc.peerMu.Lock()
-	svc.setTestConnEntryLocked(local, &connEntry{core: core})
+	svc.setTestConnEntryLocked(conn, &connEntry{core: core})
 	svc.health[overlay] = &peerHealth{Connected: true, LastConnectedAt: time.Now()}
 	conns := svc.peerSendableConnectionsLocked(x, domain.CapMeshDatagramV1, time.Now())
 	svc.peerMu.Unlock()
@@ -138,20 +136,18 @@ func (f *reactionsFixture) accepted(id domain.PeerIdentity, auth *connauth.State
 		types = append(types, domain.DTypeDMControl)
 	}
 	declarations := netcore.HandshakeDeclarations{DeclaredDTypes: domain.ExplicitDTypes(types)}
-	local, remote := net.Pipe()
-	f.t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
 	overlay := domain.PeerAddress(net.JoinHostPort("10.0.1."+itoaForTest(f.n), "64646"))
-	core := netcore.New(netcore.ConnID(800+f.n), &fakeConn{Conn: local, remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.1." + itoaForTest(f.n)), Port: 40000}},
+	conn := newNoIOConn(f.t, &net.TCPAddr{IP: net.ParseIP("10.0.1." + itoaForTest(f.n)), Port: 40000})
+	core := newTestNetCore(f.t, netcore.ConnID(800+f.n), conn,
 		netcore.Inbound, netcore.Options{
 			Address:      overlay,
 			Identity:     id,
 			Caps:         []domain.Capability{domain.CapMeshDatagramV1},
 			Declarations: &declarations,
 		})
-	f.t.Cleanup(core.Close)
 	core.SetAuth(auth)
 	f.svc.peerMu.Lock()
-	f.svc.setTestConnEntryLocked(local, &connEntry{core: core})
+	f.svc.setTestConnEntryLocked(conn, &connEntry{core: core})
 	f.svc.health[overlay] = &peerHealth{Connected: healthy, LastConnectedAt: time.Now()}
 	f.svc.peerMu.Unlock()
 	return func() {

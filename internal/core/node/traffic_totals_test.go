@@ -240,7 +240,7 @@ func registerInboundMeteredConn(t *testing.T, svc *Service, id uint64, addr doma
 			t.Fatalf("seed inbound write: %v", err)
 		}
 	}
-	core := netcore.New(netcore.ConnID(id), m, netcore.Inbound, netcore.Options{Address: addr})
+	core := newTestNetCore(t, netcore.ConnID(id), m, netcore.Inbound, netcore.Options{Address: addr})
 	if auth != nil {
 		core.SetAuth(auth)
 	}
@@ -248,7 +248,6 @@ func registerInboundMeteredConn(t *testing.T, svc *Service, id uint64, addr doma
 	svc.registerInboundConnLocked(m, core, m, nil)
 	svc.peerMu.Unlock()
 	t.Cleanup(func() {
-		core.Close()
 		_ = local.Close()
 		_ = remote.Close()
 	})

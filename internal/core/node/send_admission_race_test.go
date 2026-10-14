@@ -275,14 +275,13 @@ func installAdmissionInboundPeer(
 		client, server := net.Pipe()
 		t.Cleanup(func() { _ = client.Close() })
 		t.Cleanup(func() { _ = server.Close() })
-		core := netcore.New(id, server, netcore.Inbound, netcore.Options{
+		core := newTestNetCore(t, id, server, netcore.Inbound, netcore.Options{
 			Address:         address,
 			Identity:        peer,
 			Caps:            []domain.Capability{domain.CapMeshDatagramV1, domain.CapMeshDatagramTransitV1},
 			ProtocolVersion: 27,
 			Declarations:    &declarations,
 		})
-		t.Cleanup(core.Close)
 
 		svc.peerMu.Lock()
 		svc.setTestConnEntryLocked(client, &connEntry{core: core, tracked: true})

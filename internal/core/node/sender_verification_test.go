@@ -93,7 +93,7 @@ func TestInboundPushMessage_NonDM_ForgedSenderRejected(t *testing.T) {
 	}
 
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(1), peerConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("inbound-peer-1"),
 		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
@@ -164,7 +164,7 @@ func TestInboundPushMessage_NonDM_VerifiedSenderAccepted(t *testing.T) {
 	}
 
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(2), peerConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(2), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-2"),
 		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
@@ -214,7 +214,7 @@ func TestInboundPushMessage_NonDM_RelayPeerAsSenderAccepted(t *testing.T) {
 	}
 
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(3), peerConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(3), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-3"),
 		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
@@ -265,7 +265,7 @@ func TestInboundPushMessage_DM_BypassesSenderGate(t *testing.T) {
 	}
 
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(4), peerConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(4), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("relay-peer-4"),
 		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
@@ -416,7 +416,7 @@ func TestInboundPushMessage_NonDM_UnknownAuthorNotStored(t *testing.T) {
 	}
 
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(5), peerConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(5), peerConn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress("ban-test-peer"),
 		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})
@@ -491,7 +491,7 @@ func TestInboundPushMessage_DM_UnknownSenderRecovery_SkipsGetPeers(t *testing.T)
 	relayAddr := domain.PeerAddress(ln.Addr().String())
 	markOldNode(svc, relayAddr)
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(17), peerConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(17), peerConn, netcore.Inbound, netcore.Options{
 		Address:  relayAddr,
 		Identity: domain.PeerIdentityFromWire(peerID.Address),
 	})

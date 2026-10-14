@@ -110,8 +110,7 @@ func TestTransportTrafficCountsInboundCloseOnce(t *testing.T) {
 	svc := newTestService(t, config.NodeTypeFull)
 	const sent, received = 128, 32
 	metered := meteredPipeWithTraffic(t, svc, sent, received)
-	core := netcore.New(netcore.ConnID(501), metered, netcore.Inbound, netcore.Options{Address: "10.0.0.8:64646"})
-	t.Cleanup(core.Close)
+	core := newTestNetCore(t, netcore.ConnID(501), metered, netcore.Inbound, netcore.Options{Address: "10.0.0.8:64646"})
 
 	svc.peerMu.Lock()
 	svc.registerInboundConnLocked(metered, core, metered, nil)

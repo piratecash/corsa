@@ -193,16 +193,12 @@ func TestLegacyUnprovenResyncDoesNotDebounceNamedIdentity(t *testing.T) {
 // hello named claimed and passed auth_session — the relayable proof.
 func legacyInboundConn(t *testing.T, svc *Service, id netcore.ConnID, remote *net.TCPAddr, claimed domain.PeerIdentity) domain.ConnID {
 	t.Helper()
-	local, peer := net.Pipe()
-	t.Cleanup(func() { _ = local.Close() })
-	t.Cleanup(func() { _ = peer.Close() })
-	conn := &fakeConn{Conn: local, remoteAddr: remote}
-	pc := netcore.New(id, conn, netcore.Inbound, netcore.Options{
+	conn := newNoIOConn(t, remote)
+	pc := newTestNetCore(t, id, conn, netcore.Inbound, netcore.Options{
 		Address:  domain.PeerAddress(remote.String()),
 		Identity: claimed,
 		Caps:     legacyRoutingCaps,
 	})
-	closeNetCoreOnCleanup(t, pc)
 	pc.SetAuth(&connauth.State{Verified: true, Hello: protocol.Frame{Address: claimed.String()}})
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(conn, &connEntry{core: pc})
@@ -459,12 +455,8 @@ func TestPenaltySubjectOfAcceptedLegacyConnection(t *testing.T) {
 
 func TestPenaltySubjectOfCoreReadsTheProofNotTheHello(t *testing.T) {
 	peer, _ := sessionv2test.NewProvenPeer(t)
-	local, other := net.Pipe()
-	t.Cleanup(func() { _ = local.Close() })
-	t.Cleanup(func() { _ = other.Close() })
-	conn := &fakeConn{Conn: local, remoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.66"), Port: 40001}}
-	core := netcore.New(netcore.ConnID(9), conn, netcore.Inbound, netcore.Options{Identity: peer.Identity})
-	t.Cleanup(core.Close)
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP("10.0.0.66"), Port: 40001})
+	core := newTestNetCore(t, netcore.ConnID(9), conn, netcore.Inbound, netcore.Options{Identity: peer.Identity})
 	legacy := penaltySubject{space: penaltySubjectInboundHost, address: "10.0.0.66"}
 
 	if got := penaltySubjectOfCore(9, core); got != legacy {

@@ -155,14 +155,13 @@ func installDatagramPeer(
 			clientPipe, serverPipe := net.Pipe()
 			t.Cleanup(func() { _ = clientPipe.Close() })
 			t.Cleanup(func() { _ = serverPipe.Close() })
-			core := netcore.New(domain.ConnID(9100+i), serverPipe, netcore.Inbound, netcore.Options{
+			core := newTestNetCore(t, domain.ConnID(9100+i), serverPipe, netcore.Inbound, netcore.Options{
 				Address:         address,
 				Identity:        peer,
 				Caps:            []domain.Capability{domain.CapMeshDatagramV1, domain.CapMeshDatagramTransitV1},
 				ProtocolVersion: conn.version,
 				Declarations:    &declarations,
 			})
-			t.Cleanup(core.Close)
 			svc.peerMu.Lock()
 			svc.setTestConnEntryLocked(clientPipe, &connEntry{
 				core:    core,

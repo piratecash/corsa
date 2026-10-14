@@ -7917,10 +7917,10 @@ func TestConnectedHostsLocked(t *testing.T) {
 	// distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by
 	// connectedHostsLocked's direction filter.
-	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(t, server, pc)
+	svc.registerAuthenticatedInboundPeerLocked(server, pc)
 
 	svc.deliveryMu.RLock()
 	hosts := svc.connectedHostsLocked()
@@ -7986,10 +7986,10 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	// distinguishes directions via NetCore.Dir(), so the seed must
 	// carry an Inbound NetCore — a bare entry would be ignored by the
 	// direction filter in connectedHostsLocked.
-	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(t, server, pc)
+	svc.registerAuthenticatedInboundPeerLocked(server, pc)
 	svc.peerMu.Unlock()
 
 	candidates := svc.peerDialCandidates()
@@ -8319,10 +8319,10 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 
 	svc.peerMu.Lock()
 	// Register inbound connection + peer info with a different overlay address.
-	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(t, server, pc)
+	svc.registerAuthenticatedInboundPeerLocked(server, pc)
 
 	svc.deliveryMu.RLock()
 	hosts := svc.connectedHostsLocked()
@@ -9181,7 +9181,7 @@ func TestEvictStaleInboundConnsClosesZombies(t *testing.T) {
 	// Register as inbound connection with per-connection lastActivity
 	// old enough to be considered stale.
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address:      peerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
@@ -9244,7 +9244,7 @@ func TestEvictStaleInboundConnsSkipsHealthy(t *testing.T) {
 	peerAddr := domain.PeerAddress("10.0.0.88:64646")
 
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address:      peerAddr,
 		LastActivity: time.Now(), // recent activity — should not be evicted
 	})
@@ -9306,11 +9306,11 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	// svc.upstream is under s.deliveryMu; conn/registry state under s.peerMu.
 	// Canonical order: s.peerMu OUTER, s.deliveryMu INNER.
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(1), server1, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), server1, netcore.Inbound, netcore.Options{
 		Address:      stalledPeerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(t, server1, pc)
+	svc.registerAuthenticatedInboundPeerLocked(server1, pc)
 
 	// Also add an outbound session as control.
 	svc.deliveryMu.Lock()
@@ -9584,7 +9584,7 @@ func TestPeerHealthFramesSingleRowWithOutboundSession(t *testing.T) {
 	defer func() { _ = staleConn.Close() }()
 	defer func() { _ = staleRemote.Close() }()
 	svc.peerMu.Lock()
-	pc := netcore.New(netcore.ConnID(99), staleConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(99), staleConn, netcore.Inbound, netcore.Options{
 		Address:  peerAddr,
 		Identity: domaintest.ID("stale-identity"),
 	})

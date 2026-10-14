@@ -15,7 +15,7 @@ import (
 // after PR 2 migrated outbound writes onto the managed path.
 func TestPeerSessionCloseDelegatesToNetCore(t *testing.T) {
 	conn, _ := newBufferedMockConn(t)
-	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
+	nc := newTestNetCore(t, 1, conn, netcore.Outbound, netcore.Options{})
 
 	onCloseCalls := 0
 	session := &peerSession{
@@ -66,7 +66,7 @@ func TestPeerSessionCloseWithoutNetCoreClosesConn(t *testing.T) {
 // ordering must be preserved: NetCore stays resolvable until writerDone.
 func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
 	conn, _ := newBufferedMockConn(t)
-	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
+	nc := newTestNetCore(t, 1, conn, netcore.Outbound, netcore.Options{})
 
 	var writerDoneAtOnClose bool
 	session := &peerSession{
@@ -97,7 +97,7 @@ func TestPeerSessionCloseOrderingProtectsSingleWriter(t *testing.T) {
 // path) cannot double-fire onClose or double-close the underlying NetCore.
 func TestPeerSessionCloseIsConcurrencySafe(t *testing.T) {
 	conn, _ := newBufferedMockConn(t)
-	nc := netcore.New(1, conn, netcore.Outbound, netcore.Options{})
+	nc := newTestNetCore(t, 1, conn, netcore.Outbound, netcore.Options{})
 
 	var onCloseCalls int32
 	session := &peerSession{

@@ -260,6 +260,10 @@ func TestSessionFixedFootprint(t *testing.T) {
 	}
 
 	type liveSession struct {
+		// core is never read back: it is here so the value retainedBytes
+		// measures reaches the lower half of the connection itself, rather
+		// than the figure depending on newTestNetCore's cleanup list happening
+		// to keep the core alive. newTestNetCore owns closing it.
 		core    *netcore.NetCore
 		session *peerSession
 		client  net.Conn
@@ -268,7 +272,6 @@ func TestSessionFixedFootprint(t *testing.T) {
 	sessions := make([]liveSession, 0, sessionFootprintCount)
 	t.Cleanup(func() {
 		for _, live := range sessions {
-			live.core.Close()
 			_ = live.client.Close()
 		}
 	})
@@ -279,7 +282,7 @@ func TestSessionFixedFootprint(t *testing.T) {
 			peer := domain.PeerIdentityFromWire(fmt.Sprintf("%040x", i+1))
 			address := domain.PeerAddress(fmt.Sprintf("10.10.%d.%d:64646", i/256, i%256))
 			declarations := datagramPeerDeclarations()
-			core := netcore.New(domain.ConnID(20000+i), serverPipe, netcore.Outbound, netcore.Options{
+			core := newTestNetCore(t, domain.ConnID(20000+i), serverPipe, netcore.Outbound, netcore.Options{
 				Address:         address,
 				Identity:        peer,
 				Caps:            []domain.Capability{domain.CapMeshDatagramV1},

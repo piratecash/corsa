@@ -117,8 +117,7 @@ func TestNodeStatusConnectedPeersCountsInboundOnly(t *testing.T) {
 	// lock-step with the ActiveConnectionsJSON test suite — drift in
 	// either direction would mean the two consumers see different
 	// "connected" semantics.
-	cleanup := addInboundPeer(t, svc, "10.0.0.1:9000", "inbound-peer-id-001", domain.ConnID(101))
-	t.Cleanup(cleanup)
+	addInboundPeer(t, svc, "10.0.0.1:9000", "inbound-peer-id-001", domain.ConnID(101))
 
 	if got := svc.NodeStatus().ConnectedPeers; got != 1 {
 		t.Errorf("ConnectedPeers with one inbound-only peer = %d, want 1", got)
@@ -151,10 +150,8 @@ func TestNodeStatusConnectedPeersDeduplicatesByIdentity(t *testing.T) {
 	// Two inbound conns from the same peer identity at different
 	// remote addresses (the masternode-vs-relay case where one peer
 	// dials in twice from the same operator).
-	c1 := addInboundPeer(t, svc, "10.0.0.3:9001", "shared-peer-id", domain.ConnID(301))
-	t.Cleanup(c1)
-	c2 := addInboundPeer(t, svc, "10.0.0.3:9002", "shared-peer-id", domain.ConnID(302))
-	t.Cleanup(c2)
+	addInboundPeer(t, svc, "10.0.0.3:9001", "shared-peer-id", domain.ConnID(301))
+	addInboundPeer(t, svc, "10.0.0.3:9002", "shared-peer-id", domain.ConnID(302))
 
 	if got := svc.NodeStatus().ConnectedPeers; got != 1 {
 		t.Errorf("ConnectedPeers with two inbound conns from same identity = %d, want 1 (dedupe by identity)", got)

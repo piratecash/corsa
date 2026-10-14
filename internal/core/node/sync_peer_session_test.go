@@ -29,8 +29,7 @@ func attachTestNetCore(t *testing.T, session *peerSession) {
 	if session == nil || session.conn == nil || session.netCore != nil {
 		return
 	}
-	session.netCore = netcore.New(netcore.ConnID(1), session.conn, netcore.Outbound, netcore.Options{})
-	closeNetCoreOnCleanup(t, session.netCore)
+	session.netCore = newTestNetCore(t, netcore.ConnID(1), session.conn, netcore.Outbound, netcore.Options{})
 }
 
 // newSyncTestService creates a minimal Service for testing syncPeerSession().

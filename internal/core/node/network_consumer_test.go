@@ -206,8 +206,7 @@ func TestDispatchNetworkFrame_AsyncReplies_RouteViaNetworkBackend(t *testing.T) 
 			clientPipe, serverPipe := net.Pipe()
 			t.Cleanup(func() { _ = clientPipe.Close() })
 			t.Cleanup(func() { _ = serverPipe.Close() })
-			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-			t.Cleanup(pc.Close)
+			pc := newTestNetCore(t, connID, serverPipe, netcore.Inbound, netcore.Options{})
 
 			if tc.authVerified {
 				// Attach Verified=true auth state to the NetCore so
@@ -409,8 +408,7 @@ func TestDispatchNetworkFrame_SyncReplies_RouteViaNetworkBackendSync(t *testing.
 			clientPipe, serverPipe := net.Pipe()
 			t.Cleanup(func() { _ = clientPipe.Close() })
 			t.Cleanup(func() { _ = serverPipe.Close() })
-			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-			t.Cleanup(pc.Close)
+			pc := newTestNetCore(t, connID, serverPipe, netcore.Inbound, netcore.Options{})
 
 			if tc.authVerified {
 				pc.SetAuth(&connauth.State{Verified: true})
@@ -529,8 +527,7 @@ func TestWriteFrameToInbound_ClassifiesUnregisteredViaNetworkBackend(t *testing.
 			clientPipe, serverPipe := net.Pipe()
 			t.Cleanup(func() { _ = clientPipe.Close() })
 			t.Cleanup(func() { _ = serverPipe.Close() })
-			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-			t.Cleanup(pc.Close)
+			pc := newTestNetCore(t, connID, serverPipe, netcore.Inbound, netcore.Options{})
 
 			// Tracked inbound entry — required so
 			// forEachTrackedInboundConnLocked locates this NetCore by
@@ -666,8 +663,7 @@ func TestWritePushFrame_RemovesSubscriberOnTransportDrop(t *testing.T) {
 			clientPipe, serverPipe := net.Pipe()
 			t.Cleanup(func() { _ = clientPipe.Close() })
 			t.Cleanup(func() { _ = serverPipe.Close() })
-			pc := netcore.New(connID, serverPipe, netcore.Inbound, netcore.Options{})
-			t.Cleanup(pc.Close)
+			pc := newTestNetCore(t, connID, serverPipe, netcore.Inbound, netcore.Options{})
 
 			// svc.conns entry is mandatory: writePushFrame short-circuits
 			// when netCoreForID returns nil (that is the "already
@@ -835,8 +831,7 @@ func TestSendSessionFrameViaNetwork_NetworkPathVisibleToBackend(t *testing.T) {
 			peerSide, sessionSide := net.Pipe()
 			t.Cleanup(func() { _ = peerSide.Close() })
 			t.Cleanup(func() { _ = sessionSide.Close() })
-			pc := netcore.New(connID, sessionSide, netcore.Outbound, netcore.Options{})
-			t.Cleanup(pc.Close)
+			pc := newTestNetCore(t, connID, sessionSide, netcore.Outbound, netcore.Options{})
 
 			session := &peerSession{
 				address:      domain.PeerAddress("test-peer"),

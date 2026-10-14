@@ -34,10 +34,10 @@ func registerInboundFrom(t *testing.T, svc *Service, remote string, authenticate
 	if err != nil {
 		t.Fatalf("port of %q: %v", remote, err)
 	}
-	conn := &memConn{remote: &net.TCPAddr{IP: net.ParseIP(host), Port: port}}
-	core := netcore.New(0, conn, netcore.Inbound, netcore.Options{LastActivity: time.Now().UTC()})
+	conn := newNoIOConn(t, &net.TCPAddr{IP: net.ParseIP(host), Port: port})
+	core := newTestNetCore(t, 0, conn, netcore.Inbound, netcore.Options{LastActivity: time.Now().UTC()})
 	svc.peerMu.Lock()
-	svc.registerTestInboundLocked(t, conn, core, authenticated)
+	svc.registerTestInboundLocked(conn, core, authenticated)
 	svc.peerMu.Unlock()
 }
 

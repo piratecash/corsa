@@ -200,14 +200,13 @@ func installDatagramInboundConn(
 	t.Cleanup(func() { _ = clientPipe.Close() })
 	t.Cleanup(func() { _ = serverPipe.Close() })
 
-	core := netcore.New(id, serverPipe, netcore.Inbound, netcore.Options{
+	core := newTestNetCore(t, id, serverPipe, netcore.Inbound, netcore.Options{
 		Address:         address,
 		Identity:        peer,
 		Caps:            []domain.Capability{domain.CapMeshDatagramV1, domain.CapMeshDatagramTransitV1},
 		ProtocolVersion: 27,
 		Declarations:    &declarations,
 	})
-	t.Cleanup(core.Close)
 
 	svc.peerMu.Lock()
 	svc.setTestConnEntryLocked(clientPipe, &connEntry{core: core, tracked: true})

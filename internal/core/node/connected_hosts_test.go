@@ -125,9 +125,9 @@ func TestOnlyAnAuthenticatedInboundConnectionReservesItsHost(t *testing.T) {
 			}
 
 			_, server := loopbackSocketPair(t)
-			core := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{})
+			core := newTestNetCore(t, netcore.ConnID(1), server, netcore.Inbound, netcore.Options{})
 			svc.peerMu.Lock()
-			svc.registerTestInboundLocked(t, server, core, tc.tracked)
+			svc.registerTestInboundLocked(server, core, tc.tracked)
 			svc.peerMu.Unlock()
 
 			if got := !candidatesContain(svc, bootstrap); got != tc.want {

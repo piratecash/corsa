@@ -41,7 +41,7 @@ func TestFullRelayStateStoreDoesNotUnsendAFrame(t *testing.T) {
 	// the write completes.
 	local, remote := net.Pipe()
 	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
-	core := netcore.New(netcore.ConnID(1), local, netcore.Inbound, netcore.Options{
+	core := newTestNetCore(t, netcore.ConnID(1), local, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("10.0.0.1:64646"),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1},
 	})

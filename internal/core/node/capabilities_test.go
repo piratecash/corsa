@@ -273,7 +273,7 @@ func TestConnHasCapability(t *testing.T) {
 		connIDByNetConn: make(map[net.Conn]netcore.ConnID),
 	}
 
-	pc := netcore.New(netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("10.0.0.1:64646"),
 		Caps:    []domain.Capability{domain.CapMeshRelayV1},
 	})
@@ -302,7 +302,7 @@ func TestRememberConnPeerAddrStoresCapabilities(t *testing.T) {
 		connIDByNetConn: make(map[net.Conn]netcore.ConnID),
 	}
 
-	pc := netcore.New(netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{})
+	pc := newTestNetCore(t, netcore.ConnID(1), serverConn, netcore.Inbound, netcore.Options{})
 	svc.setTestConnEntryLocked(serverConn, &connEntry{core: pc})
 
 	hello := protocol.Frame{

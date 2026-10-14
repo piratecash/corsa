@@ -243,7 +243,7 @@ func TestIsPeerReachable_InboundConnectionWithCapability(t *testing.T) {
 	defer func() { _ = pipeLocal.Close() }()
 	defer func() { _ = pipeRemote.Close() }()
 
-	pc := netcore.New(netcore.ConnID(1), pipeLocal, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), pipeLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-B"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
@@ -863,13 +863,12 @@ func TestFileTransferPeerRouteMetaInboundConnContributesNegotiatedVersion(t *tes
 	defer func() { _ = inRemote.Close() }()
 
 	const inboundVersion = domain.ProtocolVersion(12)
-	pc := netcore.New(netcore.ConnID(42), inLocal, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(42), inLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-inbound"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 		ProtocolVersion: inboundVersion,
 	})
-	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc, tracked: true})
 	svc.health[domain.PeerAddress("addr-inbound")] = &peerHealth{
 		Connected:           true,
@@ -991,13 +990,12 @@ func TestPeerSendableConnectionsDeterministicAcrossMapIteration(t *testing.T) {
 		local, remote := net.Pipe()
 		t.Cleanup(func() { _ = local.Close() })
 		t.Cleanup(func() { _ = remote.Close() })
-		pc := netcore.New(id, local, netcore.Inbound, netcore.Options{
+		pc := newTestNetCore(t, id, local, netcore.Inbound, netcore.Options{
 			Address:         domain.PeerAddress(addr),
 			Identity:        idPeerB,
 			Caps:            []domain.Capability{domain.CapFileTransferV1},
 			ProtocolVersion: 12,
 		})
-		t.Cleanup(func() { pc.Close() })
 		svc.setTestConnEntryLocked(local, &connEntry{core: pc, tracked: true})
 		svc.health[domain.PeerAddress(addr)] = commonHealth()
 	}
@@ -1068,13 +1066,12 @@ func TestFileTransferPeerRouteMetaPrefersOutboundOverInbound(t *testing.T) {
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	pc := netcore.New(netcore.ConnID(7), inLocal, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(7), inLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-inbound-mix"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 		ProtocolVersion: 13,
 	})
-	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc, tracked: true})
 	svc.health[domain.PeerAddress("addr-inbound-mix")] = &peerHealth{
 		Connected:           true,
@@ -1139,13 +1136,12 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundBufferFull(t *testing.
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	pc := netcore.New(netcore.ConnID(1), inLocal, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(1), inLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-in"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 		ProtocolVersion: 12,
 	})
-	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
 	svc.health[domain.PeerAddress("addr-in")] = &peerHealth{
 		Connected:           true,
@@ -1205,13 +1201,12 @@ func TestSendFrameToIdentityFallsBackToInboundWhenOutboundSendQueueClosed(t *tes
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	pc := netcore.New(netcore.ConnID(2), inLocal, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(2), inLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-in-fallback"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 		ProtocolVersion: 12,
 	})
-	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
 	svc.health[domain.PeerAddress("addr-in-fallback")] = &peerHealth{
 		Connected:           true,
@@ -1285,13 +1280,12 @@ func TestSendFrameToIdentityRejectsInboundBeforeActivation(t *testing.T) {
 	defer func() { _ = inLocal.Close() }()
 	defer func() { _ = inRemote.Close() }()
 
-	pc := netcore.New(netcore.ConnID(7), inLocal, netcore.Inbound, netcore.Options{
+	pc := newTestNetCore(t, netcore.ConnID(7), inLocal, netcore.Inbound, netcore.Options{
 		Address:         domain.PeerAddress("addr-in-preactivation"),
 		Identity:        idPeerB,
 		Caps:            []domain.Capability{domain.CapMeshRelayV1, domain.CapFileTransferV1},
 		ProtocolVersion: 12,
 	})
-	defer pc.Close()
 	svc.setTestConnEntryLocked(inLocal, &connEntry{core: pc})
 	// Intentionally no svc.health entry for addr-in-preactivation.
 
