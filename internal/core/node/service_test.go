@@ -7923,19 +7923,23 @@ func TestConnectedHostsLocked(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(server, pc)
+	svc.registerAuthenticatedInboundPeerLocked(t, server, pc)
 
 	svc.deliveryMu.RLock()
 	hosts := svc.connectedHostsLocked()
 	svc.deliveryMu.RUnlock()
 	svc.peerMu.Unlock()
 
-	if _, ok := hosts["10.0.0.1"]; !ok {
-		t.Error("expected outbound host 10.0.0.1 in connectedHosts")
+	outbound := outboundHostsOf(hosts)
+	if _, ok := outbound["10.0.0.1"]; !ok || !hosts.Holds("10.0.0.1") {
+		t.Error("expected outbound host 10.0.0.1 in connectedHosts, in the outbound direction")
 	}
 	// The inbound connection's remote address is 127.0.0.1 (the client side).
-	if _, ok := hosts["127.0.0.1"]; !ok {
+	if !hosts.Holds("127.0.0.1") {
 		t.Error("expected inbound host 127.0.0.1 in connectedHosts")
+	}
+	if _, ok := outbound["127.0.0.1"]; ok {
+		t.Error("inbound host 127.0.0.1 must not be in the outbound direction")
 	}
 }
 
@@ -7988,7 +7992,7 @@ func TestDialCandidatesSkipsConnectedInboundHost(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		LastActivity: time.Now().UTC(),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(server, pc)
+	svc.registerAuthenticatedInboundPeerLocked(t, server, pc)
 	svc.peerMu.Unlock()
 
 	candidates := svc.peerDialCandidates()
@@ -8321,7 +8325,7 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 	pc := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{
 		Address: domain.PeerAddress("1.2.3.4:64646"),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(server, pc)
+	svc.registerAuthenticatedInboundPeerLocked(t, server, pc)
 
 	svc.deliveryMu.RLock()
 	hosts := svc.connectedHostsLocked()
@@ -8329,11 +8333,11 @@ func TestConnectedHostsUsesTransportIP(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	// The real remote IP (127.0.0.1) should be in the set.
-	if _, ok := hosts["127.0.0.1"]; !ok {
+	if !hosts.Holds("127.0.0.1") {
 		t.Error("expected transport IP 127.0.0.1 in connectedHosts")
 	}
 	// The overlay address (1.2.3.4) should NOT be in the set.
-	if _, ok := hosts["1.2.3.4"]; ok {
+	if hosts.Holds("1.2.3.4") {
 		t.Error("overlay address 1.2.3.4 should not be in connectedHosts (only transport IP)")
 	}
 }
@@ -9309,7 +9313,7 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 		Address:      stalledPeerAddr,
 		LastActivity: time.Now().Add(-heartbeatInterval - pongStallTimeout - 10*time.Second),
 	})
-	svc.registerAuthenticatedInboundPeerLocked(server1, pc)
+	svc.registerAuthenticatedInboundPeerLocked(t, server1, pc)
 
 	// Also add an outbound session as control.
 	svc.deliveryMu.Lock()
@@ -9322,11 +9326,11 @@ func TestConnectedHostsLockedSkipsStalledInbound(t *testing.T) {
 	svc.peerMu.Unlock()
 
 	// Outbound host must still be present.
-	if _, ok := hosts["10.0.0.1"]; !ok {
+	if !hosts.Holds("10.0.0.1") {
 		t.Error("expected outbound host 10.0.0.1 in connectedHosts")
 	}
 	// Stalled inbound host (127.0.0.1 from TCP) must be excluded.
-	if _, ok := hosts["127.0.0.1"]; ok {
+	if hosts.Holds("127.0.0.1") {
 		t.Error("stalled inbound host 127.0.0.1 should be excluded from connectedHosts")
 	}
 }

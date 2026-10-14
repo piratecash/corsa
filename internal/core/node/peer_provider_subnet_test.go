@@ -102,10 +102,10 @@ func TestCandidates_DistinctSubnets_AllReturned(t *testing.T) {
 	}
 }
 
-func TestCandidates_SubnetOccupiedByConnection(t *testing.T) {
+func TestCandidates_SubnetOccupiedByOutboundSession(t *testing.T) {
 	cfg := subnetFilterConfig()
-	cfg.ConnectedFn = func() map[string]struct{} {
-		return map[string]struct{}{"1.2.3.9": {}}
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith([]string{"1.2.3.9"}, nil)
 	}
 	pp := NewPeerProvider(cfg)
 	pp.Add(mustAddr("1.2.3.4:64646"), domain.PeerSourceBootstrap)
@@ -116,7 +116,24 @@ func TestCandidates_SubnetOccupiedByConnection(t *testing.T) {
 		t.Fatalf("Candidates() returned %d entries, want 1", len(candidates))
 	}
 	if candidates[0].Address != mustAddr("5.6.7.8:64646") {
-		t.Errorf("candidate = %s, want 5.6.7.8:64646 (1.2.3.0/24 occupied by connection)", candidates[0].Address)
+		t.Errorf("candidate = %s, want 5.6.7.8:64646 (1.2.3.0/24 occupied by an outbound session)", candidates[0].Address)
+	}
+}
+
+// An authenticated inbound connection is the remote side's choice: it keeps
+// its own host out of the candidates (6d) but does not occupy the group.
+func TestCandidates_SubnetNotOccupiedByAuthenticatedInbound(t *testing.T) {
+	cfg := subnetFilterConfig()
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith(nil, []string{"1.2.3.9"})
+	}
+	pp := NewPeerProvider(cfg)
+	pp.Add(mustAddr("1.2.3.4:64646"), domain.PeerSourceBootstrap)
+	pp.Add(mustAddr("1.2.3.9:64646"), domain.PeerSourceBootstrap)
+
+	candidates := pp.Candidates()
+	if len(candidates) != 1 || candidates[0].Address != mustAddr("1.2.3.4:64646") {
+		t.Fatalf("candidates = %v, want only 1.2.3.4:64646 (1.2.3.9 is connected, its /24 is free)", candidates)
 	}
 }
 
@@ -260,10 +277,10 @@ func TestKnownPeers_SameSubnetExcludeReason(t *testing.T) {
 	}
 }
 
-func TestKnownPeers_SubnetOccupiedByConnectionMarked(t *testing.T) {
+func TestKnownPeers_SubnetOccupiedByOutboundSessionMarked(t *testing.T) {
 	cfg := subnetFilterConfig()
-	cfg.ConnectedFn = func() map[string]struct{} {
-		return map[string]struct{}{"1.2.3.9": {}}
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith([]string{"1.2.3.9"}, nil)
 	}
 	pp := NewPeerProvider(cfg)
 	pp.Add(mustAddr("1.2.3.4:64646"), domain.PeerSourceBootstrap)
@@ -274,7 +291,24 @@ func TestKnownPeers_SubnetOccupiedByConnectionMarked(t *testing.T) {
 	}
 	got := infos[0].ExcludeReasons
 	if len(got) != 1 || got[0] != domain.ExcludeReasonSameSubnet {
-		t.Errorf("ExcludeReasons = %v, want [same_subnet] (subnet held by connected 1.2.3.9)", got)
+		t.Errorf("ExcludeReasons = %v, want [same_subnet] (subnet held by the outbound session to 1.2.3.9)", got)
+	}
+}
+
+func TestKnownPeers_AuthenticatedInboundDoesNotMarkSameSubnet(t *testing.T) {
+	cfg := subnetFilterConfig()
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith(nil, []string{"1.2.3.9"})
+	}
+	pp := NewPeerProvider(cfg)
+	pp.Add(mustAddr("1.2.3.4:64646"), domain.PeerSourceBootstrap)
+
+	infos := pp.KnownPeers()
+	if len(infos) != 1 {
+		t.Fatalf("KnownPeers() returned %d entries, want 1", len(infos))
+	}
+	if got := infos[0].ExcludeReasons; len(got) != 0 {
+		t.Errorf("ExcludeReasons = %v, want none (an inbound peer from 1.2.3.9 does not hold the /24)", got)
 	}
 }
 

@@ -2115,7 +2115,7 @@ func NewService(cfg config.Node, id *identity.Identity, eventBus *ebus.Bus) *Ser
 				LastErrorCode: h.LastErrorCode,
 			}
 		},
-		ConnectedFn: func() map[string]struct{} {
+		ConnectedFn: func() ConnectedHosts {
 			// connectedHostsLocked reads s.upstream (delivery domain) and the
 			// inbound registry (peer domain): both mutexes, canonical order.
 			svc.peerMu.RLock()

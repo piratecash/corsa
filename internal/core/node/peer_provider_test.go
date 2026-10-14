@@ -14,12 +14,32 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
+// connectedHostsWith builds the ConnectedFn snapshot a test needs: hosts this
+// node dialled and hosts that authenticated to it inbound.
+func connectedHostsWith(outbound, authenticatedInbound []string) ConnectedHosts {
+	hosts := newConnectedHosts()
+	for _, host := range outbound {
+		hosts.addOutbound(host)
+	}
+	for _, host := range authenticatedInbound {
+		hosts.addAuthenticatedInbound(host)
+	}
+	return hosts
+}
+
+// outboundHostsOf collects the outbound direction of a snapshot.
+func outboundHostsOf(hosts ConnectedHosts) map[string]struct{} {
+	outbound := make(map[string]struct{})
+	hosts.ForEachOutbound(func(host string) { outbound[host] = struct{}{} })
+	return outbound
+}
+
 // testProviderConfig builds a minimal PeerProviderConfig with sensible defaults
 // for testing. All callback fields return empty/safe values unless overridden.
 func testProviderConfig() PeerProviderConfig {
 	return PeerProviderConfig{
 		HealthFn:    func(domain.PeerAddress) *PeerHealthView { return nil },
-		ConnectedFn: func() map[string]struct{} { return nil },
+		ConnectedFn: func() ConnectedHosts { return ConnectedHosts{} },
 		QueuedFn:    func() map[string]struct{} { return nil },
 		ForbiddenFn: func(ip net.IP) bool { return false },
 		NetworksFn: func() map[domain.NetGroup]struct{} {
@@ -444,8 +464,8 @@ func TestCandidates_BanExpiry(t *testing.T) {
 
 func TestCandidates_ConnectedFiltered(t *testing.T) {
 	cfg := testProviderConfig()
-	cfg.ConnectedFn = func() map[string]struct{} {
-		return map[string]struct{}{"1.2.3.4": {}}
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith(nil, []string{"1.2.3.4"})
 	}
 	pp := NewPeerProvider(cfg)
 
@@ -840,8 +860,8 @@ func TestKnownPeers_ExcludeReasons(t *testing.T) {
 	cfg.NowFn = func() time.Time { return now }
 
 	// 1.2.3.4 is connected.
-	cfg.ConnectedFn = func() map[string]struct{} {
-		return map[string]struct{}{"1.2.3.4": {}}
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith(nil, []string{"1.2.3.4"})
 	}
 
 	// 5.6.7.8 is in cooldown.
@@ -907,8 +927,8 @@ func TestKnownPeers_MultipleReasons(t *testing.T) {
 	cfg.NowFn = func() time.Time { return now }
 
 	// 1.2.3.4 is both connected AND banned.
-	cfg.ConnectedFn = func() map[string]struct{} {
-		return map[string]struct{}{"1.2.3.4": {}}
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith(nil, []string{"1.2.3.4"})
 	}
 	cfg.BannedIPsFn = func() map[string]domain.BannedIPEntry {
 		return map[string]domain.BannedIPEntry{
@@ -1010,8 +1030,8 @@ func TestKnownPeers_ConnectedReflectsIPLevel(t *testing.T) {
 	// directly connected but should report Connected=true because another
 	// port on the same IP is connected (consistent with ExcludeReasons).
 	cfg := testProviderConfig()
-	cfg.ConnectedFn = func() map[string]struct{} {
-		return map[string]struct{}{"1.2.3.4": {}}
+	cfg.ConnectedFn = func() ConnectedHosts {
+		return connectedHostsWith(nil, []string{"1.2.3.4"})
 	}
 	// HealthFn only marks :9000 as connected, not :64646.
 	cfg.HealthFn = func(addr domain.PeerAddress) *PeerHealthView {

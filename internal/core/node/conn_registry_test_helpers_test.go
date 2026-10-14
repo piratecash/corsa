@@ -58,12 +58,26 @@ func (s *Service) setTestConnEntryLocked(conn net.Conn, entry *connEntry) {
 	s.connIDByNetConn[conn] = id
 }
 
+// registerTestInboundLocked registers core as an inbound connection on conn;
+// authenticated mirrors what completeInboundAuth leaves behind (tracked). It
+// owns the core's lifetime: the core is closed when the test ends, so no
+// caller can leak its writer goroutine by forgetting to (closing conn alone
+// does not stop it). A test that also closes the core is fine — Close is
+// idempotent. The caller must hold s.peerMu.
+func (s *Service) registerTestInboundLocked(t *testing.T, conn net.Conn, core *netcore.NetCore, authenticated bool) {
+	t.Helper()
+	closeNetCoreOnCleanup(t, core)
+	s.setTestConnEntryLocked(conn, &connEntry{core: core, tracked: authenticated})
+}
+
 // registerAuthenticatedInboundPeerLocked registers conn as an inbound peer
 // that completed authentication — tracked, as completeInboundAuth leaves it —
 // which is the only kind of inbound connection that reserves its host against
-// outbound dials. The caller must hold s.peerMu.
-func (s *Service) registerAuthenticatedInboundPeerLocked(conn net.Conn, core *netcore.NetCore) {
-	s.setTestConnEntryLocked(conn, &connEntry{core: core, tracked: true})
+// outbound dials. The core is closed when the test ends. The caller must hold
+// s.peerMu.
+func (s *Service) registerAuthenticatedInboundPeerLocked(t *testing.T, conn net.Conn, core *netcore.NetCore) {
+	t.Helper()
+	s.registerTestInboundLocked(t, conn, core, true)
 }
 
 // testConnEntry is the read counterpart of setTestConnEntryLocked: it

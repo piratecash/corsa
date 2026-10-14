@@ -56,7 +56,24 @@ func loopbackSocketPair(t *testing.T) (client, server net.Conn) {
 	return client, server
 }
 
-func newServiceWithBootstrapPeer(t *testing.T, bootstrap domain.PeerAddress) *Service {
+// candidateAddressMode says which bootstrap addresses may become automatic
+// dial candidates of a test Service.
+type candidateAddressMode int
+
+const (
+	// publicCandidatesOnly is production behaviour: loopback and private
+	// addresses never become candidates, and public ones are subject to
+	// the subnet-diversity filter.
+	publicCandidatesOnly candidateAddressMode = iota + 1
+	// privateCandidatesAllowed is the dev/LAN mode (AllowPrivatePeers):
+	// loopback and private addresses become candidates too, and carry no
+	// subnet group.
+	privateCandidatesAllowed
+)
+
+// newServiceWithBootstrapPeers builds a Service without Run whose bootstrap
+// peers are the given addresses, in the given candidate mode.
+func newServiceWithBootstrapPeers(t *testing.T, mode candidateAddressMode, bootstrap ...string) *Service {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -66,11 +83,11 @@ func newServiceWithBootstrapPeer(t *testing.T, bootstrap domain.PeerAddress) *Se
 	}
 	cfg := deriveTestAdvertisePort(config.Node{
 		ListenAddress:     freeAddress(t),
-		BootstrapPeers:    []string{string(bootstrap)},
+		BootstrapPeers:    bootstrap,
 		Type:              domain.NodeTypeFull,
 		PeersStatePath:    filepath.Join(dir, "peers.json"),
 		ChatLogDir:        dir,
-		AllowPrivatePeers: true,
+		AllowPrivatePeers: mode == privateCandidatesAllowed,
 	})
 	return NewService(cfg, id, nil)
 }
@@ -102,7 +119,7 @@ func TestOnlyAnAuthenticatedInboundConnectionReservesItsHost(t *testing.T) {
 			t.Parallel()
 
 			bootstrap := domain.PeerAddress("127.0.0.1:" + config.DefaultPeerPort)
-			svc := newServiceWithBootstrapPeer(t, bootstrap)
+			svc := newServiceWithBootstrapPeers(t, privateCandidatesAllowed, string(bootstrap))
 			if !candidatesContain(svc, bootstrap) {
 				t.Fatalf("precondition: bootstrap %s is not a candidate with no connection at all", bootstrap)
 			}
@@ -110,7 +127,7 @@ func TestOnlyAnAuthenticatedInboundConnectionReservesItsHost(t *testing.T) {
 			_, server := loopbackSocketPair(t)
 			core := netcore.New(netcore.ConnID(1), server, netcore.Inbound, netcore.Options{})
 			svc.peerMu.Lock()
-			svc.setTestConnEntryLocked(server, &connEntry{core: core, tracked: tc.tracked})
+			svc.registerTestInboundLocked(t, server, core, tc.tracked)
 			svc.peerMu.Unlock()
 
 			if got := !candidatesContain(svc, bootstrap); got != tc.want {

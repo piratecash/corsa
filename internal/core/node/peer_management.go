@@ -1024,12 +1024,14 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 	}
 }
 
-// connectedHostsLocked returns the set of hosts (IP addresses or
-// hostnames) that already have a peer connection — either an outbound
-// peer session or an inbound connection that has become a peer. Used by
-// the dial candidate filters (PeerProvider.Candidates through ConnectedFn,
-// and peerDialCandidates) to avoid dialing hosts we are already connected
-// to, since the goal is fault tolerance across distinct hosts.
+// connectedHostsLocked returns one snapshot of the hosts (IP addresses or
+// hostnames) this node holds a peer connection with, split by direction:
+// outbound peer sessions, and inbound connections that completed
+// authentication. The exact-host gate of both dial candidate filters
+// (PeerProvider.Candidates through ConnectedFn, and peerDialCandidates)
+// reads both directions, since the goal is fault tolerance across distinct
+// hosts; the subnet-diversity filter reads only the outbound direction
+// (see ConnectedHosts for why).
 //
 // For inbound connections the actual TCP remote IP is used instead of the
 // peer's self-reported overlay address.  A NATed peer or a peer that
@@ -1053,13 +1055,13 @@ func (s *Service) ensurePeerSessions(ctx context.Context) {
 // inbound conn state is peer-domain (s.peerMu).  Caller MUST hold
 // s.peerMu AND s.deliveryMu at least for read, acquired in canonical
 // s.peerMu OUTER → s.deliveryMu INNER order.
-func (s *Service) connectedHostsLocked() map[string]struct{} {
-	hosts := make(map[string]struct{})
+func (s *Service) connectedHostsLocked() ConnectedHosts {
+	hosts := newConnectedHosts()
 
 	// Outbound sessions.
 	for addr := range s.upstream {
 		if host, _, ok := splitHostPort(string(addr)); ok {
-			hosts[host] = struct{}{}
+			hosts.addOutbound(host)
 		}
 	}
 
@@ -1078,7 +1080,7 @@ func (s *Service) connectedHostsLocked() map[string]struct{} {
 			return true
 		}
 		if ip := remoteIPFromString(info.remoteAddr); ip != "" {
-			hosts[ip] = struct{}{}
+			hosts.addAuthenticatedInbound(ip)
 		}
 		return true
 	})
@@ -1169,10 +1171,8 @@ func (s *Service) peerDialCandidates() []peerDialCandidate {
 			// (outbound or inbound). The goal is fault tolerance
 			// across distinct hosts, not accumulating multiple
 			// connections to the same IP.
-			if host, _, ok := splitHostPort(string(address)); ok {
-				if _, connected := connectedHosts[host]; connected {
-					continue
-				}
+			if host, _, ok := splitHostPort(string(address)); ok && connectedHosts.Holds(host) {
+				continue
 			}
 			if _, ok := seen[address]; ok {
 				continue

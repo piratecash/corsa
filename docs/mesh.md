@@ -386,6 +386,12 @@ Peer states: `healthy` → `degraded` → `stalled` → `reconnecting`.
   `InboundClosed`, so an exclusion they caused would last until the next
   periodic fill. See [routing.md](routing.md), "Which connections reserve a
   host".
+- **Only this node's outbound choices occupy a subnet group** — the
+  subnet-diversity filter (one automatic outbound connection per /24 or
+  /64) counts outbound sessions and connection-manager slots, never inbound
+  connections: the remote side chooses those, and counting them would let
+  it close whole groups to this node's outbound dials. See
+  [routing.md](routing.md), "Which connections occupy a subnet group".
 
 **Aggregate network status** is derived from the number of _usable_ peers
 (healthy + degraded). Stalled peers have a live TCP session but are excluded
@@ -1163,6 +1169,12 @@ sequenceDiagram
   tracked-соединения, поэтому вызванное ими исключение длилось бы до
   следующего периодического fill. См. [routing.md](routing.md),
   «Какие соединения резервируют хост».
+- **Группу подсети занимает только исходящий выбор ноды** — фильтр
+  разнообразия подсетей (одно автоматическое исходящее соединение на /24
+  или /64) учитывает исходящие сессии и слоты менеджера соединений, но
+  никогда не входящие соединения: их выбирает удалённая сторона, и их учёт
+  позволил бы ей закрывать для исходящих дозвонов ноды целые группы. См.
+  [routing.md](routing.md), «Какие соединения занимают группу подсети».
 
 **Агрегированный статус сети** определяется по количеству _пригодных_ пиров
 (healthy + degraded). Stalled-пиры имеют живое TCP-соединение, но исключены

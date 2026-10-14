@@ -74,12 +74,14 @@ type PeerProviderConfig struct {
 	// be mutated by the caller after return.
 	HealthFn func(domain.PeerAddress) *PeerHealthView
 
-	// ConnectedFn returns a snapshot copy of IPs that already have a peer
-	// connection: an outbound session, or an inbound connection that has
-	// completed authentication (v1 auth_session or v2 session_proof). A
-	// silent socket, a hello without auth and an unfinished handshake do
-	// not count. Must be a new map each call.
-	ConnectedFn func() map[string]struct{}
+	// ConnectedFn returns one snapshot of the hosts this node holds a peer
+	// connection with, split by direction: outbound sessions, and inbound
+	// connections that completed authentication (v1 auth_session or v2
+	// session_proof). A silent socket, a hello without auth and an
+	// unfinished handshake are in neither set. The exact-host gate reads
+	// both directions; the subnet-diversity filter reads only the outbound
+	// one (see ConnectedHosts). Must be a new snapshot each call.
+	ConnectedFn func() ConnectedHosts
 
 	// QueuedFn returns a snapshot copy of IPs currently in ConnectionManager
 	// queue. Must be a new map each call.
@@ -343,8 +345,9 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 	cfg := pp.config
 	now := cfg.NowFn()
 
-	// Step 1: connected IPs (outbound + authenticated inbound).
-	connectedIPs := cfg.ConnectedFn()
+	// Step 1: connected hosts, split by direction (outbound + authenticated
+	// inbound).
+	connected := cfg.ConnectedFn()
 
 	// Step 2: queued IPs in CM.
 	queuedIPs := cfg.QueuedFn()
@@ -464,8 +467,9 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 			continue
 		}
 
-		// 6d: skip already connected IPs.
-		if _, connected := connectedIPs[kp.IP]; connected {
+		// 6d: skip hosts this node already has a peer connection with,
+		// in either direction.
+		if connected.Holds(kp.IP) {
 			continue
 		}
 
@@ -565,13 +569,16 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 
 	// Step 9: subnet-diversity filter — at most one automatic outbound
 	// connection per subnet group (/24 IPv4, /64 IPv6). The occupied set
-	// is seeded from connected (inbound + outbound) and queued (dialing)
-	// IPs, so a candidate sharing a subnet with an existing or in-flight
-	// connection is skipped entirely. Within the candidate list itself
-	// the sorted order decides the winner: the best-ranked candidate
-	// claims the subnet, the rest are skipped. Manual add_peer bypasses
-	// Candidates() via ManualPeerRequested and is deliberately exempt.
-	occupiedSubnets := pp.occupiedSubnetGroups(connectedIPs, queuedIPs)
+	// is seeded from this node's own outbound choices only — outbound
+	// sessions and connection-manager slots in any state — so a candidate
+	// sharing a subnet with an existing or in-flight outbound connection is
+	// skipped entirely. Inbound connections do not occupy a group: the
+	// remote side chooses them (see ConnectedHosts). Within the candidate
+	// list itself the sorted order decides the winner: the best-ranked
+	// candidate claims the subnet, the rest are skipped. Manual add_peer
+	// bypasses Candidates() via ManualPeerRequested and is deliberately
+	// exempt.
+	occupiedSubnets := pp.occupiedSubnetGroups(connected, queuedIPs)
 
 	// Step 10: generate DialAddresses and build result.
 	result := make([]domain.CandidatePeer, 0, len(deduped))
@@ -613,19 +620,23 @@ func (pp *PeerProvider) Candidates() []domain.CandidatePeer {
 }
 
 // occupiedSubnetGroups builds the initial set of subnet-diversity group
-// keys occupied by active connections and queued CM slots. Returns nil
-// when the filter is disabled (AllowSameSubnetCandidates) — callers use
-// the nil map as the "filter off" signal.
-func (pp *PeerProvider) occupiedSubnetGroups(connectedIPs, queuedIPs map[string]struct{}) map[string]struct{} {
+// keys occupied by this node's outbound choices: its outbound sessions and
+// its queued CM slots (any state). Authenticated inbound connections in
+// connected are deliberately ignored — the remote side picked them, and
+// letting them occupy a group would let any remote veto this node's
+// outbound dials to a whole group. Returns nil when the filter is disabled
+// (AllowSameSubnetCandidates) — callers use the nil map as the "filter
+// off" signal.
+func (pp *PeerProvider) occupiedSubnetGroups(connected ConnectedHosts, queuedIPs map[string]struct{}) map[string]struct{} {
 	if pp.config.AllowSameSubnetCandidates {
 		return nil
 	}
-	occupied := make(map[string]struct{}, len(connectedIPs)+len(queuedIPs))
-	for ip := range connectedIPs {
-		if key := subnetGroupKey(ip); key != "" {
+	occupied := make(map[string]struct{}, len(queuedIPs))
+	connected.ForEachOutbound(func(host string) {
+		if key := subnetGroupKey(host); key != "" {
 			occupied[key] = struct{}{}
 		}
-	}
+	})
 	for ip := range queuedIPs {
 		if key := subnetGroupKey(ip); key != "" {
 			occupied[key] = struct{}{}
@@ -645,7 +656,7 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 	cfg := pp.config
 	now := cfg.NowFn()
 
-	connectedIPs := cfg.ConnectedFn()
+	connected := cfg.ConnectedFn()
 	queuedIPs := cfg.QueuedFn()
 	reachableGroups := cfg.NetworksFn()
 	bannedIPs := pp.buildBannedIPsSet(now)
@@ -707,7 +718,7 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 		}
 
 		// Connected.
-		if _, connected := connectedIPs[kp.IP]; connected {
+		if connected.Holds(kp.IP) {
 			reasons = append(reasons, domain.ExcludeReasonConnected)
 		}
 
@@ -734,7 +745,7 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 		// Reflect IP-level connectivity: if any port on this IP is
 		// connected, this address is effectively connected too.
 		// Keeps Connected consistent with ExcludeReasons=[connected].
-		if _, ipConnected := connectedIPs[kp.IP]; ipConnected {
+		if connected.Holds(kp.IP) {
 			isConnected = true
 		}
 
@@ -809,10 +820,11 @@ func (pp *PeerProvider) KnownPeers() []domain.KnownPeerInfo {
 	// Subnet-diversity pass: mirrors Candidates() step 9. Among entries
 	// that survived all other filters, walk them in the same order
 	// Candidates() selects (score desc, AddedAt asc, Address asc) and
-	// mark every entry whose subnet group is already occupied — by a
-	// connected/queued IP or by a better-ranked surviving entry — with
-	// ExcludeReasonSameSubnet.
-	if occupiedSubnets := pp.occupiedSubnetGroups(connectedIPs, queuedIPs); occupiedSubnets != nil {
+	// mark every entry whose subnet group is already occupied — by an
+	// outbound session, a queued CM slot or a better-ranked surviving
+	// entry — with ExcludeReasonSameSubnet. An authenticated inbound
+	// connection does not occupy a group here either.
+	if occupiedSubnets := pp.occupiedSubnetGroups(connected, queuedIPs); occupiedSubnets != nil {
 		eligible := make([]int, 0, len(result))
 		for i := range result {
 			if len(result[i].ExcludeReasons) == 0 {
